@@ -17,6 +17,16 @@ pub struct RedactWriter<W: Write> {
     buffer: Vec<u8>,
 }
 
+impl<W: Write + std::fmt::Debug> std::fmt::Debug for RedactWriter<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedactWriter")
+            .field("inner", &self.inner)
+            .field("policy", &self.policy)
+            .field("surface", &self.surface)
+            .finish()
+    }
+}
+
 impl<W: Write> RedactWriter<W> {
     /// Build a new `RedactWriter` over `inner`, applying `policy` to
     /// every flush.

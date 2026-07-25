@@ -18,6 +18,7 @@ pub mod llm;
 pub mod redact;
 pub mod secret;
 pub mod storage;
+pub mod telemetry;
 pub mod time;
 
 pub use error::{Error, Result};
