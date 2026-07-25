@@ -9,7 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::ids::RunId;
 
 /// Output of the intake phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// All fields are lenient: `#[serde(default)]` lets missing fields
+/// become empty, and unknown fields from the model are silently
+/// ignored. The `MiniMax-M3` model with `thinking` enabled routinely
+/// mixes `Intake` and `Brief` fields in the same response, so the
+/// schema must tolerate that.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Intake {
     /// The user's problem statement, rephrased by the LLM.
     pub problem: String,
@@ -26,7 +33,11 @@ pub struct Intake {
 }
 
 /// Output of the clarify phase — the canonical brief.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Same leniency as `Intake`. `acceptance` is a `Vec<String>` because
+/// the model returns it as a list, not a single string.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Brief {
     /// Concrete problem.
     pub problem: String,
@@ -40,8 +51,8 @@ pub struct Brief {
     pub assumptions: Vec<String>,
     /// Explicit non-goals.
     pub non_goals: Vec<String>,
-    /// Acceptance criteria.
-    pub acceptance: String,
+    /// Acceptance criteria (one bullet per item; the model emits a list).
+    pub acceptance: Vec<String>,
     /// Known risks.
     pub risks: Vec<String>,
 }
@@ -252,7 +263,7 @@ mod tests {
             constraints: vec!["c".into()],
             assumptions: vec![],
             non_goals: vec![],
-            acceptance: "ok".into(),
+            acceptance: vec!["ok".into()],
             risks: vec!["r".into()],
         };
         let j = serde_json::to_string(&b).unwrap();

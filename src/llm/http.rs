@@ -80,8 +80,20 @@ pub(crate) struct MessagesRequestBody<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    /// Disables the `thinking` block for `MiniMax-M3`. The model still
+    /// produces a `text` block, so our text-only wire format continues
+    /// to work and the response stays focused on the JSON contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingControl>,
     system: &'a str,
     messages: Vec<MessagesMessage>,
+}
+
+/// `thinking: {"type": "disabled"}` per the MiniMax docs.
+#[derive(Debug, Serialize)]
+pub(crate) struct ThinkingControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,16 +148,27 @@ impl MessagesResponseBody {
             usage,
         })
     }
+
+    /// Borrow the raw stop_reason without consuming the body.
+    pub(crate) fn stop_reason(&self) -> Option<&str> {
+        self.stop_reason.as_deref()
+    }
 }
 
 /// Translate a [`Request`] into the body shape expected by the
 /// Anthropic-compatible messages endpoint.
 pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
+    let thinking = if req.model.to_ascii_lowercase().contains("m3") {
+        Some(ThinkingControl { kind: "disabled" })
+    } else {
+        None
+    };
     MessagesRequestBody {
         model: &req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
+        thinking,
         system: &req.system,
         messages: vec![MessagesMessage {
             role: "user",

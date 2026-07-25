@@ -23,12 +23,78 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 /// Strip a leading/trailing markdown fence from the model output, then
-/// parse the inner JSON.
+/// parse the inner JSON. If the first parse fails because the model
+/// emitted a truncated response (missing closing brackets), try a single
+/// auto-close pass and re-parse.
 pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     let trimmed = strip_code_fence(raw);
-    serde_json::from_str::<T>(&trimmed).map_err(|e| {
-        crate::Error::SchemaViolation(format!("model output is not valid JSON: {e}; raw={raw}"))
-    })
+    if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
+        return Ok(v);
+    }
+    if let Some(closed) = auto_close_json(&trimmed)
+        && let Ok(v) = serde_json::from_str::<T>(&closed)
+    {
+        return Ok(v);
+    }
+    let e = serde_json::from_str::<T>(&trimmed)
+        .err()
+        .expect("parse failed above");
+    let tail_start = trimmed.len().saturating_sub(500);
+    let tail = &trimmed[tail_start..];
+    Err(crate::Error::SchemaViolation(format!(
+        "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
+        trimmed.len(),
+        tail,
+        trimmed
+    )))
+}
+
+/// If `s` is a JSON object/array that ends abruptly (the model emitted
+/// content but forgot the closing brackets), append the missing
+/// closers. Returns the patched string only when the patched version
+/// is itself syntactically valid JSON.
+fn auto_close_json(s: &str) -> Option<String> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for c in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match c {
+            '{' | '[' => stack.push(c),
+            '}' if stack.pop() != Some('{') => return None,
+            ']' if stack.pop() != Some('[') => return None,
+            _ => {}
+        }
+    }
+    if in_string || stack.is_empty() {
+        return None;
+    }
+    let mut closers = String::new();
+    while let Some(open) = stack.pop() {
+        closers.push(match open {
+            '{' => '}',
+            '[' => ']',
+            _ => return None,
+        });
+    }
+    let mut patched = String::with_capacity(s.len() + closers.len());
+    patched.push_str(s);
+    patched.push_str(&closers);
+    Some(patched)
 }
 
 /// Remove leading ```json and trailing ``` markers from a model output.
@@ -97,5 +163,21 @@ mod tests {
         let s = "not json";
         let r: std::result::Result<Sample, _> = parse_model_json(s);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn auto_closes_missing_brackets() {
+        // Model emitted the content but forgot the final `}`.
+        let truncated = r#"{"a":1,"b":"x","c":[1,2,3]"#;
+        let v: Sample = parse_model_json(truncated).unwrap();
+        assert_eq!(v.a, 1);
+        assert_eq!(v.b, "x");
+    }
+
+    #[test]
+    fn auto_closes_nested() {
+        let truncated = r#"{"a":7,"b":"x"}"#; // already complete
+        let v: Sample = parse_model_json(truncated).unwrap();
+        assert_eq!(v.a, 7);
     }
 }

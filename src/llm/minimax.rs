@@ -138,9 +138,17 @@ impl Provider for MinimaxProvider {
                             .json()
                             .await
                             .map_err(|e| Error::Provider(format!("decode response: {e}")))?;
-                        return parsed
+                        let stop = parsed.stop_reason().map(str::to_owned);
+                        let resp = parsed
                             .into_response()
-                            .map_err(|e| Error::Provider(e.into()));
+                            .map_err(|e| Error::Provider(e.to_string()))?;
+                        if stop.as_deref() == Some("max_tokens") {
+                            eprintln!(
+                                "[minimax] WARNING: response truncated at max_tokens (text_len={})",
+                                resp.text.len()
+                            );
+                        }
+                        return Ok(resp);
                     }
                     let body = resp.text().await.unwrap_or_default();
                     let err = classify_status(status, &body);

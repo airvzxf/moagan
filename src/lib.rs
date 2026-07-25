@@ -40,6 +40,18 @@ pub fn run() -> anyhow::Result<()> {
     std::process::exit(code)
 }
 
+/// Synchronous entry point used by `main.rs` and integration tests.
+/// Wraps the CLI dispatch in a multi-thread Tokio runtime so
+/// `reqwest` (which depends on Tokio's IO reactor) can actually run
+/// the HTTP send future even though the phases call it via
+/// `pollster::block_on`.
+pub fn run_blocking() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async { run() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

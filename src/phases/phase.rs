@@ -98,13 +98,33 @@ impl RunContext {
             model: self.default_model.clone(),
             system,
             user,
-            max_tokens: 1024,
+            max_tokens: max_tokens_for_role(role),
             temperature: Some(0.4),
             top_p: Some(0.95),
             response_schema: None,
         };
         let provider = self.provider();
         provider.send(&req).await
+    }
+}
+
+/// Per-role `max_tokens`. The model can produce very verbose JSON for
+/// the high-cardinality roles (intake, clarify, deliver); the others
+/// stay compact. Calibrated for the v0.1 smoke (minimax Claude-style
+/// endpoint). A future release will let providers override this
+/// through the per-role config in `prompts/`.
+fn max_tokens_for_role(role: Role) -> u32 {
+    match role {
+        Role::Intake => 131072,
+        Role::Clarify => 131072,
+        Role::Route => 131072,
+        Role::Propose => 131072,
+        Role::Gate => 131072,
+        Role::Critique => 131072,
+        Role::Repair => 131072,
+        Role::Judge => 131072,
+        Role::Rank => 131072,
+        Role::Deliver => 131072,
     }
 }
 

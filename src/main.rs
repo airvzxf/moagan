@@ -2,7 +2,7 @@ use anyhow::Result;
 
 fn main() -> Result<()> {
     init_tracing();
-    moagan::run()
+    moagan::run_blocking()
 }
 
 fn init_tracing() {

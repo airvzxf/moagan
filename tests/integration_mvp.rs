@@ -68,7 +68,7 @@ fn clarify_json() -> &'static str {
   "constraints": ["Use the canonical English names"],
   "assumptions": ["The user is asking for the standard 7-color model"],
   "non_goals": ["Detailed wavelength information"],
-  "acceptance": "The list is exactly R, O, Y, G, B, I, V in that order",
+  "acceptance": ["The list is exactly R, O, Y, G, B, I, V in that order"],
   "risks": ["Off-by-one if the user means a different model"]
 }"#
 }
