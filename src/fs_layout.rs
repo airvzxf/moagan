@@ -83,6 +83,27 @@ pub struct RunDir<'a> {
     _home: &'a MoaganHome,
 }
 
+impl std::fmt::Debug for RunDir<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunDir").field("root", &self.root).finish()
+    }
+}
+
+impl Clone for RunDir<'_> {
+    fn clone(&self) -> Self {
+        // SAFETY: the underlying `MoaganHome` reference is held for the
+        // lifetime of the process via `RunContext::new`. We extend the
+        // lifetime of the reference to match the new RunDir's lifetime
+        // (always shorter than 'static).
+        #[allow(clippy::borrow_deref_ref)]
+        let home: &'static MoaganHome = unsafe { &*(self._home as *const MoaganHome) };
+        Self {
+            root: self.root.clone(),
+            _home: home,
+        }
+    }
+}
+
 impl RunDir<'_> {
     /// Root directory of the run.
     pub fn root(&self) -> &Path {
