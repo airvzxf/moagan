@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{parse_model_json, read_json, write_json};
+use crate::phases::util::{read_json, write_json};
 
 /// Deliver phase.
 pub struct DeliverPhase;
@@ -46,7 +46,11 @@ impl Phase for DeliverPhase {
             "[deliver] LLM returned, parsing as FinalReport. text_len={}",
             resp.text.len()
         );
-        let report: FinalReport = parse_model_json::<FinalReport>(&resp.text)?;
+        let report: FinalReport = pollster::block_on(ctx.parse_model_json(
+            Role::Deliver,
+            &resp.text,
+            "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
+        ))?;
         let final_dir = ctx.run_dir().final_dir();
         std::fs::create_dir_all(&final_dir)?;
         let json_path: PathBuf = final_dir.join("portfolio.json");

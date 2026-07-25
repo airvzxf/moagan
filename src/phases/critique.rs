@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{parse_model_json, read_json, write_json};
+use crate::phases::util::{read_json, write_json};
 
 /// Critique phase. `critics_per_proposal` critics per proposal.
 pub struct CritiquePhase {
@@ -39,7 +39,11 @@ impl Phase for CritiquePhase {
                 let id = format!("{}_critic_{c}", proposal.id);
                 let user = serde_json::to_string(&proposal).map_err(crate::Error::from)?;
                 let resp = pollster::block_on(ctx.call(Role::Critique, system.clone(), user))?;
-                let critique: Critique = parse_model_json(&resp.text)?;
+                let critique: Critique = pollster::block_on(ctx.parse_model_json(
+                    Role::Critique,
+                    &resp.text,
+                    "Critique: {verdict, issues[], suggestions[]}",
+                ))?;
                 let out_path: PathBuf = critiques_dir.join(format!("{id}.json"));
                 write_json(&out_path, &critique)?;
                 paths.push(out_path);

@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{parse_model_json, read_json, write_json};
+use crate::phases::util::{read_json, write_json};
 
 /// Clarify phase.
 pub struct ClarifyPhase;
@@ -21,7 +21,11 @@ impl Phase for ClarifyPhase {
         let user = serde_json::to_string(&intake).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Clarify).to_owned();
         let resp = pollster::block_on(ctx.call(Role::Clarify, system, user))?;
-        let brief: Brief = parse_model_json(&resp.text)?;
+        let brief: Brief = pollster::block_on(ctx.parse_model_json(
+            Role::Clarify,
+            &resp.text,
+            "Brief: {problem, objectives, deliverables, constraints, assumptions, non_goals, acceptance[], risks[]}",
+        ))?;
         write_json(&ctx.run_dir().brief(), &brief)?;
         Ok(PhaseOutput::Brief(ctx.run_dir().brief()))
     }

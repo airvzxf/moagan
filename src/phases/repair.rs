@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{parse_model_json, read_json, write_json};
+use crate::phases::util::{read_json, write_json};
 
 /// Repair phase. Issues one repair per failed gate.
 pub struct RepairPhase;
@@ -47,7 +47,11 @@ impl Phase for RepairPhase {
             }))
             .map_err(crate::Error::from)?;
             let resp = pollster::block_on(ctx.call(Role::Repair, system.clone(), user))?;
-            let mut repair: Repair = parse_model_json(&resp.text)?;
+            let mut repair: Repair = pollster::block_on(ctx.parse_model_json(
+                Role::Repair,
+                &resp.text,
+                "Repair: {id, summary, approach, tradeoffs[], evidence[], changes[]}",
+            ))?;
             if repair.id.is_empty() {
                 repair.id = proposal.id.clone();
             }

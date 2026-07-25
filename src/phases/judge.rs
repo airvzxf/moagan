@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{parse_model_json, write_json};
+use crate::phases::util::write_json;
 
 /// Judge phase. `judges` judge scores per proposal.
 pub struct JudgePhase {
@@ -52,7 +52,11 @@ impl Phase for JudgePhase {
             let mut scores = Vec::new();
             for _ in 0..self.judges {
                 let resp = pollster::block_on(ctx.call(Role::Judge, system.clone(), user.clone()))?;
-                let score: JudgeScore = parse_model_json(&resp.text)?;
+                let score: JudgeScore = pollster::block_on(ctx.parse_model_json(
+                    Role::Judge,
+                    &resp.text,
+                    "JudgeScore: {score, criteria{correctness,completeness,fit,evidence,clarity}, comments}",
+                ))?;
                 scores.push(score);
             }
             let aggregate = aggregate(&scores);

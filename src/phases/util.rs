@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::atomic::writer::AtomicWriter;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
@@ -24,8 +24,8 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Strip a leading/trailing markdown fence from the model output, then
 /// parse the inner JSON. If the first parse fails because the model
-/// emitted a truncated response (missing closing brackets), try a single
-/// auto-close pass and re-parse.
+/// emitted a truncated response (missing closing brackets), try a
+/// single auto-close pass and re-parse.
 pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     let trimmed = strip_code_fence(raw);
     if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
@@ -46,6 +46,94 @@ pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
         trimmed.len(),
         tail,
         trimmed
+    )))
+}
+
+/// Marker for the v0.1 stub. Focused continuation (catalog 10-integrada-v0
+/// §D.4.6) is implemented in `parse_model_json_with_continuation` but
+/// the phase pipeline does not yet wire a follow-up call when the
+/// auto-close pass also fails. The marker is here so the catalog item
+/// is visible in the source and a future commit can flip the
+/// `parse_model_json` body to call the continuation variant.
+pub const FOCUSED_CONTINUATION_AVAILABLE: bool = true;
+
+/// Build a focused-continuation user message. Given the truncated
+/// model output and a sample of the desired JSON shape, this returns a
+/// user prompt that asks the model to emit only the missing tail. The
+/// caller is expected to feed this through the same provider and then
+/// concatenate `truncated` + `tail` before re-parsing.
+pub fn build_continuation_user_message(truncated: &str, schema_hint: &str) -> String {
+    format!(
+        "The previous response was truncated before the JSON closed. \
+         Continue the JSON below from the exact byte where you stopped. \
+         Output ONLY the bytes that follow the marker; do not repeat the \
+         prefix; do not include any commentary or markdown fences.\n\n\
+         Schema reminder: {schema_hint}\n\n\
+         ---BEGIN TRUNCATED JSON---\n{truncated}\n---END TRUNCATED JSON---\n\
+         ---BEGIN CONTINUATION (output only what comes after the marker)---\n"
+    )
+}
+
+/// Async parser with focused continuation fallback.
+///
+/// 1. Strip the JSON fence and try to parse directly.
+/// 2. If that fails, try the auto-close pass (handles missing `}]`).
+/// 3. If auto-close also fails, ask the model to emit the missing tail
+///    (`build_continuation_user_message`), concatenate, and re-parse.
+///
+/// Catalog 10-integrada-v0 §D.4.6.
+pub async fn parse_with_continuation<T, F, Fut>(
+    raw: &str,
+    schema_hint: &str,
+    max_continuation_bytes: usize,
+    call_provider: F,
+) -> Result<T>
+where
+    T: DeserializeOwned,
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::llm::Response>>,
+{
+    // Pass 1: direct parse.
+    if let Ok(v) = parse_model_json::<T>(raw) {
+        return Ok(v);
+    }
+    let trimmed = strip_code_fence(raw);
+    // Pass 2: auto-close missing brackets.
+    if let Some(closed) = auto_close_json(&trimmed)
+        && let Ok(v) = serde_json::from_str::<T>(&closed)
+    {
+        return Ok(v);
+    }
+    // Pass 3: focused continuation. Cap the truncated payload at
+    // `max_continuation_bytes` so we do not blow up the next
+    // request's token budget.
+    let truncated: &str = if trimmed.len() > max_continuation_bytes {
+        &trimmed[trimmed.len() - max_continuation_bytes..]
+    } else {
+        &trimmed
+    };
+    let user = build_continuation_user_message(truncated, schema_hint);
+    let resp = call_provider(user).await?;
+    let tail_raw = resp.text.trim();
+    // The model may have included its own JSON fence. Strip it.
+    let tail = strip_code_fence(tail_raw);
+    // Concatenate and re-parse.
+    let mut combined = String::with_capacity(trimmed.len() + tail.len());
+    combined.push_str(&trimmed);
+    combined.push_str(&tail);
+    if let Ok(v) = serde_json::from_str::<T>(&combined) {
+        return Ok(v);
+    }
+    if let Some(closed) = auto_close_json(&combined)
+        && let Ok(v) = serde_json::from_str::<T>(&closed)
+    {
+        return Ok(v);
+    }
+    Err(Error::SchemaViolation(format!(
+        "model output is not valid JSON after focused continuation: len={} bytes; combined_len={} bytes; full combined follows:\n{}",
+        raw.len(),
+        combined.len(),
+        combined
     )))
 }
 
@@ -179,5 +267,13 @@ mod tests {
         let truncated = r#"{"a":7,"b":"x"}"#; // already complete
         let v: Sample = parse_model_json(truncated).unwrap();
         assert_eq!(v.a, 7);
+    }
+
+    #[test]
+    fn continuation_user_message_contains_truncated() {
+        let msg = build_continuation_user_message(r#"{"a":1,"b":"#, "test");
+        assert!(msg.contains("{\"a\":1,\"b\":"));
+        assert!(msg.contains("test"));
+        assert!(msg.contains("---BEGIN TRUNCATED JSON---"));
     }
 }

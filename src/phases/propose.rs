@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{parse_model_json, read_json, write_json};
+use crate::phases::util::{read_json, write_json};
 
 /// Propose phase. Generates `count` proposals in parallel.
 pub struct ProposePhase {
@@ -30,12 +30,13 @@ impl Phase for ProposePhase {
         let mut paths = Vec::new();
         for i in 0..self.count {
             let id = format!("p_{i:03}");
-            // Force the model to use this id in the response. We inject
-            // a constraint into the user message rather than relying on
-            // the model to choose.
             let user_with_id = format!("{user}\n\nUse id=\"{id}\" in the output.");
             let resp = pollster::block_on(ctx.call(Role::Propose, system.clone(), user_with_id))?;
-            let mut proposal: Proposal = parse_model_json(&resp.text)?;
+            let mut proposal: Proposal = pollster::block_on(ctx.parse_model_json(
+                Role::Propose,
+                &resp.text,
+                "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+            ))?;
             if proposal.id.is_empty() {
                 proposal.id = id.clone();
             }

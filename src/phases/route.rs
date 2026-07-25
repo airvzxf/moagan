@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{parse_model_json, read_json, write_json};
+use crate::phases::util::{read_json, write_json};
 
 /// Route phase.
 pub struct RoutePhase;
@@ -20,7 +20,11 @@ impl Phase for RoutePhase {
         let user = serde_json::to_string(&brief).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Route).to_owned();
         let resp = pollster::block_on(ctx.call(Role::Route, system, user))?;
-        let route: Route = parse_model_json(&resp.text)?;
+        let route: Route = pollster::block_on(ctx.parse_model_json(
+            Role::Route,
+            &resp.text,
+            "Route: {mode, reason, sketches, proposals, judges}",
+        ))?;
         let path = ctx.run_dir().final_dir().join("route.json");
         write_json(&path, &route)?;
         Ok(PhaseOutput::Route(path))
