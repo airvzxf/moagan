@@ -7,6 +7,8 @@
 #![warn(unreachable_pub)]
 #![warn(clippy::all)]
 
+pub mod secret;
+
 /// Reserved entry point exported for `main.rs`. Real implementation lands in module
 /// `cli::run` after the CLI subcommands are wired (commit 10).
 pub fn run() -> anyhow::Result<()> {
