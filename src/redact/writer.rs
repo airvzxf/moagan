@@ -57,8 +57,8 @@ impl<W: Write> RedactWriter<W> {
                 return Ok(());
             }
         };
-        let redacted = apply(&self.policy, self.surface, text)
-            .unwrap_or(std::borrow::Cow::Borrowed(text));
+        let redacted =
+            apply(&self.policy, self.surface, text).unwrap_or(std::borrow::Cow::Borrowed(text));
         inner.write_all(redacted.as_bytes())?;
         self.buffer.clear();
         Ok(())
@@ -74,8 +74,8 @@ impl<W: Write> Write for RedactWriter<W> {
         while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=pos).collect();
             let text = std::str::from_utf8(&line).unwrap_or("");
-            let redacted = apply(&self.policy, self.surface, text)
-                .unwrap_or(std::borrow::Cow::Borrowed(text));
+            let redacted =
+                apply(&self.policy, self.surface, text).unwrap_or(std::borrow::Cow::Borrowed(text));
             if let Some(inner) = self.inner.as_mut() {
                 inner.write_all(redacted.as_bytes())?;
             }
