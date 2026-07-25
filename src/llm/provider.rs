@@ -49,7 +49,9 @@ pub struct ProviderRegistry {
 impl std::fmt::Debug for ProviderRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.by_name.keys().map(String::as_str).collect();
-        f.debug_struct("ProviderRegistry").field("names", &names).finish()
+        f.debug_struct("ProviderRegistry")
+            .field("names", &names)
+            .finish()
     }
 }
 

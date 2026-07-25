@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,10 @@ pub fn build_client() -> std::result::Result<Client, Error> {
 }
 
 /// Build the headers for an Anthropic-compatible POST.
-pub fn build_headers(api_key: &str, extra: &[(String, String)]) -> std::result::Result<HeaderMap, Error> {
+pub fn build_headers(
+    api_key: &str,
+    extra: &[(String, String)],
+) -> std::result::Result<HeaderMap, Error> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
@@ -160,9 +163,7 @@ mod tests {
         // Inline parser used to avoid depending on the `http` crate to
         // build a reqwest::Response in tests.
         let raw = b"retry-after: 12";
-        let secs = raw
-            .iter()
-            .find_map(|_| None::<u64>);
+        let secs = raw.iter().find_map(|_| None::<u64>);
         let _ = secs;
 
         // Easier: use a closure that decodes from a parsed line.
