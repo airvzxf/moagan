@@ -15,6 +15,7 @@ use crate::error::Result;
 use crate::fs_layout::RunDir;
 use crate::ids::RunId;
 use crate::redact::{RedactPolicy, RedactWriter, Surface};
+use crate::storage::sqlite::Db;
 use crate::time::now_unix_secs;
 
 /// One phase event (start/end/error/cancel).
@@ -86,6 +87,10 @@ struct Inner {
     calls_path: PathBuf,
     phases: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     calls: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
+    /// Optional SQLite index. When present, every `phase()` and
+    /// `call()` mirrors the JSONL record into the corresponding
+    /// table so `moagan inspect` returns live data.
+    db: Option<Db>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -94,14 +99,21 @@ impl std::fmt::Debug for Inner {
             .field("run_id", &self.run_id)
             .field("phases_path", &self.phases_path)
             .field("calls_path", &self.calls_path)
+            .field("db_indexed", &self.db.is_some())
             .finish()
     }
 }
 
 impl Telemetry {
     /// Open the telemetry streams for a run. Creates the directory
-    /// if it does not exist.
-    pub fn open(run_id: RunId, run: &RunDir<'_>, policy: RedactPolicy) -> Result<Self> {
+    /// if it does not exist. When `db` is provided, every record is
+    /// mirrored to SQLite as well as the JSONL files.
+    pub fn open(
+        run_id: RunId,
+        run: &RunDir<'_>,
+        policy: RedactPolicy,
+        db: Option<Db>,
+    ) -> Result<Self> {
         run.telemetry(); // ensures the path is computed
         std::fs::create_dir_all(run.telemetry())?;
         let phases_path: PathBuf = run.telemetry().join("phases.jsonl");
@@ -129,6 +141,7 @@ impl Telemetry {
                     policy,
                     Surface::Telemetry,
                 ))),
+                db,
             }),
         })
     }
@@ -160,6 +173,7 @@ impl Telemetry {
                     policy,
                     Surface::Telemetry,
                 ))),
+                db: None,
             }),
         }
     }
@@ -184,11 +198,17 @@ impl Telemetry {
             at_unix: now_unix_secs(),
             error: error.map(str::to_owned),
         };
-        let bytes = serde_json::to_vec(&ev).map_err(crate::error::Error::from)?;
+        let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
         let mut g = self.inner.phases.lock();
         if let Some(w) = g.as_mut() {
             w.write_all(&bytes)?;
             w.write_all(b"\n")?;
+        }
+        if let Some(db) = &self.inner.db {
+            // Mirror into SQLite. Errors here are non-fatal: the
+            // JSONL is the canonical timeline; the DB is a queryable
+            // index.
+            let _ = db.record_phase(self.inner.run_id, phase, seq, status, error);
         }
         Ok(())
     }
@@ -231,11 +251,29 @@ impl Telemetry {
             ended_unix,
             error: error.map(str::to_owned),
         };
-        let bytes = serde_json::to_vec(&ev).map_err(crate::error::Error::from)?;
+        let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
         let mut g = self.inner.calls.lock();
         if let Some(w) = g.as_mut() {
             w.write_all(&bytes)?;
             w.write_all(b"\n")?;
+        }
+        if let Some(db) = &self.inner.db {
+            let _ = db.record_call(
+                call_id,
+                self.inner.run_id,
+                phase,
+                role,
+                provider,
+                model,
+                cache_key,
+                cache_hit,
+                http_status.map(i64::from),
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_creation,
+                error,
+            );
         }
         Ok(())
     }
@@ -314,7 +352,7 @@ mod tests {
         let home = crate::fs_layout::MoaganHome::resolve().unwrap();
         let run_dir = home.run_dir(RunId::new());
         run_dir.ensure().unwrap();
-        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default()).unwrap();
+        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
         t.phase("intake", 1, "end", None).unwrap();
         t.flush().unwrap();
         let content = std::fs::read_to_string(t.phases_path()).unwrap();
@@ -330,7 +368,7 @@ mod tests {
         let home = crate::fs_layout::MoaganHome::resolve().unwrap();
         let run_dir = home.run_dir(RunId::new());
         run_dir.ensure().unwrap();
-        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default()).unwrap();
+        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
         t.phase("intake", 1, "error", Some("key=sk-cp-aaaaaaaaaaaaaaaaaaaa"))
             .unwrap();
         t.flush().unwrap();

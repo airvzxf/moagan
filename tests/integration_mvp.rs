@@ -138,7 +138,7 @@ fn build_run_context(
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
-        Telemetry::open(run_id, &run_dir, RedactPolicy::default()).expect("open telemetry");
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
     let parallelism = Parallelism::new(2);
     RunContext::new(
         run_id,

@@ -15,6 +15,7 @@ use crate::phases::{
     ProposePhase, RankPhase, RepairPhase, RoutePhase,
 };
 use crate::redact::RedactPolicy;
+use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
 /// Options for `moagan run`.
@@ -54,7 +55,23 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
     let policy = RedactPolicy::default();
-    let telemetry = Telemetry::open(run_id, &run_dir, policy)?;
+    // Open the SQLite index under MOAGAN_HOME/meta.sqlite. The
+    // pipeline mirrors every phase event and every LLM call into
+    // the DB so `moagan inspect` returns live data.
+    let db = Db::open(&home.meta_db_path())?;
+    let config_hash = Some(crate::ids::blake3_hex(
+        crate::ids::canonical_hash(&[cfg.default_provider.as_str()]).as_bytes(),
+    ));
+    db.register_run(
+        run_id,
+        &opts.mode,
+        "running",
+        env!("CARGO_PKG_VERSION"),
+        config_hash.as_deref(),
+        None,
+        None,
+    )?;
+    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
     let parallelism = Parallelism::new(cfg.max_parallelism);
 
     let ctx = crate::phases::RunContext::new(
@@ -76,6 +93,9 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
     telemetry.flush()?;
+    if let Err(e) = db.update_run_status(run_id, "completed") {
+        eprintln!("warn: failed to update run status: {e}");
+    }
     println!(
         "moagan run {} mode={} provider={} -> {}",
         run_id.short(),
