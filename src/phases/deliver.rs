@@ -20,7 +20,9 @@ impl Phase for DeliverPhase {
     }
 
     fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        eprintln!("[deliver] start");
         let ranking: Ranking = read_json(&ctx.run_dir().rankings().join("ranking.json"))?;
+        eprintln!("[deliver] ranking loaded: winner={}", ranking.winner);
         let proposals_dir = ctx.run_dir().proposals();
         let winner_proposal: Proposal =
             read_json(&proposals_dir.join(format!("{}.json", ranking.winner))).or_else(|_| {
@@ -31,6 +33,7 @@ impl Phase for DeliverPhase {
                     .join(format!("{}_rev_0.json", ranking.winner));
                 read_json(&p)
             })?;
+        eprintln!("[deliver] winner_proposal loaded");
         let user = serde_json::to_string(&serde_json::json!({
             "winner": ranking.winner,
             "proposal": winner_proposal,
@@ -39,7 +42,11 @@ impl Phase for DeliverPhase {
         .map_err(crate::Error::from)?;
         let system = system_prompt(Role::Deliver).to_owned();
         let resp = pollster::block_on(ctx.call(Role::Deliver, system, user))?;
-        let report: FinalReport = parse_model_json(&resp.text)?;
+        eprintln!(
+            "[deliver] LLM returned, parsing as FinalReport. text_len={}",
+            resp.text.len()
+        );
+        let report: FinalReport = parse_model_json::<FinalReport>(&resp.text)?;
         let final_dir = ctx.run_dir().final_dir();
         std::fs::create_dir_all(&final_dir)?;
         let json_path: PathBuf = final_dir.join("portfolio.json");

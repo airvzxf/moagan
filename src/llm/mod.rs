@@ -15,6 +15,7 @@ pub mod role;
 pub mod wire;
 pub mod wire_format;
 
+pub use mock::{MockProvider, MockResponse};
 pub use provider::{Provider, ProviderRegistry, registry_from_config};
 pub use role::Role;
 pub use wire::{CallRecord, Request, Response, Usage};

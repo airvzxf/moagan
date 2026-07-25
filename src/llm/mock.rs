@@ -66,6 +66,9 @@ pub struct MockProvider {
     model: String,
     endpoint: String,
     calls: parking_lot::Mutex<Vec<CallRecord>>,
+    /// When true, wrap around to the start when the queue is exhausted.
+    /// Default true so smoke tests do not need to count call sequences.
+    cycle: bool,
 }
 
 impl MockProvider {
@@ -78,6 +81,7 @@ impl MockProvider {
             model: "mock-model".to_owned(),
             endpoint: "mock://local".to_owned(),
             calls: parking_lot::Mutex::new(Vec::new()),
+            cycle: true,
         }
     }
 
@@ -90,6 +94,11 @@ impl MockProvider {
     /// Push a response onto the queue.
     pub fn push(&mut self, response: MockResponse) {
         self.responses.push(response);
+    }
+
+    /// Set whether exhausted calls wrap to the start. Default true.
+    pub fn set_cycle(&mut self, cycle: bool) {
+        self.cycle = cycle;
     }
 
     /// Number of remaining (unconsumed) responses.
@@ -165,7 +174,15 @@ impl Provider for MockProvider {
     }
 
     async fn send(&self, _req: &Request) -> Result<Response> {
-        let i = self.index.fetch_add(1, Ordering::SeqCst);
+        let n = self.responses.len();
+        if n == 0 {
+            return Err(Error::MockExhausted);
+        }
+        let i = if self.cycle {
+            self.index.fetch_add(1, Ordering::SeqCst) % n
+        } else {
+            self.index.fetch_add(1, Ordering::SeqCst)
+        };
         let record = CallRecord {
             cache_key: String::new(),
             provider: self.name().to_owned(),
@@ -208,6 +225,23 @@ mod tests {
         let r2 = p.send(&req()).await.unwrap();
         assert_eq!(r1.text, "first");
         assert_eq!(r2.text, "second");
+    }
+
+    #[tokio::test]
+    async fn cycle_returns_error_when_disabled() {
+        let mut p = MockProvider::new(vec![MockResponse::plain("only")]);
+        p.set_cycle(false);
+        let req = || Request {
+            role: Role::Intake,
+            model: "m".into(),
+            system: "s".into(),
+            user: "u".into(),
+            max_tokens: 16,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+        };
+        let _r1 = p.send(&req()).await.unwrap();
         assert!(p.send(&req()).await.is_err());
     }
 

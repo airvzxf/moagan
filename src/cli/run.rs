@@ -3,13 +3,13 @@
 
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{Config, ProviderConfig};
 use crate::domain::Manifest;
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
-use crate::llm::registry_from_config;
+use crate::llm::{registry_from_config, ProviderRegistry};
 use crate::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
     ProposePhase, RankPhase, RepairPhase, RoutePhase,
@@ -50,7 +50,7 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     } else {
         opts.provider.clone()
     };
-    let providers = Arc::new(registry_from_config(&cfg.providers)?);
+    let providers = Arc::new(build_registry_for(&cfg, &default_provider)?);
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
     let policy = RedactPolicy::default();
@@ -84,6 +84,22 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         run_dir.root().display()
     );
     Ok(run_id)
+}
+
+fn build_registry_for(cfg: &Config, selected: &str) -> Result<ProviderRegistry> {
+    // Build a registry containing only the selected provider (plus `mock`
+    // when explicitly requested). The full cfg may declare other
+    // providers whose `from_config` requires an API key; we must not
+    // construct them when the user did not ask for them.
+    let mut spec_map = std::collections::BTreeMap::new();
+    if let Some(spec) = cfg.providers.get(selected) {
+        spec_map.insert(selected.to_owned(), spec.clone());
+    } else {
+        return Err(Error::InvalidArgs(format!(
+            "provider '{selected}' is not in config"
+        )));
+    }
+    registry_from_config(&spec_map)
 }
 
 fn build_pipeline_for_mode(mode: &str, cfg: &Config) -> Pipeline {

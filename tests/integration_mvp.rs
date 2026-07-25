@@ -1,0 +1,297 @@
+//! End-to-end smoke test for the MVP pipeline with the mock provider.
+//!
+//! Verifies the gates promised in the plan:
+//! 1. `moagan run --mode fast --provider mock` produces
+//!    `final/portfolio.md` and `rankings/ranking.json`.
+//! 2. The pipeline runs all 10 phases in order.
+//! 3. Telemetry records every phase and call.
+
+use std::sync::Arc;
+
+use moagan::config::Config;
+use moagan::error::Result;
+use moagan::execution::Parallelism;
+use moagan::fs_layout::MoaganHome;
+use moagan::ids::RunId;
+use moagan::llm::MockProvider;
+use moagan::llm::{MockResponse, ProviderRegistry};
+use moagan::phases::{
+    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext,
+};
+use moagan::redact::RedactPolicy;
+use moagan::telemetry::Telemetry;
+
+fn build_mock_provider() -> Arc<MockProvider> {
+    // The pipeline call sequence in fast mode is:
+    //   intake, clarify, route,
+    //   propose p_000, propose p_001, propose p_002,
+    //   critique*6 (3 props x 2 critics),
+    //   judge*9 (3 props x 3 judges),
+    //   deliver
+    // We pre-load a response for every call so each role gets a
+    // JSON payload of the right shape.
+    let mut p = MockProvider::empty();
+    p.push(MockResponse::plain(intake_json()));
+    p.push(MockResponse::plain(clarify_json()));
+    p.push(MockResponse::plain(route_json()));
+    p.push(MockResponse::plain(propose_json("p_000")));
+    p.push(MockResponse::plain(propose_json("p_001")));
+    p.push(MockResponse::plain(propose_json("p_002")));
+    for _ in 0..6 {
+        p.push(MockResponse::plain(critique_json()));
+    }
+    for _ in 0..9 {
+        p.push(MockResponse::plain(judge_json()));
+    }
+    p.push(MockResponse::plain(deliver_json()));
+    p.set_cycle(false);
+    Arc::new(p)
+}
+
+fn intake_json() -> &'static str {
+    r#"{
+  "problem": "Enumerate the seven colors of the rainbow in order",
+  "objectives": ["List the colors in standard order"],
+  "constraints": ["Standard ROYGBIV order"],
+  "non_goals": ["Physics, wavelengths, or color theory beyond naming"],
+  "open_questions": [],
+  "raw_prompt": "Enumera los 7 colores del arcoiris en orden"
+}"#
+}
+
+fn clarify_json() -> &'static str {
+    r#"{
+  "problem": "List the seven colors of the rainbow in standard order",
+  "objectives": ["Produce ROYGBIV in order"],
+  "deliverables": ["A list of seven color names"],
+  "constraints": ["Use the canonical English names"],
+  "assumptions": ["The user is asking for the standard 7-color model"],
+  "non_goals": ["Detailed wavelength information"],
+  "acceptance": "The list is exactly R, O, Y, G, B, I, V in that order",
+  "risks": ["Off-by-one if the user means a different model"]
+}"#
+}
+
+fn route_json() -> &'static str {
+    r#"{
+  "mode": "fast",
+  "reason": "Simple enumeration, no architecture needed",
+  "sketches": 0,
+  "proposals": 3,
+  "judges": 3
+}"#
+}
+
+fn propose_json(id: &str) -> String {
+    format!(
+        r#"{{
+  "id": "{id}",
+  "summary": "Standard ROYGBIV in English ({id})",
+  "approach": "Output the canonical order: red, orange, yellow, green, blue, indigo, violet.",
+  "tradeoffs": ["None — the user asked for the standard order"],
+  "evidence": ["Wikipedia: Rainbow"]
+}}"#
+    )
+}
+
+fn critique_json() -> &'static str {
+    r#"{
+  "verdict": "accept",
+  "issues": [],
+  "suggestions": []
+}"#
+}
+
+fn judge_json() -> &'static str {
+    r#"{
+  "score": 8.0,
+  "criteria": {
+    "correctness": 9.0,
+    "completeness": 8.0,
+    "fit": 9.0,
+    "evidence": 8.0,
+    "clarity": 8.0
+  },
+  "comments": "Clean and correct."
+}"#
+}
+
+fn deliver_json() -> &'static str {
+    r#"{
+  "title": "The seven colors of the rainbow",
+  "summary": "Red, orange, yellow, green, blue, indigo, violet.",
+  "recommendation": "Use the canonical ROYGBIV order.",
+  "alternatives": ["Use a regional naming convention if the audience is young children."],
+  "next_steps": ["Verify with a quick visual check against any standard reference."]
+}"#
+}
+
+fn build_run_context(
+    home: Arc<MoaganHome>,
+    provider: Arc<MockProvider>,
+    run_id: RunId,
+) -> RunContext {
+    let mut registry = ProviderRegistry::default();
+    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
+    registry.insert("mock".into(), arc);
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().expect("ensure run dir");
+    let telemetry =
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default()).expect("open telemetry");
+    let parallelism = Parallelism::new(2);
+    RunContext::new(
+        run_id,
+        home,
+        Arc::new(registry),
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "Enumera los 7 colores del arcoíris en orden".into(),
+        "fast".into(),
+    )
+}
+
+#[test]
+fn mock_provider_end_to_end_smoke() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let run_id = RunId::new();
+    let provider = build_mock_provider();
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(ProposePhase { count: 3 })
+        .push(GatePhase)
+        .push(CritiquePhase {
+            critics_per_proposal: 2,
+        })
+        .push(RepairPhase)
+        .push(JudgePhase { judges: 3 })
+        .push(RankPhase)
+        .push(DeliverPhase);
+
+    let outputs = pipeline.run(&ctx)?;
+    assert_eq!(outputs.len(), 10, "expected 10 phase outputs");
+
+    // Write manifest like run.rs does.
+    let run_dir = home.run_dir(run_id);
+    let manifest = moagan::domain::Manifest {
+        schema_version: "v1".into(),
+        run_id,
+        mode: "fast".into(),
+        status: "completed".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+        brief_sha256: String::new(),
+        brief_blake3: String::new(),
+        provider: "mock".into(),
+        model: "mock-model".into(),
+        phases: Vec::new(),
+        usage: moagan::domain::ManifestUsage::default(),
+        manifest_blake3: String::new(),
+    };
+    let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+    moagan::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
+
+    assert!(run_dir.manifest().exists(), "manifest.json was not written");
+    assert!(
+        run_dir.final_dir().join("portfolio.md").exists(),
+        "portfolio.md was not written"
+    );
+    assert!(
+        run_dir.rankings().join("ranking.json").exists(),
+        "ranking.json was not written"
+    );
+    assert!(
+        run_dir.proposals().join("p_000.json").exists(),
+        "p_000 proposal was not written"
+    );
+    assert!(
+        run_dir.evaluations().join("p_000.json").exists(),
+        "p_000 evaluation was not written"
+    );
+    let phases = std::fs::read_to_string(run_dir.telemetry().join("phases.jsonl"))?;
+    assert!(phases.contains("\"phase\":\"intake\""));
+    assert!(phases.contains("\"phase\":\"deliver\""));
+
+    let portfolio = std::fs::read_to_string(run_dir.final_dir().join("portfolio.md"))?;
+    assert!(portfolio.contains("#"));
+    let ranking = std::fs::read_to_string(run_dir.rankings().join("ranking.json"))?;
+    assert!(ranking.contains("\"winner\""));
+
+    Ok(())
+}
+
+#[test]
+fn cli_parses_run_subcommand() {
+    use clap::Parser;
+    let cli = moagan::cli::Cli::parse_from([
+        "moagan",
+        "run",
+        "--mode",
+        "fast",
+        "--provider",
+        "mock",
+        "--prompt",
+        "Enumera los 7 colores del arcoíris en orden",
+    ]);
+    match cli.cmd {
+        moagan::cli::Cmd::Run {
+            mode,
+            provider,
+            prompt,
+            ..
+        } => {
+            assert_eq!(mode, "fast");
+            assert_eq!(provider, "mock");
+            assert_eq!(prompt, "Enumera los 7 colores del arcoíris en orden");
+        }
+        _ => panic!("expected Run"),
+    }
+}
+
+#[test]
+fn inspect_listing_returns_zero_runs_when_db_is_fresh() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = MoaganHome::resolve()?;
+    home.ensure()?;
+    let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
+    let entries = moagan::cli::inspect::list_recent(&db, 10)?;
+    assert!(entries.is_empty());
+    Ok(())
+}
+
+#[test]
+fn forbidden_cargo_toml_guard_rejects_secrecy() {
+    let bad = "[dependencies]\nsecrecy = \"0.8\"\n";
+    assert!(moagan::cli::forbidden::check_cargo_toml(bad).is_err());
+}
+
+#[test]
+fn config_load_returns_defaults() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    unsafe {
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let cfg = Config::load()?;
+    assert!(cfg.providers.contains_key("minimax"));
+    assert!(cfg.providers.contains_key("mock"));
+    Ok(())
+}

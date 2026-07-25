@@ -26,7 +26,8 @@ impl Phase for RankPhase {
         for entry in std::fs::read_dir(&evaluations_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !file_name.ends_with(".json") || file_name.ends_with(".meta.json") {
                 continue;
             }
             let agg: Aggregated = read_json(&path)?;
