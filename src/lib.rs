@@ -9,6 +9,7 @@
 
 pub mod atomic;
 pub mod cancel;
+pub mod cli;
 pub mod config;
 pub mod domain;
 pub mod error;
@@ -23,20 +24,59 @@ pub mod storage;
 pub mod telemetry;
 pub mod time;
 
-pub use error::{Error, Result};
+pub use error::{Error, Result, exit_code};
 
-/// Reserved entry point exported for `main.rs`. Real implementation lands in module
-/// `cli::run` after the CLI subcommands are wired (commit 10).
+/// CLI entry point. Returns a Unix exit code.
 pub fn run() -> anyhow::Result<()> {
-    anyhow::bail!("moagan::run is not implemented yet; CLI lands in commit 10")
+    use clap::Parser;
+    let cli = cli::Cli::parse();
+    let code = match cli::dispatch(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            i32::from(exit_code(&e))
+        }
+    };
+    std::process::exit(code)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
-    fn run_returns_not_implemented() {
-        assert!(run().is_err());
+    fn parse_run_subcommand() {
+        let cli = cli::Cli::parse_from([
+            "moagan",
+            "run",
+            "--mode",
+            "fast",
+            "--provider",
+            "mock",
+            "--prompt",
+            "hello",
+        ]);
+        match cli.cmd {
+            cli::Cmd::Run {
+                mode,
+                provider,
+                prompt,
+                ..
+            } => {
+                assert_eq!(mode, "fast");
+                assert_eq!(provider, "mock");
+                assert_eq!(prompt, "hello");
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_uses_exit_code_mapper() {
+        let e = Error::InvalidArgs("x".into());
+        assert_eq!(exit_code(&e), 2);
+        let e = Error::PlanExhausted("x".into());
+        assert_eq!(exit_code(&e), 4);
     }
 }

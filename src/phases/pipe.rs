@@ -86,9 +86,9 @@ mod tests {
     }
 
     fn empty_ctx() -> RunContext {
-        let home = std::sync::Arc::new(
-            crate::fs_layout::MoaganHome::at(std::path::PathBuf::from("/tmp/moagan-test")),
-        );
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
+            "/tmp/moagan-test",
+        )));
         RunContext {
             run_id: crate::ids::RunId::default(),
             home,

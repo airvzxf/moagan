@@ -95,7 +95,9 @@ impl ProviderRegistry {
 /// `minimax` configuration is wired against the `minimax` provider
 /// implementation; everything else falls back to `MockProvider` with an
 /// explicit-not-implemented error unless the user explicitly opts in.
-pub fn registry_from_config(cfg: &HashMap<String, ProviderConfig>) -> Result<ProviderRegistry> {
+pub fn registry_from_config(
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
+) -> Result<ProviderRegistry> {
     let mut registry = ProviderRegistry::default();
     for (name, spec) in cfg {
         let provider: Arc<dyn Provider> = match spec.kind.as_str() {
