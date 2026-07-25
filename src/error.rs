@@ -76,6 +76,30 @@ impl From<IoError> for Error {
     }
 }
 
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::Provider(format!("sqlite: {e}"))
+    }
+}
+
+impl From<r2d2::Error> for Error {
+    fn from(e: r2d2::Error) -> Self {
+        Error::Provider(format!("sqlite pool: {e}"))
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::SchemaViolation(format!("json: {e}"))
+    }
+}
+
+impl From<toml::de::Error> for Error {
+    fn from(e: toml::de::Error) -> Self {
+        Error::InvalidArgs(format!("toml: {e}"))
+    }
+}
+
 /// Structured I/O errors. Splits the raw `io::Error` from the
 /// context-rich variants so callers can match precisely.
 #[derive(Debug, Error)]

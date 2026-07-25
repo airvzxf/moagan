@@ -8,8 +8,12 @@
 #![warn(clippy::all)]
 
 pub mod atomic;
+pub mod config;
 pub mod error;
+pub mod fs_layout;
+pub mod ids;
 pub mod secret;
+pub mod storage;
 pub mod time;
 
 pub use error::{Error, Result};

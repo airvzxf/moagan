@@ -1,0 +1,249 @@
+//! Configuration model and loader.
+//!
+//! Resolution order (highest priority first):
+//! 1. CLI flags (wired in commit 10).
+//! 2. `MOAGAN_*` environment variables (e.g. `MOAGAN_MAX_PARALLELISM`).
+//! 3. `~/.config/moagan/config.toml` if present.
+//! 4. Built-in defaults.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::Result;
+
+/// Top-level configuration record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// Where runs and meta live. Defaults to `${MOAGAN_HOME:-~/.local/share/moagan}`.
+    pub home: Option<PathBuf>,
+    /// Hard cap on concurrent LLM calls. Default 4.
+    pub max_parallelism: usize,
+    /// Sketch timeout in seconds. 0 means infinite. Default 120.
+    pub sketch_timeout_secs: u64,
+    /// Phase timeout in seconds. 0 means infinite. Default 0.
+    pub phase_timeout_secs: u64,
+    /// Total run timeout in seconds. 0 means infinite. Default 0.
+    pub total_timeout_secs: u64,
+    /// Token budget for the run. `None` means unlimited.
+    pub token_budget: Option<u64>,
+    /// Named providers the user can select with `--provider`.
+    pub providers: BTreeMap<String, ProviderConfig>,
+    /// Default provider name when `--provider` is omitted.
+    pub default_provider: String,
+    /// Default export format. `tar.gz` or `zip`.
+    pub export_format: String,
+    /// Export compression level (0..=9). Default 6.
+    pub export_compression: u32,
+    /// Redact secrets before persisting. Default true.
+    pub redact_in_telemetry: bool,
+    /// Include run summary in CI logs. Default false.
+    pub emit_summary: bool,
+    /// Disable colour in CLI output. Default false.
+    pub no_color: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            home: None,
+            max_parallelism: 4,
+            sketch_timeout_secs: 120,
+            phase_timeout_secs: 0,
+            total_timeout_secs: 0,
+            token_budget: None,
+            providers: default_providers(),
+            default_provider: "minimax".to_owned(),
+            export_format: "tar.gz".to_owned(),
+            export_compression: 6,
+            redact_in_telemetry: true,
+            emit_summary: false,
+            no_color: false,
+        }
+    }
+}
+
+fn default_providers() -> BTreeMap<String, ProviderConfig> {
+    let mut m = BTreeMap::new();
+    m.insert(
+        "minimax".to_owned(),
+        ProviderConfig {
+            kind: "minimax".to_owned(),
+            endpoint: "https://api.minimax.io/anthropic/v1".to_owned(),
+            model: "MiniMax-M3".to_owned(),
+            max_tokens: Some(4096),
+            temperature: Some(0.6),
+            top_p: Some(0.95),
+            hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
+        },
+    );
+    m.insert(
+        "mock".to_owned(),
+        ProviderConfig {
+            kind: "mock".to_owned(),
+            endpoint: "mock://local".to_owned(),
+            model: "mock-model".to_owned(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            hard_incompatibilities: vec![],
+        },
+    );
+    m
+}
+
+/// Per-provider configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    /// Provider implementation name (e.g. `"minimax"`, `"mock"`).
+    pub kind: String,
+    /// HTTP endpoint (Anthropic-compatible for kind `minimax`).
+    pub endpoint: String,
+    /// Default model name.
+    pub model: String,
+    /// Default max tokens per call.
+    pub max_tokens: Option<u32>,
+    /// Default sampling temperature.
+    pub temperature: Option<f32>,
+    /// Default top-p.
+    pub top_p: Option<f32>,
+    /// Crate names that must never appear in `Cargo.toml` together with
+    /// this provider — runtime vs static guard.
+    pub hard_incompatibilities: Vec<String>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            kind: "mock".to_owned(),
+            endpoint: "mock://local".to_owned(),
+            model: "mock-model".to_owned(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            hard_incompatibilities: vec![],
+        }
+    }
+}
+
+impl Config {
+    /// Build the default configuration without touching the filesystem.
+    pub fn defaults() -> Self {
+        Self::default()
+    }
+
+    /// Load configuration from `~/.config/moagan/config.toml` if it
+    /// exists, then apply `MOAGAN_*` env overrides. Returns defaults if
+    /// no file is present.
+    pub fn load() -> Result<Self> {
+        let path = default_config_path();
+        let mut cfg = if path.exists() {
+            let raw = std::fs::read_to_string(&path)?;
+            toml::from_str(&raw).map_err(|e| {
+                crate::Error::InvalidArgs(format!("config parse error at {path:?}: {e}"))
+            })?
+        } else {
+            Self::default()
+        };
+        cfg.apply_env_overrides();
+        Ok(cfg)
+    }
+
+    /// Apply `MOAGAN_*` environment overrides. Any override that fails
+    /// to parse is silently ignored; bad config is up to the user.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("MOAGAN_MAX_PARALLELISM")
+            && let Ok(n) = v.parse()
+        {
+            self.max_parallelism = n;
+        }
+        if let Ok(v) = std::env::var("MOAGAN_SKETCH_TIMEOUT")
+            && let Ok(n) = v.parse()
+        {
+            self.sketch_timeout_secs = n;
+        }
+        if let Ok(v) = std::env::var("MOAGAN_PHASE_TIMEOUT")
+            && let Ok(n) = v.parse()
+        {
+            self.phase_timeout_secs = n;
+        }
+        if let Ok(v) = std::env::var("MOAGAN_TOTAL_TIMEOUT")
+            && let Ok(n) = v.parse()
+        {
+            self.total_timeout_secs = n;
+        }
+        if let Ok(v) = std::env::var("MOAGAN_DEFAULT_PROVIDER") {
+            self.default_provider = v;
+        }
+    }
+
+    /// Resolve the configured provider by name. Returns
+    /// `Error::InvalidArgs` if the provider is unknown.
+    pub fn provider(&self, name: &str) -> Result<&ProviderConfig> {
+        self.providers
+            .get(name)
+            .ok_or_else(|| crate::Error::InvalidArgs(format!("unknown provider: {name}")))
+    }
+}
+
+fn default_config_path() -> PathBuf {
+    if let Ok(env) = std::env::var("MOAGAN_CONFIG") {
+        return PathBuf::from(env);
+    }
+    let proj = directories::ProjectDirs::from("net", "rovisoft", "moagan");
+    match proj {
+        Some(p) => p.config_dir().join("config.toml"),
+        None => PathBuf::from("config.toml"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sane() {
+        let cfg = Config::default();
+        assert_eq!(cfg.max_parallelism, 4);
+        assert_eq!(cfg.sketch_timeout_secs, 120);
+        assert_eq!(cfg.phase_timeout_secs, 0);
+        assert_eq!(cfg.total_timeout_secs, 0);
+        assert!(cfg.redact_in_telemetry);
+        assert!(cfg.providers.contains_key("minimax"));
+        assert!(cfg.providers.contains_key("mock"));
+    }
+
+    #[test]
+    fn provider_lookup() {
+        let cfg = Config::default();
+        assert!(cfg.provider("minimax").is_ok());
+        assert!(cfg.provider("mock").is_ok());
+        assert!(cfg.provider("does-not-exist").is_err());
+    }
+
+    #[test]
+    fn tomllib_round_trip() {
+        let cfg = Config::default();
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(back.max_parallelism, cfg.max_parallelism);
+        assert_eq!(back.default_provider, cfg.default_provider);
+        assert_eq!(back.providers.len(), cfg.providers.len());
+    }
+
+    #[test]
+    fn env_overrides_parallelism() {
+        unsafe {
+            std::env::set_var("MOAGAN_MAX_PARALLELISM", "12");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.max_parallelism, 12);
+        unsafe {
+            std::env::remove_var("MOAGAN_MAX_PARALLELISM");
+        }
+    }
+}
