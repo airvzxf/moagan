@@ -1,0 +1,41 @@
+/target
+Cargo.lock.bak
+**/*.rs.bk
+*.pdb
+
+# Local run artifacts
+.runs/
+moagan.runs/
+*.run-id
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Secrets / keys
+*.pem
+*.key
+secrets/
+
+# Editor/OS
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+.fleet/
+
+# Build / coverage artifacts
+coverage/
+*.lcov
+*.profraw
+
+# Telemetry / cache overflow
+dashboard.html
+phases.jsonl.gz
+calls.jsonl.gz
+
+# Claude / opencode scratch
+.claude/
+.opencode/
