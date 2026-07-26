@@ -91,7 +91,12 @@ impl RunContext {
     }
 
     /// Send a `Request` through the active provider and surface the
-    /// response. Used by every LLM-backed phase.
+    /// response. Every call is mirrored into the call-level telemetry
+    /// (JSONL + SQLite when the index is enabled) with a fresh
+    /// UUIDv7 id, start/end timestamps, the HTTP status, the
+    /// reported token usage, and the model name. The phase name in
+    /// the call record is `role.as_str()`, which matches the phase
+    /// pipeline name.
     pub async fn call(&self, role: Role, system: String, user: String) -> Result<Response> {
         let req = Request {
             role,
@@ -104,7 +109,52 @@ impl RunContext {
             response_schema: None,
         };
         let provider = self.provider();
-        provider.send(&req).await
+        let call_id = uuid::Uuid::now_v7().to_string();
+        let started_unix = crate::time::now_unix_secs();
+        let result = provider.send(&req).await;
+        let ended_unix = crate::time::now_unix_secs();
+        let phase_name = role.as_str();
+        match &result {
+            Ok((status, response)) => {
+                let _ = self.telemetry.call(
+                    &call_id,
+                    phase_name,
+                    phase_name,
+                    self.default_provider.as_str(),
+                    self.default_model.as_str(),
+                    "",
+                    false,
+                    Some(*status),
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                    response.usage.cache_read,
+                    response.usage.cache_creation,
+                    started_unix,
+                    ended_unix,
+                    None,
+                );
+            }
+            Err(e) => {
+                let _ = self.telemetry.call(
+                    &call_id,
+                    phase_name,
+                    phase_name,
+                    self.default_provider.as_str(),
+                    self.default_model.as_str(),
+                    "",
+                    false,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    started_unix,
+                    ended_unix,
+                    Some(&e.to_string()),
+                );
+            }
+        }
+        result.map(|(_, r)| r)
     }
 
     /// Parse an LLM response as JSON. The `role` and `schema_hint` are

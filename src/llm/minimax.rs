@@ -115,7 +115,7 @@ impl Provider for MinimaxProvider {
         &self.endpoint
     }
 
-    async fn send(&self, req: &Request) -> Result<Response> {
+    async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let url = self.messages_url();
         let body = body_from_request(req);
         let mut attempt: u32 = 0;
@@ -132,6 +132,7 @@ impl Provider for MinimaxProvider {
             match result {
                 Ok(resp) => {
                     let status = resp.status();
+                    let status_code = status.as_u16();
                     let retry_after = retry_after(&resp);
                     if status.is_success() {
                         let parsed: MessagesResponseBody = resp
@@ -148,7 +149,7 @@ impl Provider for MinimaxProvider {
                                 resp.text.len()
                             );
                         }
-                        return Ok(resp);
+                        return Ok((status_code, resp));
                     }
                     let body = resp.text().await.unwrap_or_default();
                     let err = classify_status(status, &body);

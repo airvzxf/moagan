@@ -28,9 +28,13 @@ pub trait Provider: Send + Sync {
     /// any stable string (e.g. `"mock://local"`).
     fn endpoint(&self) -> &str;
 
-    /// Send a request and return the response. Implementations must
-    /// honour the caller's cancellation context if they support it.
-    async fn send(&self, req: &Request) -> Result<Response>;
+    /// Send a request and return the HTTP status alongside the
+    /// response. The status is recorded in the call-level telemetry
+    /// so audits can see which calls were clipped, throttled, or
+    /// failed at the transport layer without parsing the response
+    /// body. Implementations must honour the caller's cancellation
+    /// context if they support it.
+    async fn send(&self, req: &Request) -> Result<(u16, Response)>;
 
     /// Optional: count tokens for pre-flight estimation. Default returns
     /// `None` and the caller falls back to a heuristic.

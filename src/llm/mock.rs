@@ -173,7 +173,7 @@ impl Provider for MockProvider {
         &self.endpoint
     }
 
-    async fn send(&self, _req: &Request) -> Result<Response> {
+    async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
         let n = self.responses.len();
         if n == 0 {
             return Err(Error::MockExhausted);
@@ -196,7 +196,7 @@ impl Provider for MockProvider {
         };
         self.calls.lock().push(record);
         let r = self.responses.get(i).ok_or(Error::MockExhausted)?;
-        Ok(r.clone().into_response())
+        Ok((200, r.clone().into_response()))
     }
 }
 
@@ -221,8 +221,10 @@ mod tests {
             top_p: None,
             response_schema: None,
         };
-        let r1 = p.send(&req()).await.unwrap();
-        let r2 = p.send(&req()).await.unwrap();
+        let (status1, r1) = p.send(&req()).await.unwrap();
+        let (status2, r2) = p.send(&req()).await.unwrap();
+        assert_eq!(status1, 200);
+        assert_eq!(status2, 200);
         assert_eq!(r1.text, "first");
         assert_eq!(r2.text, "second");
     }
