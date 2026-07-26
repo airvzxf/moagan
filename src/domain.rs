@@ -58,7 +58,8 @@ pub struct Brief {
 }
 
 /// Output of the route phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Route {
     /// Mode name (`"fast"` or `"standard"`).
     pub mode: String,
@@ -73,7 +74,8 @@ pub struct Route {
 }
 
 /// Output of the propose phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Proposal {
     /// Stable id (e.g. `"p_001"`).
     pub id: String,
@@ -88,7 +90,8 @@ pub struct Proposal {
 }
 
 /// Output of the gate phase (one per proposal).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Gate {
     /// Did the proposal pass the structural check?
     pub pass: bool,
@@ -99,7 +102,8 @@ pub struct Gate {
 }
 
 /// Output of the critique phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Critique {
     /// Verdict.
     pub verdict: String,
@@ -110,7 +114,8 @@ pub struct Critique {
 }
 
 /// Output of the repair phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Repair {
     /// Repaired proposal id.
     pub id: String,
@@ -127,7 +132,8 @@ pub struct Repair {
 }
 
 /// Output of the judge phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JudgeScore {
     /// Overall score (0..=10).
     pub score: f32,
@@ -138,7 +144,8 @@ pub struct JudgeScore {
 }
 
 /// Per-criterion breakdown.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JudgeCriteria {
     /// 0..=10.
     pub correctness: f32,
@@ -153,7 +160,8 @@ pub struct JudgeCriteria {
 }
 
 /// Output of the rank phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Ranking {
     /// Ranked proposals (highest first).
     pub ranked: Vec<RankEntry>,
@@ -162,7 +170,8 @@ pub struct Ranking {
 }
 
 /// One entry in the ranking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RankEntry {
     /// Proposal id.
     pub id: String,
@@ -173,7 +182,8 @@ pub struct RankEntry {
 }
 
 /// Output of the deliver phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FinalReport {
     /// Title.
     pub title: String,
@@ -269,5 +279,23 @@ mod tests {
         let j = serde_json::to_string(&b).unwrap();
         let back: Brief = serde_json::from_str(&j).unwrap();
         assert_eq!(back.problem, "x");
+    }
+
+    /// Each LLM-output struct must accept an empty JSON object without
+    /// failing the parse. The model frequently omits optional fields
+    /// (especially `comments` on JudgeScore), and we tolerate that by
+    /// defaulting to zero/empty values rather than hard-erroring.
+    #[test]
+    fn empty_object_parses_as_default_for_all_output_types() {
+        let _: Proposal = serde_json::from_str("{}").unwrap();
+        let _: Gate = serde_json::from_str("{}").unwrap();
+        let _: Critique = serde_json::from_str("{}").unwrap();
+        let _: Repair = serde_json::from_str("{}").unwrap();
+        let _: JudgeScore = serde_json::from_str("{}").unwrap();
+        let _: JudgeCriteria = serde_json::from_str("{}").unwrap();
+        let _: Ranking = serde_json::from_str("{}").unwrap();
+        let _: RankEntry = serde_json::from_str("{}").unwrap();
+        let _: FinalReport = serde_json::from_str("{}").unwrap();
+        let _: Route = serde_json::from_str("{}").unwrap();
     }
 }
