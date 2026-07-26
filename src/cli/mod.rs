@@ -10,6 +10,7 @@ use crate::fs_layout::MoaganHome;
 use crate::storage::sqlite::Db;
 
 pub mod continue_cmd;
+pub mod doctor;
 pub mod forbidden;
 pub mod inspect;
 pub mod run;
@@ -57,6 +58,13 @@ pub enum Cmd {
         /// Override the home directory.
         #[arg(long)]
         runs_dir: Option<std::path::PathBuf>,
+        /// Load mock responses from this directory (provider=mock only).
+        /// Files are read in alphabetical order; each file is a JSON
+        /// object with `text` (required), `usage` (optional), and
+        /// `finish_reason` (optional). When omitted, the mock returns
+        /// an empty queue and the call fails on the first request.
+        #[arg(long)]
+        mock_dir: Option<std::path::PathBuf>,
         /// Non-interactive: no prompts.
         #[arg(long, default_value_t = false)]
         non_interactive: bool,
@@ -118,6 +126,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             provider,
             prompt,
             runs_dir,
+            mock_dir,
             non_interactive,
         } => {
             let run_id = run::run(
@@ -126,6 +135,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     provider,
                     prompt,
                     home: runs_dir,
+                    mock_dir,
                     non_interactive,
                 },
                 &cfg,
@@ -173,9 +183,6 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Refine { .. } | Cmd::Rerank { .. } => Err(Error::InvalidState(
             "refine and rerank land in v0.2; tracked in the integrated catalog".into(),
         )),
-        Cmd::Doctor => {
-            println!("moagan doctor: ok");
-            Ok(0)
-        }
+        Cmd::Doctor => doctor::run(),
     }
 }

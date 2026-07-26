@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{IoError, Result};
+use crate::error::{Error, IoError, Result};
 use crate::ids::RunId;
 
 /// Resolved root directory for all moagan state.
@@ -30,15 +30,20 @@ impl MoaganHome {
         {
             return Ok(Self::at(PathBuf::from(env)));
         }
-        let proj =
-            directories::ProjectDirs::from("net", "rovisoft", "moagan").ok_or_else(|| {
-                IoError::Raw(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "could not resolve user home directory",
-                ))
-            })?;
-        let root = proj.data_dir().to_path_buf();
-        Ok(Self::at(root))
+        if let Some(home) = std::env::var_os("HOME")
+            && !home.is_empty()
+        {
+            return Ok(Self::at(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("moagan"),
+            ));
+        }
+        Err(Error::Io(IoError::Raw(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not resolve user home directory; set MOAGAN_HOME",
+        ))))
     }
 
     /// Root path (e.g. `~/.local/share/moagan`).

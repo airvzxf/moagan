@@ -183,6 +183,15 @@ impl Config {
         if let Ok(v) = std::env::var("MOAGAN_DEFAULT_PROVIDER") {
             self.default_provider = v;
         }
+        if let Ok(v) = std::env::var("MOAGAN_MINIMAX_ENDPOINT")
+            && !v.trim().is_empty()
+        {
+            for spec in self.providers.values_mut() {
+                if spec.kind == "minimax" {
+                    spec.endpoint = v.clone();
+                }
+            }
+        }
     }
 
     /// Resolve the configured provider by name. Returns
@@ -198,11 +207,16 @@ fn default_config_path() -> PathBuf {
     if let Ok(env) = std::env::var("MOAGAN_CONFIG") {
         return PathBuf::from(env);
     }
-    let proj = directories::ProjectDirs::from("net", "rovisoft", "moagan");
-    match proj {
-        Some(p) => p.config_dir().join("config.toml"),
-        None => PathBuf::from("config.toml"),
+    if let Some(proj) = directories::ProjectDirs::from("", "", "moagan") {
+        return proj.config_dir().join("config.toml");
     }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("moagan")
+            .join("config.toml");
+    }
+    PathBuf::from("config.toml")
 }
 
 #[cfg(test)]
@@ -254,5 +268,29 @@ mod tests {
         unsafe {
             std::env::remove_var("MOAGAN_MAX_PARALLELISM");
         }
+    }
+
+    #[test]
+    fn env_overrides_minimax_endpoint() {
+        // Default config has the hardcoded production endpoint.
+        let mut cfg = Config::default();
+        let baseline = cfg.providers.get("minimax").unwrap().endpoint.clone();
+        assert_eq!(baseline, "https://api.minimax.io/anthropic/v1");
+
+        // With the env var set, apply_env_overrides rewrites every
+        // provider whose kind is "minimax" but leaves other providers
+        // (e.g. "mock") alone.
+        unsafe {
+            std::env::set_var("MOAGAN_MINIMAX_ENDPOINT", "http://localhost:8086/x");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_MINIMAX_ENDPOINT");
+        }
+        assert_eq!(
+            cfg.providers.get("minimax").unwrap().endpoint,
+            "http://localhost:8086/x"
+        );
+        assert_eq!(cfg.providers.get("mock").unwrap().endpoint, "mock://local");
     }
 }

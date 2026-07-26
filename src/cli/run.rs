@@ -29,6 +29,9 @@ pub struct RunOptions {
     pub prompt: String,
     /// Optional override of the home directory.
     pub home: Option<std::path::PathBuf>,
+    /// Optional directory of canned mock responses. Only used when
+    /// `provider` resolves to a `mock` kind; ignored otherwise.
+    pub mock_dir: Option<std::path::PathBuf>,
     /// Whether to be non-interactive (no prompts).
     pub non_interactive: bool,
 }
@@ -51,7 +54,11 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     } else {
         opts.provider.clone()
     };
-    let providers = Arc::new(build_registry_for(cfg, &default_provider)?);
+    let providers = Arc::new(build_registry_for(
+        cfg,
+        &default_provider,
+        opts.mock_dir.as_deref(),
+    )?);
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
     let policy = RedactPolicy::default();
@@ -106,19 +113,30 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     Ok(run_id)
 }
 
-fn build_registry_for(cfg: &Config, selected: &str) -> Result<ProviderRegistry> {
-    // Build a registry containing only the selected provider (plus `mock`
-    // when explicitly requested). The full cfg may declare other
-    // providers whose `from_config` requires an API key; we must not
-    // construct them when the user did not ask for them.
-    let mut spec_map = std::collections::BTreeMap::new();
-    if let Some(spec) = cfg.providers.get(selected) {
-        spec_map.insert(selected.to_owned(), spec.clone());
-    } else {
-        return Err(Error::InvalidArgs(format!(
-            "provider '{selected}' is not in config"
-        )));
+fn build_registry_for(
+    cfg: &Config,
+    selected: &str,
+    mock_dir: Option<&std::path::Path>,
+) -> Result<ProviderRegistry> {
+    // Build a registry containing only the selected provider. The full
+    // cfg may declare other providers whose `from_config` requires an
+    // API key; we must not construct them when the user did not ask
+    // for them.
+    let spec = cfg
+        .providers
+        .get(selected)
+        .ok_or_else(|| Error::InvalidArgs(format!("provider '{selected}' is not in config")))?
+        .clone();
+    if spec.kind == "mock"
+        && let Some(dir) = mock_dir
+    {
+        let mock = crate::llm::MockProvider::from_dir(dir)?;
+        let mut reg = ProviderRegistry::default();
+        reg.insert(selected.to_owned(), Arc::new(mock));
+        return Ok(reg);
     }
+    let mut spec_map = std::collections::BTreeMap::new();
+    spec_map.insert(selected.to_owned(), spec);
     registry_from_config(&spec_map)
 }
 
