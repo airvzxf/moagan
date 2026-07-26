@@ -86,7 +86,7 @@ impl MinimaxProvider {
         let base = suggested.unwrap_or(Duration::from_millis(500));
         let jitter = (fastrand::u64(..) % 250) + 1;
         let total = base + Duration::from_millis(jitter);
-        // ±50% jitter as per 10-integrada-v0 §D.4.7.
+        // ±50% jitter as per catalog 10-integrada-v0 (decision row 34, §4.7 retries).
         let half = total / 2;
         let low = total.saturating_sub(half);
         let high = total + half;

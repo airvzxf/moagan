@@ -2,7 +2,7 @@
 //! artefacts left by the previous phase and writes new ones.
 //!
 //! Compliance: T01-06 §8 (non-discovery pipeline).
-//! 10-integrada-v0 §D.11 defines `PhaseObject` and the layer graph;
+//! 10-integrada-v0 §D.12.1 defines `PhaseObject` and the layer graph;
 //! the v0.1 MVP uses a flat `Vec<Box<dyn Phase>>` per the baseline.
 
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 //! Token-bucket rate limiter. Per-provider, in-memory.
 //!
-//! Compliance: 10-integrada-v0 §D.15 (rate_limiter). Replaces the
+//! Compliance: 10-integrada-v0 §D.19.6 (rate_limiter). Replaces the
 //! `governor` crate (rejected in catalog §C).
 
 use std::sync::Arc;

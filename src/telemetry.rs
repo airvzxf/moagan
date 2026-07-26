@@ -1,7 +1,7 @@
 //! Telemetry layer. Two append-only JSONL streams (phases, calls), each
 //! piped through a `RedactWriter` so secrets never land on disk.
 //!
-//! Compliance: T01-06 §27 + 10-integrada-v0 §D.13 (heartbeat stub),
+//! Compliance: T01-06 §27 + 10-integrada-v0 §D.17 (heartbeat stub),
 //! §D.27 (telemetry redact on write).
 
 use std::io::Write;

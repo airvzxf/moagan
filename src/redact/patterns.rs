@@ -1,6 +1,6 @@
 //! Regex patterns for secret redaction. Compiled once, reused.
 //!
-//! Compliance: T01-06 §5.2 (20 patterns) + 10-integrada-v0 §D.8 (12 more).
+//! Compliance: T01-06 §5.2 (22 patterns) + 10-integrada-v0 §D.8 (12 more).
 //! All patterns are case-insensitive unless the protocol is well-known
 //! to be case-sensitive (e.g. JWT base64).
 
@@ -157,8 +157,8 @@ mod tests {
 
     #[test]
     fn pattern_count_matches_contract() {
-        // T01-06 §5.2 wanted 20 patterns; we ship 22 to cover the §D.8
-        // catalog additions. Count must stay > 20 for spec coverage.
+        // T01-06 §5.2 ships 22 patterns. We extend with the §D.8 catalog
+        // additions so the total stays > 20 for spec coverage.
         assert!(
             PATTERNS.len() >= 20,
             "expected >=20 patterns, got {}",

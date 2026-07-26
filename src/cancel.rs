@@ -2,7 +2,7 @@
 //! future share the same `CancellationToken`; setting it causes every
 //! listener to wake up with `Error::Cancelled` or `Error::Cancel`.
 //!
-//! Compliance: T01-06 §6.4 + 10-integrada-v0 §D.9 (token type wrapper).
+//! Compliance: T01-06 §6.4 + 10-integrada-v0 §D.10 (token type wrapper).
 
 use std::sync::Arc;
 

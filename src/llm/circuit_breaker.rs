@@ -37,7 +37,7 @@ struct Inner {
 
 impl CircuitBreaker {
     /// Build a breaker with the given threshold / window / cooldown.
-    /// Defaults mirror T01-06 §15.4 / catalog §D.15.
+    /// Defaults mirror catalog 10-integrada-v0 §D.19.5.
     pub fn new(threshold: u32, window: Duration, cooldown: Duration) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -131,7 +131,7 @@ impl CircuitBreaker {
 
 impl Default for CircuitBreaker {
     fn default() -> Self {
-        // T01-06 §15.4: 5 errors in 60s -> open 5min.
+        // catalog 10-integrada-v0 §D.19.5: 5 errors in 60s -> open 5min.
         Self::new(5, Duration::from_secs(60), Duration::from_secs(300))
     }
 }

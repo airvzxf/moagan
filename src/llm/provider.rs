@@ -1,7 +1,8 @@
 //! Provider trait and registry.
 //!
-//! Catalog references: 10-integrada-v0 §D.15 (circuit_breaker, rate_limiter,
-//! plan, api_key, cost_estimator). All providers implement [`Provider`].
+//! Catalog references: 10-integrada-v0 §D.15 (config, cost_estimator),
+//! §D.19.5 (circuit_breaker), §D.19.6 (rate_limiter), §D.19.8 (plan),
+//! §D.35 (api_key switching). All providers implement [`Provider`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
