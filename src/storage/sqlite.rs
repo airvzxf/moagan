@@ -132,6 +132,13 @@ impl Db {
     }
 
     /// Record a phase event.
+    ///
+    /// Uses `INSERT OR REPLACE` because the phases table has
+    /// `PRIMARY KEY (run_id, phase, seq)` and the pipeline writes three
+    /// events per phase (start, end, error) with the same key. A
+    /// plain INSERT would fail with `UNIQUE constraint` on the second
+    /// and third write; the row would never reflect the final status
+    /// and `moagan inspect` would show every phase as still running.
     pub fn record_phase(
         &self,
         run_id: RunId,
@@ -143,7 +150,8 @@ impl Db {
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
-            "INSERT INTO phases (run_id, phase, seq, status, started_unix, ended_unix, error) \
+            "INSERT OR REPLACE INTO phases \
+             (run_id, phase, seq, status, started_unix, ended_unix, error) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![run_id.to_string(), phase, seq, status, now, now, error,],
         )?;
@@ -374,8 +382,8 @@ mod tests {
         let id = RunId::new();
         db.register_run(id, "fast", "running", "0.1.0", None, None, None)
             .unwrap();
-        db.record_phase(id, "intake", 1, "start", None).unwrap();
-        db.record_phase(id, "intake", 2, "end", None).unwrap();
+        db.record_phase(id, "intake", 0, "start", None).unwrap();
+        db.record_phase(id, "intake", 0, "end", None).unwrap();
         db.record_call(
             "c1",
             id,
@@ -395,6 +403,34 @@ mod tests {
         .unwrap();
         let runs = db.list_runs(10).unwrap();
         assert_eq!(runs.len(), 1);
+    }
+
+    /// The pipeline writes three events per phase (start, end, error)
+    /// with the same (run_id, phase, seq) key. The schema's PRIMARY
+    /// KEY treats those as one logical row, so the third write must
+    /// not fail with UNIQUE constraint and the row must reflect the
+    /// last status seen.
+    #[test]
+    fn record_phase_replaces_when_same_key_is_reused() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        db.record_phase(id, "intake", 0, "start", None).unwrap();
+        db.record_phase(id, "intake", 0, "end", None).unwrap();
+        db.record_phase(id, "intake", 0, "error", Some("boom"))
+            .unwrap();
+        let conn = db.pool.get().unwrap();
+        let (status, err): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, error FROM phases \
+                 WHERE run_id = ?1 AND phase = 'intake' AND seq = 0",
+                rusqlite::params![id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "error");
+        assert_eq!(err.as_deref(), Some("boom"));
     }
 
     #[test]
