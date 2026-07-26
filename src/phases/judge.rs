@@ -56,7 +56,7 @@ impl Phase for JudgePhase {
                     system.clone(),
                     user.clone(),
                     "JudgeScore: {score, criteria{correctness,completeness,fit,evidence,clarity}, comments}",
-                    1,
+                    5,
                 )?;
                 scores.push(score);
             }

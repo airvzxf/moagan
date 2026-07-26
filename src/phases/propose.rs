@@ -36,7 +36,7 @@ impl Phase for ProposePhase {
                 system.clone(),
                 user_with_id,
                 "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
-                1,
+                5,
             )?;
             if proposal.id.is_empty() {
                 proposal.id = id.clone();

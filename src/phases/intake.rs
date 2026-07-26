@@ -25,7 +25,7 @@ impl Phase for IntakePhase {
             system,
             user,
             "Intake: {problem, objectives, constraints, non_goals, open_questions, raw_prompt}",
-            1,
+            5,
         )?;
         let path = ctx.run_dir().final_dir().join("intake.json");
         let brief_path = ctx.run_dir().brief();

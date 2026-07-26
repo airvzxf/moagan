@@ -46,7 +46,7 @@ impl Phase for DeliverPhase {
             system,
             user,
             "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
-            1,
+            5,
         )?;
         eprintln!("[deliver] report parsed");
         let final_dir = ctx.run_dir().final_dir();

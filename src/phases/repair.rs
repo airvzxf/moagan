@@ -51,7 +51,7 @@ impl Phase for RepairPhase {
                 system.clone(),
                 user,
                 "Repair: {id, summary, approach, tradeoffs[], evidence[], changes[]}",
-                1,
+                5,
             )?;
             if repair.id.is_empty() {
                 repair.id = proposal.id.clone();

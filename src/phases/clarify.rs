@@ -25,7 +25,7 @@ impl Phase for ClarifyPhase {
             system,
             user,
             "Brief: {problem, objectives, deliverables, constraints, assumptions, non_goals, acceptance[], risks[]}",
-            1,
+            5,
         )?;
         write_json(&ctx.run_dir().brief(), &brief)?;
         Ok(PhaseOutput::Brief(ctx.run_dir().brief()))

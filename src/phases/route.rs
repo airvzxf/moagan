@@ -24,7 +24,7 @@ impl Phase for RoutePhase {
             system,
             user,
             "Route: {mode, reason, sketches, proposals, judges}",
-            1,
+            5,
         )?;
         let path = ctx.run_dir().final_dir().join("route.json");
         write_json(&path, &route)?;

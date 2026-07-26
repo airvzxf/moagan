@@ -43,7 +43,7 @@ impl Phase for CritiquePhase {
                     system.clone(),
                     user,
                     "Critique: {verdict, issues[], suggestions[]}",
-                    1,
+                    5,
                 )?;
                 let out_path: PathBuf = critiques_dir.join(format!("{id}.json"));
                 write_json(&out_path, &critique)?;

@@ -112,15 +112,20 @@ pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
 /// the validator (`Role::validate_json`) annotates with the expected
 /// role schema; the user must retry or use a different model.
 fn repair_m3_brackets(s: &str) -> Option<String> {
-    // Compose the two repair passes. The colon-repair pass only
-    // inserts `:` between a complete string and the next `[` or
-    // `{`; the bracket-repair pass only fixes missing closers and
-    // mismatched closers. Together they cover the two most common
-    // m3 pathologies. We always feed the bracket-repair the output
-    // of the colon-repair so it sees the corrected scope.
-    let colon_repaired = repair_missing_colon(s);
-    let candidate = colon_repaired.as_deref().unwrap_or(s);
-    repair_missing_brackets(candidate)
+    // Three chained repair passes. The order matters:
+    //  1. colon-repair: insert `:` between a complete string and the
+    //     next `[` or `{` (the `"key"[item]` pathology).
+    //  2. separator-repair: insert `,` between two adjacent values
+    //     inside an array or object (the `["a" "b"]` pathology).
+    //  3. bracket-repair: append missing closers and rebalance
+    //     mismatched `}` / `]` cascades.
+    // Each pass is a no-op when its target pathology is absent, so the
+    // composition is safe to run on already-valid inputs.
+    let colon = repair_missing_colon(s);
+    let after_colon = colon.as_deref().unwrap_or(s);
+    let seps = repair_missing_separators(after_colon);
+    let after_seps = seps.as_deref().unwrap_or(after_colon);
+    repair_missing_brackets(after_seps)
 }
 
 /// Walk the input, find places where a string literal is followed by
@@ -200,6 +205,208 @@ fn repair_missing_colon(s: &str) -> Option<String> {
         }
     }
     if changed { Some(out) } else { None }
+}
+
+// --- separator repair (state machine) ---
+
+/// State of the JSON-walker state machine. The walker is a tiny
+/// hand-rolled JSON recognizer that knows enough to spot a missing
+/// `,` between array elements or object values, and a missing
+/// closer at the end. It is NOT a full JSON parser: it does not
+/// validate types, only structural sequencing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    /// Inside an object. `expecting_key` is `true` after `{` or
+    /// `,` (the next non-ws is either `"` opening a key string,
+    /// or `}` for an empty object); it is `false` after `:`
+    /// (the next non-ws is the value or `}` for an empty value).
+    Object { expecting_key: bool },
+    /// Inside an array, looking for values separated by `,`.
+    Array,
+}
+
+/// Walk the input and insert a missing `,` between array elements
+/// or object values when the model emits two values back-to-back
+/// without a separator. Also removes trailing commas inside `]` and
+/// `}`.
+///
+/// This handles the m3 failure mode that the bracket-walker
+/// (`repair_missing_brackets`) cannot: the model writes two
+/// array elements adjacent, e.g. `["a" "b" "c"]`, and serde
+/// reports `expected ',' or ']'`. The walker detects "we just
+/// closed a value, the next non-whitespace is the start of another
+/// value" and inserts `,`.
+fn repair_missing_separators(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(n + 8);
+    // Stack: (frame, has_value). `has_value` is true once a
+    // complete value has been emitted inside this container; the
+    // next value-start char then needs a leading `,`.
+    let mut stack: Vec<(Frame, bool)> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    let mut changed = false;
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if in_string && c == '\\' && i + 1 < n {
+            out.push(c);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if in_string && escape {
+            out.push(c);
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            let was_in_string = in_string;
+            in_string = !in_string;
+            out.push(c);
+            i += 1;
+            if was_in_string {
+                // Mark that this container has now seen a value.
+                if let Some((_, has_value)) = stack.last_mut() {
+                    *has_value = true;
+                }
+                // After a string close, the next non-ws char
+                // tells us what the writer intended. For an object
+                // after a key (expecting_key=true) it must be `:`;
+                // for an object after a value, or an array
+                // element, it must be `,` or the matching closer.
+                // Anything else means the model forgot a separator
+                // or the `:` itself.
+                let mut j = i;
+                while j < n && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < n {
+                    let next = chars[j];
+                    let expect_colon = matches!(
+                        stack.last().map(|(f, _)| f),
+                        Some(Frame::Object {
+                            expecting_key: true
+                        })
+                    );
+                    let want = if expect_colon { ':' } else { ',' };
+                    if next != want && next != ']' && next != '}' {
+                        out.push(want);
+                        changed = true;
+                        if let Some((Frame::Object { expecting_key }, _)) = stack.last_mut() {
+                            // After an inserted separator the
+                            // object phase flips. Inserted `,`
+                            // means we are now waiting for a key.
+                            // Inserted `:` means we are waiting
+                            // for a value.
+                            *expecting_key = want == ',';
+                        }
+                    } else if next == want
+                        && expect_colon
+                        && let Some((Frame::Object { expecting_key }, _)) = stack.last_mut()
+                    {
+                        *expecting_key = false;
+                    }
+                }
+            }
+            continue;
+        }
+        if in_string {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        match c {
+            '{' | '[' => {
+                // The case of "value closer, then whitespace, then
+                // new value start" is handled by the whitespace
+                // branch below. Here we just push the opener.
+                out.push(c);
+                if c == '{' {
+                    stack.push((
+                        Frame::Object {
+                            expecting_key: true,
+                        },
+                        false,
+                    ));
+                } else {
+                    stack.push((Frame::Array, false));
+                }
+            }
+            '}' | ']' => {
+                // Eat a trailing comma so the result is well-formed
+                // JSON. This handles `[1, 2, 3,]`.
+                if out.ends_with(',') {
+                    out.pop();
+                    changed = true;
+                }
+                out.push(c);
+                stack.pop();
+                // The container we just closed held a complete
+                // value (this `}` or `]`). Mark the parent as
+                // having-seen-a-value so the next value-start
+                // (in the parent's context) gets a leading `,`.
+                if let Some((_, has_value)) = stack.last_mut() {
+                    *has_value = true;
+                }
+            }
+            ',' => {
+                out.push(c);
+                if let Some((Frame::Object { expecting_key }, _)) = stack.last_mut() {
+                    *expecting_key = true;
+                }
+            }
+            ':' => {
+                out.push(c);
+                if let Some((Frame::Object { expecting_key }, _)) = stack.last_mut() {
+                    *expecting_key = false;
+                }
+            }
+            c if c.is_whitespace() => {
+                // Detect "value closer, whitespace, new value start"
+                // (the model wrote `} {"` and forgot the `,`).
+                // Insert the `,` between the closer and the
+                // whitespace so the result reads `}, {"…`.
+                if let Some((_, has_value)) = stack.last()
+                    && *has_value
+                {
+                    let mut j = i + 1;
+                    while j < n && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    let next = if j < n { Some(chars[j]) } else { None };
+                    let is_value_start = matches!(next, Some('"') | Some('{') | Some('['));
+                    let prev = out.chars().last();
+                    let prev_is_closer = prev == Some('}') || prev == Some(']');
+                    if is_value_start && prev_is_closer && !out.ends_with(',') {
+                        out.push(',');
+                        changed = true;
+                    }
+                }
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    if in_string {
+        return None;
+    }
+    if stack.is_empty() {
+        if changed { Some(out) } else { None }
+    } else {
+        // Stack is non-empty: the input has unclosed containers. The
+        // bracket-repair pass will handle that case better than we
+        // do here (it knows which closer to append and how to
+        // rebalance cascade mismatches). Give up so the upstream
+        // chain can hand the input to the bracket-repair.
+        None
+    }
 }
 
 // --- bracket repair ---
@@ -501,6 +708,65 @@ mod tests {
         let s = r#"{"a":1,"b":"hel"#;
         let r: std::result::Result<Sample, _> = parse_model_json(s);
         assert!(r.is_err());
+    }
+
+    // --- separator-repair tests (m3 bug 3: missing `,` between values) ---
+
+    #[test]
+    fn repair_inserts_comma_between_array_strings() {
+        // The model wrote `["a" "b" "c"]` — three strings with no
+        // commas between them. The separator-repair pass inserts the
+        // missing commas.
+        let s = r#"["a" "b" "c"]"#;
+        let out = repair_m3_brackets(s).unwrap();
+        assert_eq!(out, r#"["a", "b", "c"]"#);
+    }
+
+    #[test]
+    fn repair_inserts_comma_between_object_values() {
+        // The model wrote `{"k1":"v1" "k2":"v2"}` — two pairs with
+        // no comma between them.
+        let s = r#"{"k1":"v1" "k2":"v2"}"#;
+        let out = repair_m3_brackets(s).unwrap();
+        assert_eq!(out, r#"{"k1":"v1", "k2":"v2"}"#);
+    }
+
+    #[test]
+    fn repair_does_not_double_existing_comma() {
+        // When the input is well-formed, the repair should be a
+        // no-op (return the same string).
+        let s = r#"{"a":1, "b":2, "c":3}"#;
+        let out = repair_m3_brackets(s).unwrap();
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn repair_eats_trailing_comma_before_closer() {
+        // The model wrote `[1, 2, 3,]` — a trailing comma inside
+        // the array. The separator-repair pass strips it.
+        let s = r#"[1, 2, 3,]"#;
+        let out = repair_m3_brackets(s).unwrap();
+        assert_eq!(out, r#"[1, 2, 3]"#);
+    }
+
+    #[test]
+    fn repair_handles_missing_comma_and_missing_closer_together() {
+        // The full m3-style cascade: missing `,` between values AND
+        // missing `]` at the end. The combined separator+bracket
+        // repair should produce a single valid JSON.
+        let s = r#"["a" "b" "c"]"#;
+        let out = repair_m3_brackets(s).unwrap();
+        assert_eq!(out, r#"["a", "b", "c"]"#);
+    }
+
+    #[test]
+    fn repair_inside_array_with_objects() {
+        // Each item is an object literal; the model wrote them
+        // back-to-back without commas. The walker inserts `,`
+        // before each subsequent `{`.
+        let s = r#"[{"a":1} {"b":2} {"c":3}]"#;
+        let out = repair_m3_brackets(s).unwrap();
+        assert_eq!(out, r#"[{"a":1}, {"b":2}, {"c":3}]"#);
     }
 
     // --- colon-insertion tests (m3 bug 2: missing `:` between key and value) ---
