@@ -80,9 +80,10 @@ pub(crate) struct MessagesRequestBody<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
-    /// Disables the `thinking` block for `MiniMax-M3`. The model still
-    /// produces a `text` block, so our text-only wire format continues
-    /// to work and the response stays focused on the JSON contract.
+    /// Optional `thinking` control. We never set it on M-series
+    /// models (the reference sweep shows thinking ON is the
+    /// reliable default), but the field is kept here for future
+    /// disable-from-config overrides.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingControl>,
     system: &'a str,
@@ -112,6 +113,7 @@ pub(crate) struct MessagesResponseBody {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MessagesContent {
+    /// Block type. We only consume `text`; `thinking` is dropped.
     #[serde(rename = "type")]
     kind: String,
     text: Option<String>,
@@ -127,6 +129,9 @@ pub(crate) struct MessagesUsage {
 
 impl MessagesResponseBody {
     /// Extract the joined text and stop reason from the response body.
+    /// Only `text` blocks are kept; `thinking` blocks are
+    /// deliberately discarded (see `body_from_request` for the
+    /// rationale).
     pub(crate) fn into_response(self) -> std::result::Result<Response, &'static str> {
         let mut text = String::new();
         for c in self.content {
@@ -157,18 +162,23 @@ impl MessagesResponseBody {
 
 /// Translate a [`Request`] into the body shape expected by the
 /// Anthropic-compatible messages endpoint.
+///
+/// We do NOT send `thinking: disabled` for `MiniMax-M3`. The reference
+/// sweep script (`minimax-moa-v1/scripts/run_sweep.py`) gets
+/// consistently reliable JSON from the same model with thinking ON;
+/// the model uses the thinking pass to plan the JSON shape before
+/// emitting the text block. Sending `thinking: disabled` produces
+/// earlier truncations on the M-series models. We only extract the
+/// `text` block from the response, so the thinking content is
+/// discarded — but the model's text block is more reliable as a
+/// result.
 pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
-    let thinking = if req.model.to_ascii_lowercase().contains("m3") {
-        Some(ThinkingControl { kind: "disabled" })
-    } else {
-        None
-    };
     MessagesRequestBody {
         model: &req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
-        thinking,
+        thinking: None,
         system: &req.system,
         messages: vec![MessagesMessage {
             role: "user",

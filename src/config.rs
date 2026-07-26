@@ -67,18 +67,23 @@ impl Default for Config {
 
 fn default_providers() -> BTreeMap<String, ProviderConfig> {
     let mut m = BTreeMap::new();
+    let make_minimax = |model: &str| ProviderConfig {
+        kind: "minimax".to_owned(),
+        endpoint: "https://api.minimax.io/anthropic/v1".to_owned(),
+        model: model.to_owned(),
+        max_tokens: Some(131072),
+        temperature: Some(0.6),
+        top_p: Some(0.95),
+        hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
+    };
+    m.insert("minimax".to_owned(), make_minimax("MiniMax-M3"));
+    m.insert("minimax-m3".to_owned(), make_minimax("MiniMax-M3"));
+    m.insert("minimax-m2.7".to_owned(), make_minimax("MiniMax-M2.7"));
     m.insert(
-        "minimax".to_owned(),
-        ProviderConfig {
-            kind: "minimax".to_owned(),
-            endpoint: "https://api.minimax.io/anthropic/v1".to_owned(),
-            model: "MiniMax-M3".to_owned(),
-            max_tokens: Some(4096),
-            temperature: Some(0.6),
-            top_p: Some(0.95),
-            hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
-        },
+        "minimax-m2.7-highspeed".to_owned(),
+        make_minimax("MiniMax-M2.7-highspeed"),
     );
+    m.insert("minimax-m2.5".to_owned(), make_minimax("MiniMax-M2.5"));
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
@@ -213,6 +218,10 @@ mod tests {
         assert_eq!(cfg.total_timeout_secs, 0);
         assert!(cfg.redact_in_telemetry);
         assert!(cfg.providers.contains_key("minimax"));
+        assert!(cfg.providers.contains_key("minimax-m3"));
+        assert!(cfg.providers.contains_key("minimax-m2.7"));
+        assert!(cfg.providers.contains_key("minimax-m2.7-highspeed"));
+        assert!(cfg.providers.contains_key("minimax-m2.5"));
         assert!(cfg.providers.contains_key("mock"));
     }
 

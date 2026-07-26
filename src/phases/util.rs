@@ -64,13 +64,15 @@ pub const FOCUSED_CONTINUATION_AVAILABLE: bool = true;
 /// concatenate `truncated` + `tail` before re-parsing.
 pub fn build_continuation_user_message(truncated: &str, schema_hint: &str) -> String {
     format!(
-        "The previous response was truncated before the JSON closed. \
-         Continue the JSON below from the exact byte where you stopped. \
-         Output ONLY the bytes that follow the marker; do not repeat the \
-         prefix; do not include any commentary or markdown fences.\n\n\
+        "The previous response was truncated mid-JSON before the object \
+         closed. Re-emit the COMPLETE JSON object below, keeping the \
+         content that was already produced (between ---BEGIN PREFIX--- \
+         and ---END PREFIX---) and finishing any field that was cut \
+         off. Output the full JSON object starting with `{{` and \
+         ending with `}}`. No commentary, no markdown fences.\n\n\
          Schema reminder: {schema_hint}\n\n\
-         ---BEGIN TRUNCATED JSON---\n{truncated}\n---END TRUNCATED JSON---\n\
-         ---BEGIN CONTINUATION (output only what comes after the marker)---\n"
+         ---BEGIN PREFIX (truncated, may be incomplete)---\n{truncated}\n\
+         ---END PREFIX---\n\nOutput ONLY the complete JSON object now:"
     )
 }
 
@@ -274,6 +276,6 @@ mod tests {
         let msg = build_continuation_user_message(r#"{"a":1,"b":"#, "test");
         assert!(msg.contains("{\"a\":1,\"b\":"));
         assert!(msg.contains("test"));
-        assert!(msg.contains("---BEGIN TRUNCATED JSON---"));
+        assert!(msg.contains("---BEGIN PREFIX"));
     }
 }
