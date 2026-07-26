@@ -32,11 +32,11 @@ impl Phase for ProposePhase {
             let id = format!("p_{i:03}");
             let user_with_id = format!("{user}\n\nUse id=\"{id}\" in the output.");
             let resp = pollster::block_on(ctx.call(Role::Propose, system.clone(), user_with_id))?;
-            let mut proposal: Proposal = pollster::block_on(ctx.parse_model_json(
+            let mut proposal: Proposal = ctx.parse_model_json(
                 Role::Propose,
                 &resp.text,
                 "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
-            ))?;
+            )?;
             if proposal.id.is_empty() {
                 proposal.id = id.clone();
             }

@@ -47,11 +47,11 @@ impl Phase for RepairPhase {
             }))
             .map_err(crate::Error::from)?;
             let resp = pollster::block_on(ctx.call(Role::Repair, system.clone(), user))?;
-            let mut repair: Repair = pollster::block_on(ctx.parse_model_json(
+            let mut repair: Repair = ctx.parse_model_json(
                 Role::Repair,
                 &resp.text,
                 "Repair: {id, summary, approach, tradeoffs[], evidence[], changes[]}",
-            ))?;
+            )?;
             if repair.id.is_empty() {
                 repair.id = proposal.id.clone();
             }

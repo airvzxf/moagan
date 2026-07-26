@@ -52,11 +52,11 @@ impl Phase for JudgePhase {
             let mut scores = Vec::new();
             for _ in 0..self.judges {
                 let resp = pollster::block_on(ctx.call(Role::Judge, system.clone(), user.clone()))?;
-                let score: JudgeScore = pollster::block_on(ctx.parse_model_json(
+                let score: JudgeScore = ctx.parse_model_json(
                     Role::Judge,
                     &resp.text,
                     "JudgeScore: {score, criteria{correctness,completeness,fit,evidence,clarity}, comments}",
-                ))?;
+                )?;
                 scores.push(score);
             }
             let aggregate = aggregate(&scores);

@@ -39,11 +39,11 @@ impl Phase for CritiquePhase {
                 let id = format!("{}_critic_{c}", proposal.id);
                 let user = serde_json::to_string(&proposal).map_err(crate::Error::from)?;
                 let resp = pollster::block_on(ctx.call(Role::Critique, system.clone(), user))?;
-                let critique: Critique = pollster::block_on(ctx.parse_model_json(
+                let critique: Critique = ctx.parse_model_json(
                     Role::Critique,
                     &resp.text,
                     "Critique: {verdict, issues[], suggestions[]}",
-                ))?;
+                )?;
                 let out_path: PathBuf = critiques_dir.join(format!("{id}.json"));
                 write_json(&out_path, &critique)?;
                 paths.push(out_path);

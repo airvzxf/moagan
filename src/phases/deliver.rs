@@ -46,11 +46,11 @@ impl Phase for DeliverPhase {
             "[deliver] LLM returned, parsing as FinalReport. text_len={}",
             resp.text.len()
         );
-        let report: FinalReport = pollster::block_on(ctx.parse_model_json(
+        let report: FinalReport = ctx.parse_model_json(
             Role::Deliver,
             &resp.text,
             "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
-        ))?;
+        )?;
         let final_dir = ctx.run_dir().final_dir();
         std::fs::create_dir_all(&final_dir)?;
         let json_path: PathBuf = final_dir.join("portfolio.json");

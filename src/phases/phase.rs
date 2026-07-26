@@ -107,38 +107,17 @@ impl RunContext {
         provider.send(&req).await
     }
 
-    /// Parse an LLM response with focused-continuation fallback. The
-    /// `role` is reused for the continuation call so the model knows
-    /// what schema to keep extending.
-    pub async fn parse_model_json<T>(&self, role: Role, raw: &str, schema_hint: &str) -> Result<T>
+    /// Parse an LLM response as JSON. The `role` and `schema_hint` are
+    /// currently only used for the error message; the actual parsing
+    /// is just a `strip_code_fence` + `serde_json::from_str`. If the
+    /// model produces invalid JSON, the error carries the full raw
+    /// payload so the diagnostic travels with the failure.
+    pub fn parse_model_json<T>(&self, role: Role, raw: &str, schema_hint: &str) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        use crate::phases::util::parse_with_continuation;
-        let provider = self.provider();
-        let default_model = self.default_model.clone();
-        let provider_arc = provider.clone();
-        let model_for_call = default_model.clone();
-        let model_for_schema = default_model;
-        let hint = format!("{schema_hint} (model: {model_for_schema})");
-        parse_with_continuation::<T, _, _>(raw, &hint, 4096, move |user: String| {
-            let provider = provider_arc.clone();
-            let model = model_for_call.clone();
-            async move {
-                let req = Request {
-                    role,
-                    model,
-                    system: String::new(),
-                    user,
-                    max_tokens: 4096,
-                    temperature: Some(0.2),
-                    top_p: Some(0.95),
-                    response_schema: None,
-                };
-                provider.send(&req).await
-            }
-        })
-        .await
+        let _ = (role, schema_hint);
+        crate::phases::util::parse_model_json::<T>(raw)
     }
 }
 
