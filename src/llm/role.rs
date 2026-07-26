@@ -1,11 +1,18 @@
 //! LLM role enum. Typed inverse of the T01-06 §4 role list.
+//!
+//! Each role also exposes a short schema description and a validator
+//! function so that callers can both teach the model what shape to
+//! emit AND detect shape drift when the model's output doesn't match
+//! the expected type. The schemas live next to the role enum so
+//! adding a new role requires touching exactly one Rust file.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Error;
+use crate::domain::{Brief, Critique, FinalReport, Intake, JudgeScore, Proposal, Repair, Route};
+use crate::error::{Error, Result};
 
 /// The set of LLM roles in the MVP pipeline.
 ///
@@ -53,6 +60,72 @@ impl Role {
         }
     }
 
+    /// Short, machine- and human-readable schema description for
+    /// this role. Used in system prompts and log lines so an operator
+    /// can see at a glance what fields the model is supposed to emit.
+    /// Long descriptions belong in `system_prompt(role)` instead.
+    pub fn schema_description(&self) -> &'static str {
+        match self {
+            Self::Intake => {
+                "Intake: {problem, objectives[], constraints[], non_goals[], open_questions[], raw_prompt}"
+            }
+            Self::Clarify => {
+                "Brief: {problem, objectives[], deliverables[], constraints[], assumptions[], non_goals[], acceptance[], risks[]}"
+            }
+            Self::Route => "Route: {mode, reason, sketches, proposals, judges}",
+            Self::Propose => "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+            Self::Gate => "Gate: {pass, issues[], missing[]}",
+            Self::Critique => "Critique: {verdict, issues[], suggestions[]}",
+            Self::Repair => "Repair: {id, summary, approach, tradeoffs[], evidence[], changes[]}",
+            Self::Judge => {
+                "JudgeScore: {score, criteria{correctness,completeness,fit,evidence,clarity}, comments}"
+            }
+            Self::Rank => "Ranking: {ranked[], winner}",
+            Self::Deliver => {
+                "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}"
+            }
+        }
+    }
+
+    /// Validate that `value` is the shape this role expects, by
+    /// deserializing into the corresponding domain type. The current
+    /// implementation reuses the existing typed deserialization so
+    /// adding a new role means adding it once here.
+    ///
+    /// On failure, the error embeds the role name and the field that
+    /// could not be parsed, which is much friendlier than the raw
+    /// "expected `,` or `]` at line 1 column N" that serde produces.
+    pub fn validate_json(&self, value: &serde_json::Value) -> Result<()> {
+        let result: std::result::Result<(), serde_json::Error> = match self {
+            Self::Intake => serde_json::from_value::<Intake>(value.clone()).map(|_| ()),
+            Self::Clarify => serde_json::from_value::<Brief>(value.clone()).map(|_| ()),
+            Self::Route => serde_json::from_value::<Route>(value.clone()).map(|_| ()),
+            Self::Propose => serde_json::from_value::<Proposal>(value.clone()).map(|_| ()),
+            Self::Gate => {
+                // Gate does not call the LLM in v0.1 (the validator
+                // exists for completeness / future use). Gate accepts
+                // a boolean `pass` plus the issues/missing arrays
+                // via the domain type — defined in domain.rs.
+                serde_json::from_value::<crate::domain::Gate>(value.clone()).map(|_| ())
+            }
+            Self::Critique => serde_json::from_value::<Critique>(value.clone()).map(|_| ()),
+            Self::Repair => serde_json::from_value::<Repair>(value.clone()).map(|_| ()),
+            Self::Judge => serde_json::from_value::<JudgeScore>(value.clone()).map(|_| ()),
+            Self::Rank => {
+                serde_json::from_value::<crate::domain::Ranking>(value.clone()).map(|_| ())
+            }
+            Self::Deliver => serde_json::from_value::<FinalReport>(value.clone()).map(|_| ()),
+        };
+        if let Err(e) = result {
+            return Err(Error::SchemaViolation(format!(
+                "role={} schema mismatch: {e}; expected {}",
+                self.as_str(),
+                self.schema_description()
+            )));
+        }
+        Ok(())
+    }
+
     /// All roles in canonical order.
     pub fn all() -> &'static [Role] {
         &[
@@ -79,7 +152,7 @@ impl fmt::Display for Role {
 impl FromStr for Role {
     type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "intake" => Ok(Self::Intake),
             "clarify" => Ok(Self::Clarify),
@@ -127,5 +200,81 @@ mod tests {
         assert_eq!(j, "\"gate\"");
         let back: Role = serde_json::from_str(&j).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn schema_description_covers_every_role() {
+        // Every role we ship must expose a non-empty schema. Roles
+        // added without a description break the system prompt used
+        // for new modes (`discovery`, `deep`, `explore`).
+        for r in Role::all() {
+            let desc = r.schema_description();
+            assert!(!desc.is_empty(), "{:?} has no schema_description", r);
+            assert!(
+                desc.starts_with("Proposal:")
+                    || desc.starts_with("Critique:")
+                    || desc.starts_with("Brief:")
+                    || desc.starts_with("Intake:")
+                    || desc.starts_with("Route:")
+                    || desc.starts_with("Gate:")
+                    || desc.starts_with("Repair:")
+                    || desc.starts_with("JudgeScore:")
+                    || desc.starts_with("Ranking:")
+                    || desc.starts_with("FinalReport:"),
+                "{:?} description does not start with its name: {desc}",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn schema_description_uses_role_name_as_prefix() {
+        // Easier-to-read than the loop above; documents intent.
+        assert!(Role::Intake.schema_description().starts_with("Intake:"));
+        assert!(Role::Critique.schema_description().starts_with("Critique:"));
+        assert!(Role::Propose.schema_description().starts_with("Proposal:"));
+        assert!(Role::Judge.schema_description().starts_with("JudgeScore:"));
+    }
+
+    #[test]
+    fn validate_json_accepts_a_well_formed_critique() {
+        // A minimal-but-valid Critique. With `#[serde(default)]` on
+        // the domain type, even empty fields are accepted; this test
+        // exercises the happy path with realistic content.
+        let raw = serde_json::json!({
+            "verdict": "fix",
+            "issues": ["It lacks a fallback"],
+            "suggestions": ["Add a fallback path"]
+        });
+        assert!(Role::Critique.validate_json(&raw).is_ok());
+    }
+
+    #[test]
+    fn validate_json_rejects_wrong_type() {
+        // `verdict` is supposed to be a string; pass a number and
+        // expect the validator to flag it. The error must mention
+        // the role name so an operator scanning logs knows what
+        // phase produced the broken JSON.
+        let bad = serde_json::json!({
+            "verdict": 42,
+            "issues": [],
+            "suggestions": []
+        });
+        let err = Role::Critique.validate_json(&bad).unwrap_err();
+        assert!(err.to_string().contains("critique"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_json_returns_ok_for_default_filled_types() {
+        // The domain types are `#[serde(default)]` since commit
+        // ce309b2, so an empty object is acceptable. Pinning that
+        // here so future schema additions don't silently break the
+        // validator.
+        let empty = serde_json::json!({});
+        assert!(Role::Critique.validate_json(&empty).is_ok());
+        assert!(Role::Intake.validate_json(&empty).is_ok());
+        assert!(Role::Propose.validate_json(&empty).is_ok());
+        assert!(Role::Judge.validate_json(&empty).is_ok());
+        assert!(Role::Deliver.validate_json(&empty).is_ok());
     }
 }

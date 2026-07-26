@@ -157,17 +157,36 @@ impl RunContext {
         result.map(|(_, r)| r)
     }
 
-    /// Parse an LLM response as JSON. The `role` and `schema_hint` are
-    /// currently only used for the error message; the actual parsing
-    /// is just a `strip_code_fence` + `serde_json::from_str`. If the
-    /// model produces invalid JSON, the error carries the full raw
-    /// payload so the diagnostic travels with the failure.
+    /// Parse an LLM response as JSON. The `role` is used to produce a
+    /// role-aware error message when the schema doesn't match. The
+    /// `schema_hint` parameter is kept for backwards compatibility;
+    /// the role's `schema_description()` is now the canonical source.
+    ///
+    /// After the direct parse fails, we try the narrow bracket-repair
+    /// pass and re-parse. If both fail we run `role.validate_json()`
+    /// against the raw payload so the operator sees a message like
+    /// `role=Critique schema mismatch: missing field 'verdict'` instead
+    /// of `expected ',' or ']' at line 1 column N`.
     pub fn parse_model_json<T>(&self, role: Role, raw: &str, schema_hint: &str) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        let _ = (role, schema_hint);
-        crate::phases::util::parse_model_json::<T>(raw)
+        let _ = schema_hint;
+        match crate::phases::util::parse_model_json::<T>(raw) {
+            Ok(v) => Ok(v),
+            Err(util_err) => {
+                // If the raw can be parsed into a generic JSON value,
+                // ask the role for a schema-aware diagnostic. This is
+                // done only on the failure path (cost: one extra parse)
+                // and the value is dropped before the error propagates.
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+                    && let Err(schema_err) = role.validate_json(&value)
+                {
+                    return Err(schema_err);
+                }
+                Err(util_err)
+            }
+        }
     }
 }
 
