@@ -26,11 +26,12 @@
 
 ## Architectural authority
 
-1. `14-integrada-v4.md` (product vision).
-2. `T01-06-06b3a1c2.md` (Rust implementation spec, normative).
-3. `10-integrada-v0.md` (additive patch catalog, opt-in).
+1. `docs/proposal-01-concept.md` (product vision; spec id V4).
+2. `docs/proposal-02-rust.md` (Rust implementation spec, normative; spec id T01-06).
+3. `docs/proposal-03-add-ons.md` (additive patch catalog, opt-in; spec id 10-integrada-v0, base T01-06).
 
-When conflicts arise, T01-06 wins. Catalog patches are opt-in and documented in `docs/ARCHITECTURE.md`.
+When conflicts arise, T01-06 wins. Catalog patches are opt-in and documented inline in
+`docs/proposal-03-add-ons.md` (each section is an opt-in overlay).
 
 ## Validation gauntlet
 
