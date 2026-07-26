@@ -59,10 +59,17 @@ impl Db {
                 "PRAGMA journal_mode = WAL;\
                  PRAGMA synchronous = NORMAL;\
                  PRAGMA foreign_keys = ON;\
-                 PRAGMA busy_timeout = 5000;",
+                 PRAGMA busy_timeout = 30000;",
             )
         });
-        let pool = Pool::builder().max_size(8).build(manager)?;
+        // moagan is single-threaded for v0.1 (every async LLM call is
+        // blocked with pollster). With max_size > 1 the pool can open a
+        // second connection while the first still holds an exclusive
+        // lock during the WAL-mode pragma, which surfaces as
+        // `r2d2: database is locked` at startup. max_size=1 keeps a
+        // single connection alive for the lifetime of the run, which
+        // is plenty for v0.1.
+        let pool = Pool::builder().max_size(1).build(manager)?;
         let db = Self {
             pool: Arc::new(pool),
             path: path.to_path_buf(),
