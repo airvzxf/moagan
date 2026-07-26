@@ -20,11 +20,12 @@ impl Phase for ClarifyPhase {
         let intake: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let user = serde_json::to_string(&intake).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Clarify).to_owned();
-        let resp = pollster::block_on(ctx.call(Role::Clarify, system, user))?;
-        let brief: Brief = ctx.parse_model_json(
+        let brief: Brief = ctx.call_with_retry_parse(
             Role::Clarify,
-            &resp.text,
+            system,
+            user,
             "Brief: {problem, objectives, deliverables, constraints, assumptions, non_goals, acceptance[], risks[]}",
+            1,
         )?;
         write_json(&ctx.run_dir().brief(), &brief)?;
         Ok(PhaseOutput::Brief(ctx.run_dir().brief()))

@@ -19,11 +19,12 @@ impl Phase for RoutePhase {
         let brief: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let user = serde_json::to_string(&brief).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Route).to_owned();
-        let resp = pollster::block_on(ctx.call(Role::Route, system, user))?;
-        let route: Route = ctx.parse_model_json(
+        let route: Route = ctx.call_with_retry_parse(
             Role::Route,
-            &resp.text,
+            system,
+            user,
             "Route: {mode, reason, sketches, proposals, judges}",
+            1,
         )?;
         let path = ctx.run_dir().final_dir().join("route.json");
         write_json(&path, &route)?;

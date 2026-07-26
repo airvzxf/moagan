@@ -295,3 +295,153 @@ fn config_load_returns_defaults() -> Result<()> {
     assert!(cfg.providers.contains_key("mock"));
     Ok(())
 }
+
+// --- retry-on-parse-failure tests ------------------------------------
+// These tests exercise `RunContext::call_with_retry_parse`, which the
+// pipeline uses to recover from transient JSON malformation. The
+// provider is the mock so we can pre-load a "bad" first response
+// followed by a "good" second one.
+
+#[test]
+fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
+    // The mock provider in --cycle=false returns each queued
+    // response in order. We queue two responses and verify the
+    // helper consumes both: the first (broken) is detected, the
+    // second (well-formed) is parsed.
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    // First call returns a mid-string truncation. The walker gives
+    // up (unterminated strings are unrepairable) so the parse
+    // fails, the helper detects the failure, and the second call
+    // is consumed.
+    mp.push(MockResponse::plain(
+        "{\"id\":\"p_000\",\"summary\":\"unterminated",
+    ));
+    // Second call returns a clean proposal.
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"second","approach":"","tradeoffs":[],"evidence":[]}"#,
+    ));
+    mp.set_cycle(false);
+
+    let mut reg = ProviderRegistry::default();
+    reg.insert(
+        "mock".into(),
+        Arc::new(mp) as Arc<dyn moagan::llm::Provider>,
+    );
+    let providers = Arc::new(reg);
+    let config = Config::load()?;
+    let default_model = config.provider("mock")?.model.clone();
+    let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+    db.register_run(
+        run_id,
+        "fast",
+        "running",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        None,
+        None,
+    )?;
+    let policy = RedactPolicy::default();
+    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db))?;
+    let parallelism = Parallelism::new(1);
+
+    let ctx = RunContext::new(
+        run_id,
+        Arc::clone(&home),
+        providers,
+        "mock".into(),
+        default_model,
+        parallelism,
+        telemetry,
+        "x".into(),
+        "fast".into(),
+    );
+
+    // First response is broken; parse would fail. The retry should
+    // pick up the second (clean) response and parse it.
+    let parsed: moagan::domain::Proposal = ctx.call_with_retry_parse(
+        moagan::llm::Role::Propose,
+        "system".into(),
+        "user".into(),
+        "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+        1,
+    )?;
+    assert_eq!(parsed.id, "p_000");
+    assert_eq!(parsed.summary, "second");
+    Ok(())
+}
+
+#[test]
+fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
+    // Both responses are broken. After max_retries=1, the helper
+    // returns Err instead of looping forever.
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain("not-json"));
+    mp.push(MockResponse::plain("also-not-json"));
+    mp.set_cycle(false);
+
+    let mut reg = ProviderRegistry::default();
+    reg.insert(
+        "mock".into(),
+        Arc::new(mp) as Arc<dyn moagan::llm::Provider>,
+    );
+    let providers = Arc::new(reg);
+    let config = Config::load()?;
+    let default_model = config.provider("mock")?.model.clone();
+    let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+    db.register_run(
+        run_id,
+        "fast",
+        "running",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        None,
+        None,
+    )?;
+    let policy = RedactPolicy::default();
+    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db))?;
+    let parallelism = Parallelism::new(1);
+
+    let ctx = RunContext::new(
+        run_id,
+        Arc::clone(&home),
+        providers,
+        "mock".into(),
+        default_model,
+        parallelism,
+        telemetry,
+        "x".into(),
+        "fast".into(),
+    );
+
+    let result: moagan::error::Result<moagan::domain::Proposal> = ctx.call_with_retry_parse(
+        moagan::llm::Role::Propose,
+        "system".into(),
+        "user".into(),
+        "Proposal: ...",
+        1,
+    );
+    assert!(result.is_err());
+    Ok(())
+}

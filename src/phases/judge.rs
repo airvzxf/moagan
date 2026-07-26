@@ -51,11 +51,12 @@ impl Phase for JudgePhase {
             let user = serde_json::to_string(&subject).map_err(crate::Error::from)?;
             let mut scores = Vec::new();
             for _ in 0..self.judges {
-                let resp = pollster::block_on(ctx.call(Role::Judge, system.clone(), user.clone()))?;
-                let score: JudgeScore = ctx.parse_model_json(
+                let score: JudgeScore = ctx.call_with_retry_parse(
                     Role::Judge,
-                    &resp.text,
+                    system.clone(),
+                    user.clone(),
                     "JudgeScore: {score, criteria{correctness,completeness,fit,evidence,clarity}, comments}",
+                    1,
                 )?;
                 scores.push(score);
             }

@@ -188,6 +188,74 @@ impl RunContext {
             }
         }
     }
+
+    /// Call the model and parse the response, retrying the call up to
+    /// `max_retries` additional times if the parse fails. Each attempt
+    /// goes through the normal pipeline (provider send + telemetry +
+    /// bracket-repair + validator), so retries show up in the call-level
+    /// metrics just like any other LLM call.
+    ///
+    /// Why this exists: a few percent of MiniMax-M3 calls land on
+    /// structurally invalid JSON that the walker cannot repair
+    /// (mid-string truncation, unescaped quotes inside strings). For a
+    /// non-deterministic model this is a transient failure: a fresh
+    /// attempt usually succeeds on the same prompt. One extra call
+    /// pushes the end-to-end success rate above 99%.
+    ///
+    /// The default `max_retries` is 1. Each retry is a full LLM call,
+    /// so cost scales linearly.
+    pub fn call_with_retry_parse<T>(
+        &self,
+        role: Role,
+        system: String,
+        user: String,
+        schema_hint: &str,
+        max_retries: u32,
+    ) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        for attempt in 0..=max_retries {
+            let response = pollster::block_on(self.call(role, system.clone(), user.clone()));
+            match response {
+                Ok(resp) => match self.parse_model_json::<T>(role, &resp.text, schema_hint) {
+                    Ok(v) => {
+                        if attempt > 0 {
+                            eprintln!(
+                                "[moagan] role={} recovered after {} retry",
+                                role.as_str(),
+                                attempt
+                            );
+                        }
+                        return Ok(v);
+                    }
+                    Err(e) if attempt < max_retries => {
+                        eprintln!(
+                            "[moagan] role={} attempt {}/{} parse failed; retrying: {}",
+                            role.as_str(),
+                            attempt + 1,
+                            max_retries + 1,
+                            e
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
+                Err(e) if attempt < max_retries => {
+                    eprintln!(
+                        "[moagan] role={} attempt {}/{} call failed; retrying: {}",
+                        role.as_str(),
+                        attempt + 1,
+                        max_retries + 1,
+                        e
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
 }
 
 /// Per-role `max_tokens`. The model can produce very verbose JSON for

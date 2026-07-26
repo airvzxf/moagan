@@ -20,11 +20,12 @@ impl Phase for IntakePhase {
     fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
         let system = system_prompt(Role::Intake).to_owned();
         let user = ctx.raw_prompt.clone();
-        let resp = pollster::block_on(ctx.call(Role::Intake, system, user))?;
-        let intake: Intake = ctx.parse_model_json(
+        let intake: Intake = ctx.call_with_retry_parse(
             Role::Intake,
-            &resp.text,
+            system,
+            user,
             "Intake: {problem, objectives, constraints, non_goals, open_questions, raw_prompt}",
+            1,
         )?;
         let path = ctx.run_dir().final_dir().join("intake.json");
         let brief_path = ctx.run_dir().brief();

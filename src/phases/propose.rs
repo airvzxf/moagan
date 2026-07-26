@@ -31,11 +31,12 @@ impl Phase for ProposePhase {
         for i in 0..self.count {
             let id = format!("p_{i:03}");
             let user_with_id = format!("{user}\n\nUse id=\"{id}\" in the output.");
-            let resp = pollster::block_on(ctx.call(Role::Propose, system.clone(), user_with_id))?;
-            let mut proposal: Proposal = ctx.parse_model_json(
+            let mut proposal: Proposal = ctx.call_with_retry_parse(
                 Role::Propose,
-                &resp.text,
+                system.clone(),
+                user_with_id,
                 "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+                1,
             )?;
             if proposal.id.is_empty() {
                 proposal.id = id.clone();

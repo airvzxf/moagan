@@ -41,16 +41,14 @@ impl Phase for DeliverPhase {
         }))
         .map_err(crate::Error::from)?;
         let system = system_prompt(Role::Deliver).to_owned();
-        let resp = pollster::block_on(ctx.call(Role::Deliver, system, user))?;
-        eprintln!(
-            "[deliver] LLM returned, parsing as FinalReport. text_len={}",
-            resp.text.len()
-        );
-        let report: FinalReport = ctx.parse_model_json(
+        let report: FinalReport = ctx.call_with_retry_parse(
             Role::Deliver,
-            &resp.text,
+            system,
+            user,
             "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
+            1,
         )?;
+        eprintln!("[deliver] report parsed");
         let final_dir = ctx.run_dir().final_dir();
         std::fs::create_dir_all(&final_dir)?;
         let json_path: PathBuf = final_dir.join("portfolio.json");
