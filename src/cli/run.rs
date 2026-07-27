@@ -160,7 +160,7 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
         .push(CritiquePhase {
             critics_per_proposal: critics,
         })
-        .push(RepairPhase)
+        .push(RepairPhase::from_config(cfg))
         .push(JudgePhase { judges })
         .push(RankPhase { config: cfg_arc })
         .push(DeliverPhase)

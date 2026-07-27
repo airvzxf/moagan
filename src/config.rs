@@ -45,6 +45,10 @@ pub struct Config {
     pub no_color: bool,
     /// Per-criterion weights for the ranked score. Equal weights by default.
     pub ranking_weights: RankingWeights,
+    /// Maximum number of repair rounds per failed proposal. Default 5.
+    /// Spec T01-06 §16.10 allows 0..2; v0.1 default is 5 per operator
+    /// preference (the cost is bounded by parallelism).
+    pub repair_max_rounds: u32,
     /// Forbidden technologies the gate rejects when present in a
     /// proposal. Empty by default; the user can populate this from
     /// the brief's constraints.
@@ -151,6 +155,7 @@ impl Default for Config {
             emit_summary: false,
             no_color: false,
             ranking_weights: RankingWeights::default(),
+            repair_max_rounds: 5,
             gate_forbidden_techs: Vec::new(),
             gate_min_length: 50,
             gate_max_length: 5000,
@@ -285,11 +290,15 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("MOAGAN_REPAIR_MAX_ROUNDS")
+            && let Ok(n) = v.parse()
+        {
+            self.repair_max_rounds = n;
+        }
         if let Ok(v) = std::env::var("MOAGAN_GATE_FORBIDDEN_TECHS")
             && !v.trim().is_empty()
         {
-            self.gate_forbidden_techs =
-                v.split(',').map(|s| s.trim().to_owned()).collect();
+            self.gate_forbidden_techs = v.split(',').map(|s| s.trim().to_owned()).collect();
         }
     }
 }

@@ -175,7 +175,7 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         .push(CritiquePhase {
             critics_per_proposal: 2,
         })
-        .push(RepairPhase)
+        .push(RepairPhase::default())
         .push(JudgePhase { judges: 3 })
         .push(RankPhase {
             config: Arc::new(Config::default()),
