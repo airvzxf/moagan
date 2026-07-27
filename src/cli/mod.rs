@@ -242,7 +242,7 @@ impl Cmd {
 }
 
 /// Dispatch the parsed CLI.
-pub fn dispatch(cli: Cli) -> Result<i32> {
+pub async fn dispatch(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
     let cfg = Config::load()?;
@@ -267,7 +267,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     max_parallelism,
                 },
                 &cfg,
-            )?;
+            )
+            .await?;
             println!("run id: {run_id}");
             Ok(0)
         }
@@ -335,7 +336,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 &proposal,
                 &cfg,
                 &home,
-            )?;
+            )
+            .await?;
             println!("refined proposal {proposal} for run {run_id}");
             Ok(0)
         }
@@ -347,7 +349,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     .map_err(|e| Error::InvalidArgs(format!("{e}")))?,
                 &cfg,
                 &home,
-            )?;
+            )
+            .await?;
             println!("reranked run {run_id}");
             Ok(0)
         }

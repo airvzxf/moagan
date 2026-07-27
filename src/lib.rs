@@ -28,10 +28,10 @@ pub mod time;
 pub use error::{Error, Result, exit_code};
 
 /// CLI entry point. Returns a Unix exit code.
-pub fn run() -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;
     let cli = cli::Cli::parse();
-    let code = match cli::dispatch(cli) {
+    let code = match cli::dispatch(cli).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
@@ -42,15 +42,11 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 /// Synchronous entry point used by `main.rs` and integration tests.
-/// Wraps the CLI dispatch in a multi-thread Tokio runtime so
-/// `reqwest` (which depends on Tokio's IO reactor) can actually run
-/// the HTTP send future even though the phases call it via
-/// `pollster::block_on`.
 pub fn run_blocking() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(async { run() })
+    rt.block_on(run())
 }
 
 #[cfg(test)]

@@ -68,11 +68,3 @@ wiremock = "0.6"
 insta = { version = "1.39", features = ["yaml"] }
 assert_cmd = "2"
 pollster = "0.4"
-
-[dependencies.pollster]
-version = "0.4"
-optional = true
-
-[features]
-default = ["sync-runtime"]
-sync-runtime = ["dep:pollster"]

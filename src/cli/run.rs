@@ -43,7 +43,7 @@ pub struct RunOptions {
 }
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
-pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
+pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     if let Some(ref home) = opts.home {
         unsafe {
             std::env::set_var("MOAGAN_HOME", home);
@@ -102,10 +102,20 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         telemetry.clone(),
         opts.prompt.clone(),
         opts.mode.as_str().to_owned(),
-    );
+    )
+    .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs);
 
     let pipeline = build_pipeline_for_mode(opts.mode, cfg);
-    let _outputs = pollster::block_on(pipeline.run(&ctx))?;
+    let pipeline_future = pipeline.run(&ctx);
+    tokio::pin!(pipeline_future);
+    let _outputs = tokio::select! {
+        result = &mut pipeline_future => result?,
+        signal = shutdown_signal() => {
+            signal?;
+            ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
+            return Err(ctx.cancel().into_error());
+        }
+    };
 
     // Flush telemetry before the manifest reads phases/calls.
     // Without this, the gzip stream is incomplete (no CRC/length
@@ -134,6 +144,24 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         run_dir.root().display()
     );
     Ok(run_id)
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = terminate.recv() => {}
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        Ok(())
+    }
 }
 
 /// Build a `ProviderRegistry` containing only `selected` (the provider
