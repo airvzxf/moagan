@@ -1,14 +1,15 @@
 //! `moagan run` — start a new run, build a pipeline, execute it, write
 //! the manifest, and print a summary.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::cli::Mode;
 use crate::config::Config;
-use crate::domain::Manifest;
+use crate::domain::{Manifest, ManifestPhase, ManifestUsage};
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
-use crate::fs_layout::MoaganHome;
+use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
@@ -17,7 +18,7 @@ use crate::phases::{
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
-use crate::telemetry::Telemetry;
+use crate::telemetry::{PhaseEvent, Telemetry};
 
 /// Options for `moagan run`.
 #[derive(Debug, Clone)]
@@ -63,6 +64,7 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
     let policy = RedactPolicy::default();
+    let default_model_for_manifest = default_model.clone();
     // Open the SQLite index under MOAGAN_HOME/meta.sqlite. The
     // pipeline mirrors every phase event and every LLM call into
     // the DB so `moagan inspect` returns live data.
@@ -95,9 +97,16 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     );
 
     let pipeline = build_pipeline_for_mode(opts.mode, cfg);
-    let outputs = pollster::block_on(pipeline.run(&ctx))?;
+    let _outputs = pollster::block_on(pipeline.run(&ctx))?;
 
-    let manifest = build_manifest(&run_id, opts.mode.as_str(), "completed", &outputs);
+    let manifest = build_manifest(
+        &run_id,
+        opts.mode.as_str(),
+        "completed",
+        &run_dir,
+        &default_provider,
+        default_model_for_manifest.as_str(),
+    )?;
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
     telemetry.flush()?;
@@ -170,11 +179,38 @@ fn build_manifest(
     run_id: &RunId,
     mode: &str,
     status: &str,
-    _outputs: &[crate::phases::PhaseOutput],
-) -> Manifest {
+    run_dir: &RunDir<'_>,
+    provider: &str,
+    model: &str,
+) -> Result<Manifest> {
     use chrono::Utc;
     let now = Utc::now();
-    Manifest {
+
+    // 1. Compute the brief hashes from the on-disk canonical brief.
+    let (brief_sha256, brief_blake3) = match std::fs::read(run_dir.brief()) {
+        Ok(bytes) => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let sha = hex::encode(hasher.finalize());
+            let blake = blake3::hash(&bytes).to_hex().to_string();
+            (sha, blake)
+        }
+        Err(_) => (String::new(), String::new()),
+    };
+
+    // 2. Aggregate phase events from telemetry/phases.jsonl into one
+    //    ManifestPhase per phase name. Start events set started_unix;
+    //    end events set ended_unix + status; error events set error.
+    let phases_path = run_dir.telemetry().join("phases.jsonl");
+    let phase_events = read_phase_events(&phases_path);
+    let call_counts = count_calls_per_phase(&run_dir.telemetry().join("calls.jsonl"));
+    let manifest_phases = aggregate_phase_events(&phase_events, &call_counts);
+
+    // 3. Aggregate usage from telemetry/calls.jsonl.
+    let usage = aggregate_usage(&run_dir.telemetry().join("calls.jsonl"));
+
+    let mut manifest = Manifest {
         schema_version: "v1".into(),
         run_id: *run_id,
         mode: mode.into(),
@@ -182,12 +218,120 @@ fn build_manifest(
         created_at: now,
         updated_at: now,
         client_version: env!("CARGO_PKG_VERSION").into(),
-        brief_sha256: String::new(),
-        brief_blake3: String::new(),
-        provider: String::new(),
-        model: String::new(),
-        phases: Vec::new(),
-        usage: crate::domain::ManifestUsage::default(),
+        brief_sha256,
+        brief_blake3,
+        provider: provider.into(),
+        model: model.into(),
+        phases: manifest_phases,
+        usage,
         manifest_blake3: String::new(),
+    };
+
+    // 4. Compute the self-hash over the canonical JSON with
+    //    `manifest_blake3` set to the empty string. The hash is then
+    //    filled into the manifest, so consumers can verify the
+    //    contents by re-hashing with the field blanked.
+    let mut canonical = manifest.clone();
+    canonical.manifest_blake3 = String::new();
+    let json = serde_json::to_vec(&canonical).map_err(Error::from)?;
+    let hash = blake3::hash(&json).to_hex().to_string();
+    manifest.manifest_blake3 = hash;
+
+    Ok(manifest)
+}
+
+/// Read every `phases.jsonl` line into a `PhaseEvent` list. Missing
+/// files and individual malformed lines are silently skipped so a
+/// partial telemetry stream never blocks manifest emission.
+fn read_phase_events(path: &Path) -> Vec<PhaseEvent> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<PhaseEvent>(line).ok())
+        .collect()
+}
+
+fn aggregate_phase_events(
+    events: &[PhaseEvent],
+    call_counts: &std::collections::BTreeMap<String, u32>,
+) -> Vec<ManifestPhase> {
+    use std::collections::BTreeMap;
+    let mut by_name: BTreeMap<String, ManifestPhase> = BTreeMap::new();
+    for ev in events {
+        let phase_name = ev.phase.clone();
+        let calls = call_counts.get(&phase_name).copied().unwrap_or(0);
+        let entry = by_name
+            .entry(phase_name.clone())
+            .or_insert_with(|| ManifestPhase {
+                phase: phase_name.clone(),
+                started_unix: ev.at_unix,
+                ended_unix: 0,
+                status: "running".into(),
+                calls,
+                error: None,
+            });
+        match ev.status.as_str() {
+            "start" => {
+                entry.started_unix = ev.at_unix;
+            }
+            "end" => {
+                entry.ended_unix = ev.at_unix;
+                entry.status = "end".into();
+            }
+            "error" => {
+                entry.ended_unix = ev.at_unix;
+                entry.status = "error".into();
+                entry.error = ev.error.clone();
+            }
+            _ => {}
+        }
     }
+    by_name.into_values().collect()
+}
+
+/// Walk every `calls.jsonl` line and count how many calls landed in
+/// each phase name. Used to populate `ManifestPhase.calls`.
+fn count_calls_per_phase(path: &Path) -> std::collections::BTreeMap<String, u32> {
+    use std::collections::BTreeMap;
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return BTreeMap::new(),
+    };
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    for line in raw.lines() {
+        let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(phase) = ev.get("phase").and_then(|v| v.as_str()) {
+            *counts.entry(phase.to_owned()).or_default() += 1;
+        }
+    }
+    counts
+}
+
+/// Sum input / output / cache tokens from every recorded call.
+fn aggregate_usage(path: &Path) -> ManifestUsage {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return ManifestUsage::default(),
+    };
+    let mut usage = ManifestUsage::default();
+    for line in raw.lines() {
+        let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        usage.input_tokens += ev.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        usage.output_tokens += ev
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        usage.cache_read += ev.get("cache_read").and_then(|v| v.as_u64()).unwrap_or(0);
+        usage.cache_creation += ev
+            .get("cache_creation")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+    }
+    usage
 }
