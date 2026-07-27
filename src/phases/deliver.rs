@@ -75,14 +75,27 @@ fn render_markdown(report: &FinalReport, ranking: &Ranking) -> String {
         }
         s.push('\n');
     }
-    s.push_str("## Ranking\n\n");
-    for (i, r) in ranking.ranked.iter().enumerate() {
+    s.push_str("## Top-3\n\n");
+    for (i, r) in ranking.ranked.iter().take(3).enumerate() {
+        let badge = match i {
+            0 => "winner",
+            1 => "runner-up",
+            2 => "third",
+            _ => "",
+        };
         s.push_str(&format!(
-            "{}. **{}** — score {:.2}: {}\n",
+            "{}. **{}** ({}) — score {:.2}: {}\n",
             i + 1,
             r.id,
+            badge,
             r.score,
             r.reason
+        ));
+    }
+    if ranking.ranked.len() > 3 {
+        s.push_str(&format!(
+            "\n(Full ranking: {} candidates.)\n",
+            ranking.ranked.len()
         ));
     }
     s.push('\n');

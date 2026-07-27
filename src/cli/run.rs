@@ -150,7 +150,7 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
         Mode::Fast => (3u32, 2u32, 3u32),
         Mode::Standard => (3u32, 3u32, 5u32),
     };
-    let _ = cfg;
+    let cfg_arc = std::sync::Arc::new(cfg.clone());
     Pipeline::new()
         .push(IntakePhase)
         .push(ClarifyPhase)
@@ -162,7 +162,7 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
         })
         .push(RepairPhase)
         .push(JudgePhase { judges })
-        .push(RankPhase)
+        .push(RankPhase { config: cfg_arc })
         .push(DeliverPhase)
 }
 

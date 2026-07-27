@@ -177,7 +177,9 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         })
         .push(RepairPhase)
         .push(JudgePhase { judges: 3 })
-        .push(RankPhase)
+        .push(RankPhase {
+            config: Arc::new(Config::default()),
+        })
         .push(DeliverPhase);
 
     let outputs = pollster::block_on(pipeline.run(&ctx))?;

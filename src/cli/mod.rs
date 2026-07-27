@@ -1,6 +1,8 @@
 //! CLI surface. Subcommands are: `run`, `continue`, `resume`, `rerun`,
-//! `inspect`, `refine`, `rerank`. v0.1 ships `run` and `inspect`; the
-//! others are stubbed with friendly errors.
+//! `inspect`, `refine`, `rerank`. v0.1 ships `run`, `inspect`, `refine`,
+//! and `rerank`; the others are stubbed with friendly errors.
+
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -152,6 +154,23 @@ pub enum Cmd {
     Doctor,
 }
 
+impl Cmd {
+    /// The human description of what each subcommand does, used in
+    /// `moagan --help` and in error messages.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::Run { .. } => "Start a new run",
+            Self::Continue { .. } => "Continue a paused or failed run",
+            Self::Resume { .. } => "Resume a run mid-phase",
+            Self::Rerun { .. } => "Rerun an existing run with overrides",
+            Self::Inspect { .. } => "Inspect runs",
+            Self::Refine { .. } => "Re-run the deliver phase for one proposal",
+            Self::Rerank { .. } => "Re-run the rank phase on existing evaluations",
+            Self::Doctor => "Check the local environment",
+        }
+    }
+}
+
 /// Dispatch the parsed CLI.
 pub fn dispatch(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
@@ -235,9 +254,31 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Cmd::Refine { .. } | Cmd::Rerank { .. } => Err(Error::InvalidState(
-            "refine and rerank land in v0.2; tracked in the integrated catalog".into(),
-        )),
+        Cmd::Refine { run_id, proposal } => {
+            let home = Arc::new(MoaganHome::resolve()?);
+            continue_cmd::run_refine(
+                run_id
+                    .parse()
+                    .map_err(|e| Error::InvalidArgs(format!("{e}")))?,
+                &proposal,
+                &cfg,
+                &home,
+            )?;
+            println!("refined proposal {proposal} for run {run_id}");
+            Ok(0)
+        }
+        Cmd::Rerank { run_id } => {
+            let home = Arc::new(MoaganHome::resolve()?);
+            continue_cmd::run_rerank(
+                run_id
+                    .parse()
+                    .map_err(|e| Error::InvalidArgs(format!("{e}")))?,
+                &cfg,
+                &home,
+            )?;
+            println!("reranked run {run_id}");
+            Ok(0)
+        }
         Cmd::Doctor => doctor::run(),
     }
 }

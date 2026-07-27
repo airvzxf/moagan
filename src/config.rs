@@ -43,6 +43,87 @@ pub struct Config {
     pub emit_summary: bool,
     /// Disable colour in CLI output. Default false.
     pub no_color: bool,
+    /// Per-criterion weights for the ranked score. Equal weights by default.
+    pub ranking_weights: RankingWeights,
+}
+
+/// Per-criterion weights used by the `RankPhase` to compute the
+/// weighted score from the aggregated `JudgeScore`. Each weight is a
+/// non-negative `f32`; the relative magnitude determines the
+/// criterion's influence. The default is uniform (1.0).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RankingWeights {
+    /// Weight for the average `correctness` score.
+    pub correctness: f32,
+    /// Weight for the average `completeness` score.
+    pub completeness: f32,
+    /// Weight for the average `fit` score.
+    pub fit: f32,
+    /// Weight for the average `evidence` score.
+    pub evidence: f32,
+    /// Weight for the average `clarity` score.
+    pub clarity: f32,
+    /// Weight for the overall `score` (the unweighted average).
+    pub overall: f32,
+}
+
+impl Default for RankingWeights {
+    fn default() -> Self {
+        Self {
+            correctness: 1.0,
+            completeness: 1.0,
+            fit: 1.0,
+            evidence: 1.0,
+            clarity: 1.0,
+            overall: 0.0,
+        }
+    }
+}
+
+impl RankingWeights {
+    /// Compute the weighted score for an aggregated judge result.
+    /// The weighted score is
+    /// `sum(w_i * c_i) / sum(w_i)` where `c_i` is the per-criterion
+    /// average and `w_i` is the corresponding weight. The `overall`
+    /// weight is added on top of the per-criterion weighted
+    /// average — it lets the operator trust (or distrust) the
+    /// model's `score` field above the per-criterion signal.
+    pub fn weighted_score(
+        &self,
+        correctness: f32,
+        completeness: f32,
+        fit: f32,
+        evidence: f32,
+        clarity: f32,
+        overall: f32,
+    ) -> f32 {
+        let weights = [
+            self.correctness,
+            self.completeness,
+            self.fit,
+            self.evidence,
+            self.clarity,
+        ];
+        let criteria = [correctness, completeness, fit, evidence, clarity];
+        let sum: f32 = weights.iter().sum();
+        let weighted_avg = if sum > 0.0 {
+            weights
+                .iter()
+                .zip(criteria.iter())
+                .map(|(w, c)| w * c)
+                .sum::<f32>()
+                / sum
+        } else {
+            0.0
+        };
+        let total = sum + self.overall;
+        if total > 0.0 {
+            (sum * weighted_avg + self.overall * overall) / total
+        } else {
+            0.0
+        }
+    }
 }
 
 impl Default for Config {
@@ -61,6 +142,7 @@ impl Default for Config {
             redact_in_telemetry: true,
             emit_summary: false,
             no_color: false,
+            ranking_weights: RankingWeights::default(),
         }
     }
 }
