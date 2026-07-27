@@ -164,17 +164,16 @@ impl Telemetry {
     ) -> Result<Self> {
         run.telemetry(); // ensures the path is computed
         std::fs::create_dir_all(run.telemetry())?;
-        let phases_path: PathBuf = run.telemetry().join("phases.jsonl");
-        let calls_path: PathBuf = run.telemetry().join("calls.jsonl");
+        // Spec §1.5 declares `gz` as the default compression for the
+        // two append-only streams (`phases.jsonl` and `calls.jsonl`).
+        // AGENTS.md's smoke gate #2 then names the on-disk file
+        // literally as `telemetry/calls.jsonl.gz`. Warnings stay
+        // uncompressed because they are tiny and frequently tailed.
+        let phases_path: PathBuf = run.telemetry().join("phases.jsonl.gz");
+        let calls_path: PathBuf = run.telemetry().join("calls.jsonl.gz");
         let warnings_path: PathBuf = run.telemetry().join("warnings.jsonl");
-        let phases_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&phases_path)?;
-        let calls_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&calls_path)?;
+        let phases_writer = crate::storage::compression::open_gz_append(&phases_path)?;
+        let calls_writer = crate::storage::compression::open_gz_append(&calls_path)?;
         let warnings_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -186,12 +185,12 @@ impl Telemetry {
                 calls_path,
                 warnings_path,
                 phases: Mutex::new(Some(RedactWriter::new(
-                    Box::new(phases_file),
+                    phases_writer,
                     policy.clone(),
                     Surface::Telemetry,
                 ))),
                 calls: Mutex::new(Some(RedactWriter::new(
-                    Box::new(calls_file),
+                    calls_writer,
                     policy.clone(),
                     Surface::Telemetry,
                 ))),
@@ -489,7 +488,7 @@ mod tests {
         let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
         t.phase("intake", 1, "end", None).unwrap();
         t.flush().unwrap();
-        let content = std::fs::read_to_string(t.phases_path()).unwrap();
+        let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
         assert!(content.contains("intake"));
     }
 
@@ -506,7 +505,7 @@ mod tests {
         t.phase("intake", 1, "error", Some("key=sk-cp-aaaaaaaaaaaaaaaaaaaa"))
             .unwrap();
         t.flush().unwrap();
-        let content = std::fs::read_to_string(t.phases_path()).unwrap();
+        let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
         assert!(content.contains("[REDACTED:minimax_sk_cp]"));
         assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
     }
