@@ -472,30 +472,53 @@ impl RunContext {
 }
 
 /// Per-role `max_tokens` ceiling. Calibrated for the v0.1 smoke
-/// (`minimax` Claude-style endpoint that accepts up to 128K output).
-/// These ceilings match T01-06 §4.2 — the old `131072` constant was
-/// leaving ~99% of the budget unused on roles that emit 1-2 KB JSON
-/// (intake, route, judge) and let the model drift into verbose prose
-/// on roles that should be terse.
+/// (`minimax` Claude-style endpoint that accepts up to 128K output)
+/// and revised upward after empirical observation that the model
+/// legitimately needs much more headroom for prose-heavy roles.
 ///
-/// A future release will let providers override these defaults through
-/// the per-role `prompts/registry.rs` configuration block, but the
-/// floors here are the contract: an intake never needs more than 1024
-/// tokens of output, a sketch never more than 1024, a clarification
-/// never more than 2048, etc.
+/// The model is **not** an algorithm with fixed output length —
+/// `critique` may produce a paragraph explaining a borderline
+/// score; `propose` may include a code block; `repair` may carry
+/// the full original proposal plus a diff; `deliver` may render
+/// a long portfolio with multiple sections. Hard-coding low
+/// ceilings (`max_tokens=1500` for judge, `4000` for critique)
+/// truncates these legitimately large responses mid-thought,
+/// surfaces `finish_reason=max_tokens` warnings, and forces the
+/// retry loop into additional cost.
+///
+/// New calibration (2026-07-27, powers-of-two so the ceilings are
+/// round numbers operators can reason about):
+///
+///   intake    1024    rephrase + extract, schema is tight
+///   clarify   2048    brief with several assumptions
+///   route      512    single JSON object
+///   sketch    1024    single JSON object, ~500 tokens
+///   propose  32768    full approach with code/tradeoffs/evidence
+///   gate      1024    single JSON object
+///   critique  8192    paragraph-length verdict with suggestions
+///   repair   16384    full proposal + diff
+///   judge     2048    rubric breakdown + comments
+///   rank      2048    ordered ranking + representatives
+///   deliver   8192    portfolio with title/summary/recommendation +
+///                     alternatives + next_steps
+///
+/// A future release will let providers override these defaults
+/// through the per-role `prompts/registry.rs` configuration block,
+/// but the values here are the contract: when the model wants to
+/// write more, let it; when it wants less, it returns less.
 fn max_tokens_for_role(role: Role) -> u32 {
     match role {
         Role::Intake => 1024,
         Role::Clarify => 2048,
         Role::Route => 512,
         Role::Sketch => 1024,
-        Role::Propose => 6000,
+        Role::Propose => 32768,
         Role::Gate => 1024,
-        Role::Critique => 4000,
-        Role::Repair => 6000,
-        Role::Judge => 1500,
-        Role::Rank => 1500,
-        Role::Deliver => 4000,
+        Role::Critique => 8192,
+        Role::Repair => 16384,
+        Role::Judge => 2048,
+        Role::Rank => 2048,
+        Role::Deliver => 8192,
     }
 }
 
