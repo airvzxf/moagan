@@ -1,6 +1,8 @@
 //! Clarify phase. Reads `brief.json` (the intake), asks the model to
 //! produce the canonical brief, writes it back.
 
+use async_trait::async_trait;
+
 use crate::domain::Brief;
 use crate::error::Result;
 use crate::llm::Role;
@@ -11,12 +13,13 @@ use crate::phases::util::{read_json, write_json};
 /// Clarify phase.
 pub struct ClarifyPhase;
 
+#[async_trait]
 impl Phase for ClarifyPhase {
     fn name(&self) -> &'static str {
         "clarify"
     }
 
-    fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+    async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
         let intake: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let user = serde_json::to_string(&intake).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Clarify).to_owned();
@@ -26,7 +29,8 @@ impl Phase for ClarifyPhase {
             user,
             "Brief: {problem, objectives, deliverables, constraints, assumptions, non_goals, acceptance[], risks[]}",
             5,
-        )?;
+        )
+        .await?;
         write_json(&ctx.run_dir().brief(), &brief)?;
         Ok(PhaseOutput::Brief(ctx.run_dir().brief()))
     }

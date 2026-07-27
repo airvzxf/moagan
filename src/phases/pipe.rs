@@ -50,12 +50,16 @@ impl Pipeline {
     /// Run the pipeline end-to-end. Returns the outputs of each phase
     /// in order. On the first error, records `error` in telemetry and
     /// returns the error.
-    pub fn run(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
+    ///
+    /// Async so that phases can fan out LLM calls in parallel; the
+    /// outer CLI calls this via `pollster::block_on` from inside a
+    /// Tokio runtime that drives the `reqwest` IO reactor.
+    pub async fn run(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
         let mut outputs = Vec::with_capacity(self.phases.len());
         for (i, phase) in self.phases.iter().enumerate() {
             let seq = i as i64;
             ctx.telemetry.phase(phase.name(), seq, "start", None)?;
-            let result = phase.execute(ctx);
+            let result = phase.execute(ctx).await;
             match &result {
                 Ok(_) => ctx.telemetry.phase(phase.name(), seq, "end", None)?,
                 Err(e) => {
@@ -73,14 +77,16 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::telemetry::Telemetry;
+    use async_trait::async_trait;
     use std::sync::Arc;
 
     struct StubPhase(&'static str);
+    #[async_trait]
     impl Phase for StubPhase {
         fn name(&self) -> &'static str {
             self.0
         }
-        fn execute(&self, _ctx: &RunContext) -> Result<PhaseOutput> {
+        async fn execute(&self, _ctx: &RunContext) -> Result<PhaseOutput> {
             Ok(PhaseOutput::Intake(std::path::PathBuf::from(self.0)))
         }
     }
@@ -106,7 +112,7 @@ mod tests {
     fn pipeline_runs_phases_in_order() {
         let pipe = Pipeline::new().push(StubPhase("a")).push(StubPhase("b"));
         let ctx = empty_ctx();
-        let out = pipe.run(&ctx).unwrap();
+        let out = pollster::block_on(pipe.run(&ctx)).unwrap();
         assert_eq!(out.len(), 2);
     }
 
@@ -114,7 +120,7 @@ mod tests {
     fn empty_pipeline_runs_zero_phases() {
         let pipe = Pipeline::new();
         let ctx = empty_ctx();
-        let out = pipe.run(&ctx).unwrap();
+        let out = pollster::block_on(pipe.run(&ctx)).unwrap();
         assert!(out.is_empty());
     }
 }

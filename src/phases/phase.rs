@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -269,7 +270,7 @@ impl RunContext {
     /// structured warning (`model.retry_parse`, `model.retry_provider`,
     /// `model.recovered_after_retry`) so the post-execution review
     /// can answer "did the model fail?" without scraping stderr.
-    pub fn call_with_retry_parse<T>(
+    pub async fn call_with_retry_parse<T>(
         &self,
         role: Role,
         system: String,
@@ -282,7 +283,7 @@ impl RunContext {
     {
         let phase_name = role.as_str();
         for attempt in 0..=max_retries {
-            let response = pollster::block_on(self.call(role, system.clone(), user.clone()));
+            let response = self.call(role, system.clone(), user.clone()).await;
             let warn_ctx = || WarningContext {
                 phase: Some(phase_name.to_owned()),
                 role: Some(phase_name.to_owned()),
@@ -390,13 +391,16 @@ pub enum PhaseOutput {
 }
 
 /// A unit of pipeline work.
+#[async_trait]
 pub trait Phase: Send + Sync {
     /// Stable phase name (e.g. `"intake"`, `"propose"`).
     fn name(&self) -> &'static str;
     /// Execute the phase. Implementations should record phase start
     /// and end through `ctx.telemetry` and write artefacts under
-    /// `ctx.run_dir`.
-    fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput>;
+    /// `ctx.run_dir`. Async so that phases can fan out LLM calls in
+    /// parallel via `futures::future::join_all` while respecting the
+    /// global `parallelism` cap acquired through `ctx.parallelism`.
+    async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput>;
 }
 
 #[cfg(test)]

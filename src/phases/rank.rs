@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use async_trait::async_trait;
+
 use crate::domain::{RankEntry, Ranking};
 use crate::error::Result;
 use crate::phases::judge::Aggregated;
@@ -13,12 +15,13 @@ use crate::phases::util::{read_json, write_json};
 /// Rank phase.
 pub struct RankPhase;
 
+#[async_trait]
 impl Phase for RankPhase {
     fn name(&self) -> &'static str {
         "rank"
     }
 
-    fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+    async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
         let evaluations_dir = ctx.run_dir().evaluations();
         let rankings_dir = ctx.run_dir().rankings();
         std::fs::create_dir_all(&rankings_dir)?;

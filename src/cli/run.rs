@@ -94,7 +94,7 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     );
 
     let pipeline = build_pipeline_for_mode(&opts.mode, cfg);
-    let outputs = pipeline.run(&ctx)?;
+    let outputs = pollster::block_on(pipeline.run(&ctx))?;
 
     let manifest = build_manifest(&run_id, &opts.mode, "completed", &outputs);
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;

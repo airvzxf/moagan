@@ -180,7 +180,7 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         .push(RankPhase)
         .push(DeliverPhase);
 
-    let outputs = pipeline.run(&ctx)?;
+    let outputs = pollster::block_on(pipeline.run(&ctx))?;
     assert_eq!(outputs.len(), 10, "expected 10 phase outputs");
 
     // Write manifest like run.rs does.
@@ -369,13 +369,13 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
 
     // First response is broken; parse would fail. The retry should
     // pick up the second (clean) response and parse it.
-    let parsed: moagan::domain::Proposal = ctx.call_with_retry_parse(
+    let parsed: moagan::domain::Proposal = pollster::block_on(ctx.call_with_retry_parse(
         moagan::llm::Role::Propose,
         "system".into(),
         "user".into(),
         "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
         1,
-    )?;
+    ))?;
     assert_eq!(parsed.id, "p_000");
     assert_eq!(parsed.summary, "second");
     Ok(())
@@ -435,13 +435,14 @@ fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
         "fast".into(),
     );
 
-    let result: moagan::error::Result<moagan::domain::Proposal> = ctx.call_with_retry_parse(
-        moagan::llm::Role::Propose,
-        "system".into(),
-        "user".into(),
-        "Proposal: ...",
-        1,
-    );
+    let result: moagan::error::Result<moagan::domain::Proposal> =
+        pollster::block_on(ctx.call_with_retry_parse(
+            moagan::llm::Role::Propose,
+            "system".into(),
+            "user".into(),
+            "Proposal: ...",
+            1,
+        ));
     assert!(result.is_err());
     Ok(())
 }
@@ -541,13 +542,13 @@ fn json_repair_emits_model_json_repair_applied_warning() -> Result<()> {
     // 1. Direct parse fails (truncated).
     // 2. repair_m3_brackets with trace fires the bracket pass.
     // 3. The parse succeeds (the patched result is valid JSON).
-    let parsed: moagan::domain::Proposal = ctx.call_with_retry_parse(
+    let parsed: moagan::domain::Proposal = pollster::block_on(ctx.call_with_retry_parse(
         moagan::llm::Role::Propose,
         "system".into(),
         "user".into(),
         "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
         0,
-    )?;
+    ))?;
     assert_eq!(parsed.id, "p_000");
     assert_eq!(parsed.summary, "x");
 
@@ -586,13 +587,13 @@ fn retry_recovery_emits_retry_and_recovery_warnings() -> Result<()> {
     let run_id = RunId::new();
     let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
 
-    let parsed: moagan::domain::Proposal = ctx.call_with_retry_parse(
+    let parsed: moagan::domain::Proposal = pollster::block_on(ctx.call_with_retry_parse(
         moagan::llm::Role::Propose,
         "system".into(),
         "user".into(),
         "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
         1,
-    )?;
+    ))?;
     assert_eq!(parsed.summary, "second");
 
     let summary = db.warnings_summary(run_id)?;

@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
+
 use crate::domain::{Gate, Proposal};
 use crate::error::Result;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
@@ -11,12 +13,13 @@ use crate::phases::util::{read_json, write_json};
 /// Gate phase. One report per proposal.
 pub struct GatePhase;
 
+#[async_trait]
 impl Phase for GatePhase {
     fn name(&self) -> &'static str {
         "gate"
     }
 
-    fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+    async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
         let proposals_dir = ctx.run_dir().proposals();
         let validation_dir = ctx.run_dir().validation();
         std::fs::create_dir_all(&validation_dir)?;

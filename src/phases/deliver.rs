@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use async_trait::async_trait;
+
 use crate::domain::{FinalReport, Proposal, Ranking};
 use crate::error::Result;
 use crate::llm::Role;
@@ -14,26 +16,23 @@ use crate::phases::util::{read_json, write_json};
 /// Deliver phase.
 pub struct DeliverPhase;
 
+#[async_trait]
 impl Phase for DeliverPhase {
     fn name(&self) -> &'static str {
         "deliver"
     }
 
-    fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
-        eprintln!("[deliver] start");
+    async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
         let ranking: Ranking = read_json(&ctx.run_dir().rankings().join("ranking.json"))?;
-        eprintln!("[deliver] ranking loaded: winner={}", ranking.winner);
         let proposals_dir = ctx.run_dir().proposals();
         let winner_proposal: Proposal =
             read_json(&proposals_dir.join(format!("{}.json", ranking.winner))).or_else(|_| {
-                // Try repair if original is missing.
                 let p = ctx
                     .run_dir()
                     .revisions()
                     .join(format!("{}_rev_0.json", ranking.winner));
                 read_json(&p)
             })?;
-        eprintln!("[deliver] winner_proposal loaded");
         let user = serde_json::to_string(&serde_json::json!({
             "winner": ranking.winner,
             "proposal": winner_proposal,
@@ -41,14 +40,15 @@ impl Phase for DeliverPhase {
         }))
         .map_err(crate::Error::from)?;
         let system = system_prompt(Role::Deliver).to_owned();
-        let report: FinalReport = ctx.call_with_retry_parse(
-            Role::Deliver,
-            system,
-            user,
-            "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
-            5,
-        )?;
-        eprintln!("[deliver] report parsed");
+        let report: FinalReport = ctx
+            .call_with_retry_parse(
+                Role::Deliver,
+                system,
+                user,
+                "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
+                5,
+            )
+            .await?;
         let final_dir = ctx.run_dir().final_dir();
         std::fs::create_dir_all(&final_dir)?;
         let json_path: PathBuf = final_dir.join("portfolio.json");
