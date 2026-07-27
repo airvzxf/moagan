@@ -1,7 +1,7 @@
 //! `minimax` provider — Anthropic-compatible endpoint at
 //! `https://api.minimax.io/anthropic/v1/messages`.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -122,6 +122,13 @@ impl Provider for MinimaxProvider {
         loop {
             attempt += 1;
             let headers = build_headers(self.api_key.expose(), &[])?;
+            let request_started = Instant::now();
+            tracing::debug!(
+                provider = self.name,
+                attempt,
+                stage = "http.request.started",
+                "Provider HTTP stage"
+            );
             let result = self
                 .client
                 .post(&url)
@@ -133,20 +140,32 @@ impl Provider for MinimaxProvider {
                 Ok(resp) => {
                     let status = resp.status();
                     let status_code = status.as_u16();
+                    tracing::debug!(
+                        provider = self.name,
+                        attempt,
+                        stage = "http.headers.received",
+                        status = status_code,
+                        elapsed_ms = request_started.elapsed().as_millis(),
+                        "Provider HTTP stage"
+                    );
                     let retry_after = retry_after(&resp);
                     if status.is_success() {
+                        let decode_started = Instant::now();
                         let parsed: MessagesResponseBody = resp
                             .json()
                             .await
                             .map_err(|e| Error::Provider(format!("decode response: {e}")))?;
+                        tracing::debug!(
+                            provider = self.name,
+                            attempt,
+                            stage = "http.body.decoded",
+                            status = status_code,
+                            elapsed_ms = decode_started.elapsed().as_millis(),
+                            "Provider HTTP stage"
+                        );
                         let resp = parsed
                             .into_response()
                             .map_err(|e| Error::Provider(e.to_string()))?;
-                        // Truncation is surfaced through `Response.truncated`
-                        // so the caller (phase.rs) can register a
-                        // `model.response_truncated` warning with
-                        // structured details (role, attempt, byte
-                        // count). No stderr noise here.
                         return Ok((status_code, resp));
                     }
                     let body = resp.text().await.unwrap_or_default();

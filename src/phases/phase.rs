@@ -7,10 +7,12 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::cancel::Cancel;
 use crate::error::Result;
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
@@ -45,6 +47,9 @@ pub struct RunContext {
     /// successful call so subsequent runs of the same prompt reuse
     /// the cached response (compliance with T01-06 §3.3).
     pub cache: Cache,
+    cancel: Cancel,
+    phase_timeout: Duration,
+    total_timeout: Duration,
 }
 
 impl std::fmt::Debug for RunContext {
@@ -89,7 +94,39 @@ impl RunContext {
             raw_prompt,
             mode,
             cache,
+            cancel: Cancel::new(),
+            phase_timeout: Duration::ZERO,
+            total_timeout: Duration::ZERO,
         }
+    }
+
+    pub(crate) fn with_timeouts(self, phase_secs: u64, total_secs: u64) -> Self {
+        self.with_timeout_durations(
+            Duration::from_secs(phase_secs),
+            Duration::from_secs(total_secs),
+        )
+    }
+
+    pub(crate) fn with_timeout_durations(
+        mut self,
+        phase_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Self {
+        self.phase_timeout = phase_timeout;
+        self.total_timeout = total_timeout;
+        self
+    }
+
+    pub(crate) fn phase_timeout(&self) -> Duration {
+        self.phase_timeout
+    }
+
+    pub(crate) fn total_timeout(&self) -> Duration {
+        self.total_timeout
+    }
+
+    pub(crate) fn cancel(&self) -> &Cancel {
+        &self.cancel
     }
 
     /// Borrow the run-specific directory namespace.
@@ -170,7 +207,22 @@ impl RunContext {
     ) -> Result<Response> {
         let provider = self.provider();
         let call_id = uuid::Uuid::now_v7().to_string();
+        let provider_started = std::time::Instant::now();
+        tracing::debug!(
+            call_id = %call_id,
+            phase = req.role.as_str(),
+            stage = "provider.send.started",
+            "LLM call stage"
+        );
         let result = provider.send(&req).await;
+        tracing::debug!(
+            call_id = %call_id,
+            phase = req.role.as_str(),
+            stage = "provider.send.completed",
+            elapsed_ms = provider_started.elapsed().as_millis(),
+            success = result.is_ok(),
+            "LLM call stage"
+        );
         let ended_unix = crate::time::now_unix_secs();
         let phase_name = req.role.as_str();
         let ctx = || WarningContext {
@@ -182,14 +234,36 @@ impl RunContext {
         match &result {
             Ok((status, response)) => {
                 if let Some(ref key) = cache_key {
-                    let _ = self.cache.store(
+                    let cache_started = std::time::Instant::now();
+                    tracing::debug!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "cache.store.started",
+                        "LLM call stage"
+                    );
+                    match self.cache.store(
                         key,
                         self.default_provider.as_str(),
                         self.default_model.as_str(),
                         response,
-                    );
+                    ) {
+                        Ok(()) => tracing::debug!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "cache.store.completed",
+                            elapsed_ms = cache_started.elapsed().as_millis(),
+                            "LLM call stage"
+                        ),
+                        Err(e) => tracing::warn!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "cache.store.error",
+                            error = %e,
+                            "LLM call stage"
+                        ),
+                    }
                 }
-                let _ = self.telemetry.call(
+                if let Err(e) = self.telemetry.call(
                     &call_id,
                     phase_name,
                     phase_name,
@@ -205,7 +279,22 @@ impl RunContext {
                     started_unix,
                     ended_unix,
                     None,
-                );
+                ) {
+                    tracing::warn!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "telemetry.call.error",
+                        error = %e,
+                        "LLM call stage"
+                    );
+                } else {
+                    tracing::debug!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "telemetry.call.completed",
+                        "LLM call stage"
+                    );
+                }
                 if response.truncated {
                     let _ = self.telemetry.warn(
                         "model.response_truncated",
@@ -231,7 +320,7 @@ impl RunContext {
                 }
             }
             Err(e) => {
-                let _ = self.telemetry.call(
+                if let Err(telemetry_error) = self.telemetry.call(
                     &call_id,
                     phase_name,
                     phase_name,
@@ -247,7 +336,15 @@ impl RunContext {
                     started_unix,
                     ended_unix,
                     Some(&e.to_string()),
-                );
+                ) {
+                    tracing::warn!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "telemetry.call.error",
+                        error = %telemetry_error,
+                        "LLM call stage"
+                    );
+                }
             }
         }
         result.map(|(_, r)| r)

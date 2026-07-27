@@ -279,11 +279,11 @@ impl Telemetry {
             w.write_all(&bytes)?;
             w.write_all(b"\n")?;
         }
-        if let Some(db) = &self.inner.db {
-            // Mirror into SQLite. Errors here are non-fatal: the
-            // JSONL is the canonical timeline; the DB is a queryable
-            // index.
-            let _ = db.record_phase(self.inner.run_id, phase, seq, status, error);
+        drop(g);
+        if let Some(db) = &self.inner.db
+            && let Err(e) = db.record_phase(self.inner.run_id, phase, seq, status, error)
+        {
+            tracing::warn!(phase, seq, status, error = %e, "SQLite phase mirror failed");
         }
         Ok(())
     }
@@ -333,8 +333,9 @@ impl Telemetry {
             w.write_all(&bytes)?;
             w.write_all(b"\n")?;
         }
-        if let Some(db) = &self.inner.db {
-            let _ = db.record_call(
+        drop(g);
+        if let Some(db) = &self.inner.db
+            && let Err(e) = db.record_call(
                 call_id,
                 self.inner.run_id,
                 phase,
@@ -349,7 +350,9 @@ impl Telemetry {
                 cache_read,
                 cache_creation,
                 error,
-            );
+            )
+        {
+            tracing::warn!(call_id, phase, error = %e, "SQLite call mirror failed");
         }
         Ok(())
     }
@@ -403,11 +406,8 @@ impl Telemetry {
         }
         drop(g);
         if let Some(db) = &self.inner.db {
-            // Mirror into SQLite. Errors here are non-fatal: the
-            // JSONL is the canonical timeline; the DB is a queryable
-            // index.
             let details_str = ev.details.to_string();
-            let _ = db.record_warning(
+            if let Err(e) = db.record_warning(
                 self.inner.run_id,
                 ev.at_unix_ms,
                 &ev.code,
@@ -418,7 +418,9 @@ impl Telemetry {
                 ev.attempt.map(i64::from),
                 &ev.message,
                 &details_str,
-            );
+            ) {
+                tracing::warn!(code = ev.code, error = %e, "SQLite warning mirror failed");
+            }
         }
         Ok(())
     }
