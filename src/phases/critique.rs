@@ -53,13 +53,17 @@ impl Phase for CritiquePhase {
         let critiques_dir_arc = std::sync::Arc::new(critiques_dir);
 
         let futures = proposals.iter().flat_map(|p| {
-            let user = serde_json::to_string(p).unwrap_or_default();
+            let user_base = serde_json::to_string(p).unwrap_or_default();
             let prop_id = p.id.clone();
             let system_arc = std::sync::Arc::clone(&system_arc);
             let critiques_dir_arc = std::sync::Arc::clone(&critiques_dir_arc);
             (0..critics).map(move |c| {
                 let id = format!("{}_critic_{c}", prop_id);
-                let user = user.clone();
+                // Differentiate each critic's prompt so the cross-run
+                // cache treats them as distinct calls (otherwise the
+                // second critic on a given proposal would always
+                // return the first critic's cached response).
+                let user = format!("[critic_index={c}]\n{user_base}");
                 let ctx = ctx.clone();
                 let system_arc = std::sync::Arc::clone(&system_arc);
                 let critiques_dir = std::sync::Arc::clone(&critiques_dir_arc);

@@ -15,6 +15,7 @@ use crate::error::Result;
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
+use crate::llm::cache::{Cache, CacheConfig};
 use crate::llm::{ProviderRegistry, Request, Response, Role};
 use crate::telemetry::{Telemetry, WarningContext};
 
@@ -39,6 +40,11 @@ pub struct RunContext {
     pub raw_prompt: String,
     /// Original mode string (e.g. "fast" or "standard").
     pub mode: String,
+    /// Cross-run LLM cache rooted at `<MOAGAN_HOME>/cache/llm`.
+    /// Consulted before every provider call and populated after a
+    /// successful call so subsequent runs of the same prompt reuse
+    /// the cached response (compliance with T01-06 §3.3).
+    pub cache: Cache,
 }
 
 impl std::fmt::Debug for RunContext {
@@ -48,6 +54,7 @@ impl std::fmt::Debug for RunContext {
             .field("default_provider", &self.default_provider)
             .field("default_model", &self.default_model)
             .field("mode", &self.mode)
+            .field("cache_root", &self.cache.config_for_debug().root)
             .finish()
     }
 }
@@ -66,6 +73,11 @@ impl RunContext {
         raw_prompt: String,
         mode: String,
     ) -> Self {
+        let cache = Cache::new(CacheConfig {
+            root: home.cross_run_cache_dir(),
+            cross_run: true,
+            no_store: false,
+        });
         Self {
             run_id,
             home,
@@ -76,6 +88,7 @@ impl RunContext {
             telemetry,
             raw_prompt,
             mode,
+            cache,
         }
     }
 
@@ -98,6 +111,11 @@ impl RunContext {
     /// reported token usage, and the model name. The phase name in
     /// the call record is `role.as_str()`, which matches the phase
     /// pipeline name.
+    ///
+    /// The cross-run LLM cache is consulted first: a hit short-
+    /// circuits the provider call and records a `cache_hit=1` row
+    /// in the `calls` table. A miss falls through to the provider
+    /// and the response is stored for the next run.
     pub async fn call(&self, role: Role, system: String, user: String) -> Result<Response> {
         let req = Request {
             role,
@@ -109,12 +127,52 @@ impl RunContext {
             top_p: Some(0.95),
             response_schema: None,
         };
+        let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
+        let started_unix = crate::time::now_unix_secs();
+        if let Some(entry) = self.cache.lookup(&cache_key)? {
+            return self.record_cache_hit(entry, role, &cache_key, started_unix);
+        }
+        self.dispatch_to_provider(req, Some(cache_key), started_unix)
+            .await
+    }
+
+    /// Provider call without consulting the cache. Used on parse-
+    /// failure retries (see `call_with_retry_parse`) so a previously
+    /// cached broken response does not poison the retry.
+    pub(crate) async fn call_uncached(
+        &self,
+        role: Role,
+        system: String,
+        user: String,
+        started_unix: i64,
+    ) -> Result<Response> {
+        let req = Request {
+            role,
+            model: self.default_model.clone(),
+            system,
+            user,
+            max_tokens: max_tokens_for_role(role),
+            temperature: Some(0.4),
+            top_p: Some(0.95),
+            response_schema: None,
+        };
+        self.dispatch_to_provider(req, None, started_unix).await
+    }
+
+    /// Send the prepared request to the provider, record telemetry,
+    /// emit truncation / empty warnings, and (when a `cache_key` is
+    /// supplied) persist the response in the cross-run cache.
+    async fn dispatch_to_provider(
+        &self,
+        req: Request,
+        cache_key: Option<String>,
+        started_unix: i64,
+    ) -> Result<Response> {
         let provider = self.provider();
         let call_id = uuid::Uuid::now_v7().to_string();
-        let started_unix = crate::time::now_unix_secs();
         let result = provider.send(&req).await;
         let ended_unix = crate::time::now_unix_secs();
-        let phase_name = role.as_str();
+        let phase_name = req.role.as_str();
         let ctx = || WarningContext {
             phase: Some(phase_name.to_owned()),
             role: Some(phase_name.to_owned()),
@@ -123,18 +181,26 @@ impl RunContext {
         };
         match &result {
             Ok((status, response)) => {
+                if let Some(ref key) = cache_key {
+                    let _ = self.cache.store(
+                        key,
+                        self.default_provider.as_str(),
+                        self.default_model.as_str(),
+                        response,
+                    );
+                }
                 let _ = self.telemetry.call(
                     &call_id,
                     phase_name,
                     phase_name,
                     self.default_provider.as_str(),
                     self.default_model.as_str(),
-                    "",
+                    cache_key.as_deref().unwrap_or(""),
                     false,
                     Some(*status),
                     response.usage.input_tokens,
                     response.usage.output_tokens,
-                    response.usage.cache_read,
+                    0,
                     response.usage.cache_creation,
                     started_unix,
                     ended_unix,
@@ -171,7 +237,7 @@ impl RunContext {
                     phase_name,
                     self.default_provider.as_str(),
                     self.default_model.as_str(),
-                    "",
+                    cache_key.as_deref().unwrap_or(""),
                     false,
                     None,
                     0,
@@ -185,6 +251,58 @@ impl RunContext {
             }
         }
         result.map(|(_, r)| r)
+    }
+
+    /// Record a cache hit and surface the cached response. The cached
+    /// `usage` is used to populate `cache_read`/`cache_creation` in
+    /// the call record so the run's cache-hit rate is observable.
+    fn record_cache_hit(
+        &self,
+        entry: crate::llm::cache::CacheEntry,
+        role: Role,
+        cache_key: &str,
+        started_unix: i64,
+    ) -> Result<Response> {
+        let response = entry.response;
+        let ended_unix = crate::time::now_unix_secs();
+        let call_id = uuid::Uuid::now_v7().to_string();
+        let phase_name = role.as_str();
+        let _ = self.telemetry.call(
+            &call_id,
+            phase_name,
+            phase_name,
+            self.default_provider.as_str(),
+            self.default_model.as_str(),
+            cache_key,
+            true,
+            Some(200),
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            entry.usage.cache_read,
+            0,
+            started_unix,
+            ended_unix,
+            None,
+        );
+        if response.truncated {
+            let _ = self.telemetry.warn(
+                "model.response_truncated",
+                "warn",
+                "model response ended at max_tokens",
+                serde_json::json!({
+                    "text_bytes": response.text.len(),
+                    "finish_reason": response.finish_reason,
+                    "cache_hit": true,
+                }),
+                WarningContext {
+                    phase: Some(phase_name.to_owned()),
+                    role: Some(phase_name.to_owned()),
+                    call_id: Some(call_id),
+                    attempt: Some(0),
+                },
+            );
+        }
+        Ok(response)
     }
 
     /// Parse an LLM response as JSON. The `role` is used to produce a
@@ -283,7 +401,17 @@ impl RunContext {
     {
         let phase_name = role.as_str();
         for attempt in 0..=max_retries {
-            let response = self.call(role, system.clone(), user.clone()).await;
+            // First attempt uses the cached path so re-running the
+            // same prompt reuses the prior response. Retries bypass
+            // the cache so a previously cached broken response does
+            // not poison the retry loop.
+            let started_unix = crate::time::now_unix_secs();
+            let response = if attempt == 0 {
+                self.call(role, system.clone(), user.clone()).await
+            } else {
+                self.call_uncached(role, system.clone(), user.clone(), started_unix)
+                    .await
+            };
             let warn_ctx = || WarningContext {
                 phase: Some(phase_name.to_owned()),
                 role: Some(phase_name.to_owned()),

@@ -671,3 +671,97 @@ fn warnings_jsonl_file_is_created_even_when_empty() -> Result<()> {
     assert!(warnings_path.exists(), "warnings.jsonl was not created");
     Ok(())
 }
+
+// --- cross-run LLM cache tests -----------------------------------------
+
+#[test]
+fn second_identical_call_is_served_from_cache() -> Result<()> {
+    // Same prompt twice with the same provider + model. The mock is
+    // pre-loaded with two responses; only the first call should reach
+    // the provider. The second must come from the cross-run cache.
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"first","approach":"","tradeoffs":[],"evidence":[]}"#,
+    ));
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"second","approach":"","tradeoffs":[],"evidence":[]}"#,
+    ));
+    mp.set_cycle(false);
+
+    let run_id = RunId::new();
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+
+    let r1 =
+        pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
+    assert!(r1.text.contains("\"first\""));
+
+    let r2 =
+        pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
+    // Cache hit: must return the first response, not the second one
+    // the mock would otherwise have returned.
+    assert!(r2.text.contains("\"first\""));
+    assert!(!r2.text.contains("\"second\""));
+
+    // Both calls are recorded in SQLite, the second with cache_hit=1.
+    let calls =
+        moagan::storage::sqlite::Db::open(&home.meta_db_path())?.list_calls_for_run(run_id)?;
+    assert_eq!(calls.len(), 2);
+    let misses = calls.iter().filter(|c| c.cache_hit == 0).count();
+    let hits = calls.iter().filter(|c| c.cache_hit == 1).count();
+    assert_eq!(misses, 1, "exactly one miss expected");
+    assert_eq!(hits, 1, "exactly one hit expected");
+    assert!(
+        !calls[0].cache_key.is_empty(),
+        "cache_key must be populated"
+    );
+    assert_eq!(calls[0].cache_key, calls[1].cache_key);
+
+    // And a JSONL entry is written for the hit.
+    ctx.telemetry.flush()?;
+    let calls_jsonl = std::fs::read_to_string(ctx.telemetry.calls_path())?;
+    assert!(calls_jsonl.contains("\"cache_hit\":true"));
+    let _ = db;
+    Ok(())
+}
+
+#[test]
+fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
+    // Regression: if the first response is cached and broken, the
+    // retry would otherwise keep returning the same broken response.
+    // `call_with_retry_parse` must bypass the cache on retries.
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain("{\"a\":1,\"b\":\"unterminated"));
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"second","approach":"","tradeoffs":[],"evidence":[]}"#,
+    ));
+    mp.set_cycle(false);
+
+    let run_id = RunId::new();
+    let (ctx, _db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+
+    let parsed: moagan::domain::Proposal = pollster::block_on(ctx.call_with_retry_parse(
+        moagan::llm::Role::Propose,
+        "system".into(),
+        "user".into(),
+        "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+        1,
+    ))?;
+    assert_eq!(parsed.summary, "second");
+    Ok(())
+}

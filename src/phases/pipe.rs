@@ -95,6 +95,11 @@ mod tests {
         let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
             "/tmp/moagan-test",
         )));
+        let cache = crate::llm::cache::Cache::new(crate::llm::cache::CacheConfig {
+            root: home.cross_run_cache_dir(),
+            cross_run: true,
+            no_store: false,
+        });
         RunContext {
             run_id: crate::ids::RunId::default(),
             home,
@@ -105,6 +110,7 @@ mod tests {
             telemetry: Telemetry::noop(),
             raw_prompt: String::new(),
             mode: "fast".into(),
+            cache,
         }
     }
 

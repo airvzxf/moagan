@@ -66,14 +66,18 @@ impl Phase for JudgePhase {
         let evaluations_dir_arc = std::sync::Arc::new(evaluations_dir);
 
         let futures = subjects.iter().flat_map(|(proposal_id, subject)| {
-            let user = serde_json::to_string(subject).unwrap_or_default();
+            let user_base = serde_json::to_string(subject).unwrap_or_default();
             let prop_id = proposal_id.clone();
             let system_arc = std::sync::Arc::clone(&system_arc);
             let evaluations_dir_arc = std::sync::Arc::clone(&evaluations_dir_arc);
-            (0..judges).map(move |_j| {
+            (0..judges).map(move |j| {
                 let ctx = ctx.clone();
                 let system_arc = std::sync::Arc::clone(&system_arc);
-                let user = user.clone();
+                // Differentiate each judge's prompt so the cross-run
+                // cache treats them as distinct calls (otherwise the
+                // second judge on a given proposal would always
+                // return the first judge's cached response).
+                let user = format!("[judge_index={j}]\n{user_base}");
                 let proposal_id = prop_id.clone();
                 let evaluations_dir = std::sync::Arc::clone(&evaluations_dir_arc);
                 async move {

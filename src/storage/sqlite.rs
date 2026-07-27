@@ -417,6 +417,40 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Full call list for a run, ordered by `started_unix` ascending.
+    /// Used by tests and the cache-hit rate analytics.
+    pub fn list_calls_for_run(&self, run_id: RunId) -> Result<Vec<CallRow>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT call_id, phase, role, provider, model, cache_key, cache_hit, http_status, \
+                    input_tokens, output_tokens, cache_read, cache_creation, started_unix, \
+                    ended_unix, error \
+             FROM calls WHERE run_id = ? ORDER BY started_unix ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id.to_string()], |r| {
+                Ok(CallRow {
+                    call_id: r.get(0)?,
+                    phase: r.get(1)?,
+                    role: r.get(2)?,
+                    provider: r.get(3)?,
+                    model: r.get(4)?,
+                    cache_key: r.get(5)?,
+                    cache_hit: r.get(6)?,
+                    http_status: r.get::<_, Option<i64>>(7)?.map(|v| v as u16),
+                    input_tokens: r.get::<_, i64>(8)? as u64,
+                    output_tokens: r.get::<_, i64>(9)? as u64,
+                    cache_read: r.get::<_, i64>(10)? as u64,
+                    cache_creation: r.get::<_, i64>(11)? as u64,
+                    started_unix: r.get(12)?,
+                    ended_unix: r.get::<_, Option<i64>>(13)?,
+                    error: r.get(14)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 /// One row from the `warnings` summary grouping.
@@ -451,6 +485,43 @@ pub struct WarningRow {
     pub message: String,
     /// Structured details (JSON-encoded).
     pub details: String,
+}
+
+/// One row from the `calls` table. The schema is defined in
+/// `migrations/v001_initial.sql`.
+#[derive(Debug, Clone)]
+pub struct CallRow {
+    /// Unique call id (UUID v7).
+    pub call_id: String,
+    /// Pipeline phase that issued the call (e.g. `"intake"`).
+    pub phase: String,
+    /// LLM role (e.g. `"intake"`).
+    pub role: String,
+    /// Provider name.
+    pub provider: String,
+    /// Model name.
+    pub model: String,
+    /// Canonical cache key (BLAKE3) when the call went through the
+    /// cross-run cache.
+    pub cache_key: String,
+    /// `1` when the response was served from cache, `0` otherwise.
+    pub cache_hit: i64,
+    /// HTTP status from the provider (`None` on transport failure).
+    pub http_status: Option<u16>,
+    /// Input tokens billed.
+    pub input_tokens: u64,
+    /// Output tokens billed.
+    pub output_tokens: u64,
+    /// Tokens served from cache (subset of `input_tokens`).
+    pub cache_read: u64,
+    /// Tokens written to cache.
+    pub cache_creation: u64,
+    /// Start unix seconds.
+    pub started_unix: i64,
+    /// End unix seconds.
+    pub ended_unix: Option<i64>,
+    /// Error message, if any.
+    pub error: Option<String>,
 }
 
 /// Row read from `runs`.

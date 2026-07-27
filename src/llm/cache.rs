@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::ids::canonical_hash;
 use crate::llm::prompts::prompt_set_hash;
 
-use super::wire::{Request, Response};
+use super::wire::{Request, Response, Usage};
 
 /// Cache configuration.
 #[derive(Debug, Clone)]
@@ -37,8 +37,9 @@ pub struct CacheEntry {
     pub model: String,
     /// Stored response.
     pub response: Response,
-    /// Stored usage.
-    pub usage: serde_json::Value,
+    /// Stored usage breakdown (input/output/cache_read/cache_creation).
+    /// Hydrated into `response.usage` and reused for telemetry on hit.
+    pub usage: Usage,
     /// Created unix seconds.
     pub created_unix: i64,
 }
@@ -58,6 +59,13 @@ impl Cache {
     /// Build a new cache rooted at `root`.
     pub fn new(config: CacheConfig) -> Self {
         Self { config }
+    }
+
+    /// Read-only access to the cache config (used by the run context
+    /// `Debug` impl to surface the cache root without exposing the
+    /// full config).
+    pub fn config_for_debug(&self) -> &CacheConfig {
+        &self.config
     }
 
     /// Produce the canonical cache key for `req`.
@@ -86,6 +94,13 @@ impl Cache {
     }
 
     /// Look up an entry. Returns `None` on miss.
+    ///
+    /// Reads the JSON file directly without consulting the
+    /// `AtomicWriter` sidecar: the sidecar's `sealed_at_unix` field
+    /// changes every second, so re-reading more than one second after
+    /// writing would otherwise spuriously fail with `MetaMismatch`.
+    /// The cache is a perf optimisation, not a tamper-evidence store,
+    /// so the sidecar check is unnecessary here.
     pub fn lookup(&self, cache_key: &str) -> Result<Option<CacheEntry>> {
         if self.config.no_store {
             return Ok(None);
@@ -94,7 +109,7 @@ impl Cache {
         if !path.exists() {
             return Ok(None);
         }
-        let (raw, _meta) = AtomicWriter::new().read_with_meta(&path)?;
+        let raw = std::fs::read(&path).map_err(|e| Error::Cache(format!("read {path:?}: {e}")))?;
         let entry: CacheEntry = serde_json::from_slice(&raw)
             .map_err(|e| Error::Cache(format!("decode {path:?}: {e}")))?;
         Ok(Some(entry))
@@ -117,11 +132,15 @@ impl Cache {
             provider: provider.to_owned(),
             model: model.to_owned(),
             response: resp.clone(),
-            usage: serde_json::json!({"input": resp.usage.input_tokens, "output": resp.usage.output_tokens}),
+            usage: resp.usage.clone(),
             created_unix: crate::time::now_unix_secs(),
         };
         let bytes = serde_json::to_vec(&entry).map_err(|e| Error::Cache(format!("encode: {e}")))?;
         let path = self.path_for(cache_key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Cache(format!("mkdir {parent:?}: {e}")))?;
+        }
         AtomicWriter::new().write(&path, &bytes)?;
         Ok(())
     }
@@ -130,9 +149,10 @@ impl Cache {
         // Shard by the first 2 hex chars so a single dir never holds
         // too many entries.
         let (_a, _b, rest) = split_hex(cache_key);
+        let shard = &rest[..rest.len().min(4)];
         self.config
             .root
-            .join(&rest[..4])
+            .join(shard)
             .join(format!("{cache_key}.json"))
     }
 
@@ -197,12 +217,44 @@ mod tests {
             text: "hello".into(),
             finish_reason: Some("end_turn".into()),
             truncated: false,
-            usage: super::super::wire::Usage::default(),
+            usage: Usage {
+                input_tokens: 11,
+                output_tokens: 7,
+                cache_read: 0,
+                cache_creation: 0,
+            },
         };
         cache.store(key, "mock", "m", &resp).unwrap();
         let entry = cache.lookup(key).unwrap().unwrap();
         assert_eq!(entry.response.text, "hello");
         assert_eq!(entry.provider, "mock");
+        assert_eq!(entry.usage.input_tokens, 11);
+        assert_eq!(entry.usage.output_tokens, 7);
+    }
+
+    #[test]
+    fn lookup_after_one_second_does_not_fail_with_meta_mismatch() {
+        // Regression: Cache used to call `AtomicWriter::read_with_meta`,
+        // whose sidecar `sealed_at_unix` field changes every second.
+        // After the wall clock crossed a second boundary, re-reading
+        // the cache spuriously raised `IoError::MetaMismatch`. The
+        // fix: skip the sidecar check for cache reads.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(CacheConfig {
+            root: tmp.path().to_path_buf(),
+            cross_run: false,
+            no_store: false,
+        });
+        let resp = Response {
+            text: "ok".into(),
+            finish_reason: Some("end_turn".into()),
+            truncated: false,
+            usage: Usage::default(),
+        };
+        cache.store("k", "mock", "m", &resp).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let entry = cache.lookup("k").unwrap().expect("hit");
+        assert_eq!(entry.response.text, "ok");
     }
 
     #[test]
