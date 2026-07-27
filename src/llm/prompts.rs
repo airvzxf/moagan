@@ -11,6 +11,7 @@ use super::role::Role;
 const INTAKE_PROMPT: &str = include_str!("prompts/intake.md");
 const CLARIFY_PROMPT: &str = include_str!("prompts/clarify.md");
 const ROUTE_PROMPT: &str = include_str!("prompts/route.md");
+const SKETCH_PROMPT: &str = include_str!("prompts/sketch.md");
 const PROPOSE_PROMPT: &str = include_str!("prompts/propose.md");
 const GATE_PROMPT: &str = include_str!("prompts/gate.md");
 const CRITIQUE_PROMPT: &str = include_str!("prompts/critique.md");
@@ -30,6 +31,7 @@ pub fn prompt_set_hash() -> String {
                 INTAKE_PROMPT,
                 CLARIFY_PROMPT,
                 ROUTE_PROMPT,
+                SKETCH_PROMPT,
                 PROPOSE_PROMPT,
                 GATE_PROMPT,
                 CRITIQUE_PROMPT,
@@ -50,6 +52,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Intake => INTAKE_PROMPT,
         Role::Clarify => CLARIFY_PROMPT,
         Role::Route => ROUTE_PROMPT,
+        Role::Sketch => SKETCH_PROMPT,
         Role::Propose => PROPOSE_PROMPT,
         Role::Gate => GATE_PROMPT,
         Role::Critique => CRITIQUE_PROMPT,

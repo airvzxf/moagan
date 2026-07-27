@@ -488,6 +488,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::Intake => 1024,
         Role::Clarify => 2048,
         Role::Route => 512,
+        Role::Sketch => 1024,
         Role::Propose => 6000,
         Role::Gate => 1024,
         Role::Critique => 4000,

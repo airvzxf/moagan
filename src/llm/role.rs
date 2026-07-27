@@ -11,7 +11,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Brief, Critique, FinalReport, Intake, JudgeScore, Proposal, Repair, Route};
+use crate::domain::{
+    Brief, Critique, FinalReport, Intake, JudgeScore, Proposal, Repair, Route, Sketch,
+};
 use crate::error::{Error, Result};
 
 /// The set of LLM roles in the MVP pipeline.
@@ -27,6 +29,8 @@ pub enum Role {
     Clarify,
     /// Route — decide fast/standard depth.
     Route,
+    /// Sketch — short exploration artefact (v0.2, T01-06 §5.5).
+    Sketch,
     /// Propose — generate a proposal.
     Propose,
     /// Gate — structural validation of a proposal.
@@ -50,6 +54,7 @@ impl Role {
             Self::Intake => "intake",
             Self::Clarify => "clarify",
             Self::Route => "route",
+            Self::Sketch => "sketch",
             Self::Propose => "propose",
             Self::Gate => "gate",
             Self::Critique => "critique",
@@ -73,6 +78,9 @@ impl Role {
                 "Brief: {problem, objectives[], deliverables[], constraints[], assumptions[], non_goals[], acceptance[], risks[]}"
             }
             Self::Route => "Route: {mode, reason, sketches, proposals, judges}",
+            Self::Sketch => {
+                "Sketch: {thesis, key_decisions[], architecture_outline, assumptions[], strengths[], weaknesses[], hard_constraint_check{}, expected_validation}"
+            }
             Self::Propose => "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
             Self::Gate => "Gate: {pass, issues[], missing[]}",
             Self::Critique => "Critique: {verdict, issues[], suggestions[]}",
@@ -100,6 +108,7 @@ impl Role {
             Self::Intake => serde_json::from_value::<Intake>(value.clone()).map(|_| ()),
             Self::Clarify => serde_json::from_value::<Brief>(value.clone()).map(|_| ()),
             Self::Route => serde_json::from_value::<Route>(value.clone()).map(|_| ()),
+            Self::Sketch => serde_json::from_value::<Sketch>(value.clone()).map(|_| ()),
             Self::Propose => serde_json::from_value::<Proposal>(value.clone()).map(|_| ()),
             Self::Gate => {
                 // Gate does not call the LLM in v0.1 (the validator
@@ -132,6 +141,7 @@ impl Role {
             Self::Intake,
             Self::Clarify,
             Self::Route,
+            Self::Sketch,
             Self::Propose,
             Self::Gate,
             Self::Critique,
@@ -157,6 +167,7 @@ impl FromStr for Role {
             "intake" => Ok(Self::Intake),
             "clarify" => Ok(Self::Clarify),
             "route" => Ok(Self::Route),
+            "sketch" => Ok(Self::Sketch),
             "propose" => Ok(Self::Propose),
             "gate" => Ok(Self::Gate),
             "critique" => Ok(Self::Critique),
@@ -189,8 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_ten() {
-        assert_eq!(Role::all().len(), 10);
+    fn all_roles_are_count_eleven() {
+        // v0.2 added the `sketch` role between route and propose;
+        // the total goes from 10 to 11.
+        assert_eq!(Role::all().len(), 11);
     }
 
     #[test]
@@ -216,6 +229,7 @@ mod tests {
                     || desc.starts_with("Brief:")
                     || desc.starts_with("Intake:")
                     || desc.starts_with("Route:")
+                    || desc.starts_with("Sketch:")
                     || desc.starts_with("Gate:")
                     || desc.starts_with("Repair:")
                     || desc.starts_with("JudgeScore:")
@@ -276,5 +290,6 @@ mod tests {
         assert!(Role::Propose.validate_json(&empty).is_ok());
         assert!(Role::Judge.validate_json(&empty).is_ok());
         assert!(Role::Deliver.validate_json(&empty).is_ok());
+        assert!(Role::Sketch.validate_json(&empty).is_ok());
     }
 }
