@@ -1,0 +1,6 @@
+{
+  "text": "{\"title\":\"The seven colors of the rainbow\",\"summary\":\"Red, orange, yellow, green, blue, indigo, violet.\",\"recommendation\":\"Use the canonical ROYGBIV order.\",\"alternatives\":[\"Use a regional naming convention if the audience is young children.\"],\"next_steps\":[\"Verify with a quick visual check against any standard reference.\"]}",
+  "input_tokens": 200,
+  "output_tokens": 180,
+  "finish_reason": "end_turn"
+}

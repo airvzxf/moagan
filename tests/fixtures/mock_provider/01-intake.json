@@ -1,0 +1,6 @@
+{
+  "text": "{\"problem\":\"Enumerate the seven colors of the rainbow in order\",\"objectives\":[\"List the colors in standard order\"],\"constraints\":[\"Standard ROYGBIV order\"],\"non_goals\":[\"Physics, wavelengths, or color theory beyond naming\"],\"open_questions\":[],\"raw_prompt\":\"Enumera los 7 colores del arcoiris en orden\"}",
+  "input_tokens": 100,
+  "output_tokens": 120,
+  "finish_reason": "end_turn"
+}

@@ -1,0 +1,6 @@
+{
+  "text": "{\"id\":\"p_000\",\"summary\":\"Standard ROYGBIV in English (p_000)\",\"approach\":\"Output the canonical order: red, orange, yellow, green, blue, indigo, violet.\",\"tradeoffs\":[\"None — the user asked for the standard order\"],\"evidence\":[\"Wikipedia: Rainbow\"]}",
+  "input_tokens": 400,
+  "output_tokens": 200,
+  "finish_reason": "end_turn"
+}
