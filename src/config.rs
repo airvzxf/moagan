@@ -45,6 +45,14 @@ pub struct Config {
     pub no_color: bool,
     /// Per-criterion weights for the ranked score. Equal weights by default.
     pub ranking_weights: RankingWeights,
+    /// Forbidden technologies the gate rejects when present in a
+    /// proposal. Empty by default; the user can populate this from
+    /// the brief's constraints.
+    pub gate_forbidden_techs: Vec<String>,
+    /// Minimum proposal length (chars) for the gate length check.
+    pub gate_min_length: usize,
+    /// Maximum proposal length (chars) for the gate length check.
+    pub gate_max_length: usize,
 }
 
 /// Per-criterion weights used by the `RankPhase` to compute the
@@ -143,6 +151,9 @@ impl Default for Config {
             emit_summary: false,
             no_color: false,
             ranking_weights: RankingWeights::default(),
+            gate_forbidden_techs: Vec::new(),
+            gate_min_length: 50,
+            gate_max_length: 5000,
         }
     }
 }
@@ -274,8 +285,16 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("MOAGAN_GATE_FORBIDDEN_TECHS")
+            && !v.trim().is_empty()
+        {
+            self.gate_forbidden_techs =
+                v.split(',').map(|s| s.trim().to_owned()).collect();
+        }
     }
+}
 
+impl Config {
     /// Resolve the configured provider by name. Returns
     /// `Error::InvalidArgs` if the provider is unknown.
     pub fn provider(&self, name: &str) -> Result<&ProviderConfig> {
