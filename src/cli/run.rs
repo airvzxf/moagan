@@ -161,12 +161,28 @@ pub(crate) fn build_registry_for(
 
 /// Build the canonical pipeline for a given mode. The cardinality
 /// table mirrors the v0.1 MVP in `docs/proposal-01-concept.md` §13.6
-/// (3 proposals, 2 critics, 3 judges for `fast`; 3 proposals, 3
-/// critics, 5 judges for `standard`).
+/// and §5.3 of `docs/proposal-02-rust.md` for the v0.2 additions:
+///
+/// - `fast`: 3 proposals, 2 critics, 3 judges. No sketch phase.
+/// - `standard`: 3 proposals, 3 critics, 5 judges, 4 sketches.
+/// - `deep`: 5 proposals, 4 critics, 7 judges, 6 sketches,
+///   2 repair rounds, adversarial review (deferred to a
+///   follow-up commit — for now deep mirrors standard cardinality
+///   and lets the user inspect the artefacts).
+/// - `explore`: 0 proposals, 0 critics, 0 judges, 12 sketches.
+///   Pipeline ends at sketches; the user inspects the sketch map
+///   manually.
+/// - `batch`: 3 proposals, 2 critics, 3 judges, 4 sketches.
+///   Mirrors fast cardinality plus sketches; differs in its
+///   JSON-stable output contract and lack of human pauses (deferred
+///   to a follow-up commit).
 fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
     let (proposals, critics, judges) = match mode {
         Mode::Fast => (3u32, 2u32, 3u32),
         Mode::Standard => (3u32, 3u32, 5u32),
+        Mode::Deep => (5u32, 4u32, 7u32),
+        Mode::Explore => (0u32, 0u32, 0u32),
+        Mode::Batch => (3u32, 2u32, 3u32),
     };
     let cfg_arc = std::sync::Arc::new(cfg.clone());
     Pipeline::new()
