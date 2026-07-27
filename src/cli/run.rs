@@ -36,6 +36,10 @@ pub struct RunOptions {
     pub mock_dir: Option<std::path::PathBuf>,
     /// Whether to be non-interactive (no prompts).
     pub non_interactive: bool,
+    /// Override the global cap on concurrent LLM calls. When `None`
+    /// the config-file value (`cfg.max_parallelism`, default 4) is
+    /// used. The constructor (`Parallelism::new`) clamps to `>= 1`.
+    pub max_parallelism: Option<usize>,
 }
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
@@ -82,7 +86,11 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         None,
     )?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    let parallelism = Parallelism::new(cfg.max_parallelism);
+    // CLI `--max-parallelism` overrides the config-file value.
+    // When neither is set the constructor falls back to 4 inside
+    // `cfg::Config::default`; `Parallelism::new` clamps to >= 1.
+    let max_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
+    let parallelism = Parallelism::new(max_parallelism);
 
     let ctx = crate::phases::RunContext::new(
         run_id,

@@ -161,6 +161,15 @@ pub enum Cmd {
         /// Non-interactive: no prompts.
         #[arg(long, default_value_t = false)]
         non_interactive: bool,
+        /// Override the global cap on concurrent LLM calls. The
+        /// value is parsed as `usize`; the constructor (`Parallelism::new`)
+        /// clamps to `>= 1`. When omitted, the config-file value
+        /// (`cfg.max_parallelism`, default 4) is used. Useful for
+        /// `--mode deep` runs against `minimax` real, where 35 judge
+        /// calls + 20 critiques + 6 sketches want much more headroom
+        /// than the default 4 to amortise network latency.
+        #[arg(long, value_name = "N")]
+        max_parallelism: Option<usize>,
     },
     /// Continue a paused or failed run.
     Continue {
@@ -245,6 +254,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             runs_dir,
             mock_dir,
             non_interactive,
+            max_parallelism,
         } => {
             let run_id = run::run(
                 run::RunOptions {
@@ -254,6 +264,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     home: runs_dir,
                     mock_dir,
                     non_interactive,
+                    max_parallelism,
                 },
                 &cfg,
             )?;
