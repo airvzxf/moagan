@@ -147,16 +147,13 @@ impl MessagesResponseBody {
             cache_read: u.cache_read_input_tokens.unwrap_or(0),
             cache_creation: u.cache_creation_input_tokens.unwrap_or(0),
         });
+        let truncated = matches!(self.stop_reason.as_deref(), Some("max_tokens"));
         Ok(Response {
             text,
             finish_reason: self.stop_reason,
+            truncated,
             usage,
         })
-    }
-
-    /// Borrow the raw stop_reason without consuming the body.
-    pub(crate) fn stop_reason(&self) -> Option<&str> {
-        self.stop_reason.as_deref()
     }
 }
 

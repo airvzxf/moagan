@@ -196,6 +196,7 @@ mod tests {
         let resp = Response {
             text: "hello".into(),
             finish_reason: Some("end_turn".into()),
+            truncated: false,
             usage: super::super::wire::Usage::default(),
         };
         cache.store(key, "mock", "m", &resp).unwrap();

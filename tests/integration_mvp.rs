@@ -445,3 +445,226 @@ fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
     assert!(result.is_err());
     Ok(())
 }
+
+// --- warnings-stream integration tests --------------------------------
+
+fn single_role_ctx(
+    home: Arc<MoaganHome>,
+    provider: Arc<MockProvider>,
+    run_id: RunId,
+) -> (RunContext, moagan::storage::sqlite::Db) {
+    let mut registry = ProviderRegistry::default();
+    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
+    registry.insert("mock".into(), arc);
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().expect("ensure run dir");
+    let db = moagan::storage::sqlite::Db::open(&home.meta_db_path()).expect("open db");
+    db.register_run(
+        run_id,
+        "fast",
+        "running",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        None,
+        None,
+    )
+    .expect("register run");
+    let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))
+        .expect("open telemetry");
+    let parallelism = Parallelism::new(1);
+    let ctx = RunContext::new(
+        run_id,
+        home,
+        Arc::new(registry),
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "x".into(),
+        "fast".into(),
+    );
+    (ctx, db)
+}
+
+#[test]
+fn truncated_response_emits_model_response_truncated_warning() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::truncated(r#"{"x":1}"#));
+    mp.set_cycle(false);
+
+    let run_id = RunId::new();
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+
+    let _ =
+        pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
+
+    let summary = db.warnings_summary(run_id)?;
+    assert!(
+        summary.iter().any(|r| r.code == "model.response_truncated"),
+        "expected model.response_truncated, got: {:?}",
+        summary
+    );
+    Ok(())
+}
+
+#[test]
+fn json_repair_emits_model_json_repair_applied_warning() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    // Input is missing the final `}` so the bracket-repair pass
+    // has to append the closer. After repair the payload is valid
+    // JSON that matches the Proposal schema.
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"x","approach":"y","tradeoffs":[],"evidence":[]"#,
+    ));
+    mp.set_cycle(false);
+
+    let run_id = RunId::new();
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+
+    // The parser will:
+    // 1. Direct parse fails (truncated).
+    // 2. repair_m3_brackets with trace fires the bracket pass.
+    // 3. The parse succeeds (the patched result is valid JSON).
+    let parsed: moagan::domain::Proposal = ctx.call_with_retry_parse(
+        moagan::llm::Role::Propose,
+        "system".into(),
+        "user".into(),
+        "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+        0,
+    )?;
+    assert_eq!(parsed.id, "p_000");
+    assert_eq!(parsed.summary, "x");
+
+    let summary = db.warnings_summary(run_id)?;
+    let repair = summary
+        .iter()
+        .find(|r| r.code == "model.json_repair_applied")
+        .expect("expected model.json_repair_applied warning");
+    assert!(
+        repair.count >= 1,
+        "expected at least one repair event, got count={}",
+        repair.count
+    );
+    Ok(())
+}
+
+#[test]
+fn retry_recovery_emits_retry_and_recovery_warnings() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    // First response is unparseable mid-string. Retry consumes the
+    // second well-formed one.
+    mp.push(MockResponse::plain("{\"a\":1,\"b\":\"unterminated"));
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"second","approach":"","tradeoffs":[],"evidence":[]}"#,
+    ));
+    mp.set_cycle(false);
+
+    let run_id = RunId::new();
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+
+    let parsed: moagan::domain::Proposal = ctx.call_with_retry_parse(
+        moagan::llm::Role::Propose,
+        "system".into(),
+        "user".into(),
+        "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+        1,
+    )?;
+    assert_eq!(parsed.summary, "second");
+
+    let summary = db.warnings_summary(run_id)?;
+    let codes: Vec<&str> = summary.iter().map(|r| r.code.as_str()).collect();
+    assert!(
+        codes.contains(&"model.retry_parse"),
+        "expected model.retry_parse in {:?}",
+        codes
+    );
+    assert!(
+        codes.contains(&"model.recovered_after_retry"),
+        "expected model.recovered_after_retry in {:?}",
+        codes
+    );
+    Ok(())
+}
+
+#[test]
+fn inspect_summarize_run_returns_codes() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::truncated(r#"{"x":1}"#));
+    mp.set_cycle(false);
+
+    let run_id = RunId::new();
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    let _ =
+        pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
+    ctx.telemetry.flush()?;
+
+    let summary =
+        moagan::cli::inspect::summarize_run(&db, run_id)?.expect("run should be in the index");
+    assert_eq!(summary.run_id, run_id);
+    assert!(!summary.by_code.is_empty());
+    assert!(
+        summary
+            .by_code
+            .iter()
+            .any(|r| r.code == "model.response_truncated"),
+        "expected model.response_truncated, got: {:?}",
+        summary.by_code
+    );
+    Ok(())
+}
+
+#[test]
+fn warnings_jsonl_file_is_created_even_when_empty() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mp = MockProvider::empty();
+    let run_id = RunId::new();
+    let (ctx, _db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    ctx.telemetry.flush()?;
+
+    // Even with no calls, the warnings stream should be present
+    // (the file is opened at telemetry setup). The mock provider
+    // has no responses so we never call `ctx.call` — this is
+    // specifically testing that the file is opened eagerly.
+    let warnings_path = ctx.telemetry.warnings_path().to_path_buf();
+    assert!(warnings_path.exists(), "warnings.jsonl was not created");
+    Ok(())
+}

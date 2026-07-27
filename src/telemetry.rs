@@ -16,7 +16,7 @@ use crate::fs_layout::RunDir;
 use crate::ids::RunId;
 use crate::redact::{RedactPolicy, RedactWriter, Surface};
 use crate::storage::sqlite::Db;
-use crate::time::now_unix_secs;
+use crate::time::{now_unix_millis, now_unix_secs};
 
 /// One phase event (start/end/error/cancel).
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -72,6 +72,50 @@ pub struct CallEvent {
     pub error: Option<String>,
 }
 
+/// One warning event. Streamed to `telemetry/warnings.jsonl` and
+/// mirrored to the SQLite `warnings` table (when the index is
+/// enabled). Surfaces model auto-corrections, retries, and
+/// truncation events so post-execution review can detect new
+/// failure patterns without scraping stderr.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct WarningEvent {
+    /// Run id.
+    pub run_id: String,
+    /// Unix milliseconds (ms resolution, not seconds).
+    pub at_unix_ms: i64,
+    /// Warning code (e.g. `model.json_repair_applied`).
+    pub code: String,
+    /// Severity (`warn` or `info`).
+    pub level: String,
+    /// Phase name, if known.
+    pub phase: Option<String>,
+    /// LLM role, if known.
+    pub role: Option<String>,
+    /// Call id, if known.
+    pub call_id: Option<String>,
+    /// Attempt number (0-indexed), if known.
+    pub attempt: Option<u32>,
+    /// Human-readable message (one line, no payload).
+    pub message: String,
+    /// Structured details (JSON-encoded). Never contains the raw
+    /// model output — only counts, repair kinds, byte deltas.
+    pub details: serde_json::Value,
+}
+
+/// Context for a warning. Carries the optional phase/role/call_id
+/// so the warning can be correlated with the call record.
+#[derive(Debug, Clone, Default)]
+pub struct WarningContext {
+    /// Phase name.
+    pub phase: Option<String>,
+    /// LLM role.
+    pub role: Option<String>,
+    /// Call id.
+    pub call_id: Option<String>,
+    /// Attempt number.
+    pub attempt: Option<u32>,
+}
+
 /// Telemetry handle. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Telemetry {
@@ -85,8 +129,11 @@ struct Inner {
     phases_path: PathBuf,
     /// Path to `telemetry/calls.jsonl`.
     calls_path: PathBuf,
+    /// Path to `telemetry/warnings.jsonl`.
+    warnings_path: PathBuf,
     phases: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     calls: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
+    warnings: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     /// Optional SQLite index. When present, every `phase()` and
     /// `call()` mirrors the JSONL record into the corresponding
     /// table so `moagan inspect` returns live data.
@@ -99,6 +146,7 @@ impl std::fmt::Debug for Inner {
             .field("run_id", &self.run_id)
             .field("phases_path", &self.phases_path)
             .field("calls_path", &self.calls_path)
+            .field("warnings_path", &self.warnings_path)
             .field("db_indexed", &self.db.is_some())
             .finish()
     }
@@ -118,6 +166,7 @@ impl Telemetry {
         std::fs::create_dir_all(run.telemetry())?;
         let phases_path: PathBuf = run.telemetry().join("phases.jsonl");
         let calls_path: PathBuf = run.telemetry().join("calls.jsonl");
+        let warnings_path: PathBuf = run.telemetry().join("warnings.jsonl");
         let phases_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -126,11 +175,16 @@ impl Telemetry {
             .create(true)
             .append(true)
             .open(&calls_path)?;
+        let warnings_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&warnings_path)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 run_id,
                 phases_path,
                 calls_path,
+                warnings_path,
                 phases: Mutex::new(Some(RedactWriter::new(
                     Box::new(phases_file),
                     policy.clone(),
@@ -138,6 +192,11 @@ impl Telemetry {
                 ))),
                 calls: Mutex::new(Some(RedactWriter::new(
                     Box::new(calls_file),
+                    policy.clone(),
+                    Surface::Telemetry,
+                ))),
+                warnings: Mutex::new(Some(RedactWriter::new(
+                    Box::new(warnings_file),
                     policy,
                     Surface::Telemetry,
                 ))),
@@ -163,12 +222,18 @@ impl Telemetry {
                 run_id: RunId::default(),
                 phases_path: PathBuf::from("/dev/null"),
                 calls_path: PathBuf::from("/dev/null"),
+                warnings_path: PathBuf::from("/dev/null"),
                 phases: Mutex::new(Some(RedactWriter::new(
                     Box::new(NullWriter),
                     policy.clone(),
                     Surface::Telemetry,
                 ))),
                 calls: Mutex::new(Some(RedactWriter::new(
+                    Box::new(NullWriter),
+                    policy.clone(),
+                    Surface::Telemetry,
+                ))),
+                warnings: Mutex::new(Some(RedactWriter::new(
                     Box::new(NullWriter),
                     policy,
                     Surface::Telemetry,
@@ -186,6 +251,11 @@ impl Telemetry {
     /// Path to the calls log.
     pub fn calls_path(&self) -> &Path {
         &self.inner.calls_path
+    }
+
+    /// Path to the warnings log.
+    pub fn warnings_path(&self) -> &Path {
+        &self.inner.warnings_path
     }
 
     /// Record a phase event.
@@ -286,12 +356,76 @@ impl Telemetry {
         self.phase("heartbeat", 0, "tick", None)
     }
 
+    /// Record a warning event. The event is appended to
+    /// `telemetry/warnings.jsonl` and mirrored to the SQLite
+    /// `warnings` table (when the index is enabled). Used by the
+    /// parser, the retry loop, and the provider to surface
+    /// auto-corrections and recovery events that would otherwise be
+    /// silently swallowed.
+    ///
+    /// `code` is the canonical warning key (e.g.
+    /// `model.json_repair_applied`). `level` is `warn` or `info`.
+    /// `ctx` carries optional phase/role/call_id/attempt so the
+    /// warning can be correlated with the call record. `details`
+    /// is the structured payload — never include the raw model
+    /// output here, only counts and kinds.
+    pub fn warn(
+        &self,
+        code: &str,
+        level: &str,
+        message: &str,
+        details: serde_json::Value,
+        ctx: WarningContext,
+    ) -> Result<()> {
+        let ev = WarningEvent {
+            run_id: self.inner.run_id.to_string(),
+            at_unix_ms: now_unix_millis(),
+            code: code.to_owned(),
+            level: level.to_owned(),
+            phase: ctx.phase,
+            role: ctx.role,
+            call_id: ctx.call_id,
+            attempt: ctx.attempt,
+            message: message.to_owned(),
+            details,
+        };
+        let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
+        let mut g = self.inner.warnings.lock();
+        if let Some(w) = g.as_mut() {
+            w.write_all(&bytes)?;
+            w.write_all(b"\n")?;
+        }
+        drop(g);
+        if let Some(db) = &self.inner.db {
+            // Mirror into SQLite. Errors here are non-fatal: the
+            // JSONL is the canonical timeline; the DB is a queryable
+            // index.
+            let details_str = ev.details.to_string();
+            let _ = db.record_warning(
+                self.inner.run_id,
+                ev.at_unix_ms,
+                &ev.code,
+                &ev.level,
+                ev.phase.as_deref(),
+                ev.role.as_deref(),
+                ev.call_id.as_deref(),
+                ev.attempt.map(i64::from),
+                &ev.message,
+                &details_str,
+            );
+        }
+        Ok(())
+    }
+
     /// Flush both streams. Idempotent.
     pub fn flush(&self) -> Result<()> {
         if let Some(w) = self.inner.phases.lock().as_mut() {
             w.flush()?;
         }
         if let Some(w) = self.inner.calls.lock().as_mut() {
+            w.flush()?;
+        }
+        if let Some(w) = self.inner.warnings.lock().as_mut() {
             w.flush()?;
         }
         Ok(())
@@ -373,6 +507,73 @@ mod tests {
             .unwrap();
         t.flush().unwrap();
         let content = std::fs::read_to_string(t.phases_path()).unwrap();
+        assert!(content.contains("[REDACTED:minimax_sk_cp]"));
+        assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn warn_writes_jsonl_and_mirrors_to_sqlite() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+        let db = Db::open(&home.meta_db_path()).unwrap();
+        db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        let t =
+            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone())).unwrap();
+        let ctx = WarningContext {
+            phase: Some("critique".into()),
+            role: Some("critique".into()),
+            call_id: Some("c1".into()),
+            attempt: Some(0),
+        };
+        t.warn(
+            "model.json_repair_applied",
+            "warn",
+            "colon repair",
+            serde_json::json!({"repair_kind": "colon", "bytes_before": 42, "bytes_after": 43}),
+            ctx,
+        )
+        .unwrap();
+        t.flush().unwrap();
+
+        let content = std::fs::read_to_string(t.warnings_path()).unwrap();
+        assert!(content.contains("model.json_repair_applied"));
+        assert!(content.contains("colon"));
+        assert!(content.contains("\"phase\":\"critique\""));
+
+        let summary = db.warnings_summary(run_id).unwrap();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].code, "model.json_repair_applied");
+        assert_eq!(summary[0].count, 1);
+        assert_eq!(summary[0].first_message, "colon repair");
+    }
+
+    #[test]
+    fn warn_redacts_secrets_in_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+        let run_dir = home.run_dir(RunId::new());
+        run_dir.ensure().unwrap();
+        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
+        t.warn(
+            "model.retry_provider",
+            "warn",
+            "got 401 with key=sk-cp-aaaaaaaaaaaaaaaaaaaa",
+            serde_json::json!({}),
+            WarningContext::default(),
+        )
+        .unwrap();
+        t.flush().unwrap();
+        let content = std::fs::read_to_string(t.warnings_path()).unwrap();
         assert!(content.contains("[REDACTED:minimax_sk_cp]"));
         assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
     }

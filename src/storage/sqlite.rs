@@ -20,6 +20,10 @@ mod sql_v001 {
     pub(super) const V001: &str = include_str!("migrations/v001_initial.sql");
 }
 
+mod sql_v002 {
+    pub(super) const V002: &str = include_str!("migrations/v002_warnings.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -90,6 +94,10 @@ impl Db {
         if current < 1 {
             conn.execute_batch(sql_v001::V001)?;
             conn.execute_batch("PRAGMA user_version = 1;")?;
+        }
+        if current < 2 {
+            conn.execute_batch(sql_v002::V002)?;
+            conn.execute_batch("PRAGMA user_version = 2;")?;
         }
         Ok(())
     }
@@ -325,6 +333,124 @@ impl Db {
             None => Ok(None),
         }
     }
+
+    /// Record a warning event. Mirrors `telemetry/warnings.jsonl` so
+    /// post-execution inspection can answer "did the model produce
+    /// any auto-corrections?" with a single SQL query.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_warning(
+        &self,
+        run_id: RunId,
+        at_unix_ms: i64,
+        code: &str,
+        level: &str,
+        phase: Option<&str>,
+        role: Option<&str>,
+        call_id: Option<&str>,
+        attempt: Option<i64>,
+        message: &str,
+        details: &str,
+    ) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO warnings \
+             (run_id, at_unix_ms, code, level, phase, role, call_id, attempt, message, details) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                run_id.to_string(),
+                at_unix_ms,
+                code,
+                level,
+                phase,
+                role,
+                call_id,
+                attempt,
+                message,
+                details,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Count warnings for a run, grouped by code. Returns
+    /// `[(code, count, first_message)]` ordered by count desc.
+    pub fn warnings_summary(&self, run_id: RunId) -> Result<Vec<WarningSummaryRow>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT code, COUNT(*), MIN(message) \
+             FROM warnings WHERE run_id = ? \
+             GROUP BY code ORDER BY COUNT(*) DESC, code ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id.to_string()], |r| {
+                Ok(WarningSummaryRow {
+                    code: r.get(0)?,
+                    count: r.get(1)?,
+                    first_message: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Full warning list for a run, ordered by `at_unix_ms` ascending.
+    pub fn list_warnings(&self, run_id: RunId) -> Result<Vec<WarningRow>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT at_unix_ms, code, level, phase, role, call_id, attempt, message, details \
+             FROM warnings WHERE run_id = ? ORDER BY at_unix_ms ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id.to_string()], |r| {
+                Ok(WarningRow {
+                    at_unix_ms: r.get(0)?,
+                    code: r.get(1)?,
+                    level: r.get(2)?,
+                    phase: r.get(3)?,
+                    role: r.get(4)?,
+                    call_id: r.get(5)?,
+                    attempt: r.get(6)?,
+                    message: r.get(7)?,
+                    details: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}
+
+/// One row from the `warnings` summary grouping.
+#[derive(Debug, Clone)]
+pub struct WarningSummaryRow {
+    /// Warning code (e.g. `model.json_repair_applied`).
+    pub code: String,
+    /// Number of warnings with this code.
+    pub count: i64,
+    /// First message seen for this code (for quick triage).
+    pub first_message: String,
+}
+
+/// One row from the full `warnings` list.
+#[derive(Debug, Clone)]
+pub struct WarningRow {
+    /// Unix milliseconds when the warning was emitted.
+    pub at_unix_ms: i64,
+    /// Warning code.
+    pub code: String,
+    /// Severity level (`warn` / `info`).
+    pub level: String,
+    /// Phase name, if known.
+    pub phase: Option<String>,
+    /// LLM role, if known.
+    pub role: Option<String>,
+    /// Call id, if known.
+    pub call_id: Option<String>,
+    /// Attempt number, if known.
+    pub attempt: Option<i64>,
+    /// Human-readable message.
+    pub message: String,
+    /// Structured details (JSON-encoded).
+    pub details: String,
 }
 
 /// Row read from `runs`.
@@ -366,7 +492,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
     }
 
     #[test]
@@ -461,5 +587,74 @@ mod tests {
         assert_eq!(calls, 2);
         assert_eq!(inp, 300);
         assert_eq!(out, 150);
+    }
+
+    #[test]
+    fn record_warning_and_summary_group_by_code() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        db.record_warning(
+            id,
+            1_700_000_000_000,
+            "model.json_repair_applied",
+            "warn",
+            Some("critique"),
+            Some("critique"),
+            Some("c1"),
+            Some(0),
+            "colon repair",
+            r#"{"repair_kind":"colon","bytes":42}"#,
+        )
+        .unwrap();
+        db.record_warning(
+            id,
+            1_700_000_000_500,
+            "model.json_repair_applied",
+            "warn",
+            Some("critique"),
+            Some("critique"),
+            Some("c2"),
+            Some(0),
+            "bracket repair",
+            r#"{"repair_kind":"bracket","bytes":13}"#,
+        )
+        .unwrap();
+        db.record_warning(
+            id,
+            1_700_000_001_000,
+            "model.retry_parse",
+            "warn",
+            Some("critique"),
+            Some("critique"),
+            Some("c3"),
+            Some(1),
+            "parse failed",
+            "{}",
+        )
+        .unwrap();
+
+        let summary = db.warnings_summary(id).unwrap();
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0].code, "model.json_repair_applied");
+        assert_eq!(summary[0].count, 2);
+        assert_eq!(summary[1].code, "model.retry_parse");
+        assert_eq!(summary[1].count, 1);
+
+        let all = db.list_warnings(id).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].code, "model.json_repair_applied");
+        assert_eq!(all[0].at_unix_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn warnings_summary_for_other_run_is_empty() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        let summary = db.warnings_summary(id).unwrap();
+        assert!(summary.is_empty());
     }
 }

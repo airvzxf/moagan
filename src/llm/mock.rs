@@ -33,6 +33,16 @@ impl MockResponse {
         }
     }
 
+    /// Build a response with `finish_reason=max_tokens` so the
+    /// pipeline sees a truncated response.
+    pub fn truncated(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            usage: Usage::default(),
+            finish_reason: Some("max_tokens".into()),
+        }
+    }
+
     /// Build a response with explicit usage.
     pub fn with_usage(text: impl Into<String>, input: u64, output: u64) -> Self {
         Self {
@@ -49,9 +59,11 @@ impl MockResponse {
 
     /// Convert to a `Response` for the [`Provider`] trait.
     pub fn into_response(self) -> Response {
+        let truncated = matches!(self.finish_reason.as_deref(), Some("max_tokens"));
         Response {
             text: self.text,
             finish_reason: self.finish_reason,
+            truncated,
             usage: self.usage,
         }
     }
@@ -259,5 +271,18 @@ mod tests {
         .unwrap();
         let p = MockProvider::from_dir(dir).unwrap();
         assert_eq!(p.remaining(), 2);
+    }
+
+    #[test]
+    fn truncated_response_sets_flag() {
+        let r = MockResponse::truncated("partial").into_response();
+        assert_eq!(r.finish_reason.as_deref(), Some("max_tokens"));
+        assert!(r.truncated);
+    }
+
+    #[test]
+    fn plain_response_is_not_truncated() {
+        let r = MockResponse::plain("hi").into_response();
+        assert!(!r.truncated);
     }
 }

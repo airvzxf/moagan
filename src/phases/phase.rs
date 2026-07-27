@@ -15,7 +15,7 @@ use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, Request, Response, Role};
-use crate::telemetry::Telemetry;
+use crate::telemetry::{Telemetry, WarningContext};
 
 /// Shared state every phase can read.
 #[derive(Clone)]
@@ -114,6 +114,12 @@ impl RunContext {
         let result = provider.send(&req).await;
         let ended_unix = crate::time::now_unix_secs();
         let phase_name = role.as_str();
+        let ctx = || WarningContext {
+            phase: Some(phase_name.to_owned()),
+            role: Some(phase_name.to_owned()),
+            call_id: Some(call_id.clone()),
+            attempt: Some(0),
+        };
         match &result {
             Ok((status, response)) => {
                 let _ = self.telemetry.call(
@@ -133,6 +139,29 @@ impl RunContext {
                     ended_unix,
                     None,
                 );
+                if response.truncated {
+                    let _ = self.telemetry.warn(
+                        "model.response_truncated",
+                        "warn",
+                        "model response ended at max_tokens",
+                        serde_json::json!({
+                            "text_bytes": response.text.len(),
+                            "finish_reason": response.finish_reason,
+                        }),
+                        ctx(),
+                    );
+                }
+                if response.text.is_empty() {
+                    let _ = self.telemetry.warn(
+                        "model.response_empty",
+                        "warn",
+                        "model returned an empty text block",
+                        serde_json::json!({
+                            "finish_reason": response.finish_reason,
+                        }),
+                        ctx(),
+                    );
+                }
             }
             Err(e) => {
                 let _ = self.telemetry.call(
@@ -167,12 +196,39 @@ impl RunContext {
     /// against the raw payload so the operator sees a message like
     /// `role=Critique schema mismatch: missing field 'verdict'` instead
     /// of `expected ',' or ']' at line 1 column N`.
+    ///
+    /// Every repair pass that actually modified the model output is
+    /// reported to the warnings stream as a `model.json_repair_applied`
+    /// event with the kind (colon / separator / bracket) and the
+    /// byte delta. Use this method from phase code instead of
+    /// `crate::phases::util::parse_model_json` so the post-execution
+    /// review can see which m3 pathology was triggered.
     pub fn parse_model_json<T>(&self, role: Role, raw: &str, schema_hint: &str) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
         let _ = schema_hint;
-        match crate::phases::util::parse_model_json::<T>(raw) {
+        let phase_name = role.as_str();
+        let parsed = crate::phases::util::parse_model_json_traced::<T, _>(raw, |ev| {
+            let _ = self.telemetry.warn(
+                "model.json_repair_applied",
+                "warn",
+                "model JSON was auto-corrected",
+                serde_json::json!({
+                    "repair_kind": ev.kind.as_str(),
+                    "bytes_before": ev.bytes_before,
+                    "bytes_after": ev.bytes_after,
+                    "bytes_delta": ev.bytes_after as i64 - ev.bytes_before as i64,
+                }),
+                WarningContext {
+                    phase: Some(phase_name.to_owned()),
+                    role: Some(phase_name.to_owned()),
+                    call_id: None,
+                    attempt: None,
+                },
+            );
+        });
+        match parsed {
             Ok(v) => Ok(v),
             Err(util_err) => {
                 // If the raw can be parsed into a generic JSON value,
@@ -182,6 +238,20 @@ impl RunContext {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
                     && let Err(schema_err) = role.validate_json(&value)
                 {
+                    let _ = self.telemetry.warn(
+                        "model.schema_mismatch",
+                        "warn",
+                        "model JSON failed role schema check",
+                        serde_json::json!({
+                            "schema_mismatch": schema_err.to_string(),
+                        }),
+                        WarningContext {
+                            phase: Some(phase_name.to_owned()),
+                            role: Some(phase_name.to_owned()),
+                            call_id: None,
+                            attempt: None,
+                        },
+                    );
                     return Err(schema_err);
                 }
                 Err(util_err)
@@ -195,15 +265,10 @@ impl RunContext {
     /// bracket-repair + validator), so retries show up in the call-level
     /// metrics just like any other LLM call.
     ///
-    /// Why this exists: a few percent of MiniMax-M3 calls land on
-    /// structurally invalid JSON that the walker cannot repair
-    /// (mid-string truncation, unescaped quotes inside strings). For a
-    /// non-deterministic model this is a transient failure: a fresh
-    /// attempt usually succeeds on the same prompt. One extra call
-    /// pushes the end-to-end success rate above 99%.
-    ///
-    /// The default `max_retries` is 1. Each retry is a full LLM call,
-    /// so cost scales linearly.
+    /// Every retry, recovery, and parse failure is recorded as a
+    /// structured warning (`model.retry_parse`, `model.retry_provider`,
+    /// `model.recovered_after_retry`) so the post-execution review
+    /// can answer "did the model fail?" without scraping stderr.
     pub fn call_with_retry_parse<T>(
         &self,
         role: Role,
@@ -215,39 +280,58 @@ impl RunContext {
     where
         T: serde::de::DeserializeOwned,
     {
+        let phase_name = role.as_str();
         for attempt in 0..=max_retries {
             let response = pollster::block_on(self.call(role, system.clone(), user.clone()));
+            let warn_ctx = || WarningContext {
+                phase: Some(phase_name.to_owned()),
+                role: Some(phase_name.to_owned()),
+                call_id: None,
+                attempt: Some(attempt),
+            };
             match response {
                 Ok(resp) => match self.parse_model_json::<T>(role, &resp.text, schema_hint) {
                     Ok(v) => {
                         if attempt > 0 {
-                            eprintln!(
-                                "[moagan] role={} recovered after {} retry",
-                                role.as_str(),
-                                attempt
+                            let _ = self.telemetry.warn(
+                                "model.recovered_after_retry",
+                                "info",
+                                "model answer recovered after retry",
+                                serde_json::json!({
+                                    "attempts": attempt + 1,
+                                }),
+                                warn_ctx(),
                             );
                         }
                         return Ok(v);
                     }
                     Err(e) if attempt < max_retries => {
-                        eprintln!(
-                            "[moagan] role={} attempt {}/{} parse failed; retrying: {}",
-                            role.as_str(),
-                            attempt + 1,
-                            max_retries + 1,
-                            e
+                        let _ = self.telemetry.warn(
+                            "model.retry_parse",
+                            "warn",
+                            "model response parse failed; retrying",
+                            serde_json::json!({
+                                "attempt": attempt + 1,
+                                "max_attempts": max_retries + 1,
+                                "error": e.to_string(),
+                            }),
+                            warn_ctx(),
                         );
                         continue;
                     }
                     Err(e) => return Err(e),
                 },
                 Err(e) if attempt < max_retries => {
-                    eprintln!(
-                        "[moagan] role={} attempt {}/{} call failed; retrying: {}",
-                        role.as_str(),
-                        attempt + 1,
-                        max_retries + 1,
-                        e
+                    let _ = self.telemetry.warn(
+                        "model.retry_provider",
+                        "warn",
+                        "model call failed; retrying",
+                        serde_json::json!({
+                            "attempt": attempt + 1,
+                            "max_attempts": max_retries + 1,
+                            "error": e.to_string(),
+                        }),
+                        warn_ctx(),
                     );
                     continue;
                 }

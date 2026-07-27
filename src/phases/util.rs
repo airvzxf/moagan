@@ -9,6 +9,39 @@ use serde::de::DeserializeOwned;
 use crate::atomic::writer::AtomicWriter;
 use crate::error::Result;
 
+/// Which repair pass actually changed the model output. Surfaced
+/// through `parse_model_json_traced` so the warnings stream can
+/// tell post-execution reviewers which m3 pathology this model
+/// triggered (one diagnosis per kind, in the order they fired).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairKind {
+    /// A `:` was inserted between a complete key string and the
+    /// value opener (`"...["` -> `"":[...]`).
+    Colon,
+    /// A `,` was inserted between two adjacent values inside an
+    /// array or object, or a trailing comma was eaten.
+    Separator,
+    /// A missing closer (`}` or `]`) was appended, or a misplaced
+    /// closer was rebalanced.
+    Bracket,
+}
+
+impl RepairKind {
+    /// Stable string label used in the warnings stream.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Colon => "colon",
+            Self::Separator => "separator",
+            Self::Bracket => "bracket",
+        }
+    }
+}
+
+/// One repair event the traced parser emits to the sink callback.
+/// Alias of [`RepairTrace`] used in the public API where the
+/// `Trace` suffix is less idiomatic.
+pub type RepairEvent = RepairTrace;
+
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = std::fs::read(path)?;
@@ -84,6 +117,52 @@ pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     )))
 }
 
+/// Like [`parse_model_json`] but reports every repair pass that
+/// actually modified the model output, via the `sink` callback. Use
+/// this from phase code so the warnings stream can show exactly
+/// which m3 pathology was triggered (colon / separator / bracket).
+/// The callback is invoked at most once per repair pass, in
+/// pipeline order.
+pub fn parse_model_json_traced<T, F>(raw: &str, mut sink: F) -> Result<T>
+where
+    T: DeserializeOwned,
+    F: FnMut(RepairEvent),
+{
+    let trimmed = strip_code_fence(raw);
+    if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
+        return Ok(v);
+    }
+    let (repaired, repairs) = repair_m3_brackets_with_trace(&trimmed);
+    let Some(repaired) = repaired else {
+        let e = serde_json::from_str::<T>(&trimmed)
+            .err()
+            .expect("parse failed above");
+        let tail_start = trimmed.len().saturating_sub(500);
+        let tail = &trimmed[tail_start..];
+        return Err(crate::Error::SchemaViolation(format!(
+            "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
+            trimmed.len(),
+            tail,
+            trimmed
+        )));
+    };
+    for r in repairs {
+        sink(RepairEvent {
+            kind: r.kind,
+            bytes_before: r.bytes_before,
+            bytes_after: r.bytes_after,
+        });
+    }
+    serde_json::from_str::<T>(&repaired).map_err(|e| {
+        crate::Error::SchemaViolation(format!(
+            "model output is not valid JSON after repair: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
+            repaired.len(),
+            &repaired[repaired.len().saturating_sub(500)..],
+            repaired
+        ))
+    })
+}
+
 /// Repair two narrow cases we have observed in the MiniMax-M3
 /// output stream:
 ///
@@ -112,20 +191,72 @@ pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
 /// the validator (`Role::validate_json`) annotates with the expected
 /// role schema; the user must retry or use a different model.
 fn repair_m3_brackets(s: &str) -> Option<String> {
-    // Three chained repair passes. The order matters:
-    //  1. colon-repair: insert `:` between a complete string and the
-    //     next `[` or `{` (the `"key"[item]` pathology).
-    //  2. separator-repair: insert `,` between two adjacent values
-    //     inside an array or object (the `["a" "b"]` pathology).
-    //  3. bracket-repair: append missing closers and rebalance
-    //     mismatched `}` / `]` cascades.
-    // Each pass is a no-op when its target pathology is absent, so the
-    // composition is safe to run on already-valid inputs.
-    let colon = repair_missing_colon(s);
-    let after_colon = colon.as_deref().unwrap_or(s);
-    let seps = repair_missing_separators(after_colon);
-    let after_seps = seps.as_deref().unwrap_or(after_colon);
-    repair_missing_brackets(after_seps)
+    repair_m3_brackets_with_trace(s).0
+}
+
+/// One tracked repair event emitted by the chain. Includes the
+/// byte-delta so the warnings stream can show how much the model
+/// output was rewritten.
+#[derive(Debug, Clone)]
+pub struct RepairTrace {
+    /// Which repair pass fired.
+    pub kind: RepairKind,
+    /// Length of the input that fed into this pass.
+    pub bytes_before: usize,
+    /// Length of the output after this pass applied.
+    pub bytes_after: usize,
+}
+
+/// Pipeline of the three repair passes. Returns the patched string
+/// (when the chain managed to produce one) and the list of repair
+/// events that actually modified the input, in pipeline order. The
+/// list is empty when the input was already balanced.
+fn repair_m3_brackets_with_trace(s: &str) -> (Option<String>, Vec<RepairTrace>) {
+    let mut events: Vec<RepairTrace> = Vec::new();
+    let mut current = s.to_owned();
+
+    if let Some(patched) = repair_missing_colon(&current)
+        && patched.len() != current.len()
+    {
+        let bytes_before = current.len();
+        let bytes_after = patched.len();
+        events.push(RepairTrace {
+            kind: RepairKind::Colon,
+            bytes_before,
+            bytes_after,
+        });
+        current = patched;
+    }
+    if let Some(patched) = repair_missing_separators(&current)
+        && patched.len() != current.len()
+    {
+        let bytes_before = current.len();
+        let bytes_after = patched.len();
+        events.push(RepairTrace {
+            kind: RepairKind::Separator,
+            bytes_before,
+            bytes_after,
+        });
+        current = patched;
+    }
+    match repair_missing_brackets(&current) {
+        Some(patched) if patched.len() != current.len() => {
+            let bytes_before = current.len();
+            let bytes_after = patched.len();
+            events.push(RepairTrace {
+                kind: RepairKind::Bracket,
+                bytes_before,
+                bytes_after,
+            });
+            (Some(patched), events)
+        }
+        Some(patched) => (Some(patched), events),
+        None => {
+            // The chain refuses to repair (unterminated string, etc).
+            // Surface the failure to the caller with no result.
+            (None, events)
+        }
+    }
 }
 
 /// Walk the input, find places where a string literal is followed by
@@ -887,5 +1018,75 @@ mod tests {
         let v: Sample = parse_model_json(s).unwrap();
         assert_eq!(v.a, 1);
         assert_eq!(v.b, "ok");
+    }
+
+    // --- traced parser tests -----------------------------------------
+
+    #[test]
+    fn traced_reports_colon_and_bracket_repair() {
+        // `"b"[1,2]` — missing colon between the key string and the
+        // array value, plus missing closing `]}` at the end. Triggers
+        // both the colon and bracket passes. We parse as a generic
+        // Value because the colon-virus inputs don't fit `Sample`.
+        let s = r#"{"a":1,"b"[1,2"#;
+        let mut kinds: Vec<RepairKind> = Vec::new();
+        let v: serde_json::Value = parse_model_json_traced(s, |ev| {
+            kinds.push(ev.kind);
+        })
+        .unwrap();
+        assert_eq!(v["a"], serde_json::json!(1));
+        assert!(kinds.contains(&RepairKind::Colon));
+        assert!(kinds.contains(&RepairKind::Bracket));
+    }
+
+    #[test]
+    fn traced_reports_separator_repair() {
+        let s = r#"["a" "b" "c"]"#;
+        let mut kinds: Vec<RepairKind> = Vec::new();
+        let v: serde_json::Value = parse_model_json_traced(s, |ev| {
+            kinds.push(ev.kind);
+        })
+        .unwrap();
+        assert!(v.is_array());
+        assert!(kinds.contains(&RepairKind::Separator));
+    }
+
+    #[test]
+    fn traced_no_events_on_valid_input() {
+        let s = r#"{"a":1,"b":"ok"}"#;
+        let mut kinds: Vec<RepairKind> = Vec::new();
+        let _v: Sample = parse_model_json_traced(s, |ev| {
+            kinds.push(ev.kind);
+        })
+        .unwrap();
+        assert!(kinds.is_empty());
+    }
+
+    #[test]
+    fn traced_includes_bytes_delta() {
+        let s = r#"{"a":1,"b":[1,2"#;
+        let mut events: Vec<RepairEvent> = Vec::new();
+        let _v: serde_json::Value = parse_model_json_traced(s, |ev| {
+            events.push(ev);
+        })
+        .unwrap();
+        // At least the bracket pass fires; after BYTES.len != before.
+        let bracket = events
+            .iter()
+            .find(|e| e.kind == RepairKind::Bracket)
+            .expect("bracket repair event");
+        assert!(bracket.bytes_after > bracket.bytes_before);
+    }
+
+    #[test]
+    fn traced_propagates_failure_on_unrepairable() {
+        let s = r#"{"a":1,"b":"hel"#;
+        let mut kinds: Vec<RepairKind> = Vec::new();
+        let r: std::result::Result<Sample, _> =
+            parse_model_json_traced(s, |ev| kinds.push(ev.kind));
+        assert!(r.is_err());
+        // No repair events were emitted because the chain refused to
+        // write the unterminated input.
+        assert!(kinds.is_empty());
     }
 }

@@ -95,6 +95,13 @@ pub enum Cmd {
         /// List the N most recent runs.
         #[arg(long, default_value_t = 10)]
         limit: u32,
+        /// Drill into one run by id and print its warnings
+        /// summary. When set, `--limit` is ignored.
+        run_id: Option<String>,
+        /// Print every individual warning event (in addition to
+        /// the per-code summary).
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
     },
     /// Localised refinement: re-run one phase for one proposal.
     Refine {
@@ -164,19 +171,37 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             continue_cmd::run_rerun(parsed)?;
             Ok(0)
         }
-        Cmd::Inspect { limit } => {
+        Cmd::Inspect {
+            limit,
+            run_id,
+            verbose,
+        } => {
             let home = MoaganHome::resolve()?;
             let db = Db::open(&home.meta_db_path())?;
-            let entries = inspect::list_recent(&db, limit)?;
-            for e in entries {
-                println!(
-                    "{}  {}  {:>16}  created_unix={}  updated_unix={}",
-                    e.run_id.short(),
-                    e.mode,
-                    e.status,
-                    e.created_unix,
-                    e.updated_unix
-                );
+            if let Some(id) = run_id {
+                let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
+                match inspect::summarize_run(&db, parsed)? {
+                    Some(summary) => {
+                        inspect::print_run_summary(&summary, verbose);
+                    }
+                    None => {
+                        return Err(Error::InvalidState(format!(
+                            "run {id} not found in the index"
+                        )));
+                    }
+                }
+            } else {
+                let entries = inspect::list_recent(&db, limit)?;
+                for e in entries {
+                    println!(
+                        "{}  {}  {:>16}  created_unix={}  updated_unix={}",
+                        e.run_id.short(),
+                        e.mode,
+                        e.status,
+                        e.created_unix,
+                        e.updated_unix
+                    );
+                }
             }
             Ok(0)
         }

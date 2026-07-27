@@ -35,6 +35,12 @@ pub struct Response {
     pub text: String,
     /// Stop reason reported by the provider (`"end_turn"`, `"max_tokens"`, etc.).
     pub finish_reason: Option<String>,
+    /// Convenience flag: `true` when the response was cut at
+    /// `max_tokens`. Provider implementations set this based on
+    /// `finish_reason`, so the rest of the pipeline can branch on
+    /// it without re-parsing the finish string.
+    #[serde(default)]
+    pub truncated: bool,
     /// Token usage.
     pub usage: Usage,
 }
