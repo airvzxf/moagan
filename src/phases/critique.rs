@@ -48,7 +48,6 @@ impl Phase for CritiquePhase {
 
         let critics = self.critics_per_proposal as usize;
         let total = proposals.len() * critics;
-        let _guard = ctx.parallelism.acquire_many(total).await?;
         let system_arc = std::sync::Arc::new(system);
         let critiques_dir_arc = std::sync::Arc::new(critiques_dir);
 
@@ -69,6 +68,7 @@ impl Phase for CritiquePhase {
                 let critiques_dir = std::sync::Arc::clone(&critiques_dir_arc);
                 let id_clone = id.clone();
                 async move {
+                    let _permit = ctx.parallelism.acquire().await?;
                     let critique: Critique = ctx
                         .call_with_retry_parse(
                             Role::Critique,

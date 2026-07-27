@@ -83,7 +83,6 @@ impl Phase for ProposePhase {
 
         let count = self.count as usize;
         let sketch_ids = Self::load_sketch_ids(ctx);
-        let _guard = ctx.parallelism.acquire_many(count).await?;
         let system_arc = std::sync::Arc::new(system);
         let user_arc = std::sync::Arc::new(user);
 
@@ -95,6 +94,7 @@ impl Phase for ProposePhase {
             let id_for_default = id.clone();
             let source_sketch = sketch_ids.get(i).cloned().unwrap_or_default();
             async move {
+                let _permit = ctx.parallelism.acquire().await?;
                 let mut proposal: Proposal = ctx
                     .call_with_retry_parse(
                         Role::Propose,

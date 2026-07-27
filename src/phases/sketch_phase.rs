@@ -127,7 +127,6 @@ impl Phase for SketchPhase {
         let sketches_dir = ctx.run_dir().sketches();
         std::fs::create_dir_all(&sketches_dir)?;
 
-        let _guard = ctx.parallelism.acquire_many(count).await?;
         let system_arc = std::sync::Arc::new(system);
         let user_arc = std::sync::Arc::new(user);
 
@@ -141,6 +140,7 @@ impl Phase for SketchPhase {
             let system_arc = std::sync::Arc::clone(&system_arc);
             let angle_for_sketch = angle.clone();
             async move {
+                let _permit = ctx.parallelism.acquire().await?;
                 let mut sketch: Sketch = ctx
                     .call_with_retry_parse(
                         Role::Sketch,

@@ -79,7 +79,6 @@ impl Phase for RepairPhase {
         if total == 0 {
             return Ok(PhaseOutput::Repairs(Vec::new()));
         }
-        let _guard = ctx.parallelism.acquire_many(total).await?;
         let system_arc = Arc::new(system);
         let max_rounds = self.max_rounds.max(1);
 
@@ -95,6 +94,7 @@ impl Phase for RepairPhase {
             let revisions_dir = revisions_dir.clone();
             let proposal_id = proposal.id.clone();
             async move {
+                let _permit = ctx.parallelism.acquire().await?;
                 let mut paths: Vec<PathBuf> = Vec::with_capacity(max_rounds as usize);
                 for round in 0..max_rounds {
                     let user_payload = if round == 0 {

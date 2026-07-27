@@ -61,7 +61,6 @@ impl Phase for JudgePhase {
 
         let judges = self.judges as usize;
         let total = subjects.len() * judges;
-        let _guard = ctx.parallelism.acquire_many(total).await?;
         let system_arc = std::sync::Arc::new(system);
         let evaluations_dir_arc = std::sync::Arc::new(evaluations_dir);
 
@@ -81,6 +80,13 @@ impl Phase for JudgePhase {
                 let proposal_id = prop_id.clone();
                 let evaluations_dir = std::sync::Arc::clone(&evaluations_dir_arc);
                 async move {
+                    let _permit = ctx.parallelism.acquire().await?;
+                    tracing::debug!(
+                        proposal_id = %proposal_id,
+                        judge_index = j,
+                        stage = "judge.future.started",
+                        "Judge stage"
+                    );
                     let score: JudgeScore = ctx
                         .call_with_retry_parse(
                             Role::Judge,
@@ -90,12 +96,20 @@ impl Phase for JudgePhase {
                             5,
                         )
                         .await?;
+                    tracing::debug!(
+                        proposal_id = %proposal_id,
+                        judge_index = j,
+                        stage = "judge.future.completed",
+                        "Judge stage"
+                    );
                     Ok::<(String, JudgeScore, std::sync::Arc<PathBuf>), crate::error::Error>((proposal_id, score, evaluations_dir))
                 }
             })
         });
 
+        tracing::debug!(total, stage = "judge.join.started", "Judge stage");
         let results = join_all(futures).await;
+        tracing::debug!(total, stage = "judge.join.completed", "Judge stage");
 
         // Aggregate per proposal.
         use std::collections::BTreeMap;
