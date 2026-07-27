@@ -87,6 +87,11 @@ pub struct Proposal {
     pub tradeoffs: Vec<String>,
     /// Evidence backing the proposal.
     pub evidence: Vec<String>,
+    /// Sketch id this proposal was derived from (`"sk_xxx"`). Empty
+    /// for `fast` mode where the sketch phase is skipped. Filled by
+    /// `ProposePhase` so the deliver / inspect surface can show the
+    /// lineage even after the artefacts are flattened.
+    pub source_sketch: String,
 }
 
 /// Output of the sketch phase — a short, opinionated exploration

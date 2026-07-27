@@ -1,12 +1,21 @@
 //! Propose phase. Reads the brief, asks the model for N proposals in
 //! parallel, writes `proposals/p_001.json`, `proposals/p_002.json`, …
+//!
+//! When `SketchPhase` ran earlier in the same run, `ProposePhase`
+//! reads the surviving sketches from `sketches/` and pairs the i-th
+//! proposal with the i-th sketch. The pairing is best-effort: if
+//! there are more proposals than sketches the extras get an empty
+//! `source_sketch`; if there are fewer proposals than sketches the
+//! trailing sketches are unused. The intent is **lineage**, not
+//! selection — the proposal still stands on its own merits and the
+//! gate/judge phases do not look at `source_sketch`.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::domain::Proposal;
+use crate::domain::{Proposal, Sketch};
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
@@ -20,6 +29,43 @@ use crate::phases::util::{read_json, write_json};
 pub struct ProposePhase {
     /// Number of proposals to generate.
     pub count: u32,
+}
+
+impl ProposePhase {
+    /// Read every `sketches/sk_*.json` and return their ids in
+    /// alphabetical order (which matches the persistence order).
+    /// Returns an empty vector when the directory is missing or
+    /// `fast` mode skipped the sketch phase; the caller treats
+    /// either case as "no source sketch".
+    fn load_sketch_ids(ctx: &RunContext) -> Vec<String> {
+        let dir = ctx.run_dir().sketches();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(it) => it,
+            Err(_) => return Vec::new(),
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter(|p| {
+                // sidecar .meta.json files are persisted next to each
+                // artefact — keep only the primary .json files.
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| !s.ends_with(".meta.json"))
+                    .unwrap_or(true)
+            })
+            .collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|p| {
+                let raw = std::fs::read_to_string(&p).ok()?;
+                let sk: Sketch = serde_json::from_str(&raw).ok()?;
+                if sk.id.is_empty() { None } else { Some(sk.id) }
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -36,6 +82,7 @@ impl Phase for ProposePhase {
         std::fs::create_dir_all(&proposals_dir)?;
 
         let count = self.count as usize;
+        let sketch_ids = Self::load_sketch_ids(ctx);
         let _guard = ctx.parallelism.acquire_many(count).await?;
         let system_arc = std::sync::Arc::new(system);
         let user_arc = std::sync::Arc::new(user);
@@ -46,6 +93,7 @@ impl Phase for ProposePhase {
             let ctx = ctx.clone();
             let system_arc = std::sync::Arc::clone(&system_arc);
             let id_for_default = id.clone();
+            let source_sketch = sketch_ids.get(i).cloned().unwrap_or_default();
             async move {
                 let mut proposal: Proposal = ctx
                     .call_with_retry_parse(
@@ -59,6 +107,7 @@ impl Phase for ProposePhase {
                 if proposal.id.is_empty() {
                     proposal.id = id_for_default;
                 }
+                proposal.source_sketch = source_sketch;
                 Ok::<(String, Proposal), crate::error::Error>((id, proposal))
             }
         });
