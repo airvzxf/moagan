@@ -7,6 +7,10 @@
 //! 3. Telemetry records every phase and call.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use async_trait::async_trait;
 
 use moagan::config::Config;
 use moagan::error::Result;
@@ -14,9 +18,9 @@ use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::MockProvider;
-use moagan::llm::{MockResponse, ProviderRegistry};
+use moagan::llm::{MockResponse, Provider, ProviderRegistry, Request, Response, Usage};
 use moagan::phases::{
-    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
+    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
     ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, SketchPhase,
 };
 use moagan::redact::RedactPolicy;
@@ -1010,5 +1014,194 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
         "explore must not produce proposals"
     );
 
+    Ok(())
+}
+
+#[derive(Debug)]
+struct DelayedJudgeProvider {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    calls: AtomicUsize,
+    delay: Duration,
+}
+
+impl DelayedJudgeProvider {
+    fn new(delay: Duration) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            delay,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for DelayedJudgeProvider {
+    fn name(&self) -> &str {
+        "delayed"
+    }
+
+    fn model(&self) -> &str {
+        "delayed-model"
+    }
+
+    fn endpoint(&self) -> &str {
+        "delayed://local"
+    }
+
+    async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok((
+            200,
+            Response {
+                text: judge_json().to_owned(),
+                finish_reason: Some("end_turn".into()),
+                truncated: false,
+                usage: Usage::default(),
+            },
+        ))
+    }
+}
+
+fn judge_context(
+    home: Arc<MoaganHome>,
+    provider: Arc<dyn Provider>,
+    provider_name: &str,
+    model: &str,
+    run_id: RunId,
+    max_parallelism: usize,
+) -> RunContext {
+    let mut registry = ProviderRegistry::default();
+    registry.insert(provider_name.into(), provider);
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().expect("ensure run dir");
+    let telemetry =
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
+    RunContext::new(
+        run_id,
+        home,
+        Arc::new(registry),
+        provider_name.into(),
+        model.into(),
+        Parallelism::new(max_parallelism),
+        telemetry,
+        "judge concurrency".into(),
+        "deep".into(),
+    )
+}
+
+fn seed_judge_proposals(home: &MoaganHome, run_id: RunId, count: usize) -> Result<()> {
+    let proposals_dir = home.run_dir(run_id).proposals();
+    std::fs::create_dir_all(&proposals_dir)?;
+    for i in 0..count {
+        let proposal = moagan::domain::Proposal {
+            id: format!("p_{i:03}"),
+            summary: format!("Proposal {i}"),
+            approach: "A concrete approach".into(),
+            tradeoffs: vec!["One tradeoff".into()],
+            evidence: vec!["One source".into()],
+            source_sketch: String::new(),
+        };
+        let bytes = serde_json::to_vec(&proposal)?;
+        std::fs::write(proposals_dir.join(format!("p_{i:03}.json")), bytes)?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn judge_phase_respects_parallelism_cap() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
+    home.ensure()?;
+    let run_id = RunId::new();
+    seed_judge_proposals(&home, run_id, 5)?;
+    let provider = Arc::new(DelayedJudgeProvider::new(Duration::from_millis(20)));
+    let ctx = judge_context(
+        home.clone(),
+        provider.clone(),
+        "delayed",
+        "delayed-model",
+        run_id,
+        4,
+    );
+
+    let output = JudgePhase { judges: 7 }.execute(&ctx).await?;
+    let moagan::phases::PhaseOutput::Evaluations(paths) = output else {
+        panic!("expected evaluations");
+    };
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 35);
+    assert!(provider.peak.load(Ordering::SeqCst) <= 4);
+    assert_eq!(paths.len(), 5);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
+    use moagan::config::ProviderConfig;
+    use moagan::llm::minimax::MinimaxProvider;
+    use moagan::secret::SecretString;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let template = ResponseTemplate::new(200)
+        .set_delay(Duration::from_millis(10))
+        .set_body_json(serde_json::json!({
+            "content": [{"type": "text", "text": judge_json()}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }
+        }));
+    Mock::given(method("POST"))
+        .and(path("/anthropic/v1/messages"))
+        .respond_with(template)
+        .mount(&server)
+        .await;
+
+    let spec = ProviderConfig {
+        kind: "minimax".into(),
+        endpoint: format!("{}/anthropic/v1", server.uri()),
+        model: "MiniMax-M3".into(),
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        hard_incompatibilities: vec![],
+    };
+    let provider: Arc<dyn Provider> = Arc::new(MinimaxProvider::new(
+        &spec,
+        SecretString::new("test-key".into()),
+    )?);
+    let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
+    home.ensure()?;
+    let run_id = RunId::new();
+    seed_judge_proposals(&home, run_id, 5)?;
+    let ctx = judge_context(home.clone(), provider, "minimax", "MiniMax-M3", run_id, 4);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        JudgePhase { judges: 7 }.execute(&ctx),
+    )
+    .await
+    .map_err(|_| moagan::Error::Timeout("local HTTP judge test".into()))??;
+    let moagan::phases::PhaseOutput::Evaluations(paths) = output else {
+        panic!("expected evaluations");
+    };
+    ctx.telemetry.flush()?;
+
+    assert_eq!(server.received_requests().await.unwrap().len(), 35);
+    assert_eq!(paths.len(), 5);
+    let calls = moagan::storage::compression::read_to_string(ctx.telemetry.calls_path())?;
+    assert_eq!(calls.lines().count(), 35);
     Ok(())
 }
