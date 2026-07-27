@@ -76,7 +76,7 @@ mod tests {
                 prompt,
                 ..
             } => {
-                assert_eq!(mode, "fast");
+                assert_eq!(mode, cli::Mode::Fast);
                 assert_eq!(provider, "mock");
                 assert_eq!(prompt, "hello");
             }

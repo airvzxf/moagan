@@ -253,7 +253,7 @@ fn cli_parses_run_subcommand() {
             prompt,
             ..
         } => {
-            assert_eq!(mode, "fast");
+            assert_eq!(mode, moagan::cli::Mode::Fast);
             assert_eq!(provider, "mock");
             assert_eq!(prompt, "Enumera los 7 colores del arcoíris en orden");
         }

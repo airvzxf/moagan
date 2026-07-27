@@ -2,7 +2,7 @@
 //! `inspect`, `refine`, `rerank`. v0.1 ships `run` and `inspect`; the
 //! others are stubbed with friendly errors.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -14,6 +14,35 @@ pub mod doctor;
 pub mod forbidden;
 pub mod inspect;
 pub mod run;
+
+/// Pipeline mode. The MVP v0.1 ships only `fast` and `standard`.
+/// `deep`, `explore`, `batch`, and `discovery` are explicitly
+/// rejected at the CLI surface so we don't silently fall back to a
+/// `fast` pipeline as the previous `default` branch did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum Mode {
+    /// Quick top-3 candidates (~5 batches in parallel).
+    Fast,
+    /// Balanced proposals + critics + judges (~10 batches).
+    Standard,
+}
+
+impl Mode {
+    /// Stable lowercase string for storage and telemetry.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Standard => "standard",
+        }
+    }
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Top-level CLI.
 #[derive(Debug, Parser)]
@@ -46,9 +75,10 @@ impl Cli {
 pub enum Cmd {
     /// Start a new run.
     Run {
-        /// Mode (`fast`, `standard`, `deep`, `explore`, `batch`, `discovery`).
-        #[arg(long, default_value = "fast")]
-        mode: String,
+        /// Pipeline mode. Only `fast` and `standard` are implemented
+        /// in v0.1; other values are rejected at parse time.
+        #[arg(long, value_enum, default_value_t = Mode::Fast)]
+        mode: Mode,
         /// Provider name (must be in config).
         #[arg(long, default_value = "minimax")]
         provider: String,

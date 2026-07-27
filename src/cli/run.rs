@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::cli::Mode;
 use crate::config::Config;
 use crate::domain::Manifest;
 use crate::error::{Error, Result};
@@ -21,8 +22,8 @@ use crate::telemetry::Telemetry;
 /// Options for `moagan run`.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
-    /// Mode name (`"fast"`, `"standard"`, ...).
-    pub mode: String,
+    /// Pipeline mode (closed enum: `fast` or `standard`).
+    pub mode: Mode,
     /// Provider name (must be in config).
     pub provider: String,
     /// User prompt.
@@ -71,7 +72,7 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     ));
     db.register_run(
         run_id,
-        &opts.mode,
+        opts.mode.as_str(),
         "running",
         env!("CARGO_PKG_VERSION"),
         config_hash.as_deref(),
@@ -90,13 +91,13 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         parallelism,
         telemetry.clone(),
         opts.prompt.clone(),
-        opts.mode.clone(),
+        opts.mode.as_str().to_owned(),
     );
 
-    let pipeline = build_pipeline_for_mode(&opts.mode, cfg);
+    let pipeline = build_pipeline_for_mode(opts.mode, cfg);
     let outputs = pollster::block_on(pipeline.run(&ctx))?;
 
-    let manifest = build_manifest(&run_id, &opts.mode, "completed", &outputs);
+    let manifest = build_manifest(&run_id, opts.mode.as_str(), "completed", &outputs);
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
     telemetry.flush()?;
@@ -106,7 +107,7 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     println!(
         "moagan run {} mode={} provider={} -> {}",
         run_id.short(),
-        opts.mode,
+        opts.mode.as_str(),
         default_provider,
         run_dir.root().display()
     );
@@ -140,11 +141,14 @@ fn build_registry_for(
     registry_from_config(&spec_map)
 }
 
-fn build_pipeline_for_mode(mode: &str, cfg: &Config) -> Pipeline {
+/// Build the canonical pipeline for a given mode. The cardinality
+/// table mirrors the v0.1 MVP in `docs/proposal-01-concept.md` §13.6
+/// (3 proposals, 2 critics, 3 judges for `fast`; 3 proposals, 3
+/// critics, 5 judges for `standard`).
+fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
     let (proposals, critics, judges) = match mode {
-        "fast" => (3u32, 2u32, 3u32),
-        "standard" => (3u32, 3u32, 5u32),
-        _ => (3u32, 2u32, 3u32),
+        Mode::Fast => (3u32, 2u32, 3u32),
+        Mode::Standard => (3u32, 3u32, 5u32),
     };
     let _ = cfg;
     Pipeline::new()
