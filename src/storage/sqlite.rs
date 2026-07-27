@@ -24,6 +24,10 @@ mod sql_v002 {
     pub(super) const V002: &str = include_str!("migrations/v002_warnings.sql");
 }
 
+mod sql_v003 {
+    pub(super) const V003: &str = include_str!("migrations/v003_calls_status.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -98,6 +102,10 @@ impl Db {
         if current < 2 {
             conn.execute_batch(sql_v002::V002)?;
             conn.execute_batch("PRAGMA user_version = 2;")?;
+        }
+        if current < 3 {
+            conn.execute_batch(sql_v003::V003)?;
+            conn.execute_batch("PRAGMA user_version = 3;")?;
         }
         Ok(())
     }
@@ -194,9 +202,11 @@ impl Db {
     ) -> Result<()> {
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
+        let http_status_u16 = http_status.and_then(|s| u16::try_from(s).ok());
+        let status = call_status(http_status_u16, error);
         conn.execute(
-            "INSERT INTO calls (call_id, run_id, phase, role, provider, model, cache_key, cache_hit, http_status, input_tokens, output_tokens, cache_read, cache_creation, started_unix, ended_unix, error) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO calls (call_id, run_id, phase, role, provider, model, cache_key, cache_hit, http_status, input_tokens, output_tokens, cache_read, cache_creation, started_unix, ended_unix, error, status) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 call_id,
                 run_id.to_string(),
@@ -214,6 +224,7 @@ impl Db {
                 now,
                 now,
                 error,
+                status,
             ],
         )?;
         Ok(())
@@ -543,6 +554,44 @@ pub struct RunRow {
     pub parent_run_id: Option<String>,
 }
 
+/// Derive the `calls.status` enum from the `http_status` and `error`
+/// fields. Exposed as a pure function so the JSONL `CallEvent` and the
+/// SQLite `calls` row stay in sync and so the rule is unit-testable in
+/// isolation.
+///
+/// Rules (first match wins):
+/// 1. `error` message contains `"timeout"` → `"timeout"`.
+/// 2. `error` message contains `"cancel"` → `"cancelled"`.
+/// 3. `error` is `Some(_)` → `"error"` (covers transport failures,
+///    schema violations, and any other provider error).
+/// 4. `http_status` is `Some(2xx)` → `"ok"`.
+/// 5. `http_status` is `Some(4xx|5xx)` → `"error"`.
+/// 6. `http_status` is `None` (cache hit or pre-flight abort) → `"ok"`.
+///
+/// Values match T01-06 §2.1's CHECK constraint
+/// `status IN ('ok','error','timeout','cancelled','truncated')`.
+/// `"truncated"` is currently emitted by the LLM layer as a warning
+/// rather than a call status; if we ever need it here the rule will
+/// inspect the response finish_reason.
+pub fn call_status(http_status: Option<u16>, error: Option<&str>) -> &'static str {
+    if let Some(msg) = error {
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("timeout") {
+            return "timeout";
+        }
+        if lower.contains("cancel") {
+            return "cancelled";
+        }
+        return "error";
+    }
+    match http_status {
+        Some(s) if (200..300).contains(&s) => "ok",
+        Some(s) if (400..600).contains(&s) => "error",
+        Some(_) => "error",
+        None => "ok",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,7 +612,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     #[test]
@@ -727,5 +776,65 @@ mod tests {
             .unwrap();
         let summary = db.warnings_summary(id).unwrap();
         assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn call_status_http_200_is_ok() {
+        assert_eq!(call_status(Some(200), None), "ok");
+    }
+
+    #[test]
+    fn call_status_http_2xx_is_ok() {
+        for s in [200u16, 201, 204, 206, 299] {
+            assert_eq!(call_status(Some(s), None), "ok", "http={s}");
+        }
+    }
+
+    #[test]
+    fn call_status_error_message_overrides_http() {
+        assert_eq!(
+            call_status(Some(200), Some("schema violation: bad json")),
+            "error"
+        );
+    }
+
+    #[test]
+    fn call_status_timeout_by_error_message() {
+        assert_eq!(
+            call_status(Some(504), Some("request timeout exceeded")),
+            "timeout"
+        );
+    }
+
+    #[test]
+    fn call_status_cancelled_by_error_message() {
+        assert_eq!(
+            call_status(Some(499), Some("operation cancelled by user")),
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn call_status_http_4xx_is_error() {
+        for s in [400u16, 401, 404, 429, 499] {
+            assert_eq!(
+                call_status(Some(s), None),
+                "error",
+                "http={s} without error message"
+            );
+        }
+    }
+
+    #[test]
+    fn call_status_http_5xx_is_error() {
+        for s in [500u16, 502, 503, 504] {
+            assert_eq!(call_status(Some(s), None), "error", "http={s}");
+        }
+    }
+
+    #[test]
+    fn call_status_cache_hit_no_http_is_ok() {
+        // Cache hits never issue an HTTP request; we treat them as ok.
+        assert_eq!(call_status(None, None), "ok");
     }
 }

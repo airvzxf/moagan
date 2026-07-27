@@ -70,6 +70,12 @@ pub struct CallEvent {
     pub ended_unix: i64,
     /// Optional error message.
     pub error: Option<String>,
+    /// Derived outcome enum (`ok|error|timeout|cancelled|truncated`).
+    /// Mirrors the SQLite `calls.status` column so JSONL and SQL stay
+    /// in lock-step. Existing JSONL files written before this field
+    /// was added deserialize with `status = None`; readers must treat
+    /// that as `unknown` (see migration v003).
+    pub status: Option<String>,
 }
 
 /// One warning event. Streamed to `telemetry/warnings.jsonl` and
@@ -319,6 +325,7 @@ impl Telemetry {
             started_unix,
             ended_unix,
             error: error.map(str::to_owned),
+            status: Some(crate::storage::sqlite::call_status(http_status, error).to_string()),
         };
         let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
         let mut g = self.inner.calls.lock();
