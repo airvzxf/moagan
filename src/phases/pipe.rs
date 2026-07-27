@@ -51,15 +51,50 @@ impl Pipeline {
     /// in order. On the first error, records `error` in telemetry and
     /// returns the error.
     ///
-    /// Async so that phases can fan out LLM calls in parallel; the
-    /// outer CLI calls this via `pollster::block_on` from inside a
-    /// Tokio runtime that drives the `reqwest` IO reactor.
+    /// Async so that phases can fan out LLM calls in parallel while
+    /// the Tokio runtime drives network and timer progress.
     pub async fn run(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
+        let timeout = ctx.total_timeout();
+        if timeout.is_zero() {
+            return self.run_phases(ctx).await;
+        }
+        match tokio::time::timeout(timeout, self.run_phases(ctx)).await {
+            Ok(result) => result,
+            Err(_) => {
+                ctx.cancel()
+                    .cancel(crate::cancel::CancelReason::TotalTimeout);
+                Err(crate::Error::Timeout(format!(
+                    "run exceeded {} seconds",
+                    timeout.as_secs()
+                )))
+            }
+        }
+    }
+
+    async fn run_phases(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
         let mut outputs = Vec::with_capacity(self.phases.len());
         for (i, phase) in self.phases.iter().enumerate() {
             let seq = i as i64;
             ctx.telemetry.phase(phase.name(), seq, "start", None)?;
-            let result = phase.execute(ctx).await;
+            let timeout = ctx.phase_timeout();
+            let result = if timeout.is_zero() {
+                phase.execute(ctx).await
+            } else {
+                match tokio::time::timeout(timeout, phase.execute(ctx)).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        ctx.cancel()
+                            .cancel(crate::cancel::CancelReason::PhaseTimeout(
+                                phase.name().to_owned(),
+                            ));
+                        Err(crate::Error::Timeout(format!(
+                            "phase {} exceeded {} seconds",
+                            phase.name(),
+                            timeout.as_secs()
+                        )))
+                    }
+                }
+            };
             match &result {
                 Ok(_) => ctx.telemetry.phase(phase.name(), seq, "end", None)?,
                 Err(e) => {
@@ -91,27 +126,33 @@ mod tests {
         }
     }
 
+    struct SlowPhase;
+    #[async_trait]
+    impl Phase for SlowPhase {
+        fn name(&self) -> &'static str {
+            "slow"
+        }
+        async fn execute(&self, _ctx: &RunContext) -> Result<PhaseOutput> {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            Ok(PhaseOutput::Intake(std::path::PathBuf::from("slow")))
+        }
+    }
+
     fn empty_ctx() -> RunContext {
         let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
             "/tmp/moagan-test",
         )));
-        let cache = crate::llm::cache::Cache::new(crate::llm::cache::CacheConfig {
-            root: home.cross_run_cache_dir(),
-            cross_run: true,
-            no_store: false,
-        });
-        RunContext {
-            run_id: crate::ids::RunId::default(),
+        RunContext::new(
+            crate::ids::RunId::default(),
             home,
-            providers: Arc::new(crate::llm::ProviderRegistry::default()),
-            default_provider: "mock".into(),
-            default_model: "mock-model".into(),
-            parallelism: crate::execution::Parallelism::new(1),
-            telemetry: Telemetry::noop(),
-            raw_prompt: String::new(),
-            mode: "fast".into(),
-            cache,
-        }
+            Arc::new(crate::llm::ProviderRegistry::default()),
+            "mock".into(),
+            "mock-model".into(),
+            crate::execution::Parallelism::new(1),
+            Telemetry::noop(),
+            String::new(),
+            "fast".into(),
+        )
     }
 
     #[test]
@@ -128,5 +169,35 @@ mod tests {
         let ctx = empty_ctx();
         let out = pollster::block_on(pipe.run(&ctx)).unwrap();
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn phase_timeout_cancels_the_run() {
+        let pipe = Pipeline::new().push(SlowPhase);
+        let ctx = empty_ctx().with_timeout_durations(
+            std::time::Duration::from_millis(20),
+            std::time::Duration::ZERO,
+        );
+        let result = pipe.run(&ctx).await;
+        assert!(matches!(result, Err(crate::Error::Timeout(_))));
+        assert_eq!(
+            ctx.cancel().reason(),
+            Some(crate::cancel::CancelReason::PhaseTimeout("slow".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn total_timeout_cancels_the_run() {
+        let pipe = Pipeline::new().push(SlowPhase);
+        let ctx = empty_ctx().with_timeout_durations(
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(20),
+        );
+        let result = pipe.run(&ctx).await;
+        assert!(matches!(result, Err(crate::Error::Timeout(_))));
+        assert_eq!(
+            ctx.cancel().reason(),
+            Some(crate::cancel::CancelReason::TotalTimeout)
+        );
     }
 }
