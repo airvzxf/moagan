@@ -17,7 +17,7 @@ use moagan::llm::MockProvider;
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, SketchPhase,
 };
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -804,5 +804,211 @@ fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
         1,
     ))?;
     assert_eq!(parsed.summary, "second");
+    Ok(())
+}
+
+/// Build a mock provider pre-loaded with the v0.2 deep-mode call
+/// sequence: 1 intake + 1 clarify + 1 route + 6 sketches + 5
+/// proposals + 20 critiques (5 props × 4 critics) + 35 judge
+/// evaluations (5 props × 7 judges) + 1 deliver = 69 calls. Each
+/// `MockResponse` ships a payload that round-trips through the
+/// role-specific domain type so `SketchPhase`'s filter and the
+/// `ProposePhase::source_sketch` pairing both see real artefacts.
+fn build_deep_mock_provider() -> std::sync::Arc<MockProvider> {
+    use moagan::domain::Sketch;
+    let mut p = MockProvider::empty();
+    p.push(MockResponse::plain(intake_json()));
+    p.push(MockResponse::plain(clarify_json()));
+    p.push(MockResponse::plain(route_json()));
+    for i in 0..6 {
+        let sk = Sketch {
+            id: format!("sk_{i:03}"),
+            thesis: format!(
+                "Sketch {i} defends an opinionated approach to the user's problem with a unique angle."
+            ),
+            key_decisions: vec![format!("d{i}-1"), format!("d{i}-2")],
+            architecture_outline: format!("outline {i}"),
+            assumptions: vec![format!("assumption {i}")],
+            strengths: vec![format!("strength {i}")],
+            weaknesses: vec![format!("weakness {i}")],
+            hard_constraint_check: [("no_serverless".to_string(), true)].into_iter().collect(),
+            expected_validation: format!("smoke test {i}"),
+            angle: format!("angle-{i}"),
+        };
+        p.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+    }
+    for i in 0..5 {
+        p.push(MockResponse::plain(propose_json(&format!("p_{i:03}"))));
+    }
+    for _ in 0..20 {
+        p.push(MockResponse::plain(critique_json()));
+    }
+    for _ in 0..35 {
+        p.push(MockResponse::plain(judge_json()));
+    }
+    p.push(MockResponse::plain(deliver_json()));
+    p.set_cycle(false);
+    std::sync::Arc::new(p)
+}
+
+/// End-to-end smoke for `--mode deep` with the mock provider. The
+/// pipeline now has 11 phases (sketch inserted between route and
+/// propose). We assert the new sidecars exist and that each
+/// proposal carries the `source_sketch` lineage field populated.
+#[test]
+fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let provider = build_deep_mock_provider();
+    let run_id = RunId::new();
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(SketchPhase { count: 6 })
+        .push(ProposePhase { count: 5 })
+        .push(GatePhase)
+        .push(CritiquePhase {
+            critics_per_proposal: 4,
+        })
+        .push(RepairPhase::default())
+        .push(JudgePhase { judges: 7 })
+        .push(RankPhase {
+            config: Arc::new(Config::default()),
+        })
+        .push(DeliverPhase);
+
+    let outputs = pollster::block_on(pipeline.run(&ctx))?;
+    assert_eq!(outputs.len(), 11, "deep mode runs 11 phases");
+
+    ctx.telemetry.flush()?;
+
+    let run_dir = home.run_dir(run_id);
+
+    // Six sketch sidecars survived the filter.
+    let sketch_files: Vec<_> = std::fs::read_dir(run_dir.sketches())?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let p = e.path();
+            p.extension().and_then(|s| s.to_str()) == Some("json")
+                && !p.to_string_lossy().ends_with(".meta.json")
+        })
+        .collect();
+    assert_eq!(sketch_files.len(), 6, "expected 6 sketch artefacts");
+
+    let summary_path = run_dir.final_dir().join("sketches_summary.json");
+    let summary_text = std::fs::read_to_string(&summary_path)?;
+    let summary: serde_json::Value = serde_json::from_str(&summary_text)?;
+    assert_eq!(summary["raw"], 6);
+    assert_eq!(summary["kept"], 6);
+    assert_eq!(summary["dropped_empty_thesis"], 0);
+    assert_eq!(summary["dropped_hard_constraint"], 0);
+
+    // Each proposal carries a `source_sketch` pointing at the i-th
+    // sketch.
+    for i in 0..5 {
+        let p_path = run_dir.proposals().join(format!("p_{i:03}.json"));
+        let p_text = std::fs::read_to_string(&p_path)?;
+        let p: serde_json::Value = serde_json::from_str(&p_text)?;
+        let expected = format!("sk_{i:03}");
+        assert_eq!(
+            p["source_sketch"].as_str(),
+            Some(expected.as_str()),
+            "proposal {i} should point at sketch {expected}, got {}",
+            p["source_sketch"]
+        );
+    }
+
+    // Portfolio and ranking written by deliver.
+    assert!(run_dir.final_dir().join("portfolio.md").exists());
+    assert!(run_dir.rankings().join("ranking.json").exists());
+
+    Ok(())
+}
+
+/// `explore` ends at sketches — no proposals, no judging, no
+/// deliver. The pipeline returns 4 phase outputs and persists
+/// 12 sketch sidecars without ever touching `proposals/`.
+#[test]
+fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    // Build a mock provider with 1 intake + 1 clarify + 1 route + 12
+    // sketches; nothing else needs to be queued because explore ends
+    // at the sketch phase.
+    use moagan::domain::Sketch;
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain(intake_json()));
+    mp.push(MockResponse::plain(clarify_json()));
+    mp.push(MockResponse::plain(route_json()));
+    for i in 0..12 {
+        let sk = Sketch {
+            id: format!("sk_{i:03}"),
+            thesis: format!(
+                "Sketch {i} defends an opinionated approach to the user's problem with a unique angle."
+            ),
+            key_decisions: vec![format!("d{i}-1")],
+            architecture_outline: format!("outline {i}"),
+            assumptions: vec![],
+            strengths: vec![format!("s{i}")],
+            weaknesses: vec![format!("w{i}")],
+            hard_constraint_check: std::collections::BTreeMap::new(),
+            expected_validation: format!("ev {i}"),
+            angle: format!("angle-{i}"),
+        };
+        mp.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+    }
+    mp.set_cycle(false);
+
+    let provider = Arc::new(mp);
+    let run_id = RunId::new();
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(SketchPhase { count: 12 });
+
+    let outputs = pollster::block_on(pipeline.run(&ctx))?;
+    assert_eq!(
+        outputs.len(),
+        4,
+        "explore mode runs exactly 4 phases (intake, clarify, route, sketch)"
+    );
+
+    ctx.telemetry.flush()?;
+
+    let run_dir = home.run_dir(run_id);
+    let sketch_files: Vec<_> = std::fs::read_dir(run_dir.sketches())?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let p = e.path();
+            p.extension().and_then(|s| s.to_str()) == Some("json")
+                && !p.to_string_lossy().ends_with(".meta.json")
+        })
+        .collect();
+    assert_eq!(sketch_files.len(), 12);
+    assert!(
+        !run_dir.proposals().exists() || std::fs::read_dir(run_dir.proposals())?.next().is_none(),
+        "explore must not produce proposals"
+    );
+
     Ok(())
 }
