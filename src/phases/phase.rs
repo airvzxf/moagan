@@ -123,7 +123,7 @@ impl RunContext {
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(0.4),
+            temperature: Some(temperature_for_role(role)),
             top_p: Some(0.95),
             response_schema: None,
         };
@@ -152,7 +152,7 @@ impl RunContext {
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(0.4),
+            temperature: Some(temperature_for_role(role)),
             top_p: Some(0.95),
             response_schema: None,
         };
@@ -499,6 +499,52 @@ fn max_tokens_for_role(role: Role) -> u32 {
     }
 }
 
+/// Per-role sampling temperature. Replaces the previous v0.1 hardcoded
+/// `Some(0.4)` for every role.
+///
+/// Calibration rationale (empirical, 2026-07-27):
+///
+/// - **Sketch (`1.0`)**: empirical sweeps showed T=1.0 maximises the
+///   standard deviation of thesis vectors across the angle-cycled
+///   fan-out — i.e. the largest semantic spread. This is what the
+///   `sketches_summary.json` "kept" count and downstream clustering
+///   rely on; lower temperatures (0.4, 0.7) produce near-duplicates
+///   that waste LLM budget without expanding the search space. The
+///   spec §4.2 reference of T=0.7 predates the empirical sweep.
+/// - **Clarify / Route / Rank (`0.0`)**: deterministic JSON shape is
+///   required so downstream phases (gate, propose, deliver) can rely
+///   on a stable contract. Variance in the brief breaks every later
+///   phase.
+/// - **Gate (`0.0`)**: validation is mechanical; no randomness allowed.
+/// - **Judge (`0.2`)**: rubric consistency matters more than novelty;
+///   a small amount of variance lets independent judges diverge
+///   productively on borderline scores.
+/// - **Propose / Critique / Repair / Deliver (`0.4`)**: prose-heavy
+///   roles benefit from some variance to escape repetition, but the
+///   output must still parse against the schema. The JSON repair
+///   walker (`phases/util.rs`) absorbs the occasional drift.
+/// - **Intake (`0.4`)**: rephrasing the user prompt needs some
+///   variance but should remain faithful.
+///
+/// A future release will let providers override these defaults through
+/// the per-role `prompts/registry.rs` configuration block, but the
+/// values here are the contract.
+fn temperature_for_role(role: Role) -> f32 {
+    match role {
+        Role::Intake => 0.4,
+        Role::Clarify => 0.0,
+        Role::Route => 0.0,
+        Role::Sketch => 1.0,
+        Role::Propose => 0.4,
+        Role::Gate => 0.0,
+        Role::Critique => 0.4,
+        Role::Repair => 0.4,
+        Role::Judge => 0.2,
+        Role::Rank => 0.0,
+        Role::Deliver => 0.4,
+    }
+}
+
 /// Outcome of a phase. Each variant corresponds to a sidecar file
 /// that the phase is responsible for writing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,5 +597,39 @@ mod tests {
         let j = serde_json::to_string(&out).unwrap();
         assert!(j.contains("Intake"));
         assert!(j.contains("/tmp/intake.json"));
+    }
+
+    /// Sketch ships T=1.0 because empirical sweeps showed that
+    /// maximises semantic spread across the angle-cycled fan-out.
+    /// Pinning the value here so a future change cannot silently
+    /// reduce the diversity that v0.2's `SketchPhase` relies on.
+    #[test]
+    fn temperature_sketch_is_one() {
+        assert_eq!(temperature_for_role(Role::Sketch), 1.0);
+    }
+
+    /// Roles whose output is consumed by JSON parsers downstream
+    /// (clarify, route, rank, gate) MUST be deterministic. A
+    /// non-zero temperature on any of these risks schema drift that
+    /// the repair walker cannot recover from.
+    #[test]
+    fn temperature_deterministic_roles_are_zero() {
+        assert_eq!(temperature_for_role(Role::Clarify), 0.0);
+        assert_eq!(temperature_for_role(Role::Route), 0.0);
+        assert_eq!(temperature_for_role(Role::Gate), 0.0);
+        assert_eq!(temperature_for_role(Role::Rank), 0.0);
+    }
+
+    /// Every role must have a defined temperature so the helper is
+    /// total and exhaustive over `Role::all()`.
+    #[test]
+    fn temperature_defined_for_every_role() {
+        for r in Role::all() {
+            let t = temperature_for_role(*r);
+            assert!(
+                (0.0..=2.0).contains(&t),
+                "{r:?} temperature {t} outside [0, 2]"
+            );
+        }
     }
 }
