@@ -125,6 +125,12 @@ impl RunDir<'_> {
         self.root.join("brief.json")
     }
 
+    /// `sketches/` directory — short, opinionated hypotheses emitted
+    /// by the `SketchPhase` (v0.2). Empty for `fast` mode.
+    pub fn sketches(&self) -> PathBuf {
+        self.root.join("sketches")
+    }
+
     /// `proposals/` directory.
     pub fn proposals(&self) -> PathBuf {
         self.root.join("proposals")

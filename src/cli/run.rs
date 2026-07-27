@@ -14,7 +14,7 @@ use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, SketchPhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -177,18 +177,33 @@ pub(crate) fn build_registry_for(
 ///   JSON-stable output contract and lack of human pauses (deferred
 ///   to a follow-up commit).
 fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
-    let (proposals, critics, judges) = match mode {
-        Mode::Fast => (3u32, 2u32, 3u32),
-        Mode::Standard => (3u32, 3u32, 5u32),
-        Mode::Deep => (5u32, 4u32, 7u32),
-        Mode::Explore => (0u32, 0u32, 0u32),
-        Mode::Batch => (3u32, 2u32, 3u32),
+    let (proposals, critics, judges, sketches) = match mode {
+        Mode::Fast => (3u32, 2u32, 3u32, 0u32),
+        Mode::Standard => (3u32, 3u32, 5u32, 4u32),
+        Mode::Deep => (5u32, 4u32, 7u32, 6u32),
+        Mode::Explore => (0u32, 0u32, 0u32, 12u32),
+        Mode::Batch => (3u32, 2u32, 3u32, 4u32),
     };
     let cfg_arc = std::sync::Arc::new(cfg.clone());
-    Pipeline::new()
+    let mut pipeline = Pipeline::new()
         .push(IntakePhase)
         .push(ClarifyPhase)
-        .push(RoutePhase)
+        .push(RoutePhase);
+    // SketchPhase runs after Route whenever the mode says so. When
+    // `count == 0` the phase short-circuits to an empty
+    // `PhaseOutput::Sketches`, but we still insert it so the
+    // manifest's phase list reflects the intended shape.
+    if mode.runs_sketches() {
+        pipeline = pipeline.push(SketchPhase { count: sketches });
+    }
+    // `explore` ends at sketches — no proposals, no judging. The user
+    // inspects the sketch map manually (see final/sketches_summary.json
+    // and sketches/sk_*.json). Inserting the downstream phases would
+    // crash deliver with "no proposals to portfolio".
+    if mode == Mode::Explore {
+        return pipeline;
+    }
+    pipeline
         .push(ProposePhase { count: proposals })
         .push(GatePhase)
         .push(CritiquePhase {

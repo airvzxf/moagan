@@ -510,13 +510,15 @@ pub enum PhaseOutput {
     Brief(PathBuf),
     /// `route.json` was written.
     Route(PathBuf),
+    /// A list of `sketches/sk_*.json` files. Empty for `fast` mode.
+    Sketches(Vec<PathBuf>),
     /// A list of `proposals/p_*.json` files.
     Proposals(Vec<PathBuf>),
     /// A list of `validation/p_*.json` files (one per proposal).
     Validations(Vec<PathBuf>),
     /// A list of `critiques/p_*_critic_*.json` files.
     Critiques(Vec<PathBuf>),
-    /// A list of `revisions/p_*_rev_*.json` files.
+    /// A list of `revisions/p_*_rev_<n>.json` files.
     Repairs(Vec<PathBuf>),
     /// A list of `evaluations/p_*.json` files.
     Evaluations(Vec<PathBuf>),
