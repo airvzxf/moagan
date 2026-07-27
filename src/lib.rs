@@ -18,6 +18,7 @@ pub mod fs_layout;
 pub mod ids;
 pub mod llm;
 pub mod phases;
+pub mod ranking;
 pub mod redact;
 pub mod secret;
 pub mod storage;

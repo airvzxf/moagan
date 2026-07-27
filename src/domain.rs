@@ -165,6 +165,10 @@ pub struct JudgeCriteria {
 pub struct Ranking {
     /// Ranked proposals (highest first).
     pub ranked: Vec<RankEntry>,
+    /// Diversity-preserving top-3 representatives (Pareto front →
+    /// cluster → crowding). The deliver phase consumes this list;
+    /// when empty (front smaller than 3) it falls back to `ranked`.
+    pub representatives: Vec<RankEntry>,
     /// Winning proposal id.
     pub winner: String,
 }
