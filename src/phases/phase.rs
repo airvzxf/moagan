@@ -471,23 +471,30 @@ impl RunContext {
     }
 }
 
-/// Per-role `max_tokens`. The model can produce very verbose JSON for
-/// the high-cardinality roles (intake, clarify, deliver); the others
-/// stay compact. Calibrated for the v0.1 smoke (minimax Claude-style
-/// endpoint). A future release will let providers override this
-/// through the per-role config in `prompts/`.
+/// Per-role `max_tokens` ceiling. Calibrated for the v0.1 smoke
+/// (`minimax` Claude-style endpoint that accepts up to 128K output).
+/// These ceilings match T01-06 §4.2 — the old `131072` constant was
+/// leaving ~99% of the budget unused on roles that emit 1-2 KB JSON
+/// (intake, route, judge) and let the model drift into verbose prose
+/// on roles that should be terse.
+///
+/// A future release will let providers override these defaults through
+/// the per-role `prompts/registry.rs` configuration block, but the
+/// floors here are the contract: an intake never needs more than 1024
+/// tokens of output, a sketch never more than 1024, a clarification
+/// never more than 2048, etc.
 fn max_tokens_for_role(role: Role) -> u32 {
     match role {
-        Role::Intake => 131072,
-        Role::Clarify => 131072,
-        Role::Route => 131072,
-        Role::Propose => 131072,
-        Role::Gate => 131072,
-        Role::Critique => 131072,
-        Role::Repair => 131072,
-        Role::Judge => 131072,
-        Role::Rank => 131072,
-        Role::Deliver => 131072,
+        Role::Intake => 1024,
+        Role::Clarify => 2048,
+        Role::Route => 512,
+        Role::Propose => 6000,
+        Role::Gate => 1024,
+        Role::Critique => 4000,
+        Role::Repair => 6000,
+        Role::Judge => 1500,
+        Role::Rank => 1500,
+        Role::Deliver => 4000,
     }
 }
 
