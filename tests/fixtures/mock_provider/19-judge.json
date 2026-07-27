@@ -1,0 +1,6 @@
+{
+  "text": "{\"score\":8.0,\"criteria\":{\"correctness\":9.0,\"completeness\":8.0,\"fit\":9.0,\"evidence\":8.0,\"clarity\":8.0},\"comments\":\"Clean and correct.\"}",
+  "input_tokens": 400,
+  "output_tokens": 120,
+  "finish_reason": "end_turn"
+}

@@ -1,0 +1,6 @@
+{
+  "text": "{\"mode\":\"fast\",\"reason\":\"Simple enumeration, no architecture needed\",\"sketches\":0,\"proposals\":3,\"judges\":3}",
+  "input_tokens": 80,
+  "output_tokens": 60,
+  "finish_reason": "end_turn"
+}

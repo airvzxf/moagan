@@ -1,0 +1,6 @@
+{
+  "text": "{\"verdict\":\"accept\",\"issues\":[],\"suggestions\":[]}",
+  "input_tokens": 300,
+  "output_tokens": 80,
+  "finish_reason": "end_turn"
+}
