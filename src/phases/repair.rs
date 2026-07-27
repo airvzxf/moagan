@@ -127,8 +127,8 @@ impl Phase for RepairPhase {
                     if repair.id.is_empty() {
                         repair.id = proposal_id.clone();
                     }
-                    let out_path: PathBuf = revisions_dir
-                        .join(format!("{proposal_id}_rev_{round}.json"));
+                    let out_path: PathBuf =
+                        revisions_dir.join(format!("{proposal_id}_rev_{round}.json"));
                     write_json(&out_path, &repair)?;
                     paths.push(out_path);
                 }
