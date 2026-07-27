@@ -22,6 +22,25 @@ use moagan::phases::{
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
 
+/// Process-wide mutex that serialises every test which mutates the
+/// `MOAGAN_HOME` / `MOAGAN_CONFIG` environment variables. Without it,
+/// the parallel test runner lets one test observe a `MOAGAN_HOME`
+/// pointing at a sibling test's already-deleted tempdir, and SQLite
+/// open fails with "unable to open database file". Adding the lock is
+/// cheaper than restructuring every test to read the env through a
+/// shared helper.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the process-wide env mutex and panic on poison (the only
+/// way it can be poisoned is if another test panicked mid-mutation,
+/// which is already a hard failure).
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    match ENV_LOCK.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
 fn build_mock_provider() -> Arc<MockProvider> {
     // The pipeline call sequence in fast mode is:
     //   intake, clarify, route,
@@ -155,6 +174,7 @@ fn build_run_context(
 
 #[test]
 fn mock_provider_end_to_end_smoke() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -265,6 +285,7 @@ fn cli_parses_run_subcommand() {
 
 #[test]
 fn inspect_listing_returns_zero_runs_when_db_is_fresh() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -285,6 +306,7 @@ fn forbidden_cargo_toml_guard_rejects_secrecy() {
 
 #[test]
 fn config_load_returns_defaults() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -310,6 +332,7 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
     // response in order. We queue two responses and verify the
     // helper consumes both: the first (broken) is detected, the
     // second (well-formed) is parsed.
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -387,6 +410,7 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
 fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
     // Both responses are broken. After max_retries=1, the helper
     // returns Err instead of looping forever.
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -491,6 +515,7 @@ fn single_role_ctx(
 
 #[test]
 fn truncated_response_emits_model_response_truncated_warning() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -520,6 +545,7 @@ fn truncated_response_emits_model_response_truncated_warning() -> Result<()> {
 
 #[test]
 fn json_repair_emits_model_json_repair_applied_warning() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -569,6 +595,7 @@ fn json_repair_emits_model_json_repair_applied_warning() -> Result<()> {
 
 #[test]
 fn retry_recovery_emits_retry_and_recovery_warnings() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -615,6 +642,7 @@ fn retry_recovery_emits_retry_and_recovery_warnings() -> Result<()> {
 
 #[test]
 fn inspect_summarize_run_returns_codes() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -650,6 +678,7 @@ fn inspect_summarize_run_returns_codes() -> Result<()> {
 
 #[test]
 fn warnings_jsonl_file_is_created_even_when_empty() -> Result<()> {
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -679,6 +708,7 @@ fn second_identical_call_is_served_from_cache() -> Result<()> {
     // Same prompt twice with the same provider + model. The mock is
     // pre-loaded with two responses; only the first call should reach
     // the provider. The second must come from the cross-run cache.
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -737,6 +767,7 @@ fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
     // Regression: if the first response is cached and broken, the
     // retry would otherwise keep returning the same broken response.
     // `call_with_retry_parse` must bypass the cache on retries.
+    let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("MOAGAN_HOME", tmp.path());
