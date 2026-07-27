@@ -79,13 +79,26 @@ pub fn run_refine(
     let policy = crate::redact::RedactPolicy::default();
     let telemetry = Telemetry::open(run_id, &run_dir, policy, None)?;
     let parallelism = crate::execution::Parallelism::new(cfg.max_parallelism);
-    let providers = Arc::new(crate::llm::ProviderRegistry::default());
+    // Build a registry with the configured default provider actually
+    // registered; otherwise `RunContext::provider()` panics on the
+    // first call. The model name comes from the spec, not the
+    // hard-coded "minimax" string (which is the provider alias).
+    let default_provider = cfg.default_provider.clone();
+    let providers = Arc::new(
+        super::run::build_registry_for(cfg, &default_provider, None)
+            .map_err(|e| Error::InvalidState(format!("refine: {e}")))?,
+    );
+    let default_model = cfg
+        .provider(&default_provider)
+        .map_err(|e| Error::InvalidState(format!("refine: {e}")))?
+        .model
+        .clone();
     let ctx = RunContext::new(
         run_id,
         Arc::clone(home),
         providers,
-        cfg.default_provider.clone(),
-        "minimax".into(),
+        default_provider,
+        default_model,
         parallelism,
         telemetry,
         String::new(),
@@ -136,13 +149,26 @@ pub fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> Result
     let policy = crate::redact::RedactPolicy::default();
     let telemetry = Telemetry::open(run_id, &run_dir, policy, None)?;
     let parallelism = crate::execution::Parallelism::new(cfg.max_parallelism);
-    let providers = Arc::new(crate::llm::ProviderRegistry::default());
+    // Same fix as `run_refine`: build a real registry so `RankPhase`
+    // does not panic if it ever needs to call the model (today the
+    // rank phase is pure compute, but defensive construction keeps the
+    // provider/model fields aligned with the rest of the binary).
+    let default_provider = cfg.default_provider.clone();
+    let providers = Arc::new(
+        super::run::build_registry_for(cfg, &default_provider, None)
+            .map_err(|e| Error::InvalidState(format!("rerank: {e}")))?,
+    );
+    let default_model = cfg
+        .provider(&default_provider)
+        .map_err(|e| Error::InvalidState(format!("rerank: {e}")))?
+        .model
+        .clone();
     let ctx = RunContext::new(
         run_id,
         Arc::clone(home),
         providers,
-        cfg.default_provider.clone(),
-        "minimax".into(),
+        default_provider,
+        default_model,
         parallelism,
         telemetry,
         String::new(),
