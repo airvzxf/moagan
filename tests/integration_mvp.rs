@@ -205,6 +205,12 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
     let outputs = pollster::block_on(pipeline.run(&ctx))?;
     assert_eq!(outputs.len(), 10, "expected 10 phase outputs");
 
+    // Flush telemetry so the gzip stream is finalized before the
+    // assertions read it. Without this, the on-disk gzip member has
+    // no CRC/length trailer and `MultiGzDecoder` returns
+    // `UnexpectedEof`.
+    ctx.telemetry.flush()?;
+
     // Write manifest like run.rs does.
     let run_dir = home.run_dir(run_id);
     let manifest = moagan::domain::Manifest {
@@ -243,8 +249,12 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         run_dir.evaluations().join("p_000.json").exists(),
         "p_000 evaluation was not written"
     );
-    let phases = std::fs::read_to_string(run_dir.telemetry().join("phases.jsonl"))?;
-    assert!(phases.contains("\"phase\":\"intake\""));
+    let phases =
+        moagan::storage::compression::read_to_string(&run_dir.telemetry().join("phases.jsonl.gz"))?;
+    assert!(
+        phases.contains("\"phase\":\"intake\""),
+        "phases.jsonl.gz did not contain intake event; raw=\n{phases}"
+    );
     assert!(phases.contains("\"phase\":\"deliver\""));
 
     let portfolio = std::fs::read_to_string(run_dir.final_dir().join("portfolio.md"))?;
@@ -756,7 +766,7 @@ fn second_identical_call_is_served_from_cache() -> Result<()> {
 
     // And a JSONL entry is written for the hit.
     ctx.telemetry.flush()?;
-    let calls_jsonl = std::fs::read_to_string(ctx.telemetry.calls_path())?;
+    let calls_jsonl = moagan::storage::compression::read_to_string(ctx.telemetry.calls_path())?;
     assert!(calls_jsonl.contains("\"cache_hit\":true"));
     let _ = db;
     Ok(())

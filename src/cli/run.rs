@@ -99,6 +99,12 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let pipeline = build_pipeline_for_mode(opts.mode, cfg);
     let _outputs = pollster::block_on(pipeline.run(&ctx))?;
 
+    // Flush telemetry before the manifest reads phases/calls.
+    // Without this, the gzip stream is incomplete (no CRC/length
+    // trailer) and `MultiGzDecoder` returns `UnexpectedEof`,
+    // silently leaving the manifest with empty `phases`/`usage`.
+    telemetry.flush()?;
+
     let manifest = build_manifest(
         &run_id,
         opts.mode.as_str(),
@@ -109,7 +115,6 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     )?;
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
-    telemetry.flush()?;
     if let Err(e) = db.update_run_status(run_id, "completed") {
         eprintln!("warn: failed to update run status: {e}");
     }
@@ -203,16 +208,22 @@ fn build_manifest(
         Err(_) => (String::new(), String::new()),
     };
 
-    // 2. Aggregate phase events from telemetry/phases.jsonl into one
+    // 2. Aggregate phase events from telemetry/phases.jsonl.gz into one
     //    ManifestPhase per phase name. Start events set started_unix;
     //    end events set ended_unix + status; error events set error.
-    let phases_path = run_dir.telemetry().join("phases.jsonl");
-    let phase_events = read_phase_events(&phases_path);
-    let call_counts = count_calls_per_phase(&run_dir.telemetry().join("calls.jsonl"));
+    //    `read_to_string` auto-detects the `.gz` suffix and falls back
+    //    to plain `.jsonl` for runs produced before compression was
+    //    wired (legacy readers).
+    let phases_path = run_dir.telemetry().join("phases.jsonl.gz");
+    let legacy_phases_path = run_dir.telemetry().join("phases.jsonl");
+    let phase_events = read_phase_events(&phases_path, &legacy_phases_path);
+    let calls_path = run_dir.telemetry().join("calls.jsonl.gz");
+    let legacy_calls_path = run_dir.telemetry().join("calls.jsonl");
+    let call_counts = count_calls_per_phase(&calls_path, &legacy_calls_path);
     let manifest_phases = aggregate_phase_events(&phase_events, &call_counts);
 
-    // 3. Aggregate usage from telemetry/calls.jsonl.
-    let usage = aggregate_usage(&run_dir.telemetry().join("calls.jsonl"));
+    // 3. Aggregate usage from telemetry/calls.jsonl[.gz].
+    let usage = aggregate_usage(&calls_path, &legacy_calls_path);
 
     let mut manifest = Manifest {
         schema_version: "v1".into(),
@@ -244,17 +255,29 @@ fn build_manifest(
     Ok(manifest)
 }
 
-/// Read every `phases.jsonl` line into a `PhaseEvent` list. Missing
+/// Read every `phases.jsonl[.gz]` line into a `PhaseEvent` list.
+/// Tries the gzipped path first (current default), then the legacy
+/// plain path (runs produced before compression was wired). Missing
 /// files and individual malformed lines are silently skipped so a
 /// partial telemetry stream never blocks manifest emission.
-fn read_phase_events(path: &Path) -> Vec<PhaseEvent> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+fn read_phase_events(primary: &Path, legacy: &Path) -> Vec<PhaseEvent> {
+    let raw = read_telemetry_text(primary, legacy);
+    if raw.is_empty() {
+        return Vec::new();
+    }
     raw.lines()
         .filter_map(|line| serde_json::from_str::<PhaseEvent>(line).ok())
         .collect()
+}
+
+/// Resolve a telemetry text stream. Prefers the primary path (the
+/// current spec default, e.g. `phases.jsonl.gz`); falls back to the
+/// legacy plain path. Returns an empty string if neither exists.
+fn read_telemetry_text(primary: &Path, legacy: &Path) -> String {
+    match crate::storage::compression::read_to_string(primary) {
+        Ok(s) => s,
+        Err(_) => crate::storage::compression::read_to_string(legacy).unwrap_or_default(),
+    }
 }
 
 fn aggregate_phase_events(
@@ -295,14 +318,14 @@ fn aggregate_phase_events(
     by_name.into_values().collect()
 }
 
-/// Walk every `calls.jsonl` line and count how many calls landed in
-/// each phase name. Used to populate `ManifestPhase.calls`.
-fn count_calls_per_phase(path: &Path) -> std::collections::BTreeMap<String, u32> {
+/// Walk every `calls.jsonl[.gz]` line and count how many calls landed
+/// in each phase name. Used to populate `ManifestPhase.calls`.
+fn count_calls_per_phase(primary: &Path, legacy: &Path) -> std::collections::BTreeMap<String, u32> {
     use std::collections::BTreeMap;
-    let raw = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return BTreeMap::new(),
-    };
+    let raw = read_telemetry_text(primary, legacy);
+    if raw.is_empty() {
+        return BTreeMap::new();
+    }
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
     for line in raw.lines() {
         let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -316,11 +339,11 @@ fn count_calls_per_phase(path: &Path) -> std::collections::BTreeMap<String, u32>
 }
 
 /// Sum input / output / cache tokens from every recorded call.
-fn aggregate_usage(path: &Path) -> ManifestUsage {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return ManifestUsage::default(),
-    };
+fn aggregate_usage(primary: &Path, legacy: &Path) -> ManifestUsage {
+    let raw = read_telemetry_text(primary, legacy);
+    if raw.is_empty() {
+        return ManifestUsage::default();
+    }
     let mut usage = ManifestUsage::default();
     for line in raw.lines() {
         let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) else {
