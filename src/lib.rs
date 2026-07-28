@@ -26,6 +26,7 @@ pub mod secret;
 pub mod storage;
 pub mod telemetry;
 pub mod time;
+pub mod validators;
 
 pub use error::{Error, Result, exit_code};
 
