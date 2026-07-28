@@ -1,13 +1,12 @@
-//! End-to-end integration test for `moagan audit` against the real
-//! `moagan run` binary. It boots the audit sidecar on a
-//! kernel-assigned port, points Moagan at a wiremock Anthropic
-//! server, runs a 35-judge-call deep run, and asserts the
-//! `moagan audit verify` reports perfect coverage.
+//! End-to-end audit test through the real CLI process.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use moagan::audit::format::{AuditRecord, AuditWriter, count_invalid_crcs, sha256_hex};
 use moagan::ids::RunId;
 use serde_json::json;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -15,13 +14,13 @@ fn judge_json() -> &'static str {
     r#"{"score":9.0,"criteria":{"correctness":9.0,"completeness":9.0,"fit":9.0,"evidence":9.0,"clarity":9.0},"comments":"ok"}"#
 }
 
-async fn boot_mock() -> MockServer {
+async fn boot_mock_with_delay(delay: Duration) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/anthropic/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(5))
+                .set_delay(delay)
                 .set_body_json(json!({
                     "content": [{"type": "text", "text": judge_json()}],
                     "stop_reason": "end_turn",
@@ -38,234 +37,407 @@ async fn boot_mock() -> MockServer {
     server
 }
 
-fn read_port_from_stderr(stderr: &str) -> Option<u16> {
-    for line in stderr.lines() {
-        if !line.contains("proxy listening") {
-            continue;
-        }
-        let left = line.split("->").next()?;
-        let after = left.split("http://").nth(1)?;
-        let port_str = after.split(':').nth(1)?;
-        return port_str.trim().parse().ok();
-    }
-    None
+async fn boot_mock() -> MockServer {
+    boot_mock_with_delay(Duration::from_millis(5)).await
 }
 
-fn write_mock_response_dir(dir: &std::path::Path) {
-    let _ = std::fs::create_dir_all(dir);
-    let body = json!({
-        "text": judge_json(),
-        "input_tokens": 10,
-        "output_tokens": 20,
-        "finish_reason": "end_turn"
-    });
-    std::fs::write(dir.join("00_intake.json"), body.to_string()).unwrap();
-    std::fs::write(dir.join("01_clarify.json"), body.to_string()).unwrap();
-    std::fs::write(dir.join("02_route.json"), body.to_string()).unwrap();
-    for i in 0..6 {
-        std::fs::write(
-            dir.join(format!("03_sketch_s{:02}.json", i)),
-            body.to_string(),
-        )
-        .unwrap();
-    }
-    for i in 0..5 {
-        std::fs::write(
-            dir.join(format!("04_propose_p{:03}.json", i)),
-            body.to_string(),
-        )
-        .unwrap();
-    }
-    for i in 0..20 {
-        std::fs::write(
-            dir.join(format!("05_critique_c{:02}.json", i)),
-            body.to_string(),
-        )
-        .unwrap();
-    }
-    for i in 0..35 {
-        std::fs::write(
-            dir.join(format!("06_judge_j{:02}.json", i)),
-            body.to_string(),
-        )
-        .unwrap();
-    }
-    std::fs::write(dir.join("07_deliver.json"), body.to_string()).unwrap();
+fn binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_moagan"))
 }
 
-fn moagan_bin() -> Option<std::path::PathBuf> {
-    let bin = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("moagan");
-    if bin.exists() { Some(bin) } else { None }
+fn parse_proxy_port(line: &str) -> u16 {
+    line.split("http://")
+        .nth(1)
+        .and_then(|value| value.split(" ->").next())
+        .and_then(|address| address.rsplit(':').next())
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("could not parse proxy port from {line:?}"))
+}
+
+fn try_latest_run(root: &Path) -> Option<RunId> {
+    std::fs::read_dir(root.join(".runs"))
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<RunId>().ok())
+        .max()
+}
+
+fn latest_run(root: &Path) -> RunId {
+    try_latest_run(root).expect("run directory was not created")
+}
+
+fn metric(stdout: &str, name: &str) -> usize {
+    stdout
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('\t')?;
+            (key == name).then(|| value.parse().ok()).flatten()
+        })
+        .unwrap_or_else(|| panic!("metric {name} missing from {stdout:?}"))
+}
+
+async fn direct_post(port: u16, body: &[u8]) -> Vec<u8> {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let header = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: proxy\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    response
+}
+
+#[tokio::test]
+async fn audit_verify_without_runs_returns_two() {
+    let home = tempfile::tempdir().unwrap();
+    let output = tokio::process::Command::new(binary())
+        .args(["audit", "verify", "--runs-dir"])
+        .arg(home.path())
+        .output()
+        .await
+        .expect("spawn audit verify without runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("summary\tinvalid"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn audit_e2e_thirty_five_judge_calls() {
-    let Some(moagan_bin) = moagan_bin() else {
-        eprintln!("skipping e2e audit test: moagan binary not built");
-        return;
-    };
-    let server = boot_mock().await;
-    let upstream = format!("{}/v1", server.uri());
-    let mock_dir = tempfile::tempdir().unwrap();
-    write_mock_response_dir(mock_dir.path());
-    let home_dir = tempfile::tempdir().unwrap();
-
-    // 1. Boot the audit sidecar WITHOUT --run-id so its background
-    // poller dynamically discovers whatever run `moagan run` is
-    // about to create. The poller polls every 200 ms.
-    let mut proxy = tokio::process::Command::new(&moagan_bin)
-        .arg("audit")
-        .arg("proxy")
-        .arg("--port")
-        .arg("0")
-        .arg("--upstream")
-        .arg(&upstream)
-        .arg("--runs-dir")
-        .arg(home_dir.path())
+async fn sidecar_survives_a_sigkill_of_moagan_run() {
+    let server = boot_mock_with_delay(Duration::from_millis(250)).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut proxy = tokio::process::Command::new(binary())
+        .args([
+            "audit",
+            "proxy",
+            "--port",
+            "0",
+            "--upstream",
+            &format!("{}/anthropic/v1", server.uri()),
+            "--runs-dir",
+        ])
+        .arg(home.path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn moagan audit proxy");
-    let mut proxy_err = proxy.stderr.take().unwrap();
-    let mut buf = String::new();
-    use tokio::io::AsyncBufReadExt;
-    let mut reader = tokio::io::BufReader::new(&mut proxy_err);
-    let _ = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut buf)).await;
-    eprintln!("proxy stderr first line: {buf:?}");
-    while !buf.contains("proxy listening") {
-        let mut next = String::new();
-        let r = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut next)).await;
-        if r.is_err() {
-            break;
-        }
-        if next.is_empty() {
-            break;
-        }
-        buf.push_str(&next);
-        if buf.contains("proxy listening") {
-            break;
-        }
-    }
-    eprintln!("proxy stderr first line: {buf:?}");
-    let port = match read_port_from_stderr(&buf) {
-        Some(p) => p,
-        None => {
-            eprintln!("could not read proxy port");
-            return;
-        }
-    };
-    eprintln!("proxy_port={port}");
-    eprintln!("stderr_so_far:\n{buf}");
-    // 2. Run a deep mode run that points at the sidecar.
-    let run_output = tokio::process::Command::new(&moagan_bin)
-        .arg("run")
-        .arg("--mode")
-        .arg("deep")
-        .arg("--provider")
-        .arg("minimax")
-        .arg("--prompt")
-        .arg("List the seven rainbow colors in order")
-        .arg("--runs-dir")
-        .arg(home_dir.path())
-        .arg("--max-parallelism")
-        .arg("4")
+        .unwrap();
+    let stderr = proxy.stderr.take().unwrap();
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let first_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let port = parse_proxy_port(&first_line);
+    let stderr_drain =
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+
+    let mut run = tokio::process::Command::new(binary())
+        .args([
+            "run",
+            "--mode",
+            "deep",
+            "--provider",
+            "minimax",
+            "--prompt",
+            "Crash durability probe",
+            "--runs-dir",
+        ])
+        .arg(home.path())
+        .args(["--max-parallelism", "4"])
         .env(
             "MOAGAN_MINIMAX_ENDPOINT",
-            format!("http://127.0.0.1:{port}/v1"),
+            format!("http://127.0.0.1:{port}/anthropic/v1"),
         )
-        .env("MOAGAN_MINIMAX_API_KEY", "test-key")
+        .env("MINIMAX_API_KEY", "test-key")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let mut observed_run = None;
+    for _ in 0..500 {
+        if let Some(run_id) = try_latest_run(home.path()) {
+            let audit_path = home
+                .path()
+                .join(".runs")
+                .join(run_id.to_string())
+                .join("telemetry")
+                .join("external_audit.jsonl.gz");
+            if moagan::storage::compression::read_to_string(&audit_path)
+                .is_ok_and(|text| text.contains("\"event\":\"request\""))
+            {
+                observed_run = Some(run_id);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let run_id = observed_run.expect("run never reached the sidecar");
+    let run_pid = run.id().unwrap();
+    assert!(
+        tokio::process::Command::new("kill")
+            .args(["-KILL", &run_pid.to_string()])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    let run_status = run.wait().await.unwrap();
+    assert!(!run_status.success());
+    assert!(proxy.try_wait().unwrap().is_none());
+
+    let direct = direct_post(port, br#"{"model":"probe"}"#).await;
+    assert!(String::from_utf8_lossy(&direct).starts_with("HTTP/1.1 200"));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let proxy_pid = proxy.id().unwrap();
+    assert!(
+        tokio::process::Command::new("kill")
+            .args(["-TERM", &proxy_pid.to_string()])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), proxy.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    stderr_drain.await.unwrap();
+
+    let audit_path = home
+        .path()
+        .join(".runs")
+        .join(run_id.to_string())
+        .join("telemetry")
+        .join("external_audit.jsonl.gz");
+    let audit = moagan::storage::compression::read_to_string(&audit_path).unwrap();
+    let requests = audit
+        .lines()
+        .filter(|line| line.contains("\"event\":\"request\""))
+        .count();
+    let terminals = audit
+        .lines()
+        .filter(|line| {
+            line.contains("\"event\":\"response\"") || line.contains("\"event\":\"upstream_error\"")
+        })
+        .count();
+    assert!(requests >= 2, "{audit}");
+    assert_eq!(requests, terminals, "{audit}");
+    assert_eq!(count_invalid_crcs(&audit).0, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audit_e2e_deep_run_has_exact_external_coverage() {
+    let server = boot_mock().await;
+    let home = tempfile::tempdir().unwrap();
+    let mut proxy = tokio::process::Command::new(binary())
+        .args([
+            "audit",
+            "proxy",
+            "--port",
+            "0",
+            "--upstream",
+            &format!("{}/anthropic/v1", server.uri()),
+            "--runs-dir",
+        ])
+        .arg(home.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn audit proxy");
+    let stderr = proxy.stderr.take().expect("proxy stderr pipe");
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let first_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("proxy startup timeout")
+        .expect("read proxy stderr")
+        .expect("proxy exited before announcing address");
+    assert!(first_line.contains("proxy listening"), "{first_line}");
+    let port = parse_proxy_port(&first_line);
+    let stderr_drain = tokio::spawn(async move {
+        let mut output = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output
+    });
+
+    let run = tokio::process::Command::new(binary())
+        .args([
+            "run",
+            "--mode",
+            "deep",
+            "--provider",
+            "minimax",
+            "--prompt",
+            "List the seven rainbow colors in order",
+            "--runs-dir",
+        ])
+        .arg(home.path())
+        .args(["--max-parallelism", "4"])
+        .env(
+            "MOAGAN_MINIMAX_ENDPOINT",
+            format!("http://127.0.0.1:{port}/anthropic/v1"),
+        )
         .env("MINIMAX_API_KEY", "test-key")
         .env("RUST_LOG", "info,moagan=error")
-        .env("MOAGAN_HOME", home_dir.path())
+        .env("MOAGAN_HOME", home.path())
         .output()
         .await
         .expect("spawn moagan run");
-    // Give the poller a final chance to flush any in-flight writer
-    // swap before we kill the proxy.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let _ = proxy.kill().await;
-    if !run_output.status.success() {
-        eprintln!(
-            "moagan run failed: status={:?} stderr={}",
-            run_output.status,
-            String::from_utf8_lossy(&run_output.stderr)
-        );
-        return;
-    }
-    let run_dir = std::path::PathBuf::from(home_dir.path()).join(".runs");
-    eprintln!(
-        "moagan run stdout: {}",
-        String::from_utf8_lossy(&run_output.stdout)
-    );
-    let mut entries: Vec<_> = std::fs::read_dir(&run_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
-    entries.sort_by_key(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok());
-    let run_id: RunId = entries
-        .last()
-        .unwrap()
-        .file_name()
-        .to_string_lossy()
-        .parse()
-        .unwrap();
-    let audit_path = std::path::PathBuf::from(home_dir.path())
-        .join(".runs")
-        .join(format!("{run_id}"))
-        .join("telemetry")
-        .join("external_audit.jsonl");
     assert!(
-        audit_path.exists(),
-        "audit file not found at {}",
-        audit_path.display()
+        run.status.success(),
+        "run failed: status={:?}\nstdout={}\nstderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
     );
-    let text = std::fs::read_to_string(&audit_path).unwrap();
-    let req_count = text
-        .lines()
-        .filter(|l| l.contains("\"event\":\"request\""))
-        .count();
-    eprintln!("req_count={req_count}");
-    assert!(
-        req_count >= 35,
-        "expected >= 35 request records, got {req_count}"
-    );
-    let (invalid, bad) = moagan::audit::format::count_invalid_crcs(&text);
-    assert_eq!(invalid, 0, "audit file has invalid CRCs: {bad:?}");
 
-    // 3. Verify with `moagan audit verify`.
-    let verify = tokio::process::Command::new(&moagan_bin)
-        .arg("audit")
-        .arg("verify")
-        .arg("--runs-dir")
-        .arg(home_dir.path())
-        .arg("--run-id")
-        .arg(format!("{run_id}"))
-        .env("MOAGAN_HOME", home_dir.path())
+    let pid = proxy.id().expect("proxy pid");
+    let signal = tokio::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .await
+        .expect("send SIGTERM");
+    assert!(signal.success());
+    let proxy_status = tokio::time::timeout(Duration::from_secs(10), proxy.wait())
+        .await
+        .expect("proxy did not shut down after SIGTERM")
+        .expect("wait for proxy");
+    let proxy_stderr = stderr_drain.await.expect("join stderr drain");
+    assert!(
+        proxy_status.success(),
+        "proxy exited {:?}: {proxy_stderr}",
+        proxy_status.code()
+    );
+
+    let run_id = latest_run(home.path());
+    let run_root = home.path().join(".runs").join(run_id.to_string());
+    let audit_path = run_root.join("telemetry").join("external_audit.jsonl.gz");
+    assert!(audit_path.exists(), "missing {}", audit_path.display());
+    assert_eq!(&std::fs::read(&audit_path).unwrap()[..2], &[0x1f, 0x8b]);
+    let audit = moagan::storage::compression::read_to_string(&audit_path).unwrap();
+    let request_count = audit
+        .lines()
+        .filter(|line| line.contains("\"event\":\"request\""))
+        .count();
+    let response_count = audit
+        .lines()
+        .filter(|line| line.contains("\"event\":\"response\""))
+        .count();
+    assert!(
+        request_count >= 35,
+        "only {request_count} requests recorded"
+    );
+    assert_eq!(request_count, response_count);
+    assert_eq!(count_invalid_crcs(&audit).0, 0);
+
+    let calls_path = run_root.join("telemetry").join("calls.jsonl.gz");
+    let calls = moagan::storage::compression::read_to_string(&calls_path).unwrap();
+    let internal_http_count = calls
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| !event["cache_hit"].as_bool().unwrap_or(false))
+        .count();
+    assert_eq!(request_count, internal_http_count);
+
+    let verify = tokio::process::Command::new(binary())
+        .args(["audit", "verify", "--runs-dir"])
+        .arg(home.path())
+        .args(["--run-id", &run_id.to_string()])
+        .env("MOAGAN_HOME", home.path())
         .output()
         .await
-        .expect("spawn moagan audit verify");
-    let stdout = String::from_utf8_lossy(&verify.stdout);
-    eprintln!("verify stdout: {stdout}");
-    eprintln!("verify stderr: {}", String::from_utf8_lossy(&verify.stderr));
-    eprintln!("verify exit: {:?}", verify.status.code());
-    assert!(stdout.contains("metric\tvalue"));
-    // match_count must equal req_count / 2 (every request is paired
-    // with one response) and the summary must be "ok" or "mismatch"
-    // depending on the internal-vs-external body_canonical layout.
-    // In practice moagan's internal body_canonical is the canonical
-    // form of the request body and the sidecar uses the same
-    // canonical form, so we expect match_count >= 35 (35 judge
-    // calls each with a body_sha256 hit) and a clean exit.
-    let verify_status = verify.status.code().unwrap_or(-1);
-    assert!(
-        verify_status == 0 || verify_status == 1,
-        "verify exit was {verify_status}, want 0 or 1"
+        .expect("spawn audit verify");
+    let stdout = String::from_utf8(verify.stdout).unwrap();
+    assert_eq!(
+        verify.status.code(),
+        Some(0),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&verify.stderr)
     );
+    assert_eq!(metric(&stdout, "match_count"), request_count);
+    for name in [
+        "body_mismatch_count",
+        "orphan_request_count",
+        "orphan_response_count",
+        "unmatched_internal_count",
+        "unmatched_external_count",
+        "crc_invalid_count",
+    ] {
+        assert_eq!(metric(&stdout, name), 0, "{stdout}");
+    }
+    assert!(stdout.contains("summary\tok\n"), "{stdout}");
+    let tsv = std::fs::read_to_string(run_root.join("telemetry").join("external_audit.verify.tsv"))
+        .unwrap();
+    assert_eq!(tsv, stdout);
+
+    let extra_hash = sha256_hex(b"extra");
+    let mut extra_request = AuditRecord {
+        ts: 1.0,
+        event: "request".into(),
+        id: "extra-pair".into(),
+        method: Some("POST".into()),
+        url: Some("http://upstream/messages".into()),
+        status: None,
+        headers: Default::default(),
+        body_canonical: None,
+        body_sha256: extra_hash,
+        body_size: 5,
+        elapsed_ms: None,
+        crc32: String::new(),
+        error: None,
+    };
+    let mut extra_response = AuditRecord {
+        ts: 1.1,
+        event: "response".into(),
+        id: "extra-pair".into(),
+        method: None,
+        url: None,
+        status: Some(200),
+        headers: Default::default(),
+        body_canonical: None,
+        body_sha256: sha256_hex(b"ok"),
+        body_size: 2,
+        elapsed_ms: Some(1),
+        crc32: String::new(),
+        error: None,
+    };
+    let mut writer = AuditWriter::append(&audit_path).unwrap();
+    writer.write_record(&mut extra_request).unwrap();
+    writer.write_record(&mut extra_response).unwrap();
+    writer.flush_gz().unwrap();
+    let mismatch = tokio::process::Command::new(binary())
+        .args(["audit", "verify", "--runs-dir"])
+        .arg(home.path())
+        .args(["--run-id", &run_id.to_string()])
+        .env("MOAGAN_HOME", home.path())
+        .output()
+        .await
+        .expect("spawn mismatched-audit verify");
+    assert_eq!(mismatch.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&mismatch.stdout).contains("summary\tmismatch"));
+
+    std::fs::remove_file(&audit_path).unwrap();
+    let missing = tokio::process::Command::new(binary())
+        .args(["audit", "verify", "--runs-dir"])
+        .arg(home.path())
+        .args(["--run-id", &run_id.to_string()])
+        .env("MOAGAN_HOME", home.path())
+        .output()
+        .await
+        .expect("spawn missing-audit verify");
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("summary\tinvalid"));
 }
