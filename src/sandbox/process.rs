@@ -206,6 +206,18 @@ impl Sandbox {
         &self.config
     }
 
+    /// Allocate a fresh scratch directory owned by the caller.
+    ///
+    /// Use this when a validator needs to drop files (e.g. a Cargo
+    /// project layout) into the sandbox BEFORE invoking a command.
+    /// The returned [`TempDir`] is independent of the scratch dirs
+    /// that [`Sandbox::run`] creates per invocation; callers that
+    /// want the layout visible to the spawned process must hand
+    /// the path explicitly to [`Sandbox::run_in`].
+    pub fn new_workdir(&self) -> Result<TempDir> {
+        Ok(TempDir::new()?)
+    }
+
     /// Execute `cmd` with `args` inside a fresh scratch directory.
     ///
     /// Policy:
@@ -218,7 +230,21 @@ impl Sandbox {
     /// 4. Stdout/stderr are captured up to the configured cap.
     /// 5. The wall-clock timeout from the config is enforced via
     ///    `tokio::time::timeout`.
+    ///
+    /// The scratch directory is created and cleaned up inside this
+    /// call. If you need to populate the directory with files (e.g.
+    /// a Cargo project layout) before running the command, use
+    /// [`Sandbox::new_workdir`] plus [`Sandbox::run_in`].
     pub async fn run(&self, cmd: &str, args: &[&str]) -> Result<SandboxResult> {
+        let work = self.new_workdir()?;
+        self.run_in(work.path(), cmd, args).await
+    }
+
+    /// Execute `cmd` with `args` inside the supplied `work_dir`. The
+    /// directory's contents are visible to the spawned process and
+    /// the process's CWD is set to it. The caller retains ownership
+    /// of `work_dir` and decides when to drop it.
+    pub async fn run_in(&self, work_dir: &Path, cmd: &str, args: &[&str]) -> Result<SandboxResult> {
         let started = Instant::now();
         let argv: Vec<String> = std::iter::once(cmd.to_owned())
             .chain(args.iter().map(|s| (*s).to_owned()))
@@ -246,9 +272,6 @@ impl Sandbox {
             ));
         }
 
-        let work_dir = TempDir::new()?;
-        let work_path = work_dir.path().to_path_buf();
-
         let (stdout_cap, stderr_cap) = match self.config.max_capture_bytes {
             Some(n) => (n, n),
             None => (MAX_STDOUT_BYTES, MAX_STDERR_BYTES),
@@ -257,13 +280,13 @@ impl Sandbox {
         let mut command = Command::new(cmd);
         command
             .args(args)
-            .current_dir(&work_path)
+            .current_dir(work_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let env = self.build_env(&work_path);
+        let env = self.build_env(work_dir);
         command.env_clear();
         for (k, v) in &env {
             command.env(k, v);
@@ -374,11 +397,6 @@ impl Sandbox {
             None => Vec::new(),
         };
 
-        // `TempDir` is dropped here; the scratch directory is removed
-        // unless `keep` is set. Holding it on the Sandbox would
-        // survive the `run` call, which we don't want.
-        drop(work_dir);
-
         Ok(SandboxResult::new(
             exit_code,
             String::from_utf8_lossy(&stdout_bytes).into_owned(),
@@ -394,14 +412,23 @@ impl Sandbox {
     /// Strategy:
     /// - Copy inherited env, run [`SandboxConfig::strip_secrets_env`]
     ///   to drop anything that smells like a credential.
-    /// - Force `PATH` to the standard system paths so the child does
-    ///   not get a poisoned search path.
+    /// - Force `PATH` to start with the standard system paths so the
+    ///   child does not get a poisoned search path, then preserve the
+    ///   inherited PATH so user-installed toolchains (`rustup`,
+    ///   `cargo`) remain reachable.
     /// - Force `HOME` to the scratch directory so the child cannot
     ///   leak the real user's home contents.
     fn build_env(&self, work_path: &Path) -> std::collections::HashMap<String, String> {
         let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
         self.config.strip_secrets_env(&mut env);
-        env.insert("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into());
+        let inherited_path = env
+            .get("PATH")
+            .cloned()
+            .unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+        env.insert(
+            "PATH".into(),
+            format!("/usr/local/bin:/usr/bin:/bin:{inherited_path}"),
+        );
         env.insert("HOME".into(), work_path.to_string_lossy().into_owned());
         env
     }
