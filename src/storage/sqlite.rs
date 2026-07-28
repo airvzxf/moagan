@@ -28,6 +28,10 @@ mod sql_v003 {
     pub(super) const V003: &str = include_str!("migrations/v003_calls_status.sql");
 }
 
+mod sql_v004 {
+    pub(super) const V004: &str = include_str!("migrations/v004_calls_body_sha256.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -106,6 +110,10 @@ impl Db {
         if current < 3 {
             conn.execute_batch(sql_v003::V003)?;
             conn.execute_batch("PRAGMA user_version = 3;")?;
+        }
+        if current < 4 {
+            conn.execute_batch(sql_v004::V004)?;
+            conn.execute_batch("PRAGMA user_version = 4;")?;
         }
         Ok(())
     }
@@ -192,21 +200,23 @@ impl Db {
         provider: &str,
         model: &str,
         cache_key: &str,
+        body_sha256: Option<&str>,
         cache_hit: bool,
         http_status: Option<i64>,
         input_tokens: u64,
         output_tokens: u64,
         cache_read: u64,
         cache_creation: u64,
+        started_unix: i64,
+        ended_unix: i64,
         error: Option<&str>,
     ) -> Result<()> {
         let conn = self.pool.get()?;
-        let now = crate::time::now_unix_secs();
         let http_status_u16 = http_status.and_then(|s| u16::try_from(s).ok());
         let status = call_status(http_status_u16, error);
         conn.execute(
-            "INSERT INTO calls (call_id, run_id, phase, role, provider, model, cache_key, cache_hit, http_status, input_tokens, output_tokens, cache_read, cache_creation, started_unix, ended_unix, error, status) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO calls (call_id, run_id, phase, role, provider, model, cache_key, body_sha256, cache_hit, http_status, input_tokens, output_tokens, cache_read, cache_creation, started_unix, ended_unix, error, status) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 call_id,
                 run_id.to_string(),
@@ -215,14 +225,15 @@ impl Db {
                 provider,
                 model,
                 cache_key,
+                body_sha256,
                 cache_hit as i64,
                 http_status,
                 input_tokens as i64,
                 output_tokens as i64,
                 cache_read as i64,
                 cache_creation as i64,
-                now,
-                now,
+                started_unix,
+                ended_unix,
                 error,
                 status,
             ],
@@ -434,9 +445,9 @@ impl Db {
     pub fn list_calls_for_run(&self, run_id: RunId) -> Result<Vec<CallRow>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT call_id, phase, role, provider, model, cache_key, cache_hit, http_status, \
-                    input_tokens, output_tokens, cache_read, cache_creation, started_unix, \
-                    ended_unix, error \
+            "SELECT call_id, phase, role, provider, model, cache_key, body_sha256, cache_hit, http_status, \
+                     input_tokens, output_tokens, cache_read, cache_creation, started_unix, \
+                     ended_unix, error \
              FROM calls WHERE run_id = ? ORDER BY started_unix ASC",
         )?;
         let rows = stmt
@@ -448,15 +459,16 @@ impl Db {
                     provider: r.get(3)?,
                     model: r.get(4)?,
                     cache_key: r.get(5)?,
-                    cache_hit: r.get(6)?,
-                    http_status: r.get::<_, Option<i64>>(7)?.map(|v| v as u16),
-                    input_tokens: r.get::<_, i64>(8)? as u64,
-                    output_tokens: r.get::<_, i64>(9)? as u64,
-                    cache_read: r.get::<_, i64>(10)? as u64,
-                    cache_creation: r.get::<_, i64>(11)? as u64,
-                    started_unix: r.get(12)?,
-                    ended_unix: r.get::<_, Option<i64>>(13)?,
-                    error: r.get(14)?,
+                    body_sha256: r.get(6)?,
+                    cache_hit: r.get(7)?,
+                    http_status: r.get::<_, Option<i64>>(8)?.map(|v| v as u16),
+                    input_tokens: r.get::<_, i64>(9)? as u64,
+                    output_tokens: r.get::<_, i64>(10)? as u64,
+                    cache_read: r.get::<_, i64>(11)? as u64,
+                    cache_creation: r.get::<_, i64>(12)? as u64,
+                    started_unix: r.get(13)?,
+                    ended_unix: r.get::<_, Option<i64>>(14)?,
+                    error: r.get(15)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -515,6 +527,8 @@ pub struct CallRow {
     /// Canonical cache key (BLAKE3) when the call went through the
     /// cross-run cache.
     pub cache_key: String,
+    /// SHA-256 of the exact HTTP request body.
+    pub body_sha256: Option<String>,
     /// `1` when the response was served from cache, `0` otherwise.
     pub cache_hit: i64,
     /// HTTP status from the provider (`None` on transport failure).
@@ -612,7 +626,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
     }
 
     #[test]
@@ -645,17 +659,25 @@ mod tests {
             "mock",
             "mock-model",
             "cache-key-1",
+            Some("sha256"),
             false,
             Some(200),
             0,
             0,
             0,
             0,
+            100,
+            101,
             None,
         )
         .unwrap();
         let runs = db.list_runs(10).unwrap();
         assert_eq!(runs.len(), 1);
+        let calls = db.list_calls_for_run(id).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].body_sha256.as_deref(), Some("sha256"));
+        assert_eq!(calls[0].started_unix, 100);
+        assert_eq!(calls[0].ended_unix, Some(101));
     }
 
     /// The pipeline writes three events per phase (start, end, error)

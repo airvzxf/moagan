@@ -27,7 +27,7 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
 rustls = "0.23"
 sha2 = "0.10"
 blake3 = "1.5"
@@ -68,3 +68,5 @@ wiremock = "0.6"
 insta = { version = "1.39", features = ["yaml"] }
 assert_cmd = "2"
 pollster = "0.4"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "io-util", "time"] }
+rustls = "0.23"
