@@ -57,7 +57,7 @@ use crate::error::Result;
 use crate::sandbox::Sandbox;
 
 /// Verdict a validator returns for a single proposal.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ValidationStatus {
     /// All hard checks passed. Default variant so a freshly
     /// constructed empty evidence never reads as `Error`.
@@ -91,7 +91,7 @@ impl ValidationStatus {
 }
 
 /// Aggregated evidence returned by every validator.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ValidationEvidence {
     /// Validator name (e.g. `"structural"`, `"rust"`).
     pub validator: String,

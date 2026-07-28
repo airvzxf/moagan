@@ -65,11 +65,20 @@ impl Phase for RepairPhase {
             if !file_name.ends_with(".json") || file_name.ends_with(".meta.json") {
                 continue;
             }
+            // Skip sidecar files written by sibling phases. The
+            // validate phase persists `p_<id>.evidence.json` here
+            // and the gate phase persists `p_<id>.json`. Anything
+            // else (e.g. `p_<id>.evidence.json` or future audit
+            // files) is not a Gate artefact and must not be parsed
+            // as one.
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem.contains('.') {
+                continue;
+            }
             let gate: Gate = read_json(&path)?;
             if gate.pass {
                 continue;
             }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let proposal_path: PathBuf = proposals_dir.join(format!("{stem}.json"));
             let proposal: Proposal = read_json(&proposal_path)?;
             entries.push((path, proposal, gate));

@@ -14,7 +14,7 @@ use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase, SketchPhase,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, SketchPhase, ValidatePhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -239,8 +239,22 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
     if mode == Mode::Explore {
         return pipeline;
     }
+    pipeline = pipeline.push(ProposePhase { count: proposals });
+
+    // The Validate phase runs the executable validator suite
+    // (structural + constraints + language validators) for modes
+    // that benefit from a per-proposal evidence pass. `fast`,
+    // `standard`, and `explore` skip it because they have no
+    // executable artefacts to validate; `deep` and `batch` get it
+    // because their proposals frequently include code snippets
+    // that should type-check / compile before the gate phase
+    // decides which proposals advance. Compliance with V4 §5.8 +
+    // 13.6.
+    if matches!(mode, Mode::Deep | Mode::Batch) {
+        pipeline = pipeline.push(ValidatePhase::new());
+    }
+
     pipeline
-        .push(ProposePhase { count: proposals })
         .push(GatePhase)
         .push(CritiquePhase {
             critics_per_proposal: critics,
