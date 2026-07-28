@@ -81,7 +81,9 @@ impl Role {
             Self::Sketch => {
                 "Sketch: {thesis, key_decisions[], architecture_outline, assumptions[], strengths[], weaknesses[], hard_constraint_check{}, expected_validation}"
             }
-            Self::Propose => "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+            Self::Propose => {
+                "Proposal: {id, summary, approach, tradeoffs[], evidence[], artifacts[]{kind,language,source}?}"
+            }
             Self::Gate => "Gate: {pass, issues[], missing[]}",
             Self::Critique => "Critique: {verdict, issues[], suggestions[]}",
             Self::Repair => "Repair: {id, summary, approach, tradeoffs[], evidence[], changes[]}",

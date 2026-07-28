@@ -100,7 +100,7 @@ impl Phase for ProposePhase {
                         Role::Propose,
                         system_arc.as_str().to_owned(),
                         user_with_id,
-                        "Proposal: {id, summary, approach, tradeoffs[], evidence[]}",
+                        "Proposal: {id, summary, approach, tradeoffs[], evidence[], artifacts[]{kind,language,source}}",
                         5,
                     )
                     .await?;
