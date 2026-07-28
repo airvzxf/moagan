@@ -112,10 +112,46 @@ impl RustValidator {
                     clippy_status,
                     &clippy_result,
                 );
+
+                if clippy_status == ValidationStatus::Pass {
+                    // Step 4: `cargo test --offline`. A artifact
+                    // that declares no #[test] does not earn a
+                    // Fail — proposal-01-concept.md §5.8 says
+                    // "Un test ausente no equivale a test
+                    // aprobado", and the corollary is that the
+                    // absence of tests must be visible (not
+                    // confused with a pass). The validator runs
+                    // the full `cargo test` and inspects the
+                    // output afterwards to surface the no-tests
+                    // marker.
+                    let test_result = sandbox
+                        .run_in(work.path(), "cargo", &["test", "--offline"])
+                        .await?;
+                    let test_status = status_from_sandbox(test_result.status);
+                    let no_tests = test_count_is_zero(&test_result.stderr, &test_result.stdout);
+                    record_step(
+                        &mut evidence,
+                        "cargo test --offline",
+                        test_status,
+                        &test_result,
+                    );
+                    if no_tests && test_status == ValidationStatus::Pass {
+                        evidence
+                            .skipped_checks
+                            .push("no tests declared in artifact".into());
+                    }
+                } else {
+                    evidence
+                        .skipped_checks
+                        .push("cargo test --offline (prior step failed)".into());
+                }
             } else {
                 evidence
                     .skipped_checks
                     .push("cargo clippy --offline -- -D warnings (prior step failed)".into());
+                evidence
+                    .skipped_checks
+                    .push("cargo test --offline (prior step failed)".into());
             }
         } else {
             evidence
@@ -124,6 +160,9 @@ impl RustValidator {
             evidence
                 .skipped_checks
                 .push("cargo clippy --offline -- -D warnings (prior step failed)".into());
+            evidence
+                .skipped_checks
+                .push("cargo test --offline (prior step failed)".into());
         }
 
         if let Some(v) = capture_tool_version(sandbox, "cargo").await {
@@ -131,6 +170,28 @@ impl RustValidator {
         }
         Ok(evidence)
     }
+}
+
+/// True when `cargo test --no-run` produced no test cases. cargo
+/// prints `running 0 tests` to stdout for each test binary. We
+/// also accept the older "Running 0 tests" form for completeness.
+/// A missing test binary or a build error returns false (the
+/// caller treats that as a real failure).
+fn test_count_is_zero(stderr: &str, stdout: &str) -> bool {
+    let combined = format!("{stderr}\n{stdout}");
+    let has_zero = combined.contains("running 0 tests")
+        || combined.contains("Running 0 tests")
+        || combined.contains("0 tests, 0 passed");
+    let has_at_least_one = combined.contains("running 1 test")
+        || combined.contains("running 2 tests")
+        || combined.contains("running 3 tests")
+        || combined.contains("running 4 tests")
+        || combined.contains("running 5 tests")
+        || combined.contains("running 6 tests")
+        || combined.contains("running 7 tests")
+        || combined.contains("running 8 tests")
+        || combined.contains("running 9 tests");
+    has_zero && !has_at_least_one
 }
 
 impl Validator for RustValidator {
@@ -349,8 +410,9 @@ mod tests {
         assert_eq!(ev.status, ValidationStatus::Pass);
         assert!(ev.command.is_some());
         assert_eq!(ev.exit_code, Some(0));
-        // The three toolchain steps must all have run for a clean
-        // artifact.
+        // The three pre-test toolchain steps must all have run for
+        // a clean artifact. The fourth step (test) is either run
+        // or recorded as a no-tests-declared marker.
         let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
         assert!(labels.iter().any(|l| l.contains("cargo check --offline")));
         assert!(labels.iter().any(|l| l.contains("cargo fmt --check")));
@@ -358,6 +420,10 @@ mod tests {
             labels
                 .iter()
                 .any(|l| l.contains("cargo clippy --offline -- -D warnings"))
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("cargo test --offline")),
+            "cargo test step must be recorded; got {labels:?}"
         );
         // The reproducibility field records the cargo version that
         // produced the verdict. Skip the assertion when capture
@@ -388,12 +454,12 @@ mod tests {
         assert!(ev.stderr_summary.contains("error"));
     }
 
-    /// When the first step (`cargo check`) fails the remaining two
+    /// When the first step (`cargo check`) fails the remaining
     /// steps must be reported as skipped so the sidecar accurately
     /// describes what ran. The verdict stays `Fail` and the failing
     /// step is the one whose stdout/stderr is preserved.
     #[test]
-    fn broken_rust_skips_fmt_and_clippy_after_check_failure() {
+    fn broken_rust_skips_remaining_steps_after_check_failure() {
         if std::process::Command::new("cargo")
             .arg("--version")
             .output()
@@ -420,6 +486,10 @@ mod tests {
                 .any(|s| s.contains("cargo clippy --offline -- -D warnings")),
             "clippy must be skipped when check fails, got {skipped:?}"
         );
+        assert!(
+            skipped.iter().any(|s| s.contains("cargo test --offline")),
+            "test must be skipped when check fails, got {skipped:?}"
+        );
         let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
         assert!(
             !labels.iter().any(|l| l.contains("cargo fmt --check")),
@@ -428,6 +498,10 @@ mod tests {
         assert!(
             !labels.iter().any(|l| l.contains("cargo clippy")),
             "clippy must not appear in checks_run when skipped, got {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("cargo test --offline")),
+            "test must not appear in checks_run when skipped, got {labels:?}"
         );
     }
 
@@ -452,14 +526,167 @@ mod tests {
             .unwrap();
         assert_eq!(ev.status, ValidationStatus::Pass);
         let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "cargo check --offline",
-                "cargo fmt --check",
-                "cargo clippy --offline -- -D warnings",
-            ]
+        // The first three steps are always check / fmt / clippy;
+        // the fourth step is the cargo test invocation (either
+        // a real run or a "no tests declared" marker).
+        assert!(labels.iter().any(|l| l.contains("cargo check --offline")));
+        assert!(labels.iter().any(|l| l.contains("cargo fmt --check")));
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("cargo clippy --offline -- -D warnings"))
         );
+        assert!(
+            labels.iter().any(|l| l.contains("cargo test --offline")),
+            "test step must appear in checks_run; got {labels:?}"
+        );
+    }
+
+    /// The fixture `good_rust` declares no #[test]. The validator
+    /// must report Pass (compiling is enough) AND surface the
+    /// "no tests declared" marker so the deliver phase can tell
+    /// the difference between "tests passed" and "no tests".
+    #[test]
+    fn rust_validator_marks_no_tests_as_skipped() {
+        if std::process::Command::new("cargo")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ev = rt
+            .block_on(RustValidator::check(&good_rust(), &sandbox()))
+            .unwrap();
+        assert_eq!(ev.status, ValidationStatus::Pass);
+        assert!(
+            ev.skipped_checks
+                .iter()
+                .any(|c| c.contains("no tests declared")),
+            "no-tests artifact must surface 'no tests declared' in skipped_checks, got {:?}",
+            ev.skipped_checks
+        );
+    }
+
+    /// An artifact with a passing test must run the test and
+    /// report Pass.
+    #[test]
+    fn rust_validator_passes_when_test_passes() {
+        if std::process::Command::new("cargo")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let artifact = CodeArtifact::new(
+            "src/lib.rs",
+            "rust",
+            r#"pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adds_two_positive_numbers() {
+        assert_eq!(add(2, 3), 5);
+    }
+}
+"#,
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ev = rt
+            .block_on(RustValidator::check(&artifact, &sandbox()))
+            .unwrap();
+        assert_eq!(ev.status, ValidationStatus::Pass);
+        let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
+        // The "no tests declared" marker must NOT be present
+        // because this artifact has a test.
+        assert!(
+            !ev.skipped_checks
+                .iter()
+                .any(|c| c.contains("no tests declared")),
+            "artifact with tests must not show the no-tests marker, got {:?}",
+            ev.skipped_checks
+        );
+        // The test step must show up as a real run, not a
+        // skipped marker.
+        assert!(
+            labels.iter().any(|l| l == &"cargo test --offline"),
+            "test step must show as a real run when tests exist, got {labels:?}"
+        );
+    }
+
+    /// An artifact with a failing test must report Fail with the
+    /// test name in `failed_checks`.
+    #[test]
+    fn rust_validator_fails_when_test_fails() {
+        if std::process::Command::new("cargo")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let artifact = CodeArtifact::new(
+            "src/lib.rs",
+            "rust",
+            r#"pub fn broken() -> i32 {
+    42
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn this_one_fails() {
+        assert_eq!(broken(), 7);
+    }
+}
+"#,
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ev = rt
+            .block_on(RustValidator::check(&artifact, &sandbox()))
+            .unwrap();
+        assert_eq!(ev.status, ValidationStatus::Fail);
+        let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
+        assert!(
+            labels.iter().any(|l| l == &"cargo test --offline"),
+            "test step must show as a real run when tests exist, got {labels:?}"
+        );
+        assert!(
+            ev.failed_checks
+                .iter()
+                .any(|c| c.contains("cargo test --offline")),
+            "failing test must appear in failed_checks, got {:?}",
+            ev.failed_checks
+        );
+    }
+
+    #[test]
+    fn test_count_is_zero_recognises_cargo_output() {
+        // The actual cargo output goes to stdout, not stderr.
+        assert!(test_count_is_zero(
+            "",
+            "   Compiling adder v0.1.0\n    Finished test [unoptimized + debuginfo] target(s) in 0.5s\n     Running unittests src/lib.rs (target/debug/deps/adder-1234)\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        ));
+        assert!(!test_count_is_zero(
+            "",
+            "running 1 test\ntest tests::it_works ... ok\n",
+        ));
     }
 
     #[test]
