@@ -502,3 +502,88 @@ fn validate_phase_dispatches_sql_artifact() -> Result<()> {
 
     Ok(())
 }
+
+/// The Validate phase must dispatch a JSON Schema artifact to
+/// SchemaValidator and record the verdict. Uses the paired
+/// pattern (one `json-schema` artifact + one `json` artifact)
+/// since that is the most common case in real proposals.
+#[test]
+fn validate_phase_dispatches_schema_artifact() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    let schema_artifact = CodeArtifact::new(
+        "user.schema.json",
+        "json-schema",
+        r#"{
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+            "required": ["id", "name"]
+        }"#,
+    );
+    let data_artifact = CodeArtifact::new("user.json", "json", r#"{"id": 1, "name": "alice"}"#);
+    let proposal = moagan::domain::Proposal {
+        id: "p_000".into(),
+        summary: "A proposal that ships a JSON schema and matching data.".into(),
+        approach: "Validate the user payload against the schema.".into(),
+        tradeoffs: vec!["t".into()],
+        evidence: vec!["e".into()],
+        source_sketch: String::new(),
+        artifacts: vec![schema_artifact, data_artifact],
+    };
+    let proposals_dir = run_dir.proposals();
+    std::fs::create_dir_all(&proposals_dir)?;
+    write_json(&proposals_dir.join("p_000.json"), &proposal)?;
+
+    let provider = Arc::new(MockProvider::empty());
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let phase = ValidatePhase::new();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async { phase.execute(&ctx).await })?;
+    ctx.telemetry.flush()?;
+
+    let sidecar_path = run_dir.validation().join("evidence").join("p_000.json");
+    let raw = std::fs::read_to_string(&sidecar_path)?;
+    let sidecar: serde_json::Value = serde_json::from_str(&raw)?;
+    let schema_entry = sidecar
+        .get("validators")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|v| v.get("validator").and_then(|s| s.as_str()) == Some("schema"))
+        })
+        .expect("evidence must include a schema validator entry");
+    let status = schema_entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    assert_eq!(status, "Pass", "schema validator must report Pass");
+    let checks_run: Vec<String> = schema_entry
+        .get("checks_run")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        checks_run.iter().any(|c| c.contains("validated 1 pair")),
+        "schema validator must report one validated pair, got {checks_run:?}"
+    );
+
+    Ok(())
+}

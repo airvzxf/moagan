@@ -28,8 +28,8 @@ use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::read_json;
 use crate::sandbox::{Sandbox, SandboxConfig};
 use crate::validators::{
-    ConstraintsValidator, PythonValidator, RustValidator, SqlValidator, StructuralValidator,
-    TypeScriptValidator, ValidationEvidence, Validator,
+    ConstraintsValidator, PythonValidator, RustValidator, SchemaValidator, SqlValidator,
+    StructuralValidator, TypeScriptValidator, ValidationEvidence, Validator,
 };
 
 /// Sidecar schema persisted by the validate phase. Serialised as
@@ -171,6 +171,15 @@ impl Phase for ValidatePhase {
                     | SqlValidator::LANGUAGE_SQLITE
                     | SqlValidator::LANGUAGE_POSTGRES
                     | SqlValidator::LANGUAGE_MYSQL => SqlValidator::check(artifact, &sandbox).await,
+                    // The schema validator inspects the full set of
+                    // artifacts (it needs to pair a schema with a
+                    // data document). Dispatching it from the
+                    // per-artifact loop would only see one artifact
+                    // at a time, so we skip it here and run it
+                    // after the loop.
+                    SchemaValidator::LANGUAGE | SchemaValidator::LANGUAGE_JSON => {
+                        continue;
+                    }
                     other => Ok(ValidationEvidence::skipped(
                         other,
                         "no validator registered for this language",
@@ -180,6 +189,29 @@ impl Phase for ValidatePhase {
                     Ok(ev) => evidences.push(ev),
                     Err(e) => evidences.push(ValidationEvidence {
                         validator: lang.into(),
+                        status: crate::validators::ValidationStatus::Error,
+                        failed_checks: vec![format!("validator error: {e}")],
+                        ..ValidationEvidence::default()
+                    }),
+                }
+            }
+
+            // Schema validator: inspects the full set of artifacts
+            // to pair schemas with their data documents. Skip
+            // silently when no artifact claims a JSON Schema /
+            // JSON language so proposals without schemas keep a
+            // clean sidecar.
+            let has_schema_artifact = proposal.artifacts.iter().any(|a| {
+                a.language.eq_ignore_ascii_case(SchemaValidator::LANGUAGE)
+                    || a.language
+                        .eq_ignore_ascii_case(SchemaValidator::LANGUAGE_JSON)
+                    || a.kind == "json-schema+data"
+            });
+            if has_schema_artifact {
+                match SchemaValidator::check(&proposal.artifacts, &sandbox) {
+                    Ok(ev) => evidences.push(ev),
+                    Err(e) => evidences.push(ValidationEvidence {
+                        validator: "schema".into(),
                         status: crate::validators::ValidationStatus::Error,
                         failed_checks: vec![format!("validator error: {e}")],
                         ..ValidationEvidence::default()

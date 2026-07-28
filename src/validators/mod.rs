@@ -12,6 +12,7 @@
 pub mod constraints;
 pub mod python_validator;
 pub mod rust_validator;
+pub mod schema_validator;
 pub mod sql_validator;
 pub mod structural;
 pub mod typescript_validator;
@@ -19,6 +20,7 @@ pub mod typescript_validator;
 pub use constraints::ConstraintsValidator;
 pub use python_validator::PythonValidator;
 pub use rust_validator::RustValidator;
+pub use schema_validator::SchemaValidator;
 pub use sql_validator::SqlValidator;
 pub use structural::StructuralValidator;
 pub use typescript_validator::TypeScriptValidator;
