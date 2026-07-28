@@ -1,21 +1,35 @@
-//! Rust validator — runs `cargo check` in the sandbox.
+//! Rust validator — runs `cargo check`, `cargo fmt --check`, and
+//! `cargo clippy` in the sandbox.
 //!
 //! Strategy: drop the artifact's source into a freshly generated
 //! `Cargo.toml` + `src/main.rs` (or `src/lib.rs`) project inside the
-//! sandbox's temp dir and invoke `cargo check --offline`. The
-//! `--offline` flag prevents the validator from downloading crates
-//! from the network, keeping the run hermetic.
+//! sandbox's temp dir and run the three toolchain steps in order:
+//!
+//! 1. `cargo check --offline`
+//! 2. `cargo fmt --check`
+//! 3. `cargo clippy --offline -- -D warnings`
+//!
+//! The steps are gated: when a step fails, the remaining steps are
+//! recorded as `skipped_checks` (the prior failure short-circuits
+//! the work). The first failure dictates the verdict; if every
+//! step passes, the verdict is `Pass`.
+//!
+//! The `--offline` flag on `check` and `clippy` prevents the
+//! validator from downloading crates from the network, keeping
+//! the run hermetic. `fmt` is offline by design.
 //!
 //! Verdict mapping:
-//! - `cargo` missing on disk → `Skipped`
+//! - `cargo` missing on disk → `Skipped` for every step
 //! - `exit_code == 0` → `Pass`
-//! - non-zero exit → `Fail` (compile error)
+//! - non-zero exit → `Fail` (compile error / format drift / lint)
 //!
 //! The validator reports `command`, `exit_code`, `stdout_summary`,
-//! and `stderr_summary` so the deliver phase can surface the actual
-//! error to the user.
+//! and `stderr_summary` so the deliver phase can surface the
+//! actual error to the user.
 //!
-//! Compliance: `proposal-02-rust.md` §5.7 + §7.
+//! Compliance: `proposal-01-concept.md` §5.8 ("cargo fmt --check",
+//! "cargo check", "cargo clippy -- -D warnings") +
+//! `proposal-02-rust.md` §5.7 + §7.
 
 use std::fs;
 
@@ -38,8 +52,9 @@ impl RustValidator {
     /// to dispatch artifacts.
     pub const LANGUAGE: &'static str = "rust";
 
-    /// Run `cargo check --offline` against the artifact inside the
-    /// sandbox's scratch dir.
+    /// Run the Rust toolchain checks against the artifact inside
+    /// the sandbox's scratch dir. See module docs for the exact
+    /// step ordering and verdict mapping.
     pub async fn check(artifact: &CodeArtifact, sandbox: &Sandbox) -> Result<ValidationEvidence> {
         if !looks_like_rust_source(&artifact.source) {
             // Very loose sanity check: an empty / placeholder source
@@ -56,11 +71,61 @@ impl RustValidator {
         let work = sandbox.new_workdir()?;
         write_minimal_crate(work.path(), artifact)?;
 
-        let result = sandbox
+        let mut evidence = ValidationEvidence {
+            validator: "rust".into(),
+            status: ValidationStatus::Pass,
+            ..ValidationEvidence::default()
+        };
+
+        // Step 1: `cargo check --offline`.
+        let check_result = sandbox
             .run_in(work.path(), "cargo", &["check", "--offline"])
             .await?;
+        let check_status = status_from_sandbox(check_result.status);
+        record_step(
+            &mut evidence,
+            "cargo check --offline",
+            check_status,
+            &check_result,
+        );
 
-        let mut evidence = evidence_from_result(result);
+        // Steps 2 and 3 only run when step 1 passed.
+        if check_status == ValidationStatus::Pass {
+            let fmt_result = sandbox
+                .run_in(work.path(), "cargo", &["fmt", "--check"])
+                .await?;
+            let fmt_status = status_from_sandbox(fmt_result.status);
+            record_step(&mut evidence, "cargo fmt --check", fmt_status, &fmt_result);
+
+            if fmt_status == ValidationStatus::Pass {
+                let clippy_result = sandbox
+                    .run_in(
+                        work.path(),
+                        "cargo",
+                        &["clippy", "--offline", "--", "-D", "warnings"],
+                    )
+                    .await?;
+                let clippy_status = status_from_sandbox(clippy_result.status);
+                record_step(
+                    &mut evidence,
+                    "cargo clippy --offline -- -D warnings",
+                    clippy_status,
+                    &clippy_result,
+                );
+            } else {
+                evidence
+                    .skipped_checks
+                    .push("cargo clippy --offline -- -D warnings (prior step failed)".into());
+            }
+        } else {
+            evidence
+                .skipped_checks
+                .push("cargo fmt --check (prior step failed)".into());
+            evidence
+                .skipped_checks
+                .push("cargo clippy --offline -- -D warnings (prior step failed)".into());
+        }
+
         if let Some(v) = capture_tool_version(sandbox, "cargo").await {
             evidence.reproducibility.push(("cargo".into(), v));
         }
@@ -143,23 +208,40 @@ fn write_minimal_crate(root: &std::path::Path, artifact: &CodeArtifact) -> Resul
     Ok(())
 }
 
-fn evidence_from_result(result: SandboxResult) -> ValidationEvidence {
-    let mut evidence = ValidationEvidence {
-        validator: "rust".into(),
-        status: status_from_sandbox(result.status),
-        command: Some(result.command.clone()),
-        exit_code: Some(result.exit_code),
-        stdout_summary: tail(&result.stdout, 2_000),
-        stderr_summary: tail(&result.stderr, 2_000),
-        ..ValidationEvidence::default()
-    };
-    evidence.checks_run.push("cargo check --offline".into());
-    if result.status == SandboxStatus::Fail {
-        evidence
-            .failed_checks
-            .push("cargo check returned non-zero exit".into());
+/// Record one toolchain step into the running evidence. The first
+/// command + exit + stdout/stderr reported is from the failing
+/// step (or the last step if every step passed).
+fn record_step(
+    evidence: &mut ValidationEvidence,
+    label: &str,
+    status: ValidationStatus,
+    result: &SandboxResult,
+) {
+    evidence.checks_run.push(label.to_owned());
+    // Always update the headline command/exit/stdout/stderr so
+    // the deliver phase can show what produced the verdict. On
+    // Pass the last step wins; on Fail the failing step wins.
+    evidence.command = Some(result.command.clone());
+    evidence.exit_code = Some(result.exit_code);
+    evidence.stdout_summary = tail(&result.stdout, 2_000);
+    evidence.stderr_summary = tail(&result.stderr, 2_000);
+    match status {
+        ValidationStatus::Pass | ValidationStatus::Warn => {}
+        ValidationStatus::Fail => {
+            evidence.status = ValidationStatus::Fail;
+            evidence
+                .failed_checks
+                .push(format!("{label} returned non-zero exit"));
+        }
+        ValidationStatus::Skipped | ValidationStatus::Error => {
+            if evidence.status == ValidationStatus::Pass {
+                evidence.status = status;
+            }
+            evidence
+                .skipped_checks
+                .push(format!("{label} unavailable: {}", result.stderr));
+        }
     }
-    evidence
 }
 
 fn status_from_sandbox(status: SandboxStatus) -> ValidationStatus {
@@ -194,10 +276,12 @@ mod tests {
     }
 
     fn good_rust() -> CodeArtifact {
+        // Formatted the way `cargo fmt` would leave it so the
+        // `cargo fmt --check` step stays green.
         CodeArtifact::new(
             "src/lib.rs",
             "rust",
-            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
         )
     }
 
@@ -205,7 +289,7 @@ mod tests {
         CodeArtifact::new(
             "src/lib.rs",
             "rust",
-            "pub fn add(a: i32, b: i32) -> i32 { a + ; }\n",
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a + ;\n}\n",
         )
     }
 
@@ -265,6 +349,16 @@ mod tests {
         assert_eq!(ev.status, ValidationStatus::Pass);
         assert!(ev.command.is_some());
         assert_eq!(ev.exit_code, Some(0));
+        // The three toolchain steps must all have run for a clean
+        // artifact.
+        let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
+        assert!(labels.iter().any(|l| l.contains("cargo check --offline")));
+        assert!(labels.iter().any(|l| l.contains("cargo fmt --check")));
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("cargo clippy --offline -- -D warnings"))
+        );
         // The reproducibility field records the cargo version that
         // produced the verdict. Skip the assertion when capture
         // returned nothing (e.g. an isolated sandbox without
@@ -292,6 +386,80 @@ mod tests {
             .unwrap();
         assert_eq!(ev.status, ValidationStatus::Fail);
         assert!(ev.stderr_summary.contains("error"));
+    }
+
+    /// When the first step (`cargo check`) fails the remaining two
+    /// steps must be reported as skipped so the sidecar accurately
+    /// describes what ran. The verdict stays `Fail` and the failing
+    /// step is the one whose stdout/stderr is preserved.
+    #[test]
+    fn broken_rust_skips_fmt_and_clippy_after_check_failure() {
+        if std::process::Command::new("cargo")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ev = rt
+            .block_on(RustValidator::check(&broken_rust(), &sandbox()))
+            .unwrap();
+        assert_eq!(ev.status, ValidationStatus::Fail);
+        let skipped: Vec<&str> = ev.skipped_checks.iter().map(String::as_str).collect();
+        assert!(
+            skipped.iter().any(|s| s.contains("cargo fmt --check")),
+            "fmt must be skipped when check fails, got {skipped:?}"
+        );
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s.contains("cargo clippy --offline -- -D warnings")),
+            "clippy must be skipped when check fails, got {skipped:?}"
+        );
+        let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
+        assert!(
+            !labels.iter().any(|l| l.contains("cargo fmt --check")),
+            "fmt must not appear in checks_run when skipped, got {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("cargo clippy")),
+            "clippy must not appear in checks_run when skipped, got {labels:?}"
+        );
+    }
+
+    /// A well-formatted, lint-clean artifact must produce a Pass
+    /// verdict with all three steps in `checks_run` and the
+    /// `reproducibility` field populated with the cargo version.
+    #[test]
+    fn good_rust_runs_three_steps_in_order() {
+        if std::process::Command::new("cargo")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ev = rt
+            .block_on(RustValidator::check(&good_rust(), &sandbox()))
+            .unwrap();
+        assert_eq!(ev.status, ValidationStatus::Pass);
+        let labels: Vec<&str> = ev.checks_run.iter().map(String::as_str).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "cargo check --offline",
+                "cargo fmt --check",
+                "cargo clippy --offline -- -D warnings",
+            ]
+        );
     }
 
     #[test]
@@ -331,32 +499,35 @@ mod tests {
     }
 
     #[test]
-    fn evidence_from_result_maps_status() {
+    fn record_step_promotes_fail_to_evidence_status() {
+        let mut e = ValidationEvidence::default();
+        let r = SandboxResult {
+            exit_code: 101,
+            stdout: String::new(),
+            stderr: "boom".into(),
+            duration: std::time::Duration::from_millis(1),
+            status: SandboxStatus::Fail,
+            command: "cargo check".into(),
+        };
+        record_step(&mut e, "cargo check", ValidationStatus::Fail, &r);
+        assert_eq!(e.status, ValidationStatus::Fail);
+        assert!(e.failed_checks.iter().any(|c| c.contains("cargo check")));
+    }
+
+    #[test]
+    fn record_step_leaves_pass_alone() {
+        let mut e = ValidationEvidence::default();
         let r = SandboxResult {
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
             duration: std::time::Duration::from_millis(1),
             status: SandboxStatus::Pass,
-            command: "cargo check".into(),
+            command: "cargo fmt --check".into(),
         };
-        let e = evidence_from_result(r);
+        record_step(&mut e, "cargo fmt --check", ValidationStatus::Pass, &r);
         assert_eq!(e.status, ValidationStatus::Pass);
-        assert_eq!(e.exit_code, Some(0));
-    }
-
-    #[test]
-    fn evidence_from_result_maps_fail() {
-        let r = SandboxResult {
-            exit_code: 101,
-            stdout: String::new(),
-            stderr: "error[E0425]: ...".into(),
-            duration: std::time::Duration::from_millis(1),
-            status: SandboxStatus::Fail,
-            command: "cargo check".into(),
-        };
-        let e = evidence_from_result(r);
-        assert_eq!(e.status, ValidationStatus::Fail);
-        assert!(e.stderr_summary.contains("E0425"));
+        assert!(e.checks_run.iter().any(|c| c == "cargo fmt --check"));
+        assert!(e.failed_checks.is_empty());
     }
 }
