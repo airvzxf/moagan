@@ -10,10 +10,43 @@
 //! Compliance: `proposal-02-rust.md` §5.7 + §5.8.
 
 pub mod constraints;
+pub mod rust_validator;
 pub mod structural;
 
 pub use constraints::ConstraintsValidator;
+pub use rust_validator::RustValidator;
 pub use structural::StructuralValidator;
+
+/// A single piece of code attached to a proposal. The pipeline uses
+/// `language` to pick the right `CodeValidator`; `kind` is a free-form
+/// label (`"src/lib.rs"`, `"tests/smoke.py"`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeArtifact {
+    /// Logical name of the artifact (file path relative to the
+    /// proposal, or any human-readable identifier).
+    pub kind: String,
+    /// Programming language (`"rust"`, `"python"`, `"typescript"`,
+    /// `"sql"`, ...). Used to dispatch to the right validator.
+    pub language: String,
+    /// The actual source code. Validators feed this into the
+    /// sandboxed compiler / linter.
+    pub source: String,
+}
+
+impl CodeArtifact {
+    /// Build a new artifact from its three components.
+    pub fn new(
+        kind: impl Into<String>,
+        language: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            language: language.into(),
+            source: source.into(),
+        }
+    }
+}
 
 use crate::domain::Proposal;
 use crate::error::Result;
