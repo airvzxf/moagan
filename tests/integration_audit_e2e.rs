@@ -52,7 +52,6 @@ fn read_port_from_stderr(stderr: &str) -> Option<u16> {
     None
 }
 
-
 fn write_mock_response_dir(dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(dir);
     let body = json!({
@@ -103,11 +102,7 @@ fn moagan_bin() -> Option<std::path::PathBuf> {
         .parent()
         .unwrap()
         .join("moagan");
-    if bin.exists() {
-        Some(bin)
-    } else {
-        None
-    }
+    if bin.exists() { Some(bin) } else { None }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -180,21 +175,13 @@ async fn audit_e2e_thirty_five_judge_calls() {
     let mut buf = String::new();
     use tokio::io::AsyncBufReadExt;
     let mut reader = tokio::io::BufReader::new(&mut proxy_err);
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        reader.read_line(&mut buf),
-    )
-    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut buf)).await;
     eprintln!("proxy stderr first line: {buf:?}");
     // The proxy may emit a couple of lines; read until we see "proxy
     // listening" or hit the timeout.
     while !buf.contains("proxy listening") {
         let mut next = String::new();
-        let r = tokio::time::timeout(
-            Duration::from_secs(5),
-            reader.read_line(&mut next),
-        )
-        .await;
+        let r = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut next)).await;
         if r.is_err() {
             break;
         }
@@ -229,7 +216,10 @@ async fn audit_e2e_thirty_five_judge_calls() {
         .arg(home_dir.path())
         .arg("--max-parallelism")
         .arg("4")
-        .env("MOAGAN_MINIMAX_ENDPOINT", format!("http://127.0.0.1:{port}/v1"))
+        .env(
+            "MOAGAN_MINIMAX_ENDPOINT",
+            format!("http://127.0.0.1:{port}/v1"),
+        )
         .env("MOAGAN_MINIMAX_API_KEY", "test-key")
         .env("MINIMAX_API_KEY", "test-key")
         .env("RUST_LOG", "info,moagan=error")
@@ -238,7 +228,6 @@ async fn audit_e2e_thirty_five_judge_calls() {
         .await
         .expect("spawn moagan run");
     let _ = proxy.kill().await;
-    let run_dir = std::path::PathBuf::from(home_dir.path()).join(".runs");
     if !run_output.status.success() {
         eprintln!(
             "moagan run failed: status={:?} stderr={}",
@@ -248,7 +237,10 @@ async fn audit_e2e_thirty_five_judge_calls() {
         return;
     }
     let run_dir = std::path::PathBuf::from(home_dir.path()).join(".runs");
-    eprintln!("moagan run stdout: {}", String::from_utf8_lossy(&run_output.stdout));
+    eprintln!(
+        "moagan run stdout: {}",
+        String::from_utf8_lossy(&run_output.stdout)
+    );
     let mut entries: Vec<_> = std::fs::read_dir(&run_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -258,7 +250,13 @@ async fn audit_e2e_thirty_five_judge_calls() {
     // sidecar was started with no --run-id, so it picked the
     // first run it found. We do the same and read the latest run
     // directory to find the deep run's output.
-    let run_id: RunId = entries.last().unwrap().file_name().to_string_lossy().parse().unwrap();
+    let run_id: RunId = entries
+        .last()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .parse()
+        .unwrap();
     let _ = run_id;
     let audit_path = std::path::PathBuf::from(home_dir.path())
         .join(".runs")
@@ -298,4 +296,3 @@ async fn audit_e2e_thirty_five_judge_calls() {
     assert!(stdout.contains("metric\tvalue"));
     let _ = compression::read_to_string;
 }
-

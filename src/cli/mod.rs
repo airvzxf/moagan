@@ -228,6 +228,7 @@ pub enum Cmd {
     /// subcommand cross-checks the recorded JSONL against Moagan's
     /// internal calls.
     Audit {
+        /// Audit subcommand (`proxy` or `verify`).
         #[command(subcommand)]
         sub: AuditCmd,
     },

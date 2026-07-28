@@ -16,6 +16,10 @@ use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 
+/// `moagan audit proxy` — bind 127.0.0.1:<port>, forward to
+/// `--upstream`, append every request/response to
+/// `<run_dir>/telemetry/external_audit.jsonl`. SIGINT/SIGTERM
+/// triggers a clean shutdown.
 #[derive(Debug, Clone)]
 pub struct ProxyArgs {
     /// Override MOAGAN_HOME.
@@ -37,6 +41,9 @@ pub struct ProxyArgs {
     pub timeout_secs: u64,
 }
 
+/// `moagan audit verify` — cross-check the sidecar JSONL against
+/// Moagan's internal `calls.jsonl.gz` + SQLite, write a TSV summary,
+/// return the exit code (0 ok, 1 mismatch/orphans, 2 missing/invalid).
 #[derive(Debug, Clone)]
 pub struct VerifyArgs {
     /// Override MOAGAN_HOME.
@@ -73,7 +80,7 @@ fn pick_latest_run(home: &MoaganHome) -> Result<RunId> {
             name.parse::<RunId>().ok().map(|id| (id, e.path()))
         })
         .collect();
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.0));
     entries
         .into_iter()
         .next()
