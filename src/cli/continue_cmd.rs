@@ -47,7 +47,7 @@ pub fn run_rerun(run_id: RunId) -> Result<()> {
 /// the only one shown.
 ///
 /// Returns the path to the refined markdown file.
-pub fn run_refine(
+pub async fn run_refine(
     run_id: RunId,
     proposal_id: &str,
     cfg: &Config,
@@ -112,13 +112,15 @@ pub fn run_refine(
         "proposal": subject_json,
     }))
     .map_err(Error::from)?;
-    let report: crate::domain::FinalReport = pollster::block_on(ctx.call_with_retry_parse(
-        Role::Deliver,
-        system,
-        user,
-        "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
-        5,
-    ))?;
+    let report: crate::domain::FinalReport = ctx
+        .call_with_retry_parse(
+            Role::Deliver,
+            system,
+            user,
+            "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}",
+            5,
+        )
+        .await?;
     let final_dir = run_dir.final_dir();
     std::fs::create_dir_all(&final_dir)?;
     let md = format!(
@@ -136,7 +138,7 @@ pub fn run_refine(
 /// existing `evaluations/p_*.json` sidecars using the per-criterion
 /// weights in `Config::ranking_weights`. Writes a fresh
 /// `rankings/ranking.json` (overwriting the previous one).
-pub fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> Result<()> {
+pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> Result<()> {
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
         return Err(Error::InvalidState(format!(
@@ -174,6 +176,6 @@ pub fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> Result
         String::new(),
         "rerank".into(),
     );
-    pollster::block_on(phase.execute(&ctx))?;
+    phase.execute(&ctx).await?;
     Ok(())
 }

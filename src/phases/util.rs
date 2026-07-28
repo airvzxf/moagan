@@ -55,6 +55,34 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
+/// Return the last `max_bytes` bytes of `s` as a UTF-8 safe slice.
+///
+/// Rust's `&str[i..j]` panics with `byte index N is not a char
+/// boundary` when the byte index falls inside a multi-byte UTF-8
+/// code point. The naive `&s[s.len().saturating_sub(500)..]`
+/// pattern (used three times in this file before this commit)
+/// produced that exact panic whenever the model returned more
+/// than 500 bytes containing CJK, emoji, or any non-ASCII
+/// script — the common case for `critique` outputs in `--mode
+/// deep` once the model decided to mix Spanish/Chinese into its
+/// verdict.
+///
+/// The fix walks **forward** from `s.len() - max_bytes` to the
+/// next UTF-8 char boundary so the returned slice is always
+/// `<= max_bytes` bytes and never splits a code point. When the
+/// input is shorter than `max_bytes` the original string is
+/// returned untouched.
+pub(crate) fn safe_tail(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = s.len() - max_bytes;
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    &s[idx..]
+}
+
 /// Strip a leading/trailing markdown fence from the model output and
 /// parse the inner JSON.
 ///
@@ -107,8 +135,7 @@ pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     let e = serde_json::from_str::<T>(&trimmed)
         .err()
         .expect("parse failed above");
-    let tail_start = trimmed.len().saturating_sub(500);
-    let tail = &trimmed[tail_start..];
+    let tail = safe_tail(&trimmed, 500);
     Err(crate::Error::SchemaViolation(format!(
         "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
         trimmed.len(),
@@ -137,8 +164,7 @@ where
         let e = serde_json::from_str::<T>(&trimmed)
             .err()
             .expect("parse failed above");
-        let tail_start = trimmed.len().saturating_sub(500);
-        let tail = &trimmed[tail_start..];
+        let tail = safe_tail(&trimmed, 500);
         return Err(crate::Error::SchemaViolation(format!(
             "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
             trimmed.len(),
@@ -154,10 +180,11 @@ where
         });
     }
     serde_json::from_str::<T>(&repaired).map_err(|e| {
+        let tail = safe_tail(&repaired, 500);
         crate::Error::SchemaViolation(format!(
             "model output is not valid JSON after repair: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
             repaired.len(),
-            &repaired[repaired.len().saturating_sub(500)..],
+            tail,
             repaired
         ))
     })
@@ -1088,5 +1115,86 @@ mod tests {
         // No repair events were emitted because the chain refused to
         // write the unterminated input.
         assert!(kinds.is_empty());
+    }
+
+    /// Regression: naive `&s[s.len()-500..]` panicked with
+    /// "byte index N is not a char boundary" whenever the
+    /// model returned more than 500 bytes containing CJK.
+    /// The original `parse_model_json` error path used that
+    /// naive slice; the `safe_tail` helper reproduces the
+    /// slice but trims forward to the next UTF-8 char boundary,
+    /// eliminating the panic.
+    #[test]
+    fn safe_tail_handles_cjk_at_byte_boundary() {
+        // Build a string whose last byte is the middle byte of the
+        // 3-byte UTF-8 sequence for `创` (E5 88 9B). The naive
+        // 500-byte slice from the end would land inside that
+        // sequence; `safe_tail` must walk back to a boundary.
+        let mut s = String::with_capacity(520);
+        for _ in 0..(510 / 3) {
+            s.push('创');
+        }
+        // Pad to >=510 bytes of CJK
+        while s.len() < 520 {
+            s.push('创');
+        }
+        // 1 more char puts the final byte sequence in the last 3
+        // bytes; safe_tail(max=500) must land before it.
+        assert!(s.len() > 500);
+
+        let tail = safe_tail(&s, 500);
+        // No panic, length is <= max_bytes, and the slice is a
+        // valid char boundary (Rust guarantees this for `&str`
+        // already; the test mainly confirms we did not panic).
+        assert!(tail.len() <= 500);
+        assert!(s.is_char_boundary(s.len() - tail.len()));
+    }
+
+    /// Pure ASCII input behaves identically to a naive 500-byte
+    /// slice: every byte is a char boundary so no walking happens.
+    #[test]
+    fn safe_tail_ascii_is_exact_slice() {
+        let s = "x".repeat(800);
+        let tail = safe_tail(&s, 500);
+        assert_eq!(tail.len(), 500);
+        assert_eq!(tail, "x".repeat(500));
+    }
+
+    /// Input shorter than `max_bytes` is returned unchanged. This
+    /// avoids an unnecessary copy in the common error-path case
+    /// (most model failures are <500 bytes long).
+    #[test]
+    fn safe_tail_short_string_unchanged() {
+        let s = "hello world";
+        let tail = safe_tail(s, 500);
+        assert_eq!(tail, s);
+    }
+
+    /// The error path of `parse_model_json` no longer panics when
+    /// the model's invalid JSON contains CJK past byte 500. The
+    /// previous code panicked with "byte index N is not a char
+    /// boundary"; this test pins the fix end-to-end.
+    #[test]
+    fn parse_model_json_error_message_includes_cjk_tail_without_panic() {
+        // An invalid JSON that contains CJK beyond byte 500.
+        let mut raw = String::with_capacity(800);
+        raw.push_str("not json at all, just prose ");
+        for _ in 0..(700 / 3) {
+            raw.push('创');
+        }
+        // Confirm the test setup matches the bug condition: >500
+        // bytes, multi-byte UTF-8 present near the end.
+        assert!(raw.len() > 500);
+
+        let result: Result<Sample> = parse_model_json(&raw);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        // The tail excerpt is embedded in the diagnostic — it must
+        // be present, not a panic.
+        assert!(
+            msg.contains("tail="),
+            "error did not include tail summary: {msg}"
+        );
     }
 }

@@ -1,6 +1,8 @@
-//! Pipeline phases. The MVP ships a non-discovery pipeline
-//! (intake → clarify → route → propose → gate → critique → repair →
-//! judge → rank → deliver) per V4 §13.6 MVP definition.
+//! Pipeline phases. v0.2 ships a non-discovery pipeline with optional
+//! sketches
+//! (intake → clarify → route → sketch? → propose → gate → critique →
+//! repair → judge → rank → deliver) per V4 §13.6. The sketch step is
+//! gated by `Mode::runs_sketches()`; `fast` skips it.
 
 pub mod clarify;
 pub mod critique;
@@ -14,6 +16,7 @@ pub mod propose;
 pub mod rank;
 pub mod repair;
 pub mod route;
+pub mod sketch_phase;
 pub mod util;
 
 pub use clarify::ClarifyPhase;
@@ -28,3 +31,4 @@ pub use propose::ProposePhase;
 pub use rank::RankPhase;
 pub use repair::RepairPhase;
 pub use route::RoutePhase;
+pub use sketch_phase::SketchPhase;

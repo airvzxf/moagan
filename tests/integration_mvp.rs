@@ -7,6 +7,10 @@
 //! 3. Telemetry records every phase and call.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use async_trait::async_trait;
 
 use moagan::config::Config;
 use moagan::error::Result;
@@ -14,10 +18,10 @@ use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::MockProvider;
-use moagan::llm::{MockResponse, ProviderRegistry};
+use moagan::llm::{MockResponse, Provider, ProviderRegistry, Request, Response, Usage};
 use moagan::phases::{
-    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext,
+    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, SketchPhase,
 };
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -804,5 +808,400 @@ fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
         1,
     ))?;
     assert_eq!(parsed.summary, "second");
+    Ok(())
+}
+
+/// Build a mock provider pre-loaded with the v0.2 deep-mode call
+/// sequence: 1 intake + 1 clarify + 1 route + 6 sketches + 5
+/// proposals + 20 critiques (5 props × 4 critics) + 35 judge
+/// evaluations (5 props × 7 judges) + 1 deliver = 69 calls. Each
+/// `MockResponse` ships a payload that round-trips through the
+/// role-specific domain type so `SketchPhase`'s filter and the
+/// `ProposePhase::source_sketch` pairing both see real artefacts.
+fn build_deep_mock_provider() -> std::sync::Arc<MockProvider> {
+    use moagan::domain::Sketch;
+    let mut p = MockProvider::empty();
+    p.push(MockResponse::plain(intake_json()));
+    p.push(MockResponse::plain(clarify_json()));
+    p.push(MockResponse::plain(route_json()));
+    for i in 0..6 {
+        let sk = Sketch {
+            id: format!("sk_{i:03}"),
+            thesis: format!(
+                "Sketch {i} defends an opinionated approach to the user's problem with a unique angle."
+            ),
+            key_decisions: vec![format!("d{i}-1"), format!("d{i}-2")],
+            architecture_outline: format!("outline {i}"),
+            assumptions: vec![format!("assumption {i}")],
+            strengths: vec![format!("strength {i}")],
+            weaknesses: vec![format!("weakness {i}")],
+            hard_constraint_check: [("no_serverless".to_string(), true)].into_iter().collect(),
+            expected_validation: format!("smoke test {i}"),
+            angle: format!("angle-{i}"),
+        };
+        p.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+    }
+    for i in 0..5 {
+        p.push(MockResponse::plain(propose_json(&format!("p_{i:03}"))));
+    }
+    for _ in 0..20 {
+        p.push(MockResponse::plain(critique_json()));
+    }
+    for _ in 0..35 {
+        p.push(MockResponse::plain(judge_json()));
+    }
+    p.push(MockResponse::plain(deliver_json()));
+    p.set_cycle(false);
+    std::sync::Arc::new(p)
+}
+
+/// End-to-end smoke for `--mode deep` with the mock provider. The
+/// pipeline now has 11 phases (sketch inserted between route and
+/// propose). We assert the new sidecars exist and that each
+/// proposal carries the `source_sketch` lineage field populated.
+#[test]
+fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let provider = build_deep_mock_provider();
+    let run_id = RunId::new();
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(SketchPhase { count: 6 })
+        .push(ProposePhase { count: 5 })
+        .push(GatePhase)
+        .push(CritiquePhase {
+            critics_per_proposal: 4,
+        })
+        .push(RepairPhase::default())
+        .push(JudgePhase { judges: 7 })
+        .push(RankPhase {
+            config: Arc::new(Config::default()),
+        })
+        .push(DeliverPhase);
+
+    let outputs = pollster::block_on(pipeline.run(&ctx))?;
+    assert_eq!(outputs.len(), 11, "deep mode runs 11 phases");
+
+    ctx.telemetry.flush()?;
+
+    let run_dir = home.run_dir(run_id);
+
+    // Six sketch sidecars survived the filter.
+    let sketch_files: Vec<_> = std::fs::read_dir(run_dir.sketches())?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let p = e.path();
+            p.extension().and_then(|s| s.to_str()) == Some("json")
+                && !p.to_string_lossy().ends_with(".meta.json")
+        })
+        .collect();
+    assert_eq!(sketch_files.len(), 6, "expected 6 sketch artefacts");
+
+    let summary_path = run_dir.final_dir().join("sketches_summary.json");
+    let summary_text = std::fs::read_to_string(&summary_path)?;
+    let summary: serde_json::Value = serde_json::from_str(&summary_text)?;
+    assert_eq!(summary["raw"], 6);
+    assert_eq!(summary["kept"], 6);
+    assert_eq!(summary["dropped_empty_thesis"], 0);
+    assert_eq!(summary["dropped_hard_constraint"], 0);
+
+    // Each proposal carries a `source_sketch` pointing at the i-th
+    // sketch.
+    for i in 0..5 {
+        let p_path = run_dir.proposals().join(format!("p_{i:03}.json"));
+        let p_text = std::fs::read_to_string(&p_path)?;
+        let p: serde_json::Value = serde_json::from_str(&p_text)?;
+        let expected = format!("sk_{i:03}");
+        assert_eq!(
+            p["source_sketch"].as_str(),
+            Some(expected.as_str()),
+            "proposal {i} should point at sketch {expected}, got {}",
+            p["source_sketch"]
+        );
+    }
+
+    // Portfolio and ranking written by deliver.
+    assert!(run_dir.final_dir().join("portfolio.md").exists());
+    assert!(run_dir.rankings().join("ranking.json").exists());
+
+    Ok(())
+}
+
+/// `explore` ends at sketches — no proposals, no judging, no
+/// deliver. The pipeline returns 4 phase outputs and persists
+/// 12 sketch sidecars without ever touching `proposals/`.
+#[test]
+fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    // Build a mock provider with 1 intake + 1 clarify + 1 route + 12
+    // sketches; nothing else needs to be queued because explore ends
+    // at the sketch phase.
+    use moagan::domain::Sketch;
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain(intake_json()));
+    mp.push(MockResponse::plain(clarify_json()));
+    mp.push(MockResponse::plain(route_json()));
+    for i in 0..12 {
+        let sk = Sketch {
+            id: format!("sk_{i:03}"),
+            thesis: format!(
+                "Sketch {i} defends an opinionated approach to the user's problem with a unique angle."
+            ),
+            key_decisions: vec![format!("d{i}-1")],
+            architecture_outline: format!("outline {i}"),
+            assumptions: vec![],
+            strengths: vec![format!("s{i}")],
+            weaknesses: vec![format!("w{i}")],
+            hard_constraint_check: std::collections::BTreeMap::new(),
+            expected_validation: format!("ev {i}"),
+            angle: format!("angle-{i}"),
+        };
+        mp.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+    }
+    mp.set_cycle(false);
+
+    let provider = Arc::new(mp);
+    let run_id = RunId::new();
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(SketchPhase { count: 12 });
+
+    let outputs = pollster::block_on(pipeline.run(&ctx))?;
+    assert_eq!(
+        outputs.len(),
+        4,
+        "explore mode runs exactly 4 phases (intake, clarify, route, sketch)"
+    );
+
+    ctx.telemetry.flush()?;
+
+    let run_dir = home.run_dir(run_id);
+    let sketch_files: Vec<_> = std::fs::read_dir(run_dir.sketches())?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let p = e.path();
+            p.extension().and_then(|s| s.to_str()) == Some("json")
+                && !p.to_string_lossy().ends_with(".meta.json")
+        })
+        .collect();
+    assert_eq!(sketch_files.len(), 12);
+    assert!(
+        !run_dir.proposals().exists() || std::fs::read_dir(run_dir.proposals())?.next().is_none(),
+        "explore must not produce proposals"
+    );
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct DelayedJudgeProvider {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    calls: AtomicUsize,
+    delay: Duration,
+}
+
+impl DelayedJudgeProvider {
+    fn new(delay: Duration) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            delay,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for DelayedJudgeProvider {
+    fn name(&self) -> &str {
+        "delayed"
+    }
+
+    fn model(&self) -> &str {
+        "delayed-model"
+    }
+
+    fn endpoint(&self) -> &str {
+        "delayed://local"
+    }
+
+    async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok((
+            200,
+            Response {
+                text: judge_json().to_owned(),
+                finish_reason: Some("end_turn".into()),
+                truncated: false,
+                usage: Usage::default(),
+            },
+        ))
+    }
+}
+
+fn judge_context(
+    home: Arc<MoaganHome>,
+    provider: Arc<dyn Provider>,
+    provider_name: &str,
+    model: &str,
+    run_id: RunId,
+    max_parallelism: usize,
+) -> RunContext {
+    let mut registry = ProviderRegistry::default();
+    registry.insert(provider_name.into(), provider);
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().expect("ensure run dir");
+    let telemetry =
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
+    RunContext::new(
+        run_id,
+        home,
+        Arc::new(registry),
+        provider_name.into(),
+        model.into(),
+        Parallelism::new(max_parallelism),
+        telemetry,
+        "judge concurrency".into(),
+        "deep".into(),
+    )
+}
+
+fn seed_judge_proposals(home: &MoaganHome, run_id: RunId, count: usize) -> Result<()> {
+    let proposals_dir = home.run_dir(run_id).proposals();
+    std::fs::create_dir_all(&proposals_dir)?;
+    for i in 0..count {
+        let proposal = moagan::domain::Proposal {
+            id: format!("p_{i:03}"),
+            summary: format!("Proposal {i}"),
+            approach: "A concrete approach".into(),
+            tradeoffs: vec!["One tradeoff".into()],
+            evidence: vec!["One source".into()],
+            source_sketch: String::new(),
+        };
+        let bytes = serde_json::to_vec(&proposal)?;
+        std::fs::write(proposals_dir.join(format!("p_{i:03}.json")), bytes)?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn judge_phase_respects_parallelism_cap() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
+    home.ensure()?;
+    let run_id = RunId::new();
+    seed_judge_proposals(&home, run_id, 5)?;
+    let provider = Arc::new(DelayedJudgeProvider::new(Duration::from_millis(20)));
+    let ctx = judge_context(
+        home.clone(),
+        provider.clone(),
+        "delayed",
+        "delayed-model",
+        run_id,
+        4,
+    );
+
+    let output = JudgePhase { judges: 7 }.execute(&ctx).await?;
+    let moagan::phases::PhaseOutput::Evaluations(paths) = output else {
+        panic!("expected evaluations");
+    };
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 35);
+    assert!(provider.peak.load(Ordering::SeqCst) <= 4);
+    assert_eq!(paths.len(), 5);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
+    use moagan::config::ProviderConfig;
+    use moagan::llm::minimax::MinimaxProvider;
+    use moagan::secret::SecretString;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let template = ResponseTemplate::new(200)
+        .set_delay(Duration::from_millis(10))
+        .set_body_json(serde_json::json!({
+            "content": [{"type": "text", "text": judge_json()}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }
+        }));
+    Mock::given(method("POST"))
+        .and(path("/anthropic/v1/messages"))
+        .respond_with(template)
+        .mount(&server)
+        .await;
+
+    let spec = ProviderConfig {
+        kind: "minimax".into(),
+        endpoint: format!("{}/anthropic/v1", server.uri()),
+        model: "MiniMax-M3".into(),
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        hard_incompatibilities: vec![],
+    };
+    let provider: Arc<dyn Provider> = Arc::new(MinimaxProvider::new(
+        &spec,
+        SecretString::new("test-key".into()),
+    )?);
+    let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
+    home.ensure()?;
+    let run_id = RunId::new();
+    seed_judge_proposals(&home, run_id, 5)?;
+    let ctx = judge_context(home.clone(), provider, "minimax", "MiniMax-M3", run_id, 4);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        JudgePhase { judges: 7 }.execute(&ctx),
+    )
+    .await
+    .map_err(|_| moagan::Error::Timeout("local HTTP judge test".into()))??;
+    let moagan::phases::PhaseOutput::Evaluations(paths) = output else {
+        panic!("expected evaluations");
+    };
+    ctx.telemetry.flush()?;
+
+    assert_eq!(server.received_requests().await.unwrap().len(), 35);
+    assert_eq!(paths.len(), 5);
+    let calls = moagan::storage::compression::read_to_string(ctx.telemetry.calls_path())?;
+    assert_eq!(calls.lines().count(), 35);
     Ok(())
 }

@@ -1,6 +1,7 @@
 //! CLI surface. Subcommands are: `run`, `continue`, `resume`, `rerun`,
-//! `inspect`, `refine`, `rerank`. v0.1 ships `run`, `inspect`, `refine`,
-//! and `rerank`; the others are stubbed with friendly errors.
+//! `inspect`, `refine`, `rerank`. v0.2 ships `run`, `inspect`, `refine`,
+//! and `rerank`; `continue`/`resume`/`rerun` remain stubbed with the
+//! v0.2-friendly error message.
 
 use std::sync::Arc;
 
@@ -17,10 +18,20 @@ pub mod forbidden;
 pub mod inspect;
 pub mod run;
 
-/// Pipeline mode. The MVP v0.1 ships only `fast` and `standard`.
-/// `deep`, `explore`, `batch`, and `discovery` are explicitly
-/// rejected at the CLI surface so we don't silently fall back to a
-/// `fast` pipeline as the previous `default` branch did.
+/// Pipeline mode. v0.2 ships `fast`, `standard`, `deep`, `explore`,
+/// and `batch`. `discovery` is deferred to a later sub-phase: its
+/// pipeline diverges so heavily (sibling CLI subcommand, separate
+/// parser inputs, role prompts that have no analog in the linear
+/// pipeline) that adding it to this same flag would muddle the
+/// dispatcher. Callers that try `--mode discovery` today get a clap
+/// parse error that points them at the upcoming `moagan discover`.
+///
+/// Cardinality ranges per spec §5.3:
+/// - fast:    2-4 agents (~5 batches in parallel)
+/// - standard: 6-12 agents (~10 batches)
+/// - deep:    12-25 agents (5-6 sketches, 4-5 proposals, 2 repair rounds)
+/// - explore: 8-12 sketches (no synthesis, just clustering + map)
+/// - batch:   configurable, no human pauses, json-stable output
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum Mode {
@@ -28,6 +39,15 @@ pub enum Mode {
     Fast,
     /// Balanced proposals + critics + judges (~10 batches).
     Standard,
+    /// 5-6 sketches + 4-5 proposals + 2 repair rounds + multi-judge
+    /// panel + adversarial review. Heaviest in-process path.
+    Deep,
+    /// High-diversity sketches only; no synthesis, ranking is
+    /// secondary. Useful for mapping an unknown problem space.
+    Explore,
+    /// Configurable cardinality, no human pauses, ambiguous
+    /// blockers become `NeedsInput` JSON output. CI/automation use.
+    Batch,
 }
 
 impl Mode {
@@ -36,6 +56,46 @@ impl Mode {
         match self {
             Self::Fast => "fast",
             Self::Standard => "standard",
+            Self::Deep => "deep",
+            Self::Explore => "explore",
+            Self::Batch => "batch",
+        }
+    }
+
+    /// Whether this mode is allowed to run sketches before proposals.
+    /// `fast` skips sketches; everything else runs a `SketchPhase`
+    /// between route and propose. `batch` reuses the same answer as
+    /// `standard` because batch determinism is a downstream concern.
+    pub fn runs_sketches(&self) -> bool {
+        !matches!(self, Self::Fast)
+    }
+
+    /// Cardinality ceiling on concurrent LLM calls for proposals in
+    /// this mode. Spec §5.3 numbers. v0.2 only acts on the upper
+    /// bound; the per-mode cardinality tuning lands in Sub-fase A
+    /// commit "wire sketch_phase" once the `ProposePhase` accepts
+    /// `desired_proposals` as input.
+    pub fn desired_proposals(&self) -> usize {
+        match self {
+            Self::Fast => 3,
+            Self::Standard => 3,
+            Self::Deep => 5,
+            Self::Explore => 0, // no full proposals; sketches only
+            Self::Batch => 3,
+        }
+    }
+
+    /// Cardinality ceiling for the sketches phase. `fast` returns 0
+    /// so callers skip the phase entirely. `explore` returns the
+    /// upper bound of its spec range; `deep` and `standard` cluster
+    /// around 4-6.
+    pub fn desired_sketches(&self) -> usize {
+        match self {
+            Self::Fast => 0,
+            Self::Standard => 4,
+            Self::Deep => 6,
+            Self::Explore => 12,
+            Self::Batch => 4,
         }
     }
 }
@@ -77,8 +137,9 @@ impl Cli {
 pub enum Cmd {
     /// Start a new run.
     Run {
-        /// Pipeline mode. Only `fast` and `standard` are implemented
-        /// in v0.1; other values are rejected at parse time.
+        /// Pipeline mode. v0.2 ships `fast`, `standard`, `deep`,
+        /// `explore`, `batch`. `discovery` is deferred and produces
+        /// a clap parse error.
         #[arg(long, value_enum, default_value_t = Mode::Fast)]
         mode: Mode,
         /// Provider name (must be in config).
@@ -100,6 +161,15 @@ pub enum Cmd {
         /// Non-interactive: no prompts.
         #[arg(long, default_value_t = false)]
         non_interactive: bool,
+        /// Override the global cap on concurrent LLM calls. The
+        /// value is parsed as `usize`; the constructor (`Parallelism::new`)
+        /// clamps to `>= 1`. When omitted, the config-file value
+        /// (`cfg.max_parallelism`, default 4) is used. Useful for
+        /// `--mode deep` runs against `minimax` real, where 35 judge
+        /// calls + 20 critiques + 6 sketches want much more headroom
+        /// than the default 4 to amortise network latency.
+        #[arg(long, value_name = "N")]
+        max_parallelism: Option<usize>,
     },
     /// Continue a paused or failed run.
     Continue {
@@ -172,7 +242,7 @@ impl Cmd {
 }
 
 /// Dispatch the parsed CLI.
-pub fn dispatch(cli: Cli) -> Result<i32> {
+pub async fn dispatch(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
     let cfg = Config::load()?;
@@ -184,6 +254,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             runs_dir,
             mock_dir,
             non_interactive,
+            max_parallelism,
         } => {
             let run_id = run::run(
                 run::RunOptions {
@@ -193,9 +264,11 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     home: runs_dir,
                     mock_dir,
                     non_interactive,
+                    max_parallelism,
                 },
                 &cfg,
-            )?;
+            )
+            .await?;
             println!("run id: {run_id}");
             Ok(0)
         }
@@ -263,7 +336,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 &proposal,
                 &cfg,
                 &home,
-            )?;
+            )
+            .await?;
             println!("refined proposal {proposal} for run {run_id}");
             Ok(0)
         }
@@ -275,7 +349,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     .map_err(|e| Error::InvalidArgs(format!("{e}")))?,
                 &cfg,
                 &home,
-            )?;
+            )
+            .await?;
             println!("reranked run {run_id}");
             Ok(0)
         }

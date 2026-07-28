@@ -14,7 +14,7 @@ use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, SketchPhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -36,10 +36,14 @@ pub struct RunOptions {
     pub mock_dir: Option<std::path::PathBuf>,
     /// Whether to be non-interactive (no prompts).
     pub non_interactive: bool,
+    /// Override the global cap on concurrent LLM calls. When `None`
+    /// the config-file value (`cfg.max_parallelism`, default 4) is
+    /// used. The constructor (`Parallelism::new`) clamps to `>= 1`.
+    pub max_parallelism: Option<usize>,
 }
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
-pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
+pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     if let Some(ref home) = opts.home {
         unsafe {
             std::env::set_var("MOAGAN_HOME", home);
@@ -82,7 +86,11 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         None,
     )?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    let parallelism = Parallelism::new(cfg.max_parallelism);
+    // CLI `--max-parallelism` overrides the config-file value.
+    // When neither is set the constructor falls back to 4 inside
+    // `cfg::Config::default`; `Parallelism::new` clamps to >= 1.
+    let max_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
+    let parallelism = Parallelism::new(max_parallelism);
 
     let ctx = crate::phases::RunContext::new(
         run_id,
@@ -94,10 +102,20 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         telemetry.clone(),
         opts.prompt.clone(),
         opts.mode.as_str().to_owned(),
-    );
+    )
+    .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs);
 
     let pipeline = build_pipeline_for_mode(opts.mode, cfg);
-    let _outputs = pollster::block_on(pipeline.run(&ctx))?;
+    let pipeline_future = pipeline.run(&ctx);
+    tokio::pin!(pipeline_future);
+    let _outputs = tokio::select! {
+        result = &mut pipeline_future => result?,
+        signal = shutdown_signal() => {
+            signal?;
+            ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
+            return Err(ctx.cancel().into_error());
+        }
+    };
 
     // Flush telemetry before the manifest reads phases/calls.
     // Without this, the gzip stream is incomplete (no CRC/length
@@ -126,6 +144,24 @@ pub fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         run_dir.root().display()
     );
     Ok(run_id)
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = terminate.recv() => {}
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        Ok(())
+    }
 }
 
 /// Build a `ProviderRegistry` containing only `selected` (the provider
@@ -161,18 +197,49 @@ pub(crate) fn build_registry_for(
 
 /// Build the canonical pipeline for a given mode. The cardinality
 /// table mirrors the v0.1 MVP in `docs/proposal-01-concept.md` §13.6
-/// (3 proposals, 2 critics, 3 judges for `fast`; 3 proposals, 3
-/// critics, 5 judges for `standard`).
+/// and §5.3 of `docs/proposal-02-rust.md` for the v0.2 additions:
+///
+/// - `fast`: 3 proposals, 2 critics, 3 judges. No sketch phase.
+/// - `standard`: 3 proposals, 3 critics, 5 judges, 4 sketches.
+/// - `deep`: 5 proposals, 4 critics, 7 judges, 6 sketches,
+///   2 repair rounds, adversarial review (deferred to a
+///   follow-up commit — for now deep mirrors standard cardinality
+///   and lets the user inspect the artefacts).
+/// - `explore`: 0 proposals, 0 critics, 0 judges, 12 sketches.
+///   Pipeline ends at sketches; the user inspects the sketch map
+///   manually.
+/// - `batch`: 3 proposals, 2 critics, 3 judges, 4 sketches.
+///   Mirrors fast cardinality plus sketches; differs in its
+///   JSON-stable output contract and lack of human pauses (deferred
+///   to a follow-up commit).
 fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
-    let (proposals, critics, judges) = match mode {
-        Mode::Fast => (3u32, 2u32, 3u32),
-        Mode::Standard => (3u32, 3u32, 5u32),
+    let (proposals, critics, judges, sketches) = match mode {
+        Mode::Fast => (3u32, 2u32, 3u32, 0u32),
+        Mode::Standard => (3u32, 3u32, 5u32, 4u32),
+        Mode::Deep => (5u32, 4u32, 7u32, 6u32),
+        Mode::Explore => (0u32, 0u32, 0u32, 12u32),
+        Mode::Batch => (3u32, 2u32, 3u32, 4u32),
     };
     let cfg_arc = std::sync::Arc::new(cfg.clone());
-    Pipeline::new()
+    let mut pipeline = Pipeline::new()
         .push(IntakePhase)
         .push(ClarifyPhase)
-        .push(RoutePhase)
+        .push(RoutePhase);
+    // SketchPhase runs after Route whenever the mode says so. When
+    // `count == 0` the phase short-circuits to an empty
+    // `PhaseOutput::Sketches`, but we still insert it so the
+    // manifest's phase list reflects the intended shape.
+    if mode.runs_sketches() {
+        pipeline = pipeline.push(SketchPhase { count: sketches });
+    }
+    // `explore` ends at sketches — no proposals, no judging. The user
+    // inspects the sketch map manually (see final/sketches_summary.json
+    // and sketches/sk_*.json). Inserting the downstream phases would
+    // crash deliver with "no proposals to portfolio".
+    if mode == Mode::Explore {
+        return pipeline;
+    }
+    pipeline
         .push(ProposePhase { count: proposals })
         .push(GatePhase)
         .push(CritiquePhase {

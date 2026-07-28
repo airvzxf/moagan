@@ -87,6 +87,55 @@ pub struct Proposal {
     pub tradeoffs: Vec<String>,
     /// Evidence backing the proposal.
     pub evidence: Vec<String>,
+    /// Sketch id this proposal was derived from (`"sk_xxx"`). Empty
+    /// for `fast` mode where the sketch phase is skipped. Filled by
+    /// `ProposePhase` so the deliver / inspect surface can show the
+    /// lineage even after the artefacts are flattened.
+    pub source_sketch: String,
+}
+
+/// Output of the sketch phase — a short, opinionated exploration
+/// artefact produced by the `sketcher` role (T01-06 §5.5). Each sketch
+/// is a self-contained 400-800 token hypothesis that does NOT see
+/// other sketches; isolation prevents premature convergence across the
+/// fan-out.
+///
+/// Leniency: every field is `#[serde(default)]` so a model that omits
+/// `weaknesses` or `expected_validation` (common with `MiniMax-M3`
+/// when it treats the field as optional) still parses. The
+/// `hard_constraint_check` map is permissive about its value type so
+/// the model can return either `true`/`false` or a richer verdict
+/// string.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sketch {
+    /// Stable id (`"sk_<uuid7>"`), assigned by `SketchPhase` after
+    /// the LLM call returns. Not part of the LLM contract; the
+    /// `SketchPhase` fills it before persistence.
+    pub id: String,
+    /// One-sentence thesis the rest of the sketch defends.
+    pub thesis: String,
+    /// Key architectural decisions (3-6 entries typically).
+    pub key_decisions: Vec<String>,
+    /// Architectural outline in prose (50-2000 chars).
+    pub architecture_outline: String,
+    /// Assumptions the sketch relies on.
+    pub assumptions: Vec<String>,
+    /// Strengths.
+    pub strengths: Vec<String>,
+    /// Weaknesses (honest accounting; used by the selection step).
+    pub weaknesses: Vec<String>,
+    /// Hard-constraint check: constraint_id → passes? Map keyed by
+    /// the brief's hard-constraint identifier (or a free-form label
+    /// when the model cannot enumerate them).
+    pub hard_constraint_check: std::collections::BTreeMap<String, bool>,
+    /// What kind of evidence would falsify this sketch.
+    pub expected_validation: String,
+    /// Model angle used (e.g. `"minimalist"`, `"pragmatic"`,
+    /// `"production-grade"`, `"security-first"`). Set by
+    /// `SketchPhase` from the fan-out schedule, NOT by the model —
+    /// helps the `epistemic_legacy` aggregator recognise duplicates.
+    pub angle: String,
 }
 
 /// Output of the gate phase (one per proposal).
@@ -301,5 +350,52 @@ mod tests {
         let _: RankEntry = serde_json::from_str("{}").unwrap();
         let _: FinalReport = serde_json::from_str("{}").unwrap();
         let _: Route = serde_json::from_str("{}").unwrap();
+        let _: Sketch = serde_json::from_str("{}").unwrap();
+    }
+
+    /// Sketch round-trips a realistic payload and preserves every
+    /// field including the `BTreeMap` of hard-constraint verdicts.
+    #[test]
+    fn sketch_round_trips() {
+        let payload = serde_json::json!({
+            "thesis": "Use Rust + SQLite + a single binary.",
+            "key_decisions": ["single binary", "SQLite only"],
+            "architecture_outline": "CLI binary that owns SQLite, telemetry, and the agent registry.",
+            "assumptions": ["users are comfortable with one process per run"],
+            "strengths": ["simple deployment"],
+            "weaknesses": ["no horizontal scaling"],
+            "hard_constraint_check": {"no_serverless": true, "no_jvm": true},
+            "expected_validation": "Build a 1k-line Rust crate that compiles in <2s and runs a fast smoke.",
+            "angle": "minimalist",
+            "id": "sk_001"
+        });
+        let sk: Sketch = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(sk.thesis, "Use Rust + SQLite + a single binary.");
+        assert_eq!(sk.angle, "minimalist");
+        assert_eq!(sk.hard_constraint_check.len(), 2);
+        assert!(sk.hard_constraint_check["no_serverless"]);
+        let back = serde_json::to_value(&sk).unwrap();
+        assert_eq!(back["id"], "sk_001");
+        assert_eq!(back["angle"], "minimalist");
+    }
+
+    /// When the model returns only the LLM-visible fields (no
+    /// `id`/`angle`), `SketchPhase` fills them post-parse. This test
+    /// pins the assumption: the LLM payload is enough on its own.
+    #[test]
+    fn sketch_minimal_payload_parses() {
+        let payload = serde_json::json!({
+            "thesis": "tiny thesis",
+            "key_decisions": ["k1", "k2"],
+            "architecture_outline": "outlined.",
+            "assumptions": [],
+            "strengths": ["s1"],
+            "weaknesses": ["w1"],
+            "hard_constraint_check": {},
+            "expected_validation": "ev"
+        });
+        let sk: Sketch = serde_json::from_value(payload).unwrap();
+        assert_eq!(sk.id, "");
+        assert_eq!(sk.angle, "");
     }
 }

@@ -293,6 +293,7 @@ mod tests {
             approach: "x".into(),
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
+            source_sketch: String::new(),
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(!g.pass);
@@ -307,6 +308,7 @@ mod tests {
             approach: "We start with...".into(),
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
+            source_sketch: String::new(),
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("truncated")));
@@ -321,6 +323,7 @@ mod tests {
             approach: "Here is code:\n```rust\nfn x() {}\n".into(),
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
+            source_sketch: String::new(),
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("unbalanced")));
@@ -335,6 +338,7 @@ mod tests {
             approach: "Use postgres for everything".into(),
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
+            source_sketch: String::new(),
         };
         let g = structural_check(&p, &empty_brief(), &["postgres".into()], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("forbidden")));
@@ -350,6 +354,7 @@ mod tests {
                 .into(),
             tradeoffs: vec!["None — the user asked for the standard order".into()],
             evidence: vec!["Wikipedia: Rainbow".into()],
+            source_sketch: String::new(),
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.pass, "issues = {:?}", g.issues);
@@ -364,6 +369,7 @@ mod tests {
             approach: "We will TODO the rest later".into(),
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
+            source_sketch: String::new(),
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("placeholder")));
@@ -378,6 +384,7 @@ mod tests {
             approach: "Output X".into(),
             tradeoffs: vec![],
             evidence: vec![],
+            source_sketch: String::new(),
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         // tradeoffs/evidence missing = soft warning, but proposal still passes.

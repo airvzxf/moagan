@@ -19,6 +19,8 @@ pub enum CancelReason {
     UserInterrupt,
     /// Total run timeout fired.
     TotalTimeout,
+    /// A pipeline phase exceeded its configured timeout.
+    PhaseTimeout(String),
     /// Plan exhausted (token budget crossed).
     PlanExhausted,
     /// Explicit API key switch.
@@ -32,6 +34,7 @@ impl std::fmt::Display for CancelReason {
         match self {
             Self::UserInterrupt => f.write_str("user interrupt"),
             Self::TotalTimeout => f.write_str("total timeout"),
+            Self::PhaseTimeout(phase) => write!(f, "phase timeout: {phase}"),
             Self::PlanExhausted => f.write_str("plan exhausted"),
             Self::ApiKeySwitch => f.write_str("api key switch"),
             Self::Requested => f.write_str("requested"),

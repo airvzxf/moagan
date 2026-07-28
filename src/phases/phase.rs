@@ -7,10 +7,12 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::cancel::Cancel;
 use crate::error::Result;
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
@@ -45,6 +47,9 @@ pub struct RunContext {
     /// successful call so subsequent runs of the same prompt reuse
     /// the cached response (compliance with T01-06 §3.3).
     pub cache: Cache,
+    cancel: Cancel,
+    phase_timeout: Duration,
+    total_timeout: Duration,
 }
 
 impl std::fmt::Debug for RunContext {
@@ -89,7 +94,39 @@ impl RunContext {
             raw_prompt,
             mode,
             cache,
+            cancel: Cancel::new(),
+            phase_timeout: Duration::ZERO,
+            total_timeout: Duration::ZERO,
         }
+    }
+
+    pub(crate) fn with_timeouts(self, phase_secs: u64, total_secs: u64) -> Self {
+        self.with_timeout_durations(
+            Duration::from_secs(phase_secs),
+            Duration::from_secs(total_secs),
+        )
+    }
+
+    pub(crate) fn with_timeout_durations(
+        mut self,
+        phase_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Self {
+        self.phase_timeout = phase_timeout;
+        self.total_timeout = total_timeout;
+        self
+    }
+
+    pub(crate) fn phase_timeout(&self) -> Duration {
+        self.phase_timeout
+    }
+
+    pub(crate) fn total_timeout(&self) -> Duration {
+        self.total_timeout
+    }
+
+    pub(crate) fn cancel(&self) -> &Cancel {
+        &self.cancel
     }
 
     /// Borrow the run-specific directory namespace.
@@ -123,7 +160,7 @@ impl RunContext {
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(0.4),
+            temperature: Some(temperature_for_role(role)),
             top_p: Some(0.95),
             response_schema: None,
         };
@@ -152,7 +189,7 @@ impl RunContext {
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(0.4),
+            temperature: Some(temperature_for_role(role)),
             top_p: Some(0.95),
             response_schema: None,
         };
@@ -170,7 +207,22 @@ impl RunContext {
     ) -> Result<Response> {
         let provider = self.provider();
         let call_id = uuid::Uuid::now_v7().to_string();
+        let provider_started = std::time::Instant::now();
+        tracing::debug!(
+            call_id = %call_id,
+            phase = req.role.as_str(),
+            stage = "provider.send.started",
+            "LLM call stage"
+        );
         let result = provider.send(&req).await;
+        tracing::debug!(
+            call_id = %call_id,
+            phase = req.role.as_str(),
+            stage = "provider.send.completed",
+            elapsed_ms = provider_started.elapsed().as_millis(),
+            success = result.is_ok(),
+            "LLM call stage"
+        );
         let ended_unix = crate::time::now_unix_secs();
         let phase_name = req.role.as_str();
         let ctx = || WarningContext {
@@ -182,14 +234,36 @@ impl RunContext {
         match &result {
             Ok((status, response)) => {
                 if let Some(ref key) = cache_key {
-                    let _ = self.cache.store(
+                    let cache_started = std::time::Instant::now();
+                    tracing::debug!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "cache.store.started",
+                        "LLM call stage"
+                    );
+                    match self.cache.store(
                         key,
                         self.default_provider.as_str(),
                         self.default_model.as_str(),
                         response,
-                    );
+                    ) {
+                        Ok(()) => tracing::debug!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "cache.store.completed",
+                            elapsed_ms = cache_started.elapsed().as_millis(),
+                            "LLM call stage"
+                        ),
+                        Err(e) => tracing::warn!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "cache.store.error",
+                            error = %e,
+                            "LLM call stage"
+                        ),
+                    }
                 }
-                let _ = self.telemetry.call(
+                if let Err(e) = self.telemetry.call(
                     &call_id,
                     phase_name,
                     phase_name,
@@ -205,7 +279,22 @@ impl RunContext {
                     started_unix,
                     ended_unix,
                     None,
-                );
+                ) {
+                    tracing::warn!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "telemetry.call.error",
+                        error = %e,
+                        "LLM call stage"
+                    );
+                } else {
+                    tracing::debug!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "telemetry.call.completed",
+                        "LLM call stage"
+                    );
+                }
                 if response.truncated {
                     let _ = self.telemetry.warn(
                         "model.response_truncated",
@@ -231,7 +320,7 @@ impl RunContext {
                 }
             }
             Err(e) => {
-                let _ = self.telemetry.call(
+                if let Err(telemetry_error) = self.telemetry.call(
                     &call_id,
                     phase_name,
                     phase_name,
@@ -247,7 +336,15 @@ impl RunContext {
                     started_unix,
                     ended_unix,
                     Some(&e.to_string()),
-                );
+                ) {
+                    tracing::warn!(
+                        call_id = %call_id,
+                        phase = phase_name,
+                        stage = "telemetry.call.error",
+                        error = %telemetry_error,
+                        "LLM call stage"
+                    );
+                }
             }
         }
         result.map(|(_, r)| r)
@@ -471,23 +568,100 @@ impl RunContext {
     }
 }
 
-/// Per-role `max_tokens`. The model can produce very verbose JSON for
-/// the high-cardinality roles (intake, clarify, deliver); the others
-/// stay compact. Calibrated for the v0.1 smoke (minimax Claude-style
-/// endpoint). A future release will let providers override this
-/// through the per-role config in `prompts/`.
+/// Per-role `max_tokens` ceiling. Calibrated for the v0.1 smoke
+/// (`minimax` Claude-style endpoint that accepts up to 128K output)
+/// and revised upward after empirical observation that the model
+/// legitimately needs much more headroom for prose-heavy roles.
+///
+/// The model is **not** an algorithm with fixed output length —
+/// `critique` may produce a paragraph explaining a borderline
+/// score; `propose` may include a code block; `repair` may carry
+/// the full original proposal plus a diff; `deliver` may render
+/// a long portfolio with multiple sections. Hard-coding low
+/// ceilings (`max_tokens=1500` for judge, `4000` for critique)
+/// truncates these legitimately large responses mid-thought,
+/// surfaces `finish_reason=max_tokens` warnings, and forces the
+/// retry loop into additional cost.
+///
+/// New calibration (2026-07-27, powers-of-two so the ceilings are
+/// round numbers operators can reason about):
+///
+///   intake    1024    rephrase + extract, schema is tight
+///   clarify   2048    brief with several assumptions
+///   route      512    single JSON object
+///   sketch    1024    single JSON object, ~500 tokens
+///   propose  32768    full approach with code/tradeoffs/evidence
+///   gate      1024    single JSON object
+///   critique  8192    paragraph-length verdict with suggestions
+///   repair   16384    full proposal + diff
+///   judge     2048    rubric breakdown + comments
+///   rank      2048    ordered ranking + representatives
+///   deliver   8192    portfolio with title/summary/recommendation +
+///                     alternatives + next_steps
+///
+/// A future release will let providers override these defaults
+/// through the per-role `prompts/registry.rs` configuration block,
+/// but the values here are the contract: when the model wants to
+/// write more, let it; when it wants less, it returns less.
 fn max_tokens_for_role(role: Role) -> u32 {
     match role {
-        Role::Intake => 131072,
-        Role::Clarify => 131072,
-        Role::Route => 131072,
-        Role::Propose => 131072,
-        Role::Gate => 131072,
-        Role::Critique => 131072,
-        Role::Repair => 131072,
-        Role::Judge => 131072,
-        Role::Rank => 131072,
-        Role::Deliver => 131072,
+        Role::Intake => 1024,
+        Role::Clarify => 2048,
+        Role::Route => 512,
+        Role::Sketch => 1024,
+        Role::Propose => 32768,
+        Role::Gate => 1024,
+        Role::Critique => 8192,
+        Role::Repair => 16384,
+        Role::Judge => 2048,
+        Role::Rank => 2048,
+        Role::Deliver => 8192,
+    }
+}
+
+/// Per-role sampling temperature. Replaces the previous v0.1 hardcoded
+/// `Some(0.4)` for every role.
+///
+/// Calibration rationale (empirical, 2026-07-27):
+///
+/// - **Sketch (`1.0`)**: empirical sweeps showed T=1.0 maximises the
+///   standard deviation of thesis vectors across the angle-cycled
+///   fan-out — i.e. the largest semantic spread. This is what the
+///   `sketches_summary.json` "kept" count and downstream clustering
+///   rely on; lower temperatures (0.4, 0.7) produce near-duplicates
+///   that waste LLM budget without expanding the search space. The
+///   spec §4.2 reference of T=0.7 predates the empirical sweep.
+/// - **Clarify / Route / Rank (`0.0`)**: deterministic JSON shape is
+///   required so downstream phases (gate, propose, deliver) can rely
+///   on a stable contract. Variance in the brief breaks every later
+///   phase.
+/// - **Gate (`0.0`)**: validation is mechanical; no randomness allowed.
+/// - **Judge (`0.2`)**: rubric consistency matters more than novelty;
+///   a small amount of variance lets independent judges diverge
+///   productively on borderline scores.
+/// - **Propose / Critique / Repair / Deliver (`0.4`)**: prose-heavy
+///   roles benefit from some variance to escape repetition, but the
+///   output must still parse against the schema. The JSON repair
+///   walker (`phases/util.rs`) absorbs the occasional drift.
+/// - **Intake (`0.4`)**: rephrasing the user prompt needs some
+///   variance but should remain faithful.
+///
+/// A future release will let providers override these defaults through
+/// the per-role `prompts/registry.rs` configuration block, but the
+/// values here are the contract.
+fn temperature_for_role(role: Role) -> f32 {
+    match role {
+        Role::Intake => 0.4,
+        Role::Clarify => 0.0,
+        Role::Route => 0.0,
+        Role::Sketch => 1.0,
+        Role::Propose => 0.4,
+        Role::Gate => 0.0,
+        Role::Critique => 0.4,
+        Role::Repair => 0.4,
+        Role::Judge => 0.2,
+        Role::Rank => 0.0,
+        Role::Deliver => 0.4,
     }
 }
 
@@ -502,13 +676,15 @@ pub enum PhaseOutput {
     Brief(PathBuf),
     /// `route.json` was written.
     Route(PathBuf),
+    /// A list of `sketches/sk_*.json` files. Empty for `fast` mode.
+    Sketches(Vec<PathBuf>),
     /// A list of `proposals/p_*.json` files.
     Proposals(Vec<PathBuf>),
     /// A list of `validation/p_*.json` files (one per proposal).
     Validations(Vec<PathBuf>),
     /// A list of `critiques/p_*_critic_*.json` files.
     Critiques(Vec<PathBuf>),
-    /// A list of `revisions/p_*_rev_*.json` files.
+    /// A list of `revisions/p_*_rev_<n>.json` files.
     Repairs(Vec<PathBuf>),
     /// A list of `evaluations/p_*.json` files.
     Evaluations(Vec<PathBuf>),
@@ -541,5 +717,39 @@ mod tests {
         let j = serde_json::to_string(&out).unwrap();
         assert!(j.contains("Intake"));
         assert!(j.contains("/tmp/intake.json"));
+    }
+
+    /// Sketch ships T=1.0 because empirical sweeps showed that
+    /// maximises semantic spread across the angle-cycled fan-out.
+    /// Pinning the value here so a future change cannot silently
+    /// reduce the diversity that v0.2's `SketchPhase` relies on.
+    #[test]
+    fn temperature_sketch_is_one() {
+        assert_eq!(temperature_for_role(Role::Sketch), 1.0);
+    }
+
+    /// Roles whose output is consumed by JSON parsers downstream
+    /// (clarify, route, rank, gate) MUST be deterministic. A
+    /// non-zero temperature on any of these risks schema drift that
+    /// the repair walker cannot recover from.
+    #[test]
+    fn temperature_deterministic_roles_are_zero() {
+        assert_eq!(temperature_for_role(Role::Clarify), 0.0);
+        assert_eq!(temperature_for_role(Role::Route), 0.0);
+        assert_eq!(temperature_for_role(Role::Gate), 0.0);
+        assert_eq!(temperature_for_role(Role::Rank), 0.0);
+    }
+
+    /// Every role must have a defined temperature so the helper is
+    /// total and exhaustive over `Role::all()`.
+    #[test]
+    fn temperature_defined_for_every_role() {
+        for r in Role::all() {
+            let t = temperature_for_role(*r);
+            assert!(
+                (0.0..=2.0).contains(&t),
+                "{r:?} temperature {t} outside [0, 2]"
+            );
+        }
     }
 }
