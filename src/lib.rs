@@ -8,6 +8,7 @@
 #![warn(clippy::all)]
 
 pub mod atomic;
+pub mod audit;
 pub mod cancel;
 pub mod cli;
 pub mod config;

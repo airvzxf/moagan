@@ -176,6 +176,23 @@ impl RunDir<'_> {
         self.root.join("telemetry")
     }
 
+    /// `telemetry/external_audit.jsonl` — append-only JSONL emitted
+    /// by the `moagan audit proxy` sidecar. Each line carries a
+    /// per-line CRC32 so a torn write is detectable. The extension
+    /// is `.jsonl` (not `.jsonl.gz`) on purpose: the sidecar writes
+    /// plain JSONL with one flush per line, which keeps a torn tail
+    /// readable line-by-line without depending on a multi-member
+    /// gzip stream being re-parseable.
+    pub fn external_audit_path(&self) -> PathBuf {
+        self.telemetry().join("external_audit.jsonl")
+    }
+
+    /// `telemetry/external_audit.verify.tsv` — output of `moagan audit
+    /// verify` for this run.
+    pub fn external_audit_verify_path(&self) -> PathBuf {
+        self.telemetry().join("external_audit.verify.tsv")
+    }
+
     /// `cache/` directory (intra-run LLM cache).
     pub fn cache(&self) -> PathBuf {
         self.root.join("cache")
@@ -234,6 +251,33 @@ mod tests {
         h.ensure().unwrap();
         assert!(h.runs_dir().is_dir());
         assert!(h.cross_run_cache_dir().is_dir());
+    }
+
+    #[test]
+    fn run_dir_ensure_supports_external_audit() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        r.ensure().unwrap();
+        let path = r.external_audit_path();
+        assert!(path.ends_with("telemetry/external_audit.jsonl"));
+        std::fs::write(&path, b"test").unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn run_dir_external_audit_verify_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        let p = r.external_audit_verify_path();
+        assert!(p.ends_with("telemetry/external_audit.verify.tsv"));
     }
 
     #[test]
