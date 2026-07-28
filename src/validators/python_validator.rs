@@ -84,9 +84,7 @@ fn looks_like_python_source(source: &str) -> bool {
         if is_def || is_class {
             let mut j = if is_def { i + 4 } else { i + 6 };
             // Walk the identifier characters.
-            while j < bytes.len()
-                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-            {
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                 j += 1;
             }
             // Skip whitespace (including newlines).

@@ -13,11 +13,13 @@ pub mod constraints;
 pub mod python_validator;
 pub mod rust_validator;
 pub mod structural;
+pub mod typescript_validator;
 
 pub use constraints::ConstraintsValidator;
 pub use python_validator::PythonValidator;
 pub use rust_validator::RustValidator;
 pub use structural::StructuralValidator;
+pub use typescript_validator::TypeScriptValidator;
 
 /// A single piece of code attached to a proposal. The pipeline uses
 /// `language` to pick the right `CodeValidator`; `kind` is a free-form
