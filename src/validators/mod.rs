@@ -10,10 +10,12 @@
 //! Compliance: `proposal-02-rust.md` §5.7 + §5.8.
 
 pub mod constraints;
+pub mod python_validator;
 pub mod rust_validator;
 pub mod structural;
 
 pub use constraints::ConstraintsValidator;
+pub use python_validator::PythonValidator;
 pub use rust_validator::RustValidator;
 pub use structural::StructuralValidator;
 

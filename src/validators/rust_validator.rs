@@ -171,7 +171,7 @@ fn status_from_sandbox(status: SandboxStatus) -> ValidationStatus {
 
 /// Keep the trailing N bytes of `text` so we never blow up the
 /// evidence payload.
-fn tail(text: &str, cap: usize) -> String {
+pub(super) fn tail(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_owned();
     }
