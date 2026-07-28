@@ -13,6 +13,8 @@ use crate::llm::prompts::prompt_set_hash;
 
 use super::wire::{Request, Response, Usage};
 
+mod sharded;
+
 /// Cache configuration.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
@@ -146,14 +148,7 @@ impl Cache {
     }
 
     fn path_for(&self, cache_key: &str) -> PathBuf {
-        // Shard by the first 2 hex chars so a single dir never holds
-        // too many entries.
-        let (_a, _b, rest) = split_hex(cache_key);
-        let shard = &rest[..rest.len().min(4)];
-        self.config
-            .root
-            .join(shard)
-            .join(format!("{cache_key}.json"))
+        sharded::path_for(&self.config.root, cache_key)
     }
 
     /// Build directory under `root` for the given key.
@@ -161,15 +156,6 @@ impl Cache {
         std::fs::create_dir_all(root).map_err(|e| Error::Cache(format!("mkdir {root:?}: {e}")))?;
         Ok(())
     }
-}
-
-fn split_hex(s: &str) -> (&str, &str, &str) {
-    let bytes = s.as_bytes();
-    if bytes.len() < 4 {
-        return ("", "", s);
-    }
-    let mid = bytes.len() / 2;
-    (&s[..2], &s[2..mid], &s[mid..])
 }
 
 #[cfg(test)]
