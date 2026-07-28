@@ -75,6 +75,7 @@ async fn audit_proxy_relays_request_with_kept_body() {
         upstream_timeout: Duration::from_secs(10),
         max_body_bytes: 1024 * 1024,
         refuse_loopback_forward: false,
+        refuse_loopback_forward_allowed: false,
     };
     let handle = moagan::audit::proxy::start(cfg).await.unwrap();
     let port = handle.local_addr.port();
@@ -137,6 +138,7 @@ async fn audit_proxy_supports_chunked_encoding() {
         upstream_timeout: Duration::from_secs(10),
         max_body_bytes: 1024 * 1024,
         refuse_loopback_forward: false,
+        refuse_loopback_forward_allowed: false,
     };
     let handle = moagan::audit::proxy::start(cfg).await.unwrap();
     let port = handle.local_addr.port();
@@ -171,6 +173,7 @@ async fn audit_proxy_refuses_loopback_upstream() {
         upstream_timeout: Duration::from_secs(10),
         max_body_bytes: 1024,
         refuse_loopback_forward: true,
+        refuse_loopback_forward_allowed: false,
     };
     let err = moagan::audit::proxy::start(cfg).await.unwrap_err();
     assert!(err.to_string().contains("refusing to forward to loopback"));

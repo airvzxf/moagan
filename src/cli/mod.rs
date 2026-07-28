@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::storage::sqlite::Db;
 
+pub mod audit;
 pub mod continue_cmd;
 pub mod doctor;
 pub mod forbidden;
@@ -222,6 +223,59 @@ pub enum Cmd {
     },
     /// Check the local environment (API key, writability).
     Doctor,
+    /// External, transparent HTTP recorder and verifier. The
+    /// `proxy` subcommand is a separate process; the `verify`
+    /// subcommand cross-checks the recorded JSONL against Moagan's
+    /// internal calls.
+    Audit {
+        #[command(subcommand)]
+        sub: AuditCmd,
+    },
+}
+
+/// Subcommands of `moagan audit`.
+#[derive(Debug, Subcommand)]
+pub enum AuditCmd {
+    /// Run the sidecar proxy. Listens on 127.0.0.1 and forwards
+    /// traffic to `--upstream`, appending every request/response
+    /// to `<run_dir>/telemetry/external_audit.jsonl`.
+    Proxy {
+        /// Override MOAGAN_HOME.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Target run id. Defaults to the most recent run.
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Bind host.
+        #[arg(long, default_value = "127.0.0.1")]
+        listen_host: String,
+        /// Bind port. `0` means kernel-assigned.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Upstream base URL.
+        #[arg(long)]
+        upstream: String,
+        /// Drop `body_canonical` from the log; keep only `body_sha256`.
+        #[arg(long, default_value_t = false)]
+        exclude_bodies: bool,
+        /// Hard cap on the request body size in bytes.
+        #[arg(long, default_value_t = 32 * 1024 * 1024)]
+        max_body_bytes: usize,
+        /// Upstream HTTP timeout in seconds.
+        #[arg(long, default_value_t = 180)]
+        timeout_secs: u64,
+    },
+    /// Cross-check the sidecar JSONL against Moagan's internal
+    /// `calls.jsonl.gz` + SQLite. Writes a TSV summary and returns
+    /// 0/1/2 according to the audit contract.
+    Verify {
+        /// Override MOAGAN_HOME.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Target run id. Defaults to the most recent run.
+        #[arg(long)]
+        run_id: Option<String>,
+    },
 }
 
 impl Cmd {
@@ -237,6 +291,7 @@ impl Cmd {
             Self::Refine { .. } => "Re-run the deliver phase for one proposal",
             Self::Rerank { .. } => "Re-run the rank phase on existing evaluations",
             Self::Doctor => "Check the local environment",
+            Self::Audit { .. } => "External, transparent audit trail",
         }
     }
 }
@@ -355,5 +410,34 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Doctor => doctor::run(),
+        Cmd::Audit { sub } => match sub {
+            AuditCmd::Proxy {
+                runs_dir,
+                run_id,
+                listen_host,
+                port,
+                upstream,
+                exclude_bodies,
+                max_body_bytes,
+                timeout_secs,
+            } => {
+                let args = audit::ProxyArgs {
+                    runs_dir,
+                    run_id,
+                    listen_host,
+                    port,
+                    upstream,
+                    exclude_bodies,
+                    max_body_bytes,
+                    timeout_secs,
+                };
+                audit::proxy_cmd(args).await?;
+                Ok(0)
+            }
+            AuditCmd::Verify { runs_dir, run_id } => {
+                let args = audit::VerifyArgs { runs_dir, run_id };
+                audit::verify_cmd(args).await
+            }
+        },
     }
 }

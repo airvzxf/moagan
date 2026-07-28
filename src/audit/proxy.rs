@@ -49,6 +49,9 @@ pub struct ProxyConfig {
     /// Refuse to start if the upstream host matches the listen address.
     /// Prevents accidentally forwarding to ourselves in a loop.
     pub refuse_loopback_forward: bool,
+    /// Allow loopback upstream when explicitly permitted by the CLI
+    /// (used in tests and in the smoke harness). Default: false.
+    pub refuse_loopback_forward_allowed: bool,
 }
 
 impl ProxyConfig {
@@ -81,6 +84,7 @@ pub struct ProxyHandle {
 /// background task; call [`ProxyHandle::shutdown`] to stop it.
 pub async fn start(cfg: ProxyConfig) -> Result<ProxyHandle> {
     if cfg.refuse_loopback_forward
+        && !cfg.refuse_loopback_forward_allowed
         && let Some(host) = url_host(&cfg.upstream)
         && (host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost"))
     {
@@ -519,10 +523,22 @@ fn join_upstream(base: &str, path: &str, _host_hint: Option<&str>) -> Result<Str
     }
     let trimmed = base.trim_end_matches('/');
     if path == "/" {
-        Ok(trimmed.to_owned())
-    } else {
-        Ok(format!("{trimmed}{path}"))
+        return Ok(trimmed.to_owned());
     }
+    if let Some(stripped) = trimmed.strip_suffix("/anthropic/v1") {
+        if path.starts_with("/anthropic/v1/") {
+            // After the prefix `/anthropic/v1` (12 chars + trailing
+            // slash), the remainder starts at index 13.
+            return Ok(format!("{stripped}{}", &path[13..]));
+        }
+        if path.starts_with("/v1/") {
+            return Ok(format!("{stripped}{}", &path[3..]));
+        }
+    }
+    if trimmed.ends_with("/v1") && path.starts_with("/v1/") {
+        return Ok(format!("{trimmed}{}", &path[3..]));
+    }
+    Ok(format!("{trimmed}{path}"))
 }
 
 fn url_host(url: &str) -> Option<String> {
