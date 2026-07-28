@@ -1,75 +1,58 @@
 //! HTTP/1.1 forwarder used by `moagan audit proxy`.
-//!
-//! The sidecar is a small, blocking-I/O TCP server built on
-//! `std::net::TcpListener` and `std::io::Read`/`Write`. The AGENTS.md
-//! no-go list forbids `axum` and `hyper`, so the proxy implements
-//! only the subset of HTTP/1.1 we actually need:
-//!
-//! - request line + headers terminated by `\r\n\r\n`;
-//! - body via `Content-Length` or `Transfer-Encoding: chunked`;
-//! - response relayed verbatim to the client, with the body read
-//!   into memory (we cap it at 32 MiB by default to avoid DoS).
-//!
-//! The forwarder is fully driven by `tokio::task::spawn_blocking`
-//! because the I/O surface is `std::net`. It uses a `reqwest::Client`
-//! (the same builder as the rest of the CLI, see
-//! `src/llm/http.rs:16`) for the upstream leg.
 
-use std::collections::BTreeMap;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::collections::{BTreeMap, HashMap};
+use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use reqwest::redirect::Policy;
-use tokio::sync::Notify;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
-use crate::error::{Error, IoError, Result};
+use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
+use crate::redact::{RedactPolicy, Surface, apply};
 
 use super::format::{AuditRecord, AuditWriter, body_canonical, redact_header, sha256_hex};
+
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_LINE_BYTES: usize = 8 * 1024;
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configures the sidecar.
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
-    /// Address to bind on. `127.0.0.1:0` lets the kernel assign.
+    /// Address to bind on.
     pub listen: SocketAddr,
-    /// Resolved upstream base URL (`https://api.minimax.io/anthropic/v1`).
+    /// Resolved upstream base URL.
     pub upstream: String,
-    /// Root directory containing `<root>/.runs/`. The proxy derives
-    /// the audit file path from this root together with `run_id`.
-    /// Required.
+    /// Root directory containing `.runs/`.
     pub runs_dir: PathBuf,
-    /// Pin the proxy to a specific run id. When `None`, the proxy
-    /// watches `<runs_dir>/.runs/` for the most recently created
-    /// run directory and starts writing to its audit file as soon as
-    /// it appears.
+    /// Optional fixed run id.
     pub run_id: Option<RunId>,
-    /// Whether to include `body_canonical` in the log. When `false`,
-    /// only `body_sha256` and `body_size` are recorded.
+    /// Whether canonical bodies are persisted.
     pub include_bodies: bool,
-    /// Per-request timeout for the upstream call.
+    /// Per-request upstream timeout.
     pub upstream_timeout: Duration,
-    /// Hard cap on the request body size in bytes.
+    /// Hard body-size cap.
     pub max_body_bytes: usize,
-    /// Refuse to start if the upstream host matches the listen address.
-    /// Prevents accidentally forwarding to ourselves in a loop.
+    /// Refuse loopback upstreams unless explicitly allowed.
     pub refuse_loopback_forward: bool,
-    /// Allow loopback upstream when explicitly permitted by the CLI
-    /// (used in tests and in the smoke harness). Default: false.
+    /// Explicit loopback-upstream opt-in.
     pub refuse_loopback_forward_allowed: bool,
-    /// Optional fixed log path. When set, the proxy always writes to
-    /// this exact path regardless of `run_id` and `runs_dir`. Used by
-    /// integration tests that want a stable file in `tempdir()`.
+    /// Optional fixed log path for tests.
     pub fixed_log_path: Option<PathBuf>,
 }
 
 impl ProxyConfig {
-    /// Build a config with sensible defaults for `max_body_bytes`
-    /// (32 MiB) and `upstream_timeout` (180 s).
+    /// Fill zero-valued limits with defaults.
     pub fn with_defaults(mut self) -> Self {
         if self.max_body_bytes == 0 {
             self.max_body_bytes = 32 * 1024 * 1024;
@@ -81,694 +64,820 @@ impl ProxyConfig {
     }
 }
 
-/// Resolved listen address + a handle used to stop the proxy. The
-/// `JoinHandle` is exposed so callers can wait for the accept loop
-/// to drain before exiting.
-#[derive(Debug)]
+/// Bound proxy and its cooperative shutdown handle.
 pub struct ProxyHandle {
-    /// Address the listener is bound to.
+    /// Address selected by the listener.
     pub local_addr: SocketAddr,
-    /// Notifier that signals the accept loop to exit.
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
+    task: Option<JoinHandle<Result<()>>>,
 }
 
-/// Pair of (writer, current run id). The accept loop reads the run
-/// id to decide whether to swap the writer at the start of each
-/// connection.
-struct WriterSlot {
-    writer: AuditWriter,
-    current_run: Option<RunId>,
+impl std::fmt::Debug for ProxyHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyHandle")
+            .field("local_addr", &self.local_addr)
+            .finish_non_exhaustive()
+    }
 }
 
-/// Start the sidecar. Returns once the listener is bound, after
-/// printing the resolved address. The accept loop runs in a
-/// background task; call [`ProxyHandle::shutdown`] to stop it.
-///
-/// When `cfg.run_id` is `None` and `cfg.fixed_log_path` is `None`,
-/// the proxy starts a background poller that watches
-/// `<cfg.runs_dir>/.runs/` for new run directories. Each new run
-/// triggers an atomic swap of the audit writer, so all calls for a
-/// single run land in that run's `<run>/telemetry/external_audit.jsonl`.
+impl ProxyHandle {
+    /// Stop accepting connections and drain active handlers.
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.shutdown.cancel();
+        let Some(task) = self.task.take() else {
+            return Ok(());
+        };
+        task.await
+            .map_err(|e| Error::InvalidState(format!("audit proxy task failed: {e}")))?
+    }
+}
+
+impl Drop for ProxyHandle {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+struct AuditSink {
+    writers: HashMap<PathBuf, AuditWriter>,
+}
+
+impl AuditSink {
+    fn new() -> Self {
+        Self {
+            writers: HashMap::new(),
+        }
+    }
+
+    fn ensure(&mut self, path: &Path) -> Result<()> {
+        if self.writers.contains_key(path) {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let writer = AuditWriter::append(path)?;
+        self.writers.insert(path.to_path_buf(), writer);
+        Ok(())
+    }
+
+    fn write(&mut self, path: &Path, record: &mut AuditRecord) -> Result<()> {
+        self.ensure(path)?;
+        let writer = self
+            .writers
+            .get_mut(path)
+            .ok_or_else(|| Error::InvalidState("audit writer was not installed".into()))?;
+        writer.write_record(record)?;
+        Ok(())
+    }
+
+    fn flush_all(&mut self) -> Result<()> {
+        for writer in self.writers.values_mut() {
+            writer.flush_gz()?;
+        }
+        Ok(())
+    }
+}
+
+/// Bind and start the sidecar.
 pub async fn start(cfg: ProxyConfig) -> Result<ProxyHandle> {
-    if cfg.refuse_loopback_forward
-        && !cfg.refuse_loopback_forward_allowed
-        && let Some(host) = url_host(&cfg.upstream)
-        && (host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost"))
-    {
+    let cfg = Arc::new(cfg.with_defaults());
+    validate_upstream(&cfg.upstream)?;
+    let listener = TcpListener::bind(cfg.listen).await?;
+    let local_addr = listener.local_addr()?;
+    validate_forward_target(&cfg, local_addr)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(cfg.upstream_timeout)
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(Policy::none())
+        .no_gzip()
+        .build()
+        .map_err(|e| Error::Provider(format!("build audit HTTP client: {e}")))?;
+    let sink = Arc::new(Mutex::new(AuditSink::new()));
+    if let Some(path) = resolve_log_path(&cfg)? {
+        sink.lock().await.ensure(&path)?;
+    }
+    let shutdown = CancellationToken::new();
+    let task_shutdown = shutdown.clone();
+    let task = tokio::spawn(serve(listener, cfg, client, sink, task_shutdown));
+    Ok(ProxyHandle {
+        local_addr,
+        shutdown,
+        task: Some(task),
+    })
+}
+
+async fn serve(
+    listener: TcpListener,
+    cfg: Arc<ProxyConfig>,
+    client: reqwest::Client,
+    sink: Arc<Mutex<AuditSink>>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let mut handlers = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let cfg = Arc::clone(&cfg);
+                let client = client.clone();
+                let sink = Arc::clone(&sink);
+                let handler_shutdown = shutdown.clone();
+                handlers.spawn(async move {
+                    handle_connection(stream, cfg, client, sink, handler_shutdown).await
+                });
+            }
+            joined = handlers.join_next(), if !handlers.is_empty() => {
+                if let Some(result) = joined {
+                    report_handler_result(result);
+                }
+            }
+        }
+    }
+
+    let drain = async {
+        while let Some(result) = handlers.join_next().await {
+            report_handler_result(result);
+        }
+    };
+    if tokio::time::timeout(SHUTDOWN_TIMEOUT, drain).await.is_err() {
+        handlers.abort_all();
+        while handlers.join_next().await.is_some() {}
+    }
+    sink.lock().await.flush_all()?;
+    Ok(())
+}
+
+fn report_handler_result(result: std::result::Result<Result<()>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("warn: audit proxy connection failed: {e}"),
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => eprintln!("warn: audit proxy handler failed: {e}"),
+    }
+}
+
+async fn handle_connection(
+    mut stream: TcpStream,
+    cfg: Arc<ProxyConfig>,
+    client: reqwest::Client,
+    sink: Arc<Mutex<AuditSink>>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let parsed = tokio::select! {
+        _ = shutdown.cancelled() => return Ok(()),
+        result = tokio::time::timeout(IO_TIMEOUT, read_request(&mut stream, cfg.max_body_bytes)) => {
+            match result {
+                Ok(Ok(request)) => request,
+                Ok(Err(e)) => {
+                    write_error(&mut stream, e.status, &e.message).await?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    write_error(&mut stream, 408, "request timeout").await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let Some(log_path) = resolve_log_path(&cfg)? else {
+        write_error(&mut stream, 503, "no active run").await?;
+        return Ok(());
+    };
+    let policy = RedactPolicy::default();
+    let id = uuid::Uuid::now_v7().to_string();
+    let started = Instant::now();
+    let request_ts = unix_now();
+    let upstream_url = join_upstream(&cfg.upstream, &parsed.target, None)?;
+    let request_sha = sha256_hex(&parsed.body);
+    let request_body = canonical_redacted_body(&policy, &parsed.body, cfg.include_bodies)?;
+    let request_headers = redacted_headers(&policy, &parsed.headers)?;
+    let logged_url = apply(&policy, Surface::Telemetry, &upstream_url)?.into_owned();
+    let mut request_record = AuditRecord {
+        ts: request_ts,
+        event: "request".into(),
+        id: id.clone(),
+        method: Some(parsed.method.as_str().to_owned()),
+        url: Some(logged_url),
+        status: None,
+        headers: request_headers,
+        body_canonical: request_body,
+        body_sha256: request_sha,
+        body_size: parsed.body.len() as u64,
+        elapsed_ms: None,
+        crc32: String::new(),
+        error: None,
+    };
+    sink.lock().await.write(&log_path, &mut request_record)?;
+
+    let mut forwarded_headers = reqwest::header::HeaderMap::new();
+    for (name, value) in &parsed.headers {
+        if is_hop_by_hop_request_header(name) {
+            continue;
+        }
+        let Ok(name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = reqwest::header::HeaderValue::from_str(value) else {
+            continue;
+        };
+        forwarded_headers.append(name, value);
+    }
+    let request = client
+        .request(parsed.method, &upstream_url)
+        .headers(forwarded_headers)
+        .body(parsed.body);
+    let response = tokio::select! {
+        _ = shutdown.cancelled() => {
+            record_upstream_error(
+                &sink,
+                &log_path,
+                &id,
+                started.elapsed(),
+                "proxy shutting down",
+                &policy,
+            ).await?;
+            write_error(&mut stream, 502, "proxy shutting down").await?;
+            return Ok(());
+        }
+        response = request.send() => response,
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(e) => {
+            record_upstream_error(
+                &sink,
+                &log_path,
+                &id,
+                started.elapsed(),
+                &e.to_string(),
+                &policy,
+            )
+            .await?;
+            write_error(&mut stream, 502, "upstream error").await?;
+            return Ok(());
+        }
+    };
+
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let response_body = match read_response_body(response, cfg.max_body_bytes).await {
+        Ok(body) => body,
+        Err(e) => {
+            record_upstream_error(&sink, &log_path, &id, started.elapsed(), &e, &policy).await?;
+            write_error(&mut stream, 502, "upstream body error").await?;
+            return Ok(());
+        }
+    };
+    let response_pairs = response_headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    let response_audit_headers = redacted_headers(&policy, &response_pairs)?;
+    let response_canonical = canonical_redacted_body(&policy, &response_body, cfg.include_bodies)?;
+    let mut response_record = AuditRecord {
+        ts: unix_now(),
+        event: "response".into(),
+        id,
+        method: None,
+        url: None,
+        status: Some(status.as_u16()),
+        headers: response_audit_headers,
+        body_canonical: response_canonical,
+        body_sha256: sha256_hex(&response_body),
+        body_size: response_body.len() as u64,
+        elapsed_ms: Some(duration_ms(started.elapsed())),
+        crc32: String::new(),
+        error: None,
+    };
+    sink.lock().await.write(&log_path, &mut response_record)?;
+
+    write_response(
+        &mut stream,
+        &parsed.version,
+        status,
+        &response_headers,
+        &response_body,
+    )
+    .await
+}
+
+async fn record_upstream_error(
+    sink: &Arc<Mutex<AuditSink>>,
+    path: &Path,
+    id: &str,
+    elapsed: Duration,
+    error: &str,
+    policy: &RedactPolicy,
+) -> Result<()> {
+    let error = apply(policy, Surface::Telemetry, error)?.into_owned();
+    let mut record = AuditRecord {
+        ts: unix_now(),
+        event: "upstream_error".into(),
+        id: id.to_owned(),
+        method: None,
+        url: None,
+        status: None,
+        headers: BTreeMap::new(),
+        body_canonical: None,
+        body_sha256: sha256_hex(b""),
+        body_size: 0,
+        elapsed_ms: Some(duration_ms(elapsed)),
+        crc32: String::new(),
+        error: Some(error),
+    };
+    sink.lock().await.write(path, &mut record)
+}
+
+struct ParsedRequest {
+    method: reqwest::Method,
+    target: String,
+    version: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+struct RequestReadError {
+    status: u16,
+    message: String,
+}
+
+impl RequestReadError {
+    fn new(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn io(error: io::Error) -> Self {
+        Self::new(400, format!("malformed request: {error}"))
+    }
+}
+
+async fn read_request(
+    stream: &mut TcpStream,
+    cap: usize,
+) -> std::result::Result<ParsedRequest, RequestReadError> {
+    let mut reader = BufReader::new(stream);
+    let mut total = 0usize;
+    let request_line = read_bounded_line(&mut reader, &mut total).await?;
+    let fields = request_line
+        .trim_end_matches(['\r', '\n'])
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if fields.len() != 3 {
+        return Err(RequestReadError::new(400, "malformed request line"));
+    }
+    let method = reqwest::Method::from_bytes(fields[0].as_bytes())
+        .map_err(|_| RequestReadError::new(400, "invalid HTTP method"))?;
+    let target = fields[1].to_owned();
+    if !target.starts_with('/') || target.starts_with("//") {
+        return Err(RequestReadError::new(
+            400,
+            "absolute request targets are not allowed",
+        ));
+    }
+    let version = fields[2].to_owned();
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err(RequestReadError::new(505, "unsupported HTTP version"));
+    }
+
+    let mut headers = Vec::new();
+    let mut content_length = None;
+    let mut transfer_encoding = None;
+    loop {
+        let line = read_bounded_line(&mut reader, &mut total).await?;
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if line.is_empty() {
+            return Err(RequestReadError::new(400, "unexpected end of headers"));
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let Some((name, value)) = trimmed.split_once(':') else {
+            return Err(RequestReadError::new(400, "malformed header"));
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim().to_owned();
+        if name.is_empty() {
+            return Err(RequestReadError::new(400, "empty header name"));
+        }
+        if name == "content-length" {
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| RequestReadError::new(400, "invalid content-length"))?;
+            if content_length.is_some_and(|prior| prior != parsed) {
+                return Err(RequestReadError::new(
+                    400,
+                    "conflicting content-length headers",
+                ));
+            }
+            content_length = Some(parsed);
+        }
+        if name == "transfer-encoding" {
+            transfer_encoding = Some(value.to_ascii_lowercase());
+        }
+        headers.push((name, value));
+    }
+    if content_length.is_some() && transfer_encoding.is_some() {
+        return Err(RequestReadError::new(400, "ambiguous request framing"));
+    }
+    let body = match transfer_encoding.as_deref() {
+        Some("chunked") => read_chunked_body(&mut reader, cap, &mut total).await?,
+        Some(_) => return Err(RequestReadError::new(501, "unsupported transfer encoding")),
+        None => match content_length {
+            Some(length) => read_n_body(&mut reader, length, cap).await?,
+            None => Vec::new(),
+        },
+    };
+    Ok(ParsedRequest {
+        method,
+        target,
+        version,
+        headers,
+        body,
+    })
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    total: &mut usize,
+) -> std::result::Result<String, RequestReadError> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf().await.map_err(RequestReadError::io)?;
+        if available.is_empty() {
+            break;
+        }
+        let count = memchr::memchr(b'\n', available).map_or(available.len(), |index| index + 1);
+        let next_len = bytes
+            .len()
+            .checked_add(count)
+            .ok_or_else(|| RequestReadError::new(431, "headers too large"))?;
+        if next_len > MAX_LINE_BYTES {
+            return Err(RequestReadError::new(431, "headers too large"));
+        }
+        bytes.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if bytes.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    *total = total
+        .checked_add(bytes.len())
+        .ok_or_else(|| RequestReadError::new(431, "headers too large"))?;
+    if *total > MAX_HEADER_BYTES {
+        return Err(RequestReadError::new(431, "headers too large"));
+    }
+    String::from_utf8(bytes).map_err(|_| RequestReadError::new(400, "headers are not UTF-8"))
+}
+
+async fn read_n_body<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    length: usize,
+    cap: usize,
+) -> std::result::Result<Vec<u8>, RequestReadError> {
+    if length > cap {
+        return Err(RequestReadError::new(413, "payload too large"));
+    }
+    let mut body = vec![0; length];
+    reader
+        .read_exact(&mut body)
+        .await
+        .map_err(RequestReadError::io)?;
+    Ok(body)
+}
+
+async fn read_chunked_body<R: AsyncBufRead + AsyncRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+    header_total: &mut usize,
+) -> std::result::Result<Vec<u8>, RequestReadError> {
+    let mut body = Vec::new();
+    loop {
+        let line = read_bounded_line(reader, header_total).await?;
+        let size = line
+            .trim_end_matches(['\r', '\n'])
+            .split(';')
+            .next()
+            .and_then(|value| usize::from_str_radix(value.trim(), 16).ok())
+            .ok_or_else(|| RequestReadError::new(400, "invalid chunk size"))?;
+        if size == 0 {
+            loop {
+                let trailer = read_bounded_line(reader, header_total).await?;
+                if trailer == "\r\n" || trailer == "\n" {
+                    break;
+                }
+                if trailer.is_empty() || !trailer.contains(':') {
+                    return Err(RequestReadError::new(400, "malformed chunk trailer"));
+                }
+            }
+            break;
+        }
+        let next_len = body
+            .len()
+            .checked_add(size)
+            .ok_or_else(|| RequestReadError::new(413, "payload too large"))?;
+        if next_len > cap {
+            return Err(RequestReadError::new(413, "payload too large"));
+        }
+        let start = body.len();
+        body.resize(next_len, 0);
+        reader
+            .read_exact(&mut body[start..])
+            .await
+            .map_err(RequestReadError::io)?;
+        let mut crlf = [0; 2];
+        reader
+            .read_exact(&mut crlf)
+            .await
+            .map_err(RequestReadError::io)?;
+        if crlf != *b"\r\n" {
+            return Err(RequestReadError::new(400, "malformed chunk terminator"));
+        }
+    }
+    Ok(body)
+}
+
+async fn read_response_body(
+    response: reqwest::Response,
+    cap: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    use futures::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| "upstream body exceeds size limit".to_owned())?;
+        if next_len > cap {
+            return Err("upstream body exceeds size limit".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn write_response(
+    stream: &mut TcpStream,
+    version: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &[u8],
+) -> Result<()> {
+    let reason = status.canonical_reason().unwrap_or("");
+    stream
+        .write_all(format!("{version} {} {reason}\r\n", status.as_u16()).as_bytes())
+        .await?;
+    for (name, value) in headers {
+        if is_hop_by_hop_response_header(name.as_str()) {
+            continue;
+        }
+        if let Ok(value) = value.to_str() {
+            stream
+                .write_all(format!("{}: {value}\r\n", name.as_str()).as_bytes())
+                .await?;
+        }
+    }
+    stream
+        .write_all(
+            format!(
+                "Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn write_error(stream: &mut TcpStream, status: u16, message: &str) -> Result<()> {
+    let status_code =
+        reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let reason = status_code.canonical_reason().unwrap_or("");
+    let body = format!("{status} {message}\n");
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.write_all(body.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+fn canonical_redacted_body(
+    policy: &RedactPolicy,
+    bytes: &[u8],
+    include: bool,
+) -> Result<Option<String>> {
+    if !include {
+        return Ok(None);
+    }
+    let canonical = body_canonical(bytes);
+    Ok(Some(
+        apply(policy, Surface::Telemetry, &canonical)?.into_owned(),
+    ))
+}
+
+fn redacted_headers(
+    policy: &RedactPolicy,
+    headers: &[(String, String)],
+) -> Result<BTreeMap<String, String>> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let value = redact_header(name, value);
+            let value = apply(policy, Surface::Telemetry, &value)?.into_owned();
+            Ok((name.clone(), value))
+        })
+        .collect()
+}
+
+fn is_hop_by_hop_request_header(name: &str) -> bool {
+    matches!(
+        name,
+        "host"
+            | "content-length"
+            | "connection"
+            | "accept-encoding"
+            | "transfer-encoding"
+            | "proxy-connection"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "upgrade"
+    )
+}
+
+fn is_hop_by_hop_response_header(name: &str) -> bool {
+    matches!(
+        name,
+        "content-length"
+            | "connection"
+            | "transfer-encoding"
+            | "proxy-connection"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "upgrade"
+    )
+}
+
+fn resolve_log_path(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
+    if let Some(path) = &cfg.fixed_log_path {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return Ok(Some(path.clone()));
+    }
+    let home = MoaganHome::at(cfg.runs_dir.clone());
+    if let Some(run_id) = cfg.run_id {
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure()?;
+        return Ok(Some(run_dir.external_audit_path()));
+    }
+    let runs_root = cfg.runs_dir.join(".runs");
+    std::fs::create_dir_all(&runs_root)?;
+    let Some(run_id) = pick_latest_run(&runs_root)? else {
+        return Ok(None);
+    };
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+    Ok(Some(run_dir.external_audit_path()))
+}
+
+fn pick_latest_run(runs_root: &Path) -> Result<Option<RunId>> {
+    let mut latest = None;
+    for entry in std::fs::read_dir(runs_root)? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(run_id) = name.parse::<RunId>() else {
+            continue;
+        };
+        if latest.is_none_or(|current| run_id > current) {
+            latest = Some(run_id);
+        }
+    }
+    Ok(latest)
+}
+
+fn validate_upstream(upstream: &str) -> Result<()> {
+    let url = reqwest::Url::parse(upstream)
+        .map_err(|e| Error::InvalidArgs(format!("invalid upstream URL: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(Error::InvalidArgs(
+            "upstream must be an absolute http(s) URL".into(),
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(Error::InvalidArgs(
+            "upstream URL must not contain a fragment".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_forward_target(cfg: &ProxyConfig, local_addr: SocketAddr) -> Result<()> {
+    let url = reqwest::Url::parse(&cfg.upstream)
+        .map_err(|e| Error::InvalidArgs(format!("invalid upstream URL: {e}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| Error::InvalidArgs("upstream URL has no host".into()))?;
+    let is_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if cfg.refuse_loopback_forward && !cfg.refuse_loopback_forward_allowed && is_loopback {
         return Err(Error::InvalidArgs(format!(
             "refusing to forward to loopback upstream {}",
             cfg.upstream
         )));
     }
-    let listener = TcpListener::bind(cfg.listen).map_err(|e| Error::Io(IoError::Raw(e)))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    let shutdown = Arc::new(Notify::new());
-    let initial_path = resolve_initial_log_path(&cfg)?;
-    let initial_run = initial_path_run_id(&initial_path);
-    let writer = Arc::new(Mutex::new(WriterSlot {
-        writer: AuditWriter::create(&initial_path).map_err(|e| Error::Io(IoError::Raw(e)))?,
-        current_run: initial_run,
-    }));
-    let client = reqwest::Client::builder()
-        .timeout(cfg.upstream_timeout)
-        .connect_timeout(Duration::from_secs(15))
-        .user_agent(concat!("moagan-audit/", env!("CARGO_PKG_VERSION")))
-        .redirect(Policy::none())
-        .build()
-        .map_err(|e| Error::Provider(format!("build reqwest client: {e}")))?;
-    let cfg = Arc::new(cfg);
-    let shutdown_clone = Arc::clone(&shutdown);
-    let writer_for_accept = Arc::clone(&writer);
-    let cfg_for_accept = Arc::clone(&cfg);
-    std::thread::spawn(move || {
-        run_accept(
-            listener,
-            cfg_for_accept,
-            writer_for_accept,
-            client,
-            shutdown_clone,
-        );
-    });
-    if cfg.fixed_log_path.is_none() && cfg.run_id.is_none() {
-        let poller_cfg = Arc::clone(&cfg);
-        let poller_writer = Arc::clone(&writer);
-        let poller_shutdown = Arc::clone(&shutdown);
-        std::thread::spawn(move || {
-            run_runs_dir_poller(poller_cfg, poller_writer, poller_shutdown);
-        });
-    }
-    Ok(ProxyHandle {
-        local_addr,
-        shutdown,
-    })
-}
-
-impl ProxyHandle {
-    /// Signal the accept loop to stop and wait for in-flight
-    /// handlers to finalise their writes.
-    pub async fn shutdown(&self) {
-        self.shutdown.notify_waiters();
-    }
-}
-
-/// Resolve the log path to use at startup.
-///
-/// Priority:
-/// 1. `cfg.fixed_log_path` if set.
-/// 2. `cfg.run_id`'s audit path if `cfg.run_id` is Some.
-/// 3. The latest existing run under `<cfg.runs_dir>/.runs/`.
-/// 4. A sentinel path under the runs dir that lets the very first
-///    request get logged somewhere; the poller will swap to the
-///    correct run as soon as it appears.
-fn resolve_initial_log_path(cfg: &ProxyConfig) -> Result<PathBuf> {
-    if let Some(p) = &cfg.fixed_log_path {
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| Error::Io(IoError::Raw(e)))?;
-        }
-        return Ok(p.clone());
-    }
-    let runs_root = cfg.runs_dir.join(".runs");
-    std::fs::create_dir_all(&runs_root).map_err(|e| Error::Io(IoError::Raw(e)))?;
-    if let Some(run_id) = cfg.run_id {
-        let home = MoaganHome::at(cfg.runs_dir.clone());
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure()?;
-        return Ok(run_dir.external_audit_path());
-    }
-    if let Some(latest) = pick_latest_run(&runs_root)? {
-        let home = MoaganHome::at(cfg.runs_dir.clone());
-        let run_dir = home.run_dir(latest);
-        run_dir.ensure()?;
-        return Ok(run_dir.external_audit_path());
-    }
-    let sentinel = runs_root.join(".audit_pending");
-    std::fs::create_dir_all(&sentinel).map_err(|e| Error::Io(IoError::Raw(e)))?;
-    Ok(sentinel.join("external_audit.jsonl"))
-}
-
-/// Extract the run id from a log path. Returns None for sentinel paths.
-fn initial_path_run_id(path: &Path) -> Option<RunId> {
-    // Path looks like <runs_dir>/.runs/<uuid>/telemetry/external_audit.jsonl
-    let components: Vec<_> = path.components().collect();
-    if components.len() < 3 {
-        return None;
-    }
-    // Walk back from the end until we find a parseable UUID.
-    for c in components.iter().rev() {
-        if let std::path::Component::Normal(s) = c
-            && let Ok(id) = s.to_string_lossy().parse::<RunId>()
-        {
-            return Some(id);
-        }
-    }
-    None
-}
-
-/// Pick the highest-UUIDv7 run directory currently on disk.
-fn pick_latest_run(runs_root: &Path) -> Result<Option<RunId>> {
-    let mut entries: Vec<(RunId, std::time::SystemTime)> = Vec::new();
-    for entry in std::fs::read_dir(runs_root).map_err(|e| Error::Io(IoError::Raw(e)))? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let name = entry.file_name().to_string_lossy().to_string();
-        let id = match name.parse::<RunId>() {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        entries.push((id, modified));
-    }
-    Ok(entries
-        .into_iter()
-        .max_by_key(|(id, _)| *id)
-        .map(|(id, _)| id))
-}
-
-/// Background poller that watches `<runs_dir>/.runs/` for new run
-/// directories. When a new run is detected, it closes the current
-/// `AuditWriter` (flushing any buffered bytes) and opens a new one
-/// for that run's audit file. The proxy then writes every
-/// subsequent request to the new file.
-///
-/// Polling interval: 200 ms. This is the right granularity for
-/// moagan's typical workload (a deep run creates the run directory
-/// tens of milliseconds before the first HTTP call).
-fn run_runs_dir_poller(
-    cfg: Arc<ProxyConfig>,
-    writer: Arc<Mutex<WriterSlot>>,
-    shutdown: Arc<Notify>,
-) {
-    let runs_root = cfg.runs_dir.join(".runs");
-    eprintln!(
-        "audit poller: started, polling every 50 ms in {}",
-        runs_root.display()
-    );
-    let interval = Duration::from_millis(50);
-    loop {
-        std::thread::sleep(interval);
-        if shutdown_has_fired(&shutdown) {
-            break;
-        }
-        sync_writer_to_latest_run(&cfg, &writer);
-    }
-}
-
-fn run_accept(
-    listener: TcpListener,
-    cfg: Arc<ProxyConfig>,
-    writer: Arc<Mutex<WriterSlot>>,
-    client: reqwest::Client,
-    shutdown: Arc<Notify>,
-) {
-    listener
-        .set_nonblocking(false)
-        .expect("reset blocking listener");
-    let dynamic = cfg.fixed_log_path.is_none() && cfg.run_id.is_none();
-    loop {
-        let (stream, _peer) = match listener.accept() {
-            Ok(pair) => pair,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                eprintln!("warn: audit proxy accept error: {e}");
-                continue;
-            }
-        };
-        if shutdown_has_fired(&shutdown) {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-            break;
-        }
-        // In dynamic-discovery mode, swap the writer to the latest
-        // run *synchronously* before the connection handler reads
-        // its first byte. The background poller (50 ms cadence)
-        // handles steady-state, but at startup the proxy can miss
-        // the first call by the full poll interval.
-        if dynamic {
-            sync_writer_to_latest_run(&cfg, &writer);
-        }
-        let cfg = Arc::clone(&cfg);
-        let writer = Arc::clone(&writer);
-        let client = client.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build audit tokio runtime");
-            let _ = rt.block_on(handle_connection(stream, cfg, writer, client));
-        });
-    }
-}
-
-/// Swap the shared writer to the latest run directory if a newer one
-/// has appeared since the last swap. Idempotent and cheap when the
-/// run id has not changed (a single hashmap lookup).
-fn sync_writer_to_latest_run(cfg: &ProxyConfig, writer: &Mutex<WriterSlot>) {
-    let runs_root = cfg.runs_dir.join(".runs");
-    let latest = match pick_latest_run(&runs_root) {
-        Ok(Some(id)) => id,
-        _ => return,
-    };
+    let port = url.port_or_known_default();
+    if is_loopback
+        && port == Some(local_addr.port())
+        && (local_addr.ip().is_loopback() || local_addr.ip().is_unspecified())
     {
-        let slot = writer.lock();
-        if slot.current_run == Some(latest) {
-            return;
-        }
-    }
-    let target = MoaganHome::at(cfg.runs_dir.clone())
-        .run_dir(latest)
-        .external_audit_path();
-    if let Some(parent) = target.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match AuditWriter::append(&target) {
-        Ok(new_writer) => {
-            let mut slot = writer.lock();
-            // Re-check under the lock to avoid two threads racing
-            // to install different writers.
-            if slot.current_run != Some(latest) {
-                *slot = WriterSlot {
-                    writer: new_writer,
-                    current_run: Some(latest),
-                };
-                eprintln!("audit proxy: writer swapped to run {latest}");
-            }
-        }
-        Err(e) => {
-            eprintln!("warn: audit proxy writer swap failed: {e}");
-        }
-    }
-}
-
-fn shutdown_has_fired(notify: &Notify) -> bool {
-    let notified = notify.notified();
-    let waker = std::task::Waker::noop();
-    let mut cx = std::task::Context::from_waker(waker);
-    match std::pin::Pin::new(&mut Box::pin(notified)).poll(&mut cx) {
-        std::task::Poll::Ready(()) => true,
-        std::task::Poll::Pending => false,
-    }
-}
-
-async fn handle_connection(
-    stream: TcpStream,
-    cfg: Arc<ProxyConfig>,
-    writer: Arc<Mutex<WriterSlot>>,
-    client: reqwest::Client,
-) -> Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(60))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(60))).ok();
-    let mut reader = BufReader::new(stream.try_clone().map_err(|e| Error::Io(IoError::Raw(e)))?);
-    let mut writer_stream = stream;
-
-    let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    if request_line.is_empty() {
-        return Ok(());
-    }
-    let mut parts = request_line.trim_end_matches(['\r', '\n']).split(' ');
-    let method = parts.next().unwrap_or("GET").to_owned();
-    let path = parts.next().unwrap_or("/").to_owned();
-    let http_version = parts.next().unwrap_or("HTTP/1.1").to_owned();
-
-    let mut headers = BTreeMap::new();
-    let mut content_length: Option<usize> = None;
-    let mut chunked = false;
-    loop {
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| Error::Io(IoError::Raw(e)))?;
-        if line == "\r\n" || line == "\n" || line.is_empty() {
-            break;
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if let Some((k, v)) = trimmed.split_once(':') {
-            let name = k.trim().to_ascii_lowercase();
-            let value = v.trim().to_owned();
-            if name == "content-length" {
-                content_length = value.parse().ok();
-            } else if name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked")
-            {
-                chunked = true;
-            }
-            headers.insert(name, value);
-        }
-    }
-
-    let body_bytes = if chunked {
-        read_chunked_body(&mut reader, cfg.max_body_bytes)?
-    } else if let Some(n) = content_length {
-        read_n_body(&mut reader, n, cfg.max_body_bytes)?
-    } else {
-        Vec::new()
-    };
-    if body_bytes.len() > cfg.max_body_bytes {
-        return write_error(&mut writer_stream, 413, "payload too large");
-    }
-
-    let id = format!(
-        "{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let started = Instant::now();
-    let upstream_url = join_upstream(
-        &cfg.upstream,
-        &path,
-        headers.get("host").map(String::as_str),
-    )?;
-    let body_sha = sha256_hex(&body_bytes);
-    let body_canon = if cfg.include_bodies {
-        Some(body_canonical(&body_bytes))
-    } else {
-        None
-    };
-    let redacted_req_headers: BTreeMap<String, String> = headers
-        .iter()
-        .map(|(k, v)| (k.clone(), redact_header(k, v)))
-        .collect();
-    let req_rec = AuditRecord {
-        ts: unix_now(),
-        event: "request".into(),
-        id: id.clone(),
-        method: Some(method.clone()),
-        url: Some(upstream_url.clone()),
-        status: None,
-        headers: redacted_req_headers,
-        body_canonical: body_canon.clone(),
-        body_sha256: body_sha.clone(),
-        body_size: body_bytes.len() as u64,
-        elapsed_ms: None,
-        crc32: String::new(),
-        error: None,
-    };
-    {
-        let mut slot = writer.lock();
-        let mut r = req_rec.clone();
-        slot.writer.write_record(&mut r).map_err(Error::from)?;
-        slot.writer.flush_gz().map_err(Error::from)?;
-    }
-
-    let mut fwd_headers = reqwest::header::HeaderMap::new();
-    for (k, v) in &headers {
-        if matches!(
-            k.as_str(),
-            "host" | "content-length" | "connection" | "accept-encoding" | "transfer-encoding"
-        ) {
-            continue;
-        }
-        if let (Ok(name), Ok(value)) = (
-            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-            reqwest::header::HeaderValue::from_str(v),
-        ) {
-            fwd_headers.insert(name, value);
-        }
-    }
-
-    let method_typed = reqwest::Method::from_bytes(method.as_bytes())
-        .map_err(|e| Error::Provider(format!("method: {e}")))?;
-    let request_builder = client
-        .request(method_typed, &upstream_url)
-        .headers(fwd_headers)
-        .body(body_bytes.clone());
-    let response_result = request_builder.send().await;
-    let response = match response_result {
-        Ok(r) => r,
-        Err(e) => {
-            let err_rec = AuditRecord {
-                ts: unix_now(),
-                event: "upstream_error".into(),
-                id: id.clone(),
-                method: None,
-                url: None,
-                status: None,
-                headers: BTreeMap::new(),
-                body_canonical: None,
-                body_sha256: String::new(),
-                body_size: 0,
-                elapsed_ms: None,
-                crc32: String::new(),
-                error: Some(e.to_string()),
-            };
-            {
-                let mut slot = writer.lock();
-                let mut r = err_rec;
-                slot.writer.write_record(&mut r).map_err(Error::from)?;
-                slot.writer.flush_gz().map_err(Error::from)?;
-            }
-            return write_error(&mut writer_stream, 502, "upstream error");
-        }
-    };
-
-    let status = response.status().as_u16();
-    let mut resp_headers = BTreeMap::new();
-    for (k, v) in response.headers().iter() {
-        let value = v.to_str().unwrap_or("<binary>").to_owned();
-        resp_headers.insert(
-            k.as_str().to_ascii_lowercase(),
-            redact_header(k.as_str(), &value),
-        );
-    }
-    let mut resp_body: Vec<u8> = Vec::new();
-    let read_result = read_response_body(&mut resp_body, response, cfg.max_body_bytes).await;
-    if let Err(e) = read_result {
-        let err_rec = AuditRecord {
-            ts: unix_now(),
-            event: "upstream_error".into(),
-            id: id.clone(),
-            method: None,
-            url: None,
-            status: None,
-            headers: BTreeMap::new(),
-            body_canonical: None,
-            body_sha256: String::new(),
-            body_size: 0,
-            elapsed_ms: None,
-            crc32: String::new(),
-            error: Some(e.to_string()),
-        };
-        {
-            let mut slot = writer.lock();
-            let mut r = err_rec;
-            slot.writer.write_record(&mut r).map_err(Error::from)?;
-        }
-        return write_error(&mut writer_stream, 502, "upstream body read error");
-    }
-    let resp_body_sha = sha256_hex(&resp_body);
-    let resp_body_canon = if cfg.include_bodies {
-        Some(body_canonical(&resp_body))
-    } else {
-        None
-    };
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    let resp_rec = AuditRecord {
-        ts: unix_now(),
-        event: "response".into(),
-        id: id.clone(),
-        method: None,
-        url: None,
-        status: Some(status),
-        headers: resp_headers,
-        body_canonical: resp_body_canon,
-        body_sha256: resp_body_sha,
-        body_size: resp_body.len() as u64,
-        elapsed_ms: Some(elapsed_ms),
-        crc32: String::new(),
-        error: None,
-    };
-    {
-        let mut slot = writer.lock();
-        let mut r = resp_rec;
-        slot.writer.write_record(&mut r).map_err(Error::from)?;
-        slot.writer.flush_gz().map_err(Error::from)?;
-    }
-
-    let resp_line = format!("{http_version} {status} {}\r\n", reason_phrase(status));
-    writer_stream
-        .write_all(resp_line.as_bytes())
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    writer_stream
-        .write_all(format!("Content-Length: {}\r\n", resp_body.len()).as_bytes())
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    writer_stream
-        .write_all(b"Connection: close\r\n\r\n")
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    writer_stream
-        .write_all(&resp_body)
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    writer_stream
-        .flush()
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    Ok(())
-}
-
-async fn read_response_body(
-    buf: &mut Vec<u8>,
-    response: reqwest::Response,
-    cap: usize,
-) -> std::result::Result<(), reqwest::Error> {
-    use futures::StreamExt;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if buf.len() + chunk.len() > cap {
-            let remaining = cap - buf.len();
-            buf.extend_from_slice(&chunk[..remaining]);
-            break;
-        }
-        buf.extend_from_slice(&chunk);
+        return Err(Error::InvalidArgs(
+            "upstream resolves to the audit proxy itself".into(),
+        ));
     }
     Ok(())
 }
 
-fn read_n_body<R: Read>(reader: &mut R, n: usize, cap: usize) -> Result<Vec<u8>> {
-    if n > cap {
-        return Err(Error::Provider(format!(
-            "content-length {n} exceeds cap {cap}"
-        )));
+fn join_upstream(base: &str, target: &str, _host_hint: Option<&str>) -> Result<String> {
+    if !target.starts_with('/') || target.starts_with("//") {
+        return Err(Error::InvalidArgs(
+            "absolute request targets are not allowed".into(),
+        ));
     }
-    let mut buf = vec![0u8; n];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    Ok(buf)
+    let mut url = reqwest::Url::parse(base)
+        .map_err(|e| Error::InvalidArgs(format!("invalid upstream URL: {e}")))?;
+    let (target_path, query) = target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)));
+    if target_path != "/" {
+        let base_segments = url
+            .path_segments()
+            .map(|segments| {
+                segments
+                    .filter(|segment| !segment.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let target_segments = target_path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let max_overlap = base_segments.len().min(target_segments.len());
+        let overlap = (0..=max_overlap)
+            .rev()
+            .find(|count| {
+                base_segments[base_segments.len().saturating_sub(*count)..]
+                    == target_segments[..*count]
+            })
+            .unwrap_or(0);
+        let mut combined = base_segments;
+        combined.extend_from_slice(&target_segments[overlap..]);
+        url.set_path(&format!("/{}", combined.join("/")));
+    }
+    url.set_query(query);
+    url.set_fragment(None);
+    Ok(url.into())
 }
 
-fn read_chunked_body<R: BufRead>(reader: &mut R, cap: usize) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    loop {
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| Error::Io(IoError::Raw(e)))?;
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        let size_str = trimmed.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_str, 16)
-            .map_err(|e| Error::Provider(format!("chunk size: {e}")))?;
-        if size == 0 {
-            let mut tail = String::new();
-            reader
-                .read_line(&mut tail)
-                .map_err(|e| Error::Io(IoError::Raw(e)))?;
-            break;
-        }
-        if out.len() + size > cap {
-            return Err(Error::Provider("chunked body exceeds cap".into()));
-        }
-        let mut buf = vec![0u8; size];
-        reader
-            .read_exact(&mut buf)
-            .map_err(|e| Error::Io(IoError::Raw(e)))?;
-        out.extend_from_slice(&buf);
-        let mut crlf = [0u8; 2];
-        reader
-            .read_exact(&mut crlf)
-            .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    }
-    Ok(out)
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn write_error<W: Write>(stream: &mut W, status: u16, msg: &str) -> Result<()> {
-    let body = format!("{status} {msg}\n");
-    let line = format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status));
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    stream
-        .write_all(format!("Content-Length: {}\r\n", body.len()).as_bytes())
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    stream
-        .write_all(b"Connection: close\r\n\r\n")
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    stream
-        .write_all(body.as_bytes())
-        .map_err(|e| Error::Io(IoError::Raw(e)))?;
-    stream.flush().map_err(|e| Error::Io(IoError::Raw(e)))?;
-    Ok(())
-}
-
-fn reason_phrase(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        408 => "Request Timeout",
-        413 => "Payload Too Large",
-        429 => "Too Many Requests",
-        500 => "Internal Server Error",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        _ => "OK",
-    }
-}
-
-fn join_upstream(base: &str, path: &str, _host_hint: Option<&str>) -> Result<String> {
-    if path.starts_with("http://") || path.starts_with("https://") {
-        return Ok(path.to_owned());
-    }
-    let trimmed = base.trim_end_matches('/');
-    if path == "/" {
-        return Ok(trimmed.to_owned());
-    }
-    if let Some(stripped) = trimmed.strip_suffix("/anthropic/v1") {
-        if path.starts_with("/anthropic/v1/") {
-            // After the prefix `/anthropic/v1` (12 chars + trailing
-            // slash), the remainder starts at index 13.
-            return Ok(format!("{stripped}{}", &path[13..]));
-        }
-        if path.starts_with("/v1/") {
-            return Ok(format!("{stripped}{}", &path[3..]));
-        }
-    }
-    if trimmed.ends_with("/v1") && path.starts_with("/v1/") {
-        return Ok(format!("{trimmed}{}", &path[3..]));
-    }
-    Ok(format!("{trimmed}{path}"))
-}
-
-fn url_host(url: &str) -> Option<String> {
-    let after = url.split("://").nth(1)?;
-    let host = after.split('/').next()?.split(':').next()?;
-    Some(host.to_owned())
-}
-
-/// Wall-clock seconds since the Unix epoch. Rounded to microsecond
-/// precision so the value round-trips through `serde_json` without
-/// losing bits: `SystemTime::as_secs_f64` has nanosecond precision but
-/// `f64` cannot represent all of those decimals exactly, so a naive
-/// value would serialise to e.g. `1785199064.2119439` but parse back
-/// as a slightly different f64 that re-serialises to
-/// `1785199064.211944`. The mismatch breaks the per-line CRC. The
-/// microsecond round keeps the value well within `serde_json`'s
-/// shortest-decimal guarantee (6 decimals).
 fn unix_now() -> f64 {
-    let d = std::time::SystemTime::now()
+    let duration = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let micros = (d.as_secs_f64() * 1_000_000.0).round();
+    let micros = (duration.as_secs_f64() * 1_000_000.0).round();
     micros / 1_000_000.0
-}
-
-#[allow(dead_code)]
-fn _resolve_loopback(a: &str) -> Option<SocketAddr> {
-    a.to_socket_addrs().ok().and_then(|mut i| i.next())
 }
 
 #[cfg(test)]
@@ -776,40 +885,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reason_phrase_known() {
-        assert_eq!(reason_phrase(200), "OK");
-        assert_eq!(reason_phrase(502), "Bad Gateway");
-    }
-
-    #[test]
-    fn join_upstream_handles_root() {
+    fn join_upstream_preserves_anthropic_prefix() {
         assert_eq!(
-            join_upstream("https://api.minimax.io", "/", None).unwrap(),
-            "https://api.minimax.io"
+            join_upstream("https://api.minimax.io/anthropic/v1", "/v1/messages", None).unwrap(),
+            "https://api.minimax.io/anthropic/v1/messages"
         );
         assert_eq!(
-            join_upstream("https://api.minimax.io/", "/messages", None).unwrap(),
-            "https://api.minimax.io/messages"
-        );
-    }
-
-    #[test]
-    fn join_upstream_passthrough_absolute() {
-        assert_eq!(
-            join_upstream("https://api.minimax.io", "https://other.example/x", None).unwrap(),
-            "https://other.example/x"
+            join_upstream(
+                "https://api.minimax.io/anthropic/v1",
+                "/anthropic/v1/messages",
+                None
+            )
+            .unwrap(),
+            "https://api.minimax.io/anthropic/v1/messages"
         );
     }
 
     #[test]
-    fn url_host_parses_https() {
+    fn join_upstream_handles_root_and_query() {
         assert_eq!(
-            url_host("https://api.minimax.io/x"),
-            Some("api.minimax.io".into())
+            join_upstream("https://api.minimax.io/v1", "/messages?x=1", None).unwrap(),
+            "https://api.minimax.io/v1/messages?x=1"
         );
         assert_eq!(
-            url_host("https://api.minimax.io:8080/x"),
-            Some("api.minimax.io".into())
+            join_upstream("https://api.minimax.io/v1", "/", None).unwrap(),
+            "https://api.minimax.io/v1"
         );
+    }
+
+    #[test]
+    fn join_upstream_rejects_absolute_targets() {
+        assert!(join_upstream("https://api.minimax.io", "https://other.example/x", None).is_err());
     }
 }
