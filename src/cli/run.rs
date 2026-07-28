@@ -242,15 +242,16 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
     pipeline = pipeline.push(ProposePhase { count: proposals });
 
     // The Validate phase runs the executable validator suite
-    // (structural + constraints + language validators) for modes
-    // that benefit from a per-proposal evidence pass. `fast`,
-    // `standard`, and `explore` skip it because they have no
-    // executable artefacts to validate; `deep` and `batch` get it
-    // because their proposals frequently include code snippets
-    // that should type-check / compile before the gate phase
-    // decides which proposals advance. Compliance with V4 §5.8 +
-    // 13.6.
-    if matches!(mode, Mode::Deep | Mode::Batch) {
+    // (structural + constraints + language validators) for every
+    // mode that produces full proposals AND has the budget to
+    // afford the extra sandbox invocation. `fast` stays fast
+    // because the structural checks live entirely inside Gate
+    // already; `explore` ends at sketches and never reaches this
+    // branch. `standard`, `deep`, and `batch` get it so proposals
+    // carrying code snippets can be type-checked / compiled
+    // before the gate phase decides which proposals advance.
+    // Compliance with V4 §5.8 + §13.6.
+    if matches!(mode, Mode::Standard | Mode::Deep | Mode::Batch) {
         pipeline = pipeline.push(ValidatePhase::new());
     }
 

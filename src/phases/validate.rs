@@ -140,61 +140,65 @@ impl Phase for ValidatePhase {
         "validate"
     }
 
-    async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
-        let proposals_dir = ctx.run_dir().proposals();
-        let validation_dir = ctx.run_dir().validation();
-        std::fs::create_dir_all(&validation_dir)?;
+async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+    let proposals_dir = ctx.run_dir().proposals();
+    let validation_dir = ctx.run_dir().validation();
+    // Evidence sidecars live under validation/evidence/ so they
+    // never collide with the Gate phase's bare validation/p_*.json
+    // sidecars, which Repair reads as Gate structs.
+    let evidence_dir = validation_dir.join("evidence");
+    std::fs::create_dir_all(&evidence_dir)?;
 
-        let sandbox_cfg = SandboxConfig::new()
-            .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs));
-        let sandbox = Sandbox::new(sandbox_cfg)?;
+    let sandbox_cfg = SandboxConfig::new()
+        .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs));
+    let sandbox = Sandbox::new(sandbox_cfg)?;
 
-        let validators = Self::build_validators();
-        let mut paths = Vec::new();
-        for entry in std::fs::read_dir(&proposals_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !file_name.ends_with(".json") || file_name.ends_with(".meta.json") {
-                continue;
+    let validators = Self::build_validators();
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(&proposals_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !file_name.ends_with(".json") || file_name.ends_with(".meta.json") {
+            continue;
+        }
+        let proposal: Proposal = read_json(&path)?;
+        let id = proposal.id.clone();
+
+        // Run every Proposal-only validator. Each one returns
+        // its own evidence; we collect them in order.
+        let mut evidences: Vec<ValidationEvidence> = Vec::new();
+        for v in &validators {
+            match v.validate(&proposal, Some(&sandbox)) {
+                Ok(ev) => evidences.push(ev),
+                Err(e) => evidences.push(ValidationEvidence {
+                    validator: v.name().into(),
+                    status: crate::validators::ValidationStatus::Error,
+                    failed_checks: vec![format!("validator error: {e}")],
+                    ..ValidationEvidence::default()
+                }),
             }
-            let proposal: Proposal = read_json(&path)?;
-            let id = proposal.id.clone();
-
-            // Run every Proposal-only validator. Each one returns
-            // its own evidence; we collect them in order.
-            let mut evidences: Vec<ValidationEvidence> = Vec::new();
-            for v in &validators {
-                match v.validate(&proposal, Some(&sandbox)) {
-                    Ok(ev) => evidences.push(ev),
-                    Err(e) => evidences.push(ValidationEvidence {
-                        validator: v.name().into(),
-                        status: crate::validators::ValidationStatus::Error,
-                        failed_checks: vec![format!("validator error: {e}")],
-                        ..ValidationEvidence::default()
-                    }),
-                }
-            }
-
-            // Aggregate verdict: any Fail collapses to Fail,
-            // otherwise any Warn is Warn, otherwise Pass. The
-            // composite helper is overkill for two validators but
-            // gives us the rule in one place.
-            let status = aggregate_status(&evidences);
-            let sidecar = ValidationSidecar {
-                schema_version: ValidationSidecar::SCHEMA_VERSION.into(),
-                proposal_id: id.clone(),
-                status,
-                validators: evidences,
-            };
-
-            let out_path: PathBuf = validation_dir.join(format!("{id}.evidence.json"));
-            crate::phases::util::write_json(&out_path, &sidecar)?;
-            paths.push(out_path);
         }
 
-        Ok(PhaseOutput::Validations(paths))
+        // Aggregate verdict: any Fail collapses to Fail,
+        // otherwise any Warn is Warn, otherwise Pass. The
+        // composite helper is overkill for two validators but
+        // gives us the rule in one place.
+        let status = aggregate_status(&evidences);
+        let sidecar = ValidationSidecar {
+            schema_version: ValidationSidecar::SCHEMA_VERSION.into(),
+            proposal_id: id.clone(),
+            status,
+            validators: evidences,
+        };
+
+        let out_path: PathBuf = evidence_dir.join(format!("{id}.json"));
+        crate::phases::util::write_json(&out_path, &sidecar)?;
+        paths.push(out_path);
     }
+
+    Ok(PhaseOutput::Validations(paths))
+}
 }
 
 fn aggregate_status(evidences: &[ValidationEvidence]) -> String {
@@ -311,7 +315,7 @@ mod tests {
         let phase = ValidatePhase::new();
         let result = phase.execute(&ctx).await;
         assert!(result.is_ok(), "execute failed: {result:?}");
-        let out_path = run_dir.validation().join("p_001.evidence.json");
+        let out_path = run_dir.validation().join("evidence").join("p_001.json");
         assert!(out_path.exists(), "evidence file missing at {out_path:?}");
         let sidecar: ValidationSidecar = read_json(&out_path).unwrap();
         assert_eq!(sidecar.proposal_id, "p_001");

@@ -172,14 +172,21 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
 
     let run_dir = home.run_dir(run_id);
     let validation_dir = run_dir.validation();
+    let evidence_dir = validation_dir.join("evidence");
 
     let mut evidence_files = 0;
     let mut gate_files = 0;
     for entry in std::fs::read_dir(&validation_dir)? {
         let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.ends_with(".evidence.json") {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".json") && !name.ends_with(".meta.json") {
+            gate_files += 1;
+        }
+    }
+    for entry in std::fs::read_dir(&evidence_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".json") && !name.ends_with(".meta.json") {
             evidence_files += 1;
             let sidecar: serde_json::Value =
                 serde_json::from_reader(std::fs::File::open(entry.path())?)?;
@@ -197,13 +204,11 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
                 "evidence sidecar should list at least structural + constraints"
             );
             assert_eq!(status, "pass", "clean proposals must aggregate to pass");
-        } else if name.ends_with(".json") && !name.ends_with(".meta.json") {
-            gate_files += 1;
         }
     }
     assert_eq!(
         evidence_files, proposals,
-        "every proposal should have a Validate evidence sidecar"
+        "every proposal should have a Validate evidence sidecar under validation/evidence/"
     );
     assert_eq!(
         gate_files, proposals,
