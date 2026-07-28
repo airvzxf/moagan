@@ -24,7 +24,7 @@ pub use typescript_validator::TypeScriptValidator;
 /// A single piece of code attached to a proposal. The pipeline uses
 /// `language` to pick the right `CodeValidator`; `kind` is a free-form
 /// label (`"src/lib.rs"`, `"tests/smoke.py"`, ...).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CodeArtifact {
     /// Logical name of the artifact (file path relative to the
     /// proposal, or any human-readable identifier).

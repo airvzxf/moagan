@@ -294,6 +294,7 @@ mod tests {
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
             source_sketch: String::new(),
+            ..Proposal::default()
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(!g.pass);
@@ -309,6 +310,7 @@ mod tests {
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
             source_sketch: String::new(),
+            ..Proposal::default()
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("truncated")));
@@ -324,6 +326,7 @@ mod tests {
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
             source_sketch: String::new(),
+            ..Proposal::default()
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("unbalanced")));
@@ -339,6 +342,7 @@ mod tests {
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
             source_sketch: String::new(),
+            ..Proposal::default()
         };
         let g = structural_check(&p, &empty_brief(), &["postgres".into()], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("forbidden")));
@@ -355,6 +359,7 @@ mod tests {
             tradeoffs: vec!["None — the user asked for the standard order".into()],
             evidence: vec!["Wikipedia: Rainbow".into()],
             source_sketch: String::new(),
+            ..Proposal::default()
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.pass, "issues = {:?}", g.issues);
@@ -370,6 +375,7 @@ mod tests {
             tradeoffs: vec!["a".into()],
             evidence: vec!["b".into()],
             source_sketch: String::new(),
+            ..Proposal::default()
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         assert!(g.issues.iter().any(|i| i.contains("placeholder")));
@@ -385,6 +391,7 @@ mod tests {
             tradeoffs: vec![],
             evidence: vec![],
             source_sketch: String::new(),
+            ..Proposal::default()
         };
         let g = structural_check(&p, &empty_brief(), &[], 0, 0);
         // tradeoffs/evidence missing = soft warning, but proposal still passes.
