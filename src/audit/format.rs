@@ -19,7 +19,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-use flate2::Crc;
+use flate2::write::GzEncoder;
+use flate2::{Compression, Crc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 /// One JSONL record emitted by the sidecar.
@@ -44,7 +45,8 @@ pub struct AuditRecord {
     /// `BTreeMap` keeps keys sorted so the CRC stays stable across
     /// hashmap re-orderings.
     pub headers: std::collections::BTreeMap<String, String>,
-    /// Canonical body (UTF-8 lossless). `None` when `--exclude-bodies`.
+    /// Canonical UTF-8 body. Invalid byte sequences use replacement
+    /// characters. `None` when `--exclude-bodies`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_canonical: Option<String>,
     /// SHA-256 of the raw body bytes. Always present.
@@ -62,10 +64,8 @@ pub struct AuditRecord {
 }
 
 /// Produce a canonical body string. JSON inputs are re-serialised
-/// with keys ordered alphabetically so two semantically equal bodies
-/// hash to the same `body_sha256` even if the upstream sent keys in
-/// a different order. Non-JSON or invalid bytes fall back to a
-/// UTF-8 lossy representation so audit never loses data.
+/// with keys ordered alphabetically. Non-JSON or invalid bytes fall
+/// back to a UTF-8 lossy representation.
 pub fn body_canonical(bytes: &[u8]) -> String {
     match serde_json::from_slice::<serde_json::Value>(bytes) {
         Ok(v) => serde_json::to_string(&canonify(v))
@@ -119,35 +119,43 @@ pub fn crc32_hex(payload: &[u8]) -> String {
     format!("{:08x}", crc.sum())
 }
 
-/// Append-only writer for the sidecar JSONL. Each [`write_record`]
-/// serialises the record, computes its CRC, and writes the line +
-/// newline in a single flush so a crash between records cannot leave
-/// a partial line on disk. The on-disk file is plain JSONL (no
-/// gzip) so a torn tail is still readable line by line; the CRC
-/// per line flags anything that did not finish cleanly. The
-/// `.jsonl.gz` extension is kept for naming consistency with the
-/// rest of the telemetry tree (`calls.jsonl.gz`,
-/// `phases.jsonl.gz`); the verifier transparently reads either
-/// format via `crate::storage::compression::read_to_string`.
+fn record_crc(rec: &AuditRecord) -> io::Result<String> {
+    let mut value = serde_json::to_value(rec).map_err(io::Error::other)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("crc32");
+    }
+    let payload = serde_json::to_vec(&canonify(value)).map_err(io::Error::other)?;
+    Ok(crc32_hex(&payload))
+}
+
+/// Append-only writer for the sidecar JSONL. Each [`Self::write_record`]
+/// serialises one line into a complete gzip member and flushes it to
+/// the underlying file. A torn trailing member cannot invalidate any
+/// previously completed record.
 pub struct AuditWriter {
     inner: BufWriter<Box<dyn Write + Send>>,
+    sync_file: Option<File>,
 }
 
 impl AuditWriter {
     /// Open a writer at `path`, creating the file if missing.
     pub fn create(path: &Path) -> io::Result<Self> {
-        let f = File::create(path)?;
+        let file = File::create(path)?;
+        let sync_file = file.try_clone()?;
         Ok(Self {
-            inner: BufWriter::new(Box::new(f)),
+            inner: BufWriter::new(Box::new(file)),
+            sync_file: Some(sync_file),
         })
     }
 
     /// Open a writer at `path` in append mode, creating the file if
     /// missing. Used by the proxy when it swaps log files across runs.
     pub fn append(path: &Path) -> io::Result<Self> {
-        let f = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let sync_file = file.try_clone()?;
         Ok(Self {
-            inner: BufWriter::new(Box::new(f)),
+            inner: BufWriter::new(Box::new(file)),
+            sync_file: Some(sync_file),
         })
     }
 
@@ -155,6 +163,7 @@ impl AuditWriter {
     pub fn from_boxed(inner: Box<dyn Write + Send>) -> Self {
         Self {
             inner: BufWriter::new(inner),
+            sync_file: None,
         }
     }
 
@@ -169,34 +178,30 @@ impl AuditWriter {
         Self::from_boxed(Box::new(MutexWriter(w)))
     }
 
-    /// Write one record atomically. After this call the bytes are
-    /// flushed to the underlying writer, but the file is not yet
-    /// fully finalised until `flush_gz` is called.
+    /// Write one record as a complete gzip member.
     pub fn write_record(&mut self, rec: &mut AuditRecord) -> io::Result<()> {
-        // The CRC is computed over a canonical form: every JSON
-        // object is canonified (alphabetical keys, recursive) so
-        // `serde_json`'s field ordering does not affect the hash.
-        rec.crc32 = String::new();
-        let mut value = serde_json::to_value(&*rec).map_err(io::Error::other)?;
-        if let Some(obj) = value.as_object_mut() {
-            obj.remove("crc32");
-        }
-        let canonical = canonify(value);
-        let payload = serde_json::to_vec(&canonical).map_err(io::Error::other)?;
-        let crc = crc32_hex(&payload);
-        rec.crc32 = crc;
-        let line = serde_json::to_vec(rec).map_err(io::Error::other)?;
-        self.inner.write_all(&line)?;
-        self.inner.write_all(b"\n")?;
+        rec.crc32 = record_crc(rec)?;
+        let line_value = canonify(serde_json::to_value(&*rec).map_err(io::Error::other)?);
+        let mut line = serde_json::to_vec(&line_value).map_err(io::Error::other)?;
+        line.push(b'\n');
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&line)?;
+        let member = encoder.finish()?;
+        self.inner.write_all(&member)?;
         self.inner.flush()?;
+        if let Some(file) = &self.sync_file {
+            file.sync_data()?;
+        }
         Ok(())
     }
 
-    /// Flush the underlying writer. After this call the bytes are
-    /// visible to a reader. Named `flush_gz` to keep the call sites
-    /// the same regardless of whether the on-disk file is gzipped.
+    /// Flush the underlying writer.
     pub fn flush_gz(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        self.inner.flush()?;
+        if let Some(file) = &self.sync_file {
+            file.sync_data()?;
+        }
+        Ok(())
     }
 }
 
@@ -258,9 +263,7 @@ pub fn count_invalid_crcs(jsonl: &str) -> (usize, Vec<String>) {
 /// Recompute a record's CRC and return the new hex string. Used by
 /// tests and the verifier when it needs to re-validate a record.
 pub fn recompute_crc(rec: &mut AuditRecord) -> String {
-    rec.crc32 = String::new();
-    let payload = serde_json::to_vec(rec).unwrap_or_default();
-    let crc = crc32_hex(&payload);
+    let crc = record_crc(rec).unwrap_or_default();
     rec.crc32 = crc.clone();
     crc
 }
@@ -329,7 +332,7 @@ mod tests {
     #[test]
     fn write_record_round_trips_with_valid_crc() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("audit.jsonl");
+        let p = tmp.path().join("audit.jsonl.gz");
         {
             let mut w = AuditWriter::create(&p).unwrap();
             let mut r = AuditRecord {
@@ -350,7 +353,7 @@ mod tests {
             w.write_record(&mut r).unwrap();
             w.flush_gz().unwrap();
         }
-        let text = std::fs::read_to_string(&p).unwrap();
+        let text = crate::storage::compression::read_to_string(&p).unwrap();
         let (invalid, bad) = count_invalid_crcs(&text);
         assert_eq!(invalid, 0, "bad lines: {bad:?}");
     }
@@ -358,7 +361,7 @@ mod tests {
     #[test]
     fn write_record_detects_torn_line() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("audit.jsonl");
+        let p = tmp.path().join("audit.jsonl.gz");
         {
             let mut w = AuditWriter::create(&p).unwrap();
             let mut r = AuditRecord {
@@ -379,7 +382,7 @@ mod tests {
             w.write_record(&mut r).unwrap();
             w.flush_gz().unwrap();
         }
-        let mut text = std::fs::read_to_string(&p).unwrap();
+        let mut text = crate::storage::compression::read_to_string(&p).unwrap();
         text.push_str("{\"crc32\":\"00000000\"}\n");
         let (invalid, _) = count_invalid_crcs(&text);
         assert_eq!(invalid, 1);
@@ -388,7 +391,7 @@ mod tests {
     #[test]
     fn append_preserves_previous_lines() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("audit.jsonl");
+        let p = tmp.path().join("audit.jsonl.gz");
         for i in 0..3 {
             let mut w = if i == 0 {
                 AuditWriter::create(&p).unwrap()
@@ -413,7 +416,7 @@ mod tests {
             w.write_record(&mut r).unwrap();
             w.flush_gz().unwrap();
         }
-        let text = std::fs::read_to_string(&p).unwrap();
+        let text = crate::storage::compression::read_to_string(&p).unwrap();
         assert_eq!(text.lines().count(), 3);
         let (invalid, bad) = count_invalid_crcs(&text);
         assert_eq!(invalid, 0, "bad lines: {bad:?}");

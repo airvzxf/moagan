@@ -65,6 +65,13 @@ pub fn open_plain_read(path: &Path) -> Result<Box<dyn Read + Send>> {
 /// for a single run are O(phases × parallel calls), and calls.jsonl is
 /// appended incrementally so the manifest reads it once per run.
 pub fn read_to_string(path: &Path) -> Result<String> {
+    if std::fs::metadata(path)
+        .map_err(|e| Error::Io(IoError::Raw(e)))?
+        .len()
+        == 0
+    {
+        return Ok(String::new());
+    }
     let mut buf = String::new();
     let mut reader: Box<dyn Read> = if is_gz_path(path) {
         open_gz_read(path)?
