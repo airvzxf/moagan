@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use moagan::ids::RunId;
-use moagan::storage::compression;
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -117,44 +116,9 @@ async fn audit_e2e_thirty_five_judge_calls() {
     write_mock_response_dir(mock_dir.path());
     let home_dir = tempfile::tempdir().unwrap();
 
-    // 0. Pre-create a run so the audit sidecar has a target run_id.
-    let pre_run = tokio::process::Command::new(&moagan_bin)
-        .arg("run")
-        .arg("--mode")
-        .arg("fast")
-        .arg("--provider")
-        .arg("mock")
-        .arg("--mock-dir")
-        .arg(mock_dir.path())
-        .arg("--prompt")
-        .arg("preflight")
-        .arg("--runs-dir")
-        .arg(home_dir.path())
-        .env("RUST_LOG", "info,moagan=error")
-        .env("MOAGAN_HOME", home_dir.path())
-        .output()
-        .await
-        .expect("spawn preflight run");
-    if !pre_run.status.success() {
-        eprintln!(
-            "preflight run failed: status={:?} stderr={}",
-            pre_run.status,
-            String::from_utf8_lossy(&pre_run.stderr)
-        );
-        return;
-    }
-    // Extract the preflight run_id so the audit sidecar can be
-    // pointed at it explicitly (it would otherwise pick "the
-    // most recent", which is fine here too, but this is more
-    // deterministic).
-    let pre_run_id = String::from_utf8_lossy(&pre_run.stdout)
-        .lines()
-        .find(|l| l.starts_with("run id:"))
-        .and_then(|l| l.split_whitespace().nth(2))
-        .unwrap_or_default()
-        .to_owned();
-
-    // 1. Boot the audit sidecar.
+    // 1. Boot the audit sidecar WITHOUT --run-id so its background
+    // poller dynamically discovers whatever run `moagan run` is
+    // about to create. The poller polls every 200 ms.
     let mut proxy = tokio::process::Command::new(&moagan_bin)
         .arg("audit")
         .arg("proxy")
@@ -164,8 +128,6 @@ async fn audit_e2e_thirty_five_judge_calls() {
         .arg(&upstream)
         .arg("--runs-dir")
         .arg(home_dir.path())
-        .arg("--run-id")
-        .arg(&pre_run_id)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -177,8 +139,6 @@ async fn audit_e2e_thirty_five_judge_calls() {
     let mut reader = tokio::io::BufReader::new(&mut proxy_err);
     let _ = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut buf)).await;
     eprintln!("proxy stderr first line: {buf:?}");
-    // The proxy may emit a couple of lines; read until we see "proxy
-    // listening" or hit the timeout.
     while !buf.contains("proxy listening") {
         let mut next = String::new();
         let r = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut next)).await;
@@ -227,6 +187,9 @@ async fn audit_e2e_thirty_five_judge_calls() {
         .output()
         .await
         .expect("spawn moagan run");
+    // Give the poller a final chance to flush any in-flight writer
+    // swap before we kill the proxy.
+    tokio::time::sleep(Duration::from_millis(400)).await;
     let _ = proxy.kill().await;
     if !run_output.status.success() {
         eprintln!(
@@ -246,10 +209,6 @@ async fn audit_e2e_thirty_five_judge_calls() {
         .filter_map(|e| e.ok())
         .collect();
     entries.sort_by_key(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok());
-    // The latest entry corresponds to the deep run; the audit
-    // sidecar was started with no --run-id, so it picked the
-    // first run it found. We do the same and read the latest run
-    // directory to find the deep run's output.
     let run_id: RunId = entries
         .last()
         .unwrap()
@@ -257,25 +216,28 @@ async fn audit_e2e_thirty_five_judge_calls() {
         .to_string_lossy()
         .parse()
         .unwrap();
-    let _ = run_id;
     let audit_path = std::path::PathBuf::from(home_dir.path())
         .join(".runs")
         .join(format!("{run_id}"))
         .join("telemetry")
         .join("external_audit.jsonl");
-    if !audit_path.exists() {
-        eprintln!("audit file not found at {}", audit_path.display());
-        return;
-    }
+    assert!(
+        audit_path.exists(),
+        "audit file not found at {}",
+        audit_path.display()
+    );
     let text = std::fs::read_to_string(&audit_path).unwrap();
     let req_count = text
         .lines()
         .filter(|l| l.contains("\"event\":\"request\""))
         .count();
+    eprintln!("req_count={req_count}");
     assert!(
         req_count >= 35,
         "expected >= 35 request records, got {req_count}"
     );
+    let (invalid, bad) = moagan::audit::format::count_invalid_crcs(&text);
+    assert_eq!(invalid, 0, "audit file has invalid CRCs: {bad:?}");
 
     // 3. Verify with `moagan audit verify`.
     let verify = tokio::process::Command::new(&moagan_bin)
@@ -294,5 +256,16 @@ async fn audit_e2e_thirty_five_judge_calls() {
     eprintln!("verify stderr: {}", String::from_utf8_lossy(&verify.stderr));
     eprintln!("verify exit: {:?}", verify.status.code());
     assert!(stdout.contains("metric\tvalue"));
-    let _ = compression::read_to_string;
+    // match_count must equal req_count / 2 (every request is paired
+    // with one response) and the summary must be "ok" or "mismatch"
+    // depending on the internal-vs-external body_canonical layout.
+    // In practice moagan's internal body_canonical is the canonical
+    // form of the request body and the sidecar uses the same
+    // canonical form, so we expect match_count >= 35 (35 judge
+    // calls each with a body_sha256 hit) and a clean exit.
+    let verify_status = verify.status.code().unwrap_or(-1);
+    assert!(
+        verify_status == 0 || verify_status == 1,
+        "verify exit was {verify_status}, want 0 or 1"
+    );
 }
