@@ -81,7 +81,7 @@ impl RunContext {
         let cache = Cache::new(CacheConfig {
             root: home.cross_run_cache_dir(),
             cross_run: true,
-            no_store: false,
+            ..Default::default()
         });
         Self {
             run_id,
