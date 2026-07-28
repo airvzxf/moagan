@@ -109,9 +109,10 @@ impl Phase for ValidatePhase {
         let evidence_dir = validation_dir.join("evidence");
         std::fs::create_dir_all(&evidence_dir)?;
 
-        let sandbox = Sandbox::new(SandboxConfig::new().with_timeout(
-            std::time::Duration::from_secs(self.sandbox_timeout_secs),
-        ))?;
+        let sandbox = Sandbox::new(
+            SandboxConfig::new()
+                .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs)),
+        )?;
 
         let validators = Self::build_validators();
         let mut paths = Vec::new();
@@ -148,12 +149,8 @@ impl Phase for ValidatePhase {
             for artifact in &proposal.artifacts {
                 let lang = artifact.language.as_str();
                 let result = match lang {
-                    RustValidator::LANGUAGE => {
-                        RustValidator::check(artifact, &sandbox).await
-                    }
-                    PythonValidator::LANGUAGE => {
-                        PythonValidator::check(artifact, &sandbox).await
-                    }
+                    RustValidator::LANGUAGE => RustValidator::check(artifact, &sandbox).await,
+                    PythonValidator::LANGUAGE => PythonValidator::check(artifact, &sandbox).await,
                     TypeScriptValidator::LANGUAGE => {
                         TypeScriptValidator::check(artifact, &sandbox).await
                     }

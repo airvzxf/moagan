@@ -27,7 +27,7 @@ use moagan::ids::RunId;
 use moagan::llm::MockProvider;
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
-    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
+    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
     ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, SketchPhase, ValidatePhase,
 };
 use moagan::redact::RedactPolicy;
@@ -130,6 +130,108 @@ fn build_run_context(
         "x".into(),
         "deep".into(),
     )
+}
+
+use moagan::phases::util::write_json;
+use moagan::validators::CodeArtifact;
+
+#[test]
+fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
+    // The integration below seeds proposals directly on disk so
+    // we can attach real artifacts and watch the language
+    // validators actually run. cargo / python3 / tsc availability
+    // is honoured by the per-validator tests (they short-circuit
+    // to Skipped when the binary is missing); this test asserts
+    // only the dispatch wiring, not the per-language outcome.
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+    let proposals_dir = run_dir.proposals();
+    std::fs::create_dir_all(&proposals_dir)?;
+
+    // Proposal 1: a Rust artifact that obviously is source.
+    let rust_artifact = CodeArtifact::new(
+        "src/lib.rs",
+        "rust",
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    );
+    let proposal_with_rust = moagan::domain::Proposal {
+        id: "p_000".into(),
+        summary: "A proposal with a Rust source attachment.".into(),
+        approach: "Uses the rust artifact below.".into(),
+        tradeoffs: vec!["none".into()],
+        evidence: vec!["self-attached source".into()],
+        source_sketch: String::new(),
+        artifacts: vec![rust_artifact],
+    };
+    write_json(&proposals_dir.join("p_000.json"), &proposal_with_rust)?;
+
+    // Proposal 2: empty artifact list (the common case today).
+    let proposal_no_artifacts = moagan::domain::Proposal {
+        id: "p_001".into(),
+        summary: "A proposal with no executable attachment.".into(),
+        approach: "Pure prose, no code.".into(),
+        tradeoffs: vec!["none".into()],
+        evidence: vec!["none".into()],
+        source_sketch: String::new(),
+        artifacts: vec![],
+    };
+    write_json(&proposals_dir.join("p_001.json"), &proposal_no_artifacts)?;
+
+    // Build a context with a mock provider the Validate phase
+    // never touches (it does not issue LLM calls).
+    let provider = Arc::new(MockProvider::empty());
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let phase = ValidatePhase::new();
+    let outputs = {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async {
+            let out = phase.execute(&ctx).await?;
+            // Touch the output to silence dead-code about PhaseOutput.
+            match &out {
+                moagan::phases::PhaseOutput::Validations(_) => Ok::<_, moagan::error::Error>(out),
+                _ => panic!("ValidatePhase must emit PhaseOutput::Validations"),
+            }
+        })
+    }?;
+    ctx.telemetry.flush()?;
+
+    let p0_evidence =
+        std::fs::read_to_string(run_dir.validation().join("evidence").join("p_000.json"))?;
+    assert!(
+        p0_evidence.contains("\"validator\":\"rust\""),
+        "p_000 with a Rust artifact must produce a rust validator entry"
+    );
+    let p1_evidence =
+        std::fs::read_to_string(run_dir.validation().join("evidence").join("p_001.json"))?;
+    assert!(
+        !p1_evidence.contains("\"validator\":\"rust\""),
+        "p_001 with no artifacts must not invoke any language validator"
+    );
+    // Both sidecars must still carry the structural + constraints validators.
+    assert!(p0_evidence.contains("\"validator\":\"structural\""));
+    assert!(p0_evidence.contains("\"validator\":\"constraints\""));
+    assert!(p1_evidence.contains("\"validator\":\"structural\""));
+    assert!(p1_evidence.contains("\"validator\":\"constraints\""));
+
+    // The Validate phase output itself wraps the two evidence paths.
+    assert!(matches!(
+        outputs,
+        moagan::phases::PhaseOutput::Validations(_)
+    ));
+
+    Ok(())
 }
 
 #[test]
