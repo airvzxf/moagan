@@ -31,6 +31,21 @@ impl ConstraintsValidator {
     /// Inspect the proposal against the hard constraints advertised
     /// by the brief.
     pub fn check(proposal: &Proposal, brief_constraints: &[String]) -> ValidationEvidence {
+        Self::check_inner(proposal, brief_constraints)
+    }
+
+    /// Same as [`Self::check`] but reads the constraint slice from the
+    /// canonical [`Brief`](crate::domain::Brief). The validate phase
+    /// uses this entry point so the brief constraints are wired into
+    /// the real check instead of the no-op trait path.
+    pub fn check_with_brief(
+        proposal: &Proposal,
+        brief: &crate::domain::Brief,
+    ) -> ValidationEvidence {
+        Self::check_inner(proposal, &brief.constraints)
+    }
+
+    fn check_inner(proposal: &Proposal, brief_constraints: &[String]) -> ValidationEvidence {
         let mut evidence = ValidationEvidence {
             validator: "constraints".into(),
             status: ValidationStatus::Pass,
@@ -95,10 +110,20 @@ impl Validator for ConstraintsValidator {
         proposal: &Proposal,
         _sandbox: Option<&Sandbox>,
     ) -> Result<ValidationEvidence> {
-        // The validator pulls hard constraints from the proposal
-        // itself when present (the model may attach them inline via
-        // the intake phase); when absent, it returns a no-op Pass.
+        // The trait path stays as a no-op Pass; the validate phase
+        // calls `check_with_brief` directly so the real brief
+        // constraints reach the checker.
         Ok(Self::check(proposal, &[]))
+    }
+}
+
+impl ConstraintsValidator {
+    /// Static form of [`Validator::name`] for call sites that need
+    /// the literal without instantiating the validator (e.g. the
+    /// validate phase dispatches on it to choose the brief-aware
+    /// entry point).
+    pub fn name_static() -> &'static str {
+        "constraints"
     }
 }
 
@@ -155,5 +180,39 @@ mod tests {
         let e = ConstraintsValidator::check(&p, &["".into(), "   ".into()]);
         assert_eq!(e.status, ValidationStatus::Pass);
         assert!(e.checks_run.is_empty());
+    }
+
+    #[test]
+    fn check_with_brief_propagates_constraints() {
+        use crate::domain::Brief;
+        let p = proposal_with("Rust + tokio, no serverless");
+        let brief = Brief {
+            constraints: vec!["no serverless".into(), "Rust".into()],
+            ..Brief::default()
+        };
+        let e = ConstraintsValidator::check_with_brief(&p, &brief);
+        assert_eq!(e.status, ValidationStatus::Pass);
+        assert_eq!(e.checks_run.len(), 2);
+        assert!(e.checks_run.iter().any(|c| c.contains("no serverless")));
+        assert!(e.checks_run.iter().any(|c| c.contains("Rust")));
+    }
+
+    #[test]
+    fn check_with_brief_records_missing_constraint_as_warn() {
+        use crate::domain::Brief;
+        let p = proposal_with("Single Rust binary with SQLite.");
+        let brief = Brief {
+            constraints: vec!["no serverless".into()],
+            ..Brief::default()
+        };
+        let e = ConstraintsValidator::check_with_brief(&p, &brief);
+        assert_eq!(e.status, ValidationStatus::Warn);
+        assert!(e.failed_checks[0].contains("no serverless"));
+    }
+
+    #[test]
+    fn name_static_matches_trait_name() {
+        assert_eq!(ConstraintsValidator::name_static(), "constraints");
+        assert_eq!(ConstraintsValidator::new().name(), "constraints");
     }
 }

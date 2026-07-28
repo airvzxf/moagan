@@ -331,3 +331,118 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
 
     Ok(())
 }
+
+/// The Validate phase must read `brief.json` and feed the real
+/// constraints into the ConstraintsValidator so the "requisitos
+/// duros" check actually runs against the proposal text. Before
+/// this fix the trait path short-circuited to `no_constraints_in_brief`
+/// for every proposal regardless of the brief content.
+#[test]
+fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    // Brief with two hard constraints, one of which the proposal
+    // echoes and one it does not.
+    let brief = moagan::domain::Brief {
+        problem: "x".into(),
+        objectives: vec![],
+        deliverables: vec![],
+        constraints: vec!["tokio runtime".into(), "deploy via systemd".into()],
+        assumptions: vec![],
+        non_goals: vec![],
+        acceptance: vec![],
+        risks: vec![],
+    };
+    write_json(&run_dir.brief(), &brief)?;
+
+    // Proposal that echoes the first constraint verbatim and omits
+    // the second — so the constraints validator must record one
+    // check as run and one as failed (overall verdict: Warn).
+    let proposal = moagan::domain::Proposal {
+        id: "p_000".into(),
+        summary: "summary that's long enough to clear the structural length floor".into(),
+        approach: "Build a CLI that uses tokio runtime for async I/O.".into(),
+        tradeoffs: vec!["t".into()],
+        evidence: vec!["e".into()],
+        source_sketch: String::new(),
+        artifacts: vec![],
+    };
+    let proposals_dir = run_dir.proposals();
+    std::fs::create_dir_all(&proposals_dir)?;
+    write_json(&proposals_dir.join("p_000.json"), &proposal)?;
+
+    let provider = Arc::new(MockProvider::empty());
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let phase = ValidatePhase::new();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async { phase.execute(&ctx).await })?;
+    ctx.telemetry.flush()?;
+
+    let sidecar_path = run_dir.validation().join("evidence").join("p_000.json");
+    let raw = std::fs::read_to_string(&sidecar_path)?;
+    let sidecar: serde_json::Value = serde_json::from_str(&raw)?;
+    let constraints_entry = sidecar
+        .get("validators")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|v| v.get("validator").and_then(|s| s.as_str()) == Some("constraints"))
+        })
+        .expect("evidence must include a constraints validator entry");
+
+    let checks_run: Vec<String> = constraints_entry
+        .get("checks_run")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    assert!(
+        checks_run.iter().any(|c| c.contains("tokio runtime")),
+        "matched constraint must appear in checks_run, got {checks_run:?}"
+    );
+    let failed: Vec<String> = constraints_entry
+        .get("failed_checks")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        failed.iter().any(|c| c.contains("deploy via systemd")),
+        "missing constraint must appear in failed_checks, got {failed:?}"
+    );
+    assert!(
+        !checks_run.iter().any(|c| c == "no_constraints_in_brief"),
+        "phase must not short-circuit when the brief has constraints, got {checks_run:?}"
+    );
+
+    let status = constraints_entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    assert_eq!(
+        status, "Warn",
+        "missing constraint must downgrade the constraints verdict to Warn"
+    );
+
+    Ok(())
+}

@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::Proposal;
+use crate::domain::{Brief, Proposal};
 use crate::error::Result;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::read_json;
@@ -114,6 +114,10 @@ impl Phase for ValidatePhase {
                 .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs)),
         )?;
 
+        // Read the brief once so the constraints validator sees the
+        // real hard constraints instead of the no-op trait path.
+        let brief: Brief = read_json(&ctx.run_dir().brief()).unwrap_or_default();
+
         let validators = Self::build_validators();
         let mut paths = Vec::new();
         for entry in std::fs::read_dir(&proposals_dir)? {
@@ -129,18 +133,27 @@ impl Phase for ValidatePhase {
             // Structural + constraints validators see the
             // Proposal only (no source code attached). They run
             // first so a hard structural failure short-circuits
-            // the (more expensive) language validators.
+            // the (more expensive) language validators. The
+            // constraints validator is invoked with the real
+            // brief constraints so "requisitos duros" actually
+            // match the proposal text instead of short-circuiting
+            // to a no-op Pass.
             let mut evidences: Vec<ValidationEvidence> = Vec::new();
             for v in &validators {
-                match v.validate(&proposal, Some(&sandbox)) {
-                    Ok(ev) => evidences.push(ev),
-                    Err(e) => evidences.push(ValidationEvidence {
-                        validator: v.name().into(),
-                        status: crate::validators::ValidationStatus::Error,
-                        failed_checks: vec![format!("validator error: {e}")],
-                        ..ValidationEvidence::default()
-                    }),
-                }
+                let ev = if v.name() == ConstraintsValidator::name_static() {
+                    ConstraintsValidator::check_with_brief(&proposal, &brief)
+                } else {
+                    match v.validate(&proposal, Some(&sandbox)) {
+                        Ok(ev) => ev,
+                        Err(e) => ValidationEvidence {
+                            validator: v.name().into(),
+                            status: crate::validators::ValidationStatus::Error,
+                            failed_checks: vec![format!("validator error: {e}")],
+                            ..ValidationEvidence::default()
+                        },
+                    }
+                };
+                evidences.push(ev);
             }
 
             // Language validators (rust / python / typescript)
