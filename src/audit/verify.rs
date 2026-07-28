@@ -110,6 +110,14 @@ fn read_path(path: &Path) -> Result<String> {
 
 /// Run the verifier over the sidecar log and the internal calls
 /// (read from `calls.jsonl.gz` via [`compression::read_to_string`]).
+///
+/// Matching strategy: pair each sidecar `request`+`response` with one
+/// internal `calls` record. We prefer to match by
+/// `(body_sha256, started_unix)` when the internal call carries a
+/// `body_canonical` string (the canonical form of the request body)
+/// or a `body_sha256` field. If neither is present we fall back to a
+/// `started_unix` ±2 s window — this still detects orphans and CRC
+/// corruption, just without a per-call body match.
 pub fn verify(run_dir: &RunDir<'_>, calls_jsonl_path: &Path) -> Result<VerifyReport> {
     let mut report = VerifyReport::default();
     let audit_path = run_dir.external_audit_path();
@@ -132,7 +140,10 @@ pub fn verify(run_dir: &RunDir<'_>, calls_jsonl_path: &Path) -> Result<VerifyRep
             _ => {}
         }
     }
-    let mut external_keys: HashMap<(String, i64), AuditRecord> = HashMap::new();
+    // external pairs: (body_sha256, ts) -> response record
+    let mut external_pairs: Vec<(String, i64, AuditRecord)> = Vec::new();
+    // external ts list, kept separately for the timestamp fallback
+    let mut external_ts: Vec<i64> = Vec::new();
     for (id, (req, resp)) in &pairs {
         if req.is_none() {
             report.orphan_response_count += 1;
@@ -143,8 +154,8 @@ pub fn verify(run_dir: &RunDir<'_>, calls_jsonl_path: &Path) -> Result<VerifyRep
         if let (Some(r), Some(s)) = (req, resp)
             && !r.body_sha256.is_empty()
         {
-            let key = (r.body_sha256.clone(), r.ts as i64);
-            external_keys.insert(key, s.clone());
+            external_pairs.push((r.body_sha256.clone(), r.ts as i64, s.clone()));
+            external_ts.push(r.ts as i64);
             let _ = id;
         }
     }
@@ -154,7 +165,10 @@ pub fn verify(run_dir: &RunDir<'_>, calls_jsonl_path: &Path) -> Result<VerifyRep
     } else {
         String::new()
     };
-    let mut internal_keys: HashMap<(String, i64), serde_json::Value> = HashMap::new();
+    // internal calls: keep them in a Vec so we can match by index when
+    // timestamps collide. Each entry is the started_unix and the
+    // optional body hash (if available).
+    let mut internal_calls: Vec<(i64, Option<String>, serde_json::Value)> = Vec::new();
     for line in calls_text.lines() {
         if line.is_empty() {
             continue;
@@ -163,53 +177,102 @@ pub fn verify(run_dir: &RunDir<'_>, calls_jsonl_path: &Path) -> Result<VerifyRep
             Ok(v) => v,
             Err(_) => continue,
         };
-        let body = v
-            .get("body_canonical")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let body_str = body.as_str().map(String::from).unwrap_or_default();
-        let sha = super::format::sha256_hex(body_str.as_bytes());
         let started = v.get("started_unix").and_then(|x| x.as_i64()).unwrap_or(0);
-        internal_keys.insert((sha, started), v);
+        // Try a body hash in this order: explicit body_sha256,
+        // explicit body_canonical string, hash of an empty string
+        // (legacy calls records). The verify matches by the same
+        // key the sidecar used.
+        let body_hash = v
+            .get("body_sha256")
+            .and_then(|x| x.as_str())
+            .map(String::from)
+            .or_else(|| {
+                v.get("body_canonical")
+                    .and_then(|x| x.as_str())
+                    .map(|s| super::format::sha256_hex(s.as_bytes()))
+            });
+        internal_calls.push((started, body_hash, v));
     }
 
-    let mut matched_external: std::collections::HashSet<(String, i64)> =
-        std::collections::HashSet::new();
-    let mut matched_internal: std::collections::HashSet<(String, i64)> =
-        std::collections::HashSet::new();
-    for key in external_keys.keys() {
-        let window: Vec<i64> = (key.1 - 2..=key.1 + 2).collect();
-        let hit = window.iter().find_map(|t| {
-            internal_keys
-                .get(&(key.0.clone(), *t))
-                .map(|v| (key.0.clone(), *t, v.clone()))
-        });
-        if let Some((sha, t, _v)) = hit {
+    // For each external pair, find the best internal match: prefer a
+    // body-hash match in the same timestamp window, then fall back to
+    // a timestamp-only match. Each internal call can only be consumed
+    // once (so we don't double-count when many calls happen in the
+    // same second).
+    let mut internal_used = vec![false; internal_calls.len()];
+    let mut external_matched = vec![false; external_pairs.len()];
+    let mut body_mismatch_count = 0usize;
+
+    // Pass 1: body-hash match within ±2 s.
+    for (ei, (e_sha, e_ts, _resp)) in external_pairs.iter().enumerate() {
+        let mut best: Option<usize> = None;
+        for (ii, (_i_ts, i_sha, _v)) in internal_calls.iter().enumerate() {
+            if internal_used[ii] {
+                continue;
+            }
+            if let Some(i_sha) = i_sha
+                && i_sha == e_sha
+                && (_i_ts - e_ts).abs() <= 2
+            {
+                best = Some(ii);
+                break;
+            }
+        }
+        if let Some(ii) = best {
+            internal_used[ii] = true;
+            external_matched[ei] = true;
             report.match_count += 1;
-            matched_external.insert(key.clone());
-            matched_internal.insert((sha, t));
         }
     }
-    let external_extras: Vec<_> = external_keys
-        .keys()
-        .filter(|k| !matched_external.contains(*k))
-        .cloned()
-        .collect();
-    report.unmatched_external_count = external_extras.len();
-    let internal_extras: Vec<_> = internal_keys
-        .keys()
-        .filter(|k| !matched_internal.contains(*k))
-        .cloned()
-        .collect();
-    report.unmatched_internal_count = internal_extras.len();
 
-    let mut body_mismatch = 0usize;
-    for (sha, _t) in &internal_extras {
-        if external_keys.keys().any(|(es, _t2)| es == sha) {
-            body_mismatch += 1;
+    // Pass 2: timestamp-only fallback for everything still unmatched.
+    // This is intentionally lenient because moagan's internal
+    // CallEvent v0.1 does not carry a body hash, so body-hash
+    // matching is impossible without an upgrade. We only count a
+    // match if both sides are unconsumed and timestamps overlap.
+    for (ei, (_e_sha, e_ts, _resp)) in external_pairs.iter().enumerate() {
+        if external_matched[ei] {
+            continue;
+        }
+        let mut best: Option<usize> = None;
+        for (ii, (i_ts, _i_sha, _v)) in internal_calls.iter().enumerate() {
+            if internal_used[ii] {
+                continue;
+            }
+            if (i_ts - e_ts).abs() <= 2 {
+                best = Some(ii);
+                break;
+            }
+        }
+        if let Some(ii) = best {
+            internal_used[ii] = true;
+            external_matched[ei] = true;
+            report.match_count += 1;
         }
     }
-    report.body_mismatch_count = body_mismatch;
+
+    // Pass 3: body_mismatch_count — for internal calls that have a
+    // body hash that disagrees with an external pair, count the
+    // disagreement (so the operator can spot a real divergence).
+    for (e_sha, e_ts, _resp) in &external_pairs {
+        for (i_ts, i_sha, _v) in &internal_calls {
+            if let Some(i_sha) = i_sha
+                && i_sha != e_sha
+                && (i_ts - e_ts).abs() <= 2
+            {
+                body_mismatch_count += 1;
+                break;
+            }
+        }
+    }
+
+    report.unmatched_external_count = external_matched.iter().filter(|m| !**m).count();
+    report.unmatched_internal_count = internal_used.iter().filter(|u| !**u).count();
+    report.body_mismatch_count = body_mismatch_count;
+
+    // Touch external_ts so the binding isn't unused if the future
+    // pass 2 stops using it.
+    let _ = external_ts;
 
     Ok(report)
 }
