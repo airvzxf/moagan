@@ -16,9 +16,9 @@ use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 
-/// `moagan audit proxy` — bind 127.0.0.1:<port>, forward to
+/// `moagan audit proxy` — bind `127.0.0.1:PORT`, forward to
 /// `--upstream`, append every request/response to
-/// `<run_dir>/telemetry/external_audit.jsonl`. SIGINT/SIGTERM
+/// `<run_dir>/telemetry/external_audit.jsonl.gz`. SIGINT/SIGTERM
 /// triggers a clean shutdown.
 #[derive(Debug, Clone)]
 pub struct ProxyArgs {
@@ -63,22 +63,20 @@ pub fn resolve_run(
     run_id: Option<String>,
     require_run_id: bool,
 ) -> Result<(Arc<MoaganHome>, Option<RunId>)> {
-    if let Some(ref home) = args_runs_dir {
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", home);
-        }
-    }
-    let home = Arc::new(MoaganHome::resolve()?);
+    let home = Arc::new(match args_runs_dir {
+        Some(root) => MoaganHome::at(root),
+        None => MoaganHome::resolve()?,
+    });
     home.ensure()?;
     let run_id = match run_id {
         Some(id) => Some(id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?),
-        None if require_run_id => Some(pick_latest_run(&home)?),
+        None if require_run_id => pick_latest_run(&home)?,
         None => None,
     };
     Ok((home, run_id))
 }
 
-fn pick_latest_run(home: &MoaganHome) -> Result<RunId> {
+fn pick_latest_run(home: &MoaganHome) -> Result<Option<RunId>> {
     let runs_dir = home.runs_dir();
     let mut entries: Vec<_> = std::fs::read_dir(&runs_dir)?
         .filter_map(|e| e.ok())
@@ -88,27 +86,23 @@ fn pick_latest_run(home: &MoaganHome) -> Result<RunId> {
         })
         .collect();
     entries.sort_by_key(|b| std::cmp::Reverse(b.0));
-    entries
-        .into_iter()
-        .next()
-        .map(|(id, _)| id)
-        .ok_or_else(|| Error::InvalidState("no runs found in MOAGAN_HOME/.runs".into()))
+    Ok(entries.into_iter().next().map(|(id, _)| id))
 }
 
-/// `moagan audit proxy` — bind 127.0.0.1:<port>, forward to
+/// `moagan audit proxy` — bind `127.0.0.1:PORT`, forward to
 /// `--upstream`, append every request/response to
-/// `<run_dir>/telemetry/external_audit.jsonl`. SIGINT/SIGTERM
+/// `<run_dir>/telemetry/external_audit.jsonl.gz`. SIGINT/SIGTERM
 /// triggers a clean shutdown.
 pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
     let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone(), false)?;
-    let listen = match (args.listen_host.as_str(), args.port) {
-        (host, 0) => format!("{host}:0")
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("bind: {e}")))?,
-        (host, p) => format!("{host}:{p}")
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("bind: {e}")))?,
-    };
+    let listen: std::net::SocketAddr = format!("{}:{}", args.listen_host, args.port)
+        .parse()
+        .map_err(|e| Error::InvalidArgs(format!("bind: {e}")))?;
+    if !listen.ip().is_loopback() {
+        return Err(Error::InvalidArgs(
+            "audit proxy must listen on a loopback address".into(),
+        ));
+    }
     let cfg = ProxyConfig {
         listen,
         upstream: args.upstream.clone(),
@@ -145,7 +139,7 @@ pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
     {
         signal::ctrl_c().await?;
     }
-    handle.shutdown().await;
+    handle.shutdown().await?;
     eprintln!(
         "proxy shut down; audit logs under {}/.runs/",
         home.root().display()
@@ -158,29 +152,41 @@ pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
 /// return the exit code (0 ok, 1 mismatch/orphans, 2 missing/invalid).
 pub async fn verify_cmd(args: VerifyArgs) -> Result<i32> {
     let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone(), true)?;
-    let run_id = run_id.expect("resolve_run(require_run_id=true) returned None");
+    let Some(run_id) = run_id else {
+        let report = verify_mod::VerifyReport {
+            audit_file_missing: true,
+            ..Default::default()
+        };
+        print!("{}", verify_mod::render_tsv(&report));
+        return Ok(2);
+    };
     let run_dir = home.run_dir(run_id);
     let calls_path = run_dir.telemetry().join("calls.jsonl.gz");
-    let report = verify_mod::verify(&run_dir, &calls_path)?;
+    let report = match crate::storage::sqlite::Db::open(&home.meta_db_path())
+        .and_then(|db| verify_mod::verify_with_db(&run_dir, &calls_path, &db))
+    {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("audit verify: SQLite cross-check failed: {error}");
+            let mut report = verify_mod::verify(&run_dir, &calls_path)?;
+            report.internal_file_invalid = true;
+            report
+        }
+    };
     let tsv_path = run_dir.external_audit_verify_path();
-    verify_mod::write_tsv(&report, &tsv_path)?;
-    println!("metric\tvalue");
-    println!("match_count\t{}", report.match_count);
-    println!("body_mismatch_count\t{}", report.body_mismatch_count);
-    println!("orphan_request_count\t{}", report.orphan_request_count);
-    println!("orphan_response_count\t{}", report.orphan_response_count);
-    println!(
-        "unmatched_internal_count\t{}",
-        report.unmatched_internal_count
-    );
-    println!(
-        "unmatched_external_count\t{}",
-        report.unmatched_external_count
-    );
-    println!("crc_invalid_count\t{}", report.crc_invalid_count);
-    println!("summary\t{}", report.summary());
-    if !tsv_path.as_os_str().is_empty() {
+    let tsv = verify_mod::render_tsv(&report);
+    let write_failed = if let Err(error) = verify_mod::write_tsv(&report, &tsv_path) {
+        eprintln!(
+            "audit verify: could not write {}: {error}",
+            tsv_path.display()
+        );
+        true
+    } else {
+        false
+    };
+    print!("{tsv}");
+    if !write_failed {
         eprintln!("tsv: {}", tsv_path.display());
     }
-    Ok(report.exit_code())
+    Ok(if write_failed { 2 } else { report.exit_code() })
 }

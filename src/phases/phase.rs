@@ -205,6 +205,9 @@ impl RunContext {
         cache_key: Option<String>,
         started_unix: i64,
     ) -> Result<Response> {
+        let request_body_sha256 = (self.default_provider == "minimax")
+            .then(|| crate::llm::http::request_body_sha256(&req))
+            .transpose()?;
         let provider = self.provider();
         let call_id = uuid::Uuid::now_v7().to_string();
         let provider_started = std::time::Instant::now();
@@ -270,6 +273,7 @@ impl RunContext {
                     self.default_provider.as_str(),
                     self.default_model.as_str(),
                     cache_key.as_deref().unwrap_or(""),
+                    request_body_sha256.as_deref(),
                     false,
                     Some(*status),
                     response.usage.input_tokens,
@@ -327,6 +331,7 @@ impl RunContext {
                     self.default_provider.as_str(),
                     self.default_model.as_str(),
                     cache_key.as_deref().unwrap_or(""),
+                    request_body_sha256.as_deref(),
                     false,
                     None,
                     0,
@@ -371,6 +376,7 @@ impl RunContext {
             self.default_provider.as_str(),
             self.default_model.as_str(),
             cache_key,
+            None,
             true,
             Some(200),
             response.usage.input_tokens,

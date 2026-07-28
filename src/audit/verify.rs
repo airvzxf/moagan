@@ -1,48 +1,52 @@
-//! `moagan audit verify` — cross-check the sidecar JSONL against
-//! Moagan's internal `calls.jsonl.gz` and SQLite.
-//!
-//! The verifier pairs each external `request`/`response` with the
-//! internal `calls` record by `body_sha256` and `started_unix`
-//! (tolerance ±2 s) and counts four outcomes. Exit codes follow the
-//! contract documented in `docs/.../audit-design.md`:
-//! - 0: perfect match.
-//! - 1: mismatches or orphans.
-//! - 2: file missing or CRC invalid.
+//! Cross-check the sidecar stream against Moagan call telemetry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::fs_layout::RunDir;
+use crate::ids::RunId;
 use crate::storage::compression;
+use crate::storage::sqlite::Db;
+use crate::telemetry::CallEvent;
 
 use super::format::AuditRecord;
+
+const MATCH_WINDOW_SECS: i64 = 1;
 
 /// Verifier output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyReport {
-    /// Calls that matched in both Moagan and the sidecar.
+    /// Calls that matched exactly.
     pub match_count: usize,
-    /// Calls where `body_sha256` differed between Moagan and the sidecar.
+    /// Calls whose request hashes differ.
     pub body_mismatch_count: usize,
-    /// Sidecar `request` events that have no matching `response`.
+    /// Requests without a terminal event.
     pub orphan_request_count: usize,
-    /// Sidecar `response` events that have no matching `request`.
+    /// Terminal events without a request.
     pub orphan_response_count: usize,
-    /// Moagan `calls` rows that have no matching sidecar pair.
+    /// Internal calls without an external match.
     pub unmatched_internal_count: usize,
-    /// Sidecar pairs that have no matching Moagan `calls` row.
+    /// External pairs without an internal match.
     pub unmatched_external_count: usize,
-    /// Audit log lines whose CRC failed the integrity check.
+    /// Audit records with invalid CRC or syntax.
     pub crc_invalid_count: usize,
-    /// True when the external audit file was missing entirely.
+    /// External audit input was absent.
     pub audit_file_missing: bool,
+    /// Internal calls input was absent.
+    pub internal_file_missing: bool,
+    /// Internal calls input could not be decoded or lacked fingerprints.
+    pub internal_file_invalid: bool,
 }
 
 impl VerifyReport {
-    /// Aggregate summary string used as the last line of the TSV.
+    /// Aggregate result.
     pub fn summary(&self) -> &'static str {
-        if self.audit_file_missing || self.crc_invalid_count > 0 {
+        if self.audit_file_missing
+            || self.internal_file_missing
+            || self.internal_file_invalid
+            || self.crc_invalid_count > 0
+        {
             "invalid"
         } else if self.body_mismatch_count == 0
             && self.orphan_request_count == 0
@@ -56,25 +60,17 @@ impl VerifyReport {
         }
     }
 
-    /// Translate the report into a Unix exit code.
+    /// Translate the result to the audit CLI contract.
     pub fn exit_code(&self) -> i32 {
-        if self.audit_file_missing || self.crc_invalid_count > 0 {
-            2
-        } else if self.body_mismatch_count > 0
-            || self.orphan_request_count > 0
-            || self.orphan_response_count > 0
-            || self.unmatched_internal_count > 0
-            || self.unmatched_external_count > 0
-        {
-            1
-        } else {
-            0
+        match self.summary() {
+            "ok" => 0,
+            "mismatch" => 1,
+            _ => 2,
         }
     }
 }
 
-/// Read the audit log lines as `AuditRecord`s. Returns
-/// `Err(AuditFileMissing)` if the path does not exist.
+/// Read and decode the external audit stream.
 pub fn read_records(path: &Path) -> Result<Vec<AuditRecord>> {
     if !path.exists() {
         return Err(Error::Io(crate::error::IoError::Raw(std::io::Error::new(
@@ -83,203 +79,290 @@ pub fn read_records(path: &Path) -> Result<Vec<AuditRecord>> {
         ))));
     }
     let text = read_path(path)?;
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let rec: AuditRecord = match serde_json::from_str(line) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        out.push(rec);
-    }
-    Ok(out)
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).map_err(Error::from))
+        .collect()
 }
 
-/// Read a text file, transparently decoding gzip when the path ends
-/// in `.gz`. Used by the verifier and the unit tests so a plain
-/// `.jsonl` works exactly like a `.jsonl.gz`.
 fn read_path(path: &Path) -> Result<String> {
-    if path.extension().and_then(|s| s.to_str()) == Some("gz") {
+    if path.extension().and_then(|value| value.to_str()) == Some("gz") {
         compression::read_to_string(path)
     } else {
-        std::fs::read_to_string(path).map_err(|e| Error::Io(crate::error::IoError::Raw(e)))
+        std::fs::read_to_string(path).map_err(Error::from)
     }
 }
 
-/// Run the verifier over the sidecar log and the internal calls
-/// (read from `calls.jsonl.gz` via [`compression::read_to_string`]).
-///
-/// Matching strategy: pair each sidecar `request`+`response` with one
-/// internal `calls` record. We prefer to match by
-/// `(body_sha256, started_unix)` when the internal call carries a
-/// `body_canonical` string (the canonical form of the request body)
-/// or a `body_sha256` field. If neither is present we fall back to a
-/// `started_unix` ±2 s window — this still detects orphans and CRC
-/// corruption, just without a per-call body match.
+struct ExternalCall {
+    id: String,
+    body_sha256: String,
+    started_unix: i64,
+}
+
+struct ExternalPair {
+    request: Option<AuditRecord>,
+    terminal: Option<AuditRecord>,
+    duplicate: bool,
+}
+
+impl ExternalPair {
+    fn new() -> Self {
+        Self {
+            request: None,
+            terminal: None,
+            duplicate: false,
+        }
+    }
+}
+
+struct InternalCall {
+    call_id: String,
+    body_sha256: String,
+    started_unix: i64,
+}
+
+/// Verify using the filesystem telemetry as the source of truth.
 pub fn verify(run_dir: &RunDir<'_>, calls_jsonl_path: &Path) -> Result<VerifyReport> {
+    verify_inner(run_dir, calls_jsonl_path, None)
+}
+
+/// Verify and also confirm that SQLite mirrors the filesystem calls.
+pub fn verify_with_db(
+    run_dir: &RunDir<'_>,
+    calls_jsonl_path: &Path,
+    db: &Db,
+) -> Result<VerifyReport> {
+    verify_inner(run_dir, calls_jsonl_path, Some(db))
+}
+
+fn verify_inner(
+    run_dir: &RunDir<'_>,
+    calls_jsonl_path: &Path,
+    db: Option<&Db>,
+) -> Result<VerifyReport> {
     let mut report = VerifyReport::default();
     let audit_path = run_dir.external_audit_path();
     if !audit_path.exists() {
         report.audit_file_missing = true;
         return Ok(report);
     }
-    let text = read_path(&audit_path)?;
-    let (invalid_count, _) = super::format::count_invalid_crcs(&text);
-    report.crc_invalid_count = invalid_count;
-
-    let records = read_records(&audit_path)?;
-    let mut pairs: HashMap<String, (Option<AuditRecord>, Option<AuditRecord>)> = HashMap::new();
-    for rec in records {
-        let entry = pairs.entry(rec.id.clone()).or_insert((None, None));
-        match rec.event.as_str() {
-            "request" => entry.0 = Some(rec),
-            "response" => entry.1 = Some(rec),
-            "upstream_error" => {}
-            _ => {}
-        }
-    }
-    // external pairs: (body_sha256, ts) -> response record
-    let mut external_pairs: Vec<(String, i64, AuditRecord)> = Vec::new();
-    // external ts list, kept separately for the timestamp fallback
-    let mut external_ts: Vec<i64> = Vec::new();
-    for (id, (req, resp)) in &pairs {
-        if req.is_none() {
-            report.orphan_response_count += 1;
-        }
-        if resp.is_none() {
-            report.orphan_request_count += 1;
-        }
-        if let (Some(r), Some(s)) = (req, resp)
-            && !r.body_sha256.is_empty()
-        {
-            external_pairs.push((r.body_sha256.clone(), r.ts as i64, s.clone()));
-            external_ts.push(r.ts as i64);
-            let _ = id;
-        }
+    if !calls_jsonl_path.exists() {
+        report.internal_file_missing = true;
+        return Ok(report);
     }
 
-    let calls_text = if calls_jsonl_path.exists() {
-        read_path(calls_jsonl_path)?
-    } else {
-        String::new()
+    let audit_text = match read_path(&audit_path) {
+        Ok(text) => text,
+        Err(_) => {
+            report.crc_invalid_count = 1;
+            return Ok(report);
+        }
     };
-    // internal calls: keep them in a Vec so we can match by index when
-    // timestamps collide. Each entry is the started_unix and the
-    // optional body hash (if available).
-    let mut internal_calls: Vec<(i64, Option<String>, serde_json::Value)> = Vec::new();
-    for line in calls_text.lines() {
-        if line.is_empty() {
-            continue;
+    let (invalid_crc, _) = super::format::count_invalid_crcs(&audit_text);
+    report.crc_invalid_count = invalid_crc;
+    let records = parse_audit_records(&audit_text, &mut report);
+    let external = pair_external_records(records, &mut report);
+
+    let calls_text = match read_path(calls_jsonl_path) {
+        Ok(text) => text,
+        Err(_) => {
+            report.internal_file_invalid = true;
+            return Ok(report);
         }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let started = v.get("started_unix").and_then(|x| x.as_i64()).unwrap_or(0);
-        // Try a body hash in this order: explicit body_sha256,
-        // explicit body_canonical string, hash of an empty string
-        // (legacy calls records). The verify matches by the same
-        // key the sidecar used.
-        let body_hash = v
-            .get("body_sha256")
-            .and_then(|x| x.as_str())
-            .map(String::from)
-            .or_else(|| {
-                v.get("body_canonical")
-                    .and_then(|x| x.as_str())
-                    .map(|s| super::format::sha256_hex(s.as_bytes()))
-            });
-        internal_calls.push((started, body_hash, v));
+    };
+    let internal = parse_internal_calls(&calls_text, &mut report);
+    if report.internal_file_invalid {
+        return Ok(report);
     }
 
-    // For each external pair, find the best internal match: prefer a
-    // body-hash match in the same timestamp window, then fall back to
-    // a timestamp-only match. Each internal call can only be consumed
-    // once (so we don't double-count when many calls happen in the
-    // same second).
-    let mut internal_used = vec![false; internal_calls.len()];
-    let mut external_matched = vec![false; external_pairs.len()];
-    let mut body_mismatch_count = 0usize;
-
-    // Pass 1: body-hash match within ±2 s.
-    for (ei, (e_sha, e_ts, _resp)) in external_pairs.iter().enumerate() {
-        let mut best: Option<usize> = None;
-        for (ii, (_i_ts, i_sha, _v)) in internal_calls.iter().enumerate() {
-            if internal_used[ii] {
-                continue;
-            }
-            if let Some(i_sha) = i_sha
-                && i_sha == e_sha
-                && (_i_ts - e_ts).abs() <= 2
-            {
-                best = Some(ii);
-                break;
-            }
-        }
-        if let Some(ii) = best {
-            internal_used[ii] = true;
-            external_matched[ei] = true;
-            report.match_count += 1;
-        }
-    }
-
-    // Pass 2: timestamp-only fallback for everything still unmatched.
-    // This is intentionally lenient because moagan's internal
-    // CallEvent v0.1 does not carry a body hash, so body-hash
-    // matching is impossible without an upgrade. We only count a
-    // match if both sides are unconsumed and timestamps overlap.
-    for (ei, (_e_sha, e_ts, _resp)) in external_pairs.iter().enumerate() {
-        if external_matched[ei] {
-            continue;
-        }
-        let mut best: Option<usize> = None;
-        for (ii, (i_ts, _i_sha, _v)) in internal_calls.iter().enumerate() {
-            if internal_used[ii] {
-                continue;
-            }
-            if (i_ts - e_ts).abs() <= 2 {
-                best = Some(ii);
-                break;
-            }
-        }
-        if let Some(ii) = best {
-            internal_used[ii] = true;
-            external_matched[ei] = true;
-            report.match_count += 1;
-        }
-    }
-
-    // Pass 3: body_mismatch_count — for internal calls that have a
-    // body hash that disagrees with an external pair, count the
-    // disagreement (so the operator can spot a real divergence).
-    for (e_sha, e_ts, _resp) in &external_pairs {
-        for (i_ts, i_sha, _v) in &internal_calls {
-            if let Some(i_sha) = i_sha
-                && i_sha != e_sha
-                && (i_ts - e_ts).abs() <= 2
-            {
-                body_mismatch_count += 1;
-                break;
-            }
-        }
-    }
-
-    report.unmatched_external_count = external_matched.iter().filter(|m| !**m).count();
-    report.unmatched_internal_count = internal_used.iter().filter(|u| !**u).count();
-    report.body_mismatch_count = body_mismatch_count;
-
-    // Touch external_ts so the binding isn't unused if the future
-    // pass 2 stops using it.
-    let _ = external_ts;
-
+    let db_discrepancies = match db {
+        Some(db) => compare_sqlite(run_dir, db, &internal)?,
+        None => 0,
+    };
+    match_calls(external, internal, &mut report);
+    report.unmatched_internal_count += db_discrepancies;
     Ok(report)
 }
 
-/// Render the report as a TSV block. Includes a header line.
+fn parse_audit_records(text: &str, _report: &mut VerifyReport) -> Vec<AuditRecord> {
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn pair_external_records(
+    records: Vec<AuditRecord>,
+    report: &mut VerifyReport,
+) -> Vec<ExternalCall> {
+    let mut pairs: HashMap<String, ExternalPair> = HashMap::new();
+    for record in records {
+        let pair = pairs
+            .entry(record.id.clone())
+            .or_insert_with(ExternalPair::new);
+        match record.event.as_str() {
+            "request" => {
+                if pair.request.replace(record).is_some() {
+                    pair.duplicate = true;
+                }
+            }
+            "response" | "upstream_error" => {
+                if pair.terminal.replace(record).is_some() {
+                    pair.duplicate = true;
+                }
+            }
+            _ => pair.duplicate = true,
+        }
+    }
+
+    let mut external = Vec::new();
+    for (id, pair) in pairs {
+        if pair.duplicate {
+            report.crc_invalid_count += 1;
+            continue;
+        }
+        match (pair.request, pair.terminal) {
+            (Some(request), Some(_)) if !request.body_sha256.is_empty() => {
+                external.push(ExternalCall {
+                    id,
+                    body_sha256: request.body_sha256,
+                    started_unix: request.ts.floor() as i64,
+                });
+            }
+            (Some(_), None) => report.orphan_request_count += 1,
+            (None, Some(_)) => report.orphan_response_count += 1,
+            (Some(_), Some(_)) => report.crc_invalid_count += 1,
+            (None, None) => {}
+        }
+    }
+    external
+        .sort_by(|left, right| (left.started_unix, &left.id).cmp(&(right.started_unix, &right.id)));
+    external
+}
+
+fn parse_internal_calls(text: &str, report: &mut VerifyReport) -> Vec<InternalCall> {
+    let mut internal = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let event: CallEvent = match serde_json::from_str(line) {
+            Ok(event) => event,
+            Err(_) => {
+                report.internal_file_invalid = true;
+                continue;
+            }
+        };
+        if event.cache_hit {
+            continue;
+        }
+        let body_sha256 = match event.body_sha256 {
+            Some(body_sha256) if !body_sha256.is_empty() => body_sha256,
+            None if event.provider != "minimax" => continue,
+            _ => {
+                report.internal_file_invalid = true;
+                continue;
+            }
+        };
+        internal.push(InternalCall {
+            call_id: event.call_id,
+            body_sha256,
+            started_unix: event.started_unix,
+        });
+    }
+    internal.sort_by(|left, right| {
+        (left.started_unix, &left.call_id).cmp(&(right.started_unix, &right.call_id))
+    });
+    internal
+}
+
+fn compare_sqlite(run_dir: &RunDir<'_>, db: &Db, internal: &[InternalCall]) -> Result<usize> {
+    let run_id = run_dir
+        .root()
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| Error::InvalidState("run directory has no run id".into()))?
+        .parse::<RunId>()
+        .map_err(|e| Error::InvalidState(format!("invalid run directory id: {e}")))?;
+    let rows = db.list_calls_for_run(run_id)?;
+    let expected = internal
+        .iter()
+        .map(|call| (call.call_id.as_str(), call.body_sha256.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut discrepancies = 0usize;
+    for row in rows.into_iter().filter(|row| row.cache_hit == 0) {
+        seen.insert(row.call_id.clone());
+        match (
+            expected.get(row.call_id.as_str()),
+            row.body_sha256.as_deref(),
+        ) {
+            (Some(expected_hash), Some(actual_hash)) if *expected_hash == actual_hash => {}
+            _ => discrepancies += 1,
+        }
+    }
+    discrepancies += internal
+        .iter()
+        .filter(|call| !seen.contains(&call.call_id))
+        .count();
+    Ok(discrepancies)
+}
+
+fn match_calls(
+    external: Vec<ExternalCall>,
+    internal: Vec<InternalCall>,
+    report: &mut VerifyReport,
+) {
+    let mut external_used = vec![false; external.len()];
+    let mut internal_used = vec![false; internal.len()];
+
+    for (external_index, external_call) in external.iter().enumerate() {
+        if let Some(internal_index) = internal.iter().enumerate().find_map(|(index, call)| {
+            (!internal_used[index]
+                && call.body_sha256 == external_call.body_sha256
+                && within_window(call.started_unix, external_call.started_unix))
+            .then_some(index)
+        }) {
+            external_used[external_index] = true;
+            internal_used[internal_index] = true;
+            report.match_count += 1;
+        }
+    }
+
+    for (external_index, external_call) in external.iter().enumerate() {
+        if external_used[external_index] {
+            continue;
+        }
+        if let Some(internal_index) = internal.iter().enumerate().find_map(|(index, call)| {
+            (!internal_used[index]
+                && call.body_sha256 != external_call.body_sha256
+                && within_window(call.started_unix, external_call.started_unix))
+            .then_some(index)
+        }) {
+            external_used[external_index] = true;
+            internal_used[internal_index] = true;
+            report.body_mismatch_count += 1;
+        }
+    }
+
+    report.unmatched_external_count += external_used.iter().filter(|used| !**used).count();
+    report.unmatched_internal_count += internal_used.iter().filter(|used| !**used).count();
+}
+
+fn within_window(left: i64, right: i64) -> bool {
+    left.abs_diff(right) <= MATCH_WINDOW_SECS as u64
+}
+
+/// Write the verification summary as TSV.
 pub fn write_tsv(report: &VerifyReport, dest: &Path) -> Result<()> {
-    let body = format!(
+    let body = render_tsv(report);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, body)?;
+    Ok(())
+}
+
+/// Render the verification summary as TSV.
+pub fn render_tsv(report: &VerifyReport) -> String {
+    format!(
         "metric\tvalue\n\
          match_count\t{}\n\
          body_mismatch_count\t{}\n\
@@ -288,6 +371,9 @@ pub fn write_tsv(report: &VerifyReport, dest: &Path) -> Result<()> {
          unmatched_internal_count\t{}\n\
          unmatched_external_count\t{}\n\
          crc_invalid_count\t{}\n\
+         audit_file_missing\t{}\n\
+         internal_file_missing\t{}\n\
+         internal_file_invalid\t{}\n\
          summary\t{}\n",
         report.match_count,
         report.body_mismatch_count,
@@ -296,45 +382,28 @@ pub fn write_tsv(report: &VerifyReport, dest: &Path) -> Result<()> {
         report.unmatched_internal_count,
         report.unmatched_external_count,
         report.crc_invalid_count,
+        report.audit_file_missing,
+        report.internal_file_missing,
+        report.internal_file_invalid,
         report.summary()
-    );
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::Io(crate::error::IoError::Raw(e)))?;
-    }
-    std::fs::write(dest, body).map_err(|e| Error::Io(crate::error::IoError::Raw(e)))?;
-    Ok(())
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::RunId;
-    use tempfile::tempdir;
 
     #[test]
-    fn report_summary_and_exit_code() {
-        let mut r = VerifyReport::default();
-        assert_eq!(r.summary(), "ok");
-        assert_eq!(r.exit_code(), 0);
-        r.body_mismatch_count = 1;
-        assert_eq!(r.summary(), "mismatch");
-        assert_eq!(r.exit_code(), 1);
-        r.body_mismatch_count = 0;
-        r.crc_invalid_count = 1;
-        assert_eq!(r.summary(), "invalid");
-        assert_eq!(r.exit_code(), 2);
-    }
-
-    #[test]
-    fn verify_reports_missing_audit_file() {
-        let tmp = tempdir().unwrap();
-        let home = crate::fs_layout::MoaganHome::at(tmp.path().to_path_buf());
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
-        let calls = run_dir.telemetry().join("calls.jsonl.gz");
-        let report = verify(&run_dir, &calls).unwrap();
-        assert!(report.audit_file_missing);
+    fn report_exit_codes_are_closed_over_the_contract() {
+        let mut report = VerifyReport::default();
+        assert_eq!(report.exit_code(), 0);
+        report.body_mismatch_count = 1;
+        assert_eq!(report.exit_code(), 1);
+        report.body_mismatch_count = 0;
+        report.crc_invalid_count = 1;
+        assert_eq!(report.exit_code(), 2);
+        report.crc_invalid_count = 0;
+        report.internal_file_missing = true;
         assert_eq!(report.exit_code(), 2);
     }
 }

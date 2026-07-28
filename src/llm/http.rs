@@ -184,6 +184,14 @@ pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
     }
 }
 
+pub(crate) fn request_body_sha256(req: &Request) -> std::result::Result<String, Error> {
+    use sha2::{Digest, Sha256};
+
+    let bytes = serde_json::to_vec(&body_from_request(req))
+        .map_err(|e| Error::Provider(format!("encode request body: {e}")))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

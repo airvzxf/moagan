@@ -52,6 +52,9 @@ pub struct CallEvent {
     pub model: String,
     /// Cache key (BLAKE3).
     pub cache_key: String,
+    /// SHA-256 of the exact HTTP request body for non-cached calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<String>,
     /// Whether the response came from cache.
     pub cache_hit: bool,
     /// HTTP status (None if no request was issued).
@@ -298,6 +301,7 @@ impl Telemetry {
         provider: &str,
         model: &str,
         cache_key: &str,
+        body_sha256: Option<&str>,
         cache_hit: bool,
         http_status: Option<u16>,
         input_tokens: u64,
@@ -316,6 +320,7 @@ impl Telemetry {
             provider: provider.to_owned(),
             model: model.to_owned(),
             cache_key: cache_key.to_owned(),
+            body_sha256: body_sha256.map(str::to_owned),
             cache_hit,
             http_status,
             input_tokens,
@@ -343,12 +348,15 @@ impl Telemetry {
                 provider,
                 model,
                 cache_key,
+                body_sha256,
                 cache_hit,
                 http_status.map(i64::from),
                 input_tokens,
                 output_tokens,
                 cache_read,
                 cache_creation,
+                started_unix,
+                ended_unix,
                 error,
             )
         {
@@ -470,6 +478,7 @@ mod tests {
             "mock",
             "m",
             "k",
+            None,
             false,
             Some(200),
             0,

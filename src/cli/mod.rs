@@ -239,7 +239,7 @@ pub enum Cmd {
 pub enum AuditCmd {
     /// Run the sidecar proxy. Listens on 127.0.0.1 and forwards
     /// traffic to `--upstream`, appending every request/response
-    /// to `<run_dir>/telemetry/external_audit.jsonl`.
+    /// to `<run_dir>/telemetry/external_audit.jsonl.gz`.
     Proxy {
         /// Override MOAGAN_HOME.
         #[arg(long)]
@@ -301,7 +301,6 @@ impl Cmd {
 pub async fn dispatch(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
-    let cfg = Config::load()?;
     match cli.cmd {
         Cmd::Run {
             mode,
@@ -312,6 +311,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             non_interactive,
             max_parallelism,
         } => {
+            let cfg = Config::load()?;
             let run_id = run::run(
                 run::RunOptions {
                     mode,
@@ -384,6 +384,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Refine { run_id, proposal } => {
+            let cfg = Config::load()?;
             let home = Arc::new(MoaganHome::resolve()?);
             continue_cmd::run_refine(
                 run_id
@@ -398,6 +399,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Rerank { run_id } => {
+            let cfg = Config::load()?;
             let home = Arc::new(MoaganHome::resolve()?);
             continue_cmd::run_rerank(
                 run_id
