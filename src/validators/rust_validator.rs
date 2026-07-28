@@ -22,7 +22,7 @@ use std::fs;
 use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxResult, SandboxStatus};
 
-use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator};
+use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator, capture_tool_version};
 
 /// Rust validator. Stateless; reuse freely.
 #[derive(Debug, Default, Clone, Copy)]
@@ -60,7 +60,11 @@ impl RustValidator {
             .run_in(work.path(), "cargo", &["check", "--offline"])
             .await?;
 
-        Ok(evidence_from_result(result))
+        let mut evidence = evidence_from_result(result);
+        if let Some(v) = capture_tool_version(sandbox, "cargo").await {
+            evidence.reproducibility.push(("cargo".into(), v));
+        }
+        Ok(evidence)
     }
 }
 
@@ -261,6 +265,13 @@ mod tests {
         assert_eq!(ev.status, ValidationStatus::Pass);
         assert!(ev.command.is_some());
         assert_eq!(ev.exit_code, Some(0));
+        // The reproducibility field records the cargo version that
+        // produced the verdict. Skip the assertion when capture
+        // returned nothing (e.g. an isolated sandbox without
+        // --version output).
+        if let Some((tool, _)) = ev.reproducibility.first() {
+            assert_eq!(tool, "cargo");
+        }
     }
 
     #[test]

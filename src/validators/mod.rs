@@ -148,6 +148,24 @@ impl ValidationEvidence {
     }
 }
 
+/// Run `<tool> --version` inside the sandbox and return the captured
+/// version string trimmed of trailing whitespace. Returns `None` when
+/// the tool is missing on disk, not in the allowlist, or returns
+/// non-zero. The result is safe to embed in `reproducibility_data` so
+/// the deliver phase can show "validated with cargo 1.97.1" without
+/// having to re-run anything.
+pub async fn capture_tool_version(sandbox: &Sandbox, tool: &str) -> Option<String> {
+    let result = sandbox.run(tool, &["--version"]).await.ok()?;
+    if result.status != crate::sandbox::SandboxStatus::Pass {
+        return None;
+    }
+    let first_line = result.stdout.lines().next()?.trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    Some(first_line.to_owned())
+}
+
 /// Common interface every validator implements.
 pub trait Validator: Send + Sync {
     /// Stable name (used in `manifest.json` and as `evidence.validator`).
@@ -340,5 +358,44 @@ mod tests {
         let agg = c.aggregate(&p_with_summary("x"), None).unwrap();
         assert_eq!(agg.status, ValidationStatus::Warn);
         assert_eq!(agg.failed_checks, vec!["soft"]);
+    }
+
+    #[test]
+    fn reproducibility_field_round_trips_through_json() {
+        let mut e = ValidationEvidence::pass("x", "y");
+        e.reproducibility
+            .push(("cargo".into(), "cargo 1.97.1".into()));
+        e.reproducibility
+            .push(("python3".into(), "Python 3.14.6".into()));
+        let j = serde_json::to_string(&e).unwrap();
+        let back: ValidationEvidence = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.reproducibility.len(), 2);
+        assert_eq!(back.reproducibility[0].0, "cargo");
+        assert_eq!(back.reproducibility[1].0, "python3");
+    }
+
+    #[tokio::test]
+    async fn capture_tool_version_returns_first_line_for_present_binary() {
+        use crate::sandbox::{Sandbox, SandboxConfig};
+        let sandbox = Sandbox::new(SandboxConfig::new()).unwrap();
+        // `echo` is on the default allowlist and writes its argv to
+        // stdout, which is not exactly `--version` output but proves
+        // the helper reads the first line.
+        let v = capture_tool_version(&sandbox, "echo").await;
+        assert!(v.is_some());
+        assert!(v.unwrap().contains("echo"));
+    }
+
+    #[tokio::test]
+    async fn capture_tool_version_returns_none_for_missing_binary() {
+        use crate::sandbox::{Allowlist, Sandbox, SandboxConfig};
+        // Allowlist a name that does not exist on disk so the helper
+        // exercises the NotFound branch instead of the allowlist
+        // branch.
+        let cfg =
+            SandboxConfig::new().with_allowlist(Allowlist::from_slice(["moagan-no-such-tool-xyz"]));
+        let sandbox = Sandbox::new(cfg).unwrap();
+        let v = capture_tool_version(&sandbox, "moagan-no-such-tool-xyz").await;
+        assert!(v.is_none());
     }
 }

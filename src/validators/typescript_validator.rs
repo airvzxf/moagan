@@ -19,7 +19,7 @@ use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxResult, SandboxStatus};
 
 use super::rust_validator::tail;
-use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator};
+use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator, capture_tool_version};
 
 /// TypeScript validator. Stateless; reuse freely.
 #[derive(Debug, Default, Clone, Copy)]
@@ -52,7 +52,11 @@ impl TypeScriptValidator {
             .run_in(work.path(), "tsc", &["--noEmit", "check.ts"])
             .await?;
 
-        Ok(evidence_from_result(result))
+        let mut evidence = evidence_from_result(result);
+        if let Some(v) = capture_tool_version(sandbox, "tsc").await {
+            evidence.reproducibility.push(("tsc".into(), v));
+        }
+        Ok(evidence)
     }
 }
 
@@ -219,6 +223,9 @@ mod tests {
             .unwrap();
         assert_eq!(ev.status, ValidationStatus::Pass);
         assert_eq!(ev.exit_code, Some(0));
+        if let Some((tool, _)) = ev.reproducibility.first() {
+            assert_eq!(tool, "tsc");
+        }
     }
 
     #[test]
