@@ -52,11 +52,17 @@ pub struct VerifyArgs {
     pub run_id: Option<String>,
 }
 
-/// Resolve the run id and home for an audit subcommand.
+/// Resolve the home and run id for an audit subcommand.
+///
+/// `require_run_id` controls what happens when `run_id` is `None`:
+/// - `true`: error out if no run exists (used by `verify`).
+/// - `false`: return `None` and let the proxy start in dynamic mode
+///   so it discovers new runs as they appear (used by `proxy`).
 pub fn resolve_run(
     args_runs_dir: Option<PathBuf>,
     run_id: Option<String>,
-) -> Result<(Arc<MoaganHome>, RunId)> {
+    require_run_id: bool,
+) -> Result<(Arc<MoaganHome>, Option<RunId>)> {
     if let Some(ref home) = args_runs_dir {
         unsafe {
             std::env::set_var("MOAGAN_HOME", home);
@@ -65,8 +71,9 @@ pub fn resolve_run(
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
     let run_id = match run_id {
-        Some(id) => id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?,
-        None => pick_latest_run(&home)?,
+        Some(id) => Some(id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?),
+        None if require_run_id => Some(pick_latest_run(&home)?),
+        None => None,
     };
     Ok((home, run_id))
 }
@@ -93,11 +100,7 @@ fn pick_latest_run(home: &MoaganHome) -> Result<RunId> {
 /// `<run_dir>/telemetry/external_audit.jsonl`. SIGINT/SIGTERM
 /// triggers a clean shutdown.
 pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
-    let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone())?;
-    let run_dir = home.run_dir(run_id);
-    run_dir.ensure()?;
-    let log_path = run_dir.external_audit_path();
-
+    let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone(), false)?;
     let listen = match (args.listen_host.as_str(), args.port) {
         (host, 0) => format!("{host}:0")
             .parse()
@@ -109,20 +112,26 @@ pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
     let cfg = ProxyConfig {
         listen,
         upstream: args.upstream.clone(),
-        log_path: log_path.clone(),
+        runs_dir: home.root().to_path_buf(),
+        run_id,
         include_bodies: !args.exclude_bodies,
         upstream_timeout: Duration::from_secs(args.timeout_secs),
         max_body_bytes: args.max_body_bytes,
         refuse_loopback_forward: false,
         refuse_loopback_forward_allowed: true,
+        fixed_log_path: None,
     };
     let handle = proxy::start(cfg).await?;
+    let run_label = match run_id {
+        Some(id) => id.short(),
+        None => "auto".to_owned(),
+    };
     eprintln!(
-        "proxy listening on http://{} -> {}\naudit log: {}\nrun id: {}",
+        "proxy listening on http://{} -> {}\nrun id: {}\nruns dir: {}",
         handle.local_addr,
         args.upstream,
-        log_path.display(),
-        run_id.short()
+        run_label,
+        home.root().display()
     );
     #[cfg(unix)]
     {
@@ -137,7 +146,10 @@ pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
         signal::ctrl_c().await?;
     }
     handle.shutdown().await;
-    eprintln!("proxy shut down; audit log: {}", log_path.display());
+    eprintln!(
+        "proxy shut down; audit logs under {}/.runs/",
+        home.root().display()
+    );
     Ok(())
 }
 
@@ -145,7 +157,8 @@ pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
 /// Moagan's internal `calls.jsonl.gz` + SQLite, write a TSV summary,
 /// return the exit code (0 ok, 1 mismatch/orphans, 2 missing/invalid).
 pub async fn verify_cmd(args: VerifyArgs) -> Result<i32> {
-    let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone())?;
+    let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone(), true)?;
+    let run_id = run_id.expect("resolve_run(require_run_id=true) returned None");
     let run_dir = home.run_dir(run_id);
     let calls_path = run_dir.telemetry().join("calls.jsonl.gz");
     let report = verify_mod::verify(&run_dir, &calls_path)?;

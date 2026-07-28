@@ -15,7 +15,7 @@
 //! cross-check the sidecar against Moagan's internal `calls.jsonl.gz`
 //! without needing the raw body on disk.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
@@ -137,6 +137,15 @@ impl AuditWriter {
     /// Open a writer at `path`, creating the file if missing.
     pub fn create(path: &Path) -> io::Result<Self> {
         let f = File::create(path)?;
+        Ok(Self {
+            inner: BufWriter::new(Box::new(f)),
+        })
+    }
+
+    /// Open a writer at `path` in append mode, creating the file if
+    /// missing. Used by the proxy when it swaps log files across runs.
+    pub fn append(path: &Path) -> io::Result<Self> {
+        let f = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             inner: BufWriter::new(Box::new(f)),
         })
@@ -374,5 +383,39 @@ mod tests {
         text.push_str("{\"crc32\":\"00000000\"}\n");
         let (invalid, _) = count_invalid_crcs(&text);
         assert_eq!(invalid, 1);
+    }
+
+    #[test]
+    fn append_preserves_previous_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("audit.jsonl");
+        for i in 0..3 {
+            let mut w = if i == 0 {
+                AuditWriter::create(&p).unwrap()
+            } else {
+                AuditWriter::append(&p).unwrap()
+            };
+            let mut r = AuditRecord {
+                ts: i as f64,
+                event: "request".into(),
+                id: format!("id-{i}"),
+                method: Some("POST".into()),
+                url: Some("http://upstream".into()),
+                status: None,
+                headers: Default::default(),
+                body_canonical: None,
+                body_sha256: sha256_hex(b"x"),
+                body_size: 1,
+                elapsed_ms: None,
+                crc32: String::new(),
+                error: None,
+            };
+            w.write_record(&mut r).unwrap();
+            w.flush_gz().unwrap();
+        }
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text.lines().count(), 3);
+        let (invalid, bad) = count_invalid_crcs(&text);
+        assert_eq!(invalid, 0, "bad lines: {bad:?}");
     }
 }

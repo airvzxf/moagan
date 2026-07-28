@@ -66,16 +66,18 @@ async fn audit_proxy_relays_request_with_kept_body() {
         .await;
 
     let tmp = tempdir().unwrap();
-    let log_path = tmp.path().join("external_audit.jsonl.gz");
+    let log_path = tmp.path().join("external_audit.jsonl");
     let cfg = ProxyConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         upstream: format!("{}/v1", server.uri()),
-        log_path: log_path.clone(),
+        runs_dir: tmp.path().to_path_buf(),
+        run_id: None,
         include_bodies: true,
         upstream_timeout: Duration::from_secs(10),
         max_body_bytes: 1024 * 1024,
         refuse_loopback_forward: false,
         refuse_loopback_forward_allowed: false,
+        fixed_log_path: Some(log_path.clone()),
     };
     let handle = moagan::audit::proxy::start(cfg).await.unwrap();
     let port = handle.local_addr.port();
@@ -129,16 +131,18 @@ async fn audit_proxy_supports_chunked_encoding() {
         .mount(&server)
         .await;
     let tmp = tempdir().unwrap();
-    let log_path = tmp.path().join("audit.jsonl.gz");
+    let log_path = tmp.path().join("audit.jsonl");
     let cfg = ProxyConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         upstream: format!("{}/v1", server.uri()),
-        log_path: log_path.clone(),
+        runs_dir: tmp.path().to_path_buf(),
+        run_id: None,
         include_bodies: true,
         upstream_timeout: Duration::from_secs(10),
         max_body_bytes: 1024 * 1024,
         refuse_loopback_forward: false,
         refuse_loopback_forward_allowed: false,
+        fixed_log_path: Some(log_path.clone()),
     };
     let handle = moagan::audit::proxy::start(cfg).await.unwrap();
     let port = handle.local_addr.port();
@@ -164,16 +168,18 @@ async fn audit_proxy_supports_chunked_encoding() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audit_proxy_refuses_loopback_upstream() {
     let tmp = tempdir().unwrap();
-    let log_path = tmp.path().join("audit.jsonl.gz");
+    let log_path = tmp.path().join("audit.jsonl");
     let cfg = ProxyConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         upstream: "http://127.0.0.1:9/v1".into(),
-        log_path,
+        runs_dir: tmp.path().to_path_buf(),
+        run_id: None,
         include_bodies: true,
         upstream_timeout: Duration::from_secs(10),
         max_body_bytes: 1024,
         refuse_loopback_forward: true,
         refuse_loopback_forward_allowed: false,
+        fixed_log_path: Some(log_path),
     };
     let err = moagan::audit::proxy::start(cfg).await.unwrap_err();
     assert!(err.to_string().contains("refusing to forward to loopback"));
