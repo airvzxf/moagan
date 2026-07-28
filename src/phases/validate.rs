@@ -28,8 +28,8 @@ use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::read_json;
 use crate::sandbox::{Sandbox, SandboxConfig};
 use crate::validators::{
-    ConstraintsValidator, PythonValidator, RustValidator, StructuralValidator, TypeScriptValidator,
-    ValidationEvidence, Validator,
+    ConstraintsValidator, PythonValidator, RustValidator, SqlValidator, StructuralValidator,
+    TypeScriptValidator, ValidationEvidence, Validator,
 };
 
 /// Sidecar schema persisted by the validate phase. Serialised as
@@ -156,7 +156,7 @@ impl Phase for ValidatePhase {
                 evidences.push(ev);
             }
 
-            // Language validators (rust / python / typescript)
+            // Language validators (rust / python / typescript / sql)
             // run per artifact. Unknown languages log a Skipped
             // evidence so the sidecar still records the dispatch.
             for artifact in &proposal.artifacts {
@@ -167,6 +167,10 @@ impl Phase for ValidatePhase {
                     TypeScriptValidator::LANGUAGE => {
                         TypeScriptValidator::check(artifact, &sandbox).await
                     }
+                    SqlValidator::LANGUAGE
+                    | SqlValidator::LANGUAGE_SQLITE
+                    | SqlValidator::LANGUAGE_POSTGRES
+                    | SqlValidator::LANGUAGE_MYSQL => SqlValidator::check(artifact, &sandbox).await,
                     other => Ok(ValidationEvidence::skipped(
                         other,
                         "no validator registered for this language",

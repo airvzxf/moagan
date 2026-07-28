@@ -446,3 +446,59 @@ fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Res
 
     Ok(())
 }
+
+/// The Validate phase must dispatch sql artifacts to SqlValidator
+/// and record the verdict. Without sqlite3 on the host the
+/// evidence is "parse only" Pass; with sqlite3 the validator
+/// additionally executes the statement in-memory.
+#[test]
+fn validate_phase_dispatches_sql_artifact() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    let sql_artifact = CodeArtifact::new(
+        "dialect:sqlite",
+        "sql-sqlite",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT); SELECT * FROM t;",
+    );
+    let proposal = moagan::domain::Proposal {
+        id: "p_000".into(),
+        summary: "A proposal that ships a SQL schema and a SELECT.".into(),
+        approach: "Build the table with sqlite, query it back.".into(),
+        tradeoffs: vec!["t".into()],
+        evidence: vec!["e".into()],
+        source_sketch: String::new(),
+        artifacts: vec![sql_artifact],
+    };
+    let proposals_dir = run_dir.proposals();
+    std::fs::create_dir_all(&proposals_dir)?;
+    write_json(&proposals_dir.join("p_000.json"), &proposal)?;
+
+    let provider = Arc::new(MockProvider::empty());
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let phase = ValidatePhase::new();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async { phase.execute(&ctx).await })?;
+    ctx.telemetry.flush()?;
+
+    let sidecar_path = run_dir.validation().join("evidence").join("p_000.json");
+    let raw = std::fs::read_to_string(&sidecar_path)?;
+    assert!(
+        raw.contains("\"validator\":\"sql\""),
+        "evidence must include a sql validator entry; got {raw}"
+    );
+
+    Ok(())
+}
