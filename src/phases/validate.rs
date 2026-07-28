@@ -28,8 +28,8 @@ use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::read_json;
 use crate::sandbox::{Sandbox, SandboxConfig};
 use crate::validators::{
-    CodeArtifact, ConstraintsValidator, PythonValidator, RustValidator, StructuralValidator,
-    TypeScriptValidator, ValidationEvidence, Validator,
+    ConstraintsValidator, PythonValidator, RustValidator, StructuralValidator, TypeScriptValidator,
+    ValidationEvidence, Validator,
 };
 
 /// Sidecar schema persisted by the validate phase. Serialised as
@@ -92,46 +92,6 @@ impl ValidatePhase {
             Box::new(ConstraintsValidator::new()),
         ]
     }
-
-    /// Run every language validator against an optional `CodeArtifact`.
-    /// Returns a vector of evidence (one per validator); an empty
-    /// `artifacts` slice yields an empty vector (every validator
-    /// sees nothing to check).
-    #[allow(dead_code)]
-    async fn run_language_validators(
-        sandbox: &Sandbox,
-        artifacts: &[CodeArtifact],
-    ) -> Result<Vec<ValidationEvidence>> {
-        let mut out = Vec::new();
-        for artifact in artifacts {
-            let language = artifact.language.as_str();
-            let result = match language {
-                RustValidator::LANGUAGE => RustValidator::check(artifact, sandbox).await,
-                PythonValidator::LANGUAGE => PythonValidator::check(artifact, sandbox).await,
-                TypeScriptValidator::LANGUAGE => {
-                    TypeScriptValidator::check(artifact, sandbox).await
-                }
-                // Unknown languages are silently skipped: the
-                // proposal surface may name future validators that
-                // do not exist yet, and we do not want to fail the
-                // phase because of a forward-compatible label.
-                _ => Ok(ValidationEvidence::skipped(
-                    language,
-                    "no validator registered for this language",
-                )),
-            };
-            match result {
-                Ok(ev) => out.push(ev),
-                Err(e) => out.push(ValidationEvidence {
-                    validator: language.into(),
-                    status: crate::validators::ValidationStatus::Error,
-                    failed_checks: vec![format!("validator error: {e}")],
-                    ..ValidationEvidence::default()
-                }),
-            }
-        }
-        Ok(out)
-    }
 }
 
 #[async_trait]
@@ -140,65 +100,98 @@ impl Phase for ValidatePhase {
         "validate"
     }
 
-async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
-    let proposals_dir = ctx.run_dir().proposals();
-    let validation_dir = ctx.run_dir().validation();
-    // Evidence sidecars live under validation/evidence/ so they
-    // never collide with the Gate phase's bare validation/p_*.json
-    // sidecars, which Repair reads as Gate structs.
-    let evidence_dir = validation_dir.join("evidence");
-    std::fs::create_dir_all(&evidence_dir)?;
+    async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        let proposals_dir = ctx.run_dir().proposals();
+        let validation_dir = ctx.run_dir().validation();
+        // Evidence sidecars live under validation/evidence/ so they
+        // never collide with the Gate phase's bare validation/p_*.json
+        // sidecars, which Repair reads as Gate structs.
+        let evidence_dir = validation_dir.join("evidence");
+        std::fs::create_dir_all(&evidence_dir)?;
 
-    let sandbox_cfg = SandboxConfig::new()
-        .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs));
-    let sandbox = Sandbox::new(sandbox_cfg)?;
+        let sandbox = Sandbox::new(SandboxConfig::new().with_timeout(
+            std::time::Duration::from_secs(self.sandbox_timeout_secs),
+        ))?;
 
-    let validators = Self::build_validators();
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(&proposals_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if !file_name.ends_with(".json") || file_name.ends_with(".meta.json") {
-            continue;
-        }
-        let proposal: Proposal = read_json(&path)?;
-        let id = proposal.id.clone();
-
-        // Run every Proposal-only validator. Each one returns
-        // its own evidence; we collect them in order.
-        let mut evidences: Vec<ValidationEvidence> = Vec::new();
-        for v in &validators {
-            match v.validate(&proposal, Some(&sandbox)) {
-                Ok(ev) => evidences.push(ev),
-                Err(e) => evidences.push(ValidationEvidence {
-                    validator: v.name().into(),
-                    status: crate::validators::ValidationStatus::Error,
-                    failed_checks: vec![format!("validator error: {e}")],
-                    ..ValidationEvidence::default()
-                }),
+        let validators = Self::build_validators();
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(&proposals_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !file_name.ends_with(".json") || file_name.ends_with(".meta.json") {
+                continue;
             }
+            let proposal: Proposal = read_json(&path)?;
+            let id = proposal.id.clone();
+
+            // Structural + constraints validators see the
+            // Proposal only (no source code attached). They run
+            // first so a hard structural failure short-circuits
+            // the (more expensive) language validators.
+            let mut evidences: Vec<ValidationEvidence> = Vec::new();
+            for v in &validators {
+                match v.validate(&proposal, Some(&sandbox)) {
+                    Ok(ev) => evidences.push(ev),
+                    Err(e) => evidences.push(ValidationEvidence {
+                        validator: v.name().into(),
+                        status: crate::validators::ValidationStatus::Error,
+                        failed_checks: vec![format!("validator error: {e}")],
+                        ..ValidationEvidence::default()
+                    }),
+                }
+            }
+
+            // Language validators (rust / python / typescript)
+            // run per artifact. Unknown languages log a Skipped
+            // evidence so the sidecar still records the dispatch.
+            for artifact in &proposal.artifacts {
+                let lang = artifact.language.as_str();
+                let result = match lang {
+                    RustValidator::LANGUAGE => {
+                        RustValidator::check(artifact, &sandbox).await
+                    }
+                    PythonValidator::LANGUAGE => {
+                        PythonValidator::check(artifact, &sandbox).await
+                    }
+                    TypeScriptValidator::LANGUAGE => {
+                        TypeScriptValidator::check(artifact, &sandbox).await
+                    }
+                    other => Ok(ValidationEvidence::skipped(
+                        other,
+                        "no validator registered for this language",
+                    )),
+                };
+                match result {
+                    Ok(ev) => evidences.push(ev),
+                    Err(e) => evidences.push(ValidationEvidence {
+                        validator: lang.into(),
+                        status: crate::validators::ValidationStatus::Error,
+                        failed_checks: vec![format!("validator error: {e}")],
+                        ..ValidationEvidence::default()
+                    }),
+                }
+            }
+
+            // Aggregate verdict: any Fail collapses to Fail,
+            // otherwise any Warn is Warn, otherwise Pass. The
+            // composite helper is overkill for two validators but
+            // gives us the rule in one place.
+            let status = aggregate_status(&evidences);
+            let sidecar = ValidationSidecar {
+                schema_version: ValidationSidecar::SCHEMA_VERSION.into(),
+                proposal_id: id.clone(),
+                status,
+                validators: evidences,
+            };
+
+            let out_path: PathBuf = evidence_dir.join(format!("{id}.json"));
+            crate::phases::util::write_json(&out_path, &sidecar)?;
+            paths.push(out_path);
         }
 
-        // Aggregate verdict: any Fail collapses to Fail,
-        // otherwise any Warn is Warn, otherwise Pass. The
-        // composite helper is overkill for two validators but
-        // gives us the rule in one place.
-        let status = aggregate_status(&evidences);
-        let sidecar = ValidationSidecar {
-            schema_version: ValidationSidecar::SCHEMA_VERSION.into(),
-            proposal_id: id.clone(),
-            status,
-            validators: evidences,
-        };
-
-        let out_path: PathBuf = evidence_dir.join(format!("{id}.json"));
-        crate::phases::util::write_json(&out_path, &sidecar)?;
-        paths.push(out_path);
+        Ok(PhaseOutput::Validations(paths))
     }
-
-    Ok(PhaseOutput::Validations(paths))
-}
 }
 
 fn aggregate_status(evidences: &[ValidationEvidence]) -> String {
