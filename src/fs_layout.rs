@@ -176,15 +176,11 @@ impl RunDir<'_> {
         self.root.join("telemetry")
     }
 
-    /// `telemetry/external_audit.jsonl` — append-only JSONL emitted
-    /// by the `moagan audit proxy` sidecar. Each line carries a
-    /// per-line CRC32 so a torn write is detectable. The extension
-    /// is `.jsonl` (not `.jsonl.gz`) on purpose: the sidecar writes
-    /// plain JSONL with one flush per line, which keeps a torn tail
-    /// readable line-by-line without depending on a multi-member
-    /// gzip stream being re-parseable.
+    /// `telemetry/external_audit.jsonl.gz` — append-only JSONL emitted
+    /// by the `moagan audit proxy` sidecar. Every line is stored as a
+    /// complete gzip member and carries a per-line CRC32.
     pub fn external_audit_path(&self) -> PathBuf {
-        self.telemetry().join("external_audit.jsonl")
+        self.telemetry().join("external_audit.jsonl.gz")
     }
 
     /// `telemetry/external_audit.verify.tsv` — output of `moagan audit
@@ -263,7 +259,7 @@ mod tests {
         let r = h.run_dir(RunId::new());
         r.ensure().unwrap();
         let path = r.external_audit_path();
-        assert!(path.ends_with("telemetry/external_audit.jsonl"));
+        assert!(path.ends_with("telemetry/external_audit.jsonl.gz"));
         std::fs::write(&path, b"test").unwrap();
         assert!(path.exists());
     }
