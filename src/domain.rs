@@ -494,6 +494,97 @@ pub struct DiscoverySummary {
     pub schema_version: String,
 }
 
+// =====================================================================
+// Phase D (Plan B sub-phase D) — domain types.
+//                                       See V4 §5.12, §5.13 and
+// proposal-02-rust.md §6.5, §8.4, §16.11.
+// =====================================================================
+
+/// Output of the synthesize phase. One per proposal cluster that
+/// triggered synthesis. The integrator LLM role is reused here to
+/// merge the cluster's proposals into one "best version"; the
+/// synthesized proposal then competes against its sources per V4 §5.13.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SynthesizedProposal {
+    /// Stable id (`s_<NN>`).
+    pub id: String,
+    /// Source proposal ids that fed this synthesis.
+    pub source_proposals: Vec<String>,
+    /// Cluster id (also used to keep the file name stable across
+    /// re-runs of the same brief).
+    pub cluster_id: String,
+    /// Synthesis strategy. The integrator role describes what kind
+    /// of merge it performed: `merge_invariants`, `pick_strongest`,
+    /// `concatenate_disjoint_sections`, etc.
+    pub synthesis_strategy: String,
+    /// Integrated proposal summary.
+    pub summary: String,
+    /// Integrated proposal approach (markdown).
+    pub approach: String,
+    /// Trade-offs inherited from the sources.
+    pub tradeoffs: Vec<String>,
+    /// Evidence (sketches / critiques / external refs).
+    pub evidence: Vec<String>,
+    /// Source proposal ids again, kept explicit for consumers that
+    /// only want the lineage.
+    pub sources: Vec<String>,
+    /// Unix seconds when this file was written.
+    pub created_unix: i64,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// Output of the adversarial judge pass. Only emitted when the
+/// disagreement_score between normal judges exceeds the configured
+/// threshold; otherwise the proposal is left alone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdversaryReport {
+    /// Proposal id this report is about.
+    pub proposal_id: String,
+    /// Did the adversary find a hidden weakness?
+    pub consensus_check: String,
+    /// Disagreement score that triggered the adversary (0..=10).
+    pub disagreement_score: f32,
+    /// Free-form weaknesses the adversary surfaced.
+    pub weaknesses: Vec<String>,
+    /// Claims the adversary considers under-verified.
+    pub unverified_claims: Vec<String>,
+    /// Score delta applied to the aggregated evaluation. Negative
+    /// pulls the proposal down; positive boosts it. Range -2..=+2.
+    pub score_delta: f32,
+    /// Short rationale.
+    pub rationale: String,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// A persisted human checkpoint. `kind` follows the proposal-01 §6.5
+/// list (`intake`, `clarify`, `final`, `custom`); the question and the
+/// raw response are captured verbatim so the run remains reproducible.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HumanCheckpoint {
+    /// Checkpoint id (`h_<NN>`). Stable across re-runs.
+    pub id: String,
+    /// Phase that asked (`intake`, `clarify`, `final`, `custom`).
+    pub phase: String,
+    /// Kind, mirroring the SQLite enum: `intake | clarify | final | custom`.
+    pub kind: String,
+    /// Question shown to the user.
+    pub question: String,
+    /// Raw response captured from stdin (always a single line, no
+    /// trailing newline).
+    pub response: String,
+    /// Unix seconds at the time of capture.
+    pub at_unix: i64,
+    /// Optional default the user accepted when they typed nothing.
+    pub accepted_default: bool,
+    /// Schema version.
+    pub schema_version: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,5 +837,83 @@ mod tests {
         let back: DiscoverySummary = serde_json::from_str(&j).unwrap();
         assert_eq!(back.total_sketches, 80);
         assert_eq!(back.categories_by_density[0], "cat_01");
+    }
+
+    // -- Phase D types (Plan B sub-phase D) -------------------------------
+
+    /// Every Phase D struct must accept an empty JSON object. Same
+    /// leniency rationale as the discovery types: the LLM may emit
+    /// `{}` when it skips the role and the pipeline must keep going.
+    #[test]
+    fn empty_object_parses_for_phase_d_types() {
+        let _: SynthesizedProposal = serde_json::from_str("{}").unwrap();
+        let _: AdversaryReport = serde_json::from_str("{}").unwrap();
+        let _: HumanCheckpoint = serde_json::from_str("{}").unwrap();
+    }
+
+    /// SynthesizedProposal preserves the lineage (`source_proposals`)
+    /// and the synthesis strategy so the deliver phase can surface
+    /// "this came from merging X and Y" in the final report.
+    #[test]
+    fn synthesized_proposal_round_trip() {
+        let s = SynthesizedProposal {
+            id: "s_001".into(),
+            source_proposals: vec!["p_001".into(), "p_002".into()],
+            cluster_id: "cluster_01".into(),
+            synthesis_strategy: "merge_invariants".into(),
+            summary: "Best of both".into(),
+            approach: "## Approach\n\nmerged".into(),
+            tradeoffs: vec!["more tokens".into()],
+            evidence: vec!["sk_001".into()],
+            sources: vec!["p_001".into(), "p_002".into()],
+            created_unix: 1_700_000_000,
+            schema_version: "v1".into(),
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        let back: SynthesizedProposal = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.id, "s_001");
+        assert_eq!(back.source_proposals.len(), 2);
+        assert_eq!(back.synthesis_strategy, "merge_invariants");
+    }
+
+    /// AdversaryReport keeps the score_delta so the rank phase can
+    /// apply it without re-parsing comments.
+    #[test]
+    fn adversary_report_round_trip() {
+        let a = AdversaryReport {
+            proposal_id: "p_001".into(),
+            consensus_check: "weak".into(),
+            disagreement_score: 1.8,
+            weaknesses: vec!["assumes no concurrent writers".into()],
+            unverified_claims: vec!["throughput of 10k req/s".into()],
+            score_delta: -0.6,
+            rationale: "edge case under load".into(),
+            schema_version: "v1".into(),
+        };
+        let j = serde_json::to_string(&a).unwrap();
+        let back: AdversaryReport = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.proposal_id, "p_001");
+        assert!((back.score_delta + 0.6).abs() < 1e-6);
+    }
+
+    /// HumanCheckpoint captures the verbatim question + response so
+    /// re-runs with the same brief can be audited later.
+    #[test]
+    fn human_checkpoint_round_trip() {
+        let c = HumanCheckpoint {
+            id: "h_001".into(),
+            phase: "clarify".into(),
+            kind: "clarify".into(),
+            question: "Continue with assumption X?".into(),
+            response: "y".into(),
+            at_unix: 1_700_000_000,
+            accepted_default: false,
+            schema_version: "v1".into(),
+        };
+        let j = serde_json::to_string(&c).unwrap();
+        let back: HumanCheckpoint = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.id, "h_001");
+        assert_eq!(back.response, "y");
+        assert!(!back.accepted_default);
     }
 }
