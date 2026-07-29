@@ -321,6 +321,66 @@ run_test "discover_integrate_uses_meets_safeguards" \
 run_test "discover_integrate_emits_safeguard_warning" \
   "grep -q 'safeguard_revert' ${ROOT}/src/phases/discover_integrate.rs"
 
+run_test "facet_cache_module_exists" \
+  "[[ -f ${ROOT}/src/discovery/facet_cache.rs ]]"
+
+run_test "facet_cache_default_ttl_constant" \
+  "grep -q 'pub const DEFAULT_TTL_SECS: u64 = 7 \\* 24 \\* 60 \\* 60' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_struct_has_schema_version" \
+  "grep -A4 'pub struct CacheEntry' ${ROOT}/src/discovery/facet_cache.rs | grep -q 'schema_version'"
+
+run_test "facet_cache_struct_has_fresh_method" \
+  "grep -q 'pub fn is_fresh' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_handle_struct" \
+  "grep -q 'pub struct FacetCache' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_lookup_function" \
+  "grep -q 'pub fn lookup' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_store_function" \
+  "grep -q 'pub fn store' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_invalidate_function" \
+  "grep -q 'pub fn invalidate' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_count_function" \
+  "grep -q 'pub fn count' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_corrupted_is_miss" \
+  "grep -q 'corrupted entry' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_stale_entry_is_miss" \
+  "grep -q 'stale_at_unix' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_schema_version_is_v1" \
+  "grep -q 'const SCHEMA_VERSION: &str = \"v1\"' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "fs_layout_cross_run_facet_cache_dir" \
+  "grep -q 'cross_run_facet_cache_dir' ${ROOT}/src/fs_layout.rs"
+
+run_test "fs_layout_ensure_creates_facet_cache_dir" \
+  "grep -A3 'pub fn ensure' ${ROOT}/src/fs_layout.rs | grep -q 'cross_run_facet_cache_dir'"
+
+run_test "discover_facet_uses_facet_cache" \
+  "grep -q 'FacetCache' ${ROOT}/src/phases/discover_facet.rs"
+
+run_test "discover_facet_emits_cache_hit_warning" \
+  "grep -q 'cache_hit' ${ROOT}/src/phases/discover_facet.rs"
+
+run_test "discover_facet_emits_store_failed_warning" \
+  "grep -q 'cache_store_failed' ${ROOT}/src/phases/discover_facet.rs"
+
+run_test "discover_facet_supports_ttl_env_override" \
+  "grep -q 'MOAGAN_FACET_CACHE_TTL_SECS' ${ROOT}/src/phases/discover_facet.rs"
+
+run_test "facet_cache_atomic_write_via_rename" \
+  "grep -q 'rename' ${ROOT}/src/discovery/facet_cache.rs"
+
+run_test "facet_cache_test_round_trip" \
+  "grep -q 'store_then_lookup_returns_same_list' ${ROOT}/src/discovery/facet_cache.rs"
+
 run_test "clusterer_simhash_threshold" \
   "grep -q 'cluster_by_simhash' ${ROOT}/src/discovery/clusterer.rs"
 

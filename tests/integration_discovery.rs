@@ -25,6 +25,7 @@ use std::sync::Arc;
 use moagan::cli::discover::build_discovery_pipeline;
 use moagan::cli::run::build_registry_for;
 use moagan::config::Config;
+use moagan::discovery::facet_cache::{DEFAULT_TTL_SECS, FacetCache};
 use moagan::discovery::integrator::{
     COVERAGE_RATIO_MIN, PRESERVED_CITATIONS_MIN, meets_safeguards,
 };
@@ -604,4 +605,61 @@ fn safeguard_fails_when_citations_dropped() {
     let b = "sk_001 only one";
     let err = meets_safeguards(a, b).unwrap_err();
     assert!(err.contains("preserved_citations"));
+}
+
+#[test]
+fn facet_cache_default_ttl_is_one_week() {
+    // Pins catalog decision D.6.3 default (7 days).
+    assert_eq!(DEFAULT_TTL_SECS, 7 * 24 * 60 * 60);
+}
+
+#[test]
+fn facet_cache_round_trip_persists_to_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = FacetCache::new(tmp.path(), Some(60));
+    let list = moagan::domain::FacetList::from_triples(
+        "cat_01",
+        "cluster_01",
+        "brief",
+        1_700_000_000,
+        vec![("Data Flows".into(), "flows".into(), true)],
+    );
+    let path = cache.store(&list).unwrap();
+    assert!(path.exists(), "store must write to disk");
+
+    // Re-open with the same root — the entry must be there.
+    let reopened = FacetCache::new(tmp.path(), Some(60));
+    let hit = reopened.lookup(&list.cache_key).unwrap();
+    assert!(hit.is_some());
+    let hit = hit.unwrap();
+    assert_eq!(hit.facets.len(), 1);
+    assert_eq!(hit.facets[0].id, "data-flows");
+}
+
+#[test]
+fn facet_cache_moagan_home_dir_path_helper() {
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = MoaganHome::resolve().unwrap();
+    let path = home.cross_run_facet_cache_dir();
+    assert!(path.ends_with("cache/facets"));
+}
+
+#[test]
+fn facet_cache_invalidate_clears_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = FacetCache::new(tmp.path(), Some(60));
+    let list = moagan::domain::FacetList::from_triples(
+        "cat_01",
+        "cluster_01",
+        "brief",
+        1_700_000_000,
+        vec![("X".into(), "x".into(), true)],
+    );
+    cache.store(&list).unwrap();
+    assert!(cache.lookup(&list.cache_key).unwrap().is_some());
+    cache.invalidate(&list.cache_key).unwrap();
+    assert!(cache.lookup(&list.cache_key).unwrap().is_none());
 }

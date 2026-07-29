@@ -13,6 +13,7 @@ pub mod clusterer;
 pub mod contradiction;
 pub mod extractor;
 pub mod facet;
+pub mod facet_cache;
 pub mod integrator;
 pub mod matrix;
 pub mod tagger;

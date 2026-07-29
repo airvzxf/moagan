@@ -66,10 +66,19 @@ impl MoaganHome {
         self.root.join("cache").join("llm")
     }
 
+    /// Directory for the cross-run facet cache: `<root>/cache/facets`.
+    /// Used by `src/discovery/facet_cache.rs` so a re-run with the
+    /// same `(brief, category_id)` skips the LLM call (V4 §6.8 +
+    /// catalog decision D.13.13).
+    pub fn cross_run_facet_cache_dir(&self) -> PathBuf {
+        self.root.join("cache").join("facets")
+    }
+
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(self.runs_dir())?;
         std::fs::create_dir_all(self.cross_run_cache_dir())?;
+        std::fs::create_dir_all(self.cross_run_facet_cache_dir())?;
         Ok(())
     }
 
