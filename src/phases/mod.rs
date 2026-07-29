@@ -7,6 +7,7 @@
 pub mod clarify;
 pub mod critique;
 pub mod deliver;
+pub mod discover_cluster;
 pub mod discover_matrix;
 pub mod discover_tag;
 pub mod gate;
@@ -25,6 +26,7 @@ pub mod validate;
 pub use clarify::ClarifyPhase;
 pub use critique::CritiquePhase;
 pub use deliver::DeliverPhase;
+pub use discover_cluster::DiscoverClusterPhase;
 pub use discover_matrix::DiscoverMatrixPhase;
 pub use discover_tag::DiscoverTagPhase;
 pub use gate::GatePhase;
