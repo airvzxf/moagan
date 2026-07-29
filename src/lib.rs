@@ -12,6 +12,7 @@ pub mod audit;
 pub mod cancel;
 pub mod cli;
 pub mod config;
+pub mod discovery;
 pub mod domain;
 pub mod error;
 pub mod execution;

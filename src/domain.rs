@@ -322,6 +322,178 @@ pub struct ManifestUsage {
     pub cache_creation: u64,
 }
 
+// =====================================================================
+// Discovery (Plan B sub-phase B) — domain types.
+//                                                See V4 §6.5–§6.10 and
+// proposal-02-rust.md §9.4–§9.10.
+// =====================================================================
+
+/// Output of the discovery tagger phase. One per sketch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SketchTags {
+    /// Sketch id (`sk_<uuid7>`).
+    pub sketch_id: String,
+    /// Primary category (e.g. "auth", "storage", "deployment").
+    pub primary: String,
+    /// Secondary categories (free-form).
+    pub secondary: Vec<String>,
+    /// Subcategory inside the primary (e.g. "session-mgmt").
+    pub subcategory: String,
+    /// Difficulty — `"low"`, `"medium"`, or `"high"`.
+    pub difficulty: String,
+    /// Cosine-like similarity score against the primary category's
+    /// centroid (0..=1). Below `0.6` the sketch is bucketed as
+    /// `uncategorized` (V4 §6.5).
+    pub similarity_to_category: f32,
+    /// Optional free-form notes from the tagger.
+    pub notes: String,
+    /// Schema version. Always `"v1"` for v0.2.
+    pub schema_version: String,
+}
+
+/// Output of the discovery cluster phase. One per cluster.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Cluster {
+    /// Stable cluster id (`cluster_<NN>`).
+    pub id: String,
+    /// Human-readable label produced by the LLM refinement pass.
+    pub label: String,
+    /// Short summary produced by the LLM refinement pass.
+    pub summary: String,
+    /// Projected category id (filled by the integrator phase).
+    pub category_id: String,
+    /// Sketch ids that belong to this cluster.
+    pub members: Vec<String>,
+    /// SimHash centroid (hex). Optional, only present when the
+    /// SimHash refinement produced one.
+    pub centroid_simhash: String,
+    /// Mean intra-cluster similarity score (0..=1).
+    pub cohesion: f32,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// Output of the discovery contradiction phase.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Contradiction {
+    /// Stable id (`c_<NN>`).
+    pub id: String,
+    /// Cluster id on the "a" side of the contradiction.
+    pub cluster_a: String,
+    /// Cluster id on the "b" side of the contradiction.
+    pub cluster_b: String,
+    /// Sketch ids that triggered the contradiction (drawn from
+    /// `cluster_a` and `cluster_b`).
+    pub representatives: Vec<String>,
+    /// Topic of the contradiction (e.g. "consistency", "deployment").
+    pub topic: String,
+    /// Human description of the disagreement.
+    pub description: String,
+    /// Severity: `"low"`, `"medium"`, `"high"`.
+    pub severity: String,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// A single facet for a category.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Facet {
+    /// Stable id (kebab-case slug).
+    pub id: String,
+    /// Human description.
+    pub description: String,
+    /// `true` when the facet must appear in the final document.
+    pub required: bool,
+}
+
+/// Facet list for a category. Cached per `sha256(brief + category_id)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FacetList {
+    /// Category id (`cat_<NN>`).
+    pub category_id: String,
+    /// Cluster id this category was derived from.
+    pub cluster_id: String,
+    /// Facets.
+    pub facets: Vec<Facet>,
+    /// SHA-256 of `brief.json + category_id` (cache key).
+    pub cache_key: String,
+    /// Created unix seconds.
+    pub created_unix: i64,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// One extracted markdown section for a facet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FacetExtraction {
+    /// Facet id.
+    pub facet_id: String,
+    /// Category id.
+    pub category_id: String,
+    /// Markdown body.
+    pub body: String,
+    /// Source sketch ids that contributed.
+    pub sources: Vec<String>,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// Final integrated document for a category.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CategoryDoc {
+    /// Category id (`cat_<NN>`).
+    pub category_id: String,
+    /// Cluster id this category descended from.
+    pub cluster_id: String,
+    /// Markdown body.
+    pub body: String,
+    /// Source sketch ids.
+    pub sources: Vec<String>,
+    /// Density score (members / max_members). Higher = larger cluster.
+    pub density: f32,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// `uncategorized.md` payload.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UncategorizedDoc {
+    /// Number of sketches that landed in this bucket.
+    pub count: usize,
+    /// Markdown body.
+    pub body: String,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// `summary.md` payload — overall executive index.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscoverySummary {
+    /// Run id.
+    pub run_id: RunId,
+    /// Total sketches generated.
+    pub total_sketches: usize,
+    /// Number of categories produced.
+    pub category_count: usize,
+    /// Number of uncategorized sketches.
+    pub uncategorized_count: usize,
+    /// Categories ordered by density (descending).
+    pub categories_by_density: Vec<String>,
+    /// Top-level executive summary in markdown.
+    pub executive_summary: String,
+    /// Schema version.
+    pub schema_version: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +578,173 @@ mod tests {
         let sk: Sketch = serde_json::from_value(payload).unwrap();
         assert_eq!(sk.id, "");
         assert_eq!(sk.angle, "");
+    }
+
+    // -- Discovery types (Plan B sub-phase B) ---------------------------
+
+    /// Every discovery struct must accept an empty JSON object.
+    /// LLM calls return `{}` when the model skips the role, and the
+    /// pipeline must keep going without panicking.
+    #[test]
+    fn empty_object_parses_for_discovery_types() {
+        let _: SketchTags = serde_json::from_str("{}").unwrap();
+        let _: Cluster = serde_json::from_str("{}").unwrap();
+        let _: Contradiction = serde_json::from_str("{}").unwrap();
+        let _: Facet = serde_json::from_str("{}").unwrap();
+        let _: FacetList = serde_json::from_str("{}").unwrap();
+        let _: FacetExtraction = serde_json::from_str("{}").unwrap();
+        let _: CategoryDoc = serde_json::from_str("{}").unwrap();
+        let _: UncategorizedDoc = serde_json::from_str("{}").unwrap();
+        let _: DiscoverySummary = serde_json::from_str("{}").unwrap();
+    }
+
+    /// SketchTags round-trips a realistic payload produced by the
+    /// tagger role. The similarity score is preserved verbatim so
+    /// the integrator can decide on `uncategorized` based on a
+    /// plain number comparison.
+    #[test]
+    fn sketch_tags_round_trip() {
+        let payload = serde_json::json!({
+            "sketch_id": "sk_001",
+            "primary": "auth",
+            "secondary": ["session-mgmt", "rbac"],
+            "subcategory": "session-mgmt",
+            "difficulty": "medium",
+            "similarity_to_category": 0.82,
+            "notes": "uses JWT and short-lived tokens",
+            "schema_version": "v1"
+        });
+        let tags: SketchTags = serde_json::from_value(payload).unwrap();
+        assert_eq!(tags.primary, "auth");
+        assert_eq!(tags.subcategory, "session-mgmt");
+        assert!((tags.similarity_to_category - 0.82).abs() < 1e-6);
+        let back = serde_json::to_value(&tags).unwrap();
+        assert_eq!(back["sketch_id"], "sk_001");
+    }
+
+    /// Cluster carries the LLM refinement label and a list of
+    /// member sketch ids. The `centroid_simhash` field is optional
+    /// so the integrator can still emit a document when the
+    /// refinement pass skipped it.
+    #[test]
+    fn cluster_round_trip() {
+        let c = Cluster {
+            id: "cluster_01".into(),
+            label: "auth strategies".into(),
+            summary: "Three sketches propose JWT-based auth.".into(),
+            category_id: String::new(),
+            members: vec!["sk_001".into(), "sk_004".into()],
+            centroid_simhash: String::new(),
+            cohesion: 0.75,
+            schema_version: "v1".into(),
+        };
+        let j = serde_json::to_string(&c).unwrap();
+        let back: Cluster = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.id, "cluster_01");
+        assert_eq!(back.members.len(), 2);
+    }
+
+    /// Contradiction preserves cluster_a/b and the severity.
+    #[test]
+    fn contradiction_round_trip() {
+        let c = Contradiction {
+            id: "c_01".into(),
+            cluster_a: "cluster_01".into(),
+            cluster_b: "cluster_05".into(),
+            representatives: vec!["sk_001".into(), "sk_022".into()],
+            topic: "consistency".into(),
+            description: "ACID vs eventual".into(),
+            severity: "high".into(),
+            schema_version: "v1".into(),
+        };
+        let j = serde_json::to_string(&c).unwrap();
+        let back: Contradiction = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.severity, "high");
+        assert_eq!(back.cluster_a, "cluster_01");
+    }
+
+    /// SketchTags tolerates the LLM omitting optional fields.
+    #[test]
+    fn sketch_tags_partial_payload_parses() {
+        let payload = serde_json::json!({
+            "sketch_id": "sk_002",
+            "primary": "uncategorized",
+            "difficulty": "low"
+        });
+        let tags: SketchTags = serde_json::from_value(payload).unwrap();
+        assert_eq!(tags.primary, "uncategorized");
+        assert_eq!(tags.subcategory, "");
+        assert!(tags.secondary.is_empty());
+    }
+
+    /// Facet keeps the slug, description, and required flag.
+    #[test]
+    fn facet_round_trip() {
+        let f = Facet {
+            id: "flujos".into(),
+            description: "Data flow sequences".into(),
+            required: true,
+        };
+        let j = serde_json::to_string(&f).unwrap();
+        let back: Facet = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.id, "flujos");
+        assert!(back.required);
+    }
+
+    /// FacetList preserves the cache key + facets.
+    #[test]
+    fn facet_list_round_trip() {
+        let fl = FacetList {
+            category_id: "cat_01".into(),
+            cluster_id: "cluster_01".into(),
+            cache_key: "deadbeef".into(),
+            created_unix: 1_700_000_000,
+            schema_version: "v1".into(),
+            facets: vec![Facet {
+                id: "flujos".into(),
+                description: "Data flows".into(),
+                required: true,
+            }],
+        };
+        let j = serde_json::to_string(&fl).unwrap();
+        let back: FacetList = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.facets.len(), 1);
+        assert_eq!(back.cache_key, "deadbeef");
+    }
+
+    /// CategoryDoc round-trips with markdown body.
+    #[test]
+    fn category_doc_round_trip() {
+        let d = CategoryDoc {
+            category_id: "cat_01".into(),
+            cluster_id: "cluster_01".into(),
+            body: "# Auth\n\n...long markdown...".into(),
+            sources: vec!["sk_001".into()],
+            density: 0.42,
+            schema_version: "v1".into(),
+        };
+        let j = serde_json::to_string(&d).unwrap();
+        let back: CategoryDoc = serde_json::from_str(&j).unwrap();
+        assert!(back.body.contains("Auth"));
+        assert!((back.density - 0.42).abs() < 1e-6);
+    }
+
+    /// DiscoverySummary preserves the run id and the category
+    /// ordering by density.
+    #[test]
+    fn discovery_summary_round_trip() {
+        let s = DiscoverySummary {
+            run_id: RunId::new(),
+            total_sketches: 80,
+            category_count: 6,
+            uncategorized_count: 4,
+            categories_by_density: vec!["cat_01".into(), "cat_03".into(), "cat_02".into()],
+            executive_summary: "# Executive\n\n...".into(),
+            schema_version: "v1".into(),
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        let back: DiscoverySummary = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.total_sketches, 80);
+        assert_eq!(back.categories_by_density[0], "cat_01");
     }
 }
