@@ -12,7 +12,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Brief, Critique, FinalReport, Intake, JudgeScore, Proposal, Repair, Route, Sketch,
+    AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, Proposal, Repair, Route,
+    Sketch, SynthesizedProposal,
 };
 use crate::error::{Error, Result};
 
@@ -57,6 +58,17 @@ pub enum Role {
     /// into a coherent category document. Uses temperature 0.4 and
     /// top_p 0.9 for prose fluency.
     Integrator,
+    /// Synthesizer — Phase D. Reads every proposal in a cluster and
+    /// produces a merged `SynthesizedProposal`. Reuses the integrator
+    /// temperature (0.4) because the contract is similar: markdown
+    /// fluency with structural preservation.
+    Synthesizer,
+    /// Adversary — Phase D. Conditional third judge. Reads the normal
+    /// judges' scores, computes its own score_delta, and surfaces
+    /// hidden weaknesses. Used only when `disagreement_score`
+    /// exceeds the configured threshold (T01-06 §5.11 + V4 §5.13).
+    /// Deterministic (`T=0.0`).
+    Adversary,
 }
 
 impl Role {
@@ -77,6 +89,8 @@ impl Role {
             Self::Tagger => "tagger",
             Self::Extractor => "extractor",
             Self::Integrator => "integrator",
+            Self::Synthesizer => "synthesizer",
+            Self::Adversary => "adversary",
         }
     }
 
@@ -114,6 +128,12 @@ impl Role {
             }
             Self::Extractor => "FacetExtraction: {facet_id, category_id, body, sources[]}",
             Self::Integrator => "CategoryDoc: {category_id, cluster_id, body, sources[], density}",
+            Self::Synthesizer => {
+                "Synthesizer: {id, source_proposals[], cluster_id, synthesis_strategy, summary, approach, tradeoffs[], evidence[], sources[]}"
+            }
+            Self::Adversary => {
+                "Adversary: {proposal_id, consensus_check, disagreement_score, weaknesses[], unverified_claims[], score_delta, rationale}"
+            }
         }
     }
 
@@ -155,6 +175,10 @@ impl Role {
             Self::Integrator => {
                 serde_json::from_value::<crate::domain::CategoryDoc>(value.clone()).map(|_| ())
             }
+            Self::Synthesizer => {
+                serde_json::from_value::<SynthesizedProposal>(value.clone()).map(|_| ())
+            }
+            Self::Adversary => serde_json::from_value::<AdversaryReport>(value.clone()).map(|_| ()),
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -183,6 +207,8 @@ impl Role {
             Self::Tagger,
             Self::Extractor,
             Self::Integrator,
+            Self::Synthesizer,
+            Self::Adversary,
         ]
     }
 }
@@ -212,6 +238,8 @@ impl FromStr for Role {
             "tagger" => Ok(Self::Tagger),
             "extractor" => Ok(Self::Extractor),
             "integrator" => Ok(Self::Integrator),
+            "synthesizer" => Ok(Self::Synthesizer),
+            "adversary" => Ok(Self::Adversary),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -237,10 +265,11 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_fourteen() {
+    fn all_roles_are_count_sixteen() {
         // v0.2 added the `sketch` role between route and propose (10→11).
         // Sub-phase B added tagger, extractor, integrator (11→14).
-        assert_eq!(Role::all().len(), 14);
+        // Sub-phase D added synthesizer and adversary (14→16).
+        assert_eq!(Role::all().len(), 16);
     }
 
     #[test]
@@ -274,7 +303,9 @@ mod tests {
                     || desc.starts_with("FinalReport:")
                     || desc.starts_with("SketchTags:")
                     || desc.starts_with("FacetExtraction:")
-                    || desc.starts_with("CategoryDoc:"),
+                    || desc.starts_with("CategoryDoc:")
+                    || desc.starts_with("Synthesizer:")
+                    || desc.starts_with("Adversary:"),
                 "{:?} description does not start with its name: {desc}",
                 r
             );

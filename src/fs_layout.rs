@@ -238,6 +238,25 @@ impl RunDir<'_> {
         self.root.join("contradictions")
     }
 
+    /// `synthesized/` directory. Phase D (V4 §5.13) — one
+    /// `s_<NN>.json` per cluster that triggered synthesis.
+    pub fn synthesized(&self) -> PathBuf {
+        self.root.join("synthesized")
+    }
+
+    /// `cluster_proposals/` directory. Phase D — one
+    /// `cp_<NN>.json` per proposal cluster.
+    pub fn cluster_proposals_dir(&self) -> PathBuf {
+        self.root.join("cluster_proposals")
+    }
+
+    /// `adversaries/` directory. Phase D — one
+    /// `p_<id>.json` per proposal that triggered the adversarial
+    /// judge pass.
+    pub fn adversaries(&self) -> PathBuf {
+        self.root.join("adversaries")
+    }
+
     /// Create every directory the run expects. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         for d in [
@@ -259,6 +278,9 @@ impl RunDir<'_> {
             self.extractions(),
             self.drafts(),
             self.contradictions(),
+            self.synthesized(),
+            self.cluster_proposals_dir(),
+            self.adversaries(),
         ] {
             std::fs::create_dir_all(&d)?;
         }
@@ -387,5 +409,61 @@ mod tests {
         assert!(r.extractions().ends_with("extractions"));
         assert!(r.drafts().ends_with("drafts"));
         assert!(r.contradictions().ends_with("contradictions"));
+    }
+
+    /// Phase D adds a `synthesized/` directory for intra-cluster
+    /// synthesis output (V4 §5.13). `ensure()` must create it so the
+    /// synthesize phase never has to mkdir itself.
+    #[test]
+    fn run_dir_ensure_creates_synthesized_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        r.ensure().unwrap();
+        assert!(r.synthesized().is_dir());
+    }
+
+    /// The `synthesized/` path helper returns the right subdirectory
+    /// name (no surprises during debugging).
+    #[test]
+    fn synthesized_path_helper() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        assert!(r.synthesized().ends_with("synthesized"));
+    }
+
+    /// Phase D also adds `cluster_proposals/` and `adversaries/`.
+    #[test]
+    fn run_dir_ensure_creates_phase_d_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        r.ensure().unwrap();
+        assert!(r.cluster_proposals_dir().is_dir());
+        assert!(r.adversaries().is_dir());
+    }
+
+    /// The `cluster_proposals/` and `adversaries/` path helpers
+    /// return the right subdirectory names.
+    #[test]
+    fn phase_d_path_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        assert!(r.cluster_proposals_dir().ends_with("cluster_proposals"));
+        assert!(r.adversaries().ends_with("adversaries"));
     }
 }
