@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 
 use crate::discovery::extractor::join_markdown;
-use crate::discovery::integrator::{build_doc, local_join};
+use crate::discovery::integrator::{build_doc, local_join, meets_safeguards};
 use crate::domain::{CategoryDoc, Cluster, FacetExtraction, FacetList};
 use crate::error::{Error, Result};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
@@ -141,6 +141,35 @@ impl Phase for DiscoverIntegratePhase {
                         if raw.body.is_empty() {
                             raw.body = local_join(&list.category_id, &cluster.label, &extractions);
                         }
+                        // Catalog decision 42 + V4 §6.10: the
+                        // integrator must not dilute the content. If
+                        // the LLM-joined body fails the coverage or
+                        // citation safeguard, revert to the local
+                        // join. The safeguard verdict is reported as
+                        // a structured warning so the integrator run
+                        // is auditable.
+                        let local_body = local_join(&list.category_id, &cluster.label, &extractions);
+                        let body = match meets_safeguards(&local_body, &raw.body) {
+                            Ok(()) => raw.body.clone(),
+                            Err(verdict) => {
+                                let _ = ctx.telemetry.warn(
+                                    "phase.discover_integrate.safeguard_revert",
+                                    "warn",
+                                    "LLM integrator failed the content-dilution safeguard; reverting to local_join",
+                                    serde_json::json!({
+                                        "category_id": list.category_id,
+                                        "cluster_id": cluster.id,
+                                        "verdict": verdict,
+                                    }),
+                                    crate::telemetry::WarningContext {
+                                        phase: Some("discover_integrate".into()),
+                                        role: Some("integrator".into()),
+                                        ..Default::default()
+                                    },
+                                );
+                                local_body
+                            }
+                        };
                         let sources = if raw.sources.is_empty() {
                             cluster.members.clone()
                         } else {
@@ -152,7 +181,7 @@ impl Phase for DiscoverIntegratePhase {
                             cluster.members.len(),
                             max_members,
                             sources,
-                            raw.body,
+                            body,
                         )
                     }
                     Err(_) => {

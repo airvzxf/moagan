@@ -25,6 +25,9 @@ use std::sync::Arc;
 use moagan::cli::discover::build_discovery_pipeline;
 use moagan::cli::run::build_registry_for;
 use moagan::config::Config;
+use moagan::discovery::integrator::{
+    COVERAGE_RATIO_MIN, PRESERVED_CITATIONS_MIN, meets_safeguards,
+};
 use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
@@ -571,4 +574,34 @@ async fn discovery_pipeline_with_mock_emits_lifecycle() {
     let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
     let result = matrix.execute(&ctx).await;
     assert!(result.is_ok(), "discover_matrix should succeed with mocks");
+}
+
+#[test]
+fn safeguard_thresholds_are_documented() {
+    // Pin the catalog decision 42 + V4 §6.10 numbers.
+    assert!((COVERAGE_RATIO_MIN - 0.85).abs() < 1e-6);
+    assert!((PRESERVED_CITATIONS_MIN - 0.9).abs() < 1e-6);
+}
+
+#[test]
+fn safeguard_passes_when_refined_preserves_everything() {
+    let a = "body cites sk_001 and sk_002 throughout. ".repeat(20);
+    let b = format!("{a}extra suffix");
+    assert!(meets_safeguards(&a, &b).is_ok());
+}
+
+#[test]
+fn safeguard_fails_when_refined_is_much_shorter() {
+    let a = "x".repeat(1000);
+    let b = "tiny";
+    let err = meets_safeguards(&a, b).unwrap_err();
+    assert!(err.contains("coverage_ratio"));
+}
+
+#[test]
+fn safeguard_fails_when_citations_dropped() {
+    let a = "sk_001 sk_002 sk_003 sk_004 sk_005 sk_006 sk_007 sk_008 sk_009 sk_010";
+    let b = "sk_001 only one";
+    let err = meets_safeguards(a, b).unwrap_err();
+    assert!(err.contains("preserved_citations"));
 }

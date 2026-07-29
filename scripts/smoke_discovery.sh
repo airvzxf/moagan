@@ -300,6 +300,27 @@ run_test "integrator_category_header" \
 run_test "integrator_local_join" \
   "grep -q 'pub fn local_join' ${ROOT}/src/discovery/integrator.rs"
 
+run_test "integrator_coverage_ratio_helper" \
+  "grep -q 'pub fn coverage_ratio' ${ROOT}/src/discovery/integrator.rs"
+
+run_test "integrator_preserved_citations_helper" \
+  "grep -q 'pub fn preserved_citations_ratio' ${ROOT}/src/discovery/integrator.rs"
+
+run_test "integrator_meets_safeguards_helper" \
+  "grep -q 'pub fn meets_safeguards' ${ROOT}/src/discovery/integrator.rs"
+
+run_test "integrator_coverage_min_constant" \
+  "grep -q 'COVERAGE_RATIO_MIN: f32 = 0.85' ${ROOT}/src/discovery/integrator.rs"
+
+run_test "integrator_preserved_citations_min_constant" \
+  "grep -q 'PRESERVED_CITATIONS_MIN: f32 = 0.9' ${ROOT}/src/discovery/integrator.rs"
+
+run_test "discover_integrate_uses_meets_safeguards" \
+  "grep -q 'meets_safeguards' ${ROOT}/src/phases/discover_integrate.rs"
+
+run_test "discover_integrate_emits_safeguard_warning" \
+  "grep -q 'safeguard_revert' ${ROOT}/src/phases/discover_integrate.rs"
+
 run_test "clusterer_simhash_threshold" \
   "grep -q 'cluster_by_simhash' ${ROOT}/src/discovery/clusterer.rs"
 
