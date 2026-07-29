@@ -35,9 +35,9 @@ use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 use crate::phases::RunContext;
 use crate::phases::{
-    DiscoverClusterPhase, DiscoverContradictPhase, DiscoverExtractPhase, DiscoverFacetPhase,
-    DiscoverIntegratePhase, DiscoverMatrixPhase, DiscoverSummaryPhase, DiscoverTagPhase,
-    IntakePhase, ClarifyPhase, Pipeline,
+    ClarifyPhase, DiscoverClusterPhase, DiscoverContradictPhase, DiscoverExtractPhase,
+    DiscoverFacetPhase, DiscoverIntegratePhase, DiscoverMatrixPhase, DiscoverSummaryPhase,
+    DiscoverTagPhase, IntakePhase, Pipeline,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -67,7 +67,9 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions) -> Pipeline {
             opts.cardinality,
         ))
         .push(DiscoverTagPhase)
-        .push(DiscoverClusterPhase { threshold: opts.cluster_threshold })
+        .push(DiscoverClusterPhase {
+            threshold: opts.cluster_threshold,
+        })
         .push(DiscoverContradictPhase::default())
         .push(DiscoverFacetPhase)
         .push(DiscoverExtractPhase)
@@ -235,7 +237,8 @@ mod tests {
 
     #[test]
     fn parse_cardinality_rejects_non_numeric() {
-        let e = parse_cardinality(&["--cardinality".to_string(), "abc".to_string()], 80).unwrap_err();
+        let e =
+            parse_cardinality(&["--cardinality".to_string(), "abc".to_string()], 80).unwrap_err();
         assert!(e.to_string().contains("invalid cardinality"));
     }
 

@@ -51,7 +51,11 @@ impl DiscoverMatrixPhase {
     /// Build a phase from explicit `(dimensions, facets_per_dim)`,
     /// sizing `sketches_per_cell` so the total reaches the con\\\
     /// figured `cardinality` (default 80).
-    pub fn from_dimensions(num_dimensions: usize, facets_per_dim: usize, cardinality: usize) -> Self {
+    pub fn from_dimensions(
+        num_dimensions: usize,
+        facets_per_dim: usize,
+        cardinality: usize,
+    ) -> Self {
         let mut m = ExplorationMatrix::from_dimensions(num_dimensions, facets_per_dim);
         let cells = m.cells().max(1);
         m.sketches_per_cell = (cardinality / cells).max(1);

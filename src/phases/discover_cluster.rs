@@ -26,7 +26,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::clusterer::{
-    bucket_by_cluster, cluster, cluster_id_for, cohesion, member_ids, SketchRecord,
+    SketchRecord, bucket_by_cluster, cluster, cluster_id_for, cohesion, member_ids,
 };
 use crate::domain::{Cluster, Sketch};
 use crate::error::{Error, Result};
@@ -117,7 +117,10 @@ impl Phase for DiscoverClusterPhase {
             text.push_str(&sk.key_decisions.join("; "));
             text.push('\n');
             text.push_str(&sk.architecture_outline);
-            records.push(SketchRecord { id: sk.id.clone(), text });
+            records.push(SketchRecord {
+                id: sk.id.clone(),
+                text,
+            });
         }
 
         if records.is_empty() {
@@ -157,8 +160,7 @@ impl Phase for DiscoverClusterPhase {
                         // system prompt (T=0.0, top_p=0.2) so the
                         // label is deterministic. The integrator
                         // has its own prompt for prose.
-                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger)
-                            .to_owned(),
+                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger).to_owned(),
                         user,
                         crate::llm::prompts::system_prompt(crate::llm::Role::Tagger),
                         3,
@@ -206,7 +208,9 @@ impl Phase for DiscoverClusterPhase {
         }
 
         if paths.is_empty() {
-            return Err(Error::InvalidState("discover_cluster produced zero clusters".into()));
+            return Err(Error::InvalidState(
+                "discover_cluster produced zero clusters".into(),
+            ));
         }
 
         let index = serde_json::json!({
@@ -242,9 +246,18 @@ mod tests {
     #[test]
     fn centroid_picks_longest_text() {
         let records = vec![
-            SketchRecord { id: "sk_001".into(), text: "short".into() },
-            SketchRecord { id: "sk_002".into(), text: "this is a much longer text".into() },
-            SketchRecord { id: "sk_003".into(), text: "mid".into() },
+            SketchRecord {
+                id: "sk_001".into(),
+                text: "short".into(),
+            },
+            SketchRecord {
+                id: "sk_002".into(),
+                text: "this is a much longer text".into(),
+            },
+            SketchRecord {
+                id: "sk_003".into(),
+                text: "mid".into(),
+            },
         ];
         let c = DiscoverClusterPhase::centroid(&records, &[0, 1, 2]);
         assert!(c.contains("longer"));

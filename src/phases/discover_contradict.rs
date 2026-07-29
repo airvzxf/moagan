@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::contradiction::{severity_rank, top_pairs, ContradictionRecord};
+use crate::discovery::contradiction::{ContradictionRecord, severity_rank, top_pairs};
 use crate::domain::{Cluster, Contradiction};
 use crate::error::Result;
 use crate::ids::RunId;
@@ -34,7 +34,9 @@ pub struct DiscoverContradictPhase {
 
 impl Default for DiscoverContradictPhase {
     fn default() -> Self {
-        Self { delta_threshold: 0.3 }
+        Self {
+            delta_threshold: 0.3,
+        }
     }
 }
 
@@ -124,9 +126,8 @@ impl Phase for DiscoverContradictPhase {
         let top = top_pairs(&distances, MAX_PAIRS);
 
         // LLM pass per pair.
-        let by_id: Arc<std::collections::HashMap<String, Cluster>> = Arc::new(
-            clusters.iter().map(|c| (c.id.clone(), c.clone())).collect(),
-        );
+        let by_id: Arc<std::collections::HashMap<String, Cluster>> =
+            Arc::new(clusters.iter().map(|c| (c.id.clone(), c.clone())).collect());
 
         let futures = top.iter().map(|(a_id, b_id, _delta)| {
             let a_id = a_id.clone();
@@ -141,26 +142,23 @@ impl Phase for DiscoverContradictPhase {
                 let raw: ContradictionRefinement = ctx
                     .call_with_retry_parse(
                         crate::llm::Role::Tagger,
-                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger)
-                            .to_owned(),
+                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger).to_owned(),
                         user,
                         crate::llm::prompts::system_prompt(crate::llm::Role::Tagger),
                         3,
                     )
                     .await
                     .unwrap_or_default();
-                Ok::<(String, String, ContradictionRefinement, Vec<String>), crate::error::Error>(
-                    (
-                        a_id,
-                        b_id,
-                        raw,
-                        {
-                            let mut v = a.members.clone();
-                            v.extend(b.members.iter().cloned());
-                            v
-                        },
-                    ),
-                )
+                Ok::<(String, String, ContradictionRefinement, Vec<String>), crate::error::Error>((
+                    a_id,
+                    b_id,
+                    raw,
+                    {
+                        let mut v = a.members.clone();
+                        v.extend(b.members.iter().cloned());
+                        v
+                    },
+                ))
             }
         });
         let results = join_all(futures).await;

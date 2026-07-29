@@ -89,7 +89,9 @@ impl Phase for DiscoverFacetPhase {
         cluster_paths.sort();
 
         if cluster_paths.is_empty() {
-            return Err(Error::InvalidState("discover_facet found zero clusters".into()));
+            return Err(Error::InvalidState(
+                "discover_facet found zero clusters".into(),
+            ));
         }
 
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -104,8 +106,7 @@ impl Phase for DiscoverFacetPhase {
                 let raw: FacetDerivation = ctx
                     .call_with_retry_parse(
                         crate::llm::Role::Tagger,
-                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger)
-                            .to_owned(),
+                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger).to_owned(),
                         user,
                         crate::llm::prompts::system_prompt(crate::llm::Role::Tagger),
                         3,
@@ -152,7 +153,9 @@ impl Phase for DiscoverFacetPhase {
         }
 
         if paths.is_empty() {
-            return Err(Error::InvalidState("discover_facet produced zero facet lists".into()));
+            return Err(Error::InvalidState(
+                "discover_facet produced zero facet lists".into(),
+            ));
         }
 
         Ok(PhaseOutput::Sketches(paths))

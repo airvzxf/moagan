@@ -64,32 +64,56 @@ impl ExplorationMatrix {
                 id: "deployment-model".into(),
                 label: "Deployment model".into(),
                 facets: vec![
-                    Facet { id: "serverless".into(), label: "serverless".into() },
-                    Facet { id: "self-hosted".into(), label: "self-hosted".into() },
+                    Facet {
+                        id: "serverless".into(),
+                        label: "serverless".into(),
+                    },
+                    Facet {
+                        id: "self-hosted".into(),
+                        label: "self-hosted".into(),
+                    },
                 ],
             },
             Dimension {
                 id: "storage".into(),
                 label: "Storage strategy".into(),
                 facets: vec![
-                    Facet { id: "sql".into(), label: "SQL".into() },
-                    Facet { id: "kv".into(), label: "embedded key-value".into() },
+                    Facet {
+                        id: "sql".into(),
+                        label: "SQL".into(),
+                    },
+                    Facet {
+                        id: "kv".into(),
+                        label: "embedded key-value".into(),
+                    },
                 ],
             },
             Dimension {
                 id: "consistency".into(),
                 label: "Consistency model".into(),
                 facets: vec![
-                    Facet { id: "strong".into(), label: "strong".into() },
-                    Facet { id: "eventual".into(), label: "eventual".into() },
+                    Facet {
+                        id: "strong".into(),
+                        label: "strong".into(),
+                    },
+                    Facet {
+                        id: "eventual".into(),
+                        label: "eventual".into(),
+                    },
                 ],
             },
             Dimension {
                 id: "observability".into(),
                 label: "Observability".into(),
                 facets: vec![
-                    Facet { id: "logs-only".into(), label: "logs only".into() },
-                    Facet { id: "metrics-tracing".into(), label: "metrics + tracing".into() },
+                    Facet {
+                        id: "logs-only".into(),
+                        label: "logs only".into(),
+                    },
+                    Facet {
+                        id: "metrics-tracing".into(),
+                        label: "metrics + tracing".into(),
+                    },
                 ],
             },
         ];
@@ -142,10 +166,7 @@ impl ExplorationMatrix {
         if self.dimensions.is_empty() {
             0
         } else {
-            self.dimensions
-                .iter()
-                .map(|d| d.facets.len().max(1))
-                .sum()
+            self.dimensions.iter().map(|d| d.facets.len().max(1)).sum()
         }
     }
 
@@ -167,7 +188,10 @@ impl ExplorationMatrix {
 
     /// Tally of dimension → facet count, useful for logs.
     pub fn tally(&self) -> BTreeMap<String, usize> {
-        self.dimensions.iter().map(|d| (d.id.clone(), d.facets.len())).collect()
+        self.dimensions
+            .iter()
+            .map(|d| (d.id.clone(), d.facets.len()))
+            .collect()
     }
 }
 
@@ -178,7 +202,13 @@ mod tests {
     #[test]
     fn default_for_80_sketches_yields_ten_per_cell() {
         let m = ExplorationMatrix::default_for(80);
-        assert_eq!(m.cardinality(), 80, "cells={} * per_cell={}", m.cells(), m.sketches_per_cell);
+        assert_eq!(
+            m.cardinality(),
+            80,
+            "cells={} * per_cell={}",
+            m.cells(),
+            m.sketches_per_cell
+        );
         assert_eq!(m.cells(), 8);
         assert_eq!(m.sketches_per_cell, 10);
     }
@@ -213,8 +243,16 @@ mod tests {
         let m = ExplorationMatrix::default_for(80);
         let cells: Vec<_> = m.iter_cells().collect();
         assert_eq!(cells.len(), 8);
-        assert!(cells.iter().any(|c| c.dimension_id == "deployment-model" && c.facet_id == "serverless"));
-        assert!(cells.iter().any(|c| c.dimension_id == "observability" && c.facet_id == "metrics-tracing"));
+        assert!(
+            cells
+                .iter()
+                .any(|c| c.dimension_id == "deployment-model" && c.facet_id == "serverless")
+        );
+        assert!(
+            cells
+                .iter()
+                .any(|c| c.dimension_id == "observability" && c.facet_id == "metrics-tracing")
+        );
     }
 
     #[test]

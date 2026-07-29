@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::discovery::tagger::{sanitise, uncategorized_ratio, UNCATEGORIZED_THRESHOLD};
+use crate::discovery::tagger::{UNCATEGORIZED_THRESHOLD, sanitise, uncategorized_ratio};
 use crate::domain::{Sketch, SketchTags};
 use crate::error::{Error, Result};
 use crate::llm::Role;
@@ -163,8 +163,7 @@ mod tests {
     fn user_payload_round_trips_sketch() {
         let s = Sketch {
             id: "sk_001".into(),
-            thesis: "Use Rust + SQLite + a single binary for the orchestration layer."
-                .into(),
+            thesis: "Use Rust + SQLite + a single binary for the orchestration layer.".into(),
             key_decisions: vec!["single binary".into(), "SQLite only".into()],
             ..Default::default()
         };

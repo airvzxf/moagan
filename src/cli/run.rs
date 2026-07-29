@@ -168,7 +168,7 @@ async fn shutdown_signal() -> Result<()> {
 /// the user asked for). Reused by `continue_cmd::run_refine` and
 /// `run_rerank` so those flows get a real provider and not an empty
 /// registry that panics on the first `RunContext::provider()` call.
-pub(crate) fn build_registry_for(
+pub fn build_registry_for(
     cfg: &Config,
     selected: &str,
     mock_dir: Option<&std::path::Path>,

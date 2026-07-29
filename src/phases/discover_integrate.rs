@@ -50,7 +50,10 @@ impl DiscoverIntegratePhase {
             .map(|e| e.path())
             .filter(|p| {
                 p.extension().and_then(|s| s.to_str()) == Some("json")
-                    && p.file_stem().and_then(|s| s.to_str()).map(|s| s.starts_with("faceta_")).unwrap_or(false)
+                    && p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.starts_with("faceta_"))
+                        .unwrap_or(false)
             })
             .collect();
         paths.sort();
@@ -82,7 +85,9 @@ impl Phase for DiscoverIntegratePhase {
         facet_paths.sort();
 
         if facet_paths.is_empty() {
-            return Err(Error::InvalidState("discover_integrate found zero facet lists".into()));
+            return Err(Error::InvalidState(
+                "discover_integrate found zero facet lists".into(),
+            ));
         }
 
         // Compute max cluster members so density is consistent.
@@ -109,20 +114,23 @@ impl Phase for DiscoverIntegratePhase {
             async move {
                 let _permit = ctx.parallelism.acquire().await?;
                 let list: FacetList = read_json(&facet_path)?;
-                let cluster_path = ctx.run_dir().clusters().join(format!("{}.json", list.cluster_id));
+                let cluster_path = ctx
+                    .run_dir()
+                    .clusters()
+                    .join(format!("{}.json", list.cluster_id));
                 let cluster: Cluster = if cluster_path.exists() {
                     read_json(&cluster_path).unwrap_or_default()
                 } else {
                     Cluster::default()
                 };
-                let extractions = DiscoverIntegratePhase::load_extractions(&ctx, &list.category_id)?;
+                let extractions =
+                    DiscoverIntegratePhase::load_extractions(&ctx, &list.category_id)?;
                 let joined = join_markdown(&extractions);
                 let user = DiscoverIntegratePhase::user_payload(&cluster.label, &joined);
                 let raw: Result<CategoryDoc> = ctx
                     .call_with_retry_parse(
                         crate::llm::Role::Integrator,
-                        crate::llm::prompts::system_prompt(crate::llm::Role::Integrator)
-                            .to_owned(),
+                        crate::llm::prompts::system_prompt(crate::llm::Role::Integrator).to_owned(),
                         user,
                         crate::llm::prompts::system_prompt(crate::llm::Role::Integrator),
                         3,
@@ -159,9 +167,15 @@ impl Phase for DiscoverIntegratePhase {
                         )
                     }
                 };
-                let md_path = ctx.run_dir().final_dir().join(format!("{}.md", md.category_id));
+                let md_path = ctx
+                    .run_dir()
+                    .final_dir()
+                    .join(format!("{}.md", md.category_id));
                 std::fs::write(&md_path, &md.body)?;
-                let json_path = ctx.run_dir().final_dir().join(format!("{}.json", md.category_id));
+                let json_path = ctx
+                    .run_dir()
+                    .final_dir()
+                    .join(format!("{}.json", md.category_id));
                 write_json(&json_path, &md)?;
                 Ok::<PathBuf, crate::error::Error>(md_path)
             }
@@ -187,7 +201,9 @@ impl Phase for DiscoverIntegratePhase {
         }
 
         if paths.is_empty() {
-            return Err(Error::InvalidState("discover_integrate produced zero category docs".into()));
+            return Err(Error::InvalidState(
+                "discover_integrate produced zero category docs".into(),
+            ));
         }
 
         // Index for the summary phase.

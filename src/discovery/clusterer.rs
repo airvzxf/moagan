@@ -46,7 +46,10 @@ pub fn cluster(records: &[SketchRecord], threshold: f32) -> Vec<ClusterChunk> {
         .into_iter()
         .map(|member_indices| {
             let texts = member_indices.iter().map(|i| texts[*i].clone()).collect();
-            ClusterChunk { member_indices, texts }
+            ClusterChunk {
+                member_indices,
+                texts,
+            }
         })
         .collect()
 }
@@ -54,7 +57,11 @@ pub fn cluster(records: &[SketchRecord], threshold: f32) -> Vec<ClusterChunk> {
 /// Map a `ClusterChunk` index back to the sketch ids in the
 /// original records list.
 pub fn member_ids(records: &[SketchRecord], chunk: &ClusterChunk) -> Vec<String> {
-    chunk.member_indices.iter().map(|i| records[*i].id.clone()).collect()
+    chunk
+        .member_indices
+        .iter()
+        .map(|i| records[*i].id.clone())
+        .collect()
 }
 
 /// Build a cluster id from its zero-based cluster index
@@ -90,7 +97,10 @@ pub fn cohesion(records: &[SketchRecord], chunk: &ClusterChunk) -> f32 {
 /// Distribute sketch ids into per-cluster buckets keyed by their
 /// `cluster_id_for` index. The output is a `BTreeMap` so iteration
 /// is deterministic.
-pub fn bucket_by_cluster(records: &[SketchRecord], chunks: &[ClusterChunk]) -> BTreeMap<String, Vec<String>> {
+pub fn bucket_by_cluster(
+    records: &[SketchRecord],
+    chunks: &[ClusterChunk],
+) -> BTreeMap<String, Vec<String>> {
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (idx, chunk) in chunks.iter().enumerate() {
         let id = cluster_id_for(idx);
@@ -104,7 +114,10 @@ mod tests {
     use super::*;
 
     fn r(id: &str, text: &str) -> SketchRecord {
-        SketchRecord { id: id.into(), text: text.into() }
+        SketchRecord {
+            id: id.into(),
+            text: text.into(),
+        }
     }
 
     #[test]
@@ -136,7 +149,10 @@ mod tests {
     #[test]
     fn member_ids_resolves_indices() {
         let records = vec![r("sk_001", "a"), r("sk_002", "b"), r("sk_003", "c")];
-        let chunk = ClusterChunk { member_indices: vec![0, 2], texts: vec!["a".into(), "c".into()] };
+        let chunk = ClusterChunk {
+            member_indices: vec![0, 2],
+            texts: vec!["a".into(), "c".into()],
+        };
         let ids = member_ids(&records, &chunk);
         assert_eq!(ids, vec!["sk_001", "sk_003"]);
     }
@@ -144,7 +160,10 @@ mod tests {
     #[test]
     fn cohesion_is_one_for_identical_texts() {
         let records = vec![r("sk_001", "identical"), r("sk_002", "identical")];
-        let chunk = ClusterChunk { member_indices: vec![0, 1], texts: vec!["identical".into(); 2] };
+        let chunk = ClusterChunk {
+            member_indices: vec![0, 1],
+            texts: vec!["identical".into(); 2],
+        };
         let c = cohesion(&records, &chunk);
         assert!(c > 0.9, "got {c}");
     }
@@ -152,7 +171,10 @@ mod tests {
     #[test]
     fn cohesion_is_zero_for_disjoint() {
         let records = vec![r("sk_001", "alpha"), r("sk_002", "omega")];
-        let chunk = ClusterChunk { member_indices: vec![0, 1], texts: vec!["alpha".into(), "omega".into()] };
+        let chunk = ClusterChunk {
+            member_indices: vec![0, 1],
+            texts: vec!["alpha".into(), "omega".into()],
+        };
         let c = cohesion(&records, &chunk);
         assert!(c < 0.5, "got {c}");
     }
@@ -160,7 +182,10 @@ mod tests {
     #[test]
     fn cohesion_singleton_is_one() {
         let records = vec![r("sk_001", "x")];
-        let chunk = ClusterChunk { member_indices: vec![0], texts: vec!["x".into()] };
+        let chunk = ClusterChunk {
+            member_indices: vec![0],
+            texts: vec!["x".into()],
+        };
         let c = cohesion(&records, &chunk);
         assert!((c - 1.0).abs() < 1e-6);
     }
@@ -169,8 +194,14 @@ mod tests {
     fn bucket_by_cluster_is_deterministic() {
         let records = vec![r("sk_001", "a"), r("sk_002", "b")];
         let chunks = vec![
-            ClusterChunk { member_indices: vec![0], texts: vec!["a".into()] },
-            ClusterChunk { member_indices: vec![1], texts: vec!["b".into()] },
+            ClusterChunk {
+                member_indices: vec![0],
+                texts: vec!["a".into()],
+            },
+            ClusterChunk {
+                member_indices: vec![1],
+                texts: vec!["b".into()],
+            },
         ];
         let b = bucket_by_cluster(&records, &chunks);
         let keys: Vec<_> = b.keys().cloned().collect();

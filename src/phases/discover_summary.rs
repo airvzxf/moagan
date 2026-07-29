@@ -85,7 +85,11 @@ impl DiscoverSummaryPhase {
             };
             docs.push(doc);
         }
-        docs.sort_by(|a, b| b.density.partial_cmp(&a.density).unwrap_or(std::cmp::Ordering::Equal));
+        docs.sort_by(|a, b| {
+            b.density
+                .partial_cmp(&a.density)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(docs)
     }
 
@@ -117,6 +121,9 @@ impl Phase for DiscoverSummaryPhase {
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
         let final_dir = ctx.run_dir().final_dir();
         let _ = std::fs::create_dir_all(&final_dir);
+        let _ = std::fs::create_dir_all(ctx.run_dir().tags());
+        let _ = std::fs::create_dir_all(ctx.run_dir().sketches());
+        let _ = std::fs::create_dir_all(ctx.run_dir().clusters());
 
         let docs = DiscoverSummaryPhase::read_category_docs(ctx)?;
         let tag_index = DiscoverSummaryPhase::read_tag_index(ctx)?;
@@ -198,7 +205,9 @@ impl Phase for DiscoverSummaryPhase {
         outputs.extend(uncategorized_paths);
 
         if outputs.is_empty() {
-            return Err(Error::InvalidState("discover_summary produced zero outputs".into()));
+            return Err(Error::InvalidState(
+                "discover_summary produced zero outputs".into(),
+            ));
         }
 
         Ok(PhaseOutput::Sketches(outputs))

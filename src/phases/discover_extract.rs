@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::discovery::facet::slug;
 use crate::discovery::extractor::{render_body, unique_sources};
+use crate::discovery::facet::slug;
 use crate::domain::{Cluster, FacetExtraction, FacetList, Sketch};
 use crate::error::{Error, Result};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
@@ -22,7 +22,12 @@ impl DiscoverExtractPhase {
     /// Build the user payload for the extractor. The model receives
     /// the cluster's sketches and the facet, and is asked to return
     /// a markdown body.
-    fn user_payload(cluster: &Cluster, facet_id: &str, facet_desc: &str, sketches: &[Sketch]) -> String {
+    fn user_payload(
+        cluster: &Cluster,
+        facet_id: &str,
+        facet_desc: &str,
+        sketches: &[Sketch],
+    ) -> String {
         let sk_lines: Vec<String> = sketches
             .iter()
             .map(|s| format!("- {}: {}", s.id, s.thesis))
@@ -47,10 +52,7 @@ impl DiscoverExtractPhase {
     /// Read each sketch whose id is in `members`. Returns an error
     /// when one of the member ids cannot be resolved so the caller
     /// can decide whether to continue or abort.
-    fn read_member_sketches(
-        ctx: &RunContext,
-        members: &[String],
-    ) -> Result<Vec<Sketch>> {
+    fn read_member_sketches(ctx: &RunContext, members: &[String]) -> Result<Vec<Sketch>> {
         let mut out = Vec::new();
         for id in members {
             let path = ctx.run_dir().sketches().join(format!("{id}.json"));
@@ -172,7 +174,9 @@ impl Phase for DiscoverExtractPhase {
         }
 
         if paths.is_empty() {
-            return Err(Error::InvalidState("discover_extract produced zero facet extractions".into()));
+            return Err(Error::InvalidState(
+                "discover_extract produced zero facet extractions".into(),
+            ));
         }
 
         // Drop a tiny summary so the integrator phase can skip the

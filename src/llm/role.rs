@@ -113,9 +113,7 @@ impl Role {
                 "SketchTags: {sketch_id, primary, secondary[], subcategory, difficulty, similarity_to_category, notes}"
             }
             Self::Extractor => "FacetExtraction: {facet_id, category_id, body, sources[]}",
-            Self::Integrator => {
-                "CategoryDoc: {category_id, cluster_id, body, sources[], density}"
-            }
+            Self::Integrator => "CategoryDoc: {category_id, cluster_id, body, sources[], density}",
         }
     }
 
@@ -148,9 +146,15 @@ impl Role {
                 serde_json::from_value::<crate::domain::Ranking>(value.clone()).map(|_| ())
             }
             Self::Deliver => serde_json::from_value::<FinalReport>(value.clone()).map(|_| ()),
-            Self::Tagger => serde_json::from_value::<crate::domain::SketchTags>(value.clone()).map(|_| ()),
-            Self::Extractor => serde_json::from_value::<crate::domain::FacetExtraction>(value.clone()).map(|_| ()),
-            Self::Integrator => serde_json::from_value::<crate::domain::CategoryDoc>(value.clone()).map(|_| ()),
+            Self::Tagger => {
+                serde_json::from_value::<crate::domain::SketchTags>(value.clone()).map(|_| ())
+            }
+            Self::Extractor => {
+                serde_json::from_value::<crate::domain::FacetExtraction>(value.clone()).map(|_| ())
+            }
+            Self::Integrator => {
+                serde_json::from_value::<crate::domain::CategoryDoc>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(

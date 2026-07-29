@@ -12,7 +12,11 @@ pub fn slug(name: &str) -> String {
     let mut s = String::new();
     let mut prev_dash = false;
     for ch in name.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' };
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '-'
+        };
         if mapped == '-' {
             if !prev_dash && !s.is_empty() {
                 s.push('-');
