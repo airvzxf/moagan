@@ -489,6 +489,11 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             facets_per_dimension,
             cluster_threshold,
         } => {
+            if cardinality < 80 {
+                return Err(Error::InvalidArgs(format!(
+                    "cardinality {cardinality} below the discovery minimum of 80"
+                )));
+            }
             let cfg = Config::load()?;
             let run_id = discover::run(
                 discover::DiscoverOptions {
