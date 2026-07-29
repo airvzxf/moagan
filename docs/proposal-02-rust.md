@@ -1252,6 +1252,41 @@ fn stability_score(proposals: &[Proposal], weights: &Weights, n_perturbations: u
 3. Correr la propuesta `syn` por las mismas fases (gate → validate → critique → repair → judge → rank).
 4. Sólo se presenta al usuario si supera a las fuentes.
 
+#### 8.4.1. Propagación de la síntesis al pipeline
+
+`SynthesizePhase` escribe el resultado en dos lugares (`src/phases/synthesize.rs`):
+
+- `synthesized/s_<NN>.json` — registro de línea genealógica inmutable
+  que conserva `source_proposals`, `cluster_id`, `synthesis_strategy`,
+  y los `tradeoffs`/`evidence` agregados. Es el artefacto auditable.
+- `proposals/s_<NN>.json` — copia con shape `Proposal` (campos
+  `id`, `summary`, `approach`, `tradeoffs`, `evidence`,
+  `source_sketch`, `artifacts`) para que las fases `Gate → Critique
+  → Repair → Judge → Rank → Deliver` la procesen como una propuesta
+  más y entre al frente de Pareto (cumple §5.13 "La síntesis
+  compite").
+
+El prefijo `s_` evita colisión con `p_<NN>` en `proposals/` y
+permite a `DeliverPhase` marcar la insignia **"synthesis"** en el
+portfolio (ver `kind_badge_for` en `src/phases/deliver.rs`). El
+campo `source_sketch` de la copia copiada se rellena con
+`syn_from_<cluster_id>` para que las fases siguientes puedan
+reconstruir la línea genealógica si lo necesitan.
+
+Coste LLM adicional por run (siempre-on en `standard`, `deep`,
+`batch`; omitido en `fast`):
+
+| Modo | Críticas extra | Jueces extra | Adversario extra |
+|---|---|---|---|
+| `standard` | 2-3 | 5 | 0-1 |
+| `deep` | 3-4 | 7 | 0-1 |
+| `batch` | 2-3 | 5 | 0-1 |
+| `fast` | 0 | 0 | 0 (síntesis omitida) |
+
+Este coste es intencional y refleja la regla de §5.13: la síntesis
+sólo sustituye a sus fuentes si demuestra mejora, lo que requiere
+ser evaluada en igualdad de condiciones.
+
 ### 8.5. Checkpoint final
 
 Sólo si:
