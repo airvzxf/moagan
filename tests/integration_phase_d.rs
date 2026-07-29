@@ -271,5 +271,105 @@ fn smoke_discovery_provider_registry_compiles_with_synthesizer_role() -> Result<
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// Phase D gap fix (commits 6032246 + e7875b3): the synthesized proposal
+// must propagate into `proposals/` so the downstream phases pick it up
+// and it enters the Pareto front (V4 §5.13 + T01-06 §8.4). These
+// tests invert the original `gap_*` checks: they assert the synthesis
+// DOES show up in critiques/evaluations/ranking.
+// ---------------------------------------------------------------------
+
+#[test]
+fn synth_to_proposal_preserves_id_and_fields() {
+    use moagan::domain::SynthesizedProposal;
+    use moagan::phases::synthesize::synth_to_proposal;
+    let s = SynthesizedProposal {
+        id: "s_07".into(),
+        cluster_id: "cp_03".into(),
+        summary: "summary".into(),
+        approach: "approach".into(),
+        tradeoffs: vec!["t".into()],
+        evidence: vec!["e".into()],
+        ..Default::default()
+    };
+    let p = synth_to_proposal(&s);
+    assert_eq!(p.id, "s_07");
+    assert_eq!(p.summary, "summary");
+    assert_eq!(p.approach, "approach");
+    assert_eq!(p.tradeoffs, vec!["t".to_string()]);
+    assert_eq!(p.evidence, vec!["e".to_string()]);
+    assert_eq!(p.source_sketch, "syn_from_cp_03");
+}
+
+#[test]
+fn synth_to_proposal_handles_empty_fields() {
+    use moagan::domain::SynthesizedProposal;
+    use moagan::phases::synthesize::synth_to_proposal;
+    let s = SynthesizedProposal {
+        id: "s_00".into(),
+        cluster_id: "cp_00".into(),
+        ..Default::default()
+    };
+    let p = synth_to_proposal(&s);
+    assert_eq!(p.id, "s_00");
+    assert!(p.summary.is_empty());
+    assert!(p.approach.is_empty());
+    assert!(p.tradeoffs.is_empty());
+    assert!(p.evidence.is_empty());
+    assert!(p.artifacts.is_empty());
+}
+
+#[test]
+fn deliver_kind_badge_marks_synthesized() {
+    // The portfolio renderer must distinguish synthesized entries
+    // (id starts with s_) from regular proposals (id starts with p_).
+    use moagan::phases::deliver::kind_badge_for;
+    assert_eq!(kind_badge_for("s_00"), "synthesis");
+    assert_eq!(kind_badge_for("p_000"), "");
+    assert_eq!(kind_badge_for("synth_001"), "synthesis");
+}
+
+#[test]
+fn synth_to_proposal_pipeline_shape() {
+    // Validates the shape that gets written into `proposals/s_*.json`
+    // so any phase downstream that reads from proposals/ can recognise
+    // a synthesized entry by its source_sketch prefix.
+    use moagan::domain::SynthesizedProposal;
+    use moagan::phases::synthesize::synth_to_proposal;
+    let s = SynthesizedProposal {
+        id: "s_03".into(),
+        cluster_id: "cp_07".into(),
+        summary: "merged".into(),
+        approach: "merged approach".into(),
+        tradeoffs: vec!["speed".into(), "simplicity".into()],
+        evidence: vec!["sk_001".into(), "sk_002".into()],
+        ..Default::default()
+    };
+    let p = synth_to_proposal(&s);
+    assert!(p.id.starts_with("s_"));
+    assert!(p.source_sketch.starts_with("syn_from_"));
+    assert_eq!(p.tradeoffs.len(), 2);
+    assert_eq!(p.evidence.len(), 2);
+    // The downstream pipeline cares about id, summary, approach,
+    // tradeoffs, evidence. All other fields can stay empty.
+    assert!(p.artifacts.is_empty());
+}
+
+#[test]
+fn synth_to_proposal_collisions_with_proposal_prefix() {
+    // Synthesized proposals MUST use the `s_` prefix so they don't
+    // collide with `p_<NN>` proposals in the same directory.
+    use moagan::domain::SynthesizedProposal;
+    use moagan::phases::synthesize::synth_to_proposal;
+    let s = SynthesizedProposal {
+        id: "s_00".into(),
+        cluster_id: "cp_00".into(),
+        ..Default::default()
+    };
+    let p = synth_to_proposal(&s);
+    assert_ne!(p.id, "p_00");
+    assert!(!p.id.starts_with("p_"));
+}
+
 #[allow(dead_code)]
 fn _unused_config_marker(_c: &Config) {}
