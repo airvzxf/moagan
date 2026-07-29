@@ -48,9 +48,7 @@ impl TypeScriptValidator {
         fs::write(work.path().join("check.ts"), &artifact.source)?;
         fs::write(work.path().join("tsconfig.json"), minimal_tsconfig())?;
 
-        let result = sandbox
-            .run_in(work.path(), "tsc", &["--noEmit", "check.ts"])
-            .await?;
+        let result = sandbox.run_in(work.path(), "tsc", &["--noEmit"]).await?;
 
         let mut evidence = evidence_from_result(result);
         if let Some(v) = capture_tool_version(sandbox, "tsc").await {
