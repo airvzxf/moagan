@@ -199,6 +199,36 @@ impl RunDir<'_> {
         self.root.join("checkpoints")
     }
 
+    /// `tags/` directory. (Discovery mode, V4 §6.5.)
+    pub fn tags(&self) -> PathBuf {
+        self.root.join("tags")
+    }
+
+    /// `clusters/` directory. (Discovery mode, V4 §6.6.)
+    pub fn clusters(&self) -> PathBuf {
+        self.root.join("clusters")
+    }
+
+    /// `facets/` directory. (Discovery mode, V4 §6.8.)
+    pub fn facets(&self) -> PathBuf {
+        self.root.join("facets")
+    }
+
+    /// `extractions/` directory. (Discovery mode, V4 §6.9.)
+    pub fn extractions(&self) -> PathBuf {
+        self.root.join("extractions")
+    }
+
+    /// `drafts/` directory. (Discovery mode, V4 §6.10.)
+    pub fn drafts(&self) -> PathBuf {
+        self.root.join("drafts")
+    }
+
+    /// `contradictions/` directory. (Discovery mode, V4 §6.7.)
+    pub fn contradictions(&self) -> PathBuf {
+        self.root.join("contradictions")
+    }
+
     /// Create every directory the run expects. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         for d in [
@@ -214,6 +244,12 @@ impl RunDir<'_> {
             self.telemetry(),
             self.cache(),
             self.checkpoints(),
+            self.tags(),
+            self.clusters(),
+            self.facets(),
+            self.extractions(),
+            self.drafts(),
+            self.contradictions(),
         ] {
             std::fs::create_dir_all(&d)?;
         }
@@ -305,5 +341,42 @@ mod tests {
         assert!(r.rankings().is_dir());
         assert!(r.final_dir().is_dir());
         assert!(r.telemetry().is_dir());
+    }
+
+    /// Discovery mode adds tags/, clusters/, facets/, extractions/,
+    /// drafts/, contradictions/. The `ensure` path must create them
+    /// so the discovery phases never have to mkdir themselves.
+    #[test]
+    fn run_dir_ensure_creates_discovery_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        r.ensure().unwrap();
+        assert!(r.tags().is_dir());
+        assert!(r.clusters().is_dir());
+        assert!(r.facets().is_dir());
+        assert!(r.extractions().is_dir());
+        assert!(r.drafts().is_dir());
+        assert!(r.contradictions().is_dir());
+    }
+
+    /// Discovery path helpers return the right subdirectory name.
+    #[test]
+    fn discovery_path_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let r = h.run_dir(RunId::new());
+        assert!(r.tags().ends_with("tags"));
+        assert!(r.clusters().ends_with("clusters"));
+        assert!(r.facets().ends_with("facets"));
+        assert!(r.extractions().ends_with("extractions"));
+        assert!(r.drafts().ends_with("drafts"));
+        assert!(r.contradictions().ends_with("contradictions"));
     }
 }
