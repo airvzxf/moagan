@@ -7,6 +7,7 @@
 pub mod clarify;
 pub mod critique;
 pub mod deliver;
+pub mod discover_matrix;
 pub mod gate;
 pub mod intake;
 pub mod judge;
@@ -23,6 +24,7 @@ pub mod validate;
 pub use clarify::ClarifyPhase;
 pub use critique::CritiquePhase;
 pub use deliver::DeliverPhase;
+pub use discover_matrix::DiscoverMatrixPhase;
 pub use gate::GatePhase;
 pub use intake::IntakePhase;
 pub use judge::JudgePhase;
