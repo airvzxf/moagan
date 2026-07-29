@@ -14,6 +14,7 @@ use crate::storage::sqlite::Db;
 
 pub mod audit;
 pub mod continue_cmd;
+pub mod discover;
 pub mod doctor;
 pub mod forbidden;
 pub mod inspect;
@@ -232,6 +233,39 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: AuditCmd,
     },
+    /// Discovery mode (Plan B sub-phase B). Generates a knowledge
+    /// base by category instead of a winning proposal. See
+    /// `docs/proposal-01-concept.md` §6 and `docs/v0.2-status.md`
+    /// for the spec.
+    Discover {
+        /// Provider name (must be in config).
+        #[arg(long, default_value = "minimax")]
+        provider: String,
+        /// User prompt.
+        #[arg(long)]
+        prompt: String,
+        /// Override the home directory.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Load mock responses from this directory (provider=mock only).
+        #[arg(long)]
+        mock_dir: Option<std::path::PathBuf>,
+        /// Minimum number of sketches to generate. Must be >= 80.
+        #[arg(long, default_value_t = 80, value_name = "N")]
+        cardinality: usize,
+        /// Override the global concurrent-LLM cap.
+        #[arg(long, value_name = "N")]
+        max_parallelism: Option<usize>,
+        /// Number of dimensions in the exploration matrix. Default 4.
+        #[arg(long, default_value_t = 4, value_name = "N")]
+        dimensions: usize,
+        /// Number of facets per dimension. Default 2.
+        #[arg(long, default_value_t = 2, value_name = "N")]
+        facets_per_dimension: usize,
+        /// SimHash threshold for clustering (0..=1). Default 0.7.
+        #[arg(long, default_value_t = 0.7)]
+        cluster_threshold: f32,
+    },
 }
 
 /// Subcommands of `moagan audit`.
@@ -293,6 +327,7 @@ impl Cmd {
             Self::Rerank { .. } => "Re-run the rank phase on existing evaluations",
             Self::Doctor => "Check the local environment",
             Self::Audit { .. } => "External, transparent audit trail",
+            Self::Discover { .. } => "Discovery mode (knowledge base by category)",
         }
     }
 }
@@ -439,8 +474,40 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             }
             AuditCmd::Verify { runs_dir, run_id } => {
                 let args = audit::VerifyArgs { runs_dir, run_id };
-                audit::verify_cmd(args).await
+                let code = audit::verify_cmd(args).await?;
+                Ok(code)
             }
         },
+        Cmd::Discover {
+            provider,
+            prompt,
+            runs_dir,
+            mock_dir,
+            cardinality,
+            max_parallelism,
+            dimensions,
+            facets_per_dimension,
+            cluster_threshold,
+        } => {
+            let cfg = Config::load()?;
+            let run_id = discover::run(
+                discover::DiscoverOptions {
+                    provider,
+                    prompt,
+                    home: runs_dir,
+                    mock_dir,
+                    cardinality,
+                    max_parallelism,
+                    dimensions,
+                    facets_per_dimension,
+                    cluster_threshold,
+                    out_dir: None,
+                },
+                &cfg,
+            )
+            .await?;
+            println!("discovery run id: {run_id}");
+            Ok(0)
+        }
     }
 }
