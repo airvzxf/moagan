@@ -622,6 +622,11 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::Judge => 2048,
         Role::Rank => 2048,
         Role::Deliver => 8192,
+        // Discovery (Plan B sub-phase B). Per docs/v0.2-status.md and
+        // proposal-01-concept.md §6.5–§6.10.
+        Role::Tagger => 512,
+        Role::Extractor => 3000,
+        Role::Integrator => 4000,
     }
 }
 
@@ -668,6 +673,12 @@ fn temperature_for_role(role: Role) -> f32 {
         Role::Judge => 0.2,
         Role::Rank => 0.0,
         Role::Deliver => 0.4,
+        // Discovery (Plan B sub-phase B). The tagger is
+        // deterministic; the extractor and integrator balance
+        // variance against prose coherence.
+        Role::Tagger => 0.0,
+        Role::Extractor => 0.4,
+        Role::Integrator => 0.4,
     }
 }
 

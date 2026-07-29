@@ -45,6 +45,18 @@ pub enum Role {
     Rank,
     /// Deliver — produce the final artefact.
     Deliver,
+    /// Tagger — discovery mode (Plan B sub-phase B). Classifies a
+    /// sketch into a primary category with subcategory + difficulty.
+    /// Uses temperature 0.0 and top_p 0.2 for determinism.
+    Tagger,
+    /// Extractor — discovery mode. Pulls the per-facet markdown
+    /// out of a cluster's sketches. Uses temperature 0.4 and top_p
+    /// 0.8 for variation across facets.
+    Extractor,
+    /// Integrator — discovery mode. Joins the per-facet markdown
+    /// into a coherent category document. Uses temperature 0.4 and
+    /// top_p 0.9 for prose fluency.
+    Integrator,
 }
 
 impl Role {
@@ -62,6 +74,9 @@ impl Role {
             Self::Judge => "judge",
             Self::Rank => "rank",
             Self::Deliver => "deliver",
+            Self::Tagger => "tagger",
+            Self::Extractor => "extractor",
+            Self::Integrator => "integrator",
         }
     }
 
@@ -93,6 +108,13 @@ impl Role {
             Self::Rank => "Ranking: {ranked[], winner}",
             Self::Deliver => {
                 "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}"
+            }
+            Self::Tagger => {
+                "SketchTags: {sketch_id, primary, secondary[], subcategory, difficulty, similarity_to_category, notes}"
+            }
+            Self::Extractor => "FacetExtraction: {facet_id, category_id, body, sources[]}",
+            Self::Integrator => {
+                "CategoryDoc: {category_id, cluster_id, body, sources[], density}"
             }
         }
     }
@@ -126,6 +148,9 @@ impl Role {
                 serde_json::from_value::<crate::domain::Ranking>(value.clone()).map(|_| ())
             }
             Self::Deliver => serde_json::from_value::<FinalReport>(value.clone()).map(|_| ()),
+            Self::Tagger => serde_json::from_value::<crate::domain::SketchTags>(value.clone()).map(|_| ()),
+            Self::Extractor => serde_json::from_value::<crate::domain::FacetExtraction>(value.clone()).map(|_| ()),
+            Self::Integrator => serde_json::from_value::<crate::domain::CategoryDoc>(value.clone()).map(|_| ()),
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -151,6 +176,9 @@ impl Role {
             Self::Judge,
             Self::Rank,
             Self::Deliver,
+            Self::Tagger,
+            Self::Extractor,
+            Self::Integrator,
         ]
     }
 }
@@ -177,6 +205,9 @@ impl FromStr for Role {
             "judge" => Ok(Self::Judge),
             "rank" => Ok(Self::Rank),
             "deliver" => Ok(Self::Deliver),
+            "tagger" => Ok(Self::Tagger),
+            "extractor" => Ok(Self::Extractor),
+            "integrator" => Ok(Self::Integrator),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -202,10 +233,10 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_eleven() {
-        // v0.2 added the `sketch` role between route and propose;
-        // the total goes from 10 to 11.
-        assert_eq!(Role::all().len(), 11);
+    fn all_roles_are_count_fourteen() {
+        // v0.2 added the `sketch` role between route and propose (10→11).
+        // Sub-phase B added tagger, extractor, integrator (11→14).
+        assert_eq!(Role::all().len(), 14);
     }
 
     #[test]
@@ -236,7 +267,10 @@ mod tests {
                     || desc.starts_with("Repair:")
                     || desc.starts_with("JudgeScore:")
                     || desc.starts_with("Ranking:")
-                    || desc.starts_with("FinalReport:"),
+                    || desc.starts_with("FinalReport:")
+                    || desc.starts_with("SketchTags:")
+                    || desc.starts_with("FacetExtraction:")
+                    || desc.starts_with("CategoryDoc:"),
                 "{:?} description does not start with its name: {desc}",
                 r
             );

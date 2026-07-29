@@ -19,6 +19,10 @@ const REPAIR_PROMPT: &str = include_str!("prompts/repair.md");
 const JUDGE_PROMPT: &str = include_str!("prompts/judge.md");
 const RANK_PROMPT: &str = include_str!("prompts/rank.md");
 const DELIVER_PROMPT: &str = include_str!("prompts/deliver.md");
+const TAGGER_PROMPT: &str = include_str!("prompts/tag.md");
+const EXTRACTOR_PROMPT: &str = include_str!("prompts/extract.md");
+const INTEGRATOR_PROMPT: &str = include_str!("prompts/integrate.md");
+const DISCOVER_MATRIX_PROMPT: &str = include_str!("prompts/discover_matrix.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -39,6 +43,10 @@ pub fn prompt_set_hash() -> String {
                 JUDGE_PROMPT,
                 RANK_PROMPT,
                 DELIVER_PROMPT,
+                TAGGER_PROMPT,
+                EXTRACTOR_PROMPT,
+                INTEGRATOR_PROMPT,
+                DISCOVER_MATRIX_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -60,7 +68,17 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Judge => JUDGE_PROMPT,
         Role::Rank => RANK_PROMPT,
         Role::Deliver => DELIVER_PROMPT,
+        Role::Tagger => TAGGER_PROMPT,
+        Role::Extractor => EXTRACTOR_PROMPT,
+        Role::Integrator => INTEGRATOR_PROMPT,
     }
+}
+
+/// Discovery-mode system prompt. Different from `system_prompt` because
+/// the matrix phase uses a single shared prompt that varies only by
+/// the `(dimension, facet)` injected into the user payload.
+pub fn discover_matrix_system_prompt() -> &'static str {
+    DISCOVER_MATRIX_PROMPT
 }
 
 #[cfg(test)]
