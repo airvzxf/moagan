@@ -12,6 +12,21 @@
 //! cluster — synthesizing a single source is just a copy and the
 //! `integrator` role would add no signal. To force synthesis on a
 //! singleton set `force_singletons = true`.
+//!
+//! Pipeline propagation (V4 §5.13 + T01-06 §8.4): the synthesized
+//! proposal "competes" — it passes gates, receives critique, is
+//! evaluated, and enters the Pareto front. To make that work with
+//! the existing phase pipeline (which iterates over `proposals/*.json`),
+//! this phase writes two artifacts per synthesis:
+//!
+//! 1. `synthesized/s_<NN>.json` — the immutable lineage record
+//!    carrying `source_proposals`, `cluster_id`, and `synthesis_strategy`.
+//! 2. `proposals/s_<NN>.json` — a copy shaped as a `Proposal` so the
+//!    downstream phases (`Gate`, `Critique`, `Repair`, `Judge`,
+//!    `Rank`, `Deliver`) treat it like any other proposal.
+//!
+//! The `s_` prefix avoids collision with `p_<NN>` ids in `proposals/`
+//! and lets `DeliverPhase` badge these as "synthesis" entries.
 
 use std::path::PathBuf;
 
@@ -26,6 +41,23 @@ use crate::phases::cluster_proposals::ProposalCluster;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::time::now_unix_secs;
+
+/// Convert a `SynthesizedProposal` into a `Proposal` for the pipeline.
+/// The synthesized proposal keeps its `s_<NN>` id and inherits the
+/// approach / summary / tradeoffs / evidence from the synthesizer.
+/// `source_sketch` records the cluster the synthesis came from so
+/// later phases can reconstruct the lineage if they need to.
+pub fn synth_to_proposal(synth: &SynthesizedProposal) -> Proposal {
+    Proposal {
+        id: synth.id.clone(),
+        summary: synth.summary.clone(),
+        approach: synth.approach.clone(),
+        tradeoffs: synth.tradeoffs.clone(),
+        evidence: synth.evidence.clone(),
+        source_sketch: format!("syn_from_{}", synth.cluster_id),
+        artifacts: Vec::new(),
+    }
+}
 
 /// Synthesize phase. For each cluster with ≥2 members, calls the
 /// `synthesizer` role to merge the cluster's proposals.
@@ -175,6 +207,19 @@ impl Phase for SynthesizePhase {
                 parsed.created_unix = now_unix_secs();
                 let path = dir.join(format!("{}.json", parsed.id));
                 write_json(&path, &parsed)?;
+
+                // Phase D propagation (V4 §5.13 + T01-06 §8.4):
+                // also drop a copy into `proposals/` shaped as a
+                // `Proposal` so the downstream Gate / Critique /
+                // Repair / Judge / Rank / Deliver phases pick the
+                // synthesis up and it enters the Pareto front.
+                let proposal = synth_to_proposal(&parsed);
+                let prop_path = ctx
+                    .run_dir()
+                    .proposals()
+                    .join(format!("{}.json", proposal.id));
+                write_json(&prop_path, &proposal)?;
+
                 Ok(Some(path))
             }
         });
@@ -207,5 +252,50 @@ mod tests {
         let s = SynthesizePhase::user_payload("cp_00", "s_00", &[p]);
         assert!(s.contains("cp_00"));
         assert!(s.contains("s_00"));
+    }
+
+    #[test]
+    fn synth_to_proposal_preserves_id() {
+        let s = SynthesizedProposal {
+            id: "s_07".into(),
+            cluster_id: "cp_03".into(),
+            summary: "summary text".into(),
+            approach: "## Approach\n\nbody".into(),
+            tradeoffs: vec!["t1".into()],
+            evidence: vec!["sk_001".into()],
+            ..Default::default()
+        };
+        let p = synth_to_proposal(&s);
+        assert_eq!(p.id, "s_07");
+    }
+
+    #[test]
+    fn synth_to_proposal_preserves_fields() {
+        let s = SynthesizedProposal {
+            id: "s_00".into(),
+            cluster_id: "cp_00".into(),
+            summary: "s".into(),
+            approach: "a".into(),
+            tradeoffs: vec!["t".into()],
+            evidence: vec!["e".into()],
+            ..Default::default()
+        };
+        let p = synth_to_proposal(&s);
+        assert_eq!(p.summary, "s");
+        assert_eq!(p.approach, "a");
+        assert_eq!(p.tradeoffs, vec!["t".to_string()]);
+        assert_eq!(p.evidence, vec!["e".to_string()]);
+        assert!(p.artifacts.is_empty());
+    }
+
+    #[test]
+    fn synth_to_proposal_records_source_cluster() {
+        let s = SynthesizedProposal {
+            id: "s_02".into(),
+            cluster_id: "cp_99".into(),
+            ..Default::default()
+        };
+        let p = synth_to_proposal(&s);
+        assert_eq!(p.source_sketch, "syn_from_cp_99");
     }
 }
