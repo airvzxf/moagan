@@ -200,7 +200,10 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
             critics_per_proposal: 2,
         })
         .push(RepairPhase::default())
-        .push(JudgePhase { judges: 3 })
+        .push(JudgePhase {
+            judges: 3,
+            ..JudgePhase::default()
+        })
         .push(RankPhase {
             config: Arc::new(Config::default()),
         })
@@ -885,7 +888,10 @@ fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
             critics_per_proposal: 4,
         })
         .push(RepairPhase::default())
-        .push(JudgePhase { judges: 7 })
+        .push(JudgePhase {
+            judges: 7,
+            ..JudgePhase::default()
+        })
         .push(RankPhase {
             config: Arc::new(Config::default()),
         })
@@ -1131,7 +1137,12 @@ async fn judge_phase_respects_parallelism_cap() -> Result<()> {
         4,
     );
 
-    let output = JudgePhase { judges: 7 }.execute(&ctx).await?;
+    let output = JudgePhase {
+        judges: 7,
+        ..JudgePhase::default()
+    }
+    .execute(&ctx)
+    .await?;
     let moagan::phases::PhaseOutput::Evaluations(paths) = output else {
         panic!("expected evaluations");
     };
@@ -1191,7 +1202,11 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
 
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        JudgePhase { judges: 7 }.execute(&ctx),
+        JudgePhase {
+            judges: 7,
+            ..JudgePhase::default()
+        }
+        .execute(&ctx),
     )
     .await
     .map_err(|_| moagan::Error::Timeout("local HTTP judge test".into()))??;

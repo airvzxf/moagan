@@ -9,11 +9,16 @@
 //! 4. mapa de divergencias (critiques' issues)
 //! 5. evidencia (links to sidecars)
 //! 6. auditoría (run_id, provider, model, weights, mode)
+//!
+//! Phase D (V4 §5.14): after the model writes the report, the phase
+//! fires the final-checkpoint prompt to confirm the user accepts the
+//! portfolio. The check is no-op in non-interactive runs.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 
+use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
 use crate::domain::{FinalReport, Proposal, Ranking};
 use crate::error::Result;
 use crate::llm::Role;
@@ -80,6 +85,22 @@ impl Phase for DeliverPhase {
         );
         let md_path: PathBuf = final_dir.join("portfolio.md");
         std::fs::write(&md_path, md)?;
+
+        // Phase D final checkpoint: confirm the portfolio before
+        // terminating the run. Persisted under
+        // `checkpoints/h_<uuid>.json` for auditability.
+        if ctx.interactive {
+            let cp = Checkpoint::yes_no(
+                CheckpointKind::Final,
+                format!("ship portfolio with winner `{}`?", ranking.winner),
+            );
+            let opts = CheckpointOpts {
+                interactive: true,
+                stdin_override: None,
+            };
+            let _ = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
+        }
+
         Ok(PhaseOutput::Deliver(md_path))
     }
 }

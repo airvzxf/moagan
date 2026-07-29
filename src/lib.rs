@@ -10,6 +10,7 @@
 pub mod atomic;
 pub mod audit;
 pub mod cancel;
+pub mod checkpoint;
 pub mod cli;
 pub mod config;
 pub mod discovery;
