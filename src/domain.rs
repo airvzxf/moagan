@@ -92,6 +92,15 @@ pub struct Proposal {
     /// `ProposePhase` so the deliver / inspect surface can show the
     /// lineage even after the artefacts are flattened.
     pub source_sketch: String,
+    /// Code artefacts attached to this proposal. `ProposePhase`
+    /// extracts fenced ```rust / ```python / ```typescript /
+    /// ```ts blocks out of the model's `approach` field and stores
+    /// them here so the validate phase can hand each one to the
+    /// matching language validator. Empty when the proposal has
+    /// no executable code (the common case for architecture-only
+    /// proposals).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub artifacts: Vec<crate::validators::CodeArtifact>,
 }
 
 /// Output of the sketch phase — a short, opinionated exploration

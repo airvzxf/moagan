@@ -18,6 +18,7 @@ pub mod repair;
 pub mod route;
 pub mod sketch_phase;
 pub mod util;
+pub mod validate;
 
 pub use clarify::ClarifyPhase;
 pub use critique::CritiquePhase;
@@ -32,3 +33,4 @@ pub use rank::RankPhase;
 pub use repair::RepairPhase;
 pub use route::RoutePhase;
 pub use sketch_phase::SketchPhase;
+pub use validate::ValidatePhase;

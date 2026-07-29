@@ -1,6 +1,6 @@
 [package]
 name = "moagan"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "AGPL-3.0-or-later"
@@ -59,9 +59,9 @@ jsonschema = { version = "0.17", default-features = false }
 zeroize = "1.7"
 tiktoken-rs = "0.5"
 tokio-util = { version = "0.7", features = ["rt"] }
+tempfile = "3.10"
 
 [dev-dependencies]
-tempfile = "3.10"
 assert_fs = "1.1"
 predicates = "3.1"
 wiremock = "0.6"
