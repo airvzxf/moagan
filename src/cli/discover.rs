@@ -34,11 +34,46 @@ use crate::execution::Parallelism;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 use crate::phases::RunContext;
+use crate::phases::{
+    DiscoverClusterPhase, DiscoverContradictPhase, DiscoverExtractPhase, DiscoverFacetPhase,
+    DiscoverIntegratePhase, DiscoverMatrixPhase, DiscoverSummaryPhase, DiscoverTagPhase,
+    IntakePhase, ClarifyPhase, Pipeline,
+};
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
 use super::run::build_registry_for;
+
+/// Build the discovery pipeline. The phases are wired in the order
+/// they appear in V4 §6.3:
+///
+/// 1. intake + clarify (mandatory seeding of the brief).
+/// 2. discover_matrix (sketch fan-out).
+/// 3. discover_tag (LLM tagger).
+/// 4. discover_cluster (SimHash + LLM refinement).
+/// 5. discover_contradict (cross-cluster disagreements).
+/// 6. discover_facet (per-cluster facet list).
+/// 7. discover_extract (per-facet markdown).
+/// 8. discover_integrate (one `final/cat_NN.md` per cluster).
+/// 9. discover_summary (executive index + optional uncategorized).
+pub fn build_discovery_pipeline(opts: &DiscoverOptions) -> Pipeline {
+    Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(DiscoverMatrixPhase::from_dimensions(
+            opts.dimensions,
+            opts.facets_per_dimension,
+            opts.cardinality,
+        ))
+        .push(DiscoverTagPhase)
+        .push(DiscoverClusterPhase { threshold: opts.cluster_threshold })
+        .push(DiscoverContradictPhase::default())
+        .push(DiscoverFacetPhase)
+        .push(DiscoverExtractPhase)
+        .push(DiscoverIntegratePhase)
+        .push(DiscoverSummaryPhase)
+}
 
 /// Options for `moagan discover`.
 #[derive(Debug, Clone)]
@@ -118,7 +153,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs);
 
-    let pipeline = crate::phases::pipe::Pipeline::new();
+    let pipeline = build_discovery_pipeline(&opts);
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
     let _outputs = tokio::select! {
