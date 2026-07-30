@@ -1367,6 +1367,77 @@ Este coste es intencional y refleja la regla de §5.13: la síntesis
 sólo sustituye a sus fuentes si demuestra mejora, lo que requiere
 ser evaluada en igualdad de condiciones.
 
+#### 8.4.2. Reemplazo de fuentes (Phase F)
+
+V4 §5.13 dice: *"Solo sustituye a sus fuentes si demuestra mejora
+sin perder coherencia."* Esta sub-fase aterriza la semántica.
+
+**Predicado** (de `proposal-03-add-ons.md` D.13.15, catálogo aditivo,
+adaptado a dimension-counting):
+
+```rust
+pub fn should_replace_synthesis(
+    synthesis_v: &QualityVector,
+    source_vs: &[QualityVector],
+) -> bool {
+    // 1. La síntesis es la mejor estricta (entre todas las fuentes)
+    //    en ≥2 de las 5 dimensiones de calidad.
+    // 2. Ninguna fuente Pareto-domina a la síntesis (reusa
+    //    `ranking::pareto::dominates`).
+}
+```
+
+Implementado en `src/phases/replace.rs`. Reutiliza
+`crate::ranking::pareto::dominates` para el bloqueo Pareto. El
+umbral de 2 dimensiones es el suelo de "mejora no trivial" que
+V4 §5.13 llama explícitamente. La adaptación a dimension-counting
+(con respecto al source-counting de D.13.15) se discutió en la
+sesión del 2026-07-30: permite que clusters de un solo miembro
+sean reemplazados cuando la síntesis gana claramente.
+
+**Comportamiento por defecto**:
+
+| Modo | Reemplaza fuentes |
+|---|---|
+| `fast` | OFF (no sintetiza) |
+| `standard` | ON |
+| `deep` | ON |
+| `batch` | ON |
+| `continue` | ON (re-corre `RankPhase` sobre evaluaciones existentes) |
+
+**Opt-out**: `--no-replace-sources` en `moagan run`. El flag
+sobreescribe el default por modo.
+
+**Efectos colaterales**:
+
+1. `proposals/p_<id>.json` gana `replaced_by: "s_<NN>"` cuando su
+   fuente fue reemplazada. El campo es `#[serde(default, skip_if_none)]`
+   para mantener compatibilidad con sidecars existentes.
+2. `rankings/ranking.json::ranked` se filtra para excluir las
+   fuentes reemplazadas.
+3. `rankings/ranking.json::representatives` gana la síntesis si no
+   estaba ya seleccionada por el paso de crowding.
+4. `synthesized/s_<NN>.json` mantiene `source_proposals` intacto —
+   la línea genealógica se conserva.
+
+**Origen de la línea genealógica**: `RankPhase` lee
+`synthesized/s_<NN>.json` (el sidecar inmutable escrito por
+`SynthesizePhase`) para resolver el mapeo `s_<NN>` →
+`source_proposals[]`. Es la única fuente de verdad para esa
+relación (sesión 2026-07-30): el id `s_00` no se corresponde
+necesariamente con `cp_00` porque clusters saltados (singletons)
+desplazan el índice.
+
+**Limitación conocida**: `proposal-03-add-ons.md` D.13.13 define
+`HARD_INCOMPATIBILITIES` (pares como `("monolith", "microservices")`
+donde la síntesis debe bloquearse). Esta sub-fase NO implementa la
+verificación de incompatibilidades — queda como opt-in del catálogo
+aditivo para una sub-fase futura.
+
+**Coste LLM adicional**: 0. La fase `RankPhase` ya corre sobre
+evaluaciones existentes; sólo cambia qué ids se mantienen en el
+ranking final.
+
 ### 8.5. Checkpoint final
 
 Sólo si:
