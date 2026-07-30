@@ -23,6 +23,8 @@ const TAGGER_PROMPT: &str = include_str!("prompts/tag.md");
 const EXTRACTOR_PROMPT: &str = include_str!("prompts/extract.md");
 const INTEGRATOR_PROMPT: &str = include_str!("prompts/integrate.md");
 const DISCOVER_MATRIX_PROMPT: &str = include_str!("prompts/discover_matrix.md");
+const SYNTHESIZE_PROMPT: &str = include_str!("prompts/synthesize.md");
+const JUDGE_ADVERSARY_PROMPT: &str = include_str!("prompts/judge_adversary.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -47,6 +49,8 @@ pub fn prompt_set_hash() -> String {
                 EXTRACTOR_PROMPT,
                 INTEGRATOR_PROMPT,
                 DISCOVER_MATRIX_PROMPT,
+                SYNTHESIZE_PROMPT,
+                JUDGE_ADVERSARY_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -71,6 +75,8 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Tagger => TAGGER_PROMPT,
         Role::Extractor => EXTRACTOR_PROMPT,
         Role::Integrator => INTEGRATOR_PROMPT,
+        Role::Synthesizer => SYNTHESIZE_PROMPT,
+        Role::Adversary => JUDGE_ADVERSARY_PROMPT,
     }
 }
 

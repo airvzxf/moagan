@@ -32,6 +32,10 @@ mod sql_v004 {
     pub(super) const V004: &str = include_str!("migrations/v004_calls_body_sha256.sql");
 }
 
+mod sql_v005 {
+    pub(super) const V005: &str = include_str!("migrations/v005_checkpoints_content.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -114,6 +118,10 @@ impl Db {
         if current < 4 {
             conn.execute_batch(sql_v004::V004)?;
             conn.execute_batch("PRAGMA user_version = 4;")?;
+        }
+        if current < 5 {
+            conn.execute_batch(sql_v005::V005)?;
+            conn.execute_batch("PRAGMA user_version = 5;")?;
         }
         Ok(())
     }
@@ -474,6 +482,86 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Record a human checkpoint. Mirrors the JSON sidecar into
+    /// the SQLite index so queries like "which runs had rejected
+    /// checkpoints?" don't have to scan every `checkpoints/` dir.
+    ///
+    /// Best-effort: callers should treat the write as fire-and-forget
+    /// (the JSON sidecar is the canonical record). `INSERT OR REPLACE`
+    /// so a re-run with the same checkpoint id is idempotent.
+    pub fn record_checkpoint(
+        &self,
+        run_id: RunId,
+        ckp_id: &str,
+        kind: &str,
+        question: &str,
+        response: &str,
+        accepted_default: bool,
+        at_unix: i64,
+    ) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO checkpoints \
+             (run_id, ckp_id, kind, question, response, accepted_default, at_unix, seq, resolved, created_unix) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                run_id.to_string(),
+                ckp_id,
+                kind,
+                question,
+                response,
+                accepted_default as i64,
+                at_unix,
+                0_i64,
+                0_i64,
+                at_unix,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Full checkpoint list for a run, ordered by `at_unix`
+    /// ascending. Returns an empty Vec if no checkpoints were
+    /// recorded (e.g. when `interactive=false` and the call path
+    /// short-circuits).
+    pub fn list_checkpoints_for_run(&self, run_id: RunId) -> Result<Vec<CheckpointRow>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT ckp_id, kind, question, response, accepted_default, at_unix \
+             FROM checkpoints WHERE run_id = ? ORDER BY at_unix ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id.to_string()], |r| {
+                Ok(CheckpointRow {
+                    ckp_id: r.get(0)?,
+                    kind: r.get(1)?,
+                    question: r.get(2)?,
+                    response: r.get(3)?,
+                    accepted_default: r.get::<_, i64>(4)? != 0,
+                    at_unix: r.get::<_, Option<i64>>(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Count of checkpoints for a run, broken down by kind.
+    /// Useful for the dashboard / `moagan inspect` summaries.
+    pub fn checkpoint_counts_by_kind(
+        &self,
+        run_id: RunId,
+    ) -> Result<std::collections::BTreeMap<String, i64>> {
+        let conn = self.pool.get()?;
+        let mut stmt =
+            conn.prepare("SELECT kind, COUNT(*) FROM checkpoints WHERE run_id = ? GROUP BY kind")?;
+        let rows = stmt
+            .query_map(params![run_id.to_string()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().collect())
+    }
 }
 
 /// One row from the `warnings` summary grouping.
@@ -485,6 +573,24 @@ pub struct WarningSummaryRow {
     pub count: i64,
     /// First message seen for this code (for quick triage).
     pub first_message: String,
+}
+
+/// One row from the `checkpoints` table. Mirrors the JSON sidecar
+/// `checkpoints/h_<uuid>.json` produced by `src/checkpoint/human.rs`.
+pub struct CheckpointRow {
+    /// Stable checkpoint id (`h_<uuid7>`).
+    pub ckp_id: String,
+    /// Closed enum mirrored as a string (`intake | clarify | final | custom`).
+    pub kind: String,
+    /// Question shown verbatim to the user.
+    pub question: String,
+    /// Raw response captured from stdin (the
+    /// `<skipped:non_interactive>` marker when `interactive=false`).
+    pub response: String,
+    /// True when the user accepted the default by hitting enter.
+    pub accepted_default: bool,
+    /// Unix seconds at capture time.
+    pub at_unix: Option<i64>,
 }
 
 /// One row from the full `warnings` list.
@@ -626,7 +732,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
     }
 
     #[test]
@@ -858,5 +964,148 @@ mod tests {
     fn call_status_cache_hit_no_http_is_ok() {
         // Cache hits never issue an HTTP request; we treat them as ok.
         assert_eq!(call_status(None, None), "ok");
+    }
+
+    // -----------------------------------------------------------------
+    // Phase F checkpoint table (migration v005)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn migration_v005_adds_checkpoints_content_columns() {
+        let db = temp_db();
+        let conn = db.pool.get().unwrap();
+        // New natural key on (run_id, ckp_id)
+        let pk_query: Vec<rusqlite::Result<String>> = conn
+            .prepare("SELECT name FROM pragma_table_info('checkpoints')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect();
+        let cols: Vec<String> = pk_query.into_iter().map(|r| r.unwrap()).collect();
+        assert!(
+            cols.contains(&"ckp_id".to_owned()),
+            "ckp_id column missing: {cols:?}"
+        );
+        assert!(
+            cols.contains(&"question".to_owned()),
+            "question column missing: {cols:?}"
+        );
+        assert!(
+            cols.contains(&"response".to_owned()),
+            "response column missing: {cols:?}"
+        );
+        assert!(
+            cols.contains(&"accepted_default".to_owned()),
+            "accepted_default column missing: {cols:?}"
+        );
+        assert!(
+            cols.contains(&"at_unix".to_owned()),
+            "at_unix column missing: {cols:?}"
+        );
+        // PRAGMA user_version is now 5
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 5);
+    }
+
+    #[test]
+    fn record_checkpoint_inserts_row() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        db.record_checkpoint(
+            id,
+            "h_019f0000-0000-7000-8000-000000000001",
+            "intake",
+            "continue?",
+            "y",
+            true,
+            1_700_000_000,
+        )
+        .unwrap();
+        let rows = db.list_checkpoints_for_run(id).unwrap();
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.ckp_id, "h_019f0000-0000-7000-8000-000000000001");
+        assert_eq!(r.kind, "intake");
+        assert_eq!(r.question, "continue?");
+        assert_eq!(r.response, "y");
+        assert!(r.accepted_default);
+        assert_eq!(r.at_unix, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn record_checkpoint_is_idempotent() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        let ckp = "h_dup";
+        for _ in 0..3 {
+            db.record_checkpoint(id, ckp, "clarify", "ship?", "y", true, 100)
+                .unwrap();
+        }
+        let rows = db.list_checkpoints_for_run(id).unwrap();
+        assert_eq!(rows.len(), 1, "INSERT OR REPLACE should dedupe");
+    }
+
+    #[test]
+    fn record_checkpoint_orders_by_at_unix() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        db.record_checkpoint(id, "h_3", "final", "ship?", "y", false, 300)
+            .unwrap();
+        db.record_checkpoint(id, "h_1", "intake", "ok?", "y", true, 100)
+            .unwrap();
+        db.record_checkpoint(id, "h_2", "clarify", "more?", "n", false, 200)
+            .unwrap();
+        let rows = db.list_checkpoints_for_run(id).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.ckp_id.as_str()).collect();
+        assert_eq!(ids, vec!["h_1", "h_2", "h_3"]);
+    }
+
+    #[test]
+    fn record_checkpoint_empty_response_round_trips() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        db.record_checkpoint(id, "h_skip", "intake", "skip?", "", false, 100)
+            .unwrap();
+        let rows = db.list_checkpoints_for_run(id).unwrap();
+        assert_eq!(rows.len(), 1);
+        // Empty string and `false` are valid values, not NULL.
+        assert_eq!(rows[0].response, "");
+        assert!(!rows[0].accepted_default);
+    }
+
+    #[test]
+    fn list_checkpoints_for_unknown_run_returns_empty() {
+        let db = temp_db();
+        let other = RunId::new();
+        let rows = db.list_checkpoints_for_run(other).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_counts_by_kind_groups_correctly() {
+        let db = temp_db();
+        let id = RunId::new();
+        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        db.record_checkpoint(id, "h_1", "intake", "q1", "y", true, 1)
+            .unwrap();
+        db.record_checkpoint(id, "h_2", "intake", "q2", "n", false, 2)
+            .unwrap();
+        db.record_checkpoint(id, "h_3", "clarify", "q3", "y", true, 3)
+            .unwrap();
+        let counts = db.checkpoint_counts_by_kind(id).unwrap();
+        assert_eq!(counts.get("intake").copied(), Some(2));
+        assert_eq!(counts.get("clarify").copied(), Some(1));
+        assert_eq!(counts.get("final"), None);
     }
 }

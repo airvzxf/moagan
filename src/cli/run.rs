@@ -13,8 +13,9 @@ use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
-    ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase, SketchPhase, ValidatePhase,
+    ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase,
+    JudgePhase, Pipeline, ProposePhase, RankPhase, RepairPhase, RoutePhase, SketchPhase,
+    SynthesizePhase, ValidatePhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -103,7 +104,8 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         opts.prompt.clone(),
         opts.mode.as_str().to_owned(),
     )
-    .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs);
+    .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
+    .with_interactive(!opts.non_interactive);
 
     let pipeline = build_pipeline_for_mode(opts.mode, cfg);
     let pipeline_future = pipeline.run(&ctx);
@@ -200,18 +202,19 @@ pub fn build_registry_for(
 /// and §5.3 of `docs/proposal-02-rust.md` for the v0.2 additions:
 ///
 /// - `fast`: 3 proposals, 2 critics, 3 judges. No sketch phase.
+///   Cluster/synthesize/adversary skipped to keep the loop short.
 /// - `standard`: 3 proposals, 3 critics, 5 judges, 4 sketches.
+///   Phase D enabled.
 /// - `deep`: 5 proposals, 4 critics, 7 judges, 6 sketches,
-///   2 repair rounds, adversarial review (deferred to a
-///   follow-up commit — for now deep mirrors standard cardinality
-///   and lets the user inspect the artefacts).
+///   2 repair rounds, Phase D enabled (synthesis + adversary).
 /// - `explore`: 0 proposals, 0 critics, 0 judges, 12 sketches.
 ///   Pipeline ends at sketches; the user inspects the sketch map
 ///   manually.
 /// - `batch`: 3 proposals, 2 critics, 3 judges, 4 sketches.
 ///   Mirrors fast cardinality plus sketches; differs in its
-///   JSON-stable output contract and lack of human pauses (deferred
-///   to a follow-up commit).
+///   JSON-stable output contract and lack of human pauses. Phase D
+///   enabled but the human checkpoints are auto-skipped (handled
+///   inside the phases via `CheckpointOpts::interactive`).
 fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
     let (proposals, critics, judges, sketches) = match mode {
         Mode::Fast => (3u32, 2u32, 3u32, 0u32),
@@ -255,13 +258,32 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
         pipeline = pipeline.push(ValidatePhase::new());
     }
 
+    // Phase D wiring (V4 §5.13 + §13.6):
+    // - `ClusterProposalsPhase` runs after critique (which has the
+    //   most up-to-date repaired proposal as input).
+    // - `SynthesizePhase` runs after clustering and before judging
+    //   so the rank phase can fold the synthesized proposal into
+    //   the same ranking. The synthesized proposal competes with
+    //   its sources per §5.13.
+    // - The adversary pass is a conditional branch inside
+    //   `JudgePhase` so it stays out of the pipeline vector.
+    // - `fast` skips both: the loop is meant to stay fast.
+    if !matches!(mode, Mode::Fast) {
+        pipeline = pipeline
+            .push(ClusterProposalsPhase::default())
+            .push(SynthesizePhase::default());
+    }
+
     pipeline
         .push(GatePhase)
         .push(CritiquePhase {
             critics_per_proposal: critics,
         })
         .push(RepairPhase::from_config(cfg))
-        .push(JudgePhase { judges })
+        .push(JudgePhase {
+            judges,
+            ..JudgePhase::default()
+        })
         .push(RankPhase { config: cfg_arc })
         .push(DeliverPhase)
 }

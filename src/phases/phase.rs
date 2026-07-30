@@ -47,6 +47,10 @@ pub struct RunContext {
     /// successful call so subsequent runs of the same prompt reuse
     /// the cached response (compliance with T01-06 §3.3).
     pub cache: Cache,
+    /// Whether the human-in-the-loop checkpoints are interactive
+    /// (`true`) or auto-suppressed (`false`). Phase D opt-out;
+    /// wired from `--non-interactive` and `Mode::Batch`.
+    pub interactive: bool,
     cancel: Cancel,
     phase_timeout: Duration,
     total_timeout: Duration,
@@ -94,10 +98,19 @@ impl RunContext {
             raw_prompt,
             mode,
             cache,
+            interactive: true,
             cancel: Cancel::new(),
             phase_timeout: Duration::ZERO,
             total_timeout: Duration::ZERO,
         }
+    }
+
+    /// Toggle the human-checkpoint interactivity. `false` makes
+    /// every checkpoint a no-op that persists a `<skipped:non_interactive>`
+    /// marker instead of blocking on stdin.
+    pub fn with_interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
+        self
     }
 
     pub(crate) fn with_timeouts(self, phase_secs: u64, total_secs: u64) -> Self {
@@ -627,6 +640,12 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::Tagger => 512,
         Role::Extractor => 3000,
         Role::Integrator => 4000,
+        // Phase D (Plan B sub-phase D). Synthesizer reuses the
+        // integrator ceiling (markdown body + structured fields).
+        // Adversary stays short: it returns weaknesses, not a long
+        // report.
+        Role::Synthesizer => 4000,
+        Role::Adversary => 2048,
     }
 }
 
@@ -679,6 +698,12 @@ fn temperature_for_role(role: Role) -> f32 {
         Role::Tagger => 0.0,
         Role::Extractor => 0.4,
         Role::Integrator => 0.4,
+        // Phase D: synthesizer balances prose fluency (0.4) against
+        // the integrator contract; adversary is fully deterministic
+        // (0.0) so re-runs of the same evaluations produce identical
+        // score_deltas — useful for snapshot tests.
+        Role::Synthesizer => 0.4,
+        Role::Adversary => 0.0,
     }
 }
 
@@ -709,6 +734,13 @@ pub enum PhaseOutput {
     Ranking(PathBuf),
     /// `final/portfolio.md` was written.
     Deliver(PathBuf),
+    /// Phase D: a list of `cluster_proposals/cp_*.json` files.
+    ClusterProposals(Vec<PathBuf>),
+    /// Phase D: a list of `synthesized/s_*.json` files.
+    Synthesized(Vec<PathBuf>),
+    /// Phase D: a list of `adversaries/p_*.json` files. Empty when
+    /// the panel of judges agreed and the adversary never fired.
+    Adversaries(Vec<PathBuf>),
 }
 
 /// A unit of pipeline work.

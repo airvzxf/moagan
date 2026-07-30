@@ -263,7 +263,10 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
             critics_per_proposal: 4,
         })
         .push(RepairPhase::default())
-        .push(JudgePhase { judges: 3 })
+        .push(JudgePhase {
+            judges: 3,
+            ..JudgePhase::default()
+        })
         .push(RankPhase {
             config: Arc::new(Config::default()),
         })

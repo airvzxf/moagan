@@ -9,11 +9,16 @@
 //! 4. mapa de divergencias (critiques' issues)
 //! 5. evidencia (links to sidecars)
 //! 6. auditoría (run_id, provider, model, weights, mode)
+//!
+//! Phase D (V4 §5.14): after the model writes the report, the phase
+//! fires the final-checkpoint prompt to confirm the user accepts the
+//! portfolio. The check is no-op in non-interactive runs.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 
+use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
 use crate::domain::{FinalReport, Proposal, Ranking};
 use crate::error::Result;
 use crate::llm::Role;
@@ -80,6 +85,23 @@ impl Phase for DeliverPhase {
         );
         let md_path: PathBuf = final_dir.join("portfolio.md");
         std::fs::write(&md_path, md)?;
+
+        // Phase D final checkpoint: confirm the portfolio before
+        // terminating the run. Persisted under
+        // `checkpoints/h_<uuid>.json` for auditability.
+        if ctx.interactive {
+            let cp = Checkpoint::yes_no(
+                CheckpointKind::Final,
+                format!("ship portfolio with winner `{}`?", ranking.winner),
+            );
+            let opts = CheckpointOpts {
+                interactive: true,
+                stdin_override: None,
+                telemetry: Some(ctx.telemetry.clone()),
+            };
+            let _ = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
+        }
+
         Ok(PhaseOutput::Deliver(md_path))
     }
 }
@@ -149,6 +171,18 @@ fn load_critiques(dir: &std::path::Path) -> Vec<(String, Vec<String>)> {
     map.into_iter().collect()
 }
 
+/// Return a small marker that tells the reader whether a portfolio
+/// entry is a regular proposal or a synthesized one (Phase D). The
+/// `s_` prefix is the contract `SynthesizePhase` writes; proposals
+/// carry `p_<NN>` ids. Empty string when neither applies.
+pub fn kind_badge_for(id: &str) -> &'static str {
+    if id.starts_with("synth_") || id.starts_with("s_") {
+        "synthesis"
+    } else {
+        ""
+    }
+}
+
 fn render_markdown(
     report: &FinalReport,
     ranking: &Ranking,
@@ -186,11 +220,19 @@ fn render_markdown(
             2 => "third",
             _ => "",
         };
+        let kind_badge = kind_badge_for(&r.id);
+        let combined_badge = if kind_badge.is_empty() {
+            badge.to_owned()
+        } else if badge.is_empty() {
+            kind_badge.to_owned()
+        } else {
+            format!("{badge}, {kind_badge}")
+        };
         s.push_str(&format!(
             "{}. **{}** ({}) — score {:.2}\n   {}\n",
             i + 1,
             r.id,
-            badge,
+            combined_badge,
             r.score,
             r.reason
         ));
@@ -242,11 +284,18 @@ fn render_markdown(
     s.push_str("- `manifest.json`\n");
     s.push_str("- `brief.json`\n");
     s.push_str("- `proposals/p_*.json`\n");
+    s.push_str("- `proposals/s_*.json` (synthesized proposals, Phase D)\n");
+    s.push_str("- `synthesized/s_*.json` (synthesis lineage, immutable)\n");
+    s.push_str("- `cluster_proposals/cp_*.json` (intra-cluster grouping)\n");
     s.push_str("- `critiques/p_*_critic_*.json`\n");
+    s.push_str("- `critiques/s_*_critic_*.json` (synthesis critiques)\n");
     s.push_str("- `evaluations/p_*.json`\n");
+    s.push_str("- `evaluations/s_*.json` (synthesis evaluations)\n");
+    s.push_str("- `adversaries/p_*.json` (third-judge reports)\n");
     s.push_str("- `validation/p_*.json`\n");
     s.push_str("- `rankings/ranking.json`\n");
     s.push_str("- `revisions/p_*_rev_*.json`\n");
+    s.push_str("- `revisions/s_*_rev_*.json` (synthesis revisions)\n");
     s.push('\n');
 
     // §5.15 piece 6: auditoría — operator-facing provenance metadata.
@@ -270,4 +319,124 @@ fn render_markdown(
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{FinalReport, RankEntry, Ranking};
+
+    #[test]
+    fn kind_badge_for_recognises_synthesized_prefix() {
+        assert_eq!(kind_badge_for("s_00"), "synthesis");
+        assert_eq!(kind_badge_for("synth_001"), "synthesis");
+    }
+
+    #[test]
+    fn kind_badge_for_returns_empty_for_proposals() {
+        assert_eq!(kind_badge_for("p_000"), "");
+        assert_eq!(kind_badge_for("p_001"), "");
+    }
+
+    #[test]
+    fn kind_badge_for_returns_empty_for_unknown_prefix() {
+        assert_eq!(kind_badge_for("winner"), "");
+        assert_eq!(kind_badge_for(""), "");
+    }
+
+    fn sample_ranking() -> Ranking {
+        Ranking {
+            ranked: vec![
+                RankEntry {
+                    id: "p_000".into(),
+                    score: 8.5,
+                    reason: "x".into(),
+                },
+                RankEntry {
+                    id: "s_00".into(),
+                    score: 7.9,
+                    reason: "y".into(),
+                },
+                RankEntry {
+                    id: "p_001".into(),
+                    score: 7.5,
+                    reason: "z".into(),
+                },
+            ],
+            representatives: vec![RankEntry {
+                id: "s_00".into(),
+                score: 7.9,
+                reason: "y".into(),
+            }],
+            winner: "p_000".into(),
+        }
+    }
+
+    fn sample_report() -> FinalReport {
+        FinalReport {
+            title: "T".into(),
+            summary: "S".into(),
+            recommendation: "R".into(),
+            alternatives: vec!["a".into()],
+            next_steps: vec!["n".into()],
+        }
+    }
+
+    #[test]
+    fn render_markdown_badge_marks_synthesized_in_portfolio() {
+        let r = sample_ranking();
+        let rep = sample_report();
+        let md = render_markdown(
+            &rep,
+            &r,
+            &[],
+            &[],
+            "rid",
+            "minimax",
+            "MiniMax-M3",
+            "standard",
+        );
+        assert!(
+            md.contains("synthesis"),
+            "expected 'synthesis' badge for s_00, got:\n{md}"
+        );
+    }
+
+    #[test]
+    fn render_markdown_keeps_winner_for_regular_proposals() {
+        let r = sample_ranking();
+        let rep = sample_report();
+        let md = render_markdown(
+            &rep,
+            &r,
+            &[],
+            &[],
+            "rid",
+            "minimax",
+            "MiniMax-M3",
+            "standard",
+        );
+        assert!(md.contains("winner"));
+        assert!(md.contains("p_000"));
+    }
+
+    #[test]
+    fn render_markdown_evidence_section_mentions_phase_d_paths() {
+        let r = sample_ranking();
+        let rep = sample_report();
+        let md = render_markdown(
+            &rep,
+            &r,
+            &[],
+            &[],
+            "rid",
+            "minimax",
+            "MiniMax-M3",
+            "standard",
+        );
+        assert!(md.contains("synthesized/s_*.json"));
+        assert!(md.contains("cluster_proposals/cp_*.json"));
+        assert!(md.contains("proposals/s_*.json"));
+        assert!(md.contains("adversaries/p_*.json"));
+    }
 }
