@@ -176,7 +176,14 @@ run_test "cardinality_zero_dimensions_rejected_or_warns" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 80 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'; test \$? -le 1"
 
 # ---------------------------------------------------------------------
-# SECTION 3 — Role inventory (15 tests)
+# SECTION 3 — Role inventory (14 tests)
+#
+# `role_count_is_fourteen` (the 15th test) was removed because it
+# was a Phase-B-era pinned assertion that became stale when Phase D
+# added `Synthesizer` and `Adversary` (count is now 16). The same
+# invariant is covered by:
+#   - `src/llm/role.rs:268 fn all_roles_are_count_sixteen()` (cargo test)
+#   - `scripts/smoke_phase_d.sh:166 role_count_is_sixteen` (cargo grep)
 # ---------------------------------------------------------------------
 
 run_test "role_intake_round_trip" \
@@ -220,9 +227,6 @@ run_test "role_extractor_round_trip" \
 
 run_test "role_integrator_round_trip" \
   "grep -q 'Integrator,' ${ROOT}/src/llm/role.rs"
-
-run_test "role_count_is_fourteen" \
-  "grep -B0 -A20 'fn all_roles_are_count_fourteen' ${ROOT}/src/llm/role.rs | grep -q '14'"
 
 # ---------------------------------------------------------------------
 # SECTION 4 — Role temperatures & max_tokens (12 tests)
@@ -681,11 +685,24 @@ run_test "no_askama_in_cargo" \
   "! grep -qE '^askama' ${ROOT}/Cargo.toml"
 
 # ---------------------------------------------------------------------
-# SECTION 15 — Git hygiene (10 tests)
+# SECTION 15 — Git hygiene (4 tests)
 # ---------------------------------------------------------------------
-
-run_test "branch_checkout_is_phase_b" \
-  "git -C ${ROOT} branch --show-current | grep -q 'feat/mvp-v0.2-phase-b'"
+#
+# Once, this section had 10 tests pinning the feature/phase-d branch
+# and validating that the commits in `origin/main..HEAD` matched
+# Phase B's review checklist (CLI cardinality fix, smoke coverage,
+# docs update, etc.). All ten were Phase-B-specific assertions.
+#
+# Phase B (PR #12) is merged, so those assertions no longer apply:
+#
+#   * `branch_checkout_is_phase_b`              — removed (Phase-D branch)
+#   * `phase_b_includes_fix_cli`                 — removed (Phase B merged)
+#   * `phase_b_includes_test_smoke`              — removed (Phase B merged)
+#   * `phase_b_includes_docs_update`             — removed (Phase B merged)
+#   * `phase_b_includes_sub_phase_b`             — removed (Phase B merged)
+#   * `phase_b_no_root_commits`                  — removed (Phase B merged)
+#
+# The four cross-cutting checks below apply to every branch.
 
 run_test "all_new_commits_signed_gpg" \
   "git -C ${ROOT} log --pretty='%G?' origin/main..HEAD | grep -vE '^G$' | wc -l | grep -qE '^0$'"
@@ -697,22 +714,7 @@ run_test "commit_count_over_5" \
   "git -C ${ROOT} log --oneline origin/main..HEAD | wc -l | awk '{ if (\$1 >= 5) exit 0; else exit 1 }'"
 
 run_test "no_uncommitted_changes_except_smoke" \
-  "git -C ${ROOT} status --porcelain 2>/dev/null | grep -v 'smoke_discovery.sh\\|smoke_audit_proxy.sh' | wc -l | awk '{ if (\$1 == 0) exit 0; else exit 1 }'"
-
-run_test "phase_b_includes_fix_cli" \
-  "git -C ${ROOT} log --pretty='%s' origin/main..HEAD | grep -qE 'fix.*cli.*cardinality|cardinality'"
-
-run_test "phase_b_includes_test_smoke" \
-  "git -C ${ROOT} log --pretty='%s' origin/main..HEAD | grep -qE 'smoke|integration'"
-
-run_test "phase_b_includes_docs_update" \
-  "git -C ${ROOT} log --pretty='%s' origin/main..HEAD | grep -qE 'docs'"
-
-run_test "phase_b_includes_sub_phase_b" \
-  "git -C ${ROOT} log --pretty='%H %s' origin/main..HEAD | wc -l | awk '{ if (\$1 >= 10) exit 0; else exit 1 }'"
-
-run_test "phase_b_no_root_commits" \
-  "! git -C ${ROOT} log --pretty='%s' origin/main..HEAD | grep -qE 'root commit|^$'"
+  "git -C ${ROOT} status --porcelain 2>/dev/null | grep -vE 'smoke_(discovery|audit_proxy|intracluster_synthesis|adversary_judge|human_checkpoint|checkpoint_mirror|phase_d_integration|smoke_multimodel)\.sh' | wc -l | awk '{ if (\$1 == 0) exit 0; else exit 1 }'"
 
 # ---------------------------------------------------------------------
 # SECTION 16 — Test counts & build (10 tests)
