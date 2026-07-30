@@ -1049,6 +1049,86 @@ pub enum Resolution {
 
 No tiene timeout. Usa `dialoguer::Select` o `dialoguer::Input`. El resultado se persiste en `checkpoints/<ckp_id>.json` y se indexa en `checkpoints` SQLite.
 
+#### 6.5.1. Mirror a SQLite vía `Telemetry::record_checkpoint` (Phase D sub-fase #6)
+
+La tabla `checkpoints` definida en `migrations/v001_initial.sql`
+sólo tenía las columnas de ciclo de vida (`resolved`, `note`,
+`created_unix`, `resolved_unix`) — el `question` y `response`
+reales nunca llegaban a SQLite. La sub-fase #6 cierra esa brecha
+para que `moagan inspect` pueda responder preguntas como
+"¿qué runs tuvieron checkpoints rechazados?" sin parsear cada
+`checkpoints/h_<uuid>.json` del filesystem.
+
+**Migración v005** (`src/storage/migrations/v005_checkpoints_content.sql`):
+
+- Añade columnas `ckp_id`, `question`, `response`,
+  `accepted_default`, `at_unix`.
+- Cambia la PK a `(run_id, ckp_id)` (reconstruye la tabla con
+  `CREATE TABLE ... checkpoints_new` + `INSERT INTO ... SELECT`
+  + `DROP TABLE` + `RENAME TO`). Los datos legacy se preservan
+  con `ckp_id = 'legacy_' || seq`.
+- Crea índices `idx_checkpoints_kind` y `idx_checkpoints_at_unix`.
+- `PRAGMA user_version` pasa de `4` a `5` (idempotente:
+  `if current < 5 { execute V005 }`).
+
+**API de DB** (`src/storage/sqlite.rs`):
+
+```rust
+pub fn record_checkpoint(
+    &self,
+    run_id: RunId,
+    ckp_id: &str,
+    kind: &str,
+    question: &str,
+    response: &str,
+    accepted_default: bool,
+    at_unix: i64,
+) -> Result<()>;                                       // INSERT OR REPLACE
+
+pub fn list_checkpoints_for_run(
+    &self,
+    run_id: RunId,
+) -> Result<Vec<CheckpointRow>>;                       // ORDER BY at_unix ASC
+
+pub fn checkpoint_counts_by_kind(
+    &self,
+    run_id: RunId,
+) -> Result<std::collections::BTreeMap<String, i64>>;  // para dashboard
+```
+
+**Wiring** (`src/checkpoint/human.rs::persist` + `src/telemetry.rs`):
+
+Cada checkpoint capturado por `ask()` o `skip()` se persiste en dos
+artefactos, en este orden:
+
+1. `checkpoints/h_<uuid7>.json` — sidecar canónico (igual que antes).
+2. JSONL `telemetry/checkpoints.jsonl` (línea append-only).
+3. SQLite `checkpoints` row vía `Telemetry::record_checkpoint`.
+
+El JSON sidecar sigue siendo la fuente de verdad para el audit
+trail. La fila SQLite es un **mirror best-effort**: si la DB está
+bloqueada o no está abierta, `record_checkpoint` loguea un
+`tracing::warn!` y no aborta el run. El mirror es idempotente
+(`INSERT OR REPLACE` por `(run_id, ckp_id)`), así que un re-run
+del mismo run no duplica filas.
+
+**Disponibilidad**: la migración está activa para cualquier `Db::open`
+existente en `v4` — la rama `if current < 5` garantiza que los
+runs previos se migran in-place al primer `moagan run` post-merge.
+
+**Queries habilitadas** (estilo `moagan inspect`):
+
+```sql
+-- Cuántos checkpoints intake hubo por run
+SELECT run_id, COUNT(*) FROM checkpoints WHERE kind = 'intake' GROUP BY run_id;
+
+-- Runs con checkpoints rechazados (el usuario tecleó 'n' o un Modify)
+SELECT run_id, COUNT(*) FROM checkpoints WHERE accepted_default = 0 GROUP BY run_id;
+
+-- Último checkpoint por run
+SELECT run_id, MAX(at_unix) FROM checkpoints GROUP BY run_id;
+```
+
 ---
 
 ## 7. Sandbox
