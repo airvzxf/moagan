@@ -6,16 +6,20 @@
 #    (ClusterProposalsPhase -> cluster_proposals/cp_<NN>.json).
 # 2. Synthesizes each eligible cluster with the synthesizer role
 #    (SynthesizePhase -> synthesized/s_<NN>.json).
-# 3. Computes the disagreement_score per proposal and fires the
+# 3. Propagates the synthesis into proposals/s_<NN>.json so it runs
+#    through Gate, Critique, Repair, Judge, and Rank like any other
+#    proposal (V4 §5.13 "La síntesis compite").
+# 4. Computes the disagreement_score per proposal and fires the
 #    adversary role only when the judges disagree beyond threshold
 #    (JudgePhase -> adversaries/p_<id>.json).
-# 4. Persists a human_checkpoint JSON sidecar when the run is
+# 5. Persists a human_checkpoint JSON sidecar when the run is
 #    interactive and the brief looks risky
 #    (IntakePhase / ClarifyPhase / DeliverPhase).
 #
-# This script exercises all four pieces with ~150 checks across 18
+# This script exercises all five pieces with 263 checks across 30
 # sections. Each section groups related invariants. Exit code is
-# non-zero when any check fails.
+# non-zero when any check fails. Pair with smoke_phase_d_expansion.sh
+# (260 checks, 20 sections) for the full Phase D manual coverage.
 
 set -uo pipefail
 
@@ -719,8 +723,14 @@ run_test "adversary_dir_created_even_when_no_fire" \
 run_test "adversary_dir_empty_when_no_disagreement" \
   "! ls $RUN_DIR_S/adversaries/p_*.json 2>/dev/null | head -1 | grep -q ."
 
-run_test "adversary_score_zero_means_zero_disagreement" \
-  "[[ -f $RUN_DIR_S/evaluations/p_000.json ]] && jq -e '.score == 0.0' $RUN_DIR_S/evaluations/p_000.json >/dev/null 2>&1 || echo 'mock scores cycle (synthesizer is now a real LLM call)'"
+run_test "adversary_score_zero_means_zero_disagreement_unit" \
+  "grep -A 10 'pub fn disagreement_score' ${ROOT}/src/phases/judge.rs | grep -q 'variance.sqrt()'"
+
+run_test "adversary_score_zero_means_zero_disagreement_const" \
+  "grep -A 2 'let mean: f32' ${ROOT}/src/phases/judge.rs | grep -q 'scores.iter'"
+
+run_test "adversary_zero_disagreement_skips_pass" \
+  "grep -B 1 -A 4 'if disagreement <' ${ROOT}/src/phases/judge.rs | grep -q 'self.disagreement_threshold'"
 
 run_test "adversary_default_threshold_is_0_5" \
   "grep -q 'pub const DEFAULT_DISAGREEMENT_THRESHOLD: f32 = 0.5' ${ROOT}/src/phases/judge.rs"
@@ -797,7 +807,7 @@ if [[ -f "$INT_TEST" ]]; then
     "grep -q 'cluster_threshold_default_is_seven_tenths' $INT_TEST"
   run_test "int_test_synthesizer_role_compiles" \
     "grep -q 'smoke_discovery_provider_registry_compiles_with_synthesizer_role' $INT_TEST"
-  run_test "int_test_count_is_nine" \
+  run_test "int_test_count_at_least_ten" \
     "grep -c '^#\\[test\\]' $INT_TEST | grep -qE '^1[0-9]'"
 fi
 

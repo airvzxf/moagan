@@ -3,9 +3,10 @@
 # propagation gap fix (commits 6032246, e7875b3, a853c6b, e7f9a27,
 # 0319444, 3157ed3).
 #
-# This script adds ~280 checks to the 263 already in smoke_phase_d.sh,
-# reaching a combined total of ~543 unique assertions. Sections here
-# focus on:
+# This script adds 260 checks across 20 sections to the 263 already in
+# smoke_phase_d.sh, reaching a combined total of 523 unique Phase D
+# assertions. Pair with the audit-proxy suite for ~1000+ total checks.
+# Sections here focus on:
 #   - E2E synthesis propagation across 4 modes (standard, deep, batch,
 #     explore)
 #   - Multi-prompt e2e runs with varied briefs
