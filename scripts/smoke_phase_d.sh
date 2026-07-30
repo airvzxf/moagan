@@ -1032,6 +1032,146 @@ run_test "summary_run_dirs_are_distinct" \
   "test \\$(ls -d $TMPHOME_S/.runs/* | wc -l) -eq 1"
 
 # ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# SECTION 31 — Checkpoint SQLite mirror (sub-fase #6, 20 tests)
+# ---------------------------------------------------------------------
+
+run_test "ckpt_db_migration_v005_exists" \
+  "[[ -f ${ROOT}/src/storage/migrations/v005_checkpoints_content.sql ]]"
+
+run_test "ckpt_db_v005_registered_in_sqlite" \
+  "grep -q 'sql_v005' ${ROOT}/src/storage/sqlite.rs"
+
+run_test "ckpt_db_v005_bumps_user_version_to_5" \
+  "grep -A 2 'if current < 5' ${ROOT}/src/storage/sqlite.rs | grep -q 'user_version = 5'"
+
+run_test "ckpt_db_record_checkpoint_exists" \
+  "grep -q 'pub fn record_checkpoint' ${ROOT}/src/storage/sqlite.rs"
+
+run_test "ckpt_db_list_checkpoints_for_run_exists" \
+  "grep -q 'pub fn list_checkpoints_for_run' ${ROOT}/src/storage/sqlite.rs"
+
+run_test "ckpt_db_checkpoint_counts_by_kind_exists" \
+  "grep -q 'pub fn checkpoint_counts_by_kind' ${ROOT}/src/storage/sqlite.rs"
+
+run_test "ckpt_db_checkpoint_row_struct_exists" \
+  "grep -q 'pub struct CheckpointRow' ${ROOT}/src/storage/sqlite.rs"
+
+run_test "ckpt_db_migration_adds_ckp_id_column" \
+  "grep -q 'ADD COLUMN ckp_id' ${ROOT}/src/storage/migrations/v005_checkpoints_content.sql"
+
+run_test "ckpt_db_migration_adds_question_column" \
+  "grep -q 'ADD COLUMN question' ${ROOT}/src/storage/migrations/v005_checkpoints_content.sql"
+
+run_test "ckpt_db_migration_adds_response_column" \
+  "grep -q 'ADD COLUMN response' ${ROOT}/src/storage/migrations/v005_checkpoints_content.sql"
+
+run_test "ckpt_db_migration_rebuilds_table_with_new_pk" \
+  "grep -q 'checkpoints_new' ${ROOT}/src/storage/migrations/v005_checkpoints_content.sql"
+
+run_test "ckpt_db_migration_creates_kind_index" \
+  "grep -q 'idx_checkpoints_kind' ${ROOT}/src/storage/migrations/v005_checkpoints_content.sql"
+
+run_test "ckpt_telemetry_record_checkpoint_exists" \
+  "grep -q 'pub fn record_checkpoint' ${ROOT}/src/telemetry.rs"
+
+run_test "ckpt_telemetry_has_checkpoints_path" \
+  "grep -q 'checkpoints_path' ${ROOT}/src/telemetry.rs"
+
+run_test "ckpt_telemetry_checkpoint_event_struct" \
+  "grep -q 'pub struct CheckpointEvent' ${ROOT}/src/telemetry.rs"
+
+run_test "ckpt_human_opts_has_telemetry_field" \
+  "grep -q 'pub telemetry: Option' ${ROOT}/src/checkpoint/human.rs"
+
+run_test "ckpt_human_persist_calls_telemetry_record" \
+  "grep -A 15 '^fn persist' ${ROOT}/src/checkpoint/human.rs | grep -q 't.record_checkpoint'"
+
+run_test "ckpt_intake_phase_passes_telemetry" \
+  "grep -A 3 'let opts = CheckpointOpts' ${ROOT}/src/phases/intake.rs | grep -q 'telemetry: Some(ctx.telemetry'"
+
+run_test "ckpt_clarify_phase_passes_telemetry" \
+  "grep -A 3 'let opts = CheckpointOpts' ${ROOT}/src/phases/clarify.rs | grep -q 'telemetry: Some(ctx.telemetry'"
+
+run_test "ckpt_deliver_phase_passes_telemetry" \
+  "grep -A 3 'let opts = CheckpointOpts' ${ROOT}/src/phases/deliver.rs | grep -q 'telemetry: Some(ctx.telemetry'"
+
+# ---------------------------------------------------------------------
+# SECTION 32 — Checkpoint SQLite e2e (10 tests)
+# ---------------------------------------------------------------------
+
+TMPHOME_DB=$(mkhome)
+OUT_DB=$(run_pipeline standard mock "Test DB checkpoint" "--non-interactive" "$TMPHOME_DB")
+RID_DB="${OUT_DB%%|*}"
+DIR_DB="${OUT_DB##*|}"
+HOME_DB=$(dirname $(dirname "$DIR_DB"))
+
+run_test "ckpt_db_e2e_user_version_is_5" \
+  "sqlite3 $HOME_DB/meta.sqlite 'PRAGMA user_version' | grep -qE '^5'"
+
+run_test "ckpt_db_e2e_checkpoints_table_exists" \
+  "sqlite3 $HOME_DB/meta.sqlite '.tables' | grep -q checkpoints"
+
+run_test "ckpt_db_e2e_checkpoint_rows_present" \
+  "test \$(sqlite3 $HOME_DB/meta.sqlite 'SELECT COUNT(*) FROM checkpoints') -ge 1"
+
+run_test "ckpt_db_e2e_checkpoint_has_known_kind" \
+  "sqlite3 $HOME_DB/meta.sqlite 'SELECT DISTINCT kind FROM checkpoints' | grep -qE 'intake|clarify|final'"
+
+run_test "ckpt_db_e2e_checkpoint_response_is_skip_marker" \
+  "sqlite3 $HOME_DB/meta.sqlite \"SELECT response FROM checkpoints LIMIT 1\" | grep -q '<skipped:non_interactive>'"
+
+run_test "ckpt_db_e2e_checkpoint_accepted_default_persisted" \
+  "sqlite3 $HOME_DB/meta.sqlite \"SELECT accepted_default FROM checkpoints LIMIT 1\" | grep -qE '^[01]'"
+
+run_test "ckpt_db_e2e_at_unix_is_positive_integer" \
+  "sqlite3 $HOME_DB/meta.sqlite \"SELECT at_unix FROM checkpoints LIMIT 1\" | grep -qE '^[0-9]+$'"
+
+run_test "ckpt_db_e2e_question_persisted" \
+  "sqlite3 $HOME_DB/meta.sqlite \"SELECT COUNT(*) FROM checkpoints WHERE question IS NOT NULL\" | grep -qE '^[1-9]'"
+
+run_test "ckpt_db_e2e_ckp_id_format_correct" \
+  "sqlite3 $HOME_DB/meta.sqlite \"SELECT ckp_id FROM checkpoints LIMIT 1\" | grep -qE '^h_'"
+
+run_test "ckpt_db_e2e_jsonl_sidecar_also_exists" \
+  "[[ -f $DIR_DB/telemetry/checkpoints.jsonl ]]"
+
+# ---------------------------------------------------------------------
+# SECTION 33 — Checkpoint JSONL stream (5 tests)
+# ---------------------------------------------------------------------
+
+run_test "ckpt_jsonl_file_exists" \
+  "[[ -f $DIR_DB/telemetry/checkpoints.jsonl ]]"
+
+run_test "ckpt_jsonl_lines_ge_1" \
+  "test \$(wc -l < $DIR_DB/telemetry/checkpoints.jsonl) -ge 1"
+
+run_test "ckpt_jsonl_first_line_is_valid_json" \
+  "head -1 $DIR_DB/telemetry/checkpoints.jsonl | jq -e . >/dev/null 2>&1"
+
+run_test "ckpt_jsonl_first_line_has_ckp_id_field" \
+  "head -1 $DIR_DB/telemetry/checkpoints.jsonl | jq -e '.ckp_id | startswith(\"h_\")' >/dev/null"
+
+run_test "ckpt_jsonl_first_line_has_kind_field" \
+  "head -1 $DIR_DB/telemetry/checkpoints.jsonl | jq -e '.kind | type == \"string\"' >/dev/null"
+
+# ---------------------------------------------------------------------
+# SECTION 34 — Migration idempotence (3 tests)
+# ---------------------------------------------------------------------
+
+TMPHOME_RE=$(mkhome)
+"$BIN" run --mode fast --provider mock --prompt "Re-run test" --runs-dir "$TMPHOME_RE" --non-interactive --mock-dir "$MOCK_DIR" > /dev/null 2>&1 || true
+
+run_test "ckpt_migration_rerun_user_version_stays_5" \
+  "sqlite3 $TMPHOME_RE/meta.sqlite 'PRAGMA user_version' | grep -qE '^5'"
+
+run_test "ckpt_migration_rerun_checkpoints_table_exists" \
+  "sqlite3 $TMPHOME_RE/meta.sqlite '.tables' | grep -q checkpoints"
+
+run_test "ckpt_migration_rerun_columns_complete" \
+  "sqlite3 $TMPHOME_RE/meta.sqlite \"SELECT COUNT(*) FROM pragma_table_info('checkpoints')\" | grep -qE '^1[0-9]'"
+
 # Summary
 # ---------------------------------------------------------------------
 
