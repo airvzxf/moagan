@@ -108,6 +108,7 @@ mod tests {
             tradeoffs: vec!["single-process model".into()],
             source_sketch: "sk_001".into(),
             artifacts: vec![],
+            replaced_by: None,
         }
     }
 

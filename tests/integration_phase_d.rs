@@ -59,6 +59,7 @@ fn proposal(id: &str, summary: &str, approach: &str) -> Proposal {
         evidence: vec!["sk_001".to_owned()],
         source_sketch: String::new(),
         artifacts: Vec::new(),
+        replaced_by: None,
     }
 }
 

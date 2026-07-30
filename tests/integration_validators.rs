@@ -171,6 +171,7 @@ fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
         evidence: vec!["self-attached source".into()],
         source_sketch: String::new(),
         artifacts: vec![rust_artifact],
+        replaced_by: None,
     };
     write_json(&proposals_dir.join("p_000.json"), &proposal_with_rust)?;
 
@@ -183,6 +184,7 @@ fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
         evidence: vec!["none".into()],
         source_sketch: String::new(),
         artifacts: vec![],
+        replaced_by: None,
     };
     write_json(&proposals_dir.join("p_001.json"), &proposal_no_artifacts)?;
 
@@ -269,6 +271,7 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
         })
         .push(RankPhase {
             config: Arc::new(Config::default()),
+            replace_sources_enabled: false,
         })
         .push(DeliverPhase);
 
@@ -379,6 +382,7 @@ fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Res
         evidence: vec!["e".into()],
         source_sketch: String::new(),
         artifacts: vec![],
+        replaced_by: None,
     };
     let proposals_dir = run_dir.proposals();
     std::fs::create_dir_all(&proposals_dir)?;
@@ -481,6 +485,7 @@ fn validate_phase_dispatches_sql_artifact() -> Result<()> {
         evidence: vec!["e".into()],
         source_sketch: String::new(),
         artifacts: vec![sql_artifact],
+        replaced_by: None,
     };
     let proposals_dir = run_dir.proposals();
     std::fs::create_dir_all(&proposals_dir)?;
@@ -543,6 +548,7 @@ fn validate_phase_dispatches_schema_artifact() -> Result<()> {
         evidence: vec!["e".into()],
         source_sketch: String::new(),
         artifacts: vec![schema_artifact, data_artifact],
+        replaced_by: None,
     };
     let proposals_dir = run_dir.proposals();
     std::fs::create_dir_all(&proposals_dir)?;

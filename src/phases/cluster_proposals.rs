@@ -222,6 +222,7 @@ mod tests {
             evidence: vec!["e1".into()],
             source_sketch: String::new(),
             artifacts: Vec::new(),
+            replaced_by: None,
         };
         let text = ClusterProposalsPhase::cluster_text(&p);
         assert!(text.contains("summary"));
@@ -251,6 +252,7 @@ mod tests {
                     evidence: vec![],
                     source_sketch: String::new(),
                     artifacts: Vec::new(),
+                    replaced_by: None,
                 },
             ),
             (
@@ -263,6 +265,7 @@ mod tests {
                     evidence: vec![],
                     source_sketch: String::new(),
                     artifacts: Vec::new(),
+                    replaced_by: None,
                 },
             ),
         ];
@@ -286,6 +289,7 @@ mod tests {
                     evidence: vec![],
                     source_sketch: String::new(),
                     artifacts: Vec::new(),
+                    replaced_by: None,
                 },
             ),
             (
@@ -298,6 +302,7 @@ mod tests {
                     evidence: vec![],
                     source_sketch: String::new(),
                     artifacts: Vec::new(),
+                    replaced_by: None,
                 },
             ),
         ];
