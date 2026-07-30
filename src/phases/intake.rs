@@ -68,6 +68,7 @@ impl Phase for IntakePhase {
             let opts = CheckpointOpts {
                 interactive: ctx.interactive,
                 stdin_override: None,
+                telemetry: Some(ctx.telemetry.clone()),
             };
             let resolution = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
             if !resolution.is_approved() {

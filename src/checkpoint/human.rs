@@ -151,7 +151,7 @@ impl Checkpoint {
 }
 
 /// Runtime options that gate the prompt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CheckpointOpts {
     /// `true` for `standard` / `deep`, `false` for `batch` /
     /// `--non-interactive`. When `false`, [`ask`] is a no-op that
@@ -161,17 +161,13 @@ pub struct CheckpointOpts {
     /// want to inject a pre-canned answer). When `None`, the call
     /// reads from `std::io::stdin()` directly.
     pub stdin_override: Option<String>,
+    /// Phase D sub-fase #6: when `Some`, every captured checkpoint
+    /// is mirrored into the SQLite index via
+    /// `Telemetry::record_checkpoint`. When `None` (tests), only
+    /// the JSON sidecar is written. Best-effort: failures are
+    /// logged inside `record_checkpoint` and never abort the run.
+    pub telemetry: Option<crate::telemetry::Telemetry>,
 }
-
-impl Default for CheckpointOpts {
-    fn default() -> Self {
-        Self {
-            interactive: true,
-            stdin_override: None,
-        }
-    }
-}
-
 impl CheckpointOpts {
     /// Non-interactive constructor — used by `--non-interactive` and
     /// `Mode::Batch`.
@@ -179,6 +175,7 @@ impl CheckpointOpts {
         Self {
             interactive: false,
             stdin_override: None,
+            telemetry: None,
         }
     }
 
@@ -187,7 +184,17 @@ impl CheckpointOpts {
         Self {
             interactive: true,
             stdin_override: Some(response.into()),
+            telemetry: None,
         }
+    }
+
+    /// Attach the telemetry handle so the captured checkpoint is
+    /// mirrored to SQLite. Called by the phase wiring (intake,
+    /// clarify, deliver) which already hold a `Telemetry`
+    /// via `RunContext`.
+    pub fn with_telemetry(mut self, telemetry: crate::telemetry::Telemetry) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 }
 
@@ -195,7 +202,15 @@ impl CheckpointOpts {
 /// "approved" (default) and is persisted to disk so the audit trail
 /// records that the prompt was suppressed, not that the user typed
 /// nothing.
-pub fn skip(checkpoint: &Checkpoint, dir: &Path) -> Result<Resolution> {
+///
+/// When `telemetry` is `Some`, the captured checkpoint is also
+/// mirrored into the SQLite index via
+/// `Telemetry::record_checkpoint` (Phase D sub-fase #6).
+pub fn skip(
+    checkpoint: &Checkpoint,
+    dir: &Path,
+    telemetry: Option<&crate::telemetry::Telemetry>,
+) -> Result<Resolution> {
     let captured = HumanCheckpoint {
         id: checkpoint.id.clone(),
         phase: checkpoint.kind.phase_name().to_owned(),
@@ -206,7 +221,7 @@ pub fn skip(checkpoint: &Checkpoint, dir: &Path) -> Result<Resolution> {
         accepted_default: checkpoint.default_yes,
         schema_version: "v1".to_owned(),
     };
-    persist(dir, &captured)?;
+    persist(dir, &captured, telemetry)?;
     Ok(if checkpoint.default_yes {
         Resolution::Approved
     } else {
@@ -216,9 +231,13 @@ pub fn skip(checkpoint: &Checkpoint, dir: &Path) -> Result<Resolution> {
 
 /// Ask the user. Blocking on stdin. Returns the [`Resolution`] and
 /// persists a `HumanCheckpoint` JSON sidecar.
+///
+/// When `opts.telemetry` is `Some`, the captured checkpoint is also
+/// mirrored into the SQLite index via
+/// `Telemetry::record_checkpoint` (Phase D sub-fase #6).
 pub fn ask(checkpoint: &Checkpoint, dir: &Path, opts: &CheckpointOpts) -> Result<Resolution> {
     if !opts.interactive {
-        return skip(checkpoint, dir);
+        return skip(checkpoint, dir, opts.telemetry.as_ref());
     }
     let (raw, accepted_default) = match opts.stdin_override.as_ref() {
         Some(s) => (s.clone(), false),
@@ -235,7 +254,7 @@ pub fn ask(checkpoint: &Checkpoint, dir: &Path, opts: &CheckpointOpts) -> Result
         accepted_default,
         schema_version: "v1".to_owned(),
     };
-    persist(dir, &captured)?;
+    persist(dir, &captured, opts.telemetry.as_ref())?;
     Ok(parsed)
 }
 
@@ -274,11 +293,21 @@ fn parse_resolution(raw: &str, default_yes: bool) -> Resolution {
     }
 }
 
-fn persist(dir: &Path, checkpoint: &HumanCheckpoint) -> Result<()> {
+fn persist(
+    dir: &Path,
+    checkpoint: &HumanCheckpoint,
+    telemetry: Option<&crate::telemetry::Telemetry>,
+) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let path: PathBuf = dir.join(format!("{}.json", checkpoint.id));
     let json = serde_json::to_vec_pretty(checkpoint)?;
     crate::atomic::writer::AtomicWriter::new().write(&path, &json)?;
+    // Phase D sub-fase #6: mirror to SQLite via Telemetry when
+    // available. Best-effort — failures are logged inside
+    // record_checkpoint and don't abort the run.
+    if let Some(t) = telemetry {
+        let _ = t.record_checkpoint(checkpoint);
+    }
     Ok(())
 }
 
@@ -350,7 +379,7 @@ mod tests {
     fn skip_persists_marker_and_returns_default() {
         let tmp = tempfile::tempdir().unwrap();
         let c = Checkpoint::new(CheckpointKind::Final, "ship it?", true);
-        let res = skip(&c, tmp.path()).unwrap();
+        let res = skip(&c, tmp.path(), None).unwrap();
         assert_eq!(res, Resolution::Approved);
         // AtomicWriter emits both the data file and a `.meta.json`
         // sidecar. We only inspect the data file for this test.
@@ -365,7 +394,7 @@ mod tests {
     fn skip_persists_marker_default_no() {
         let tmp = tempfile::tempdir().unwrap();
         let c = Checkpoint::new(CheckpointKind::Final, "ship it?", false);
-        let res = skip(&c, tmp.path()).unwrap();
+        let res = skip(&c, tmp.path(), None).unwrap();
         assert_eq!(res, Resolution::Rejected);
         let json = std::fs::read_to_string(tmp.path().join(format!("{}.json", c.id))).unwrap();
         assert!(json.contains("\"accepted_default\": false"));

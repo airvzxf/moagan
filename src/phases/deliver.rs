@@ -97,6 +97,7 @@ impl Phase for DeliverPhase {
             let opts = CheckpointOpts {
                 interactive: true,
                 stdin_override: None,
+                telemetry: Some(ctx.telemetry.clone()),
             };
             let _ = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
         }

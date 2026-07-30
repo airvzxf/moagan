@@ -111,6 +111,30 @@ pub struct WarningEvent {
     pub details: serde_json::Value,
 }
 
+/// One row written to `telemetry/checkpoints.jsonl` per checkpoint
+/// capture. Mirrors the `HumanCheckpoint` JSON sidecar verbatim so
+/// the dashboard can tail the stream live.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct CheckpointEvent {
+    /// Run id.
+    pub run_id: String,
+    /// Stable checkpoint id (`h_<uuid7>`).
+    pub ckp_id: String,
+    /// Kind, mirroring the SQLite enum:
+    /// `intake | clarify | final | custom`.
+    pub kind: String,
+    /// Question shown verbatim to the user.
+    pub question: String,
+    /// Raw response captured from stdin (the
+    /// `<skipped:non_interactive>` marker when `interactive=false`).
+    pub response: String,
+    /// True when the user accepted the default by hitting enter.
+    pub accepted_default: bool,
+    /// Unix seconds at capture time (mirrors
+    /// `HumanCheckpoint.at_unix`).
+    pub at_unix: i64,
+}
+
 /// Context for a warning. Carries the optional phase/role/call_id
 /// so the warning can be correlated with the call record.
 #[derive(Debug, Clone, Default)]
@@ -140,9 +164,14 @@ struct Inner {
     calls_path: PathBuf,
     /// Path to `telemetry/warnings.jsonl`.
     warnings_path: PathBuf,
+    /// Path to `telemetry/checkpoints.jsonl` (Phase D sub-fase #6).
+    /// Plain JSONL because checkpoints are tiny and the dashboard
+    /// tails them live (no gzip overhead).
+    checkpoints_path: PathBuf,
     phases: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     calls: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     warnings: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
+    checkpoints: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     /// Optional SQLite index. When present, every `phase()` and
     /// `call()` mirrors the JSONL record into the corresponding
     /// table so `moagan inspect` returns live data.
@@ -181,18 +210,24 @@ impl Telemetry {
         let phases_path: PathBuf = run.telemetry().join("phases.jsonl.gz");
         let calls_path: PathBuf = run.telemetry().join("calls.jsonl.gz");
         let warnings_path: PathBuf = run.telemetry().join("warnings.jsonl");
+        let checkpoints_path: PathBuf = run.telemetry().join("checkpoints.jsonl");
         let phases_writer = crate::storage::compression::open_gz_append(&phases_path)?;
         let calls_writer = crate::storage::compression::open_gz_append(&calls_path)?;
         let warnings_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&warnings_path)?;
+        let checkpoints_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&checkpoints_path)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 run_id,
                 phases_path,
                 calls_path,
                 warnings_path,
+                checkpoints_path,
                 phases: Mutex::new(Some(RedactWriter::new(
                     phases_writer,
                     policy.clone(),
@@ -205,6 +240,11 @@ impl Telemetry {
                 ))),
                 warnings: Mutex::new(Some(RedactWriter::new(
                     Box::new(warnings_file),
+                    policy.clone(),
+                    Surface::Telemetry,
+                ))),
+                checkpoints: Mutex::new(Some(RedactWriter::new(
+                    Box::new(checkpoints_file),
                     policy,
                     Surface::Telemetry,
                 ))),
@@ -231,6 +271,7 @@ impl Telemetry {
                 phases_path: PathBuf::from("/dev/null"),
                 calls_path: PathBuf::from("/dev/null"),
                 warnings_path: PathBuf::from("/dev/null"),
+                checkpoints_path: PathBuf::from("/dev/null"),
                 phases: Mutex::new(Some(RedactWriter::new(
                     Box::new(NullWriter),
                     policy.clone(),
@@ -243,6 +284,11 @@ impl Telemetry {
                 ))),
                 warnings: Mutex::new(Some(RedactWriter::new(
                     Box::new(NullWriter),
+                    policy.clone(),
+                    Surface::Telemetry,
+                ))),
+                checkpoints: Mutex::new(Some(RedactWriter::new(
+                    Box::new(NullWriter),
                     policy,
                     Surface::Telemetry,
                 ))),
@@ -254,6 +300,60 @@ impl Telemetry {
     /// Path to the phases log.
     pub fn phases_path(&self) -> &Path {
         &self.inner.phases_path
+    }
+
+    /// Path to the checkpoints log (a JSONL of every checkpoint
+    /// for the dashboard to tail without parsing the sidecar).
+    pub fn checkpoints_path(&self) -> &Path {
+        &self.inner.checkpoints_path
+    }
+
+    /// Record a human checkpoint. The JSON sidecar
+    /// `checkpoints/h_<uuid>.json` is the canonical record (already
+    /// written by `src/checkpoint/human.rs::persist`); this method
+    /// is the SQLite mirror used by `moagan inspect` to query
+    /// "which runs had rejected checkpoints?" without touching the
+    /// filesystem.
+    ///
+    /// Best-effort: failures are logged as `tracing::warn!` and do
+    /// not abort the run (the JSON sidecar remains the source of
+    /// truth).
+    pub fn record_checkpoint(&self, cp: &crate::domain::HumanCheckpoint) -> Result<()> {
+        let event = CheckpointEvent {
+            run_id: self.inner.run_id.to_string(),
+            ckp_id: cp.id.clone(),
+            kind: cp.kind.clone(),
+            question: cp.question.clone(),
+            response: cp.response.clone(),
+            accepted_default: cp.accepted_default,
+            at_unix: cp.at_unix,
+        };
+        let bytes = serde_json::to_vec(&event).map_err(crate::Error::from)?;
+        let mut g = self.inner.checkpoints.lock();
+        if let Some(w) = g.as_mut() {
+            w.write_all(&bytes)?;
+            w.write_all(b"\n")?;
+        }
+        drop(g);
+        if let Some(db) = &self.inner.db
+            && let Err(e) = db.record_checkpoint(
+                self.inner.run_id,
+                &cp.id,
+                &cp.kind,
+                &cp.question,
+                &cp.response,
+                cp.accepted_default,
+                cp.at_unix,
+            )
+        {
+            tracing::warn!(
+                ckp_id = %cp.id,
+                kind = %cp.kind,
+                error = %e,
+                "SQLite checkpoint mirror failed"
+            );
+        }
+        Ok(())
     }
 
     /// Path to the calls log.

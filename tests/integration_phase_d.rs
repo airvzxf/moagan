@@ -373,3 +373,168 @@ fn synth_to_proposal_collisions_with_proposal_prefix() {
 
 #[allow(dead_code)]
 fn _unused_config_marker(_c: &Config) {}
+
+// ---------------------------------------------------------------------
+// Phase D sub-fase #6: checkpoint rows indexed in SQLite via
+// Telemetry::record_checkpoint.
+// ---------------------------------------------------------------------
+
+#[test]
+fn checkpoint_ask_writes_sqlite_row_via_telemetry() -> Result<()> {
+    // Build a run context with a real telemetry + DB so we can
+    // exercise the full wiring: ask() → persist() → record_checkpoint().
+    let _g = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    use moagan::redact::RedactPolicy;
+    use moagan::storage::sqlite::Db;
+    use moagan::telemetry::Telemetry;
+    let db = Db::open(&home.meta_db_path())?;
+    db.register_run(run_id, "standard", "running", "0.1.0", None, None, None)?;
+    let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))?;
+    let _ = run_dir.telemetry(); // ensure dir
+
+    let cp = Checkpoint::yes_no(CheckpointKind::Intake, "continue with assumptions?");
+    let opts = CheckpointOpts {
+        interactive: true,
+        stdin_override: Some("y".to_owned()),
+        telemetry: Some(telemetry),
+    };
+    let res = moagan::checkpoint::ask(&cp, &run_dir.checkpoints(), &opts)?;
+    assert_eq!(res, moagan::checkpoint::Resolution::Approved);
+
+    // JSON sidecar exists.
+    let json_path = run_dir.checkpoints().join(format!("{}.json", cp.id));
+    assert!(json_path.exists(), "JSON sidecar must be written");
+
+    // SQLite row exists via Telemetry mirror.
+    let rows = db.list_checkpoints_for_run(run_id)?;
+    assert_eq!(rows.len(), 1, "expected exactly one checkpoint row");
+    let r = &rows[0];
+    assert_eq!(r.ckp_id, cp.id);
+    assert_eq!(r.kind, "intake");
+    assert_eq!(r.question, "continue with assumptions?");
+    assert_eq!(r.response, "y");
+    // With stdin_override("y") the user typed a value, so the
+    // accepted_default flag is false (not the empty-enter default).
+    assert!(!r.accepted_default);
+    assert!(r.at_unix.is_some());
+
+    Ok(())
+}
+
+#[test]
+fn checkpoint_skip_writes_sqlite_row_with_marker() -> Result<()> {
+    let _g = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    use moagan::redact::RedactPolicy;
+    use moagan::storage::sqlite::Db;
+    use moagan::telemetry::Telemetry;
+    let db = Db::open(&home.meta_db_path())?;
+    db.register_run(run_id, "batch", "running", "0.1.0", None, None, None)?;
+    let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))?;
+
+    let cp = Checkpoint::new(CheckpointKind::Final, "ship?", true);
+    moagan::checkpoint::skip(&cp, &run_dir.checkpoints(), Some(&telemetry))?;
+
+    let rows = db.list_checkpoints_for_run(run_id)?;
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(r.kind, "final");
+    assert_eq!(r.response, "<skipped:non_interactive>");
+    assert!(r.accepted_default);
+
+    Ok(())
+}
+
+#[test]
+fn checkpoint_ask_without_telemetry_does_not_crash() -> Result<()> {
+    // When telemetry is None, the JSON sidecar still gets written —
+    // only the SQLite mirror is skipped. This is the "tests don't
+    // need a DB" path.
+    let _g = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let _home = Arc::new(MoaganHome::resolve()?);
+
+    let cp = Checkpoint::yes_no(CheckpointKind::Clarify, "add constraint?");
+    let opts = CheckpointOpts {
+        interactive: true,
+        stdin_override: Some("add a 5GB cap".to_owned()),
+        telemetry: None,
+    };
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir)?;
+    let res = moagan::checkpoint::ask(&cp, dir, &opts)?;
+    assert_eq!(
+        res,
+        moagan::checkpoint::Resolution::Modify("add a 5GB cap".into())
+    );
+    let json_path = dir.join(format!("{}.json", cp.id));
+    assert!(json_path.exists());
+    Ok(())
+}
+
+#[test]
+fn checkpoint_counts_by_kind_groups_three_kinds() -> Result<()> {
+    let _g = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    use moagan::redact::RedactPolicy;
+    use moagan::storage::sqlite::Db;
+    use moagan::telemetry::Telemetry;
+    let db = Db::open(&home.meta_db_path())?;
+    db.register_run(run_id, "deep", "running", "0.1.0", None, None, None)?;
+    let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))?;
+
+    moagan::checkpoint::skip(
+        &Checkpoint::yes_no(CheckpointKind::Intake, "q1"),
+        &run_dir.checkpoints(),
+        Some(&telemetry),
+    )?;
+    moagan::checkpoint::skip(
+        &Checkpoint::yes_no(CheckpointKind::Clarify, "q2"),
+        &run_dir.checkpoints(),
+        Some(&telemetry),
+    )?;
+    moagan::checkpoint::skip(
+        &Checkpoint::yes_no(CheckpointKind::Clarify, "q3"),
+        &run_dir.checkpoints(),
+        Some(&telemetry),
+    )?;
+    moagan::checkpoint::skip(
+        &Checkpoint::new(CheckpointKind::Final, "ship?", true),
+        &run_dir.checkpoints(),
+        Some(&telemetry),
+    )?;
+
+    let counts = db.checkpoint_counts_by_kind(run_id)?;
+    assert_eq!(counts.get("intake").copied(), Some(1));
+    assert_eq!(counts.get("clarify").copied(), Some(2));
+    assert_eq!(counts.get("final").copied(), Some(1));
+    Ok(())
+}
