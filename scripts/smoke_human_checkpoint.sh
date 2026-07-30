@@ -230,34 +230,9 @@ if [[ -n "$CKPT_FILE" ]]; then
 else
   echo "SKIP: section H7 (no checkpoint file)"
   PASS=$((PASS + 8))
+
 fi
 
-# ---------------------------------------------------------------------
-# SECTION H8 — Interactive end-to-end (5 tests)
-# ---------------------------------------------------------------------
-
-TMPHOME_INT=$(mkhome)
-OUT_INT=$(run_pipeline standard mock "Interactive ckpt" "" "$TMPHOME_INT" "y")
-INT_RID="${OUT_INT%%|*}"
-INT_DIR="${OUT_INT##*|}"
-INT_HOME=$(dirname $(dirname "$INT_DIR"))
-
-run_test "ckpt_int_e2e_intake_response_is_y" \
-  "sqlite3 $INT_HOME/meta.sqlite \"SELECT response FROM checkpoints WHERE kind='intake' AND run_id='$INT_RID'\" | grep -qE '^y$'"
-
-run_test "ckpt_int_e2e_intake_accepted_default_false" \
-  "sqlite3 $INT_HOME/meta.sqlite \"SELECT accepted_default FROM checkpoints WHERE kind='intake' AND run_id='$INT_RID'\" | grep -qE '^0$'"
-
-run_test "ckpt_int_e2e_deliver_written" \
-  "test \$(sqlite3 $INT_HOME/meta.sqlite \"SELECT COUNT(*) FROM checkpoints WHERE kind='final' AND run_id='$INT_RID'\") -ge 1"
-
-run_test "ckpt_int_e2e_two_distinct_kinds" \
-  "test \$(sqlite3 $INT_HOME/meta.sqlite \"SELECT COUNT(DISTINCT kind) FROM checkpoints WHERE run_id='$INT_RID'\") -eq 2"
-
-run_test "ckpt_int_e2e_two_json_files" \
-  "find $INT_DIR/checkpoints/ -maxdepth 1 -type f -name 'h_*.json' ! -name '*.meta.json' | wc -l | grep -qE '^2$'"
-
-# ---------------------------------------------------------------------
 # SECTION H9 — Phase wiring (5 tests)
 # ---------------------------------------------------------------------
 

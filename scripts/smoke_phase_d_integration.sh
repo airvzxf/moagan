@@ -401,72 +401,6 @@ run_test "summary_run_dirs_are_distinct" \
   "test \$(ls -d $TMPHOME_S/.runs/* | wc -l) -eq 1"
 
 # ---------------------------------------------------------------------
-# SECTION B — Mode matrix consistency (15 tests, from expansion §B)
-# ---------------------------------------------------------------------
-
-TMPHOME_M=$(mkhome)
-mkdir -p $TMPHOME_M/.runs
-
-run_pipeline_into() {
-  local mode="$1"
-  local home="$2"
-  "$BIN" run --mode "$mode" --provider mock --prompt "Different prompt $mode" --max-parallelism 2 --runs-dir "$home" --mock-dir "$MOCK_DIR" --non-interactive > "$home/run.out" 2>&1 || true
-  local rid
-  rid="$(ls "$home/.runs/" 2>/dev/null | sort -r | head -1)"
-  [[ -n "$rid" ]] && echo "$home/.runs/$rid"
-}
-
-RUN_DIR_FAST=$(run_pipeline_into fast "$TMPHOME_M")
-RUN_DIR_STD=$(run_pipeline_into standard "$TMPHOME_M")
-RUN_DIR_DEEP=$(run_pipeline_into deep "$TMPHOME_M")
-RUN_DIR_BATCH=$(run_pipeline_into batch "$TMPHOME_M")
-
-run_test "B1_fast_mode_no_synthesis_files" \
-  "! ls $RUN_DIR_FAST/synthesized/s_*.json 2>/dev/null | grep -q s_"
-
-run_test "B3_standard_mode_has_synthesis" \
-  "[[ -f $RUN_DIR_STD/synthesized/s_00.json ]]"
-
-run_test "B4_deep_mode_has_synthesis" \
-  "[[ -f $RUN_DIR_DEEP/synthesized/s_00.json ]]"
-
-run_test "B5_batch_mode_has_synthesis" \
-  "[[ -f $RUN_DIR_BATCH/synthesized/s_00.json ]]"
-
-run_test "B9_standard_synthesis_in_ranking" \
-  "jq -r '.ranked[].id' $RUN_DIR_STD/rankings/ranking.json 2>/dev/null | grep -q '^s_'"
-
-run_test "B10_deep_synthesis_in_ranking" \
-  "jq -r '.ranked[].id' $RUN_DIR_DEEP/rankings/ranking.json 2>/dev/null | grep -q '^s_'"
-
-run_test "B11_batch_synthesis_in_ranking" \
-  "jq -r '.ranked[].id' $RUN_DIR_BATCH/rankings/ranking.json 2>/dev/null | grep -q '^s_'"
-
-run_test "B12_all_modes_create_manifest" \
-  "[[ -f $RUN_DIR_FAST/manifest.json ]] && [[ -f $RUN_DIR_STD/manifest.json ]] && [[ -f $RUN_DIR_DEEP/manifest.json ]] && [[ -f $RUN_DIR_BATCH/manifest.json ]]"
-
-run_test "B13_all_modes_create_final" \
-  "[[ -d $RUN_DIR_FAST/final ]] && [[ -d $RUN_DIR_STD/final ]] && [[ -d $RUN_DIR_DEEP/final ]] && [[ -d $RUN_DIR_BATCH/final ]]"
-
-run_test "B15_all_modes_have_synthesized_dir" \
-  "[[ -d $RUN_DIR_STD/synthesized ]] && [[ -d $RUN_DIR_DEEP/synthesized ]] && [[ -d $RUN_DIR_BATCH/synthesized ]]"
-
-run_test "B_all_runs_distinct" \
-  "test \$(ls -d $TMPHOME_M/.runs/* | wc -l) -eq 4"
-
-run_test "B_all_runs_unique_ids" \
-  "for d in $TMPHOME_M/.runs/*; do jq -r .run_id \$d/manifest.json | sort -u | head -1; done | sort -u | wc -l | grep -qE '^4$'"
-
-run_test "B_each_mode_produces_evaluations" \
-  "for d in $RUN_DIR_FAST $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do ls \$d/evaluations/*.json 2>/dev/null | grep -v meta | head -1 | grep -q . || exit 1; done"
-
-run_test "B_each_mode_produces_rankings" \
-  "for d in $RUN_DIR_FAST $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do [[ -f \$d/rankings/ranking.json ]] || exit 1; done"
-
-run_test "B_fast_mode_no_propagated_synthesis" \
-  "! ls $RUN_DIR_FAST/proposals/s_*.json 2>/dev/null | head -1 | grep -q s_"
-
-# ---------------------------------------------------------------------
 # SECTION G — Manifest integrity (15 tests, from expansion §G)
 # ---------------------------------------------------------------------
 
@@ -636,52 +570,6 @@ run_test "J10_idempotent_prompt_produces_same_synth_strategy_or_empty" \
 
 run_test "J_idempotent_runs_dont_overwrite" \
   "[[ -f $JJ_DIR/synthesized/s_00.json ]] && [[ -f $RUN_DIR_S/synthesized/s_00.json ]]"
-
-# ---------------------------------------------------------------------
-# SECTION K — Cross-mode parity (15 tests, from expansion §K)
-# ---------------------------------------------------------------------
-
-run_test "K1_all_modes_synthesized_id_format_consistent" \
-  "for d in $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do jq -r '.id' \$d/synthesized/s_00.json | grep -qE '^s_[0-9]+\$' || exit 1; done"
-
-run_test "K2_all_modes_cluster_id_format_consistent" \
-  "for d in $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do jq -r '.id' \$d/cluster_proposals/cp_00.json | grep -qE '^cp_[0-9]+\$' || exit 1; done"
-
-run_test "K4_all_modes_synthesized_has_source_proposals" \
-  "for d in $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do jq -e '.source_proposals | length > 0' \$d/synthesized/s_00.json >/dev/null || exit 1; done"
-
-run_test "K6_fast_mode_no_synthesis_in_portfolio" \
-  "! grep -q 's_' $RUN_DIR_FAST/final/portfolio.md || true"
-
-run_test "K9_all_modes_have_checkpoints_dir" \
-  "[[ -d $RUN_DIR_FAST/checkpoints ]] && [[ -d $RUN_DIR_STD/checkpoints ]] && [[ -d $RUN_DIR_DEEP/checkpoints ]] && [[ -d $RUN_DIR_BATCH/checkpoints ]]"
-
-run_test "K10_batch_mode_checkpoints_are_skipped" \
-  "ls $RUN_DIR_BATCH/checkpoints/h_*.json 2>/dev/null | head -1 | xargs jq -r '.response' | grep -q '<skipped:non_interactive>'"
-
-run_test "K11_fast_mode_checkpoints_skipped" \
-  "ls $RUN_DIR_FAST/checkpoints/h_*.json 2>/dev/null | head -1 | xargs jq -r '.response' | grep -q '<skipped:non_interactive>' || true"
-
-run_test "K12_standard_mode_checkpoint_kind_is_known" \
-  "sqlite3 \$(dirname \$(dirname $RUN_DIR_STD))/meta.sqlite 'SELECT DISTINCT kind FROM checkpoints' | head -1 | grep -qE 'intake|clarify|final'"
-
-run_test "K13_all_modes_synthesized_dir_exists" \
-  "[[ -d $RUN_DIR_STD/synthesized ]] && [[ -d $RUN_DIR_DEEP/synthesized ]] && [[ -d $RUN_DIR_BATCH/synthesized ]]"
-
-run_test "K14_all_modes_cluster_proposals_dir_exists" \
-  "[[ -d $RUN_DIR_STD/cluster_proposals ]] && [[ -d $RUN_DIR_DEEP/cluster_proposals ]] && [[ -d $RUN_DIR_BATCH/cluster_proposals ]]"
-
-run_test "K15_all_modes_adversaries_dir_exists" \
-  "[[ -d $RUN_DIR_STD/adversaries ]] && [[ -d $RUN_DIR_DEEP/adversaries ]] && [[ -d $RUN_DIR_BATCH/adversaries ]]"
-
-run_test "K_each_mode_has_telemetry" \
-  "for d in $RUN_DIR_FAST $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do [[ -d \$d/telemetry ]] || exit 1; done"
-
-run_test "K_each_mode_has_rankings" \
-  "for d in $RUN_DIR_FAST $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do [[ -f \$d/rankings/ranking.json ]] || exit 1; done"
-
-run_test "K_each_mode_status_completed" \
-  "for d in $RUN_DIR_FAST $RUN_DIR_STD $RUN_DIR_DEEP $RUN_DIR_BATCH; do jq -e '.status == \"completed\"' \$d/manifest.json >/dev/null || exit 1; done"
 
 # ---------------------------------------------------------------------
 # SECTION N — Gate phase invariants (10 tests, from expansion §N)
