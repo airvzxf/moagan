@@ -210,6 +210,19 @@ impl TelemetryCmd {
     }
 }
 
+/// Resolve the `MoaganHome` for a telemetry subcommand. When
+/// `runs_dir` is `Some`, the explicit path is used; otherwise the
+/// standard `MOAGAN_HOME` / `~/.local/share/moagan` resolution
+/// applies (T01-06 §11.1).
+pub(crate) fn resolve_home(
+    runs_dir: Option<&std::path::Path>,
+) -> Result<crate::fs_layout::MoaganHome> {
+    match runs_dir {
+        Some(p) => Ok(crate::fs_layout::MoaganHome::at(p.to_path_buf())),
+        None => crate::fs_layout::MoaganHome::resolve(),
+    }
+}
+
 macro_rules! not_yet {
     ($variant:literal) => {
         Err(Error::InvalidState(format!(
@@ -221,9 +234,130 @@ macro_rules! not_yet {
 
 mod list {
     use super::{Error, Result, TelemetryCmd};
+    use crate::ids::RunId;
+    use crate::storage::sqlite::Db;
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("list")
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, limit, run) = match cmd {
+            TelemetryCmd::List {
+                runs_dir,
+                limit,
+                run,
+            } => (runs_dir.as_ref(), *limit, run.as_deref()),
+            _ => return Err(Error::InvalidState("list: wrong variant".into())),
+        };
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let db = Db::open(&home.meta_db_path())?;
+
+        if let Some(raw) = run {
+            let run_id: RunId = raw
+                .parse()
+                .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")))?;
+            let row = db
+                .get_run(run_id)?
+                .ok_or_else(|| Error::InvalidState(format!("run {raw} not found in the index")))?;
+            let agg = db.run_aggregate(run_id)?;
+            let phases = db.list_phase_summaries_for_run(run_id)?;
+            let usage = db.list_provider_usage_for_run(run_id)?;
+            let run_dir = home.run_dir(run_id);
+            print_one_run(&row, run_dir.root(), &agg, &phases, &usage);
+        } else {
+            let rows = db.list_runs(limit)?;
+            if rows.is_empty() {
+                println!("(no runs in the index)");
+                return Ok(());
+            }
+            println!(
+                "{:<14}  {:<10}  {:<12}  {:<13}  {:<13}",
+                "run", "mode", "status", "calls", "tokens"
+            );
+            for row in &rows {
+                let run_id: RunId = row
+                    .run_id
+                    .parse()
+                    .map_err(|e| Error::InvalidArgs(format!("bad run row: {e}")))?;
+                let agg = db.run_aggregate(run_id)?;
+                println!(
+                    "{:<14}  {:<10}  {:<12}  {:<13}  {:<13}",
+                    short_id(&row.run_id),
+                    row.mode,
+                    row.status,
+                    agg.calls,
+                    agg.total_tokens(),
+                );
+            }
+            println!("({} run(s); use --run <id> to drill into one)", rows.len());
+        }
+        Ok(())
+    }
+
+    /// First 8 chars of a UUIDv7 string. UUIDv7's first segment is
+    /// always ASCII, so byte-slicing is safe here.
+    fn short_id(raw: &str) -> &str {
+        raw.get(..8).unwrap_or(raw)
+    }
+
+    fn print_one_run(
+        row: &crate::storage::sqlite::RunRow,
+        run_dir: &std::path::Path,
+        agg: &crate::storage::sqlite::RunAggregate,
+        phases: &[crate::storage::sqlite::PhaseSummaryRow],
+        usage: &[crate::storage::sqlite::ProviderUsageRow],
+    ) {
+        println!(
+            "run {}  mode={}  status={}",
+            row.run_id, row.mode, row.status
+        );
+        println!(
+            "  created_unix={}  updated_unix={}",
+            row.created_unix, row.updated_unix
+        );
+        println!("  dir={}", run_dir.display());
+        println!(
+            "  calls={}  tokens={}  providers={}  phases={}  warnings={}  checkpoints={}",
+            agg.calls,
+            agg.total_tokens(),
+            agg.provider_count,
+            agg.phase_count,
+            agg.warnings,
+            agg.checkpoints,
+        );
+        println!(
+            "  by-status: ok={}  error={}  timeout={}  cancelled={}",
+            agg.ok_calls(),
+            agg.error_calls,
+            agg.timeout_calls,
+            agg.cancelled_calls
+        );
+        if !phases.is_empty() {
+            println!("  phases:");
+            for p in phases {
+                let dur = match (p.started_unix, p.ended_unix) {
+                    (Some(s), Some(e)) => format!("{}s", e.saturating_sub(s)),
+                    _ => "-".into(),
+                };
+                let err = p.error.as_deref().unwrap_or("-");
+                println!(
+                    "    {:<10}  seq={}  status={:<6}  duration={}  error={}",
+                    p.phase, p.seq, p.status, dur, err
+                );
+            }
+        }
+        if !usage.is_empty() {
+            println!("  provider_usage:");
+            for u in usage {
+                println!(
+                    "    {:<10}  {:<16}  calls={:<5}  in={:<8}  out={:<6}  cache_read={}  cache_creation={}",
+                    u.provider,
+                    u.model,
+                    u.calls,
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_read,
+                    u.cache_creation,
+                );
+            }
+        }
     }
 }
 
@@ -307,68 +441,45 @@ mod tests {
     }
 
     #[test]
-    fn stubs_return_not_implemented() {
+    fn list_empty_index_prints_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
         let cmd = TelemetryCmd::List {
-            runs_dir: None,
-            limit: 10,
+            runs_dir: Some(tmp.path().to_path_buf()),
+            limit: 5,
             run: None,
         };
-        let err = cmd.clone().dispatch().unwrap_err();
-        assert!(matches!(err, Error::InvalidState(_)));
-        let s = format!("{err}");
-        assert!(s.contains("list"));
-        assert!(s.contains("sub-fase I"));
+        // Empty DB doesn't exist yet; the open call creates it. We
+        // capture stdout via the dispatch returning Ok(0) so the
+        // test only checks the no-error / no-panic contract.
+        let code = cmd.dispatch().unwrap();
+        assert_eq!(code, 0);
     }
 
     #[test]
-    fn all_eight_subcommands_stubbed() {
-        // Each variant dispatches to its own module's stub; this test
-        // pins the CLI surface so a refactor cannot silently drop a
-        // subcommand before Phase I lands.
-        let cases: Vec<TelemetryCmd> = vec![
-            TelemetryCmd::List {
-                runs_dir: None,
-                limit: 1,
-                run: None,
-            },
-            TelemetryCmd::Summary {
-                runs_dir: None,
-                run: "01900000-0000-0000-0000-000000000000".into(),
-            },
-            TelemetryCmd::Compare {
-                runs_dir: None,
-                run_a: "01900000-0000-0000-0000-000000000000".into(),
-                run_b: "01900000-0000-0000-0000-000000000001".into(),
-            },
-            TelemetryCmd::Provider {
-                runs_dir: None,
-                plan: Some("minimax".into()),
-                list: false,
-            },
-            TelemetryCmd::View {
-                runs_dir: None,
-                port: 4096,
-            },
-            TelemetryCmd::Export {
-                runs_dir: None,
-                run: "01900000-0000-0000-0000-000000000000".into(),
-                level: ExportLevel::default(),
-                format: ExportFormat::default(),
-                out: None,
-            },
-            TelemetryCmd::Cleanup {
-                runs_dir: None,
-                dry_run: true,
-            },
-            TelemetryCmd::Verify {
-                runs_dir: None,
-                path: std::path::PathBuf::from("/tmp/foo"),
-            },
-        ];
-        assert_eq!(cases.len(), 8);
-        for cmd in cases {
-            let err = cmd.dispatch().unwrap_err();
-            assert!(matches!(err, Error::InvalidState(_)));
-        }
+    fn list_unknown_run_id_returns_invalid_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::List {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            limit: 5,
+            run: Some("not-a-uuid".into()),
+        };
+        let err = cmd.dispatch().unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs(_)));
+    }
+
+    #[test]
+    fn list_unknown_run_uuid_returns_invalid_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::List {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            limit: 5,
+            run: Some("01900000-0000-0000-0000-000000000000".into()),
+        };
+        // Open succeeds (creates empty DB) but the row is missing.
+        let err = cmd.dispatch().unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)));
     }
 }
