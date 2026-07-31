@@ -207,6 +207,7 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         .push(RankPhase {
             config: Arc::new(Config::default()),
             replace_sources_enabled: false,
+            stability_enabled: false,
         })
         .push(DeliverPhase);
 
@@ -896,6 +897,7 @@ fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
         .push(RankPhase {
             config: Arc::new(Config::default()),
             replace_sources_enabled: false,
+            stability_enabled: false,
         })
         .push(DeliverPhase);
 

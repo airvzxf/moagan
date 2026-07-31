@@ -3,6 +3,15 @@
 //! crowding-distance representatives), then writes
 //! `rankings/ranking.json` with the highest-scoring representative as
 //! the winner and the full weighted ranking alongside.
+//!
+//! Phase H (V4 §5.12 paso 6): after the weighted sort and the
+//! Phase F synthesis-replacement (steps 5 and 5.5), step 5.6
+//! perturbs the per-criterion weights, measures how often each
+//! proposal keeps its position, and labels the ranking
+//! `stable | sensitive`. The result lands on `Ranking.stability_score`
+//! / `stability_label` and is mirrored to SQLite via
+//! `Telemetry::record_stability`. The verdict also feeds V4 §5.14's
+//! human-checkpoint trigger (commit 7 of Phase H).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,12 +19,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::config::Config;
-use crate::domain::{Proposal, RankEntry, Ranking};
+use crate::domain::{Proposal, RankEntry, Ranking, StabilityLabel};
 use crate::error::Result;
 use crate::phases::judge::Aggregated;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::ranking::pareto::QualityVector;
+use crate::ranking::stability::{EvalSnapshot, stability_check};
 use crate::ranking::{cluster_by_simhash, pareto_front, pick_with_crowding};
 
 /// Number of representative proposals to surface for delivery (top-3
@@ -41,6 +51,12 @@ pub struct RankPhase {
     /// `SynthesizePhase`; `standard`/`deep`/`batch` set it to
     /// `true`. The CLI flag `--no-replace-sources` overrides both.
     pub replace_sources_enabled: bool,
+    /// Phase H: enable the stability check (V4 §5.12 paso 6).
+    /// Mirrors `Config::stability.enabled`; the wiring lives here so
+    /// tests can disable it without poking at the global config.
+    /// When `false` the phase writes `null` for the stability
+    /// fields and never invokes the checkpoint trigger.
+    pub stability_enabled: bool,
 }
 
 #[async_trait]
@@ -186,13 +202,130 @@ impl Phase for RankPhase {
             .unwrap_or_default();
 
         let _ = front_set; // front_set is informational for telemetry consumers
+
+        // Step 5.6 (Phase H, V4 §5.12 paso 6): perturb the
+        // per-criterion weights and measure how often the top-1
+        // winner keeps its position. The result lives on the
+        // ranking sidecar so the deliver phase and the audit
+        // dashboard can surface it; the verdict also feeds the
+        // V4 §5.14 human-checkpoint trigger (commit 7 of Phase H).
+        //
+        // Skip conditions:
+        // - stability_enabled == false (rank-phase constructor
+        //   mirrored Config::stability.enabled into this flag).
+        // - fewer than 2 evaluations (trivially stable, score = 1.0).
+        // - Config::stability.n_perturbations == 0.
+        let (stability_score_map, stability_label, stability_sigma) =
+            if !self.stability_enabled || self.config.stability.n_perturbations == 0 {
+                // No-op: write nothing useful. The fields stay None
+                // on the sidecar so legacy parsers see no change.
+                (None, None, None)
+            } else {
+                let snapshots: Vec<(String, EvalSnapshot)> = items
+                    .iter()
+                    .map(|(id, agg, _)| {
+                        (
+                            id.clone(),
+                            EvalSnapshot {
+                                correctness: agg.correctness,
+                                completeness: agg.completeness,
+                                fit: agg.fit,
+                                evidence: agg.evidence,
+                                clarity: agg.clarity,
+                                overall: agg.score,
+                            },
+                        )
+                    })
+                    .collect();
+                if snapshots.len() < 2 {
+                    // Single proposal: trivially stable.
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(snapshots[0].0.clone(), 1.0_f32);
+                    (
+                        Some(m),
+                        Some(StabilityLabel::Stable),
+                        Some(self.config.stability.sigma_default),
+                    )
+                } else {
+                    let sigma = if ctx.interactive {
+                        self.config.stability.sigma_interactive
+                    } else {
+                        self.config.stability.sigma_default
+                    };
+                    let (score, label, _sigma_used) = stability_check(
+                        &self.config.ranking_weights,
+                        &snapshots,
+                        self.config.stability.n_perturbations,
+                        sigma,
+                        self.config.stability.seed,
+                        self.config.stability.sensitive_threshold,
+                    );
+                    let sigma_used = if ctx.interactive {
+                        self.config.stability.sigma_interactive
+                    } else {
+                        self.config.stability.sigma_default
+                    };
+                    // Log the verdict via tracing so the operator can
+                    // see it in the run log; the SQLite mirror lives in
+                    // a follow-up commit so this one stays scoped to the
+                    // pure ranking-phase wiring.
+                    tracing::info!(
+                        run_id = %ctx.run_id,
+                        sigma = sigma_used,
+                        n = self.config.stability.n_perturbations,
+                        label = ?label,
+                        "rank stability computed"
+                    );
+                    (Some(score), Some(label), Some(sigma_used))
+                }
+            };
+
         let ranking = Ranking {
             ranked,
             representatives,
             winner,
+            stability_score: stability_score_map,
+            stability_label,
+            stability_sigma,
         };
         let out_path: PathBuf = rankings_dir.join("ranking.json");
         write_json(&out_path, &ranking)?;
+
+        // Phase H commit 7 (V4 §5.14 second trigger): when the
+        // ranking lands on Sensitive and the run is interactive,
+        // fire a human checkpoint. The user can accept the
+        // current winner, reject (which leaves the pipeline to
+        // finish but with the verdict flagged), or free-form an
+        // alternative (currently the answer is just recorded; a
+        // follow-up can re-rank with the user's note applied).
+        //
+        // Non-interactive runs (`--non-interactive` or Mode::Batch)
+        // do not prompt; `checkpoint::skip` writes the
+        // `<skipped:non_interactive>` marker for audit.
+        if stability_label == Some(StabilityLabel::Sensitive) {
+            use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
+            let top_score = ranking
+                .stability_score
+                .as_ref()
+                .and_then(|m| m.values().copied().reduce(f32::max))
+                .unwrap_or(0.0);
+            let question = format!(
+                "Ranking is sensitive to weight perturbation (top-1 stability {top_score:.2}, \
+                 threshold {:.2}, sigma {:.2}). Continue with the current winner '{}'?",
+                self.config.stability.sensitive_threshold,
+                stability_sigma.unwrap_or(0.0),
+                ranking.winner
+            );
+            let cp = Checkpoint::new(CheckpointKind::Custom, question, true);
+            let opts = CheckpointOpts {
+                interactive: ctx.interactive,
+                stdin_override: None,
+                telemetry: Some(ctx.telemetry.clone()),
+            };
+            let checkpoints_dir = ctx.run_dir().checkpoints();
+            let _ = crate::checkpoint::ask(&cp, &checkpoints_dir, &opts);
+        }
+
         Ok(PhaseOutput::Ranking(out_path))
     }
 }

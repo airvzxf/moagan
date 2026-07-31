@@ -1438,6 +1438,146 @@ aditivo para una sub-fase futura.
 evaluaciones existentes; sólo cambia qué ids se mantienen en el
 ranking final.
 
+#### 8.4.3. Estabilidad (Phase H)
+
+V4 §5.12 paso 6: *"Se perturban los pesos dentro de un rango
+pequeño. Si top-1 sigue ganando, el ranking es estable. Si cambia,
+se marca como sensible a preferencias."* Esta sub-fase aterriza la
+semántica y, de paso, dispara el segundo trigger del checkpoint
+humano de V4 §5.14 («el ranking es inestable»).
+
+**Perturbación** (`src/ranking/stability.rs`):
+
+```rust
+pub fn perturb_weights(
+    base: &RankingWeights,
+    n: usize,
+    sigma: f32,
+    seed: u64,
+) -> Vec<RankingWeights>;
+
+pub fn stability_score(
+    weights_set: &[RankingWeights],
+    evaluations: &[(String, EvalSnapshot)],
+) -> HashMap<String, f32>;
+```
+
+- Ruido gaussiano Box-Muller (vía `fastrand`, ya en deps) añadido
+  a cada uno de los seis pesos. Sin nuevas dependencias.
+- Clip a `[0.0, 2.0]` por peso: sin pesos negativos (romperían
+  el contrato de promedio ponderado) y sin valores que dominen al
+  base weight más allá de lo razonable.
+- `n = 0` o `sigma <= 0` cortocircuita a `vec![]` (no-op).
+
+**Score** (`src/ranking/stability.rs::stability_score`):
+
+Para cada `weights` del set se recalcula el ranking; el argmax
+incrementa un contador de victorias. El resultado es un
+`HashMap<proposal_id, f32>` con la fracción `[0.0, 1.0]` de
+perturbaciones bajo las que el proposal mantuvo su posición.
+Tiebreak determinista por `id` ascendente — los `HashMap`
+resultantes son estables entre runs.
+
+**Etiqueta** (`StabilityLabel`):
+
+```rust
+pub enum StabilityLabel { Stable, Sensitive }
+```
+
+`score >= sensitive_threshold` ⇒ `Stable`, en otro caso
+`Sensitive`. El threshold vive en
+`Config::stability.sensitive_threshold` (default `0.8`).
+
+**Sidecar**:
+
+Tres campos nuevos en `Ranking` (todos
+`#[serde(default, skip_serializing_if = "Option::is_none")]` para
+compatibilidad con sidecars v0.2):
+
+- `stability_score: Option<HashMap<String, f32>>`
+- `stability_label: Option<StabilityLabel>`
+- `stability_sigma: Option<f32>` (sigma usado en la perturbación
+  efectiva, registrado para correlación con la sensibilidad
+  detectada)
+
+`None` significa "el check se omitió" — `Config::stability.enabled
+== false`, `n_perturbations == 0`, o el run tiene una sola
+propuesta (trivialmente estable).
+
+**Wiring en `RankPhase`**: paso 5.6, insertado entre el paso 5.5
+(reemplazo de fuentes, Phase F) y el write final de
+`rankings/ranking.json`. Sobre el vector `items: Vec<(String,
+Aggregated, String)>` ya cargado en el paso 1, construye snapshots
+`EvalSnapshot` por proposal y los pasa a `stability_check`.
+
+**Sigma por modo**:
+
+| Modo | Sigma | Razonamiento |
+|---|---|---|
+| No interactivo (`--non-interactive`, `Mode::Batch`) | `sigma_default` (0.05) | Conservador; perturbaciones pequeñas no voltean ganadores claros |
+| Interactivo (`standard`, `deep`) | `sigma_interactive` (0.10) | Mayor sensibilidad para detectar preferencias inestables antes del checkpoint |
+
+El veredicto se calcula sobre el ranking **post-reemplazo** (paso
+5.5 ya ejecutado). Es la semántica correcta: queremos saber si el
+**ranking final** es estable, no el pre-reemplazo.
+
+**Disparo del checkpoint** (V4 §5.14 segundo trigger):
+
+Cuando `stability_label == Some(StabilityLabel::Sensitive)` y
+`ctx.interactive == true`, `RankPhase` invoca
+`checkpoint::ask` con `CheckpointKind::Custom` y la pregunta:
+
+> *"Ranking is sensitive to weight perturbation (top-1 stability
+> {top_score:.2}, threshold {threshold:.2}, sigma {sigma:.2}).
+> Continue with the current winner '{winner}'?"*
+
+Default = "yes" (continuar). El usuario puede aceptar, rechazar
+(`n`), o free-form (`Modify`) — la respuesta se persiste en
+`checkpoints/h_<uuid>.json` y se mirror-ea a SQLite vía
+`Telemetry::record_checkpoint`.
+
+Runs no interactivos (`--non-interactive`, `Mode::Batch`) caen en
+`checkpoint::skip` que escribe el marker
+`<skipped:non_interactive>` para auditoría. El trigger está
+**disparado** (el veredicto es Sensitive) pero el prompt se
+suprime.
+
+**Propagate to `Proposal.source_nodes`** (Phase G limitation #2
+follow-up): además de la estabilidad, esta sub-fase cierra el
+commit #2 del follow-up. `ProposePhase::compute_source_nodes`
+lee `problem_graph.json` cuando es no-trivial y asigna a cada
+proposal los ids de los nodos cuyo texto pasa el umbral Jaccard
+`SOURCE_NODE_THRESHOLD = 0.7` (mismo umbral que el
+`CLUSTER_THRESHOLD` de `RankPhase`). La asignación se ordena por
+`(distancia, id)` para que la escritura sea idempotente.
+
+**Limitaciones documentadas**:
+
+1. `proptest` no se añade como dep — los invariantes de la
+   perturbación (clip, monotonicidad de sigma, fracciones suman
+   1.0) están cubiertos por tests unitarios con seeds fijos.
+2. El mirror a SQLite del verdict de estabilidad se hace vía
+   `tracing::info!` por ahora; un nuevo campo en la tabla `runs`
+   puede aterrizar en sub-fase posterior (Phase I, dashboard).
+3. `Resolution::Modify(text)` del checkpoint es informativo; el
+   pipeline no re-rankea con la nota del usuario todavía — un
+   follow-up puede cablearlo a `moagan rerank`.
+
+**Coste LLM adicional**: 0. El check es pura cómputo sobre
+evaluaciones existentes.
+
+**Configuración** (`Config::stability`):
+
+```toml
+[stability]
+enabled              = true     # default
+n_perturbations      = 8        # default
+sigma_default        = 0.05     # default
+sigma_interactive    = 0.10     # default
+sensitive_threshold  = 0.8      # default
+seed                 = 0xDEFA17_BEEF  # default
+```
+
 ### 8.5. Checkpoint final
 
 Sólo si:

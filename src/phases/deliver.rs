@@ -369,6 +369,9 @@ mod tests {
                 reason: "y".into(),
             }],
             winner: "p_000".into(),
+            stability_score: None,
+            stability_label: None,
+            stability_sigma: None,
         }
     }
 

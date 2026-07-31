@@ -692,6 +692,7 @@ fn synthesis_replaces_sources_when_dominant() -> Result<()> {
     let phase = RankPhase {
         config: Arc::new(Config::default()),
         replace_sources_enabled: true,
+        stability_enabled: false,
     };
     let ctx = fresh_ctx_with_id(home.clone(), run_id);
     let output = pollster::block_on(phase.execute(&ctx))?;
@@ -817,6 +818,7 @@ fn synthesis_does_not_replace_when_not_dominant() -> Result<()> {
     let phase = RankPhase {
         config: Arc::new(Config::default()),
         replace_sources_enabled: true,
+        stability_enabled: false,
     };
     let ctx = fresh_ctx_with_id(home.clone(), run_id);
     let output = pollster::block_on(phase.execute(&ctx))?;
@@ -923,6 +925,7 @@ fn no_replace_sources_flag_disables_replacement() -> Result<()> {
     let phase = RankPhase {
         config: Arc::new(Config::default()),
         replace_sources_enabled: false,
+        stability_enabled: false,
     };
     let ctx = fresh_ctx_with_id(home.clone(), run_id);
     let output = pollster::block_on(phase.execute(&ctx))?;

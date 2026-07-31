@@ -315,8 +315,9 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config, replace_sources_enabled: bo
             ..JudgePhase::default()
         })
         .push(RankPhase {
-            config: cfg_arc,
+            config: cfg_arc.clone(),
             replace_sources_enabled,
+            stability_enabled: cfg_arc.stability.enabled,
         })
         .push(DeliverPhase)
 }
