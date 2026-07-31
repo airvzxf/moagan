@@ -646,6 +646,10 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // report.
         Role::Synthesizer => 4000,
         Role::Adversary => 2048,
+        // Phase G (v0.3). Decomposer: T01-06 §4.2 says 3000; we
+        // round up to 4096 so the JSON can carry a multi-node
+        // graph without truncating the `dependencies` arrays.
+        Role::Decomposer => 4096,
     }
 }
 
@@ -704,6 +708,13 @@ fn temperature_for_role(role: Role) -> f32 {
         // score_deltas — useful for snapshot tests.
         Role::Synthesizer => 0.4,
         Role::Adversary => 0.0,
+        // Phase G: decomposer T=0.3 per T01-06 §4.2. The model
+        // emits a structured DAG; a small amount of variance is
+        // useful when the brief admits multiple valid
+        // decompositions, but the cycle-detection guard in
+        // `ProblemGraph::topological_layers` rejects anything that
+        // doesn't form a valid DAG.
+        Role::Decomposer => 0.3,
     }
 }
 
@@ -741,6 +752,9 @@ pub enum PhaseOutput {
     /// Phase D: a list of `adversaries/p_*.json` files. Empty when
     /// the panel of judges agreed and the adversary never fired.
     Adversaries(Vec<PathBuf>),
+    /// Phase G: `problem_graph.json` was written. Empty path means
+    /// the phase was skipped or short-circuited to a trivial graph.
+    ProblemGraph(PathBuf),
 }
 
 /// A unit of pipeline work.

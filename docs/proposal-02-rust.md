@@ -2413,6 +2413,64 @@ pub async fn decompose(brief: &CanonicalBrief, db: &Db) -> Result<ProblemGraph> 
 }
 ```
 
+#### 16.4.1. Implementación real (v0.3 sub-fase G, 2026-07-31)
+
+Aterrizado en `src/phases/decompose.rs` + `src/domain.rs` + la
+migración SQLite v006. El código real difiere del esqueleto
+arriba en tres puntos:
+
+1. **Sidecar atómico**: el grafo se persiste vía
+   `AtomicWriter::new().write(...)` para que un crash a
+   mitad de escritura no deje un `problem_graph.json` parcial.
+   El mirror a SQLite es best-effort y nunca aborta la fase.
+
+2. **DAG repair**: la fase valida el grafo con Kahn; un
+   grafo con ciclos o dependencias colgantes se repara
+   eliminando los nodos ofensivos (cap a 8 rondas). Si todo
+   se cae, vuelve al `ProblemGraph::trivial(...)`. La
+   función pura `repair(&mut ProblemGraph) -> Result<...>`
+   está cubierta por 6 unit tests en
+   `src/phases/decompose.rs::tests`.
+
+3. **`should_decompose` ladder**: la función pura
+   `domain::should_decompose(&Brief) -> bool` implementa la
+   escalera del §5.3 (≥3 constraints, ≥3 deliverables, magic
+   words `subproblem`/`phase`/`depends on`/`after`/`once`).
+   La función tiene 1 unit test que cubre cada rama.
+
+#### 16.4.2. Topological layers
+
+`ProblemGraph::topological_layers() -> Result<Vec<Vec<usize>>, String>`
+usa el algoritmo de Kahn. Las capas se devuelven en orden
+de precedencia (capa 0 = nodos raíz sin dependencias, capa 1
+= hijos de la capa 0, etc.). El método `validate_no_cycles`
+es un thin wrapper que falla con `Err("graph has a cycle;
+stuck at: [...]")` cuando el grafo no es un DAG.
+
+`roots()` devuelve los índices de los nodos sin padres, útil
+para que `SketchPhase` arranque la distribución por el
+conjunto correcto.
+
+#### 16.4.3. Wiring
+
+`DecomposePhase` se inserta en `build_pipeline_for_mode` SOLO
+cuando `mode == Mode::Deep` (T01-06 §8.1 «sólo deep»). El
+resto de modos no insertan la fase y pagan 0 overhead.
+El vector de pipeline para `Mode::Deep` queda:
+
+```
+intake -> clarify -> route -> decompose -> sketch -> propose
+  -> validate -> cluster_proposals -> synthesize
+  -> gate -> critique -> repair -> judge -> rank -> deliver
+```
+
+`SketchPhase` consume el sidecar cuando existe y es no-trivial.
+La función `distribute_across_nodes(count, &node_ids)` reparte
+el conteo de modo que cada nodo recibe al menos un sketch.
+El campo `Sketch.angle` se rellena con el id del nodo (en
+lugar del ángulo humano) para que la cache key siga distinta
+por nodo.
+
 ### 16.5. Sketch
 
 ```rust

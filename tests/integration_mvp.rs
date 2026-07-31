@@ -1116,6 +1116,7 @@ fn seed_judge_proposals(home: &MoaganHome, run_id: RunId, count: usize) -> Resul
             source_sketch: String::new(),
             artifacts: vec![],
             replaced_by: None,
+            source_nodes: Vec::new(),
         };
         let bytes = serde_json::to_vec(&proposal)?;
         std::fs::write(proposals_dir.join(format!("p_{i:03}.json")), bytes)?;

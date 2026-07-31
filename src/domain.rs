@@ -108,6 +108,14 @@ pub struct Proposal {
     /// `source_proposals` intact so the genealogy stays recoverable.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub replaced_by: Option<String>,
+    /// Phase G: ids of `ProblemGraph` nodes this proposal covers.
+    /// Empty for non-deep runs (the field is `#[serde(default)]` so
+    /// legacy sidecars parse cleanly). A proposal that addresses
+    /// every node is the most general; a proposal that addresses a
+    /// single node is the most focused. The deliver phase can use
+    /// this to surface coverage in the final report.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub source_nodes: Vec<String>,
 }
 
 /// Output of the sketch phase — a short, opinionated exploration
@@ -592,6 +600,236 @@ pub struct HumanCheckpoint {
     pub schema_version: String,
 }
 
+// =====================================================================
+// Phase G types (v0.3 «tercera etapa», Plan B sub-fase G) — DAG
+// decomposition for `deep` mode.
+//                                                See V4 §5.3
+// "Descomposición condicional" and proposal-02-rust.md §8.1 (step 3)
+// + §16.4. The phase only runs in `deep` mode; other modes skip it
+// (and `ProblemGraph::trivial` is the no-op default).
+// =====================================================================
+
+/// How a `GraphNode` should be validated when its work is done. The
+/// `decompose` role returns one of these so the downstream
+/// `SketchPhase` / `ProposePhase` know which validator to dispatch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationMethod {
+    /// No external validation; the prose is its own evidence.
+    #[default]
+    None,
+    /// The phase structural / constraints / sketch-shape validator.
+    Structural,
+    /// The `src/validators/` sandbox (Rust, Python, TS, SQL).
+    Executable,
+}
+
+/// A single node in the `ProblemGraph` DAG. Each node is a sub-question
+/// the `deep` pipeline is expected to answer; the `dependencies` list
+/// is the parent set in the directed acyclic graph. The pipeline
+/// executes the topological layers in parallel up to
+/// `RunContext::parallelism`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphNode {
+    /// Stable id (`n<NN>`). The `decompose` role is free to choose any
+    /// slug; the phase normalises duplicates.
+    pub id: String,
+    /// The sub-question the node answers.
+    pub question: String,
+    /// What artefact the node is expected to emit (markdown, code,
+    /// schema, etc.).
+    pub expected_output: String,
+    /// Hard constraints that apply specifically to this node.
+    pub constraints: Vec<String>,
+    /// Parent node ids in the DAG. Empty for root nodes.
+    pub dependencies: Vec<String>,
+    /// How the node's output should be validated. Defaults to
+    /// `ValidationMethod::None`.
+    pub validation_method: ValidationMethod,
+}
+
+/// A single integration rule that wires two adjacent layers of the DAG
+/// together. Persisted verbatim for the `DeliverPhase` so the final
+/// report can surface "how layer N feeds into layer N+1".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IntegrationRule {
+    /// Source node id.
+    pub from: String,
+    /// Target node id.
+    pub to: String,
+    /// Human description of what flows from `from` to `to`.
+    pub description: String,
+}
+
+/// Output of the `decompose` phase. Lives in `problem_graph.json` per
+/// T01-06 §1.2. When `should_decompose` is `false` (or the brief is
+/// trivial) the graph collapses to a single root node and every
+/// downstream phase behaves as if no decomposition happened.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProblemGraph {
+    /// Schema version. Always `"v1"` for v0.3.
+    pub schema_version: String,
+    /// Did the model judge the brief worth decomposing? `false` makes
+    /// the whole graph collapse to a trivial single-node graph; the
+    /// phase never calls the LLM in that case.
+    pub should_decompose: bool,
+    /// Nodes of the DAG. Empty when `should_decompose` is `false`.
+    pub nodes: Vec<GraphNode>,
+    /// Integration rules between nodes. Optional.
+    pub integration_rules: Vec<IntegrationRule>,
+    /// Optional critical path (`n0`, `n1`, ...). Best-effort from
+    /// the model; the phase re-derives a deterministic path from the
+    /// DAG when this is empty.
+    pub critical_path: Vec<String>,
+    /// Brief hash this graph was derived from. The phase fills it
+    /// post-hoc so a second run with the same brief can re-use the
+    /// graph (cross-run cache, opt-in for v0.3).
+    pub brief_blake3: String,
+    /// Unix seconds when this file was written.
+    pub created_unix: i64,
+}
+
+impl ProblemGraph {
+    /// A trivial graph: `should_decompose=false`, one synthetic root
+    /// node. Every downstream phase sees this as "no decomposition
+    /// happened" and falls back to its non-DAG behaviour.
+    pub fn trivial(brief_blake3: impl Into<String>, now_unix: i64) -> Self {
+        Self {
+            schema_version: "v1".into(),
+            should_decompose: false,
+            nodes: Vec::new(),
+            integration_rules: Vec::new(),
+            critical_path: Vec::new(),
+            brief_blake3: brief_blake3.into(),
+            created_unix: now_unix,
+        }
+    }
+
+    /// The number of nodes the graph contains (0 for trivial).
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// True when there is nothing to do.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Find the indices of root nodes (no dependencies). Returns
+    /// `Vec<usize>` of positions in `self.nodes`. A graph with no
+    /// roots but non-empty `nodes` is malformed — callers should run
+    /// `validate_no_cycles` first.
+    pub fn roots(&self) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.dependencies.is_empty())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Topological layers (Kahn's algorithm). Each layer is a `Vec<usize>`
+    /// of node indices in `self.nodes`; the i-th layer has no edges
+    /// to the (i-1)-th. Returns `Err` with the first orphan id when
+    /// the graph has a cycle or a dangling reference.
+    pub fn topological_layers(&self) -> Result<Vec<Vec<usize>>, String> {
+        let n = self.nodes.len();
+        // Index nodes by id for O(1) lookup.
+        let index: std::collections::HashMap<&str, usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.id.as_str(), i))
+            .collect();
+        // Reverse edges: for each node, who depends on it?
+        let mut rev: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut in_degree = vec![0usize; n];
+        for (i, node) in self.nodes.iter().enumerate() {
+            for dep in &node.dependencies {
+                let parent = index.get(dep.as_str()).ok_or_else(|| {
+                    format!("node '{}' depends on missing node '{}'", node.id, dep)
+                })?;
+                rev[*parent].push(i);
+                in_degree[i] += 1;
+            }
+        }
+        // Initial frontier: nodes with no remaining dependencies.
+        let mut frontier: Vec<usize> = (0..n).filter(|i| in_degree[*i] == 0).collect();
+        let mut layers: Vec<Vec<usize>> = Vec::new();
+        while !frontier.is_empty() {
+            // Stable order so identical graphs produce identical layers
+            // (this is the property `SketchPhase` and tests rely on).
+            frontier.sort();
+            let next_layer = frontier.clone();
+            layers.push(std::mem::take(&mut frontier));
+            for &node in &next_layer {
+                for &child in &rev[node] {
+                    in_degree[child] -= 1;
+                    if in_degree[child] == 0 {
+                        frontier.push(child);
+                    }
+                }
+            }
+        }
+        let visited: usize = layers.iter().map(|l| l.len()).sum();
+        if visited != n {
+            let mut stuck: Vec<String> = (0..n)
+                .filter(|i| in_degree[*i] > 0)
+                .map(|i| self.nodes[i].id.clone())
+                .collect();
+            stuck.sort();
+            stuck.dedup();
+            return Err(format!("graph has a cycle; stuck at: {stuck:?}"));
+        }
+        Ok(layers)
+    }
+
+    /// Detect cycles. Returns `Ok(())` when the DAG is acyclic and
+    /// well-formed, `Err(message)` otherwise.
+    pub fn validate_no_cycles(&self) -> Result<(), String> {
+        self.topological_layers().map(|_| ())
+    }
+}
+
+/// Should the `decompose` phase actually call the LLM? V4 §5.3
+/// defines the trigger conditions; the canonical brief drives them.
+///
+/// The implementation is **deliberately conservative**: a brief that
+/// looks simple, has few deliverables, and lacks a clear dependency
+/// graph will short-circuit to a trivial graph without spending a
+/// LLM call. The thresholds were calibrated on the v0.2 mock-provider
+/// fixtures so a typical 1-deliverable brief does not pay the cost.
+pub fn should_decompose(brief: &Brief) -> bool {
+    // Heuristic ladder (any condition makes the brief a candidate):
+    //  1. ≥ 3 hard constraints → the LLM benefits from separation.
+    //  2. ≥ 3 deliverables → multiple independent outputs.
+    //  3. ≥ 2 assumptions that mention "depends on", "after", or
+    //     "once" → explicit dependency hints from the user.
+    //  4. Brief contains the magic word "subproblem" or "phase" → the
+    //     user is already thinking in stages.
+    if brief.constraints.len() >= 3 {
+        return true;
+    }
+    if brief.deliverables.len() >= 3 {
+        return true;
+    }
+    for assumption in &brief.assumptions {
+        let lower = assumption.to_lowercase();
+        if lower.contains("depends on")
+            || lower.contains("after ")
+            || lower.contains("once ")
+            || lower.contains(" subproblem")
+            || lower.contains("phase ")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,5 +1160,256 @@ mod tests {
         assert_eq!(back.id, "h_001");
         assert_eq!(back.response, "y");
         assert!(!back.accepted_default);
+    }
+
+    // -- Phase G types (v0.3, Plan B sub-fase G) --------------------------
+
+    /// Trivial graph is empty and well-formed; downstream phases see
+    /// `is_empty() == true` and fall back to non-DAG behaviour.
+    #[test]
+    fn problem_graph_trivial_is_empty() {
+        let g = ProblemGraph::trivial("abc", 1_700_000_000);
+        assert!(g.is_empty());
+        assert!(!g.should_decompose);
+        assert!(g.roots().is_empty());
+        assert!(g.topological_layers().unwrap().is_empty());
+    }
+
+    /// Empty `nodes` with `should_decompose=true` is malformed;
+    /// `topological_layers` should not loop forever.
+    #[test]
+    fn problem_graph_empty_with_decompose_returns_no_layers() {
+        let g = ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: Vec::new(),
+            ..Default::default()
+        };
+        assert!(g.topological_layers().unwrap().is_empty());
+    }
+
+    /// Single-node graph: the node is the only root and only layer.
+    #[test]
+    fn problem_graph_single_node_is_a_single_layer() {
+        let g = ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: vec![GraphNode {
+                id: "n0".into(),
+                question: "what?".into(),
+                expected_output: "an answer".into(),
+                constraints: Vec::new(),
+                dependencies: Vec::new(),
+                validation_method: ValidationMethod::Structural,
+            }],
+            ..Default::default()
+        };
+        let layers = g.topological_layers().unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0], vec![0]);
+    }
+
+    /// Two roots + one shared child: the first layer is both roots,
+    /// the second is the child.
+    #[test]
+    fn problem_graph_two_layers_kahn() {
+        let g = ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: vec![
+                GraphNode {
+                    id: "a".into(),
+                    dependencies: vec![],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "b".into(),
+                    dependencies: vec![],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "c".into(),
+                    dependencies: vec!["a".into(), "b".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let layers = g.topological_layers().unwrap();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0], vec![0, 1]);
+        assert_eq!(layers[1], vec![2]);
+    }
+
+    /// A cycle surfaces as `Err` with a non-empty list of stuck ids.
+    #[test]
+    fn problem_graph_cycle_reports_error() {
+        let g = ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: vec![
+                GraphNode {
+                    id: "a".into(),
+                    dependencies: vec!["b".into()],
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "b".into(),
+                    dependencies: vec!["a".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let err = g.topological_layers().unwrap_err();
+        assert!(err.contains("cycle"), "got: {err}");
+    }
+
+    /// A dangling dependency surfaces as `Err` mentioning the missing id.
+    #[test]
+    fn problem_graph_dangling_dependency_reports_error() {
+        let g = ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: vec![GraphNode {
+                id: "a".into(),
+                dependencies: vec!["ghost".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = g.topological_layers().unwrap_err();
+        assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    /// Round-trip: graph → JSON → graph preserves node ids, layers,
+    /// and the schema version.
+    #[test]
+    fn problem_graph_round_trip() {
+        let g = ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: vec![
+                GraphNode {
+                    id: "a".into(),
+                    question: "Q1".into(),
+                    ..Default::default()
+                },
+                GraphNode {
+                    id: "b".into(),
+                    question: "Q2".into(),
+                    dependencies: vec!["a".into()],
+                    validation_method: ValidationMethod::Executable,
+                    ..Default::default()
+                },
+            ],
+            integration_rules: vec![IntegrationRule {
+                from: "a".into(),
+                to: "b".into(),
+                description: "Q1's output is Q2's input".into(),
+            }],
+            critical_path: vec!["a".into(), "b".into()],
+            brief_blake3: "deadbeef".into(),
+            created_unix: 1_700_000_000,
+        };
+        let j = serde_json::to_string(&g).unwrap();
+        let back: ProblemGraph = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.nodes.len(), 2);
+        assert_eq!(back.nodes[1].dependencies, vec!["a"]);
+        assert_eq!(
+            back.nodes[1].validation_method,
+            ValidationMethod::Executable
+        );
+        assert_eq!(back.integration_rules.len(), 1);
+        assert_eq!(back.critical_path, vec!["a", "b"]);
+        assert_eq!(back.brief_blake3, "deadbeef");
+    }
+
+    /// `should_decompose` mirrors the V4 §5.3 ladder.
+    #[test]
+    fn should_decompose_threshold_ladder() {
+        // Empty brief → false.
+        let brief = Brief::default();
+        assert!(!should_decompose(&brief));
+        // 1 deliverable + 1 constraint → still false.
+        let brief = Brief {
+            deliverables: vec!["deliver one thing".into()],
+            constraints: vec!["must be fast".into()],
+            ..Default::default()
+        };
+        assert!(!should_decompose(&brief));
+        // 3 deliverables → true.
+        let brief = Brief {
+            deliverables: vec!["a".into(), "b".into(), "c".into()],
+            ..Default::default()
+        };
+        assert!(should_decompose(&brief));
+        // 3 constraints → true.
+        let brief = Brief {
+            constraints: vec!["c1".into(), "c2".into(), "c3".into()],
+            ..Default::default()
+        };
+        assert!(should_decompose(&brief));
+        // Magic-word in assumption → true.
+        let brief = Brief {
+            assumptions: vec!["this is a subproblem we tackle in two parts".into()],
+            ..Default::default()
+        };
+        assert!(should_decompose(&brief));
+    }
+
+    /// `ValidationMethod` round-trips through JSON with snake_case
+    /// representation (so a downstream validator can parse it).
+    #[test]
+    fn validation_method_serialises_snake_case() {
+        let m = ValidationMethod::Executable;
+        let j = serde_json::to_string(&m).unwrap();
+        assert_eq!(j, "\"executable\"");
+        let back: ValidationMethod = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, ValidationMethod::Executable);
+    }
+
+    /// `Proposal.source_nodes` (Phase G) round-trips through JSON
+    /// and is `#[serde(skip_serializing_if = "Vec::is_empty")]` so
+    /// legacy v0.2 sidecars (which never emit the field) stay
+    /// compact.
+    #[test]
+    fn proposal_source_nodes_round_trip() {
+        let p = Proposal {
+            id: "p_007".into(),
+            source_nodes: vec!["n0".into(), "n1".into()],
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(j.contains("source_nodes"), "missing field: {j}");
+        let back: Proposal = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.source_nodes, vec!["n0", "n1"]);
+    }
+
+    /// Empty `source_nodes` is skipped in the JSON representation
+    /// (the field's `skip_serializing_if` is `Vec::is_empty`).
+    #[test]
+    fn proposal_source_nodes_omitted_when_empty() {
+        let p = Proposal::default();
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(!j.contains("source_nodes"), "leaked field: {j}");
+    }
+
+    /// Legacy v0.2 sidecars (which never had `source_nodes`) parse
+    /// into a Proposal with an empty vec, not a deserialise error.
+    #[test]
+    fn proposal_parses_legacy_sidecar_without_source_nodes() {
+        let legacy = serde_json::json!({
+            "id": "p_legacy",
+            "summary": "old shape",
+            "approach": "rust",
+            "tradeoffs": [],
+            "evidence": [],
+            "source_sketch": "",
+            "artifacts": [],
+            "replaced_by": null,
+        });
+        let p: Proposal = serde_json::from_value(legacy).unwrap();
+        assert!(p.source_nodes.is_empty());
     }
 }

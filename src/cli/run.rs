@@ -13,9 +13,9 @@ use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
-    ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase,
-    JudgePhase, Pipeline, ProposePhase, RankPhase, RepairPhase, RoutePhase, SketchPhase,
-    SynthesizePhase, ValidatePhase,
+    ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DecomposePhase, DeliverPhase, GatePhase,
+    IntakePhase, JudgePhase, Pipeline, ProposePhase, RankPhase, RepairPhase, RoutePhase,
+    SketchPhase, SynthesizePhase, ValidatePhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -246,6 +246,18 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config, replace_sources_enabled: bo
         .push(IntakePhase)
         .push(ClarifyPhase)
         .push(RoutePhase);
+
+    // Phase G (V4 §5.3 + T01-06 §8.1 step 3 + §16.4): the
+    // `DecomposePhase` only runs in `deep` mode. It is a no-op for
+    // every other mode (the wiring is conditional here, not inside
+    // the phase) so non-deep runs never pay the cost of an extra
+    // pipeline node. The phase itself short-circuits to a trivial
+    // `ProblemGraph` when the brief does not meet the trigger
+    // ladder.
+    if mode == Mode::Deep {
+        pipeline = pipeline.push(DecomposePhase);
+    }
+
     // SketchPhase runs after Route whenever the mode says so. When
     // `count == 0` the phase short-circuits to an empty
     // `PhaseOutput::Sketches`, but we still insert it so the

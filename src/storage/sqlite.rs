@@ -36,6 +36,10 @@ mod sql_v005 {
     pub(super) const V005: &str = include_str!("migrations/v005_checkpoints_content.sql");
 }
 
+mod sql_v006 {
+    pub(super) const V006: &str = include_str!("migrations/v006_problem_graph.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -122,6 +126,10 @@ impl Db {
         if current < 5 {
             conn.execute_batch(sql_v005::V005)?;
             conn.execute_batch("PRAGMA user_version = 5;")?;
+        }
+        if current < 6 {
+            conn.execute_batch(sql_v006::V006)?;
+            conn.execute_batch("PRAGMA user_version = 6;")?;
         }
         Ok(())
     }
@@ -521,6 +529,73 @@ impl Db {
         Ok(())
     }
 
+    /// Record a `ProblemGraph` (Phase G) for a run. The table is
+    /// added in migration v006; this method tolerates the
+    /// pre-v006 schema (the table will not exist) and returns
+    /// `Ok(())` so a phase that opens a legacy database never
+    /// fails the run. After the v006 migration has been applied
+    /// the write actually lands.
+    pub fn record_problem_graph(
+        &self,
+        run_id: RunId,
+        brief_blake3: &str,
+        should_decompose: bool,
+        node_count: i64,
+        at_unix: i64,
+    ) -> Result<()> {
+        let conn = self.pool.get()?;
+        // Probe the user_version so the call is a no-op on legacy
+        // databases (v1..=v5). The migration runner already updates
+        // user_version to 6 before this method is ever called from
+        // a v0.3+ run, so the check is cheap.
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 6 {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO problem_graphs \
+             (run_id, brief_blake3, should_decompose, node_count, at_unix) \
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                run_id.to_string(),
+                brief_blake3,
+                should_decompose as i64,
+                node_count,
+                at_unix,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read the `problem_graphs` row for a run. Returns `None`
+    /// when the row does not exist (pre-v006 DB or a run that
+    /// never reached the `decompose` phase). Best-effort: returns
+    /// `Ok(None)` on the legacy schema too.
+    pub fn get_problem_graph(&self, run_id: RunId) -> Result<Option<ProblemGraphRow>> {
+        let conn = self.pool.get()?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 6 {
+            return Ok(None);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT brief_blake3, should_decompose, node_count, at_unix \
+             FROM problem_graphs WHERE run_id = ?",
+        )?;
+        let row = stmt.query_row(params![run_id.to_string()], |r| {
+            Ok(ProblemGraphRow {
+                brief_blake3: r.get(0)?,
+                should_decompose: r.get::<_, i64>(1)? != 0,
+                node_count: r.get(2)?,
+                at_unix: r.get(3)?,
+            })
+        });
+        match row {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Full checkpoint list for a run, ordered by `at_unix`
     /// ascending. Returns an empty Vec if no checkpoints were
     /// recorded (e.g. when `interactive=false` and the call path
@@ -591,6 +666,20 @@ pub struct CheckpointRow {
     pub accepted_default: bool,
     /// Unix seconds at capture time.
     pub at_unix: Option<i64>,
+}
+
+/// One row in `problem_graphs` (Phase G).
+#[derive(Debug, Clone)]
+pub struct ProblemGraphRow {
+    /// BLAKE3 of the canonical brief.
+    pub brief_blake3: String,
+    /// True when the model said yes; false when the trigger ladder
+    /// vetoed the call (or the model did).
+    pub should_decompose: bool,
+    /// Number of nodes that survived repair.
+    pub node_count: i64,
+    /// Unix seconds at capture time.
+    pub at_unix: i64,
 }
 
 /// One row from the full `warnings` list.
@@ -732,7 +821,8 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        // v006 added the `problem_graphs` table.
+        assert_eq!(v, 6);
     }
 
     #[test]
@@ -1002,11 +1092,13 @@ mod tests {
             cols.contains(&"at_unix".to_owned()),
             "at_unix column missing: {cols:?}"
         );
-        // PRAGMA user_version is now 5
+        // PRAGMA user_version is now 5 (this test exercises the v005
+        // migration path; v006 lands after it but does not affect
+        // the columns under test).
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        assert!(v >= 5);
     }
 
     #[test]
@@ -1107,5 +1199,51 @@ mod tests {
         assert_eq!(counts.get("intake").copied(), Some(2));
         assert_eq!(counts.get("clarify").copied(), Some(1));
         assert_eq!(counts.get("final"), None);
+    }
+
+    /// Phase G: opening a fresh DB applies the v006 migration
+    /// (the `problem_graphs` table exists and `user_version = 6`).
+    #[test]
+    fn v006_migration_creates_problem_graphs_table() {
+        let db = temp_db();
+        let conn = db.pool.get().unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='problem_graphs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// Phase G: `record_problem_graph` writes the row and a
+    /// second call with the same `run_id` updates it (INSERT OR
+    /// REPLACE).
+    #[test]
+    fn record_problem_graph_round_trip() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "deep", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_problem_graph(run_id, "deadbeef", true, 5, 1_700_000_000)
+            .unwrap();
+        // Idempotent re-write with a different node count.
+        db.record_problem_graph(run_id, "deadbeef", true, 7, 1_700_000_100)
+            .unwrap();
+        let conn = db.pool.get().unwrap();
+        let (n, at): (i64, i64) = conn
+            .query_row(
+                "SELECT node_count, at_unix FROM problem_graphs WHERE run_id = ?",
+                rusqlite::params![run_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(at, 1_700_000_100);
     }
 }

@@ -253,6 +253,15 @@ impl Telemetry {
         })
     }
 
+    /// Borrow the SQLite index. `None` when the run was opened in
+    /// no-index mode (legacy tests, the dashboard's read-only path,
+    /// or a run that explicitly skipped the index). Phases can use
+    /// this to mirror sidecar content into SQLite; the mirror is
+    /// best-effort and never blocks the phase.
+    pub fn db(&self) -> Option<&Db> {
+        self.inner.db.as_ref()
+    }
+
     /// Build a no-op telemetry handle for tests.
     pub fn noop() -> Self {
         struct NullWriter;

@@ -68,6 +68,7 @@ fn proposal(id: &str, summary: &str, approach: &str) -> Proposal {
         source_sketch: String::new(),
         artifacts: Vec::new(),
         replaced_by: None,
+        source_nodes: Vec::new(),
     }
 }
 
