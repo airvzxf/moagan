@@ -64,6 +64,14 @@ pub struct Config {
     /// top-1 winner held its position in fewer than 80% of the
     /// perturbations.
     pub stability: StabilityConfig,
+    /// Phase I (v0.3 sub-fase I): knobs for `moagan telemetry view`
+    /// (the read-only HTTP dashboard). `DEFAULT_PORT` per
+    /// `proposal-01-concept.md §8.8`.
+    pub server: ServerConfig,
+    /// Phase I (v0.3 sub-fase I): knobs for `moagan telemetry
+    /// cleanup` (the retention pass). Mirrors the catalog
+    /// `D.5.1` retention knobs.
+    pub retention: RetentionConfig,
 }
 
 /// Per-criterion weights used by the `RankPhase` to compute the
@@ -224,6 +232,8 @@ impl Default for Config {
             gate_min_length: 50,
             gate_max_length: 5000,
             stability: StabilityConfig::default(),
+            server: ServerConfig::default(),
+            retention: RetentionConfig::default(),
         }
     }
 }
@@ -260,6 +270,71 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         },
     );
     m
+}
+
+/// Dashboard server knobs (T01-06 §10.8 + V4 §8.8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// TCP port for `moagan telemetry view`. Default 4096
+    /// (the V4 §8.8 value; the `pick_port` helper in
+    /// `telemetry::dashboard` walks forward through the
+    /// blacklist to land on a free port when 4096 is taken).
+    pub port: u16,
+    /// Bind host. Always `127.0.0.1` per V4 §8.8; exposed
+    /// as a knob so operators can re-pin to `::1` if their
+    /// test rig prefers IPv6 loopback.
+    pub host: String,
+    /// Per-request IO timeout (seconds). Default 30s.
+    pub io_timeout_secs: u64,
+    /// Whether the dashboard auto-creates the runs/ directory
+    /// when the bind succeeds. Default true so a fresh
+    /// `MOAGAN_HOME` does not require `moagan run` first.
+    pub ensure_home: bool,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            port: 4096,
+            host: "127.0.0.1".to_owned(),
+            io_timeout_secs: 30,
+            ensure_home: true,
+        }
+    }
+}
+
+/// Retention knobs (catalog D.5.1). All four fields are exposed
+/// in the config so `moagan telemetry cleanup` can be tuned
+/// without editing code. Set any `*_days` / `*_count` /
+/// `max_storage_bytes` knob to `0` to disable that specific
+/// constraint (the cleanup becomes a pure age-or-count or
+/// storage pass).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Maximum age in days. Runs older than this are eligible.
+    /// `0` disables the age filter.
+    pub keep_runs_days: u32,
+    /// Maximum total run count. `0` keeps nothing (matches
+    /// the proposal's "delete all" smoke path).
+    pub keep_runs_count: u32,
+    /// Maximum total bytes for `.runs/`. `0` disables.
+    pub max_storage_bytes: u64,
+    /// Policy: `delete` (default) or `archive` (move into
+    /// `<root>/archive/YYYY-MM-DD/<run_id>/`).
+    pub policy: String,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            keep_runs_days: 30,
+            keep_runs_count: 100,
+            max_storage_bytes: 50 * 1024 * 1024 * 1024,
+            policy: "delete".to_owned(),
+        }
+    }
 }
 
 /// Per-provider configuration.
@@ -412,6 +487,35 @@ mod tests {
         assert!(cfg.providers.contains_key("minimax-m2.7-highspeed"));
         assert!(cfg.providers.contains_key("minimax-m2.5"));
         assert!(cfg.providers.contains_key("mock"));
+    }
+
+    #[test]
+    fn server_config_defaults_match_v4_section_8_8() {
+        let cfg = Config::default();
+        assert_eq!(cfg.server.port, 4096);
+        assert_eq!(cfg.server.host, "127.0.0.1");
+        assert_eq!(cfg.server.io_timeout_secs, 30);
+        assert!(cfg.server.ensure_home);
+    }
+
+    #[test]
+    fn retention_config_defaults_match_proposal_section_12() {
+        let cfg = Config::default();
+        assert_eq!(cfg.retention.keep_runs_days, 30);
+        assert_eq!(cfg.retention.keep_runs_count, 100);
+        assert_eq!(cfg.retention.max_storage_bytes, 50 * 1024 * 1024 * 1024);
+        assert_eq!(cfg.retention.policy, "delete");
+    }
+
+    #[test]
+    fn toml_round_trip_preserves_server_and_retention() {
+        let cfg = Config::default();
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(back.server.port, cfg.server.port);
+        assert_eq!(back.server.host, cfg.server.host);
+        assert_eq!(back.retention.keep_runs_days, cfg.retention.keep_runs_days);
+        assert_eq!(back.retention.policy, cfg.retention.policy);
     }
 
     #[test]

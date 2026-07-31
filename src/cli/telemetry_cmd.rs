@@ -717,6 +717,7 @@ mod provider {
 
 mod view {
     use super::{Error, Result, TelemetryCmd};
+    use crate::config::Config;
     use crate::telemetry::dashboard::{self, DashboardConfig};
     use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
@@ -727,13 +728,22 @@ mod view {
             _ => return Err(Error::InvalidState("view: wrong variant".into())),
         };
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
-        let bind = SocketAddr::new(IpAddr::V4("127.0.0.1".parse().unwrap()), port);
-        let cfg = DashboardConfig {
+        let cfg = Config::load()?;
+        let bind = SocketAddr::new(
+            cfg.server.host.parse::<IpAddr>().map_err(|e| {
+                Error::InvalidArgs(format!("invalid dashboard host '{}': {e}", cfg.server.host))
+            })?,
+            // CLI flag wins over config when the caller passed one
+            // other than the default (4096). Otherwise honor the
+            // config knob.
+            if port == 4096 { cfg.server.port } else { port },
+        );
+        let dash_cfg = DashboardConfig {
             bind,
             home: Arc::new(home),
             db_path: None,
         };
-        let handle = dashboard::start(cfg).await?;
+        let handle = dashboard::start(dash_cfg).await?;
         println!("dashboard listening on http://{}", handle.local_addr);
         println!("endpoints:");
         println!("  GET /api/runs");
@@ -744,10 +754,6 @@ mod view {
         println!("  GET /api/runs/<id>/hashes");
         println!("  GET /api/runs/<id>/export?level=summary|full&format=tar.gz|tar|zip");
         println!("press Ctrl-C to stop");
-        // Block until the user hits Ctrl-C. The dashboard task
-        // checks its cancellation token on every accept loop
-        // iteration; the runtime's signal handler tears the
-        // process down cleanly.
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
@@ -811,6 +817,7 @@ mod export {
 
 mod cleanup {
     use super::{Error, Result, TelemetryCmd};
+    use crate::config::Config;
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
     use crate::telemetry::retention::{RetentionConfig, RetentionPolicy, apply};
@@ -823,18 +830,23 @@ mod cleanup {
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let runs_dir = home.runs_dir();
         let db = Db::open(&home.meta_db_path()).ok();
-        let cfg = RetentionConfig {
-            keep_runs_days: 30,
-            keep_runs_count: 100,
-            max_storage_bytes: 50 * 1024 * 1024 * 1024,
-            policy: RetentionPolicy::Delete,
+        let cfg = Config::load()?;
+        let policy = match cfg.retention.policy.as_str() {
+            "archive" => RetentionPolicy::Archive,
+            _ => RetentionPolicy::Delete,
+        };
+        let retention_cfg = RetentionConfig {
+            keep_runs_days: cfg.retention.keep_runs_days,
+            keep_runs_count: cfg.retention.keep_runs_count,
+            max_storage_bytes: cfg.retention.max_storage_bytes,
+            policy,
         };
         let db_lookup = |run_id: RunId| -> Option<i64> {
             db.as_ref()
                 .and_then(|d| d.get_run(run_id).ok().flatten())
                 .map(|r| r.updated_unix)
         };
-        let report = apply(&runs_dir, &db_lookup, &cfg, dry_run)?;
+        let report = apply(&runs_dir, &db_lookup, &retention_cfg, dry_run)?;
         if report.candidates.is_empty() {
             println!(
                 "(no runs match the retention policy; nothing to {}.)",
