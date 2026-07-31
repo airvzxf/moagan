@@ -724,9 +724,56 @@ mod view {
 
 mod export {
     use super::{Error, Result, TelemetryCmd};
+    use crate::ids::RunId;
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("export")
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, run, level, format, out) = match cmd {
+            TelemetryCmd::Export {
+                runs_dir,
+                run,
+                level,
+                format,
+                out,
+            } => (
+                runs_dir.as_ref(),
+                run.as_str(),
+                *level,
+                *format,
+                out.as_deref(),
+            ),
+            _ => return Err(Error::InvalidState("export: wrong variant".into())),
+        };
+        let run_id: RunId = run
+            .parse()
+            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run}': {e}")))?;
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let run_dir = home.run_dir(run_id);
+        if !run_dir.root().exists() {
+            return Err(Error::InvalidState(format!(
+                "run {run} directory not found at {}",
+                run_dir.root().display()
+            )));
+        }
+        let default_name = format!("run_{}_{}.{}", run_id.short(), level, extension_for(format));
+        let out_path = out
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| run_dir.root().with_file_name(default_name));
+        let result =
+            crate::telemetry::export::export_run(&run_dir, run_id, level, format, &out_path)?;
+        println!("export: wrote {} file(s)", result.file_count);
+        println!("  payload bytes: {}", result.payload_bytes);
+        println!("  archive bytes: {}", result.archive_bytes);
+        println!("  archive sha256: {}", result.archive_sha256);
+        println!("  path: {}", result.archive_path.display());
+        Ok(())
+    }
+
+    fn extension_for(format: super::ExportFormat) -> &'static str {
+        match format {
+            super::ExportFormat::TarGz => "tar.gz",
+            super::ExportFormat::Tar => "tar",
+            super::ExportFormat::Zip => "zip",
+        }
     }
 }
 
