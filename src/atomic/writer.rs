@@ -130,6 +130,14 @@ impl AtomicWriter {
     }
 
     /// Read the data file and verify it against its sidecar metadata.
+    ///
+    /// The integrity check compares only the data-derived fields
+    /// (`size_bytes`, `blake3_hex`, `crc32c_hex`) so the call is
+    /// deterministic regardless of when it runs after the write.
+    /// The `sealed_at_unix` and `schema_version` fields are
+    /// informational — they survive a round trip but a
+    /// `now_unix_secs()` change between the write and the read
+    /// is expected and not an error.
     pub fn read_with_meta(&self, dest: &Path) -> Result<(Vec<u8>, ArtifactMeta)> {
         let data = fs::read(dest).map_err(|e| IoError::Read {
             path: dest.to_path_buf(),
@@ -142,8 +150,11 @@ impl AtomicWriter {
         })?;
         let meta: ArtifactMeta =
             serde_json::from_slice(&meta_bytes).map_err(IoError::DeserializeMeta)?;
-        let expected = compute_meta(&data)?;
-        if expected != meta {
+        if !data_fingerprint_matches(&data, &meta) {
+            // Build a diagnostic `expected` that re-uses the
+            // sidecar's `sealed_at_unix` so the error message
+            // surfaces a single timestamp per field.
+            let expected = compute_meta_at(&data, meta.sealed_at_unix)?;
             return Err(IoError::MetaMismatch {
                 path: dest.to_path_buf(),
                 expected: Box::new(expected),
@@ -202,12 +213,19 @@ impl AtomicWriter {
 }
 
 fn compute_meta(data: &[u8]) -> Result<ArtifactMeta> {
+    compute_meta_at(data, crate::time::now_unix_secs())
+}
+
+/// Build the `ArtifactMeta` for `data` with the given
+/// `sealed_at_unix`. The timestamp is an explicit parameter so the
+/// read path can re-derive the expected meta with the sidecar's
+/// timestamp and avoid a clock-boundary race.
+fn compute_meta_at(data: &[u8], sealed_at_unix: i64) -> Result<ArtifactMeta> {
     let size_bytes = data.len() as u64;
     let mut hasher = blake3::Hasher::new();
     hasher.update(data);
     let blake3_hex = hex::encode(hasher.finalize().as_bytes());
     let crc32c_hex = crc32c_hex(data);
-    let sealed_at_unix = crate::time::now_unix_secs();
     Ok(ArtifactMeta {
         schema_version: ArtifactMeta::SCHEMA_VERSION.to_owned(),
         size_bytes,
@@ -215,6 +233,25 @@ fn compute_meta(data: &[u8]) -> Result<ArtifactMeta> {
         sealed_at_unix,
         crc32c_hex,
     })
+}
+
+/// True when the data-derived fingerprint fields of `meta` match
+/// the actual `data`. `sealed_at_unix` and `schema_version` are
+/// informational and intentionally excluded from the comparison.
+fn data_fingerprint_matches(data: &[u8], meta: &ArtifactMeta) -> bool {
+    if data.len() as u64 != meta.size_bytes {
+        return false;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(data);
+    let blake3_hex = hex::encode(hasher.finalize().as_bytes());
+    if blake3_hex != meta.blake3_hex {
+        return false;
+    }
+    if crc32c_hex(data) != meta.crc32c_hex {
+        return false;
+    }
+    true
 }
 
 /// CRC32C (Castagnoli) computed in software. Different providers name
@@ -304,6 +341,32 @@ mod tests {
         AtomicWriter::new().write(&dest, b"second-content").unwrap();
         let (got, _) = AtomicWriter::new().read_with_meta(&dest).unwrap();
         assert_eq!(got, b"second-content");
+    }
+
+    /// Regression: `read_with_meta` must not fail when the second
+    /// write happens in a different clock second than the read.
+    /// The original `overwrites_existing_file` test was flaky in
+    /// CI: when the read crossed a Unix-second boundary the
+    /// sidecar's `sealed_at_unix` was 1s older than the freshly
+    /// computed `expected`, so the comparison failed with
+    /// `MetaMismatch`. The fix compares only the data-derived
+    /// fields (`size_bytes`, `blake3_hex`, `crc32c_hex`) and
+    /// ignores the timestamp.
+    #[test]
+    fn overwrites_existing_file_survives_clock_second_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("artifact.json");
+        AtomicWriter::new().write(&dest, b"first").unwrap();
+        // Force the second write to land in a different clock
+        // second from the first one.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        AtomicWriter::new().write(&dest, b"second-content").unwrap();
+        // And force the read into yet another second.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let (got, got_meta) = AtomicWriter::new().read_with_meta(&dest).unwrap();
+        assert_eq!(got, b"second-content");
+        assert_eq!(got_meta.size_bytes, 14);
+        assert_eq!(got_meta.blake3_hex.len(), 64);
     }
 
     #[test]
