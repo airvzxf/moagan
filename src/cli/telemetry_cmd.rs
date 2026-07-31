@@ -779,9 +779,53 @@ mod export {
 
 mod cleanup {
     use super::{Error, Result, TelemetryCmd};
+    use crate::ids::RunId;
+    use crate::storage::sqlite::Db;
+    use crate::telemetry::retention::{RetentionConfig, RetentionPolicy, apply};
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("cleanup")
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, dry_run) = match cmd {
+            TelemetryCmd::Cleanup { runs_dir, dry_run } => (runs_dir.as_ref(), *dry_run),
+            _ => return Err(Error::InvalidState("cleanup: wrong variant".into())),
+        };
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let runs_dir = home.runs_dir();
+        let db = Db::open(&home.meta_db_path()).ok();
+        let cfg = RetentionConfig {
+            keep_runs_days: 30,
+            keep_runs_count: 100,
+            max_storage_bytes: 50 * 1024 * 1024 * 1024,
+            policy: RetentionPolicy::Delete,
+        };
+        let db_lookup = |run_id: RunId| -> Option<i64> {
+            db.as_ref()
+                .and_then(|d| d.get_run(run_id).ok().flatten())
+                .map(|r| r.updated_unix)
+        };
+        let report = apply(&runs_dir, &db_lookup, &cfg, dry_run)?;
+        if report.candidates.is_empty() {
+            println!(
+                "(no runs match the retention policy; nothing to {}.)",
+                if dry_run { "remove" } else { "act on" }
+            );
+            return Ok(());
+        }
+        println!(
+            "{}: {} run(s) selected, total {} bytes",
+            if dry_run { "dry-run" } else { "apply" },
+            report.candidates.len(),
+            report.total_bytes
+        );
+        for cand in &report.candidates {
+            println!(
+                "  {}  bytes={}  updated_unix={}  policy={:?}",
+                cand.run_id.short(),
+                cand.bytes,
+                cand.updated_unix,
+                report.policy
+            );
+        }
+        Ok(())
     }
 }
 
