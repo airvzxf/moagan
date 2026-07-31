@@ -188,13 +188,13 @@ impl std::fmt::Display for ExportFormat {
 
 impl TelemetryCmd {
     /// Dispatch the telemetry subcommand.
-    pub fn dispatch(self) -> Result<i32> {
+    pub async fn dispatch(self) -> Result<i32> {
         match self {
             Self::List { .. } => list::run(&self).map(|_| 0),
             Self::Summary { .. } => summary::run(&self).map(|_| 0),
             Self::Compare { .. } => compare::run(&self).map(|_| 0),
             Self::Provider { .. } => provider::run(&self).map(|_| 0),
-            Self::View { .. } => view::run(&self).map(|_| 0),
+            Self::View { .. } => view::run(&self).await.map(|_| 0),
             Self::Export { .. } => export::run(&self).map(|_| 0),
             Self::Cleanup { .. } => cleanup::run(&self).map(|_| 0),
             Self::Verify { .. } => verify::run(&self).map(|_| 0),
@@ -223,13 +223,14 @@ pub(crate) fn resolve_home(
     }
 }
 
-macro_rules! not_yet {
-    ($variant:literal) => {
-        Err(Error::InvalidState(format!(
-            "moagan telemetry {}: not yet implemented in v0.3 sub-fase I",
-            $variant
-        )))
-    };
+#[allow(dead_code)]
+mod stubs_removed {
+    use super::{Error, Result};
+    pub(crate) fn run_stub(_name: &str) -> Result<()> {
+        Err(Error::InvalidState(
+            "moagan telemetry: stub called (should be unreachable)".to_string(),
+        ))
+    }
 }
 
 mod list {
@@ -716,9 +717,40 @@ mod provider {
 
 mod view {
     use super::{Error, Result, TelemetryCmd};
+    use crate::telemetry::dashboard::{self, DashboardConfig};
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("view")
+    pub(super) async fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, port) = match cmd {
+            TelemetryCmd::View { runs_dir, port } => (runs_dir.as_ref(), *port),
+            _ => return Err(Error::InvalidState("view: wrong variant".into())),
+        };
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let bind = SocketAddr::new(IpAddr::V4("127.0.0.1".parse().unwrap()), port);
+        let cfg = DashboardConfig {
+            bind,
+            home: Arc::new(home),
+            db_path: None,
+        };
+        let handle = dashboard::start(cfg).await?;
+        println!("dashboard listening on http://{}", handle.local_addr);
+        println!("endpoints:");
+        println!("  GET /api/runs");
+        println!("  GET /api/runs/<id>");
+        println!("  GET /api/runs/<id>/phases");
+        println!("  GET /api/runs/<id>/calls");
+        println!("  GET /api/runs/<id>/provider_usage");
+        println!("  GET /api/runs/<id>/hashes");
+        println!("  GET /api/runs/<id>/export?level=summary|full&format=tar.gz|tar|zip");
+        println!("press Ctrl-C to stop");
+        // Block until the user hits Ctrl-C. The dashboard task
+        // checks its cancellation token on every accept loop
+        // iteration; the runtime's signal handler tears the
+        // process down cleanly.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
     }
 }
 
@@ -905,8 +937,8 @@ mod tests {
         // Empty DB doesn't exist yet; the open call creates it. We
         // capture stdout via the dispatch returning Ok(0) so the
         // test only checks the no-error / no-panic contract.
-        let code = cmd.dispatch().unwrap();
-        assert_eq!(code, 0);
+        let code = pollster::block_on(cmd.dispatch());
+        assert_eq!(code.unwrap(), 0);
     }
 
     #[test]
@@ -917,7 +949,7 @@ mod tests {
             limit: 5,
             run: Some("not-a-uuid".into()),
         };
-        let err = cmd.dispatch().unwrap_err();
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidArgs(_)));
     }
 
@@ -930,7 +962,7 @@ mod tests {
             run: Some("01900000-0000-0000-0000-000000000000".into()),
         };
         // Open succeeds (creates empty DB) but the row is missing.
-        let err = cmd.dispatch().unwrap_err();
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
     }
 
@@ -941,7 +973,7 @@ mod tests {
             runs_dir: Some(tmp.path().to_path_buf()),
             run: "not-a-uuid".into(),
         };
-        let err = cmd.dispatch().unwrap_err();
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidArgs(_)));
     }
 
@@ -952,7 +984,7 @@ mod tests {
             runs_dir: Some(tmp.path().to_path_buf()),
             run: "01900000-0000-0000-0000-000000000000".into(),
         };
-        let err = cmd.dispatch().unwrap_err();
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
     }
 
@@ -964,7 +996,7 @@ mod tests {
             run_a: "not-a-uuid".into(),
             run_b: "01900000-0000-0000-0000-000000000000".into(),
         };
-        let err = cmd.dispatch().unwrap_err();
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidArgs(_)));
     }
 
@@ -976,7 +1008,7 @@ mod tests {
             run_a: "01900000-0000-0000-0000-000000000000".into(),
             run_b: "01900000-0000-0000-0000-000000000001".into(),
         };
-        let err = cmd.dispatch().unwrap_err();
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
     }
 
@@ -988,7 +1020,7 @@ mod tests {
             plan: Some("nonexistent".into()),
             list: false,
         };
-        let err = cmd.dispatch().unwrap_err();
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidArgs(_)));
     }
 
@@ -1000,7 +1032,7 @@ mod tests {
             plan: None,
             list: true,
         };
-        let code = cmd.dispatch().unwrap();
+        let code = pollster::block_on(cmd.dispatch()).unwrap();
         assert_eq!(code, 0);
     }
 
@@ -1012,7 +1044,7 @@ mod tests {
             plan: None,
             list: false,
         };
-        let code = cmd.dispatch().unwrap();
+        let code = pollster::block_on(cmd.dispatch()).unwrap();
         assert_eq!(code, 0);
     }
 }

@@ -537,6 +537,6 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             println!("discovery run id: {run_id}");
             Ok(0)
         }
-        Cmd::Telemetry { sub } => telemetry_cmd::TelemetryCmd::dispatch(sub),
+        Cmd::Telemetry { sub } => telemetry_cmd::TelemetryCmd::dispatch(sub).await,
     }
 }

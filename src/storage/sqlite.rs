@@ -11,6 +11,7 @@ use std::sync::Arc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::error::Result;
@@ -643,7 +644,7 @@ impl Db {
 /// `calls`, `phases`, `provider_usage`, and `warnings` tables.
 /// Used by `moagan telemetry summary` and the dashboard
 /// `GET /api/runs/<id>` endpoint.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct RunAggregate {
     /// Number of LLM calls recorded (cache hits included).
     pub calls: i64,
@@ -673,7 +674,7 @@ pub struct RunAggregate {
 
 /// One row from `provider_usage`. Mirrors the `v001_initial.sql`
 /// schema; one row per `(run_id, provider, model)` triple.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderUsageRow {
     /// Provider name (e.g. `minimax`).
     pub provider: String,
@@ -697,7 +698,7 @@ pub struct ProviderUsageRow {
 /// dashboard normalises three events per phase (start / end / error)
 /// into a single row carrying the final status and the derived
 /// duration. A row is `None` when the phase was never recorded.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct PhaseSummaryRow {
     /// Phase name (e.g. `intake`, `propose`, `rank`).
     pub phase: String,
@@ -976,7 +977,7 @@ pub struct WarningRow {
 
 /// One row from the `calls` table. The schema is defined in
 /// `migrations/v001_initial.sql`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CallRow {
     /// Unique call id (UUID v7).
     pub call_id: String,
@@ -1014,7 +1015,7 @@ pub struct CallRow {
 }
 
 /// Row read from `runs`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RunRow {
     /// Run id.
     pub run_id: String,
