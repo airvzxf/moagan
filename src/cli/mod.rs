@@ -1,7 +1,8 @@
 //! CLI surface. Subcommands are: `run`, `continue`, `resume`, `rerun`,
-//! `inspect`, `refine`, `rerank`. v0.2 ships `run`, `inspect`, `refine`,
-//! and `rerank`; `continue`/`resume`/`rerun` remain stubbed with the
-//! v0.2-friendly error message.
+//! `inspect`, `refine`, `rerank`, `telemetry`. v0.2 ships `run`,
+//! `inspect`, `refine`, and `rerank`; `continue`/`resume`/`rerun` remain
+//! stubbed with the v0.2-friendly error message. `telemetry` lands in
+//! v0.3 sub-fase I (T01-06 §10.7 + V4 §8.7).
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ pub mod doctor;
 pub mod forbidden;
 pub mod inspect;
 pub mod run;
+pub mod telemetry_cmd;
 
 /// Pipeline mode. v0.2 ships `fast`, `standard`, `deep`, `explore`,
 /// and `batch`. `discovery` is deferred to a later sub-phase: its
@@ -275,6 +277,15 @@ pub enum Cmd {
         #[arg(long, default_value_t = 0.7)]
         cluster_threshold: f32,
     },
+    /// `moagan telemetry` — read-only inspection, dashboard, export,
+    /// verify, and retention. v0.3 sub-fase I (T01-06 §10.7 + §10.8
+    /// + §10.9 + §10.10; V4 §8.7 + §8.8).
+    Telemetry {
+        /// Subcommand (`list`, `summary`, `compare`, `provider`,
+        /// `view`, `export`, `cleanup`, `verify`).
+        #[command(subcommand)]
+        sub: telemetry_cmd::TelemetryCmd,
+    },
 }
 
 /// Subcommands of `moagan audit`.
@@ -337,6 +348,7 @@ impl Cmd {
             Self::Doctor => "Check the local environment",
             Self::Audit { .. } => "External, transparent audit trail",
             Self::Discover { .. } => "Discovery mode (knowledge base by category)",
+            Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
         }
     }
 }
@@ -525,5 +537,6 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             println!("discovery run id: {run_id}");
             Ok(0)
         }
+        Cmd::Telemetry { sub } => telemetry_cmd::TelemetryCmd::dispatch(sub),
     }
 }
