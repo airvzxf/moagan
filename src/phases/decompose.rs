@@ -134,10 +134,10 @@ fn stuck_node_ids(graph: &ProblemGraph) -> Vec<String> {
     let mut in_degree = vec![0usize; n];
     for (i, node) in graph.nodes.iter().enumerate() {
         for dep in &node.dependencies {
-            if let Some(&p) = index.get(dep.as_str()) {
-                if p != i {
-                    in_degree[i] += 1;
-                }
+            if let Some(&p) = index.get(dep.as_str())
+                && p != i
+            {
+                in_degree[i] += 1;
             }
         }
     }

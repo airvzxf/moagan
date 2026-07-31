@@ -612,21 +612,16 @@ pub struct HumanCheckpoint {
 /// How a `GraphNode` should be validated when its work is done. The
 /// `decompose` role returns one of these so the downstream
 /// `SketchPhase` / `ProposePhase` know which validator to dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationMethod {
     /// No external validation; the prose is its own evidence.
+    #[default]
     None,
     /// The phase structural / constraints / sketch-shape validator.
     Structural,
     /// The `src/validators/` sandbox (Rust, Python, TS, SQL).
     Executable,
-}
-
-impl Default for ValidationMethod {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// A single node in the `ProblemGraph` DAG. Each node is a sub-question
@@ -1333,23 +1328,33 @@ mod tests {
     /// `should_decompose` mirrors the V4 §5.3 ladder.
     #[test]
     fn should_decompose_threshold_ladder() {
-        let mut brief = Brief::default();
         // Empty brief → false.
+        let brief = Brief::default();
         assert!(!should_decompose(&brief));
         // 1 deliverable + 1 constraint → still false.
-        brief.deliverables = vec!["deliver one thing".into()];
-        brief.constraints = vec!["must be fast".into()];
+        let brief = Brief {
+            deliverables: vec!["deliver one thing".into()],
+            constraints: vec!["must be fast".into()],
+            ..Default::default()
+        };
         assert!(!should_decompose(&brief));
         // 3 deliverables → true.
-        brief.deliverables = vec!["a".into(), "b".into(), "c".into()];
+        let brief = Brief {
+            deliverables: vec!["a".into(), "b".into(), "c".into()],
+            ..Default::default()
+        };
         assert!(should_decompose(&brief));
-        // Reset, 3 constraints → true.
-        let mut brief = Brief::default();
-        brief.constraints = vec!["c1".into(), "c2".into(), "c3".into()];
+        // 3 constraints → true.
+        let brief = Brief {
+            constraints: vec!["c1".into(), "c2".into(), "c3".into()],
+            ..Default::default()
+        };
         assert!(should_decompose(&brief));
         // Magic-word in assumption → true.
-        let mut brief = Brief::default();
-        brief.assumptions = vec!["this is a subproblem we tackle in two parts".into()];
+        let brief = Brief {
+            assumptions: vec!["this is a subproblem we tackle in two parts".into()],
+            ..Default::default()
+        };
         assert!(should_decompose(&brief));
     }
 
