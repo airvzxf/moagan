@@ -1006,6 +1006,9 @@ run_test "verify_orphan_response_count_field" \
 run_test "verify_unmatched_internal_count_field" \
   "grep -q 'unmatched_internal_count' ${ROOT}/src/audit/verify.rs"
 
+run_test "e2e_script_documents_explore_timeout_override" \
+  "grep -q 'MOAGAN_SMOKE_EXPLORE_TIMEOUT' ${ROOT}/scripts/e2e_audit_proxy.sh"
+
 run_test "verify_unmatched_external_count_field" \
   "grep -q 'unmatched_external_count' ${ROOT}/src/audit/verify.rs"
 
@@ -1193,34 +1196,34 @@ run_test "audit_writer_append_helper" \
 # ---------------------------------------------------------------------
 
 run_test "telemetry_call_record_body_sha256" \
-  "grep -q 'body_sha256' ${ROOT}/src/telemetry.rs"
+  "grep -q 'body_sha256' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_module_call_event" \
-  "grep -q 'pub struct CallEvent' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub struct CallEvent' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_module_phase_event" \
-  "grep -q 'pub struct PhaseEvent' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub struct PhaseEvent' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_module_warning_event" \
-  "grep -q 'pub struct WarningEvent' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub struct WarningEvent' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_warn_function_in_discover_phases" \
   "grep -rln 'telemetry.warn' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 3) exit 0; else exit 1 }'"
 
 run_test "telemetry_calls_body_sha256_field" \
-  "grep -q 'pub body_sha256' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub body_sha256' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_calls_status_field" \
-  "grep -q 'pub status' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub status' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_calls_role_field" \
-  "grep -q 'pub role' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub role' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_calls_http_status_field" \
-  "grep -q 'pub http_status' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub http_status' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_calls_input_tokens_field" \
-  "grep -q 'pub input_tokens' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub input_tokens' ${ROOT}/src/telemetry/mod.rs"
 
 # ---------------------------------------------------------------------
 # SECTION 30 — Edge cases & integration (10 tests)
@@ -1443,49 +1446,49 @@ run_test "contradict_phase_short_circuits_single" \
 # ---------------------------------------------------------------------
 
 run_test "telemetry_call_event_has_run_id" \
-  "grep -q 'pub run_id' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub run_id' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_call_id" \
-  "grep -q 'pub call_id' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub call_id' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_phase" \
-  "grep -q 'pub phase' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub phase' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_cache_key" \
-  "grep -q 'pub cache_key' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub cache_key' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_cache_hit" \
-  "grep -q 'pub cache_hit' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub cache_hit' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_provider" \
-  "grep -q 'pub provider' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub provider' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_model" \
-  "grep -q 'pub model' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub model' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_input_tokens" \
-  "grep -q 'pub input_tokens' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub input_tokens' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_output_tokens" \
-  "grep -q 'pub output_tokens' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub output_tokens' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_started_unix" \
-  "grep -q 'pub started_unix' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub started_unix' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_call_event_has_ended_unix" \
-  "grep -q 'pub ended_unix' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub ended_unix' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "telemetry_phase_event_has_run_id" \
-  "grep -A20 'pub struct PhaseEvent' ${ROOT}/src/telemetry.rs | grep -q 'pub run_id'"
+  "grep -A20 'pub struct PhaseEvent' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub run_id'"
 
 run_test "telemetry_phase_event_has_phase_name" \
-  "grep -A20 'pub struct PhaseEvent' ${ROOT}/src/telemetry.rs | grep -q 'pub phase'"
+  "grep -A20 'pub struct PhaseEvent' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub phase'"
 
 run_test "telemetry_phase_event_has_status" \
-  "grep -A20 'pub struct PhaseEvent' ${ROOT}/src/telemetry.rs | grep -q 'pub status'"
+  "grep -A20 'pub struct PhaseEvent' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub status'"
 
 run_test "telemetry_warning_event_has_at_unix_ms" \
-  "grep -q 'pub at_unix_ms' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub at_unix_ms' ${ROOT}/src/telemetry/mod.rs"
 
 # ---------------------------------------------------------------------
 # SECTION 36 — Per-phase cargo test integration tests (10 tests)
@@ -1600,7 +1603,7 @@ run_test "llm_provider_registry_helper" \
   "grep -q 'pub fn registry_from_config' ${ROOT}/src/llm/provider.rs"
 
 run_test "llm_call_event_hash" \
-  "grep -q 'output_hash\\|body_sha256' ${ROOT}/src/telemetry.rs"
+  "grep -q 'output_hash\\|body_sha256' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "llm_role_all_returns_fourteen" \
   "grep -A30 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Tagger' && grep -A30 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Extractor' && grep -A30 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Integrator'"

@@ -3,6 +3,11 @@
 //!
 //! Compliance: T01-06 §27 + 10-integrada-v0 §D.17 (heartbeat stub),
 //! §D.27 (telemetry redact on write).
+//!
+//! Phase I (v0.3) added the read-only consumer side: [`export`]
+//! bundles a run into a portable archive with a SHA256SUMS
+//! manifest (T01-06 §10.9), and the dashboard + view / verify /
+//! cleanup subcommands land in subsequent sub-fase-I commits.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,6 +22,11 @@ use crate::ids::RunId;
 use crate::redact::{RedactPolicy, RedactWriter, Surface};
 use crate::storage::sqlite::Db;
 use crate::time::{now_unix_millis, now_unix_secs};
+
+pub mod dashboard;
+pub mod export;
+pub mod retention;
+pub mod verify;
 
 /// One phase event (start/end/error/cancel).
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]

@@ -1964,6 +1964,46 @@ pub enum TelemetryCmd {
 }
 ```
 
+#### 10.7.1. Implementación (v0.3 sub-fase I)
+
+Cada variante de `TelemetryCmd` se implementa en un submódulo
+de `src/cli/telemetry_cmd.rs` y se despacha vía
+`TelemetryCmd::dispatch(self) -> Result<i32>`. La función
+`resolve_home(runs_dir: Option<&Path>) -> Result<MoaganHome>`
+factoriza la resolución del home (override `--runs-dir` o
+`MOAGAN_HOME`).
+
+**Subcommand list (`--limit <N> [--run <id>]`)**:
+- Sin `--run`: tabla compacta de los N runs más recientes
+  ordenados por `created_unix DESC`. Cada fila lleva short
+  id, mode, status, call count y total tokens.
+- Con `--run`: drill-in de un solo run con `RunRow` +
+  `RunAggregate` + phases + provider_usage.
+
+**Subcommand summary (`--run <id>`)**:
+Imprime duración wall-clock + counters + secciones
+`by model` / `by phase`. Lee `updated_unix` desde SQLite
+cuando está disponible; cae a mtime del filesystem.
+
+**Subcommand compare (`--run-a <A> --run-b <B>`)**:
+Side-by-side + delta por métrica.
+
+**Subcommand provider (`--list` o `--plan <name>`)**:
+`--list` imprime el roster; `--plan` drilea en un provider
+configurado + recent usage.
+
+**Subcommand view (`--port <port>`)**:
+Servidor HTTP read-only (ver §10.8).
+
+**Subcommand export (`--run <id> [--level] [--format] [--out]`)**:
+Bundle del run (ver §10.9).
+
+**Subcommand cleanup (`--dry-run`)**:
+Retention pass (ver §10.10).
+
+**Subcommand verify (`--path <archive|dir>`)**:
+Re-hash del bundle (ver §10.10).
+
 ### 10.8. Dashboard
 
 `axum` se evita para no añadir dep. Se usa un servidor minimalista hecho con `tokio::net::TcpListener` + `hyper` sólo si lo necesitamos. Decisión: **no usar `hyper` ni `axum`**. En su lugar, un servidor minimalista sobre `tokio` parseando HTTP manualmente. Esto reduce deps.
@@ -1998,6 +2038,74 @@ GET /api/runs/{run_id}/export?level=summary&format=tar.gz
 
 Body: JSON. Sin estado mutable. Sin autenticación (sólo 127.0.0.1).
 
+#### 10.8.1. Implementación (v0.3 sub-fase I)
+
+El servidor se implementa en `src/telemetry/dashboard.rs`.
+`axum`, `hyper` y `tiny_http` siguen excluidos (no-go list +
+decisión §10.8). El parser HTTP/1.1 está hecho a mano sobre
+`tokio::io::BufReader` + `AsyncReadExt` / `AsyncWriteExt`.
+
+Estructura:
+
+```rust
+pub struct DashboardConfig {
+    pub bind: SocketAddr,
+    pub home: Arc<MoaganHome>,
+    pub db_path: Option<PathBuf>,
+}
+
+pub struct DashboardHandle {
+    pub local_addr: SocketAddr,
+    /* cancellation token + JoinHandle (private) */
+}
+
+pub async fn start(cfg: DashboardConfig) -> Result<DashboardHandle> { /* ... */ }
+```
+
+Constantes expuestas:
+- `DEFAULT_PORT = 4096` (V4 §8.8).
+- `PORT_BLACKLIST: &[u16] = &[22, 80, 443, 3306, 5432, 6379,
+  8080, 8443]`. La función libre `pick_port(requested)`
+  evita esos puertos y avanza hasta 1000 hacia adelante
+  hasta encontrar uno libre.
+- `MAX_HEADER_BYTES = 8 * 1024`.
+- `IO_TIMEOUT = 30s` por conexión.
+
+Comportamiento:
+- Loopback only: `cfg.bind.ip().is_loopback()` se valida
+  antes del `bind`. Direcciones no-loopback devuelven
+  `Error::InvalidArgs`.
+- `tokio::spawn` por conexión. Cada handler corre bajo
+  `tokio::time::timeout(IO_TIMEOUT, …)` para abortar
+  conexiones colgadas.
+- `Connection: close` en cada respuesta para evitar
+  bookkeeping de keep-alive.
+
+Dispatch (`fn dispatch(path, query, cfg) -> Result<Response,
+(u16, String)>`):
+
+| Path                                  | Backend                                    |
+|---------------------------------------|--------------------------------------------|
+| `/`                                   | Landing page (texto plano con la lista de endpoints). |
+| `/api/runs?limit=N`                   | `db.list_runs(limit)`, serializado como JSON. |
+| `/api/runs/{id}`                      | `{ run, aggregate, phases, provider_usage }`. |
+| `/api/runs/{id}/phases`               | `db.list_phase_summaries_for_run(id)`. |
+| `/api/runs/{id}/calls`                | `db.list_calls_for_run(id)`. |
+| `/api/runs/{id}/provider_usage`       | `db.list_provider_usage_for_run(id)`. |
+| `/api/runs/{id}/hashes`               | `compute_hashes(run_dir.root())` (walkdir + `sha2`). |
+| `/api/runs/{id}/export?level=…&format=…` | Llama a `telemetry::export::export_run` y devuelve el JSON resumen. |
+| OTRO                                   | `404 Not Found`. |
+
+Códigos de error:
+- `400 Bad Request` para run_id inválido, query mal
+  formada, export level/format desconocido.
+- `404 Not Found` para run inexistente o sub-recurso
+  desconocido.
+- `500 Internal Server Error` sólo para fallos del
+  backend (SQLite corrupto, etc.).
+- `405 Method Not Allowed` para todo lo que no sea GET
+  (`POST`/`PUT`/`DELETE`).
+
 ### 10.9. Export
 
 ```rust
@@ -2030,6 +2138,59 @@ pub fn export_run(run_id: Uuid, format: ExportFormat, level: ExportLevel, dest: 
 }
 ```
 
+#### 10.9.1. Implementación (v0.3 sub-fase I)
+
+`src/telemetry/export.rs` materializa el bundle en tres
+etapas:
+
+1. **Stage**: copia los archivos seleccionados a un
+   directorio temporal bajo `tempfile::tempdir()`. El set
+   viene de `collect_files(run_dir, level)`:
+   - always: `manifest.json`, `brief.json`,
+     `rankings/ranking.json`.
+   - summary (`+`): `sketches/`, `proposals/`,
+     `critiques/`, `revisions/`, `evaluations/`,
+     `final/`.
+   - full (`+`): `validation/`, `synthesized/`,
+     `cluster_proposals/`, `adversaries/`,
+     `checkpoints/`, `telemetry/calls.jsonl.gz`,
+     `telemetry/phases.jsonl.gz`,
+     `telemetry/warnings.jsonl`,
+     `telemetry/checkpoints.jsonl`.
+   La lista se ordena por path relativo para que el
+   `SHA256SUMS` resultante sea estable entre exports
+   del mismo run.
+2. **Hash**: cada archivo se hashea con `sha2::Sha256` vía
+   `sha256_file()` (64 KiB buffer). Las líneas resultantes
+   se escriben a `<staging>/SHA256SUMS` en formato
+   canónico `<sha256>  <path>\n` (modo binario de
+   `sha256sum`). `parse_sha256sums()` parsea
+   tolerando CRLF y separadores de espacios múltiples.
+3. **Bundle**: el directorio staged se empaca en el
+   formato pedido:
+   - `tar.gz` con `tar::Builder` + `flate2::GzEncoder`.
+   - `tar` con `tar::Builder`.
+   - `zip` con `zip::ZipWriter` +
+     `SimpleFileOptions::compression_method(Deflated)`.
+   `zip` requiere que el writer esté sobre un
+   `Write + Seek`, así que `write_zip` usa `File`
+   directamente en vez de `BufWriter`.
+
+Tipos públicos:
+- `pub struct HashEntry { sha256: String, path: String }`.
+- `pub struct ExportResult { archive_path, file_count,
+  archive_sha256, payload_bytes, archive_bytes }`.
+- `pub fn export_run(run_dir, run_id, level, format, out)
+  -> Result<ExportResult>`.
+
+El dispatch de `moagan telemetry export` resuelve el
+directorio del run vía `MoaganHome::run_dir(run_id)` y
+defaulta el nombre del archivo a
+`run_<short-id>_<level>.<ext>` cuando `--out` está
+ausente. Errores tempranos (run dir inexistente, format
+inválido) devuelven `Error::InvalidArgs` /
+`Error::InvalidState` antes de tocar el filesystem.
+
 ### 10.10. Verify
 
 ```rust
@@ -2046,6 +2207,109 @@ pub fn verify(path: PathBuf) -> Result<()> {
     Ok(())
 }
 ```
+
+#### 10.10.1. Implementación (v0.3 sub-fase I)
+
+`src/telemetry/verify.rs` consume el bundle producido por
+`export.rs` y produce un `VerifyReport`. La función
+principal:
+
+```rust
+pub fn verify(path: &Path) -> Result<VerifyReport>
+```
+
+- Si `path` es un directorio con `SHA256SUMS`, lo
+  verifica in-place.
+- Si `path` es un archivo `*.tar.gz` / `*.tar` / `*.zip`,
+  lo extrae a un `tempfile::tempdir()` antes de leer
+  `SHA256SUMS` (las paths relativas del manifest deben
+  coincidir con el layout en disco).
+- Para cada entry del `SHA256SUMS`:
+  - archivo ausente -> `VerifyVerdict::Missing`
+  - hash coincide -> `VerifyVerdict::Ok`
+  - hash distinto -> `VerifyVerdict::Mismatch { expected,
+    actual }`
+- `VerifyReport { rows, root }` lleva la lista de
+  veredictos + el directorio verificado. `ok_count()` y
+  `fail_count()` resumen.
+
+`extract_tar_gz` usa `flate2::MultiGzDecoder` (multi-member
+safe, coincide con el `MemberGzWriter` que escribe
+`compression.rs::open_gz_append`). `extract_zip` usa
+`zip::ZipArchive::by_index` + `enclosed_name()` para
+defenderse contra escapes `..`. `extract_tar` usa
+`tar::Archive::unpack`.
+
+El CLI dispatch (`moagan telemetry verify --path <path>`)
+imprime una línea por archivo (`OK` / `MISSING` /
+`MISMATCH  path  expected=…  actual=…`), un resumen final
+`OK: N files verified, M failed`, y devuelve
+`Error::InvalidState` cuando `M > 0` — sirve como gate
+de CI (`set -e` / exit code 1).
+
+### 10.10.2. Retention (`moagan telemetry cleanup`)
+
+Sub-fase I también aterriza la retention pass de V4 §12.
+El módulo `src/telemetry/retention.rs` expone:
+
+```rust
+pub struct RetentionConfig {
+    pub keep_runs_days: u32,
+    pub keep_runs_count: u32,
+    pub max_storage_bytes: u64,
+    pub policy: RetentionPolicy, // Delete | Archive
+}
+
+pub struct RetentionCandidate {
+    pub run_id: RunId,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub updated_unix: i64,
+}
+
+pub struct RetentionReport {
+    pub candidates: Vec<RetentionCandidate>,
+    pub total_bytes: u64,
+    pub dry_run: bool,
+    pub policy: RetentionPolicy,
+}
+
+pub fn plan(runs_dir, db_updated: &dyn Fn(RunId) -> Option<i64>,
+            cfg) -> Result<RetentionReport>;
+pub fn apply(runs_dir, db_updated, cfg, dry_run: bool)
+            -> Result<RetentionReport>;
+```
+
+Tres filtros componibles (semántica OR — un run es
+candidato si falla CUALQUIER keep):
+1. **Age**: `keep_runs_days > 0 && now - updated_unix >
+   keep_runs_days * 86_400`.
+2. **Count**: si `runs.len() > keep_runs_count`, los más
+   antiguos (sorted por `updated_unix ASC`) son
+   candidatos. `keep_runs_count == 0` significa "keep
+   nothing" (útil para el smoke path "delete all").
+3. **Storage**: si el running total de bytes (oldest
+   first) excede `max_storage_bytes`, los runs que
+   contribuyen al overflow son candidatos. `0` desactiva
+   el filtro.
+
+Política:
+- `Delete`: `std::fs::remove_dir_all(run_dir)`;
+  fallos se loguean a stderr y la corrida continúa
+  (best-effort).
+- `Archive`: `rename(run_dir, archive_root/YYYY-MM-DD/
+  <run_id>/)`. `archive_root` = `<root>/archive`. La
+  fecha se deriva de `updated_unix` vía el algoritmo
+  civil-from-days de Howard Hinnant (sin deps).
+
+El CLI lee `Config::retention` para los knobs:
+- `keep_runs_days: 30`
+- `keep_runs_count: 100`
+- `max_storage_bytes: 50 * 1024 * 1024 * 1024`
+- `policy: "delete" | "archive"`
+
+Defaults sensatos que el operador puede sobreescribir
+desde `~/.config/moagan/config.toml` (T01-06 §11).
 
 ---
 
