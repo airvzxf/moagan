@@ -274,6 +274,7 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
         .push(RankPhase {
             config: Arc::new(Config::default()),
             replace_sources_enabled: false,
+            stability_enabled: false,
         })
         .push(DeliverPhase);
 
