@@ -498,9 +498,87 @@ mod summary {
 
 mod compare {
     use super::{Error, Result, TelemetryCmd};
+    use crate::ids::RunId;
+    use crate::storage::sqlite::{Db, RunAggregate, RunRow};
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("compare")
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, run_a, run_b) = match cmd {
+            TelemetryCmd::Compare {
+                runs_dir,
+                run_a,
+                run_b,
+            } => (runs_dir.as_ref(), run_a.as_str(), run_b.as_str()),
+            _ => return Err(Error::InvalidState("compare: wrong variant".into())),
+        };
+        let a: RunId = run_a
+            .parse()
+            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run_a}': {e}")))?;
+        let b: RunId = run_b
+            .parse()
+            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run_b}': {e}")))?;
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let db = Db::open(&home.meta_db_path())?;
+        let row_a = db
+            .get_run(a)?
+            .ok_or_else(|| Error::InvalidState(format!("run {run_a} not found in the index")))?;
+        let row_b = db
+            .get_run(b)?
+            .ok_or_else(|| Error::InvalidState(format!("run {run_b} not found in the index")))?;
+        let agg_a = db.run_aggregate(a)?;
+        let agg_b = db.run_aggregate(b)?;
+
+        print_side_by_side(&row_a, &agg_a, &row_b, &agg_b);
+        println!();
+        print_diff("tokens", agg_a.total_tokens(), agg_b.total_tokens());
+        print_diff("calls", agg_a.calls, agg_b.calls);
+        print_diff("ok_calls", agg_a.ok_calls(), agg_b.ok_calls());
+        print_diff("error_calls", agg_a.error_calls, agg_b.error_calls);
+        print_diff("timeout_calls", agg_a.timeout_calls, agg_b.timeout_calls);
+        print_diff(
+            "cancelled_calls",
+            agg_a.cancelled_calls,
+            agg_b.cancelled_calls,
+        );
+        print_diff("providers", agg_a.provider_count, agg_b.provider_count);
+        print_diff("phases", agg_a.phase_count, agg_b.phase_count);
+        print_diff("warnings", agg_a.warnings, agg_b.warnings);
+        print_diff("checkpoints", agg_a.checkpoints, agg_b.checkpoints);
+        let dur_a = row_a.updated_unix.saturating_sub(row_a.created_unix).max(0);
+        let dur_b = row_b.updated_unix.saturating_sub(row_b.created_unix).max(0);
+        print_diff("duration_secs", dur_a, dur_b);
+        Ok(())
+    }
+
+    fn print_side_by_side(a: &RunRow, agg_a: &RunAggregate, b: &RunRow, agg_b: &RunAggregate) {
+        let id_a = short(&a.run_id);
+        let id_b = short(&b.run_id);
+        println!("{:<22}  {:<30}  {:<30}", "", id_a, id_b);
+        println!("{:<22}  {:<30}  {:<30}", "mode", a.mode, b.mode);
+        println!("{:<22}  {:<30}  {:<30}", "status", a.status, b.status);
+        println!(
+            "{:<22}  {:<30}  {:<30}",
+            "tokens",
+            agg_a.total_tokens(),
+            agg_b.total_tokens()
+        );
+        println!("{:<22}  {:<30}  {:<30}", "calls", agg_a.calls, agg_b.calls);
+        println!(
+            "{:<22}  {:<30}  {:<30}",
+            "errors", agg_a.error_calls, agg_b.error_calls
+        );
+    }
+
+    fn print_diff(label: &str, a: i64, b: i64) {
+        let delta = b - a;
+        let sign = if delta > 0 { "+" } else { "" };
+        println!(
+            "{:<22}  a={:<10}  b={:<10}  delta={}{}",
+            label, a, b, sign, delta
+        );
+    }
+
+    fn short(raw: &str) -> &str {
+        raw.get(..8).unwrap_or(raw)
     }
 }
 
@@ -627,6 +705,30 @@ mod tests {
         let cmd = TelemetryCmd::Summary {
             runs_dir: Some(tmp.path().to_path_buf()),
             run: "01900000-0000-0000-0000-000000000000".into(),
+        };
+        let err = cmd.dispatch().unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)));
+    }
+
+    #[test]
+    fn compare_invalid_run_id_returns_invalid_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Compare {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            run_a: "not-a-uuid".into(),
+            run_b: "01900000-0000-0000-0000-000000000000".into(),
+        };
+        let err = cmd.dispatch().unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs(_)));
+    }
+
+    #[test]
+    fn compare_unknown_run_returns_invalid_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Compare {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            run_a: "01900000-0000-0000-0000-000000000000".into(),
+            run_b: "01900000-0000-0000-0000-000000000001".into(),
         };
         let err = cmd.dispatch().unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
