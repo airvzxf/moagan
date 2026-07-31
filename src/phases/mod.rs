@@ -9,6 +9,7 @@
 pub mod clarify;
 pub mod cluster_proposals;
 pub mod critique;
+pub mod decompose;
 pub mod deliver;
 pub mod discover_cluster;
 pub mod discover_contradict;
@@ -36,6 +37,7 @@ pub mod validate;
 pub use clarify::ClarifyPhase;
 pub use cluster_proposals::ClusterProposalsPhase;
 pub use critique::CritiquePhase;
+pub use decompose::DecomposePhase;
 pub use deliver::DeliverPhase;
 pub use discover_cluster::DiscoverClusterPhase;
 pub use discover_contradict::DiscoverContradictPhase;

@@ -521,6 +521,44 @@ impl Db {
         Ok(())
     }
 
+    /// Record a `ProblemGraph` (Phase G) for a run. The table is
+    /// added in migration v006; this method tolerates the
+    /// pre-v006 schema (the table will not exist) and returns
+    /// `Ok(())` so a phase that opens a legacy database never
+    /// fails the run. After the v006 migration has been applied
+    /// the write actually lands.
+    pub fn record_problem_graph(
+        &self,
+        run_id: RunId,
+        brief_blake3: &str,
+        should_decompose: bool,
+        node_count: i64,
+        at_unix: i64,
+    ) -> Result<()> {
+        let conn = self.pool.get()?;
+        // Probe the user_version so the call is a no-op on legacy
+        // databases (v1..=v5). The migration runner already updates
+        // user_version to 6 before this method is ever called from
+        // a v0.3+ run, so the check is cheap.
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 6 {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO problem_graphs \
+             (run_id, brief_blake3, should_decompose, node_count, at_unix) \
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                run_id.to_string(),
+                brief_blake3,
+                should_decompose as i64,
+                node_count,
+                at_unix,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Full checkpoint list for a run, ordered by `at_unix`
     /// ascending. Returns an empty Vec if no checkpoints were
     /// recorded (e.g. when `interactive=false` and the call path
