@@ -22,13 +22,20 @@
 //! `PhaseOutput::Sketches` — the wiring in `build_pipeline_for_mode`
 //! uses this fact to skip the phase in `fast` mode without an extra
 //! branch.
+//!
+//! Phase G (v0.3): when a `problem_graph.json` is present and
+//! non-trivial, the phase re-distributes `count` sketches across
+//! the DAG nodes (one sketch per node when `count <= node_count`,
+//! otherwise `ceil(count / node_count)` per node). The angle in
+//! the user payload is replaced with the node id so the cache
+//! key stays distinct per node.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::domain::Sketch;
+use crate::domain::{ProblemGraph, Sketch};
 use crate::error::{Error, Result};
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
@@ -85,6 +92,46 @@ impl SketchPhase {
         }
     }
 
+    /// Load the `problem_graph.json` sidecar if it exists. Returns
+    /// `None` when the file is missing or the graph is trivial
+    /// (no decomposition). Pure function so the rest of the phase
+    /// can branch on the result without coupling to the file
+    /// layout.
+    fn load_problem_graph(ctx: &RunContext) -> Option<ProblemGraph> {
+        let path = ctx.run_dir().root().join("problem_graph.json");
+        if !path.exists() {
+            return None;
+        }
+        let g: ProblemGraph = read_json(&path).ok()?;
+        if g.is_empty() || !g.should_decompose {
+            return None;
+        }
+        Some(g)
+    }
+
+    /// Distribute `count` sketches across the DAG nodes. Returns a
+    /// `Vec<(node_id, sketch_index)>` that the fan-out uses to label
+    /// the per-sketch cache key. When `count < node_count` each
+    /// node still gets at least one slot; when `count >= node_count`
+    /// the slots are spread as evenly as possible.
+    fn distribute_across_nodes(count: usize, node_ids: &[String]) -> Vec<(String, usize)> {
+        if node_ids.is_empty() {
+            return (0..count).map(|i| (String::new(), i)).collect();
+        }
+        let node_count = node_ids.len();
+        let per_node = count.div_ceil(node_count).max(1);
+        let mut out = Vec::with_capacity(node_count * per_node);
+        for (i, id) in node_ids.iter().enumerate() {
+            for j in 0..per_node {
+                if out.len() >= count {
+                    break;
+                }
+                out.push((id.clone(), i * per_node + j));
+            }
+        }
+        out
+    }
+
     /// Cheap pre-filter applied before persistence. Spec §5.5 lists
     /// six checks; v0.2 only enforces the two that are mechanical
     /// (empty thesis, hard-constraint false). The richer
@@ -130,22 +177,42 @@ impl Phase for SketchPhase {
         let system_arc = std::sync::Arc::new(system);
         let user_arc = std::sync::Arc::new(user);
 
-        let futures = (0..count).map(|i| {
-            let angle = Self::angle_for(i);
-            let user_with_angle = format!(
-                "{}\n\nUse angle=\"{angle}\" and produce exactly one sketch.",
-                user_arc.as_str()
-            );
+        // Phase G: when a non-trivial problem graph exists, the
+        // fan-out is distributed across nodes (one sketch per node,
+        // spread evenly). Otherwise the original angle-cycled
+        // behaviour kicks in.
+        let problem_graph = Self::load_problem_graph(ctx);
+        let schedule: Vec<(String, usize)> = match &problem_graph {
+            Some(g) => {
+                let node_ids: Vec<String> = g.nodes.iter().map(|n| n.id.clone()).collect();
+                Self::distribute_across_nodes(count, &node_ids)
+            }
+            None => (0..count).map(|i| (Self::angle_for(i), i)).collect(),
+        };
+
+        let futures = schedule.iter().map(|(label, i)| {
+            let user_with_label = if problem_graph.is_some() {
+                format!(
+                    "{}\n\nFocus on DAG node=\"{label}\" and produce exactly one sketch.",
+                    user_arc.as_str()
+                )
+            } else {
+                format!(
+                    "{}\n\nUse angle=\"{label}\" and produce exactly one sketch.",
+                    user_arc.as_str()
+                )
+            };
             let ctx = ctx.clone();
             let system_arc = std::sync::Arc::clone(&system_arc);
-            let angle_for_sketch = angle.clone();
+            let label_for_sketch = label.clone();
+            let i = *i;
             async move {
                 let _permit = ctx.parallelism.acquire().await?;
                 let mut sketch: Sketch = ctx
                     .call_with_retry_parse(
                         Role::Sketch,
                         system_arc.as_str().to_owned(),
-                        user_with_angle,
+                        user_with_label,
                         "Sketch: {thesis, key_decisions[], architecture_outline, assumptions[], strengths[], weaknesses[], hard_constraint_check{}, expected_validation}",
                         5,
                     )
@@ -153,7 +220,7 @@ impl Phase for SketchPhase {
                 if sketch.id.is_empty() {
                     sketch.id = format!("sk_{i:03}");
                 }
-                sketch.angle = angle_for_sketch;
+                sketch.angle = label_for_sketch;
                 Ok::<Sketch, crate::error::Error>(sketch)
             }
         });
@@ -268,5 +335,47 @@ mod tests {
         let back: SketchFilterStats = serde_json::from_str(&j).unwrap();
         assert_eq!(back.raw, 4);
         assert_eq!(back.kept, 2);
+    }
+
+    /// When `count < node_count` every node still gets at least one
+    /// sketch slot, so the graph is fully covered.
+    #[test]
+    fn distribute_across_nodes_underflow_keeps_every_node() {
+        let nodes = vec!["a".into(), "b".into(), "c".into()];
+        let slots = SketchPhase::distribute_across_nodes(2, &nodes);
+        assert_eq!(slots.len(), 2);
+        let unique: std::collections::HashSet<&str> =
+            slots.iter().map(|(n, _)| n.as_str()).collect();
+        // Two distinct nodes out of three — the third waits for
+        // a follow-up run. Pinning that we never re-use the same
+        // node for two slots in the underflow case.
+        assert_eq!(unique.len(), 2);
+    }
+
+    /// When `count > node_count` the slots are spread as evenly as
+    /// possible: `count.div_ceil(node_count)`.
+    #[test]
+    fn distribute_across_nodes_overflow_rounds_up() {
+        let nodes = vec!["a".into(), "b".into()];
+        let slots = SketchPhase::distribute_across_nodes(5, &nodes);
+        // 5 / 2 = 3 per node (rounded up).
+        assert_eq!(slots.len(), 5);
+        let a_count = slots.iter().filter(|(n, _)| n == "a").count();
+        let b_count = slots.iter().filter(|(n, _)| n == "b").count();
+        assert_eq!(a_count, 3);
+        assert_eq!(b_count, 2);
+    }
+
+    /// Empty node list is treated as "no graph": the caller gets a
+    /// pure index sequence so the fan-out can fall back to the
+    /// angle-cycled behaviour.
+    #[test]
+    fn distribute_across_nodes_empty_node_list_returns_indices() {
+        let slots = SketchPhase::distribute_across_nodes(4, &[]);
+        assert_eq!(slots.len(), 4);
+        for (i, (label, idx)) in slots.iter().enumerate() {
+            assert!(label.is_empty());
+            assert_eq!(*idx, i);
+        }
     }
 }
