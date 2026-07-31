@@ -756,8 +756,24 @@ fn resolve_log_path(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
     }
     let runs_root = cfg.runs_dir.join(".runs");
     std::fs::create_dir_all(&runs_root)?;
-    let Some(run_id) = pick_latest_run(&runs_root)? else {
-        return Ok(None);
+    // The proxy is typically started BEFORE the run command
+    // creates its run dir. Wait up to 10s for a run dir to
+    // appear so the first LLM call from a freshly-spawned run
+    // can land without a 503. The interval grows from 50ms
+    // toward 1s so a fast run pays almost nothing while a
+    // slow startup still has a chance. After the deadline we
+    // give up and return None so the caller surfaces 503.
+    let mut wait_ms: u64 = 50;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let run_id = loop {
+        if let Some(id) = pick_latest_run(&runs_root)? {
+            break id;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        wait_ms = (wait_ms * 2).min(1000);
     };
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
@@ -916,5 +932,53 @@ mod tests {
     #[test]
     fn join_upstream_rejects_absolute_targets() {
         assert!(join_upstream("https://api.minimax.io", "https://other.example/x", None).is_err());
+    }
+
+    /// The proxy starts BEFORE the run command creates its run
+    /// dir. Without a wait, the first LLM call lands as a 503.
+    /// `resolve_log_path` polls for a run dir with backoff
+    /// (50ms → 1s) up to 10s before giving up. This test seeds a
+    /// run dir 200ms after the proxy would otherwise have given
+    /// up under the no-wait baseline and asserts that the
+    /// function returns Some(_) once the dir appears.
+    #[test]
+    fn resolve_log_path_waits_for_run_dir_to_appear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runs_dir = tmp.path().to_path_buf();
+        // Pre-create `.runs/` so the function does not need to
+        // create it (the proxy's `start_proxy` creates it ahead
+        // of time in practice).
+        std::fs::create_dir_all(runs_dir.join(".runs")).unwrap();
+        let cfg = ProxyConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            upstream: "https://api.minimax.io/anthropic/v1".into(),
+            runs_dir: runs_dir.clone(),
+            run_id: None,
+            include_bodies: true,
+            upstream_timeout: Duration::from_secs(180),
+            max_body_bytes: 32 * 1024 * 1024,
+            refuse_loopback_forward: false,
+            refuse_loopback_forward_allowed: true,
+            fixed_log_path: None,
+        };
+        let runs_dir_for_thread = runs_dir.clone();
+        let handle = std::thread::spawn(move || {
+            // Materialize a run dir 250ms in. The polling loop
+            // starts at 50ms and doubles, so it checks around 50,
+            // 100, 200, 400, 800 ms — the dir appears at 250ms
+            // which the 200ms-check misses but the 400ms-check
+            // catches.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::fs::create_dir(
+                runs_dir_for_thread
+                    .join(".runs")
+                    .join("01900000-0000-7000-8000-000000000001"),
+            )
+            .unwrap();
+        });
+        let result = resolve_log_path(&cfg).unwrap();
+        handle.join().unwrap();
+        let path = result.expect("proxy must wait for the run dir");
+        assert!(path.ends_with("external_audit.jsonl.gz"));
     }
 }
