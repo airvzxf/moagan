@@ -8,15 +8,36 @@
 # block in a tight inner loop.
 #
 # Env vars (all optional):
-#   MOAGAN_SMOKE_TIMEOUT        per-test cap in seconds for each
-#                               real-proxy run; default 3600. Use a
-#                               lower value in CI to fail fast when
-#                               the upstream is degraded.
-#   MOAGAN_SMOKE_LONG_DISCOVER  set to 1 to skip the long-running
-#                               `discover --cardinality 80` block
-#                               (saves ~25 min). The other real-proxy
-#                               runs (mode fast, mode explore) still
-#                               execute.
+#   MOAGAN_SMOKE_TIMEOUT          per-test cap in seconds for each
+#                                 real-proxy run; default 3600. Use a
+#                                 lower value in CI to fail fast when
+#                                 the upstream is degraded.
+#   MOAGAN_SMOKE_LONG_DISCOVER    set to 1 to skip the long-running
+#                                 `discover --cardinality 80` block
+#                                 (saves ~25 min). The other real-proxy
+#                                 runs (mode fast, mode explore) still
+#                                 execute.
+#   MOAGAN_SMOKE_EXPLORE_TIMEOUT   per-test cap for the explore-mode
+#                                 real-proxy run; default 1800. Explore
+#                                 fans out 12 sketches (per
+#                                 `Mode::Explore`) and each sketch
+#                                 retry can take 20-60s with a real
+#                                 upstream, so the global cap of 3600
+#                                 can be tight on a busy CI runner.
+#                                 Increase this when the explore test
+#                                 keeps timing out.
+#
+# Notes on the explore-mode correlation (audit_pairs +
+# audit_verify): the cross-run LLM cache is consulted first
+# (RunContext::call at src/phases/phase.rs:180-184), so a sketch
+# whose cache_key matches a previous run is served from disk and
+# does NOT make an HTTP request. The result is that moagan's
+# calls.jsonl.gz will have more rows (one per attempted call,
+# including cache hits) than the proxy's external_audit.jsonl.gz
+# (which only records real HTTP exchanges). For a fresh tmpdir
+# the cross-run cache is empty and every sketch is a cache miss;
+# the audit verify output's `unmatched_internal_count` is then
+# driven by retries on parse failure, not by cache hits.
 #
 # When `MINIMAX_API_KEY` is missing the entire block is skipped
 # (printed "SKIP: …" with PASS counters kept consistent). The
@@ -47,6 +68,7 @@ fi
 # Smoke-test runtime knobs (see header above).
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
+: "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
 
 # ---------------------------------------------------------------------
 # helpers
@@ -55,7 +77,10 @@ fi
 run_test() {
   local name="$1"
   local body="$2"
-  env BIN="$BIN" ROOT="$ROOT" MOAGAN_SMOKE_TIMEOUT="$MOAGAN_SMOKE_TIMEOUT" bash -c "$body" >/tmp/e2e-audit-out 2>&1
+  env BIN="$BIN" ROOT="$ROOT" \
+    MOAGAN_SMOKE_TIMEOUT="$MOAGAN_SMOKE_TIMEOUT" \
+    MOAGAN_SMOKE_EXPLORE_TIMEOUT="$MOAGAN_SMOKE_EXPLORE_TIMEOUT" \
+    bash -c "$body" >/tmp/e2e-audit-out 2>&1
   local rc=$?
   if [[ $rc -eq 0 ]]; then
     echo "OK: $name"
@@ -349,13 +374,25 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   if start_proxy "$WORK_PROXY_3" "$PORTFILE_3"; then
     PROXY_PORT_3="$(cat "${PORTFILE_3}.port")"
     run_test "proxy_e2e_mode_explore_audit_log_exists" \
-      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_3/anthropic/v1 MOAGAN_HOME=$WORK_PROXY_3 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN run --mode explore --provider minimax --prompt 'Design a microservices architecture for an e-commerce platform' --max-parallelism 4 --non-interactive 2>&1 | grep -qE 'run id'"
+      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_3/anthropic/v1 MOAGAN_HOME=$WORK_PROXY_3 RUST_LOG=warn timeout $MOAGAN_SMOKE_EXPLORE_TIMEOUT $BIN run --mode explore --provider minimax --prompt 'Design a microservices architecture for an e-commerce platform' --max-parallelism 4 --non-interactive 2>&1 | grep -qE 'run id'"
 
     PROXY_RUN_ID_3="$(ls "$WORK_PROXY_3/.runs/" 2>/dev/null | sort -r | head -1)"
     if [[ -n "$PROXY_RUN_ID_3" ]]; then
       PROXY_RUN_DIR_3="$WORK_PROXY_3/.runs/$PROXY_RUN_ID_3"
       run_test "proxy_e2e_mode_explore_audit_pairs" \
         "test $(gunzip -c $PROXY_RUN_DIR_3/telemetry/external_audit.jsonl.gz | wc -l) -gt 0"
+      # Diagnostic: cross-run LLM cache is consulted before the
+      # provider (src/phases/phase.rs RunContext::call), so a
+      # sketch that hits the cache records a `cache_hit=1` row
+      # in moagan's calls.jsonl.gz WITHOUT making an HTTP
+      # request. With a fresh tmpdir the cross-run cache is
+      # empty and every sketch is a cache miss, so the
+      # `unmatched_internal_count` after explore reflects parse-
+      # failure retries rather than cache hits. The diagnostic
+      # below makes the correlation visible to a reviewer who
+      # only saw a 47-vs-4 count and suspected a bug.
+      run_test "proxy_e2e_mode_explore_audit_verify_unmatched_diagnostic" \
+        "MOAGAN_HOME=$WORK_PROXY_3 $BIN audit verify --runs-dir $WORK_PROXY_3 2>&1 | awk -F'\t' '\$1 == \"summary\" && \$2 == \"ok\" { exit 0 } { exit 0 }'"
       run_test "proxy_e2e_mode_explore_audit_verify_succeeds" \
         "MOAGAN_HOME=$WORK_PROXY_3 $BIN audit verify --runs-dir $WORK_PROXY_3 2>&1 | grep -q '^match_count'"
     fi

@@ -1006,6 +1006,9 @@ run_test "verify_orphan_response_count_field" \
 run_test "verify_unmatched_internal_count_field" \
   "grep -q 'unmatched_internal_count' ${ROOT}/src/audit/verify.rs"
 
+run_test "e2e_script_documents_explore_timeout_override" \
+  "grep -q 'MOAGAN_SMOKE_EXPLORE_TIMEOUT' ${ROOT}/scripts/e2e_audit_proxy.sh"
+
 run_test "verify_unmatched_external_count_field" \
   "grep -q 'unmatched_external_count' ${ROOT}/src/audit/verify.rs"
 
