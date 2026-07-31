@@ -109,6 +109,7 @@ mod tests {
             source_sketch: "sk_001".into(),
             artifacts: vec![],
             replaced_by: None,
+            source_nodes: Vec::new(),
         }
     }
 

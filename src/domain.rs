@@ -108,6 +108,14 @@ pub struct Proposal {
     /// `source_proposals` intact so the genealogy stays recoverable.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub replaced_by: Option<String>,
+    /// Phase G: ids of `ProblemGraph` nodes this proposal covers.
+    /// Empty for non-deep runs (the field is `#[serde(default)]` so
+    /// legacy sidecars parse cleanly). A proposal that addresses
+    /// every node is the most general; a proposal that addresses a
+    /// single node is the most focused. The deliver phase can use
+    /// this to surface coverage in the final report.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub source_nodes: Vec<String>,
 }
 
 /// Output of the sketch phase — a short, opinionated exploration
@@ -746,9 +754,9 @@ impl ProblemGraph {
         let mut in_degree = vec![0usize; n];
         for (i, node) in self.nodes.iter().enumerate() {
             for dep in &node.dependencies {
-                let parent = index
-                    .get(dep.as_str())
-                    .ok_or_else(|| format!("node '{}' depends on missing node '{}'", node.id, dep))?;
+                let parent = index.get(dep.as_str()).ok_or_else(|| {
+                    format!("node '{}' depends on missing node '{}'", node.id, dep)
+                })?;
                 rev[*parent].push(i);
                 in_degree[i] += 1;
             }
@@ -1313,7 +1321,10 @@ mod tests {
         let back: ProblemGraph = serde_json::from_str(&j).unwrap();
         assert_eq!(back.nodes.len(), 2);
         assert_eq!(back.nodes[1].dependencies, vec!["a"]);
-        assert_eq!(back.nodes[1].validation_method, ValidationMethod::Executable);
+        assert_eq!(
+            back.nodes[1].validation_method,
+            ValidationMethod::Executable
+        );
         assert_eq!(back.integration_rules.len(), 1);
         assert_eq!(back.critical_path, vec!["a", "b"]);
         assert_eq!(back.brief_blake3, "deadbeef");
@@ -1351,5 +1362,49 @@ mod tests {
         assert_eq!(j, "\"executable\"");
         let back: ValidationMethod = serde_json::from_str(&j).unwrap();
         assert_eq!(back, ValidationMethod::Executable);
+    }
+
+    /// `Proposal.source_nodes` (Phase G) round-trips through JSON
+    /// and is `#[serde(skip_serializing_if = "Vec::is_empty")]` so
+    /// legacy v0.2 sidecars (which never emit the field) stay
+    /// compact.
+    #[test]
+    fn proposal_source_nodes_round_trip() {
+        let p = Proposal {
+            id: "p_007".into(),
+            source_nodes: vec!["n0".into(), "n1".into()],
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(j.contains("source_nodes"), "missing field: {j}");
+        let back: Proposal = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.source_nodes, vec!["n0", "n1"]);
+    }
+
+    /// Empty `source_nodes` is skipped in the JSON representation
+    /// (the field's `skip_serializing_if` is `Vec::is_empty`).
+    #[test]
+    fn proposal_source_nodes_omitted_when_empty() {
+        let p = Proposal::default();
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(!j.contains("source_nodes"), "leaked field: {j}");
+    }
+
+    /// Legacy v0.2 sidecars (which never had `source_nodes`) parse
+    /// into a Proposal with an empty vec, not a deserialise error.
+    #[test]
+    fn proposal_parses_legacy_sidecar_without_source_nodes() {
+        let legacy = serde_json::json!({
+            "id": "p_legacy",
+            "summary": "old shape",
+            "approach": "rust",
+            "tradeoffs": [],
+            "evidence": [],
+            "source_sketch": "",
+            "artifacts": [],
+            "replaced_by": null,
+        });
+        let p: Proposal = serde_json::from_value(legacy).unwrap();
+        assert!(p.source_nodes.is_empty());
     }
 }

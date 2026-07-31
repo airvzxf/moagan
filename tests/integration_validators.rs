@@ -172,6 +172,7 @@ fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
         source_sketch: String::new(),
         artifacts: vec![rust_artifact],
         replaced_by: None,
+        source_nodes: Vec::new(),
     };
     write_json(&proposals_dir.join("p_000.json"), &proposal_with_rust)?;
 
@@ -185,6 +186,7 @@ fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
         source_sketch: String::new(),
         artifacts: vec![],
         replaced_by: None,
+        source_nodes: Vec::new(),
     };
     write_json(&proposals_dir.join("p_001.json"), &proposal_no_artifacts)?;
 
@@ -383,6 +385,7 @@ fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Res
         source_sketch: String::new(),
         artifacts: vec![],
         replaced_by: None,
+        source_nodes: Vec::new(),
     };
     let proposals_dir = run_dir.proposals();
     std::fs::create_dir_all(&proposals_dir)?;
@@ -486,6 +489,7 @@ fn validate_phase_dispatches_sql_artifact() -> Result<()> {
         source_sketch: String::new(),
         artifacts: vec![sql_artifact],
         replaced_by: None,
+        source_nodes: Vec::new(),
     };
     let proposals_dir = run_dir.proposals();
     std::fs::create_dir_all(&proposals_dir)?;
@@ -549,6 +553,7 @@ fn validate_phase_dispatches_schema_artifact() -> Result<()> {
         source_sketch: String::new(),
         artifacts: vec![schema_artifact, data_artifact],
         replaced_by: None,
+        source_nodes: Vec::new(),
     };
     let proposals_dir = run_dir.proposals();
     std::fs::create_dir_all(&proposals_dir)?;
