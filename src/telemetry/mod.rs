@@ -24,6 +24,7 @@ use crate::storage::sqlite::Db;
 use crate::time::{now_unix_millis, now_unix_secs};
 
 pub mod export;
+pub mod verify;
 
 /// One phase event (start/end/error/cancel).
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]

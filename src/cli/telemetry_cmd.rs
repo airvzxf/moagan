@@ -787,9 +787,40 @@ mod cleanup {
 
 mod verify {
     use super::{Error, Result, TelemetryCmd};
+    use crate::telemetry::verify::{self, VerifyVerdict};
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("verify")
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let path = match cmd {
+            TelemetryCmd::Verify { path, .. } => path,
+            _ => return Err(Error::InvalidState("verify: wrong variant".into())),
+        };
+        let report = verify::verify(path)?;
+        let mut ok = 0;
+        let mut fail = 0;
+        for row in &report.rows {
+            if matches!(row.verdict, VerifyVerdict::Ok) {
+                ok += 1;
+            } else {
+                fail += 1;
+            }
+            if let VerifyVerdict::Mismatch { expected, actual } = &row.verdict {
+                println!(
+                    "MISMATCH  {}  expected={}  actual={}",
+                    row.path, expected, actual
+                );
+            } else {
+                println!("{:9}  {}", row.verdict.label(), row.path);
+            }
+        }
+        println!();
+        println!("OK: {} files verified, {} failed", ok, fail);
+        if fail > 0 {
+            Err(Error::InvalidState(format!(
+                "{fail} file(s) failed verification"
+            )))
+        } else {
+            Ok(())
+        }
     }
 }
 
