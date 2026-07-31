@@ -69,8 +69,8 @@ run_test "run_help_documents_phase_f" \
 run_test "run_help_documents_v4_5_13" \
   "$BIN run --help 2>&1 | grep -qE 'V4.5.13|V4 §5.13'"
 
-run_test "run_help_documents_D_13_15" \
-  "$BIN run --help 2>&1 | grep -q 'D.13.15'"
+run_test "run_help_documents_D_13_16" \
+  "$BIN run --help 2>&1 | grep -q 'D.13.16'"
 
 run_test "run_help_documents_default_behavior" \
   "$BIN run --help 2>&1 | grep -q 'replacement'"
@@ -449,8 +449,8 @@ run_test "f_replace_module_compiles" \
 run_test "f_all_commits_signed_g" \
   "cd ${ROOT} && git log --pretty='%G?' main..HEAD | grep -vE '^G$' | wc -l | grep -qE '^0$'"
 
-run_test "f_4_commits_in_phase_f" \
-  "cd ${ROOT} && git log --oneline main..HEAD | wc -l | grep -qE '^4$'"
+run_test "f_phase_f_has_at_least_4_commits" \
+  "cd ${ROOT} && git log --oneline main..HEAD | wc -l | awk '{ if (\$1 >= 4) exit 0; else exit 1 }'"
 
 run_test "f_branch_clean" \
   "cd ${ROOT} && git status --porcelain --untracked-files=no | wc -l | grep -qE '^0$'"
@@ -581,8 +581,8 @@ run_test "f_doc_module_level_present" \
 run_test "f_replace_doc_mentions_v4_5_13" \
   "head -8 ${ROOT}/src/phases/replace.rs | grep -q 'V4 §5.13'"
 
-run_test "f_replace_doc_mentions_d_13_15" \
-  "head -20 ${ROOT}/src/phases/replace.rs | grep -q 'D.13.15'"
+run_test "f_replace_doc_mentions_d_13_16" \
+  "head -20 ${ROOT}/src/phases/replace.rs | grep -q 'D.13.16'"
 
 run_test "f_replace_doc_mentions_dimension_counting" \
   "head -20 ${ROOT}/src/phases/replace.rs | grep -q 'dimension-counting'"

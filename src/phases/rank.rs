@@ -35,7 +35,7 @@ pub struct RankPhase {
     pub config: Arc<Config>,
     /// Phase F: enable the synthesis-replacement predicate. When
     /// `true`, a synthesis (`s_<NN>`) that dominates its source
-    /// cluster per V4 §5.13 + D.13.15 removes the source proposals
+    /// cluster per V4 §5.13 + D.13.16 removes the source proposals
     /// from the final ranking and stamps them with `replaced_by`.
     /// `fast` mode sets this to `false` because it doesn't run
     /// `SynthesizePhase`; `standard`/`deep`/`batch` set it to
@@ -144,7 +144,7 @@ impl Phase for RankPhase {
         });
 
         // Step 5.5 (Phase F): apply the synthesis-replacement
-        // predicate (V4 §5.13 + D.13.15). For every synthesis
+        // predicate (V4 §5.13 + D.13.16). For every synthesis
         // (`s_<NN>`) in the front, look up its cluster membership
         // (loaded from `synthesized/s_<NN>.json` — the immutable
         // lineage sidecar), gather the source quality vectors, and

@@ -1372,7 +1372,7 @@ ser evaluada en igualdad de condiciones.
 V4 §5.13 dice: *"Solo sustituye a sus fuentes si demuestra mejora
 sin perder coherencia."* Esta sub-fase aterriza la semántica.
 
-**Predicado** (de `proposal-03-add-ons.md` D.13.15, catálogo aditivo,
+**Predicado** (de `proposal-03-add-ons.md` D.13.16, catálogo aditivo,
 adaptado a dimension-counting):
 
 ```rust
@@ -1391,7 +1391,7 @@ Implementado en `src/phases/replace.rs`. Reutiliza
 `crate::ranking::pareto::dominates` para el bloqueo Pareto. El
 umbral de 2 dimensiones es el suelo de "mejora no trivial" que
 V4 §5.13 llama explícitamente. La adaptación a dimension-counting
-(con respecto al source-counting de D.13.15) se discutió en la
+(con respecto al source-counting de D.13.16) se discutió en la
 sesión del 2026-07-30: permite que clusters de un solo miembro
 sean reemplazados cuando la síntesis gana claramente.
 

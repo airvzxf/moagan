@@ -176,7 +176,7 @@ pub enum Cmd {
         /// (V4 §5.13). When set, the synthesis `s_<NN>` and all its
         /// sources stay in the final ranking together. Default
         /// behaviour (`flag omitted`) is to replace sources when the
-        /// synthesis dominates per D.13.15 — `standard`/`deep`/`batch`
+        /// synthesis dominates per D.13.16 — `standard`/`deep`/`batch`
         /// get the replacement; `fast` doesn't synthesize, so the
         /// flag is a no-op there.
         #[arg(long, default_value_t = false)]

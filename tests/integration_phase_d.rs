@@ -558,7 +558,7 @@ fn checkpoint_counts_by_kind_groups_three_kinds() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------
-// Phase F — synthesis-replacement wiring (V4 §5.13 + D.13.15)
+// Phase F — synthesis-replacement wiring (V4 §5.13 + D.13.16)
 // ---------------------------------------------------------------------
 
 /// Build a `SynthesizedProposal` JSON sidecar so the wiring under

@@ -1,9 +1,9 @@
-//! Synthesis-replacement predicate (Phase F, V4 §5.13 + D.13.15).
+//! Synthesis-replacement predicate (Phase F, V4 §5.13 + D.13.16).
 //!
 //! "Solo sustituye a sus fuentes si demuestra mejora sin perder
 //!  coherencia." — V4 §5.13.
 //!
-//! The predicate is the one from `proposal-03 D.13.15` (catalog
+//! The predicate is the one from `proposal-03 D.13.16` (catalog
 //! additive, opt-in to T01-06), adapted to dimension-counting rather
 //! than source-counting so that single-source clusters can still be
 //! replaced when the synthesis is strictly better in enough criteria:
@@ -14,7 +14,7 @@
 //!
 //! "Pareto-dominates" uses `crate::ranking::pareto::dominates` — every
 //! dimension >= and strictly > in at least one. This keeps the
-//! blocking semantics compatible with D.13.15 ("dominates_count == 0")
+//! blocking semantics compatible with D.13.16 ("dominates_count == 0")
 //! while making the threshold about criteria coverage (≥2) instead of
 //! per-source coverage (≥2 sources). The threshold of 2 is the
 //! "non-trivial improvement" floor called out in V4 §5.13.
@@ -24,7 +24,7 @@
 
 use crate::ranking::pareto::{QualityVector, dominates};
 
-/// V4 §5.13 + D.13.15 predicate: should the synthesis replace its
+/// V4 §5.13 + D.13.16 predicate: should the synthesis replace its
 /// sources in the final output?
 ///
 /// Returns `true` iff:
@@ -66,7 +66,7 @@ pub fn should_replace_synthesis(synthesis_v: &QualityVector, source_vs: &[Qualit
 /// final ranking because the synthesis dominated them. When the
 /// predicate says "no replace", returns an empty list. When it says
 /// "replace", ALL sources are removed — the synthesis is meant to
-/// supersede the whole cluster, not a subset of it (per D.13.15 the
+/// supersede the whole cluster, not a subset of it (per D.13.16 the
 /// synthesis must win on every dimension where any source was the
 /// best, and no source can Pareto-dominate it).
 pub fn sources_to_replace(
