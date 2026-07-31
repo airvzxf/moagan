@@ -291,6 +291,42 @@ impl Phase for RankPhase {
         };
         let out_path: PathBuf = rankings_dir.join("ranking.json");
         write_json(&out_path, &ranking)?;
+
+        // Phase H commit 7 (V4 §5.14 second trigger): when the
+        // ranking lands on Sensitive and the run is interactive,
+        // fire a human checkpoint. The user can accept the
+        // current winner, reject (which leaves the pipeline to
+        // finish but with the verdict flagged), or free-form an
+        // alternative (currently the answer is just recorded; a
+        // follow-up can re-rank with the user's note applied).
+        //
+        // Non-interactive runs (`--non-interactive` or Mode::Batch)
+        // do not prompt; `checkpoint::skip` writes the
+        // `<skipped:non_interactive>` marker for audit.
+        if stability_label == Some(StabilityLabel::Sensitive) {
+            use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
+            let top_score = ranking
+                .stability_score
+                .as_ref()
+                .and_then(|m| m.values().copied().reduce(f32::max))
+                .unwrap_or(0.0);
+            let question = format!(
+                "Ranking is sensitive to weight perturbation (top-1 stability {top_score:.2}, \
+                 threshold {:.2}, sigma {:.2}). Continue with the current winner '{}'?",
+                self.config.stability.sensitive_threshold,
+                stability_sigma.unwrap_or(0.0),
+                ranking.winner
+            );
+            let cp = Checkpoint::new(CheckpointKind::Custom, question, true);
+            let opts = CheckpointOpts {
+                interactive: ctx.interactive,
+                stdin_override: None,
+                telemetry: Some(ctx.telemetry.clone()),
+            };
+            let checkpoints_dir = ctx.run_dir().checkpoints();
+            let _ = crate::checkpoint::ask(&cp, &checkpoints_dir, &opts);
+        }
+
         Ok(PhaseOutput::Ranking(out_path))
     }
 }
