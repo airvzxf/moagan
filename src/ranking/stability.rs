@@ -126,8 +126,7 @@ fn gaussian(rng: &mut fastrand::Rng) -> f32 {
     // Avoid `log(0)`; clamp the uniform draw away from zero.
     let u1: f32 = rng.f32().max(f32::EPSILON);
     let u2: f32 = rng.f32();
-    let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
-    z0
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
 }
 
 /// Compute the per-proposal stability score under the supplied
@@ -164,9 +163,7 @@ pub fn stability_score(
             best = match best {
                 None => Some((id.as_str(), score)),
                 Some((cur_id, cur_score)) => {
-                    if score > cur_score
-                        || (score == cur_score && id.as_str() < cur_id)
-                    {
+                    if score > cur_score || (score == cur_score && id.as_str() < cur_id) {
                         Some((id.as_str(), score))
                     } else {
                         Some((cur_id, cur_score))
@@ -339,8 +336,14 @@ mod tests {
         let base = w(1.0, 1.0, 1.0, 1.0, 1.0, 0.0);
         let weights = perturb_weights(&base, 64, 1.0, 42);
         let evals = vec![
-            ("zzz_high_correctness".to_string(), snap(8.0, 8.0, 8.0, 8.0, 8.0, 8.0)),
-            ("aaa_low_correctness".to_string(), snap(6.0, 8.0, 8.0, 8.0, 8.0, 8.0)),
+            (
+                "zzz_high_correctness".to_string(),
+                snap(8.0, 8.0, 8.0, 8.0, 8.0, 8.0),
+            ),
+            (
+                "aaa_low_correctness".to_string(),
+                snap(6.0, 8.0, 8.0, 8.0, 8.0, 8.0),
+            ),
         ];
         let score = stability_score(&weights, &evals);
         // The "low correctness" proposal wins the tiebreak when

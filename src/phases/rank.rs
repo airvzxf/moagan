@@ -25,7 +25,7 @@ use crate::phases::judge::Aggregated;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::ranking::pareto::QualityVector;
-use crate::ranking::stability::{stability_check, EvalSnapshot};
+use crate::ranking::stability::{EvalSnapshot, stability_check};
 use crate::ranking::{cluster_by_simhash, pareto_front, pick_with_crowding};
 
 /// Number of representative proposals to surface for delivery (top-3
@@ -215,71 +215,70 @@ impl Phase for RankPhase {
         //   mirrored Config::stability.enabled into this flag).
         // - fewer than 2 evaluations (trivially stable, score = 1.0).
         // - Config::stability.n_perturbations == 0.
-        let (stability_score_map, stability_label, stability_sigma) = if !self.stability_enabled
-            || self.config.stability.n_perturbations == 0
-        {
-            // No-op: write nothing useful. The fields stay None
-            // on the sidecar so legacy parsers see no change.
-            (None, None, None)
-        } else {
-            let snapshots: Vec<(String, EvalSnapshot)> = items
-                .iter()
-                .map(|(id, agg, _)| {
-                    (
-                        id.clone(),
-                        EvalSnapshot {
-                            correctness: agg.correctness,
-                            completeness: agg.completeness,
-                            fit: agg.fit,
-                            evidence: agg.evidence,
-                            clarity: agg.clarity,
-                            overall: agg.score,
-                        },
-                    )
-                })
-                .collect();
-            if snapshots.len() < 2 {
-                // Single proposal: trivially stable.
-                let mut m = std::collections::HashMap::new();
-                m.insert(snapshots[0].0.clone(), 1.0_f32);
-                (
-                    Some(m),
-                    Some(StabilityLabel::Stable),
-                    Some(self.config.stability.sigma_default),
-                )
+        let (stability_score_map, stability_label, stability_sigma) =
+            if !self.stability_enabled || self.config.stability.n_perturbations == 0 {
+                // No-op: write nothing useful. The fields stay None
+                // on the sidecar so legacy parsers see no change.
+                (None, None, None)
             } else {
-                let sigma = if ctx.interactive {
-                    self.config.stability.sigma_interactive
+                let snapshots: Vec<(String, EvalSnapshot)> = items
+                    .iter()
+                    .map(|(id, agg, _)| {
+                        (
+                            id.clone(),
+                            EvalSnapshot {
+                                correctness: agg.correctness,
+                                completeness: agg.completeness,
+                                fit: agg.fit,
+                                evidence: agg.evidence,
+                                clarity: agg.clarity,
+                                overall: agg.score,
+                            },
+                        )
+                    })
+                    .collect();
+                if snapshots.len() < 2 {
+                    // Single proposal: trivially stable.
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(snapshots[0].0.clone(), 1.0_f32);
+                    (
+                        Some(m),
+                        Some(StabilityLabel::Stable),
+                        Some(self.config.stability.sigma_default),
+                    )
                 } else {
-                    self.config.stability.sigma_default
-                };
-                let (score, label, _sigma_used) = stability_check(
-                    &self.config.ranking_weights,
-                    &snapshots,
-                    self.config.stability.n_perturbations,
-                    sigma,
-                    self.config.stability.seed,
-                    self.config.stability.sensitive_threshold,
-                );
-                let sigma_used = if ctx.interactive {
-                    self.config.stability.sigma_interactive
-                } else {
-                    self.config.stability.sigma_default
-                };
-                // Log the verdict via tracing so the operator can
-                // see it in the run log; the SQLite mirror lives in
-                // a follow-up commit so this one stays scoped to the
-                // pure ranking-phase wiring.
-                tracing::info!(
-                    run_id = %ctx.run_id,
-                    sigma = sigma_used,
-                    n = self.config.stability.n_perturbations,
-                    label = ?label,
-                    "rank stability computed"
-                );
-                (Some(score), Some(label), Some(sigma_used))
-            }
-        };
+                    let sigma = if ctx.interactive {
+                        self.config.stability.sigma_interactive
+                    } else {
+                        self.config.stability.sigma_default
+                    };
+                    let (score, label, _sigma_used) = stability_check(
+                        &self.config.ranking_weights,
+                        &snapshots,
+                        self.config.stability.n_perturbations,
+                        sigma,
+                        self.config.stability.seed,
+                        self.config.stability.sensitive_threshold,
+                    );
+                    let sigma_used = if ctx.interactive {
+                        self.config.stability.sigma_interactive
+                    } else {
+                        self.config.stability.sigma_default
+                    };
+                    // Log the verdict via tracing so the operator can
+                    // see it in the run log; the SQLite mirror lives in
+                    // a follow-up commit so this one stays scoped to the
+                    // pure ranking-phase wiring.
+                    tracing::info!(
+                        run_id = %ctx.run_id,
+                        sigma = sigma_used,
+                        n = self.config.stability.n_perturbations,
+                        label = ?label,
+                        "rank stability computed"
+                    );
+                    (Some(score), Some(label), Some(sigma_used))
+                }
+            };
 
         let ranking = Ranking {
             ranked,

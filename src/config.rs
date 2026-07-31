@@ -152,7 +152,7 @@ impl Default for StabilityConfig {
             sigma_default: 0.05,
             sigma_interactive: 0.10,
             sensitive_threshold: 0.8,
-            seed: 0xDEFA17_BEEF,
+            seed: 0x00DE_FA17_BEEF_u64,
         }
     }
 }

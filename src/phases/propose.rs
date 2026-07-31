@@ -264,9 +264,8 @@ mod tests {
     #[test]
     fn source_nodes_populated_when_text_matches_node() {
         let graph = fixture_graph();
-        let proposal = fixture_proposal(
-            "the rainbow rendering pipeline data model schema is canonical",
-        );
+        let proposal =
+            fixture_proposal("the rainbow rendering pipeline data model schema is canonical");
         let nodes = ProposePhase::compute_source_nodes(&graph, &proposal);
         // n0 (data model + rainbow) matches strongly. n1 (rendering
         // pipeline) shares 3 of 10 unique words → distance 0.7 which
@@ -321,9 +320,8 @@ mod tests {
             brief_blake3: "deadbeef".into(),
             created_unix: 0,
         };
-        let proposal = fixture_proposal(
-            "we render the rainbow with the rendering pipeline end-to-end",
-        );
+        let proposal =
+            fixture_proposal("we render the rainbow with the rendering pipeline end-to-end");
         let nodes = ProposePhase::compute_source_nodes(&graph, &proposal);
         // alpha and beta should both match; gamma should not.
         assert!(nodes.contains(&"alpha".to_string()), "got {nodes:?}");

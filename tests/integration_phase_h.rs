@@ -75,7 +75,10 @@ fn fresh_ctx(home: Arc<MoaganHome>, run_id: RunId, interactive: bool) -> RunCont
 }
 
 fn write_aggregated(home: &MoaganHome, run_id: RunId, id: &str, agg: &Aggregated) {
-    let path = home.run_dir(run_id).evaluations().join(format!("{id}.json"));
+    let path = home
+        .run_dir(run_id)
+        .evaluations()
+        .join(format!("{id}.json"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     write_json(&path, agg).unwrap();
 }
@@ -139,8 +142,13 @@ fn ranking_marked_stable_when_weights_uniform_and_clear_winner() -> Result<()> {
     };
     pollster::block_on(phase.execute(&ctx))?;
     let r = read_ranking(&home, run_id);
-    assert_eq!(r.stability_label, Some(moagan::domain::StabilityLabel::Stable));
-    let score = r.stability_score.expect("score present when stability enabled");
+    assert_eq!(
+        r.stability_label,
+        Some(moagan::domain::StabilityLabel::Stable)
+    );
+    let score = r
+        .stability_score
+        .expect("score present when stability enabled");
     assert_eq!(
         score.get("p_high").copied(),
         Some(1.0),
@@ -458,9 +466,7 @@ fn proposal_source_nodes_populated_when_graph_non_trivial() -> Result<()> {
         summary: "we render the rainbow with the rendering pipeline end-to-end".into(),
         approach: "we render the rainbow with the rendering pipeline end-to-end".into(),
         tradeoffs: vec![],
-        evidence: vec![
-            "we render the rainbow with the rendering pipeline end-to-end".into()
-        ],
+        evidence: vec!["we render the rainbow with the rendering pipeline end-to-end".into()],
         artifacts: vec![],
         source_sketch: String::new(),
         source_nodes: vec![],
@@ -506,9 +512,15 @@ fn ranking_with_stability_round_trips_json() -> Result<()> {
     assert!(raw.contains("\"stability_label\""));
     assert!(raw.contains("\"stability_sigma\""));
     let back: Ranking = serde_json::from_str(&raw).unwrap();
-    assert_eq!(back.stability_label, Some(moagan::domain::StabilityLabel::Stable));
+    assert_eq!(
+        back.stability_label,
+        Some(moagan::domain::StabilityLabel::Stable)
+    );
     assert_eq!(back.stability_sigma, Some(0.05));
-    assert_eq!(back.stability_score.as_ref().unwrap().get("p_b"), Some(&0.5));
+    assert_eq!(
+        back.stability_score.as_ref().unwrap().get("p_b"),
+        Some(&0.5)
+    );
     Ok(())
 }
 

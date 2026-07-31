@@ -276,20 +276,15 @@ pub struct RankEntry {
 /// Stability verdict produced by `ranking::stability::stability_label`.
 /// `Sensitive` means the top-1 winner changed in more than
 /// `(1.0 - threshold)` of the perturbations; `Stable` otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StabilityLabel {
     /// Top-1 winner was invariant under perturbations.
+    #[default]
     Stable,
     /// Top-1 winner changed in some perturbations — operator may
     /// want to re-rank with different weights.
     Sensitive,
-}
-
-impl Default for StabilityLabel {
-    fn default() -> Self {
-        Self::Stable
-    }
 }
 
 /// Output of the deliver phase.
