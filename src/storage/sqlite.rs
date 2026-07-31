@@ -567,6 +567,35 @@ impl Db {
         Ok(())
     }
 
+    /// Read the `problem_graphs` row for a run. Returns `None`
+    /// when the row does not exist (pre-v006 DB or a run that
+    /// never reached the `decompose` phase). Best-effort: returns
+    /// `Ok(None)` on the legacy schema too.
+    pub fn get_problem_graph(&self, run_id: RunId) -> Result<Option<ProblemGraphRow>> {
+        let conn = self.pool.get()?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 6 {
+            return Ok(None);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT brief_blake3, should_decompose, node_count, at_unix \
+             FROM problem_graphs WHERE run_id = ?",
+        )?;
+        let row = stmt.query_row(params![run_id.to_string()], |r| {
+            Ok(ProblemGraphRow {
+                brief_blake3: r.get(0)?,
+                should_decompose: r.get::<_, i64>(1)? != 0,
+                node_count: r.get(2)?,
+                at_unix: r.get(3)?,
+            })
+        });
+        match row {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Full checkpoint list for a run, ordered by `at_unix`
     /// ascending. Returns an empty Vec if no checkpoints were
     /// recorded (e.g. when `interactive=false` and the call path
@@ -637,6 +666,20 @@ pub struct CheckpointRow {
     pub accepted_default: bool,
     /// Unix seconds at capture time.
     pub at_unix: Option<i64>,
+}
+
+/// One row in `problem_graphs` (Phase G).
+#[derive(Debug, Clone)]
+pub struct ProblemGraphRow {
+    /// BLAKE3 of the canonical brief.
+    pub brief_blake3: String,
+    /// True when the model said yes; false when the trigger ladder
+    /// vetoed the call (or the model did).
+    pub should_decompose: bool,
+    /// Number of nodes that survived repair.
+    pub node_count: i64,
+    /// Unix seconds at capture time.
+    pub at_unix: i64,
 }
 
 /// One row from the full `warnings` list.
