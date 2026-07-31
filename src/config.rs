@@ -57,6 +57,13 @@ pub struct Config {
     pub gate_min_length: usize,
     /// Maximum proposal length (chars) for the gate length check.
     pub gate_max_length: usize,
+    /// Phase H: knobs for the ranking-stability check. See
+    /// [`StabilityConfig`] for the field semantics. Default config
+    /// runs 8 perturbations at sigma 0.05 (non-interactive) / 0.10
+    /// (interactive) and labels the ranking `Sensitive` when the
+    /// top-1 winner held its position in fewer than 80% of the
+    /// perturbations.
+    pub stability: StabilityConfig,
 }
 
 /// Per-criterion weights used by the `RankPhase` to compute the
@@ -89,6 +96,63 @@ impl Default for RankingWeights {
             evidence: 1.0,
             clarity: 1.0,
             overall: 0.0,
+        }
+    }
+}
+
+/// Phase H (V4 §5.12 paso 6): knobs for the ranking-stability check
+/// that runs after the weighted sort (step 5.6 of `RankPhase`). The
+/// check perturbs `RankingWeights` with Gaussian noise and measures
+/// how often each proposal keeps its position. The result is
+/// persisted on `Ranking.stability_score` / `stability_label` and
+/// feeds V4 §5.14's human-checkpoint trigger ("el ranking es
+/// inestable").
+///
+/// Defaults are conservative: 8 perturbations, sigma 0.05, sensitive
+/// threshold 0.8. With the default `RankingWeights` (all 1.0) and
+/// sigma 0.05 the perturbations stay well inside the `[0.0, 2.0]`
+/// clip range and almost never flip a clear winner. Operators wanting
+/// stricter sensitivity detection raise `sigma_interactive`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StabilityConfig {
+    /// Whether the stability check runs at all. `false` skips the
+    /// check entirely; the ranking sidecar carries `null` for the
+    /// stability fields and the human-checkpoint trigger is
+    /// disarmed. Default `true`.
+    pub enabled: bool,
+    /// Number of weight perturbations. `0` is equivalent to
+    /// `enabled = false` and short-circuits. Default 8.
+    pub n_perturbations: usize,
+    /// Sigma for non-interactive runs. Default 0.05.
+    pub sigma_default: f32,
+    /// Sigma for interactive runs (`Mode::Standard` / `Mode::Deep`
+    /// without `--non-interactive`). Higher than `sigma_default`
+    /// because the user is present to absorb the extra prompts when
+    /// the ranking looks sensitive. Default 0.10.
+    pub sigma_interactive: f32,
+    /// Threshold below which the top-1 score is considered
+    /// `Sensitive`. Score in `[0.0, 1.0]` = fraction of
+    /// perturbations under which the winner kept its position.
+    /// `score >= sensitive_threshold` => `Stable`, else
+    /// `Sensitive`. Default 0.8.
+    pub sensitive_threshold: f32,
+    /// Deterministic seed for the perturbation RNG. Same seed =>
+    /// same perturbation set => same stability score. Useful for
+    /// reproducing an audit. Default 0xDEFA17_BEEF (a memorable
+    /// value; change if you want run-to-run independence).
+    pub seed: u64,
+}
+
+impl Default for StabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            n_perturbations: 8,
+            sigma_default: 0.05,
+            sigma_interactive: 0.10,
+            sensitive_threshold: 0.8,
+            seed: 0xDEFA17_BEEF,
         }
     }
 }
@@ -159,6 +223,7 @@ impl Default for Config {
             gate_forbidden_techs: Vec::new(),
             gate_min_length: 50,
             gate_max_length: 5000,
+            stability: StabilityConfig::default(),
         }
     }
 }
