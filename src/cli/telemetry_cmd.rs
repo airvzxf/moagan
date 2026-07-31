@@ -96,7 +96,7 @@ pub enum TelemetryCmd {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    /// `moagan telemetry cleanup [--dry-run]`.
+    /// `moagan telemetry cleanup [--dry-run] [--archive]`.
     Cleanup {
         /// Optional override for `MOAGAN_HOME`.
         #[arg(long)]
@@ -105,6 +105,13 @@ pub enum TelemetryCmd {
         /// the filesystem.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        /// Override the retention policy for this invocation:
+        /// archive eligible runs into `<root>/archive/YYYY-MM-DD/`
+        /// instead of deleting them. The config knob
+        /// `Config::retention.policy` is the default; the flag
+        /// wins.
+        #[arg(long, default_value_t = false)]
+        archive: bool,
     },
     /// `moagan telemetry verify --path <export-path>`.
     Verify {
@@ -729,6 +736,20 @@ mod view {
         };
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let cfg = Config::load()?;
+        // `ServerConfig::ensure_home` controls whether the
+        // dashboard creates the runs/ + cache/ directories on
+        // startup (default true). When the operator disables it
+        // (e.g., for a read-only CI dashboard pointing at a
+        // production home) we fail fast on a missing layout
+        // instead of silently materialising empty dirs.
+        if cfg.server.ensure_home {
+            home.ensure()?;
+        } else if !home.runs_dir().exists() {
+            return Err(Error::InvalidState(format!(
+                "dashboard home has no .runs/ directory and ensure_home=false: {}",
+                home.root().display()
+            )));
+        }
         let bind = SocketAddr::new(
             cfg.server.host.parse::<IpAddr>().map_err(|e| {
                 Error::InvalidArgs(format!("invalid dashboard host '{}': {e}", cfg.server.host))
@@ -823,17 +844,29 @@ mod cleanup {
     use crate::telemetry::retention::{RetentionConfig, RetentionPolicy, apply};
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
-        let (runs_dir, dry_run) = match cmd {
-            TelemetryCmd::Cleanup { runs_dir, dry_run } => (runs_dir.as_ref(), *dry_run),
+        let (runs_dir, dry_run, archive_flag) = match cmd {
+            TelemetryCmd::Cleanup {
+                runs_dir,
+                dry_run,
+                archive,
+            } => (runs_dir.as_ref(), *dry_run, *archive),
             _ => return Err(Error::InvalidState("cleanup: wrong variant".into())),
         };
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let runs_dir = home.runs_dir();
         let db = Db::open(&home.meta_db_path()).ok();
         let cfg = Config::load()?;
-        let policy = match cfg.retention.policy.as_str() {
+        // The CLI flag `--archive` wins over the config knob so
+        // operators can run a one-off archive without editing the
+        // config file.
+        let config_policy = match cfg.retention.policy.as_str() {
             "archive" => RetentionPolicy::Archive,
             _ => RetentionPolicy::Delete,
+        };
+        let policy = if archive_flag {
+            RetentionPolicy::Archive
+        } else {
+            config_policy
         };
         let retention_cfg = RetentionConfig {
             keep_runs_days: cfg.retention.keep_runs_days,

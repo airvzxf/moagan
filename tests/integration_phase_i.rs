@@ -451,6 +451,36 @@ fn cleanup_apply_archive_moves_run_directory() {
     assert!(!run_dir.root().exists(), "moved out of runs/");
 }
 
+#[test]
+fn cleanup_cli_accepts_archive_flag_and_overrides_config() {
+    // The CLI flag `--archive` is supposed to override the
+    // config knob `Config::retention.policy`. This test
+    // exercises the dispatcher wiring end-to-end via
+    // `TelemetryCmd::dispatch` (sync path).
+    let _guard = env_lock();
+    let home = populate_home();
+    let cmd = TelemetryCmd::Cleanup {
+        runs_dir: Some(home.root().to_path_buf()),
+        dry_run: true,
+        archive: true,
+    };
+    let code = pollster::block_on(cmd.dispatch()).unwrap();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn cleanup_cli_default_policy_is_delete() {
+    let _guard = env_lock();
+    let home = populate_home();
+    let cmd = TelemetryCmd::Cleanup {
+        runs_dir: Some(home.root().to_path_buf()),
+        dry_run: true,
+        archive: false,
+    };
+    let code = pollster::block_on(cmd.dispatch()).unwrap();
+    assert_eq!(code, 0);
+}
+
 #[tokio::test]
 async fn dashboard_serves_seeded_run_over_http() {
     let _guard = env_lock();

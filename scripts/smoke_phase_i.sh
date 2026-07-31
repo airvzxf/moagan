@@ -228,6 +228,20 @@ run_test "telemetry_cleanup_dry_run_no_op" '
   [[ "$out" == *"nothing to remove"* ]]
 '
 
+run_test "telemetry_cleanup_archive_flag_is_recognised" '
+  HOME=$(mktemp -d)
+  export MOAGAN_HOME="$HOME"
+  trap "rm -rf $HOME" EXIT
+  mkdir -p "$HOME/.runs"
+  out=$("'"$BIN"'" telemetry cleanup --dry-run --archive 2>&1)
+  # Either the no-op marker or a successful run summary;
+  # the key is that --archive parses without "unexpected
+  # argument 'archive'" or similar clap errors.
+  [[ "$out" == *"nothing to remove"* ]] || \
+    [[ "$out" == *"dry-run:"* ]] || \
+    [[ "$out" == *"apply:"* ]]
+'
+
 # ---------------------------------------------------------------------
 # 3. Export / verify round-trip on a hand-rolled run dir
 # ---------------------------------------------------------------------
@@ -316,6 +330,11 @@ run_test "dashboard_dispatch_unit_presence" '
 
 run_test "dashboard_rejects_non_loopback_bind" '
   grep -q "must bind on a loopback address" '"$ROOT"'/src/telemetry/dashboard.rs
+'
+
+run_test "dashboard_consumes_ensure_home_knob" '
+  grep -q "ensure_home" '"$ROOT"'/src/cli/telemetry_cmd.rs
+  grep -q "cfg.server.ensure_home" '"$ROOT"'/src/cli/telemetry_cmd.rs
 '
 
 # ---------------------------------------------------------------------
