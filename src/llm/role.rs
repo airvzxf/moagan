@@ -69,6 +69,12 @@ pub enum Role {
     /// exceeds the configured threshold (T01-06 §5.11 + V4 §5.13).
     /// Deterministic (`T=0.0`).
     Adversary,
+    /// Decomposer — Phase G. Splits a deep-mode brief into a DAG of
+    /// sub-questions so downstream phases (sketch, propose) can fan
+    /// out by node instead of by angle. T=0.3, max_tokens=3000 per
+    /// T01-06 §4.2 role table. Skipped entirely when the brief does
+    /// not meet the `should_decompose` ladder (`Proposal::trivial`).
+    Decomposer,
 }
 
 impl Role {
@@ -91,6 +97,7 @@ impl Role {
             Self::Integrator => "integrator",
             Self::Synthesizer => "synthesizer",
             Self::Adversary => "adversary",
+            Self::Decomposer => "decomposer",
         }
     }
 
@@ -133,6 +140,9 @@ impl Role {
             }
             Self::Adversary => {
                 "Adversary: {proposal_id, consensus_check, disagreement_score, weaknesses[], unverified_claims[], score_delta, rationale}"
+            }
+            Self::Decomposer => {
+                "Decomposer: {should_decompose, nodes[]{id, question, expected_output, constraints[], dependencies[], validation_method}, integration_rules[]{from, to, description}, critical_path[]}"
             }
         }
     }
@@ -179,6 +189,9 @@ impl Role {
                 serde_json::from_value::<SynthesizedProposal>(value.clone()).map(|_| ())
             }
             Self::Adversary => serde_json::from_value::<AdversaryReport>(value.clone()).map(|_| ()),
+            Self::Decomposer => {
+                serde_json::from_value::<crate::domain::ProblemGraph>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -209,6 +222,7 @@ impl Role {
             Self::Integrator,
             Self::Synthesizer,
             Self::Adversary,
+            Self::Decomposer,
         ]
     }
 }
@@ -240,6 +254,7 @@ impl FromStr for Role {
             "integrator" => Ok(Self::Integrator),
             "synthesizer" => Ok(Self::Synthesizer),
             "adversary" => Ok(Self::Adversary),
+            "decomposer" => Ok(Self::Decomposer),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -265,11 +280,12 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_sixteen() {
+    fn all_roles_are_count_seventeen() {
         // v0.2 added the `sketch` role between route and propose (10→11).
         // Sub-phase B added tagger, extractor, integrator (11→14).
         // Sub-phase D added synthesizer and adversary (14→16).
-        assert_eq!(Role::all().len(), 16);
+        // v0.3 sub-fase G added the decomposer (16→17).
+        assert_eq!(Role::all().len(), 17);
     }
 
     #[test]
@@ -305,7 +321,8 @@ mod tests {
                     || desc.starts_with("FacetExtraction:")
                     || desc.starts_with("CategoryDoc:")
                     || desc.starts_with("Synthesizer:")
-                    || desc.starts_with("Adversary:"),
+                    || desc.starts_with("Adversary:")
+                    || desc.starts_with("Decomposer:"),
                 "{:?} description does not start with its name: {desc}",
                 r
             );
