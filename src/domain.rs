@@ -244,6 +244,21 @@ pub struct Ranking {
     pub representatives: Vec<RankEntry>,
     /// Winning proposal id.
     pub winner: String,
+    /// Per-proposal stability score in `[0.0, 1.0]` (fraction of
+    /// weight perturbations under which the proposal kept its rank).
+    /// `None` when the stability check was skipped (weights fixed or
+    /// `Config::stability.enabled == false`). V4 §5.12 paso 6.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stability_score: Option<std::collections::HashMap<String, f32>>,
+    /// Coarse stability verdict. `None` mirrors `stability_score`'s
+    /// semantics — present iff the check actually ran.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stability_label: Option<StabilityLabel>,
+    /// Sigma used for the perturbations that produced `stability_score`.
+    /// Recorded for telemetry so operators can correlate sensitivity
+    /// with the perturbation magnitude.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stability_sigma: Option<f32>,
 }
 
 /// One entry in the ranking.
@@ -256,6 +271,25 @@ pub struct RankEntry {
     pub score: f32,
     /// Human-readable reason.
     pub reason: String,
+}
+
+/// Stability verdict produced by `ranking::stability::stability_label`.
+/// `Sensitive` means the top-1 winner changed in more than
+/// `(1.0 - threshold)` of the perturbations; `Stable` otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StabilityLabel {
+    /// Top-1 winner was invariant under perturbations.
+    Stable,
+    /// Top-1 winner changed in some perturbations — operator may
+    /// want to re-rank with different weights.
+    Sensitive,
+}
+
+impl Default for StabilityLabel {
+    fn default() -> Self {
+        Self::Stable
+    }
 }
 
 /// Output of the deliver phase.

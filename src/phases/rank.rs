@@ -190,6 +190,9 @@ impl Phase for RankPhase {
             ranked,
             representatives,
             winner,
+            stability_score: None,
+            stability_label: None,
+            stability_sigma: None,
         };
         let out_path: PathBuf = rankings_dir.join("ranking.json");
         write_json(&out_path, &ranking)?;
