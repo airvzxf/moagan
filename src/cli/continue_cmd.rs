@@ -152,8 +152,9 @@ pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> 
     // not expose `--no-replace-sources` today — callers wanting the
     // legacy behaviour can run `moagan run` again with the flag.
     let phase = super::super::phases::RankPhase {
-        config: cfg_arc,
+        config: cfg_arc.clone(),
         replace_sources_enabled: true,
+        stability_enabled: cfg_arc.stability.enabled,
     };
     let policy = crate::redact::RedactPolicy::default();
     let telemetry = Telemetry::open(run_id, &run_dir, policy, None)?;
