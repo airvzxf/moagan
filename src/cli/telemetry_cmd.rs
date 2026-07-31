@@ -584,9 +584,133 @@ mod compare {
 
 mod provider {
     use super::{Error, Result, TelemetryCmd};
+    use crate::config::{Config, ProviderConfig};
+    use crate::storage::sqlite::Db;
+    use std::collections::BTreeMap;
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("provider")
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, plan, list) = match cmd {
+            TelemetryCmd::Provider {
+                runs_dir,
+                plan,
+                list,
+            } => (runs_dir.as_ref(), plan.as_deref(), *list),
+            _ => return Err(Error::InvalidState("provider: wrong variant".into())),
+        };
+        let cfg = Config::load()?;
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let db = Db::open(&home.meta_db_path())?;
+
+        if list {
+            list_providers(&cfg, &db);
+        } else if let Some(name) = plan {
+            plan_summary(name, &cfg, &db)?;
+        } else {
+            // Default action (no flag): list providers. This matches
+            // V4 §8.7 ("moagan telemetry provider" with no flags
+            // shows the provider roster).
+            list_providers(&cfg, &db);
+        }
+        Ok(())
+    }
+
+    fn list_providers(cfg: &Config, db: &Db) {
+        println!(
+            "{:<14}  {:<24}  {:<14}  {:<10}  {:<10}  calls",
+            "name", "endpoint", "model", "tokens_in", "tokens_out"
+        );
+        let rows = db.aggregate_provider_usage().unwrap_or_default();
+        let mut by_key: BTreeMap<(String, String), (i64, i64, i64)> = BTreeMap::new();
+        for r in &rows {
+            let entry = by_key
+                .entry((r.provider.clone(), r.model.clone()))
+                .or_insert((0, 0, 0));
+            entry.0 += r.calls;
+            entry.1 += r.input_tokens;
+            entry.2 += r.output_tokens;
+        }
+        for (name, provider) in &cfg.providers {
+            let key = (provider.kind.clone(), provider.model.clone());
+            let stats = by_key.get(&key).copied().unwrap_or((0, 0, 0));
+            println!(
+                "{:<14}  {:<24}  {:<14}  {:<10}  {:<10}  {}",
+                name,
+                trim(&provider.endpoint, 24),
+                trim(&provider.model, 14),
+                stats.1,
+                stats.2,
+                stats.0
+            );
+        }
+    }
+
+    fn plan_summary(name: &str, cfg: &Config, db: &Db) -> Result<()> {
+        let provider: &ProviderConfig = cfg
+            .providers
+            .get(name)
+            .ok_or_else(|| Error::InvalidArgs(format!("unknown provider plan '{name}'")))?;
+        println!("Provider: {}", name);
+        println!("Kind: {}", provider.kind);
+        println!("Endpoint: {}", provider.endpoint);
+        println!("Model: {}", provider.model);
+        if let Some(max) = provider.max_tokens {
+            println!("Max tokens: {max}");
+        }
+        if let Some(t) = provider.temperature {
+            println!("Temperature: {t}");
+        }
+        if let Some(p) = provider.top_p {
+            println!("Top-p: {p}");
+        }
+        if !provider.hard_incompatibilities.is_empty() {
+            println!(
+                "Hard incompatibilities: {}",
+                provider.hard_incompatibilities.join(", ")
+            );
+        }
+        println!();
+        println!("Recent usage (last 20 runs):");
+        let rows = db.recent_runs_for_provider(&provider.kind, 20)?;
+        if rows.is_empty() {
+            println!("  (no recorded usage)");
+            return Ok(());
+        }
+        #[allow(clippy::print_literal)]
+        {
+            println!(
+                "  {:<14}  {:<24}  calls={:<5}  in={:<8}  out={:<6}  last_call_unix={}",
+                "model", "endpoint", "", "", "", ""
+            );
+        }
+        for r in &rows {
+            let last = r
+                .last_call_unix
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| "-".into());
+            println!(
+                "  {:<14}  {:<24}  calls={:<5}  in={:<8}  out={:<6}  last_call_unix={}",
+                trim(&r.model, 14),
+                trim(&provider.endpoint, 24),
+                r.calls,
+                r.input_tokens,
+                r.output_tokens,
+                last
+            );
+        }
+        Ok(())
+    }
+
+    /// Truncate `s` to at most `max` chars, appending an ellipsis
+    /// when truncation occurred. Used by the column printer so a
+    /// long endpoint URL does not blow up the table layout.
+    fn trim(s: &str, max: usize) -> String {
+        if s.chars().count() <= max {
+            s.to_owned()
+        } else {
+            let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+            out.push('…');
+            out
+        }
     }
 }
 
@@ -732,5 +856,41 @@ mod tests {
         };
         let err = cmd.dispatch().unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
+    }
+
+    #[test]
+    fn provider_unknown_plan_returns_invalid_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Provider {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            plan: Some("nonexistent".into()),
+            list: false,
+        };
+        let err = cmd.dispatch().unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs(_)));
+    }
+
+    #[test]
+    fn provider_list_runs_against_empty_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Provider {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            plan: None,
+            list: true,
+        };
+        let code = cmd.dispatch().unwrap();
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn provider_default_action_is_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Provider {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            plan: None,
+            list: false,
+        };
+        let code = cmd.dispatch().unwrap();
+        assert_eq!(code, 0);
     }
 }
