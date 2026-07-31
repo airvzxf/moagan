@@ -206,6 +206,7 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         })
         .push(RankPhase {
             config: Arc::new(Config::default()),
+            replace_sources_enabled: false,
         })
         .push(DeliverPhase);
 
@@ -894,6 +895,7 @@ fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
         })
         .push(RankPhase {
             config: Arc::new(Config::default()),
+            replace_sources_enabled: false,
         })
         .push(DeliverPhase);
 
@@ -1113,6 +1115,7 @@ fn seed_judge_proposals(home: &MoaganHome, run_id: RunId, count: usize) -> Resul
             evidence: vec!["One source".into()],
             source_sketch: String::new(),
             artifacts: vec![],
+            replaced_by: None,
         };
         let bytes = serde_json::to_vec(&proposal)?;
         std::fs::write(proposals_dir.join(format!("p_{i:03}.json")), bytes)?;

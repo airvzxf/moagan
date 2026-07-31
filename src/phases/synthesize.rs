@@ -56,6 +56,7 @@ pub fn synth_to_proposal(synth: &SynthesizedProposal) -> Proposal {
         evidence: synth.evidence.clone(),
         source_sketch: format!("syn_from_{}", synth.cluster_id),
         artifacts: Vec::new(),
+        replaced_by: None,
     }
 }
 

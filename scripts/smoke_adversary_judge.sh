@@ -167,8 +167,8 @@ run_test "judge_skipped_in_fast_mode" \
 run_test "aggregated_default_has_adversary_delta_zero" \
   "grep -B 2 -A 1 'adversary_delta: 0.0' ${ROOT}/src/phases/judge.rs"
 
-run_test "rank_phase_does_not_read_synthesized_dir" \
-  "! grep -q 'run_dir().synthesized()' ${ROOT}/src/phases/rank.rs"
+run_test "rank_phase_reads_synthesized_dir_for_replacement" \
+  "grep -q 'run_dir().synthesized()' ${ROOT}/src/phases/rank.rs"
 
 run_test "disagreement_score_unanimous_is_zero_unit_test" \
   "grep -q 'disagreement_score_unanimous_is_zero' ${ROOT}/src/phases/judge.rs"

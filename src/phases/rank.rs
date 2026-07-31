@@ -33,6 +33,14 @@ pub struct RankPhase {
     /// Shared config so the rank phase can read the per-criterion
     /// weights without going through `RunContext`.
     pub config: Arc<Config>,
+    /// Phase F: enable the synthesis-replacement predicate. When
+    /// `true`, a synthesis (`s_<NN>`) that dominates its source
+    /// cluster per V4 §5.13 + D.13.16 removes the source proposals
+    /// from the final ranking and stamps them with `replaced_by`.
+    /// `fast` mode sets this to `false` because it doesn't run
+    /// `SynthesizePhase`; `standard`/`deep`/`batch` set it to
+    /// `true`. The CLI flag `--no-replace-sources` overrides both.
+    pub replace_sources_enabled: bool,
 }
 
 #[async_trait]
@@ -135,10 +143,41 @@ impl Phase for RankPhase {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let representatives: Vec<RankEntry> = rep_indices
+        // Step 5.5 (Phase F): apply the synthesis-replacement
+        // predicate (V4 §5.13 + D.13.16). For every synthesis
+        // (`s_<NN>`) in the front, look up its cluster membership
+        // (loaded from `synthesized/s_<NN>.json` — the immutable
+        // lineage sidecar), gather the source quality vectors, and
+        // call the predicate. When it returns true, drop the
+        // sources from `ranked` and stamp their sidecars with
+        // `replaced_by` so the deliver surface can show the
+        // supersession. The synthesis is added to `representatives`
+        // if it wasn't already picked by the crowding step.
+        let mut representatives: Vec<RankEntry> = rep_indices
             .iter()
             .filter_map(|&i| ranked.iter().find(|r| r.id == items[i].0).cloned())
             .collect();
+
+        if self.replace_sources_enabled {
+            let (dropped, promoted) = apply_synthesis_replacement(
+                &ranked,
+                &representatives,
+                &items,
+                &evaluations_dir,
+                &proposals_dir,
+                &ctx.run_dir().synthesized(),
+            )?;
+            if !dropped.is_empty() {
+                ranked.retain(|r| !dropped.contains(&r.id));
+                for syn_id in &promoted {
+                    if !representatives.iter().any(|r| &r.id == syn_id)
+                        && let Some(entry) = ranked.iter().find(|r| &r.id == syn_id).cloned()
+                    {
+                        representatives.insert(0, entry);
+                    }
+                }
+            }
+        }
 
         let winner = representatives
             .first()
@@ -156,6 +195,110 @@ impl Phase for RankPhase {
         write_json(&out_path, &ranking)?;
         Ok(PhaseOutput::Ranking(out_path))
     }
+}
+
+/// Phase F: walk the synthesized sidecars, evaluate the predicate for
+/// each synthesis against its cluster sources, and return the ids that
+/// should be dropped from the ranking plus the synthesis ids that
+/// should be promoted to `representatives`. Side effects: stamp each
+/// dropped source's `proposals/p_<id>.json` with `replaced_by`.
+fn apply_synthesis_replacement(
+    ranked: &[RankEntry],
+    representatives: &[RankEntry],
+    items: &[(String, Aggregated, String)],
+    evaluations_dir: &std::path::Path,
+    proposals_dir: &std::path::Path,
+    synthesized_dir: &std::path::Path,
+) -> Result<(std::collections::BTreeSet<String>, Vec<String>)> {
+    use crate::phases::replace::should_replace_synthesis;
+    use crate::ranking::pareto::QualityVector;
+
+    let mut dropped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut promoted: Vec<String> = Vec::new();
+
+    // Build an `id -> Aggregated` index so we don't re-read the
+    // evaluations files inside the inner loop.
+    let agg_by_id: std::collections::BTreeMap<&str, &Aggregated> = items
+        .iter()
+        .map(|(id, agg, _)| (id.as_str(), agg))
+        .collect();
+
+    let synth_dir = synthesized_dir;
+    let entries = match std::fs::read_dir(synth_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok((dropped, promoted)),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !file_name.ends_with(".json") || file_name.ends_with(".meta.json") {
+            continue;
+        }
+        let synth_id = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_owned(),
+            None => continue,
+        };
+        // Synthesized ids always start with `s_` (see `synth_to_proposal`
+        // and `SynthesizePhase::execute`). Anything else is noise.
+        if !synth_id.starts_with("s_") {
+            continue;
+        }
+        // Load the synthesized sidecar to recover the cluster_id and
+        // member_proposals (the lineage record). Per the user's
+        // decision (session 2026-07-30), this sidecar is the single
+        // source of truth for s_<NN> → cp_<NN>.
+        let synth: crate::domain::SynthesizedProposal = match read_json(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let source_ids = if !synth.source_proposals.is_empty() {
+            synth.source_proposals.clone()
+        } else {
+            continue;
+        };
+
+        let Some(s_agg) = agg_by_id.get(synth_id.as_str()) else {
+            continue;
+        };
+        let s_v = QualityVector::from_aggregated(s_agg);
+
+        let mut source_vs: Vec<QualityVector> = Vec::with_capacity(source_ids.len());
+        for sid in &source_ids {
+            if let Some(a) = agg_by_id.get(sid.as_str()) {
+                source_vs.push(QualityVector::from_aggregated(a));
+            }
+        }
+        if source_vs.len() != source_ids.len() {
+            // At least one source has no Aggregated on disk — skip
+            // this synthesis rather than make a partial decision.
+            continue;
+        }
+
+        if should_replace_synthesis(&s_v, &source_vs) {
+            for sid in &source_ids {
+                dropped.insert(sid.clone());
+                // Stamp the source sidecar with `replaced_by`. Best-
+                // effort: a missing or locked file is logged but does
+                // not abort the run (the ranking still drops the id).
+                let src_path = proposals_dir.join(format!("{sid}.json"));
+                if let Ok(mut p) = read_json::<Proposal>(&src_path) {
+                    p.replaced_by = Some(synth_id.clone());
+                    if write_json(&src_path, &p).is_err() {
+                        eprintln!("warn: failed to stamp replaced_by on proposals/{sid}.json");
+                    }
+                }
+            }
+            promoted.push(synth_id.clone());
+        }
+    }
+
+    // Suppress unused warning when the loop body never fires (e.g.
+    // empty run). The references keep the borrow checker happy.
+    let _ = ranked;
+    let _ = representatives;
+    let _ = evaluations_dir;
+
+    Ok((dropped, promoted))
 }
 
 /// Load the proposal text (for clustering) by reading the original

@@ -41,6 +41,11 @@ pub struct RunOptions {
     /// the config-file value (`cfg.max_parallelism`, default 4) is
     /// used. The constructor (`Parallelism::new`) clamps to `>= 1`.
     pub max_parallelism: Option<usize>,
+    /// Phase F: opt-out of the synthesis-replacement predicate. When
+    /// `true`, the synthesis and its sources all stay in the ranking
+    /// (V4 §5.13 "no sustituye automáticamente"). Default `false`
+    /// (replacement ON for `standard`/`deep`/`batch`).
+    pub no_replace_sources: bool,
 }
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
@@ -107,7 +112,14 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
     .with_interactive(!opts.non_interactive);
 
-    let pipeline = build_pipeline_for_mode(opts.mode, cfg);
+    // Phase F: synthesis-replacement predicate is ON by default for
+    // every mode that runs SynthesizePhase (`standard`/`deep`/`batch`).
+    // `fast` never runs synthesis so the flag would be a no-op there.
+    // The CLI opt-out (`--no-replace-sources`) flips it for the
+    // current run regardless of mode.
+    let replace_sources_enabled = !opts.no_replace_sources && !matches!(opts.mode, Mode::Fast);
+
+    let pipeline = build_pipeline_for_mode(opts.mode, cfg, replace_sources_enabled);
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
     let _outputs = tokio::select! {
@@ -215,7 +227,13 @@ pub fn build_registry_for(
 ///   JSON-stable output contract and lack of human pauses. Phase D
 ///   enabled but the human checkpoints are auto-skipped (handled
 ///   inside the phases via `CheckpointOpts::interactive`).
-fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
+///
+/// Phase F (`replace_sources_enabled` flag): the synthesis-replacement
+/// predicate is wired into `RankPhase` for every mode that runs
+/// `SynthesizePhase`. `fast` skips synthesis entirely so the flag is
+/// off there; the rest default to ON. The CLI flag
+/// `--no-replace-sources` overrides the per-mode default.
+fn build_pipeline_for_mode(mode: Mode, cfg: &Config, replace_sources_enabled: bool) -> Pipeline {
     let (proposals, critics, judges, sketches) = match mode {
         Mode::Fast => (3u32, 2u32, 3u32, 0u32),
         Mode::Standard => (3u32, 3u32, 5u32, 4u32),
@@ -284,7 +302,10 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config) -> Pipeline {
             judges,
             ..JudgePhase::default()
         })
-        .push(RankPhase { config: cfg_arc })
+        .push(RankPhase {
+            config: cfg_arc,
+            replace_sources_enabled,
+        })
         .push(DeliverPhase)
 }
 

@@ -26,6 +26,7 @@ pub mod pipe;
 pub mod propose;
 pub mod rank;
 pub mod repair;
+pub mod replace;
 pub mod route;
 pub mod sketch_phase;
 pub mod synthesize;

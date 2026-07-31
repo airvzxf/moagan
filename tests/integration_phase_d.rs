@@ -16,6 +16,12 @@
 //! The test exercises (1) and (4) directly (pure rust paths with the
 //! `MockProvider`). (2) and (3) are exercised indirectly through the
 //! disagreement-score unit tests on `JudgePhase::disagreement_score`.
+//!
+//! Phase F: the last three tests exercise the synthesis-replacement
+//! wiring in `RankPhase`. They construct the artifacts on disk
+//! (`proposals/`, `evaluations/`, `synthesized/`) directly so the
+//! test outcome does not depend on the variability of the LLM mock
+//! provider's scores.
 
 #![allow(clippy::await_holding_lock)]
 
@@ -23,14 +29,16 @@ use std::sync::Arc;
 
 use moagan::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
 use moagan::config::Config;
-use moagan::domain::Proposal;
+use moagan::domain::{Proposal, SynthesizedProposal};
 use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::ProviderRegistry;
 use moagan::phases::cluster_proposals::{CLUSTER_THRESHOLD, ClusterProposalsPhase};
+use moagan::phases::judge::Aggregated;
 use moagan::phases::phase::{Phase, RunContext};
+use moagan::phases::rank::RankPhase;
 use moagan::phases::synthesize::SynthesizePhase;
 use moagan::telemetry::Telemetry;
 
@@ -59,12 +67,22 @@ fn proposal(id: &str, summary: &str, approach: &str) -> Proposal {
         evidence: vec!["sk_001".to_owned()],
         source_sketch: String::new(),
         artifacts: Vec::new(),
+        replaced_by: None,
     }
 }
 
 fn fresh_ctx(home: Arc<MoaganHome>) -> RunContext {
+    fresh_ctx_with_id(home, RunId::new())
+}
+
+/// Phase F helper: `RankPhase` reads from `ctx.run_dir()`, which is
+/// keyed by the `RunId` inside the context. The F-tests need to point
+/// both the write-side (`home.run_dir(...)`) and the read-side at
+/// the SAME id so the rank phase sees the artefacts the test laid
+/// down on disk.
+fn fresh_ctx_with_id(home: Arc<MoaganHome>, run_id: RunId) -> RunContext {
     RunContext::new(
-        RunId::new(),
+        run_id,
         home,
         Arc::new(ProviderRegistry::default()),
         "mock".into(),
@@ -536,5 +554,398 @@ fn checkpoint_counts_by_kind_groups_three_kinds() -> Result<()> {
     assert_eq!(counts.get("intake").copied(), Some(1));
     assert_eq!(counts.get("clarify").copied(), Some(2));
     assert_eq!(counts.get("final").copied(), Some(1));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Phase F — synthesis-replacement wiring (V4 §5.13 + D.13.16)
+// ---------------------------------------------------------------------
+
+/// Build a `SynthesizedProposal` JSON sidecar so the wiring under
+/// test can recover the `source_proposals` list and the synthesis's
+/// own `id`. Mirrors what `SynthesizePhase` writes at runtime.
+fn write_synthesized(dir: &std::path::Path, id: &str, cluster_id: &str, source_proposals: &[&str]) {
+    std::fs::create_dir_all(dir).unwrap();
+    let synth = SynthesizedProposal {
+        id: id.to_owned(),
+        cluster_id: cluster_id.to_owned(),
+        summary: format!("Synthesis for {cluster_id}"),
+        approach: "Merge the cluster's invariants".to_owned(),
+        tradeoffs: vec!["single combined trade-off".to_owned()],
+        evidence: vec![format!("merged from {} sources", source_proposals.len())],
+        source_proposals: source_proposals.iter().map(|s| s.to_string()).collect(),
+        synthesis_strategy: "merge_invariants".to_owned(),
+        sources: source_proposals.iter().map(|s| s.to_string()).collect(),
+        created_unix: 0,
+        schema_version: "v1".to_owned(),
+    };
+    let path = dir.join(format!("{id}.json"));
+    let json = serde_json::to_vec_pretty(&synth).unwrap();
+    std::fs::write(&path, json).unwrap();
+}
+
+/// Write a single `Aggregated` evaluation JSON sidecar with the
+/// per-criterion scores the test wants to drive the predicate with.
+fn write_aggregated(
+    dir: &std::path::Path,
+    id: &str,
+    score: f32,
+    correctness: f32,
+    completeness: f32,
+    fit: f32,
+    evidence: f32,
+    clarity: f32,
+) {
+    std::fs::create_dir_all(dir).unwrap();
+    let agg = Aggregated {
+        score,
+        correctness,
+        completeness,
+        fit,
+        evidence,
+        clarity,
+        judges: 5,
+        adversary_delta: 0.0,
+    };
+    let path = dir.join(format!("{id}.json"));
+    let json = serde_json::to_vec_pretty(&agg).unwrap();
+    std::fs::write(&path, json).unwrap();
+}
+
+#[test]
+fn synthesis_replaces_sources_when_dominant() -> Result<()> {
+    let _g = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    // Three source proposals with mediocre per-criterion scores.
+    write_proposal(
+        &run_dir.proposals(),
+        "p_000",
+        &proposal("p_000", "Mediocre option A", "use a flat file"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "p_001",
+        &proposal("p_001", "Mediocre option B", "use a queue"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "p_002",
+        &proposal("p_002", "Mediocre option C", "use polling"),
+    );
+
+    // Synthesized proposal that strictly dominates every source in
+    // ≥2 dimensions (correctness, completeness) — predicate returns true.
+    write_proposal(
+        &run_dir.proposals(),
+        "s_00",
+        &proposal("s_00", "Merged best of all", "combine invariants"),
+    );
+
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_000",
+        6.0,
+        6.0,
+        6.0,
+        8.0,
+        7.0,
+        7.0,
+    );
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_001",
+        6.0,
+        6.0,
+        6.0,
+        8.0,
+        7.0,
+        7.0,
+    );
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_002",
+        6.0,
+        6.0,
+        6.0,
+        8.0,
+        7.0,
+        7.0,
+    );
+    write_aggregated(&run_dir.evaluations(), "s_00", 9.0, 9.0, 9.0, 6.0, 6.0, 6.0);
+
+    write_synthesized(
+        &run_dir.synthesized(),
+        "s_00",
+        "cp_00",
+        &["p_000", "p_001", "p_002"],
+    );
+
+    let phase = RankPhase {
+        config: Arc::new(Config::default()),
+        replace_sources_enabled: true,
+    };
+    let ctx = fresh_ctx_with_id(home.clone(), run_id);
+    let output = pollster::block_on(phase.execute(&ctx))?;
+    let moagan::phases::PhaseOutput::Ranking(path) = output else {
+        panic!("expected Ranking output");
+    };
+    let ranking: moagan::domain::Ranking = serde_json::from_slice(&std::fs::read(&path)?)?;
+
+    let ranked_ids: Vec<&str> = ranking.ranked.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ranked_ids.contains(&"s_00"),
+        "ranking should still contain the synthesis s_00: {ranked_ids:?}"
+    );
+    assert!(
+        !ranked_ids.contains(&"p_000"),
+        "ranking should drop p_000 after replacement: {ranked_ids:?}"
+    );
+    assert!(
+        !ranked_ids.contains(&"p_001"),
+        "ranking should drop p_001 after replacement: {ranked_ids:?}"
+    );
+    assert!(
+        !ranked_ids.contains(&"p_002"),
+        "ranking should drop p_002 after replacement: {ranked_ids:?}"
+    );
+    let rep_ids: Vec<&str> = ranking
+        .representatives
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    assert!(
+        rep_ids.contains(&"s_00"),
+        "representatives should include the synthesis after replacement: {rep_ids:?}"
+    );
+
+    // Each source sidecar carries `replaced_by = "s_00"`.
+    for sid in ["p_000", "p_001", "p_002"] {
+        let p: Proposal = serde_json::from_slice(&std::fs::read(
+            run_dir.proposals().join(format!("{sid}.json")),
+        )?)?;
+        assert_eq!(
+            p.replaced_by.as_deref(),
+            Some("s_00"),
+            "expected proposals/{sid}.json to carry replaced_by = \"s_00\""
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn synthesis_does_not_replace_when_not_dominant() -> Result<()> {
+    let _g = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    // Three strong sources.
+    write_proposal(
+        &run_dir.proposals(),
+        "p_000",
+        &proposal("p_000", "Strong A", "x"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "p_001",
+        &proposal("p_001", "Strong B", "y"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "p_002",
+        &proposal("p_002", "Strong C", "z"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "s_00",
+        &proposal("s_00", "Weak synthesis", "w"),
+    );
+
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_000",
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+    );
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_001",
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+    );
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_002",
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+        9.0,
+    );
+    write_aggregated(&run_dir.evaluations(), "s_00", 3.0, 3.0, 3.0, 3.0, 3.0, 3.0);
+
+    write_synthesized(
+        &run_dir.synthesized(),
+        "s_00",
+        "cp_00",
+        &["p_000", "p_001", "p_002"],
+    );
+
+    let phase = RankPhase {
+        config: Arc::new(Config::default()),
+        replace_sources_enabled: true,
+    };
+    let ctx = fresh_ctx_with_id(home.clone(), run_id);
+    let output = pollster::block_on(phase.execute(&ctx))?;
+    let moagan::phases::PhaseOutput::Ranking(path) = output else {
+        panic!("expected Ranking output");
+    };
+    let ranking: moagan::domain::Ranking = serde_json::from_slice(&std::fs::read(&path)?)?;
+
+    let ranked_ids: Vec<&str> = ranking.ranked.iter().map(|e| e.id.as_str()).collect();
+    for id in ["p_000", "p_001", "p_002", "s_00"] {
+        assert!(
+            ranked_ids.contains(&id),
+            "ranking should still contain {id} (no replacement): {ranked_ids:?}"
+        );
+    }
+
+    for sid in ["p_000", "p_001", "p_002"] {
+        let p: Proposal = serde_json::from_slice(&std::fs::read(
+            run_dir.proposals().join(format!("{sid}.json")),
+        )?)?;
+        assert_eq!(
+            p.replaced_by, None,
+            "expected proposals/{sid}.json to keep replaced_by = None"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn no_replace_sources_flag_disables_replacement() -> Result<()> {
+    let _g = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    write_proposal(
+        &run_dir.proposals(),
+        "p_000",
+        &proposal("p_000", "Weak A", "x"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "p_001",
+        &proposal("p_001", "Weak B", "y"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "p_002",
+        &proposal("p_002", "Weak C", "z"),
+    );
+    write_proposal(
+        &run_dir.proposals(),
+        "s_00",
+        &proposal("s_00", "Strong synthesis", "w"),
+    );
+
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_000",
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+    );
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_001",
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+    );
+    write_aggregated(
+        &run_dir.evaluations(),
+        "p_002",
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+    );
+    write_aggregated(&run_dir.evaluations(), "s_00", 9.0, 9.0, 9.0, 9.0, 9.0, 9.0);
+
+    write_synthesized(
+        &run_dir.synthesized(),
+        "s_00",
+        "cp_00",
+        &["p_000", "p_001", "p_002"],
+    );
+
+    // Predicate WOULD say replace (s strict best in all 5 dims, no
+    // Pareto-block). The wiring respects replace_sources_enabled=false
+    // and leaves the ranking untouched.
+    let phase = RankPhase {
+        config: Arc::new(Config::default()),
+        replace_sources_enabled: false,
+    };
+    let ctx = fresh_ctx_with_id(home.clone(), run_id);
+    let output = pollster::block_on(phase.execute(&ctx))?;
+    let moagan::phases::PhaseOutput::Ranking(path) = output else {
+        panic!("expected Ranking output");
+    };
+    let ranking: moagan::domain::Ranking = serde_json::from_slice(&std::fs::read(&path)?)?;
+
+    let ranked_ids: Vec<&str> = ranking.ranked.iter().map(|e| e.id.as_str()).collect();
+    for id in ["p_000", "p_001", "p_002", "s_00"] {
+        assert!(
+            ranked_ids.contains(&id),
+            "ranking should still contain {id} (opt-out via flag): {ranked_ids:?}"
+        );
+    }
+
+    for sid in ["p_000", "p_001", "p_002"] {
+        let p: Proposal = serde_json::from_slice(&std::fs::read(
+            run_dir.proposals().join(format!("{sid}.json")),
+        )?)?;
+        assert_eq!(
+            p.replaced_by, None,
+            "expected proposals/{sid}.json to keep replaced_by = None when the flag is off"
+        );
+    }
     Ok(())
 }

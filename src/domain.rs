@@ -101,6 +101,13 @@ pub struct Proposal {
     /// proposals).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub artifacts: Vec<crate::validators::CodeArtifact>,
+    /// Phase F: when this proposal was superseded by a synthesis,
+    /// the id of that synthesis (e.g. `"s_00"`). `None` for active
+    /// proposals. Used by `RankPhase` to filter the final output
+    /// without losing the lineage — the synthesized sidecar keeps
+    /// `source_proposals` intact so the genealogy stays recoverable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub replaced_by: Option<String>,
 }
 
 /// Output of the sketch phase — a short, opinionated exploration

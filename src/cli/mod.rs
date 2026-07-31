@@ -172,6 +172,15 @@ pub enum Cmd {
         /// than the default 4 to amortise network latency.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
+        /// Phase F: opt-out of the synthesis-replacement predicate
+        /// (V4 §5.13). When set, the synthesis `s_<NN>` and all its
+        /// sources stay in the final ranking together. Default
+        /// behaviour (`flag omitted`) is to replace sources when the
+        /// synthesis dominates per D.13.16 — `standard`/`deep`/`batch`
+        /// get the replacement; `fast` doesn't synthesize, so the
+        /// flag is a no-op there.
+        #[arg(long, default_value_t = false)]
+        no_replace_sources: bool,
     },
     /// Continue a paused or failed run.
     Continue {
@@ -345,6 +354,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             mock_dir,
             non_interactive,
             max_parallelism,
+            no_replace_sources,
         } => {
             let cfg = Config::load()?;
             let run_id = run::run(
@@ -356,6 +366,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                     mock_dir,
                     non_interactive,
                     max_parallelism,
+                    no_replace_sources,
                 },
                 &cfg,
             )
