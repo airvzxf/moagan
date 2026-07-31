@@ -3,29 +3,42 @@
 //!
 //! When `SketchPhase` ran earlier in the same run, `ProposePhase`
 //! reads the surviving sketches from `sketches/` and pairs the i-th
-//! proposal with the i-th sketch. The pairing is best-effort: if
-//! there are more proposals than sketches the extras get an empty
+//! proposal with the i-th sketch. The pairing is best-effort: if there
+//! are more proposals than sketches the extras get an empty
 //! `source_sketch`; if there are fewer proposals than sketches the
 //! trailing sketches are unused. The intent is **lineage**, not
 //! selection — the proposal still stands on its own merits and the
 //! gate/judge phases do not look at `source_sketch`.
+//!
+//! When `DecomposePhase` ran earlier in the same run (only `Mode::Deep`)
+//! and the resulting `problem_graph.json` is non-trivial, the phase
+//! populates `Proposal.source_nodes` with the ids of the graph nodes
+//! whose text fingerprint is closest to the proposal text. This is the
+//! Phase G limitation #2 follow-up (see `docs/v0.3-status.md`).
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::domain::{Proposal, Sketch};
+use crate::domain::{ProblemGraph, Proposal, Sketch};
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
+use crate::ranking::cluster::jaccard_distance;
+
+/// Jaccard distance threshold for assigning a proposal to a DAG node.
+/// `0.7` is consistent with the `CLUSTER_THRESHOLD` in `RankPhase`: two
+/// texts with 70%+ shared vocabulary are considered to address the same
+/// sub-problem. Lowering this widens the assignment.
+const SOURCE_NODE_THRESHOLD: f32 = 0.7;
 
 /// Propose phase. Generates `count` proposals concurrently, bounded
 /// by `RunContext::parallelism` (default 4). The wall-clock cost of
 /// this phase is `ceil(count / max_parallelism) * (model_latency)`,
-/// not `count * model_latency`.
+/// not `count * (model_latency)`.
 pub struct ProposePhase {
     /// Number of proposals to generate.
     pub count: u32,
@@ -66,6 +79,65 @@ impl ProposePhase {
             })
             .collect()
     }
+
+    /// Read `problem_graph.json` from the run dir. Returns `None` when
+    /// the sidecar is missing or the graph is trivial (Phase G
+    /// limitation #1). This is the only consumer of `problem_graph.json`
+    /// outside `DecomposePhase` / `SketchPhase` / the deliver surface.
+    fn load_problem_graph(ctx: &RunContext) -> Option<ProblemGraph> {
+        let path = ctx.run_dir().problem_graph();
+        if !path.exists() {
+            return None;
+        }
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let g: ProblemGraph = serde_json::from_str(&raw).ok()?;
+        if g.should_decompose && !g.nodes.is_empty() {
+            Some(g)
+        } else {
+            None
+        }
+    }
+
+    /// Given a non-trivial graph and a freshly emitted proposal,
+    /// compute the ids of the nodes that the proposal addresses. The
+    /// assignment is based on Jaccard distance between the proposal's
+    /// textual fingerprint (`summary + approach + tradeoffs + evidence`)
+    /// and each node's fingerprint (`id + question + expected_output`).
+    ///
+    /// Returns an empty `Vec` when the graph has no nodes or when no
+    /// node passes the threshold. The result is sorted by (distance,
+    /// id) so the persisted JSON is stable across runs (idempotent
+    /// writes).
+    fn compute_source_nodes(graph: &ProblemGraph, proposal: &Proposal) -> Vec<String> {
+        let prop_text = format!(
+            "{} {} {} {}",
+            proposal.summary,
+            proposal.approach,
+            proposal.tradeoffs.join(" "),
+            proposal.evidence.join(" ")
+        );
+        let mut matched: Vec<(String, f32)> = graph
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                let node_text = format!("{} {} {}", n.id, n.question, n.expected_output);
+                let d = jaccard_distance(&prop_text, &node_text);
+                if d <= SOURCE_NODE_THRESHOLD {
+                    Some((n.id.clone(), d))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // Sort by (distance, id) so ties are deterministic and the
+        // closest node wins when many tie.
+        matched.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        matched.into_iter().map(|(id, _)| id).collect()
+    }
 }
 
 #[async_trait]
@@ -83,6 +155,7 @@ impl Phase for ProposePhase {
 
         let count = self.count as usize;
         let sketch_ids = Self::load_sketch_ids(ctx);
+        let problem_graph = Self::load_problem_graph(ctx);
         let system_arc = std::sync::Arc::new(system);
         let user_arc = std::sync::Arc::new(user);
 
@@ -93,6 +166,7 @@ impl Phase for ProposePhase {
             let system_arc = std::sync::Arc::clone(&system_arc);
             let id_for_default = id.clone();
             let source_sketch = sketch_ids.get(i).cloned().unwrap_or_default();
+            let graph_for_thread = problem_graph.clone();
             async move {
                 let _permit = ctx.parallelism.acquire().await?;
                 let mut proposal: Proposal = ctx
@@ -108,6 +182,13 @@ impl Phase for ProposePhase {
                     proposal.id = id_for_default;
                 }
                 proposal.source_sketch = source_sketch;
+                // Phase H commit 3: populate Proposal.source_nodes from
+                // the problem graph when it is non-trivial. Done here
+                // (post-parse) rather than inside the proposal to keep
+                // the model's contract unchanged.
+                if let Some(graph) = graph_for_thread.as_ref() {
+                    proposal.source_nodes = Self::compute_source_nodes(graph, &proposal);
+                }
                 Ok::<(String, Proposal), crate::error::Error>((id, proposal))
             }
         });
@@ -121,5 +202,136 @@ impl Phase for ProposePhase {
             paths.push(path);
         }
         Ok(PhaseOutput::Proposals(paths))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::GraphNode;
+
+    fn fixture_graph() -> ProblemGraph {
+        ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: vec![
+                GraphNode {
+                    id: "n0".into(),
+                    question: "design the data model for the rainbow".into(),
+                    expected_output: "schema".into(),
+                    constraints: vec![],
+                    dependencies: vec![],
+                    validation_method: Default::default(),
+                },
+                GraphNode {
+                    id: "n1".into(),
+                    question: "implement the rendering pipeline".into(),
+                    expected_output: "code".into(),
+                    constraints: vec![],
+                    dependencies: vec!["n0".into()],
+                    validation_method: Default::default(),
+                },
+                GraphNode {
+                    id: "n2".into(),
+                    question: "completely unrelated topic about cheese".into(),
+                    expected_output: "essay".into(),
+                    constraints: vec![],
+                    dependencies: vec![],
+                    validation_method: Default::default(),
+                },
+            ],
+            integration_rules: vec![],
+            critical_path: vec![],
+            brief_blake3: "deadbeef".into(),
+            created_unix: 0,
+        }
+    }
+
+    fn fixture_proposal(text: &str) -> Proposal {
+        Proposal {
+            id: "p_test".into(),
+            summary: text.into(),
+            approach: text.into(),
+            tradeoffs: vec![],
+            evidence: vec![text.into()],
+            artifacts: vec![],
+            source_sketch: String::new(),
+            source_nodes: vec![],
+            replaced_by: None,
+        }
+    }
+
+    #[test]
+    fn source_nodes_populated_when_text_matches_node() {
+        let graph = fixture_graph();
+        let proposal = fixture_proposal(
+            "the rainbow rendering pipeline data model schema is canonical",
+        );
+        let nodes = ProposePhase::compute_source_nodes(&graph, &proposal);
+        // n0 (data model + rainbow) matches strongly. n1 (rendering
+        // pipeline) shares 3 of 10 unique words → distance 0.7 which
+        // is right on the threshold boundary; the test focuses on
+        // the safe-assertion path (n0 must be present, n2 must not).
+        assert!(nodes.contains(&"n0".to_string()), "got {nodes:?}");
+        assert!(!nodes.contains(&"n2".to_string()), "got {nodes:?}");
+    }
+
+    #[test]
+    fn source_nodes_empty_when_no_match() {
+        let graph = fixture_graph();
+        let proposal = fixture_proposal("quantum entanglement experiment");
+        let nodes = ProposePhase::compute_source_nodes(&graph, &proposal);
+        assert!(nodes.is_empty(), "got {nodes:?}");
+    }
+
+    #[test]
+    fn source_nodes_picks_up_high_overlap_nodes() {
+        // Craft a proposal that strongly matches both n0 and n1.
+        let graph = ProblemGraph {
+            schema_version: "v1".into(),
+            should_decompose: true,
+            nodes: vec![
+                GraphNode {
+                    id: "alpha".into(),
+                    question: "render the rainbow with the rendering pipeline".into(),
+                    expected_output: "code".into(),
+                    constraints: vec![],
+                    dependencies: vec![],
+                    validation_method: Default::default(),
+                },
+                GraphNode {
+                    id: "beta".into(),
+                    question: "render the rainbow with the rendering pipeline".into(),
+                    expected_output: "code".into(),
+                    constraints: vec![],
+                    dependencies: vec![],
+                    validation_method: Default::default(),
+                },
+                GraphNode {
+                    id: "gamma".into(),
+                    question: "totally different topic about cheese".into(),
+                    expected_output: "essay".into(),
+                    constraints: vec![],
+                    dependencies: vec![],
+                    validation_method: Default::default(),
+                },
+            ],
+            integration_rules: vec![],
+            critical_path: vec![],
+            brief_blake3: "deadbeef".into(),
+            created_unix: 0,
+        };
+        let proposal = fixture_proposal(
+            "we render the rainbow with the rendering pipeline end-to-end",
+        );
+        let nodes = ProposePhase::compute_source_nodes(&graph, &proposal);
+        // alpha and beta should both match; gamma should not.
+        assert!(nodes.contains(&"alpha".to_string()), "got {nodes:?}");
+        assert!(nodes.contains(&"beta".to_string()), "got {nodes:?}");
+        assert!(!nodes.contains(&"gamma".to_string()), "got {nodes:?}");
+        // Stable order: tied distance, alpha < beta lexicographically.
+        let pos_a = nodes.iter().position(|n| n == "alpha").unwrap();
+        let pos_b = nodes.iter().position(|n| n == "beta").unwrap();
+        assert!(pos_a < pos_b, "got {nodes:?}");
     }
 }

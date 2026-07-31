@@ -257,6 +257,14 @@ impl RunDir<'_> {
         self.root.join("adversaries")
     }
 
+    /// `problem_graph.json` — Phase G (v0.3). Holds the DAG produced
+    /// by `DecomposePhase`; the file always exists after a deep run
+    /// (trivial or not). `ensure` does not pre-create it because the
+    /// phase is the only writer.
+    pub fn problem_graph(&self) -> PathBuf {
+        self.root.join("problem_graph.json")
+    }
+
     /// Create every directory the run expects. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         for d in [
