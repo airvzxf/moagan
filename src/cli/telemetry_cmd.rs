@@ -363,9 +363,136 @@ mod list {
 
 mod summary {
     use super::{Error, Result, TelemetryCmd};
+    use crate::ids::RunId;
+    use crate::storage::sqlite::Db;
 
-    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
-        not_yet!("summary")
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, run) = match cmd {
+            TelemetryCmd::Summary { runs_dir, run } => (runs_dir.as_ref(), run.as_str()),
+            _ => return Err(Error::InvalidState("summary: wrong variant".into())),
+        };
+        let run_id: RunId = run
+            .parse()
+            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run}': {e}")))?;
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let db = Db::open(&home.meta_db_path())?;
+        let row = db
+            .get_run(run_id)?
+            .ok_or_else(|| Error::InvalidState(format!("run {run} not found in the index")))?;
+        let agg = db.run_aggregate(run_id)?;
+        let usage = db.list_provider_usage_for_run(run_id)?;
+        let phases = db.list_phase_summaries_for_run(run_id)?;
+        let run_dir = home.run_dir(run_id);
+        let root = run_dir.root();
+        let bytes = dir_bytes(root).unwrap_or(0);
+        let duration_secs = row.updated_unix.saturating_sub(row.created_unix).max(0);
+
+        println!("Run: {}", row.run_id);
+        println!("Mode: {}", row.mode);
+        println!("Status: {}", row.status);
+        println!("Duration: {}", human_duration(duration_secs));
+        println!("Tokens: {}", agg.total_tokens());
+        println!(
+            "Calls: {} (ok={} error={} timeout={} cancelled={})",
+            agg.calls,
+            agg.ok_calls(),
+            agg.error_calls,
+            agg.timeout_calls,
+            agg.cancelled_calls
+        );
+        println!("Phases: {}", agg.phase_count);
+        println!("Warnings: {}", agg.warnings);
+        println!("Checkpoints: {}", agg.checkpoints);
+        println!("Disk: {} (path: {})", human_bytes(bytes), root.display());
+
+        if !usage.is_empty() {
+            println!("\nBy model:");
+            for u in usage {
+                println!(
+                    "  {:<10}  {:<20}  calls={:<5}  tokens={}",
+                    u.provider,
+                    u.model,
+                    u.calls,
+                    u.input_tokens + u.output_tokens
+                );
+            }
+        }
+
+        if !phases.is_empty() {
+            println!("\nBy phase:");
+            // Aggregate durations by phase name (collapse sequences).
+            let mut totals: std::collections::BTreeMap<String, (i64, i64)> =
+                std::collections::BTreeMap::new();
+            for p in &phases {
+                let entry = totals.entry(p.phase.clone()).or_insert((0, 0));
+                entry.0 += 1;
+                if let (Some(s), Some(e)) = (p.started_unix, p.ended_unix) {
+                    entry.1 += e.saturating_sub(s).max(0);
+                }
+            }
+            for (phase, (count, secs)) in totals {
+                println!(
+                    "  {:<14}  invocations={:<3}  total_secs={}",
+                    phase, count, secs
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Recursive byte count of a directory. Missing directories
+    /// return `None`; permission errors are propagated via the
+    /// `Result` (callers fall back to 0).
+    fn dir_bytes(path: &std::path::Path) -> Option<u64> {
+        let mut total: u64 = 0;
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(p) = stack.pop() {
+            let meta = std::fs::symlink_metadata(&p).ok()?;
+            if meta.is_file() {
+                total = total.checked_add(meta.len())?;
+            } else if meta.is_dir() {
+                for entry in std::fs::read_dir(&p).ok()? {
+                    let entry = entry.ok()?;
+                    stack.push(entry.path());
+                }
+            }
+        }
+        Some(total)
+    }
+
+    fn human_bytes(bytes: u64) -> String {
+        const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+        let mut value = bytes as f64;
+        let mut unit = 0;
+        while value >= 1024.0 && unit < UNITS.len() - 1 {
+            value /= 1024.0;
+            unit += 1;
+        }
+        if unit == 0 {
+            format!("{} {}", bytes, UNITS[0])
+        } else {
+            format!("{:.1} {}", value, UNITS[unit])
+        }
+    }
+
+    fn human_duration(secs: i64) -> String {
+        if secs <= 0 {
+            return "0s".to_owned();
+        }
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        let mut parts = Vec::new();
+        if h > 0 {
+            parts.push(format!("{h}h"));
+        }
+        if m > 0 {
+            parts.push(format!("{m}m"));
+        }
+        if s > 0 || parts.is_empty() {
+            parts.push(format!("{s}s"));
+        }
+        parts.join(" ")
     }
 }
 
@@ -479,6 +606,28 @@ mod tests {
             run: Some("01900000-0000-0000-0000-000000000000".into()),
         };
         // Open succeeds (creates empty DB) but the row is missing.
+        let err = cmd.dispatch().unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)));
+    }
+
+    #[test]
+    fn summary_invalid_run_id_returns_invalid_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Summary {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            run: "not-a-uuid".into(),
+        };
+        let err = cmd.dispatch().unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs(_)));
+    }
+
+    #[test]
+    fn summary_unknown_run_returns_invalid_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Summary {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            run: "01900000-0000-0000-0000-000000000000".into(),
+        };
         let err = cmd.dispatch().unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
     }
