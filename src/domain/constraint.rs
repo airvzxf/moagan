@@ -106,8 +106,7 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         let (a, b) = conflicts[0];
         assert!(
-            (a == "monolith" && b == "microservices")
-                || (a == "microservices" && b == "monolith")
+            (a == "monolith" && b == "microservices") || (a == "microservices" && b == "monolith")
         );
     }
 }

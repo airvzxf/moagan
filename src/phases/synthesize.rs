@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use futures::future::join_all;
 
+use crate::domain::constraint::{HARD_INCOMPATIBILITIES, find_conflicts};
 use crate::domain::{Proposal, SynthesizedProposal};
 use crate::error::Result;
 use crate::llm::Role;
@@ -41,6 +42,41 @@ use crate::phases::cluster_proposals::ProposalCluster;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::time::now_unix_secs;
+
+/// Cheap whole-word substring check used by `extract_tags`. Returns
+/// `true` when `tag` appears in `text` delimited by a non-alphanumeric
+/// boundary on both sides (or at a string boundary). `text` is
+/// expected to be lowercase and `tag` is matched lowercase.
+fn word_contains(text: &str, tag: &str) -> bool {
+    if tag.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let tag_bytes = tag.as_bytes();
+    let tag_len = tag_bytes.len();
+    let mut start = 0;
+    while start + tag_len <= bytes.len() {
+        // Fast substring search first.
+        if &bytes[start..start + tag_len] != tag_bytes {
+            start += 1;
+            continue;
+        }
+        // Check the left boundary: non-alphanumeric or string start.
+        let left_ok = start == 0 || !is_alnum(bytes[start - 1]);
+        // Check the right boundary: non-alphanumeric or string end.
+        let right_idx = start + tag_len;
+        let right_ok = right_idx == bytes.len() || !is_alnum(bytes[right_idx]);
+        if left_ok && right_ok {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
+fn is_alnum(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
 
 /// Convert a `SynthesizedProposal` into a `Proposal` for the pipeline.
 /// The synthesized proposal keeps its `s_<NN>` id and inherits the
@@ -93,6 +129,89 @@ impl SynthesizePhase {
              {proposals_json}\n\n\
              Return the JSON object described in the system prompt.",
         )
+    }
+
+    /// Extract candidate architectural tags from a proposal's textual
+    /// fields. The match is a whole-word, case-insensitive scan over
+    /// the summary, approach, tradeoffs, and evidence so we never miss
+    /// a tag the model wrote in the body. Returns deduplicated tags
+    /// preserving first-seen order.
+    pub fn extract_tags(proposal: &Proposal) -> Vec<String> {
+        // Build the search corpus: every public text field on the
+        // proposal. Tradeoffs and evidence are joined so a tag like
+        // "sql" listed in the evidence array is found.
+        let mut corpus = String::new();
+        corpus.push_str(&proposal.summary);
+        corpus.push('\n');
+        corpus.push_str(&proposal.approach);
+        corpus.push('\n');
+        for t in &proposal.tradeoffs {
+            corpus.push_str(t);
+            corpus.push('\n');
+        }
+        for e in &proposal.evidence {
+            corpus.push_str(e);
+            corpus.push('\n');
+        }
+        let corpus_lower = corpus.to_lowercase();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for (a, b) in HARD_INCOMPATIBILITIES {
+            for tag in [*a, *b] {
+                if !seen.contains(tag) && word_contains(&corpus_lower, tag) {
+                    seen.insert(tag.to_string());
+                    out.push(tag.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Detect incompatible tag pairs across the cluster's proposals.
+    /// Returns the offending `(tag_a, tag_b)` pair (first match
+    /// wins) plus the full tag list collected from every proposal.
+    pub fn cluster_conflict(proposals: &[Proposal]) -> Option<(String, String, Vec<String>)> {
+        let mut all_tags: Vec<String> = Vec::new();
+        for p in proposals {
+            all_tags.extend(Self::extract_tags(p));
+        }
+        let borrowed: Vec<&str> = all_tags.iter().map(String::as_str).collect();
+        if let Some((a, b)) = find_conflicts(&borrowed).into_iter().next() {
+            Some((a.to_string(), b.to_string(), all_tags))
+        } else {
+            None
+        }
+    }
+
+    /// Persist a `synthesized/skipped_<NN>.json` sidecar in `dir`.
+    /// This is the canonical filesystem-first write; the caller is
+    /// expected to mirror the row into SQLite afterwards.
+    pub fn write_skipped_in_dir(
+        dir: &std::path::Path,
+        cluster_id: &str,
+        skipped_seq: usize,
+        conflict: &(String, String, Vec<String>),
+    ) -> Result<PathBuf> {
+        #[derive(serde::Serialize)]
+        struct SkippedCluster {
+            cluster_id: String,
+            skipped: bool,
+            reason: String,
+            tags: Vec<String>,
+            schema_version: String,
+        }
+        let (a, b, tags) = conflict;
+        let payload = SkippedCluster {
+            cluster_id: cluster_id.to_string(),
+            skipped: true,
+            reason: format!("incompatible_tags: {a},{b}"),
+            tags: tags.clone(),
+            schema_version: "v1".into(),
+        };
+        let bytes = serde_json::to_vec_pretty(&payload)?;
+        let path = dir.join(format!("skipped_{:02}.json", skipped_seq));
+        crate::atomic::writer::AtomicWriter::new().write(&path, &bytes)?;
+        Ok(path)
     }
 
     /// Read every `cluster_proposals/cp_*.json` from disk.
@@ -177,6 +296,27 @@ impl Phase for SynthesizePhase {
                     SynthesizePhase::load_proposals_for_cluster(&ctx, &cluster.member_proposals)?;
                 if proposals.is_empty() {
                     return Ok::<Option<PathBuf>, crate::error::Error>(None);
+                }
+                // K.1 (proposal-03 §D.13.15): skip clusters whose
+                // proposals mix hard-incompatible tags. The synthesizer
+                // LLM would otherwise be asked to merge contradictory
+                // decisions (e.g. monolith + microservices) which
+                // produces incoherent output.
+                if let Some(conflict) = SynthesizePhase::cluster_conflict(&proposals) {
+                    let (a, b, _tags) = &conflict;
+                    tracing::warn!(
+                        cluster_id = %cluster.id,
+                        tag_a = %a,
+                        tag_b = %b,
+                        "synthesize phase skipping cluster: incompatible tags"
+                    );
+                    let skipped_path = SynthesizePhase::write_skipped_in_dir(
+                        &dir,
+                        &cluster.id,
+                        idx,
+                        &conflict,
+                    )?;
+                    return Ok(Some(skipped_path));
                 }
                 let user = SynthesizePhase::user_payload(
                     &cluster.id,
