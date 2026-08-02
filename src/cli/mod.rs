@@ -119,6 +119,13 @@ impl std::fmt::Display for Mode {
     long_about = None
 )]
 pub struct Cli {
+    /// Override the home directory. Globally available; defaults to
+    /// the resolved `MOAGAN_HOME` env var (`MOAGAN_RUNS_DIR` is also
+    /// honoured as a clap-level alias). Provided globally so
+    /// `continue`, `resume`, `rerun`, `refine`, `rerank`, `inspect`,
+    /// and `import` all share a single override path (D.14.5).
+    #[arg(long, global = true, env = "MOAGAN_RUNS_DIR")]
+    pub runs_dir: Option<std::path::PathBuf>,
     /// Subcommand.
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -429,6 +436,20 @@ impl Cmd {
 pub async fn dispatch(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
+    // D.14.5: when the global `--runs-dir` is set, mirror it into the
+    // `MOAGAN_HOME` env var so every subcommand that calls
+    // `MoaganHome::resolve()` (continue, resume, rerun, refine,
+    // rerank, inspect, import) reads the same override. Setting the
+    // env var at the top of `dispatch` is the single chokepoint and
+    // avoids threading an explicit `home` parameter through every
+    // subcommand handler in `continue_cmd.rs`. The env var is the
+    // source of truth for `MoaganHome::resolve()` already; clap only
+    // accepts the flag as a CLI-level convenience.
+    if let Some(ref runs_dir) = cli.runs_dir {
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", runs_dir);
+        }
+    }
     match cli.cmd {
         Cmd::Run {
             mode,
