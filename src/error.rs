@@ -12,6 +12,52 @@ use thiserror::Error;
 
 use crate::atomic::writer::ArtifactMeta;
 
+/// Stable process exit codes from T01-06 §12.3 and D.12.14.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ExitCode {
+    /// Successful execution.
+    Ok = 0,
+    /// Unclassified failure.
+    GenericError = 1,
+    /// Invalid CLI arguments from the baseline contract.
+    InvalidArgs = 2,
+    /// Missing or invalid provider API key.
+    ApiKeyInvalid = 3,
+    /// Provider plan exhausted.
+    PlanExhausted = 4,
+    /// Operation timed out under the baseline contract.
+    Timeout = 5,
+    /// Operation was cancelled.
+    Cancelled = 6,
+    /// Persistent schema violation.
+    SchemaViolation = 7,
+    /// I/O failure under the baseline contract.
+    IoError = 8,
+    /// Token budget exhausted.
+    BudgetExhausted = 9,
+    /// More user input is required.
+    NeedsInput = 10,
+    /// Configured budget was exceeded.
+    BudgetExceeded = 20,
+    /// Provider plan paused the run.
+    PlanPaused = 30,
+    /// Provider request failed.
+    ProviderError = 40,
+    /// Timeout from the extended catalog.
+    TimeoutExit = 50,
+    /// Invalid arguments from the extended catalog.
+    InvalidArgsExit = 60,
+    /// I/O failure from the extended catalog.
+    IoErrorExit = 70,
+    /// Run context or state failure.
+    ContextError = 80,
+    /// Export verification failed.
+    ExportVerificationFailed = 90,
+    /// Process interrupted by SIGINT.
+    SigInt = 130,
+}
+
 /// Library error type. All public APIs return `Result<T, Error>`.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -62,6 +108,23 @@ pub enum Error {
     /// Cancellation propagated.
     #[error(transparent)]
     Cancel(#[from] CancelSignal),
+}
+
+impl Error {
+    /// Return the stable process exit code for this error.
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            Self::InvalidArgs(_) => ExitCode::InvalidArgs,
+            Self::InvalidApiKey(_) => ExitCode::ApiKeyInvalid,
+            Self::PlanExhausted(_) => ExitCode::PlanExhausted,
+            Self::Timeout(_) => ExitCode::Timeout,
+            Self::Cancelled(_) | Self::Cancel(_) => ExitCode::Cancelled,
+            Self::SchemaViolation(_) => ExitCode::SchemaViolation,
+            Self::Io(_) => ExitCode::IoError,
+            Self::MockExhausted | Self::Provider(_) => ExitCode::ProviderError,
+            Self::Cache(_) | Self::InvalidState(_) => ExitCode::ContextError,
+        }
+    }
 }
 
 impl From<io::Error> for Error {
@@ -211,16 +274,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Map the error to the documented exit code (T01-06 §12.3).
 pub fn exit_code(err: &Error) -> u8 {
-    match err {
-        Error::InvalidArgs(_) => 2,
-        Error::InvalidApiKey(_) => 3,
-        Error::PlanExhausted(_) => 4,
-        Error::Timeout(_) => 5,
-        Error::Cancelled(_) | Error::Cancel(_) => 6,
-        Error::SchemaViolation(_) => 7,
-        Error::Io(_) => 8,
-        Error::MockExhausted | Error::Provider(_) | Error::Cache(_) | Error::InvalidState(_) => 1,
-    }
+    err.exit_code() as u8
 }
 
 #[cfg(test)]
@@ -228,7 +282,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exit_code_per_variant() {
+    fn exit_code_discriminants_are_stable() {
+        assert_eq!(ExitCode::Ok as i32, 0);
+        assert_eq!(ExitCode::IoError as i32, 8);
+        assert_eq!(ExitCode::ProviderError as i32, 40);
+        assert_eq!(ExitCode::SigInt as i32, 130);
+    }
+
+    #[test]
+    fn error_exit_code_method_maps_baseline_variants() {
+        assert_eq!(
+            Error::Io(IoError::Raw(io::Error::other("x"))).exit_code(),
+            ExitCode::IoError
+        );
+        assert_eq!(
+            Error::InvalidArgs("x".into()).exit_code(),
+            ExitCode::InvalidArgs
+        );
+        assert_eq!(
+            Error::InvalidApiKey("x".into()).exit_code(),
+            ExitCode::ApiKeyInvalid
+        );
+        assert_eq!(
+            Error::PlanExhausted("x".into()).exit_code(),
+            ExitCode::PlanExhausted
+        );
+        assert_eq!(Error::Timeout("x".into()).exit_code(), ExitCode::Timeout);
+        assert_eq!(
+            Error::Cancelled("x".into()).exit_code(),
+            ExitCode::Cancelled
+        );
+        assert_eq!(
+            Error::SchemaViolation("x".into()).exit_code(),
+            ExitCode::SchemaViolation
+        );
+    }
+
+    #[test]
+    fn error_exit_code_method_maps_extended_variants() {
+        assert_eq!(
+            Error::Provider("x".into()).exit_code(),
+            ExitCode::ProviderError
+        );
+        assert_eq!(Error::MockExhausted.exit_code(), ExitCode::ProviderError);
+        assert_eq!(Error::Cache("x".into()).exit_code(), ExitCode::ContextError);
+        assert_eq!(
+            Error::InvalidState("x".into()).exit_code(),
+            ExitCode::ContextError
+        );
+    }
+    #[test]
+    fn compatibility_exit_code_function_returns_numeric_code() {
         assert_eq!(exit_code(&Error::InvalidArgs("x".into())), 2);
         assert_eq!(exit_code(&Error::InvalidApiKey("x".into())), 3);
         assert_eq!(exit_code(&Error::PlanExhausted("x".into())), 4);
@@ -236,8 +340,8 @@ mod tests {
         assert_eq!(exit_code(&Error::Cancelled("x".into())), 6);
         assert_eq!(exit_code(&Error::Cancel(CancelSignal)), 6);
         assert_eq!(exit_code(&Error::SchemaViolation("x".into())), 7);
-        assert_eq!(exit_code(&Error::MockExhausted), 1);
-        assert_eq!(exit_code(&Error::Provider("x".into())), 1);
+        assert_eq!(exit_code(&Error::MockExhausted), 40);
+        assert_eq!(exit_code(&Error::Provider("x".into())), 40);
     }
 
     #[test]

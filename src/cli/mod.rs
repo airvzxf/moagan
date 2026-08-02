@@ -353,8 +353,18 @@ impl Cmd {
     }
 }
 
-/// Dispatch the parsed CLI.
+/// Dispatch the parsed CLI and convert domain errors into process exit codes.
 pub async fn dispatch(cli: Cli) -> Result<i32> {
+    match dispatch_inner(cli).await {
+        Ok(rc) => Ok(rc),
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(e.exit_code() as i32)
+        }
+    }
+}
+
+async fn dispatch_inner(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
     match cli.cmd {
