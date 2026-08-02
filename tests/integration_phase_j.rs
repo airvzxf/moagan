@@ -529,3 +529,177 @@ fn lineage_paths_round_trip_with_parent_label() -> Result<()> {
     );
     Ok(())
 }
+
+// =====================================================================
+// `--runs-dir` global flag (D.14.5)
+// =====================================================================
+//
+// The flag lives on the top-level `Cli` struct with `global = true`,
+// so clap accepts it before or after the subcommand and routes the
+// value into `cli.runs_dir`. At the start of `dispatch` we mirror it
+// into the `MOAGAN_HOME` env var so every subcommand that calls
+// `MoaganHome::resolve()` (continue, resume, rerun, refine, rerank,
+// inspect, import) reads the override without threading a new
+// parameter through the call graph.
+//
+// The tests below pin:
+//  1. clap accepts `--runs-dir` before AND after the subcommand
+//     (global flag behaviour);
+//  2. the parsed value lands in `cli.runs_dir`, NOT in the
+//     subcommand's own (dead) `runs_dir` field — i.e. the global
+//     flag truly is the single source of truth;
+/// `--runs-dir <path> continue --run-id <id>` parses without the
+/// "unexpected argument" error that v0.3-sub-fase-J shipped before
+/// the D.14.5 patch. The parsed value lands in `cli.runs_dir` and
+/// the dispatch mirror sets `MOAGAN_HOME` so `MoaganHome::resolve()`
+/// reads the override path.
+#[test]
+fn runs_dir_global_flag_before_subcommand() {
+    let cli = moagan::cli::Cli::from_iter_args([
+        "moagan",
+        "--runs-dir",
+        "/tmp/d145-home",
+        "continue",
+        "--run-id",
+        "01900000-0000-0000-0000-000000000000",
+    ])
+    .expect("clap must accept --runs-dir before the subcommand");
+    assert_eq!(
+        cli.runs_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/d145-home")),
+        "global --runs-dir must populate cli.runs_dir"
+    );
+}
+
+/// `--runs-dir <path>` is also accepted after the subcommand (the
+/// `global = true` promise). Same source-of-truth rule applies: the
+/// value lands in `cli.runs_dir`, never in a subcommand-specific
+/// field.
+#[test]
+fn runs_dir_global_flag_after_subcommand() {
+    let cli = moagan::cli::Cli::from_iter_args([
+        "moagan",
+        "continue",
+        "--run-id",
+        "01900000-0000-0000-0000-000000000000",
+        "--runs-dir",
+        "/tmp/d145-home",
+    ])
+    .expect("clap must accept --runs-dir after the subcommand");
+    assert_eq!(
+        cli.runs_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/d145-home")),
+        "global --runs-dir must populate cli.runs_dir regardless of position"
+    );
+}
+
+/// Every subcommand that previously had no `--runs-dir` of its own
+/// (continue, resume, rerun, inspect, refine, rerank, import) must
+/// now accept the global flag without a clap parse error. The smoke
+/// script exercises the same property at the binary level; the unit
+/// test pins the clap contract.
+#[test]
+fn runs_dir_global_flag_accepted_by_every_run_state_subcommand() {
+    let subs: &[&[&str]] = &[
+        &[
+            "continue",
+            "--run-id",
+            "01900000-0000-0000-0000-000000000000",
+        ],
+        &["resume", "--run-id", "01900000-0000-0000-0000-000000000000"],
+        &["rerun", "--run-id", "01900000-0000-0000-0000-000000000000"],
+        &["inspect"],
+        &["inspect", "--limit", "5"],
+        &[
+            "refine",
+            "--run-id",
+            "01900000-0000-0000-0000-000000000000",
+            "--proposal",
+            "p_000",
+        ],
+        &["rerank", "--run-id", "01900000-0000-0000-0000-000000000000"],
+        &["import", "--source-path", "/tmp/foreign-run"],
+    ];
+    for sub in subs {
+        let mut argv: Vec<&str> = vec!["moagan", "--runs-dir", "/tmp/d145-home"];
+        argv.extend_from_slice(sub);
+        let cli = moagan::cli::Cli::from_iter_args(argv.iter().copied())
+            .unwrap_or_else(|e| panic!("clap rejected {sub:?}: {e}"));
+        assert_eq!(
+            cli.runs_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/d145-home")),
+            "{sub:?}: --runs-dir did not populate cli.runs_dir"
+        );
+    }
+}
+
+/// `MOAGAN_RUNS_DIR` (the clap-level env var alias) seeds
+/// `cli.runs_dir` when no CLI flag is passed, matching the spec
+/// wording for D.14.5 ("defaults to the resolved `MOAGAN_HOME`
+/// env var").
+#[test]
+fn runs_dir_env_var_seeds_cli_runs_dir() {
+    let previous = std::env::var("MOAGAN_RUNS_DIR").ok();
+    unsafe {
+        std::env::set_var("MOAGAN_RUNS_DIR", "/tmp/from-env-var");
+    }
+    let cli = moagan::cli::Cli::from_iter_args([
+        "moagan",
+        "continue",
+        "--run-id",
+        "01900000-0000-0000-0000-000000000000",
+    ])
+    .expect("clap must accept --runs-dir via MOAGAN_RUNS_DIR");
+    assert_eq!(
+        cli.runs_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/from-env-var")),
+        "MOAGAN_RUNS_DIR must seed cli.runs_dir via clap's `env` attribute"
+    );
+    match previous {
+        Some(v) => unsafe {
+            std::env::set_var("MOAGAN_RUNS_DIR", v);
+        },
+        None => unsafe {
+            std::env::remove_var("MOAGAN_RUNS_DIR");
+        },
+    }
+}
+
+/// Dispatch mirrors `cli.runs_dir` into `MOAGAN_HOME` so the rest of
+/// the binary — `MoaganHome::resolve()` and every helper built on
+/// top of it — reads the override without a new parameter. The
+/// test seeds a parent dir under `tmp`, sets `cli.runs_dir`, and
+/// asserts the SQLite index landed under the override path.
+#[test]
+fn runs_dir_dispatch_mirrors_into_moagan_home_env() -> Result<()> {
+    let _g = env_lock();
+    let home = tempfile::tempdir().unwrap();
+    // Important: do NOT set MOAGAN_HOME — we want to prove the
+    // global flag alone is sufficient.
+    unsafe {
+        std::env::remove_var("MOAGAN_HOME");
+    }
+    let cli = moagan::cli::Cli::from_iter_args([
+        "moagan",
+        "--runs-dir",
+        home.path().to_str().unwrap(),
+        "inspect",
+        "--limit",
+        "1",
+    ])
+    .expect("clap must accept --runs-dir on `inspect`");
+    // Run dispatch. `inspect` exits with 0 (no runs yet) and
+    // internally opens `<home>/meta.sqlite`. We use that as the
+    // proof that the env var was set: if the global flag had been
+    // ignored, dispatch would have tried the default home and
+    // `meta.sqlite` would not exist under our tmpdir.
+    let rc = pollster::block_on(moagan::cli::dispatch(cli))?;
+    assert_eq!(rc, 0, "inspect must exit 0 on an empty home");
+    let db_path = home.path().join("meta.sqlite");
+    assert!(
+        db_path.is_file(),
+        "dispatch did not honour --runs-dir; expected {} to exist",
+        db_path.display()
+    );
+    Ok(())
+}
