@@ -385,6 +385,102 @@ fn rerun_matrix_override_merges_overrides() -> Result<()> {
     Ok(())
 }
 
+/// `Pipeline::run_full_pipeline` (the helper `run_rerun` dispatches
+/// to) writes the canonical sidecars `brief.json`, `final/intake.json`,
+/// ..., `final/portfolio.md` for a fresh run. Before the fix, the
+/// rerun path used `Pipeline::resume(canonical, "intake")` which
+/// skipped intake, so the rerun's new run dir never grew those
+/// sidecars (the downstream `ClarifyPhase` errored reading the
+/// missing `brief.json`). This test pins the contract: invoking
+/// the pipeline helper on a stub manifest with `cli_prompt` set
+/// produces the full set of sidecars.
+#[test]
+fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
+    let _g = env_lock();
+    let (_tmp, home) = fresh_home();
+    let parent = RunId::new();
+    let parent_dir = home.run_dir(parent);
+    parent_dir.ensure()?;
+    // Seed the parent with a completed-ish manifest so the
+    // `clone_manifest_for_rerun` path has something to read.
+    let mut parent_manifest = seed_manifest(&home, parent, "fast", None);
+    parent_manifest.cli_prompt = Some("Enumera los 7 colores del arcoíris".into());
+    parent_manifest.manifest_blake3 = blake3_of(&parent_manifest);
+    let bytes = serde_json::to_vec_pretty(&parent_manifest)?;
+    std::fs::write(parent_dir.manifest(), bytes)?;
+
+    let db = Db::open(&home.meta_db_path())?;
+    db.register_run(
+        parent,
+        &parent_manifest.mode,
+        &parent_manifest.status,
+        &parent_manifest.client_version,
+        Some(&parent_manifest.brief_blake3),
+        parent_manifest.shared_brief_hash.as_deref(),
+        parent_manifest.parent_run_id,
+    )?;
+
+    // Build the stub the rerun would build: same `mode` +
+    // `provider`, fresh `run_id`, `parent_run_id` pointing at the
+    // seeded parent, and `cli_prompt` preserved from the parent.
+    let new_id = RunId::new();
+    let mut stub = parent_manifest.clone();
+    stub.run_id = new_id;
+    stub.parent_run_id = Some(parent);
+    stub.status = "created".into();
+    stub.phases.clear();
+    stub.cli_prompt = parent_manifest.cli_prompt.clone();
+
+    let mock_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mock_provider");
+    let cfg = Config::default();
+    let final_manifest = pollster::block_on(moagan::cli::run::run_full_pipeline(
+        home.clone(),
+        db.clone(),
+        &cfg,
+        Some(mock_dir),
+        true,
+        stub,
+        parent_manifest.cli_prompt.clone().unwrap_or_default(),
+        None,
+    ))?;
+
+    let new_dir = home.run_dir(new_id);
+    // The intake phase writes `brief.json` (originally the Intake,
+    // then overwritten by Clarify with the canonical Brief). The
+    // pre-fix resume path skipped intake, so this file did NOT
+    // exist on the rerun's run dir.
+    assert!(
+        new_dir.brief().is_file(),
+        "brief.json was not written by the rerun pipeline"
+    );
+    // The intake phase also writes `final/intake.json` for the
+    // audit trail.
+    assert!(
+        new_dir.final_dir().join("intake.json").is_file(),
+        "final/intake.json was not written by the rerun pipeline"
+    );
+    // The deliver phase writes the portfolio — a canonical
+    // "pipeline ran end-to-end" marker.
+    assert!(
+        new_dir.final_dir().join("portfolio.md").is_file(),
+        "final/portfolio.md was not written by the rerun pipeline"
+    );
+    // The rebuilt manifest.json carries the parent_run_id and the
+    // cli_prompt so a follow-up rerun keeps the lineage going.
+    let rebuilt: Manifest = serde_json::from_slice(&std::fs::read(new_dir.manifest())?)
+        .map_err(moagan::error::Error::from)?;
+    assert_eq!(rebuilt.parent_run_id, Some(parent));
+    assert_eq!(
+        rebuilt.cli_prompt.as_deref(),
+        Some("Enumera los 7 colores del arcoíris")
+    );
+    assert_eq!(final_manifest.run_id, new_id);
+    Ok(())
+}
+
 // =====================================================================
 // import
 // =====================================================================
