@@ -1226,7 +1226,10 @@ fn peek_token(tok: &mut Tokenizer<'_>) -> ParseResult<Option<Tok>> {
 /// Run `sqlite3 :memory: "<source>"` in the sandbox and return the
 /// raw `SandboxResult`. The sandbox enforces the 4 KiB stdout cap.
 async fn run_in_sqlite(sandbox: &Sandbox, source: &str) -> Result<SandboxResult> {
-    sandbox.run("sqlite3", &["-bail", ":memory:", source]).await
+    sandbox
+        .run("sqlite3", &["-bail", ":memory:", source])
+        .await
+        .map_err(Into::into)
 }
 
 fn sqlite_evidence(result: SandboxResult, parse_ok: usize) -> ValidationEvidence {

@@ -18,4 +18,4 @@ pub mod process;
 pub use allowlist::{
     Allowlist, DEFAULT_ALLOWLIST, DEFAULT_DENYLIST, Denylist, contains_deny_token, is_allowed,
 };
-pub use process::{Sandbox, SandboxConfig, SandboxResult, SandboxStatus};
+pub use process::{Sandbox, SandboxConfig, SandboxError, SandboxResult, SandboxStatus};

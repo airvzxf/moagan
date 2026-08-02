@@ -3,35 +3,59 @@
 //! [`Sandbox`] wraps `tokio::process::Command` with a fresh
 //! `tempfile::TempDir` per `run`, a hard wall-clock timeout, an
 //! allowlist + denylist policy, and a capped stdout/stderr buffer
-//! (4 KiB each) so a runaway process cannot blow up the run memory.
+//! (64 KiB each by default) so a runaway process cannot blow up the
+//! run memory.
 //!
 //! The sandbox inherits the process environment but strips anything
 //! that smells like a secret (see [`SandboxConfig::strip_secrets_env`])
 //! and forces `PATH` to the standard system paths and `HOME` to the
 //! scratch directory.
 //!
-//! Compliance: `proposal-02-rust.md` §7. The hardened variants
-//! (`cgroup`, `unshare`, `seccomp`) live in catalog 10-integrada-v0
-//! §D.11 and are not yet implemented here.
+//! Compliance: `proposal-02-rust.md` §7 plus the implemented portions
+//! of catalog 10-integrada-v0 §D.11. The remaining hardened variants
+//! (`cgroup`, `unshare`, `seccomp`) are still opt-in catalog overlays.
 
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tokio::io::AsyncReadExt;
+use thiserror::Error as ThisError;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::time;
 
 use crate::error::{Error, Result};
 
 use super::allowlist::{Allowlist, Denylist, contains_deny_token, is_allowed};
 
-/// Maximum bytes captured per stream before truncation. Matches
-/// `proposal-02-rust.md` §7 cap (4 KiB).
-pub const MAX_STDOUT_BYTES: usize = 4 * 1024;
-/// Same cap for stderr. Mirrors stdout for symmetry.
-pub const MAX_STDERR_BYTES: usize = 4 * 1024;
+/// Cap stdout/stderr to `max_bytes` per stream. When the cap is hit,
+/// the sandbox returns [`SandboxError::OutputTruncated`] and the
+/// process is killed (D.11.4). The default is 64 KiB.
+pub const DEFAULT_OUTPUT_CAP_BYTES: usize = 64 * 1024;
+
+/// Maximum bytes captured per stdout stream by default.
+pub const MAX_STDOUT_BYTES: usize = DEFAULT_OUTPUT_CAP_BYTES;
+/// Maximum bytes captured per stderr stream by default.
+pub const MAX_STDERR_BYTES: usize = DEFAULT_OUTPUT_CAP_BYTES;
+
+/// Errors raised by the hardened subprocess controls.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum SandboxError {
+    /// The child attempted to write beyond the configured per-stream cap.
+    #[error("sandbox output truncated")]
+    OutputTruncated,
+    /// An I/O or task failure prevented the sandbox from collecting output.
+    #[error("sandbox I/O failure: {0}")]
+    Io(String),
+}
+
+impl From<SandboxError> for Error {
+    fn from(error: SandboxError) -> Self {
+        Self::InvalidState(error.to_string())
+    }
+}
 
 /// Compile-time configuration for the sandbox. Cheap to clone (every
 /// internal collection is small).
@@ -235,19 +259,74 @@ impl Sandbox {
     /// call. If you need to populate the directory with files (e.g.
     /// a Cargo project layout) before running the command, use
     /// [`Sandbox::new_workdir`] plus [`Sandbox::run_in`].
-    pub async fn run(&self, cmd: &str, args: &[&str]) -> Result<SandboxResult> {
-        let work = self.new_workdir()?;
+    pub async fn run(
+        &self,
+        cmd: &str,
+        args: &[&str],
+    ) -> std::result::Result<SandboxResult, SandboxError> {
+        let work = self
+            .new_workdir()
+            .map_err(|error| SandboxError::Io(error.to_string()))?;
         self.run_in(work.path(), cmd, args).await
+    }
+
+    /// Execute `cmd` with an explicit output cap inside a fresh
+    /// scratch directory.
+    pub async fn run_with_output_cap(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        max_output_bytes: usize,
+    ) -> std::result::Result<SandboxResult, SandboxError> {
+        let work = self
+            .new_workdir()
+            .map_err(|error| SandboxError::Io(error.to_string()))?;
+        self.run_in_with_output_cap(work.path(), cmd, args, max_output_bytes)
+            .await
     }
 
     /// Execute `cmd` with `args` inside the supplied `work_dir`. The
     /// directory's contents are visible to the spawned process and
     /// the process's CWD is set to it. The caller retains ownership
     /// of `work_dir` and decides when to drop it.
-    pub async fn run_in(&self, work_dir: &Path, cmd: &str, args: &[&str]) -> Result<SandboxResult> {
+    pub async fn run_in(
+        &self,
+        work_dir: &Path,
+        cmd: &str,
+        args: &[&str],
+    ) -> std::result::Result<SandboxResult, SandboxError> {
+        let max_output_bytes = self
+            .config
+            .max_capture_bytes
+            .unwrap_or(DEFAULT_OUTPUT_CAP_BYTES);
+        self.run_in_with_limits(work_dir, cmd, args, max_output_bytes)
+            .await
+    }
+
+    /// Execute `cmd` with an explicit per-stream output cap inside the
+    /// supplied `work_dir`.
+    pub async fn run_in_with_output_cap(
+        &self,
+        work_dir: &Path,
+        cmd: &str,
+        args: &[&str],
+        max_output_bytes: usize,
+    ) -> std::result::Result<SandboxResult, SandboxError> {
+        self.run_in_with_limits(work_dir, cmd, args, max_output_bytes)
+            .await
+    }
+
+    async fn run_in_with_limits(
+        &self,
+        work_dir: &Path,
+        cmd: &str,
+        args: &[&str],
+        max_output_bytes: usize,
+    ) -> std::result::Result<SandboxResult, SandboxError> {
         let started = Instant::now();
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
         let argv: Vec<String> = std::iter::once(cmd.to_owned())
-            .chain(args.iter().map(|s| (*s).to_owned()))
+            .chain(args.iter().cloned())
             .collect();
         let command_str = argv.join(" ");
 
@@ -272,14 +351,9 @@ impl Sandbox {
             ));
         }
 
-        let (stdout_cap, stderr_cap) = match self.config.max_capture_bytes {
-            Some(n) => (n, n),
-            None => (MAX_STDOUT_BYTES, MAX_STDERR_BYTES),
-        };
-
         let mut command = Command::new(cmd);
         command
-            .args(args)
+            .args(&args)
             .current_dir(work_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -288,27 +362,27 @@ impl Sandbox {
 
         let env = self.build_env(work_dir);
         command.env_clear();
-        for (k, v) in &env {
-            command.env(k, v);
+        for (key, value) in &env {
+            command.env(key, value);
         }
 
         let mut child = match command.spawn() {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(SandboxResult::new(
                     -1,
                     String::new(),
-                    format!("binary not found: {e}"),
+                    format!("binary not found: {cmd}"),
                     started.elapsed(),
                     SandboxStatus::NotFound,
                     command_str,
                 ));
             }
-            Err(e) => {
+            Err(error) => {
                 return Ok(SandboxResult::new(
                     -1,
                     String::new(),
-                    format!("spawn failed: {e}"),
+                    format!("spawn failed: {error}"),
                     started.elapsed(),
                     SandboxStatus::Error,
                     command_str,
@@ -316,86 +390,62 @@ impl Sandbox {
             }
         };
 
-        let stdout_handle = child.stdout.take().map(|mut s| {
-            tokio::spawn(async move {
-                let mut buf = Vec::with_capacity(stdout_cap);
-                let mut tmp = [0u8; 1024];
-                loop {
-                    match s.read(&mut tmp).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if buf.len() + n > stdout_cap {
-                                let remaining = stdout_cap.saturating_sub(buf.len());
-                                buf.extend_from_slice(&tmp[..remaining]);
-                                break;
-                            }
-                            buf.extend_from_slice(&tmp[..n]);
-                        }
-                        Err(_) => break,
-                    }
-                }
-                buf
-            })
-        });
-        let stderr_handle = child.stderr.take().map(|mut s| {
-            tokio::spawn(async move {
-                let mut buf = Vec::with_capacity(stderr_cap);
-                let mut tmp = [0u8; 1024];
-                loop {
-                    match s.read(&mut tmp).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if buf.len() + n > stderr_cap {
-                                let remaining = stderr_cap.saturating_sub(buf.len());
-                                buf.extend_from_slice(&tmp[..remaining]);
-                                break;
-                            }
-                            buf.extend_from_slice(&tmp[..n]);
-                        }
-                        Err(_) => break,
-                    }
-                }
-                buf
-            })
-        });
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let stdout_handle = child
+            .stdout
+            .take()
+            .map(|stream| tokio::spawn(read_stream(stream, max_output_bytes, event_tx.clone())));
+        let stderr_handle = child
+            .stderr
+            .take()
+            .map(|stream| tokio::spawn(read_stream(stream, max_output_bytes, event_tx.clone())));
+        drop(event_tx);
 
-        let timeout_at = started + self.config.timeout;
-        let (status, exit_code) = {
-            let now = Instant::now();
-            if now >= timeout_at {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                (SandboxStatus::Timeout, -1)
-            } else {
-                let remaining = timeout_at - now;
-                match time::timeout(remaining, child.wait()).await {
-                    Ok(Ok(es)) => {
-                        let exit_code = es.code().unwrap_or(-1);
-                        let status = if exit_code == 0 {
-                            SandboxStatus::Pass
-                        } else {
-                            SandboxStatus::Fail
-                        };
-                        (status, exit_code)
+        let remaining = self.config.timeout.saturating_sub(started.elapsed());
+        let deadline = time::sleep(remaining);
+        tokio::pin!(deadline);
+        let mut events_open = true;
+        let (status, exit_code, early_error) = loop {
+            tokio::select! {
+                result = child.wait() => {
+                    match result {
+                        Ok(exit) => {
+                            let exit_code = exit.code().unwrap_or(-1);
+                            let status = if exit_code == 0 {
+                                SandboxStatus::Pass
+                            } else {
+                                SandboxStatus::Fail
+                            };
+                            break (status, exit_code, None);
+                        }
+                        Err(_) => break (SandboxStatus::Error, -1, None),
                     }
-                    Ok(Err(_)) => (SandboxStatus::Error, -1),
-                    Err(_) => {
-                        let _ = child.start_kill();
-                        let _ = child.wait().await;
-                        (SandboxStatus::Timeout, -1)
+                }
+                event = event_rx.recv(), if events_open => {
+                    match event {
+                        Some(error) => {
+                            let _ = child.start_kill();
+                            let _ = child.wait().await;
+                            break (SandboxStatus::Error, -1, Some(error));
+                        }
+                        None => events_open = false,
                     }
+                }
+                _ = &mut deadline => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    break (SandboxStatus::Timeout, -1, None);
                 }
             }
         };
 
-        let stdout_bytes: Vec<u8> = match stdout_handle {
-            Some(h) => h.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let stderr_bytes: Vec<u8> = match stderr_handle {
-            Some(h) => h.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let stdout_result = await_reader(stdout_handle).await;
+        let stderr_result = await_reader(stderr_handle).await;
+        if let Some(error) = early_error {
+            return Err(error);
+        }
+        let stdout_bytes = stdout_result?;
+        let stderr_bytes = stderr_result?;
 
         Ok(SandboxResult::new(
             exit_code,
@@ -431,6 +481,49 @@ impl Sandbox {
         );
         env.insert("HOME".into(), work_path.to_string_lossy().into_owned());
         env
+    }
+}
+
+async fn read_stream<R>(
+    mut stream: R,
+    max_output_bytes: usize,
+    event_tx: mpsc::UnboundedSender<SandboxError>,
+) -> std::result::Result<Vec<u8>, SandboxError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::with_capacity(max_output_bytes.min(8 * 1024));
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = match stream.read(&mut buffer).await {
+            Ok(read) => read,
+            Err(error) => {
+                let error = SandboxError::Io(error.to_string());
+                return Err(error);
+            }
+        };
+        if read == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(read) > max_output_bytes {
+            let remaining = max_output_bytes.saturating_sub(output.len());
+            output.extend_from_slice(&buffer[..remaining]);
+            let error = SandboxError::OutputTruncated;
+            let _ = event_tx.send(error.clone());
+            return Err(error);
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+}
+
+async fn await_reader(
+    handle: Option<tokio::task::JoinHandle<std::result::Result<Vec<u8>, SandboxError>>>,
+) -> std::result::Result<Vec<u8>, SandboxError> {
+    match handle {
+        Some(handle) => handle
+            .await
+            .map_err(|error| SandboxError::Io(error.to_string()))?,
+        None => Ok(Vec::new()),
     }
 }
 
@@ -495,17 +588,19 @@ mod tests {
         assert_eq!(result.exit_code, 7);
     }
 
+    #[test]
+    fn default_output_cap_is_64_kib() {
+        assert_eq!(DEFAULT_OUTPUT_CAP_BYTES, 64 * 1024);
+        assert_eq!(MAX_STDOUT_BYTES, DEFAULT_OUTPUT_CAP_BYTES);
+        assert_eq!(MAX_STDERR_BYTES, DEFAULT_OUTPUT_CAP_BYTES);
+    }
+
     #[tokio::test]
     async fn stdout_capture_is_capped() {
-        // Generate 8 KiB of output; cap is 4 KiB by default.
         let cfg = SandboxConfig::new().with_max_capture(256);
         let sandbox = Sandbox::new(cfg).unwrap();
-        let result = sandbox
-            .run("sh", &["-c", "yes A | head -c 8192"])
-            .await
-            .unwrap();
-        assert_eq!(result.status, SandboxStatus::Pass);
-        assert!(result.stdout.len() <= 256);
+        let result = sandbox.run("sh", &["-c", "yes A | head -c 8192"]).await;
+        assert_eq!(result, Err(SandboxError::OutputTruncated));
     }
 
     #[tokio::test]
