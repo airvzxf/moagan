@@ -19,5 +19,5 @@
 pub mod loader;
 pub mod resolver;
 
-pub use loader::{ContextRefRecord, ContextScope, LoadedContext};
+pub use loader::{ContextRefRecord, ContextScope, LoadedContext, compute_shared_brief_hash};
 pub use resolver::{ContextRef, resolve, resolve_classify};

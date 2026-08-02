@@ -121,9 +121,8 @@ fn build_user_message(ctx: &RunContext) -> Result<String> {
     let Some(block) = ctx.context_block.as_ref() else {
         return Ok(raw);
     };
-    let envelope = format!(
-        "[context]\n{block}\n[/context]\n\n[user prompt]\n{raw}\n[/user prompt]\n"
-    );
+    let envelope =
+        format!("[context]\n{block}\n[/context]\n\n[user prompt]\n{raw}\n[/user prompt]\n");
     Ok(envelope)
 }
 

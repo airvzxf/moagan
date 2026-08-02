@@ -349,10 +349,7 @@ mod tests {
             .push(StubPhase("propose"))
             .push(StubPhase("deliver"));
         let resumed = Pipeline::resume(canonical, "clarify").unwrap();
-        assert_eq!(
-            resumed.names(),
-            vec!["route", "propose", "deliver"]
-        );
+        assert_eq!(resumed.names(), vec!["route", "propose", "deliver"]);
     }
 
     /// Resuming from the last canonical phase produces an empty

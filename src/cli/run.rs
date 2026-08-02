@@ -6,7 +6,11 @@ use std::sync::Arc;
 
 use crate::cli::Mode;
 use crate::config::Config;
-use crate::domain::{Manifest, ManifestPhase, ManifestUsage};
+use crate::context::{
+    ContextRef, ContextScope, compute_shared_brief_hash, loader as context_loader,
+    resolver as context_resolver,
+};
+use crate::domain::{LineagePaths, Manifest, ManifestPhase, ManifestUsage};
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
@@ -46,6 +50,14 @@ pub struct RunOptions {
     /// (V4 §5.13 "no sustituye automáticamente"). Default `false`
     /// (replacement ON for `standard`/`deep`/`batch`).
     pub no_replace_sources: bool,
+    /// Phase J: optional reference to an upstream context
+    /// (`--context`). Resolved into a `ContextRef` before the
+    /// pipeline starts.
+    pub context: Option<String>,
+    /// Phase J: scope used when loading the context. Defaults to
+    /// `Summary`; `SummaryFull` and `Full` are opt-in via the
+    /// `--context-summary` / `--context-full` flags.
+    pub context_scope: ContextScope,
 }
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
@@ -82,14 +94,55 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let config_hash = Some(crate::ids::blake3_hex(
         crate::ids::canonical_hash(&[cfg.default_provider.as_str()]).as_bytes(),
     ));
+
+    // Phase J: resolve + load the upstream context (if any) BEFORE
+    // registering the run so the SQLite mirror carries the lineage
+    // from the start. The filesystem sidecar order matches:
+    // `brief.json` -> `manifest.json` -> SQLite index (T01-06 §1.1).
+    let loaded_context = match opts.context.as_deref() {
+        Some(raw) => {
+            let cref = context_resolver::resolve(&home, raw)?;
+            let mut loaded = context_loader::load(&home, &cref, opts.context_scope)?;
+            // If the loader didn't already attach a parent_run_id
+            // record (it does for run_id refs), we synthesise one
+            // from the resolved ContextRef so the manifest always
+            // has a record for "what kind of ref was this".
+            if loaded.context_refs.is_empty() {
+                if let ContextRef::RunId(id) = &cref {
+                    loaded.parent_run_id = Some(*id);
+                }
+                let now = crate::time::now_unix_secs();
+                loaded.context_refs.push(crate::context::ContextRefRecord {
+                    source_path: cref.source(),
+                    context_type: cref.kind().to_string(),
+                    shasum: compute_shared_brief_hash(
+                        &loaded
+                            .brief_excerpt
+                            .chars()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>(),
+                    ),
+                    bytes: loaded.brief_excerpt.len() as u64,
+                    added_unix: now,
+                });
+            }
+            Some((cref, loaded))
+        }
+        None => None,
+    };
+    let parent_run_id = loaded_context.as_ref().and_then(|(_, l)| l.parent_run_id);
+    let shared_brief_hash = loaded_context
+        .as_ref()
+        .and_then(|(_, l)| l.shared_brief_hash.clone());
+
     db.register_run(
         run_id,
         opts.mode.as_str(),
         "running",
         env!("CARGO_PKG_VERSION"),
         config_hash.as_deref(),
-        None,
-        None,
+        shared_brief_hash.as_deref(),
+        parent_run_id,
     )?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
     // CLI `--max-parallelism` overrides the config-file value.
@@ -97,6 +150,50 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // `cfg::Config::default`; `Parallelism::new` clamps to >= 1.
     let max_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
     let parallelism = Parallelism::new(max_parallelism);
+
+    // Mirror the context refs into SQLite so post-execution
+    // queries (e.g. `SELECT * FROM run_context_refs WHERE run_id = ?`)
+    // return them without re-reading the sidecar.
+    if let Some((_, loaded)) = loaded_context.as_ref() {
+        for record in &loaded.context_refs {
+            if let Err(e) = db.add_context_ref(run_id, record) {
+                tracing::warn!(
+                    run_id = %run_id,
+                    error = %e,
+                    stage = "context.add_context_ref.error",
+                    "failed to mirror context_refs row"
+                );
+            }
+        }
+    }
+
+    // Build the lineage_paths block. The `relative` map is empty
+    // here; the manifest writer fills it after the pipeline runs
+    // (the `final/` and other directories exist on disk by then).
+    let lineage_paths = loaded_context.as_ref().map(|(cref, _loaded)| {
+        let mut paths = LineagePaths::default();
+        paths
+            .absolute
+            .insert(LineagePaths::LABEL_FINAL_DIR.into(), run_dir.final_dir());
+        if let ContextRef::RunId(parent) = cref {
+            let parent_dir = home.run_dir(*parent);
+            paths.relative.insert(
+                LineagePaths::LABEL_PARENT_RUN_DIR.into(),
+                format!("../{}", parent),
+            );
+            paths.absolute.insert(
+                LineagePaths::LABEL_PARENT_RUN_DIR.into(),
+                parent_dir.root().to_path_buf(),
+            );
+            let sketches = parent_dir.sketches();
+            if sketches.is_dir() {
+                paths
+                    .absolute
+                    .insert(LineagePaths::LABEL_PARENT_SKETCHES.into(), sketches);
+            }
+        }
+        paths
+    });
 
     let ctx = crate::phases::RunContext::new(
         run_id,
@@ -110,7 +207,19 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         opts.mode.as_str().to_owned(),
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
-    .with_interactive(!opts.non_interactive);
+    .with_interactive(!opts.non_interactive)
+    .with_context(
+        loaded_context
+            .as_ref()
+            .map(|(_, l)| l.brief_excerpt.clone()),
+        parent_run_id,
+        shared_brief_hash.clone(),
+        loaded_context
+            .as_ref()
+            .map(|(_, l)| l.context_refs.clone())
+            .unwrap_or_default(),
+        lineage_paths.clone(),
+    );
 
     // Phase F: synthesis-replacement predicate is ON by default for
     // every mode that runs SynthesizePhase (`standard`/`deep`/`batch`).
@@ -137,7 +246,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // silently leaving the manifest with empty `phases`/`usage`.
     telemetry.flush()?;
 
-    let manifest = build_manifest(
+    let mut manifest = build_manifest(
         &run_id,
         opts.mode.as_str(),
         "completed",
@@ -145,6 +254,15 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         &default_provider,
         default_model_for_manifest.as_str(),
     )?;
+    // Phase J: stamp the lineage block onto the manifest. The
+    // builder defaults everything to empty; the context plumbing
+    // populates these from `loaded_context`.
+    if let Some((_, loaded)) = loaded_context.as_ref() {
+        manifest.parent_run_id = loaded.parent_run_id;
+        manifest.shared_brief_hash = loaded.shared_brief_hash.clone();
+        manifest.context_refs = loaded.context_refs.clone();
+        manifest.lineage_paths = lineage_paths;
+    }
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
     if let Err(e) = db.update_run_status(run_id, "completed") {
@@ -233,7 +351,11 @@ pub fn build_registry_for(
 /// `SynthesizePhase`. `fast` skips synthesis entirely so the flag is
 /// off there; the rest default to ON. The CLI flag
 /// `--no-replace-sources` overrides the per-mode default.
-fn build_pipeline_for_mode(mode: Mode, cfg: &Config, replace_sources_enabled: bool) -> Pipeline {
+pub(crate) fn build_pipeline_for_mode(
+    mode: Mode,
+    cfg: &Config,
+    replace_sources_enabled: bool,
+) -> Pipeline {
     let (proposals, critics, judges, sketches) = match mode {
         Mode::Fast => (3u32, 2u32, 3u32, 0u32),
         Mode::Standard => (3u32, 3u32, 5u32, 4u32),
