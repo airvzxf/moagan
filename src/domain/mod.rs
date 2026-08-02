@@ -3,6 +3,8 @@
 //! allowed to surface extra information as long as the contract keys
 //! are present.
 
+pub mod constraint;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
