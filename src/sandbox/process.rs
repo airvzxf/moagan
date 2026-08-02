@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 
 use crate::error::{Error, Result};
+use crate::redact::{RedactPolicy, Surface, apply};
 
 use super::allowlist::{Allowlist, Denylist, contains_deny_token, is_allowed};
 
@@ -119,6 +120,36 @@ pub static COMMAND_CONFIGS: &[CommandConfig] = &[
 /// Find a command policy by its logical name.
 pub fn config_for(name: &str) -> Option<&'static CommandConfig> {
     COMMAND_CONFIGS.iter().find(|config| config.name == name)
+}
+
+/// Strip secrets from `args` before spawning. Secret-looking values are
+/// redacted through the crate-wide policy while preserving argument count.
+pub fn strip_secrets(args: &[String]) -> Vec<String> {
+    let policy = RedactPolicy::default();
+    args.iter()
+        .map(|arg| {
+            if looks_like_secret(arg) {
+                match apply(&policy, Surface::Telemetry, arg) {
+                    Ok(redacted) if redacted.as_ref() != arg => redacted.into_owned(),
+                    Ok(_) | Err(_) => "***REDACTED***".to_owned(),
+                }
+            } else {
+                arg.clone()
+            }
+        })
+        .collect()
+}
+
+fn looks_like_secret(value: &str) -> bool {
+    value.starts_with("sk-cp-")
+        || value.starts_with("sk-ant-")
+        || value.starts_with("sk-")
+        || value.starts_with("AIzaSy")
+        || value.starts_with("hf_")
+        || value.starts_with("r8_")
+        || value.starts_with("ghp_")
+        || value.starts_with("xoxb-")
+        || value.starts_with("Bearer ")
 }
 
 /// Compile-time configuration for the sandbox. Cheap to clone (every
@@ -389,11 +420,15 @@ impl Sandbox {
         max_output_bytes: usize,
     ) -> std::result::Result<SandboxResult, SandboxError> {
         let started = Instant::now();
-        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-        let argv: Vec<String> = std::iter::once(cmd.to_owned())
-            .chain(args.iter().cloned())
+        let raw_args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        let sanitized_args = strip_secrets(&raw_args);
+        let policy_argv: Vec<String> = std::iter::once(cmd.to_owned())
+            .chain(raw_args.iter().cloned())
             .collect();
-        let command_str = argv.join(" ");
+        let command_str = std::iter::once(cmd.to_owned())
+            .chain(sanitized_args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         if !is_allowed(cmd, &self.config.allowlist) {
             return Ok(SandboxResult::new(
@@ -405,7 +440,7 @@ impl Sandbox {
                 command_str,
             ));
         }
-        if contains_deny_token(&argv, &self.config.denylist) {
+        if contains_deny_token(&policy_argv, &self.config.denylist) {
             return Ok(SandboxResult::new(
                 -1,
                 String::new(),
@@ -418,7 +453,7 @@ impl Sandbox {
 
         let mut command = Command::new(cmd);
         command
-            .args(&args)
+            .args(&sanitized_args)
             .current_dir(work_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -681,6 +716,40 @@ mod tests {
     #[test]
     fn command_config_for_unknown_name_returns_none() {
         assert!(config_for("unknown-language").is_none());
+    }
+
+    #[test]
+    fn strip_secrets_redacts_sk_cp() {
+        let secret = "sk-cp-abcdefghijklmnopqrstuvwxyz".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains(&secret));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_bearer() {
+        let secret = "Bearer abcdefghijklmnop".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains(&secret));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_preserves_arg_count() {
+        let args = vec![
+            "--token".to_owned(),
+            "sk-cp-abcdefghijklmnopqrstuvwxyz".to_owned(),
+            "plain".to_owned(),
+        ];
+        assert_eq!(strip_secrets(&args).len(), args.len());
+    }
+
+    #[test]
+    fn strip_secrets_passes_through_non_secrets() {
+        let args = vec!["--offline".to_owned(), "check".to_owned()];
+        assert_eq!(strip_secrets(&args), args);
     }
 
     #[tokio::test]
