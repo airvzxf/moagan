@@ -805,16 +805,22 @@ impl Db {
     /// skip the work that already finished.
     ///
     /// Tie-break rule: when multiple phases ended at the same
-    /// `started_unix`, the lexicographically smaller `phase` wins
-    /// (deterministic across re-runs).
+    /// `started_unix`, canonical pipeline order wins.
     pub fn last_completed_phase(&self, run_id: RunId) -> Result<Option<String>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT phase FROM phases \
              WHERE run_id = ? AND status = 'end' \
-             ORDER BY started_unix DESC, phase ASC \
+             ORDER BY started_unix DESC, CASE phase \
+                 WHEN 'intake' THEN 0 WHEN 'clarify' THEN 1 WHEN 'route' THEN 2 \
+                 WHEN 'decompose' THEN 3 WHEN 'sketch' THEN 4 WHEN 'propose' THEN 5 \
+                 WHEN 'validate' THEN 6 WHEN 'cluster_proposals' THEN 7 \
+                 WHEN 'synthesize' THEN 8 WHEN 'gate' THEN 9 WHEN 'critique' THEN 10 \
+                 WHEN 'repair' THEN 11 WHEN 'judge' THEN 12 WHEN 'rank' THEN 13 \
+                 WHEN 'deliver' THEN 14 ELSE -1 END DESC \
              LIMIT 1",
         )?;
+
         let mut rows = stmt.query(params![run_id.to_string()])?;
         if let Some(row) = rows.next()? {
             let phase: String = row.get(0)?;
