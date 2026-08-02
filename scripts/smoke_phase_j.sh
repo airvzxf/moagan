@@ -303,6 +303,47 @@ run_test "dispatch_creates_sqlite_index_under_runs_dir" '
 '
 
 # ---------------------------------------------------------------------
+# 5. Re-run end-to-end (the bug the previous commit fixed)
+# ---------------------------------------------------------------------
+#
+# Before the fix, `moagan rerun` called `Pipeline::resume(canonical,
+# "intake")` which skipped intake, so the new run dir had no
+# `brief.json` and the next phase errored reading it. The smoke
+# runs a full `run` + `rerun` + `continue` + `rerun --matrix-override`
+# cycle and verifies the rerun populates the canonical sidecars.
+# Cross-run LLM cache hit is what makes the rerun not need the
+# `mock_dir` flag again (the prompts are the same, so the cache
+# keys are the same).
+
+run_test "rerun_runs_full_pipeline_e2e" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  FIXDIR='"$ROOT"'/tests/fixtures/mock_provider
+  out=$("'"$BIN"'" --runs-dir "$HOME" run --mode fast --provider mock --prompt "test" --non-interactive --mock-dir "$FIXDIR" 2>&1)
+  echo "$out" | grep -q "moagan run"
+  RID=$(basename $(ls -d "$HOME/.runs"/*/ | head -1))
+  # continuation: nothing left to do after deliver.
+  cont=$("'"$BIN"'" --runs-dir "$HOME" continue --run-id="$RID" 2>&1)
+  echo "$cont" | grep -q "nothing left to do"
+  # rerun: full pipeline.
+  rerun_out=$("'"$BIN"'" --runs-dir "$HOME" rerun --run-id="$RID" 2>&1)
+  echo "$rerun_out" | grep -q "moagan run"
+  # The new run dir has a brief.json (intake ran) AND a portfolio.md
+  # (deliver ran).
+  NEW_RID=$(basename $(ls -td "$HOME/.runs"/*/ | head -1))
+  [[ -f "$HOME/.runs/$NEW_RID/brief.json" ]]
+  [[ -f "$HOME/.runs/$NEW_RID/final/portfolio.md" ]]
+  # The rebuilt manifest carries the parent_run_id and the cli_prompt
+  # so a follow-up rerun keeps the lineage going.
+  python3 -c "
+import json, sys
+m = json.load(open(\"$HOME/.runs/$NEW_RID/manifest.json\"))
+assert m[\"parent_run_id\"] == \"$RID\", m[\"parent_run_id\"]
+assert m[\"cli_prompt\"] == \"test\", m.get(\"cli_prompt\")
+" || { echo "manifest contract failed" >&2; exit 1; }
+'
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

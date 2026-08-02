@@ -394,8 +394,8 @@ fn rerun_matrix_override_merges_overrides() -> Result<()> {
 /// missing `brief.json`). This test pins the contract: invoking
 /// the pipeline helper on a stub manifest with `cli_prompt` set
 /// produces the full set of sidecars.
-#[test]
-fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
+#[tokio::test(flavor = "current_thread")]
+async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
     let _g = env_lock();
     let (_tmp, home) = fresh_home();
     let parent = RunId::new();
@@ -436,7 +436,10 @@ fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
         .join("fixtures")
         .join("mock_provider");
     let cfg = Config::default();
-    let final_manifest = pollster::block_on(moagan::cli::run::run_full_pipeline(
+    // `run_full_pipeline` uses `tokio::select!` (the shutdown-signal
+    // branch), so it needs a tokio runtime. `pollster::block_on` is
+    // not enough — `tokio::test` provides the proper runtime.
+    let final_manifest = moagan::cli::run::run_full_pipeline(
         home.clone(),
         db.clone(),
         &cfg,
@@ -445,7 +448,8 @@ fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
         stub,
         parent_manifest.cli_prompt.clone().unwrap_or_default(),
         None,
-    ))?;
+    )
+    .await?;
 
     let new_dir = home.run_dir(new_id);
     // The intake phase writes `brief.json` (originally the Intake,
