@@ -164,9 +164,7 @@ fn provider_rollup_increments_via_public_helper() {
         .unwrap();
     db.increment_provider_rollup("minimax", "MiniMax-M3", 200, 80, true)
         .unwrap();
-    let row: Option<ProviderRollupRow> = db
-        .get_provider_rollup("minimax", "MiniMax-M3")
-        .unwrap();
+    let row: Option<ProviderRollupRow> = db.get_provider_rollup("minimax", "MiniMax-M3").unwrap();
     let row = row.expect("rollup row must exist");
     assert_eq!(row.calls, 2);
     assert_eq!(row.input_tokens, 300);
@@ -189,7 +187,10 @@ fn k7_substitute_returns_correct_marker() {
         substitute(PatternKind::SkCpApiKey),
         "***REDACTED:api_key:sk-cp***"
     );
-    assert_eq!(substitute(PatternKind::BearerHeader), "Bearer ***REDACTED***");
+    assert_eq!(
+        substitute(PatternKind::BearerHeader),
+        "Bearer ***REDACTED***"
+    );
 }
 
 #[test]
