@@ -191,12 +191,12 @@ pub fn load_from_path(path: &Path, scope: ContextScope) -> Result<LoadedContext>
     let mut records: Vec<ContextRefRecord> = Vec::new();
     let now = crate::time::now_unix_secs();
     if meta.is_file() {
-        ingest_file(path, &mut texts, &mut records, now, MAX_FILE_BYTES)?;
+        ingest_file(path, &mut texts, &mut records, now, MAX_FILE_BYTES, "path")?;
     } else if meta.is_dir() {
         // Paths always use `.md` extension; the user pointed at
         // a folder of markdown notes.
         let _ = scope; // documented unused; surfaces the param
-        walk_dir(path, &["md"], &mut texts, &mut records, now)?;
+        walk_dir(path, &["md"], &mut texts, &mut records, now, "dir")?;
     } else {
         return Err(Error::InvalidArgs(format!(
             "context path {path:?} is neither a file nor a directory"
@@ -227,7 +227,7 @@ fn collect_text_files(
         ContextScope::SummaryFull => &["md", "json"],
         ContextScope::Full => &["md", "json", "txt"],
     };
-    walk_dir(dir, extensions, texts, records, now_unix)
+    walk_dir(dir, extensions, texts, records, now_unix, "path")
 }
 
 fn walk_dir(
@@ -236,6 +236,7 @@ fn walk_dir(
     texts: &mut Vec<String>,
     records: &mut Vec<ContextRefRecord>,
     now_unix: i64,
+    context_type: &'static str,
 ) -> Result<()> {
     let mut entries: Vec<PathBuf> = WalkDir::new(dir)
         .follow_links(false)
@@ -253,7 +254,7 @@ fn walk_dir(
     // Sorted order so re-runs produce identical `shared_brief_hash`.
     entries.sort();
     for path in entries {
-        ingest_file(&path, texts, records, now_unix, MAX_FILE_BYTES)?;
+        ingest_file(&path, texts, records, now_unix, MAX_FILE_BYTES, context_type)?;
     }
     Ok(())
 }
@@ -264,6 +265,7 @@ fn ingest_file(
     records: &mut Vec<ContextRefRecord>,
     now_unix: i64,
     cap: u64,
+    context_type: &'static str,
 ) -> Result<()> {
     let bytes = fs::read(path).map_err(Error::from)?;
     let bytes_len = bytes.len() as u64;
@@ -279,7 +281,7 @@ fn ingest_file(
     texts.push(text);
     records.push(ContextRefRecord {
         source_path: path.display().to_string(),
-        context_type: "path".into(),
+        context_type: context_type.into(),
         shasum,
         bytes: used_bytes,
         added_unix: now_unix,

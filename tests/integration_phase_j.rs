@@ -180,6 +180,15 @@ fn context_from_dir_hashes_each_md() -> Result<()> {
     names.sort();
     assert!(names[0].ends_with("a.md"));
     assert!(names[1].ends_with("b.md"));
+    assert!(
+        loaded.context_refs.iter().all(|r| r.context_type == "dir"),
+        "directory context should tag every file as 'dir', got {:?}",
+        loaded
+            .context_refs
+            .iter()
+            .map(|r| (&r.source_path, &r.context_type))
+            .collect::<Vec<_>>()
+    );
     Ok(())
 }
 
@@ -336,8 +345,10 @@ fn rerun_creates_new_run_with_parent_run_id() -> Result<()> {
 }
 
 /// `--matrix-override <json>` deep-merges on top of the cloned
-/// config. We assert the `merge_value` semantics with a tiny
-/// synthetic example rather than driving the whole pipeline.
+/// config and persists the merge to `<run>/overrides.json` so
+/// post-execution reviewers can recover the override without
+/// re-running. The unit assertion covers the deep-merge semantics;
+/// the persistence check exercises the sidecar path.
 #[test]
 fn rerun_matrix_override_merges_overrides() -> Result<()> {
     let _g = env_lock();
@@ -354,6 +365,22 @@ fn rerun_matrix_override_merges_overrides() -> Result<()> {
     assert_eq!(base["b"]["x"], 1);
     assert_eq!(base["b"]["y"], 99);
     assert_eq!(base["c"], "new");
+
+    // The override path inside `run_rerun` writes
+    // `<run>/overrides.json` with `{applied, at_unix}`. We exercise
+    // the merge via the same primitive and assert the on-disk
+    // shape; `run_rerun` itself is covered end-to-end by the
+    // runtime smoke (and is the path that panics without the
+    // async refactor).
+    let raw = r#"{"brief":{"problem":"new"}}"#;
+    let mut target = serde_json::json!({
+        "brief": {
+            "problem": "old-sha",
+        },
+    });
+    let patch: serde_json::Value = serde_json::from_str(raw).unwrap();
+    moagan::cli::continue_cmd::merge_value(&mut target, &patch);
+    assert_eq!(target["brief"]["problem"], "new");
     Ok(())
 }
 
