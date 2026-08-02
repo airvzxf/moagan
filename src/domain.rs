@@ -36,6 +36,15 @@ pub struct Intake {
 ///
 /// Same leniency as `Intake`. `acceptance` is a `Vec<String>` because
 /// the model returns it as a list, not a single string.
+///
+/// Phase J (v0.3 «tercera etapa», sub-fase J): `context_block` is
+/// the verbatim text the intake phase prepended to the LLM prompt
+/// when `--context` was used. It is roundtripped through
+/// `brief.json` so a post-execution review can reconstruct the
+/// exact prompt the model saw without re-loading the context ref.
+/// The field is `#[serde(default, skip_serializing_if = "Option::is_none")]`
+/// so legacy sidecars (no `context_block`) parse cleanly into
+/// `None`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Brief {
@@ -55,6 +64,10 @@ pub struct Brief {
     pub acceptance: Vec<String>,
     /// Known risks.
     pub risks: Vec<String>,
+    /// Phase J: verbatim text prepended to the LLM prompt from a
+    /// `--context` reference. Empty when the run had no context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_block: Option<String>,
 }
 
 /// Output of the route phase.
@@ -304,7 +317,17 @@ pub struct FinalReport {
 }
 
 /// Top-level run manifest, written to `manifest.json` per T01-06 §33.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Phase J (v0.3 «tercera etapa», sub-fase J) adds the lineage
+/// block: `parent_run_id`, `shared_brief_hash`, `context_refs`,
+/// and `lineage_paths`. All four are `#[serde(default,
+/// skip_serializing_if = ...)]` so legacy v0.3 sidecars (pre-J)
+/// parse cleanly into `None` / empty values. The line of code
+/// that pins this behaviour is the
+/// `manifest_parses_legacy_sidecar_without_lineage_block` test in
+/// the unit-test module at the bottom of this file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Manifest {
     /// Schema version.
     pub schema_version: String,
@@ -334,6 +357,59 @@ pub struct Manifest {
     pub usage: ManifestUsage,
     /// Manifest hash (BLAKE3 over canonical JSON minus this field).
     pub manifest_blake3: String,
+    /// Phase J: parent run id when this run was launched with
+    /// `--context <run_id>` or `moagan rerun`. `None` for runs that
+    /// stand on their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<RunId>,
+    /// Phase J: SHA-256 of the canonical concatenation of every
+    /// loaded context text (`shared_brief_hash`). Stable across
+    /// re-runs of the same brief + context block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_brief_hash: Option<String>,
+    /// Phase J: per-file hashes + byte counts for every context
+    /// reference that fed into the run. Mirrors the SQLite
+    /// `run_context_refs` table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_refs: Vec<crate::context::ContextRefRecord>,
+    /// Phase J: filesystem locations the lineage walked through.
+    /// The `relative` map is for human-readable paths
+    /// (`parent_run_dir`, `final`, `sketches`); the `absolute` map
+    /// stores the resolved `PathBuf`s for re-entry. `None` when
+    /// the run had no context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_paths: Option<LineagePaths>,
+}
+
+/// Phase J lineage path block. Stored as two parallel maps so the
+/// JSON sidecar remains human-readable while the in-memory
+/// representation keeps `PathBuf` semantics.
+///
+/// The key type is `String` (not `&'static str`) so the sidecar
+/// survives `Deserialize` — `HashMap<&'static str, _>` cannot be
+/// deserialised because the deserialiser borrows from a `'de`
+/// lifetime, not `'static`. Callers that want a typed label can
+/// use the `well_known` constants below.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LineagePaths {
+    /// Stable relative labels → on-disk relative paths (e.g.
+    /// `"parent_run_dir" -> "../019f..."`). Used by the dashboard
+    /// to render clickable breadcrumb links.
+    pub relative: std::collections::HashMap<String, String>,
+    /// Stable absolute labels → on-disk absolute paths (e.g.
+    /// `"parent_run_dir" -> "/home/wolf/.../019f..."`). Used by
+    /// `moagan rerun` to re-open the parent.
+    pub absolute: std::collections::HashMap<String, std::path::PathBuf>,
+}
+
+impl LineagePaths {
+    /// Well-known label for the parent run directory.
+    pub const LABEL_PARENT_RUN_DIR: &'static str = "parent_run_dir";
+    /// Well-known label for the `final/` directory of the current run.
+    pub const LABEL_FINAL_DIR: &'static str = "final_dir";
+    /// Well-known label for the `sketches/` directory of the parent run.
+    pub const LABEL_PARENT_SKETCHES: &'static str = "parent_sketches_dir";
 }
 
 /// One row in `Manifest.phases`.
@@ -874,10 +950,12 @@ mod tests {
             non_goals: vec![],
             acceptance: vec!["ok".into()],
             risks: vec!["r".into()],
+            context_block: Some("ctx".into()),
         };
         let j = serde_json::to_string(&b).unwrap();
         let back: Brief = serde_json::from_str(&j).unwrap();
         assert_eq!(back.problem, "x");
+        assert_eq!(back.context_block.as_deref(), Some("ctx"));
     }
 
     /// Each LLM-output struct must accept an empty JSON object without
@@ -1440,5 +1518,97 @@ mod tests {
         });
         let p: Proposal = serde_json::from_value(legacy).unwrap();
         assert!(p.source_nodes.is_empty());
+    }
+
+    /// Brief.context_block is omitted when `None` (so the v0.2
+    /// legacy sidecars stay compact).
+    #[test]
+    fn brief_context_block_omitted_when_none() {
+        let b = Brief::default();
+        let j = serde_json::to_string(&b).unwrap();
+        assert!(
+            !j.contains("context_block"),
+            "leaked field: {j}"
+        );
+    }
+
+    /// Brief round-trips a v0.2 legacy sidecar (no
+    /// `context_block`) into a Brief with `context_block == None`.
+    #[test]
+    fn brief_parses_legacy_sidecar_without_context_block() {
+        let legacy = serde_json::json!({
+            "problem": "x",
+            "objectives": ["a"],
+            "deliverables": ["d"],
+            "constraints": ["c"],
+            "assumptions": [],
+            "non_goals": [],
+            "acceptance": ["ok"],
+            "risks": ["r"],
+        });
+        let b: Brief = serde_json::from_value(legacy).unwrap();
+        assert!(b.context_block.is_none());
+    }
+
+    /// Manifest round-trips a v0.3 pre-J legacy sidecar (no
+    /// lineage block) into a Manifest with the four new fields all
+    /// empty. The test pins the contract that the v0.3 → v0.3.1
+    /// upgrade is forward-compatible: existing sidecars keep
+    /// parsing.
+    #[test]
+    fn manifest_parses_legacy_sidecar_without_lineage_block() {
+        let legacy = serde_json::json!({
+            "schema_version": "v1",
+            "run_id": "019f0000-0000-7000-8000-000000000001",
+            "mode": "fast",
+            "status": "completed",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "client_version": "0.3.0",
+            "brief_sha256": "",
+            "brief_blake3": "",
+            "provider": "minimax",
+            "model": "MiniMax-M3",
+            "phases": [],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read": 0,
+                "cache_creation": 0,
+            },
+            "manifest_blake3": "",
+        });
+        let m: Manifest = serde_json::from_value(legacy).unwrap();
+        assert!(m.parent_run_id.is_none());
+        assert!(m.shared_brief_hash.is_none());
+        assert!(m.context_refs.is_empty());
+        assert!(m.lineage_paths.is_none());
+    }
+
+    /// LineagePaths round-trips the dual-map shape used by
+    /// `moagan rerun` to recover the parent run dir.
+    #[test]
+    fn lineage_paths_round_trip() {
+        let mut p = LineagePaths::default();
+        p.relative.insert(
+            LineagePaths::LABEL_PARENT_RUN_DIR.into(),
+            "../019f0000-0000-7000-8000-000000000001".into(),
+        );
+        p.absolute.insert(
+            LineagePaths::LABEL_PARENT_RUN_DIR.into(),
+            std::path::PathBuf::from("/tmp/.runs/019f0000-0000-7000-8000-000000000001"),
+        );
+        let j = serde_json::to_string(&p).unwrap();
+        let back: LineagePaths = serde_json::from_str(&j).unwrap();
+        assert_eq!(
+            back.relative.get(LineagePaths::LABEL_PARENT_RUN_DIR),
+            Some(&"../019f0000-0000-7000-8000-000000000001".to_string())
+        );
+        assert_eq!(
+            back.absolute.get(LineagePaths::LABEL_PARENT_RUN_DIR),
+            Some(&std::path::PathBuf::from(
+                "/tmp/.runs/019f0000-0000-7000-8000-000000000001"
+            ))
+        );
     }
 }

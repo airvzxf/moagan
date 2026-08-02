@@ -378,6 +378,10 @@ fn build_manifest(
         phases: manifest_phases,
         usage,
         manifest_blake3: String::new(),
+        parent_run_id: None,
+        shared_brief_hash: None,
+        context_refs: Vec::new(),
+        lineage_paths: None,
     };
 
     // 4. Compute the self-hash over the canonical JSON with
