@@ -714,6 +714,22 @@ pub struct StreamingResponse {
 
 #### D.7.4. Anclaje de rúbrica
 
+> **Estado (v0.3 sub-fase O, ✅ merged en `feat/v0.4-phase-o-rubric-compression`):**
+> implementado en `src/ranking/rubric.rs`. `pub enum Criterion`
+> con 6 variantes (`Correctness`, `Completeness`, `Fit`,
+> `Evidence`, `Clarity`, `Overall`) — el spec original hablaba
+> de «9 criterios» pero la `RankingWeights` consolidada usa 6
+> (el field `Overall` absorbe los tres restantes que el
+> concepto original separaba). `pub struct Rubric` con
+> `Default` que sembrar las 18 celdas `(c, level)` con frases
+> concretas; accessors `anchored_1/3/5` con fallback a `""`
+> para los niveles no seedeados (2, 4). Re-exportado vía
+> `pub use rubric::{Criterion, Rubric};` en `src/ranking/mod.rs`.
+> 6 unit tests en el módulo + 1 integration test
+> (`rubric_anchors_are_stable_across_calls`). El wiring al
+> prompt del `judge` / `critic` queda como follow-up (no
+> scope del opt-in mínimo).
+
 ```rust
 // src/ranking/rubric.rs (nuevo)
 pub struct Rubric { anchors: HashMap<(Criterion, u8), String> }
@@ -736,6 +752,24 @@ impl Default for Rubric {
 (Inspirado en T00-03 §1087-1098; T15-02 §9.3; T05-06; T07-07; T05-09; T00-01 §3.6.)
 
 #### D.7.5. JSONL gzip stream-friendly
+
+> **Estado (v0.3 sub-fase O, ✅ merged en `feat/v0.4-phase-o-rubric-compression`):**
+> implementado en `src/storage/compression.rs` como capa
+> aditiva. `pub enum Compression { None, Gz, Zst }` +
+> `Compression::from_extension(Path)` + `reader(Path,
+> Compression) -> io::Result<Box<dyn Read>>`. El import
+> `flate2::Compression` se renombró a `FlateCompression`
+> para evitar shadowing del nuevo enum público. La API
+> previa (`open_gz_append`, `open_gz_read`,
+> `read_to_string`) queda intacta: el nuevo `reader` usa
+> `GzDecoder` (single-stream), no `MultiGzDecoder`, porque
+> la enum está pensada para tooling que abre un solo
+> stream. 5 unit tests + 3 integration tests
+> (`compression_reader_handles_gz_file`,
+> `compression_reader_handles_zst_file`,
+> `compression_reader_handles_uncompressed`). El writer
+> streaming zstd equivalente a `MemberGzWriter` queda como
+> follow-up (no necesario hasta `--format tar.zst`).
 
 ```rust
 // src/storage/compression.rs (extender)
