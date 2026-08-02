@@ -254,7 +254,14 @@ fn walk_dir(
     // Sorted order so re-runs produce identical `shared_brief_hash`.
     entries.sort();
     for path in entries {
-        ingest_file(&path, texts, records, now_unix, MAX_FILE_BYTES, context_type)?;
+        ingest_file(
+            &path,
+            texts,
+            records,
+            now_unix,
+            MAX_FILE_BYTES,
+            context_type,
+        )?;
     }
     Ok(())
 }
