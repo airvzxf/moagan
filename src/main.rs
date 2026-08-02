@@ -3,6 +3,8 @@ use anyhow::Result;
 fn main() -> Result<()> {
     init_tracing();
     install_panic_hook();
+    #[cfg(debug_assertions)]
+    trigger_phase_l_test_panic();
     moagan::run_blocking()
 }
 
@@ -34,6 +36,13 @@ fn install_panic_hook() {
             .unwrap_or_default();
         eprintln!("panicked at {location}: {redacted}");
     }));
+}
+
+#[cfg(debug_assertions)]
+fn trigger_phase_l_test_panic() {
+    if let Ok(message) = std::env::var("MOAGAN_PHASE_L_TEST_PANIC") {
+        panic!("{message}");
+    }
 }
 
 fn redact_panic_message(message: &str) -> String {
