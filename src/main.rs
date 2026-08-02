@@ -12,7 +12,9 @@ fn init_tracing() {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,moagan=debug"));
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_target(true))
+        .with(fmt::layer().with_target(true).with_writer(
+            moagan::telemetry::redact::ReportingLayer::new(std::io::stderr),
+        ))
         .try_init();
 }
 
