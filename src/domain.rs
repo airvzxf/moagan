@@ -604,6 +604,30 @@ pub struct AdversaryReport {
     pub schema_version: String,
 }
 
+/// Why a run entered a paused state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseReason {
+    /// A human checkpoint requires a decision.
+    HumanCheckpoint,
+    /// A phase-specific timeout fired.
+    TimeoutPhase,
+    /// The total run timeout fired.
+    TimeoutTotal,
+    /// The configured plan limit was exceeded.
+    PlanExceeded,
+    /// The configured token budget was exhausted.
+    BudgetExhausted,
+    /// A provider failure requires operator attention.
+    ProviderError,
+    /// The user explicitly paused the run.
+    UserPause,
+    /// The prompt was rejected as hostile.
+    HostilePrompt,
+    /// The run cannot continue without more input.
+    NeedsInput,
+}
+
 /// A persisted human checkpoint. `kind` follows the proposal-01 §6.5
 /// list (`intake`, `clarify`, `final`, `custom`); the question and the
 /// raw response are captured verbatim so the run remains reproducible.
@@ -862,6 +886,32 @@ pub fn should_decompose(brief: &Brief) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_reason_serializes_to_snake_case() {
+        let json = serde_json::to_string(&PauseReason::HumanCheckpoint).unwrap();
+        assert_eq!(json, "\"human_checkpoint\"");
+    }
+
+    #[test]
+    fn pause_reason_round_trips_all_variants() {
+        let reasons = [
+            PauseReason::HumanCheckpoint,
+            PauseReason::TimeoutPhase,
+            PauseReason::TimeoutTotal,
+            PauseReason::PlanExceeded,
+            PauseReason::BudgetExhausted,
+            PauseReason::ProviderError,
+            PauseReason::UserPause,
+            PauseReason::HostilePrompt,
+            PauseReason::NeedsInput,
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let back: PauseReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, reason);
+        }
+    }
 
     #[test]
     fn brief_round_trips() {

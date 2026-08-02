@@ -29,6 +29,18 @@ pub enum CancelReason {
     Requested,
 }
 
+impl From<CancelReason> for crate::domain::PauseReason {
+    fn from(reason: CancelReason) -> Self {
+        match reason {
+            CancelReason::UserInterrupt | CancelReason::Requested => Self::UserPause,
+            CancelReason::TotalTimeout => Self::TimeoutTotal,
+            CancelReason::PhaseTimeout(_) => Self::TimeoutPhase,
+            CancelReason::PlanExhausted => Self::PlanExceeded,
+            CancelReason::ApiKeySwitch => Self::ProviderError,
+        }
+    }
+}
+
 impl std::fmt::Display for CancelReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
