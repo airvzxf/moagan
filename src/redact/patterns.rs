@@ -64,7 +64,7 @@ pub fn builtin_patterns() -> Vec<Pattern> {
         ),
         pat!(
             "elevenlabs_key",
-            r"[a-f0-9]{32}",
+            r"\b[a-f0-9]{32}\b",
             "[REDACTED:elevenlabs_key]"
         ),
         pat!(
