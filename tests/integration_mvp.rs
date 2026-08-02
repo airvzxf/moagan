@@ -237,6 +237,7 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         phases: Vec::new(),
         usage: moagan::domain::ManifestUsage::default(),
         manifest_blake3: String::new(),
+        lineage_paths: None,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     moagan::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;

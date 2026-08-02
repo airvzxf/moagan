@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::domain::{Manifest, ManifestPhase, ManifestUsage};
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
-use crate::fs_layout::{MoaganHome, RunDir};
+use crate::fs_layout::{MoaganHome, RunDir, RunPaths};
 use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
@@ -141,6 +141,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         &run_id,
         opts.mode.as_str(),
         "completed",
+        &home,
         &run_dir,
         &default_provider,
         default_model_for_manifest.as_str(),
@@ -326,6 +327,7 @@ fn build_manifest(
     run_id: &RunId,
     mode: &str,
     status: &str,
+    home: &MoaganHome,
     run_dir: &RunDir<'_>,
     provider: &str,
     model: &str,
@@ -378,6 +380,7 @@ fn build_manifest(
         phases: manifest_phases,
         usage,
         manifest_blake3: String::new(),
+        lineage_paths: Some(RunPaths::resolve(home, *run_id)),
     };
 
     // 4. Compute the self-hash over the canonical JSON with

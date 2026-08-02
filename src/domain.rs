@@ -334,6 +334,12 @@ pub struct Manifest {
     pub usage: ManifestUsage,
     /// Manifest hash (BLAKE3 over canonical JSON minus this field).
     pub manifest_blake3: String,
+    /// Stable table of well-known paths for this run (D.12.16).
+    /// Both relative and absolute forms are recorded so the
+    /// dashboard / inspect surface can resolve files immediately
+    /// while the export bundle still works after a move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_paths: Option<crate::fs_layout::RunPaths>,
 }
 
 /// One row in `Manifest.phases`.
@@ -1440,5 +1446,75 @@ mod tests {
         });
         let p: Proposal = serde_json::from_value(legacy).unwrap();
         assert!(p.source_nodes.is_empty());
+    }
+
+    // -- Phase M (D.12.16) — Manifest.lineage_paths ------------------------
+
+    /// `lineage_paths` is optional with `#[serde(default,
+    /// skip_serializing_if = "Option::is_none")]`. Legacy
+    /// sidecars (no field) must parse with `lineage_paths =
+    /// None`, not error out.
+    #[test]
+    fn manifest_parses_legacy_sidecar_without_lineage_paths() {
+        let legacy = serde_json::json!({
+            "schema_version": "v1",
+            "run_id": "01900000-0000-7000-8000-000000000001",
+            "mode": "fast",
+            "status": "completed",
+            "created_at": "2026-07-31T00:00:00Z",
+            "updated_at": "2026-07-31T00:00:00Z",
+            "client_version": "0.3.0",
+            "brief_sha256": "",
+            "brief_blake3": "",
+            "provider": "mock",
+            "model": "mock-1",
+            "phases": [],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read": 0,
+                "cache_creation": 0,
+            },
+            "manifest_blake3": "",
+        });
+        let m: Manifest = serde_json::from_value(legacy).unwrap();
+        assert!(m.lineage_paths.is_none());
+    }
+
+    /// A populated `lineage_paths` round-trips through serde
+    /// unchanged.
+    #[test]
+    fn manifest_with_lineage_paths_round_trips() {
+        use crate::fs_layout::{MoaganHome, RunPaths};
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = MoaganHome::resolve().unwrap();
+        let paths = RunPaths::resolve(&home, RunId::new());
+        let m = Manifest {
+            schema_version: "v1".into(),
+            run_id: RunId::new(),
+            mode: "fast".into(),
+            status: "completed".into(),
+            created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+            client_version: "0.3.0".into(),
+            brief_sha256: String::new(),
+            brief_blake3: String::new(),
+            provider: "mock".into(),
+            model: "mock-1".into(),
+            phases: Vec::new(),
+            usage: crate::domain::ManifestUsage::default(),
+            manifest_blake3: String::new(),
+            lineage_paths: Some(paths.clone()),
+        };
+        let j = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&j).unwrap();
+        let lp = back.lineage_paths.expect("lineage_paths preserved");
+        assert_eq!(lp, paths);
+        // Spot-check the keys.
+        assert!(lp.relative.contains_key("brief"));
+        assert!(lp.absolute.contains_key("final"));
     }
 }
