@@ -57,6 +57,70 @@ impl From<SandboxError> for Error {
     }
 }
 
+/// Configuration for one named validation command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandConfig {
+    /// Stable logical command name.
+    pub name: &'static str,
+    /// Binary invoked for the logical command.
+    pub binary: &'static str,
+    /// Maximum number of arguments accepted by the command.
+    pub max_args: usize,
+    /// Maximum UTF-8 byte length of one argument.
+    pub max_arg_len: usize,
+    /// Maximum bytes captured from each output stream.
+    pub max_output_bytes: usize,
+    /// Wall-clock timeout in seconds.
+    pub timeout_secs: u64,
+    /// Whether the command is permitted to use the network.
+    pub allow_network: bool,
+}
+
+/// Static command policy table for the supported validators.
+pub static COMMAND_CONFIGS: &[CommandConfig] = &[
+    CommandConfig {
+        name: "rust",
+        binary: "cargo",
+        max_args: 32,
+        max_arg_len: 1024,
+        max_output_bytes: 64 * 1024,
+        timeout_secs: 180,
+        allow_network: true,
+    },
+    CommandConfig {
+        name: "python",
+        binary: "python3",
+        max_args: 32,
+        max_arg_len: 1024,
+        max_output_bytes: 64 * 1024,
+        timeout_secs: 60,
+        allow_network: false,
+    },
+    CommandConfig {
+        name: "typescript",
+        binary: "tsc",
+        max_args: 32,
+        max_arg_len: 1024,
+        max_output_bytes: 64 * 1024,
+        timeout_secs: 60,
+        allow_network: false,
+    },
+    CommandConfig {
+        name: "sql",
+        binary: "sqlite3",
+        max_args: 32,
+        max_arg_len: 1024,
+        max_output_bytes: 64 * 1024,
+        timeout_secs: 30,
+        allow_network: false,
+    },
+];
+
+/// Find a command policy by its logical name.
+pub fn config_for(name: &str) -> Option<&'static CommandConfig> {
+    COMMAND_CONFIGS.iter().find(|config| config.name == name)
+}
+
 /// Compile-time configuration for the sandbox. Cheap to clone (every
 /// internal collection is small).
 #[derive(Debug, Clone)]
@@ -295,10 +359,11 @@ impl Sandbox {
         cmd: &str,
         args: &[&str],
     ) -> std::result::Result<SandboxResult, SandboxError> {
-        let max_output_bytes = self
-            .config
-            .max_capture_bytes
-            .unwrap_or(DEFAULT_OUTPUT_CAP_BYTES);
+        let max_output_bytes = self.config.max_capture_bytes.unwrap_or_else(|| {
+            config_for_binary(cmd)
+                .map(|config| config.max_output_bytes)
+                .unwrap_or(DEFAULT_OUTPUT_CAP_BYTES)
+        });
         self.run_in_with_limits(work_dir, cmd, args, max_output_bytes)
             .await
     }
@@ -484,6 +549,13 @@ impl Sandbox {
     }
 }
 
+fn config_for_binary(binary: &str) -> Option<&'static CommandConfig> {
+    let basename = Path::new(binary).file_name()?.to_str()?;
+    COMMAND_CONFIGS
+        .iter()
+        .find(|config| config.binary == basename)
+}
+
 async fn read_stream<R>(
     mut stream: R,
     max_output_bytes: usize,
@@ -593,6 +665,22 @@ mod tests {
         assert_eq!(DEFAULT_OUTPUT_CAP_BYTES, 64 * 1024);
         assert_eq!(MAX_STDOUT_BYTES, DEFAULT_OUTPUT_CAP_BYTES);
         assert_eq!(MAX_STDERR_BYTES, DEFAULT_OUTPUT_CAP_BYTES);
+    }
+
+    #[test]
+    fn command_config_for_known_name() {
+        let config = config_for("rust").expect("rust command config");
+        assert_eq!(config.binary, "cargo");
+        assert_eq!(config.max_args, 32);
+        assert_eq!(config.max_arg_len, 1024);
+        assert_eq!(config.max_output_bytes, 64 * 1024);
+        assert_eq!(config.timeout_secs, 180);
+        assert!(config.allow_network);
+    }
+
+    #[test]
+    fn command_config_for_unknown_name_returns_none() {
+        assert!(config_for("unknown-language").is_none());
     }
 
     #[tokio::test]
