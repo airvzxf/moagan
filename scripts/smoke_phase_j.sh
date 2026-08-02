@@ -202,6 +202,107 @@ run_test "run_with_context_full_flag_needs_context" '
 '
 
 # ---------------------------------------------------------------------
+# 4. D.14.5: global `--runs-dir` flag
+# ---------------------------------------------------------------------
+#
+# The `continue`, `resume`, `rerun`, `refine`, `rerank`, `inspect`,
+# and `import` subcommands used to reject `--runs-dir` with a clap
+# parse error. After the D.14.5 patch the flag lives on the
+# top-level `Cli` struct with `global = true`, so clap accepts it
+# before OR after the subcommand, and `dispatch` mirrors it into
+# the `MOAGAN_HOME` env var so every subcommand that calls
+# `MoaganHome::resolve()` reads the override.
+
+run_test "global_runs_dir_flag_in_top_level_help" '
+  out=$("'"$BIN"'" --help 2>&1)
+  [[ "$out" == *"--runs-dir <RUNS_DIR>"* ]]
+  [[ "$out" == *"D.14.5"* ]]
+'
+
+run_test "global_runs_dir_flag_in_subcommand_help" '
+  for sub in continue resume rerun inspect refine rerank import; do
+    out=$("'"$BIN"'" "$sub" --help 2>&1)
+    [[ "$out" == *"--runs-dir <RUNS_DIR>"* ]] || { echo "$sub missing --runs-dir: $out" >&2; return 1; }
+  done
+'
+
+run_test "continue_accepts_global_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" --runs-dir "$HOME" continue --run-id 01900000-0000-0000-0000-000000000000 2>&1)
+  [[ "$out" != *"unexpected argument"* ]] || { echo "clap rejected --runs-dir on continue: $out" >&2; return 1; }
+  [[ "$out" == *"not found"* || "$out" == *"Error"* || "$out" == *"error"* ]] || true
+'
+
+run_test "continue_accepts_runs_dir_after_subcommand" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" continue --run-id 01900000-0000-0000-0000-000000000000 --runs-dir "$HOME" 2>&1)
+  [[ "$out" != *"unexpected argument"* ]] || { echo "clap rejected --runs-dir after subcommand: $out" >&2; return 1; }
+  [[ "$out" == *"not found"* || "$out" == *"Error"* || "$out" == *"error"* ]] || true
+'
+
+run_test "resume_accepts_global_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" --runs-dir "$HOME" resume --run-id 01900000-0000-0000-0000-000000000000 2>&1)
+  [[ "$out" != *"unexpected argument"* ]]
+'
+
+run_test "rerun_accepts_global_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" --runs-dir "$HOME" rerun --run-id 01900000-0000-0000-0000-000000000000 2>&1)
+  [[ "$out" != *"unexpected argument"* ]]
+'
+
+run_test "inspect_accepts_global_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" --runs-dir "$HOME" inspect --limit 5 2>&1)
+  [[ "$out" != *"unexpected argument"* ]]
+'
+
+run_test "refine_accepts_global_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" --runs-dir "$HOME" refine --run-id 01900000-0000-0000-0000-000000000000 --proposal p_000 2>&1)
+  [[ "$out" != *"unexpected argument"* ]]
+'
+
+run_test "rerank_accepts_global_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" --runs-dir "$HOME" rerank --run-id 01900000-0000-0000-0000-000000000000 2>&1)
+  [[ "$out" != *"unexpected argument"* ]]
+'
+
+run_test "import_accepts_global_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  out=$("'"$BIN"'" --runs-dir "$HOME" import --source-path /tmp/no-such-run-dir 2>&1)
+  [[ "$out" != *"unexpected argument"* ]]
+  [[ "$out" == *"source manifest not found"* ]]
+'
+
+run_test "moagan_runs_dir_env_seeds_cli_flag" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  MOAGAN_RUNS_DIR="$HOME" out=$("'"$BIN"'" continue --run-id 01900000-0000-0000-0000-000000000000 2>&1)
+  [[ "$out" != *"unexpected argument"* ]]
+'
+
+run_test "dispatch_creates_sqlite_index_under_runs_dir" '
+  HOME=$(mktemp -d)
+  trap "rm -rf $HOME" EXIT
+  # Empty home: `inspect` exits 0 and opens <home>/meta.sqlite.
+  # If the global flag were ignored, dispatch would have used the
+  # default home and the tmpdir would be empty.
+  "'"$BIN"'" --runs-dir "$HOME" inspect --limit 1 >/dev/null 2>&1
+  [[ -f "$HOME/meta.sqlite" ]]
+'
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 
