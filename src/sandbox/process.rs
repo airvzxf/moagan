@@ -47,6 +47,9 @@ pub enum SandboxError {
     /// The child attempted to write beyond the configured per-stream cap.
     #[error("sandbox output truncated")]
     OutputTruncated,
+    /// The requested binary could not be resolved in `PATH`.
+    #[error("sandbox binary not found: {0}")]
+    BinaryNotFound(String),
     /// An I/O or task failure prevented the sandbox from collecting output.
     #[error("sandbox I/O failure: {0}")]
     Io(String),
@@ -150,6 +153,33 @@ fn looks_like_secret(value: &str) -> bool {
         || value.starts_with("ghp_")
         || value.starts_with("xoxb-")
         || value.starts_with("Bearer ")
+}
+
+/// Verify that a binary exists in `PATH` or at an absolute path before
+/// spawning. An unresolved binary returns [`SandboxError::BinaryNotFound`].
+pub fn verify_binary_exists(binary: &str) -> std::result::Result<(), SandboxError> {
+    let path = Path::new(binary);
+    if path.is_absolute() {
+        return if path.exists() {
+            Ok(())
+        } else {
+            Err(SandboxError::BinaryNotFound(binary.to_owned()))
+        };
+    }
+
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let candidate = if directory.as_os_str().is_empty() {
+                Path::new(binary).to_path_buf()
+            } else {
+                directory.join(binary)
+            };
+            if candidate.exists() {
+                return Ok(());
+            }
+        }
+    }
+    Err(SandboxError::BinaryNotFound(binary.to_owned()))
 }
 
 /// Compile-time configuration for the sandbox. Cheap to clone (every
@@ -447,6 +477,17 @@ impl Sandbox {
                 "argv contains a denylisted token".into(),
                 started.elapsed(),
                 SandboxStatus::NotAllowed,
+                command_str,
+            ));
+        }
+
+        if let Err(SandboxError::BinaryNotFound(binary)) = verify_binary_exists(cmd) {
+            return Ok(SandboxResult::new(
+                -1,
+                String::new(),
+                format!("binary not found: {binary}"),
+                started.elapsed(),
+                SandboxStatus::NotFound,
                 command_str,
             ));
         }
@@ -750,6 +791,21 @@ mod tests {
     fn strip_secrets_passes_through_non_secrets() {
         let args = vec!["--offline".to_owned(), "check".to_owned()];
         assert_eq!(strip_secrets(&args), args);
+    }
+
+    #[test]
+    fn verify_binary_exists_finds_cargo() {
+        assert!(verify_binary_exists("cargo").is_ok());
+    }
+
+    #[test]
+    fn verify_binary_exists_fails_for_missing() {
+        let result = verify_binary_exists("definitely-not-a-real-binary-xyz");
+        assert!(matches!(
+            result,
+            Err(SandboxError::BinaryNotFound(binary))
+                if binary == "definitely-not-a-real-binary-xyz"
+        ));
     }
 
     #[tokio::test]

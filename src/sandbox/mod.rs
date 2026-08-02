@@ -20,5 +20,5 @@ pub use allowlist::{
 };
 pub use process::{
     COMMAND_CONFIGS, CommandConfig, Sandbox, SandboxConfig, SandboxError, SandboxResult,
-    SandboxStatus, config_for, strip_secrets,
+    SandboxStatus, config_for, strip_secrets, verify_binary_exists,
 };
