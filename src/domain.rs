@@ -379,6 +379,19 @@ pub struct Manifest {
     /// the run had no context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_paths: Option<LineagePaths>,
+    /// D.14.6: the verbatim CLI prompt the user passed to
+    /// `moagan run --prompt <text>`. Captured at run start so
+    /// `moagan rerun` can re-feed the exact same input to the
+    /// intake phase (the LLM cache key is derived from the user
+    /// message, so re-running with the same prompt MUST replay
+    /// the same cache keys; without this field the rerun would
+    /// fall back to the LLM's `Intake.raw_prompt` echo, which
+    /// differs from the CLI prompt in mock responses). `None`
+    /// for runs that pre-date the field (legacy readers parse
+    /// it as `None` and the rerun falls back to the recovered
+    /// value).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_prompt: Option<String>,
 }
 
 /// Phase J lineage path block. Stored as two parallel maps so the

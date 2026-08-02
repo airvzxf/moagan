@@ -241,6 +241,7 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         shared_brief_hash: None,
         context_refs: Vec::new(),
         lineage_paths: None,
+        cli_prompt: None,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     moagan::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;

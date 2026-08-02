@@ -83,6 +83,7 @@ fn seed_manifest(home: &MoaganHome, run_id: RunId, mode: &str, parent: Option<Ru
         shared_brief_hash: None,
         context_refs: Vec::new(),
         lineage_paths: None,
+        cli_prompt: None,
     };
     manifest.manifest_blake3 = blake3_of(&manifest);
     let bytes = serde_json::to_vec_pretty(&manifest).unwrap();

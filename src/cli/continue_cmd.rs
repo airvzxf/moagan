@@ -10,8 +10,10 @@
 //!   records any provider / api-key / checkpoint-skip flags.
 //! - `run_resume`: same as `continue` but without the switch flags.
 //! - `run_rerun`: clones the old manifest, mints a new `run_id`,
-//!   sets `parent_run_id` to the old run, and optionally applies
-//!   `--matrix-override` on top of the cloned config.
+//!   sets `parent_run_id` to the old run, and runs the full
+//!   pipeline end-to-end (NOT a resume from intake — the new run
+//!   dir has no `brief.json` yet so the resume path would skip
+//!   intake and fail on the next phase that reads it).
 //! - `run_import`: validates the source manifest, then `fs::rename`s
 //!   the run dir into the local `MOAGAN_HOME/.runs/`. On
 //!   cross-device rename failures we fall back to copy + delete.
@@ -21,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::domain::Manifest;
+use crate::domain::{Brief, Intake, Manifest};
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
@@ -81,11 +83,15 @@ pub async fn run_resume(run_id: RunId) -> Result<()> {
 }
 
 /// `moagan rerun <run_id> [--matrix-override <json>] [--same-config]` —
-/// clone the manifest, mint a new run id, set `parent_run_id`,
-/// apply overrides, and dispatch to the resume path. Returns the
-/// new run id on stdout so callers can chain follow-ups.
+/// clone the manifest, mint a new run id, set `parent_run_id`, and
+/// run the full pipeline end-to-end (NOT a resume — the new run
+/// dir has no `brief.json` yet, so a resume-filtered pipeline would
+/// skip intake and fail on the next phase that reads it). The
+/// `--matrix-override` JSON is folded into the cloned manifest
+/// before the pipeline runs. Returns the new run id on stdout so
+/// callers can chain follow-ups.
 pub async fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result<()> {
-    let home = MoaganHome::resolve()?;
+    let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
     let old_manifest = load_manifest(&home, run_id)?;
@@ -111,6 +117,8 @@ pub async fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result
         )?;
     }
     let new_run_id = new_manifest.run_id;
+    let new_run_dir = home.run_dir(new_run_id);
+    new_run_dir.ensure()?;
     write_manifest_to_disk(&home, &new_manifest)?;
     // Mirror into SQLite. The runs table gets a fresh row;
     // run_siblings links it back to the old one as a 'rerun'.
@@ -127,9 +135,90 @@ pub async fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result
     if let Err(e) = db.update_run_status(new_run_id, "running") {
         eprintln!("warn: failed to flip rerun status to running: {e}");
     }
-    // Reruns always start from the beginning; nothing to skip.
-    resume_pipeline(&home, &new_manifest, "intake").await?;
+
+    // Reconstruct the inputs the pipeline needs from the parent run
+    // so the intake phase re-sees the same brief.
+    //
+    // - `raw_prompt`: Prefer the parent's `cli_prompt` field
+    //   (captured at `moagan run` time, see D.14.6). The LLM cache
+    //   key is derived from the user message, so re-feeding the
+    //   exact CLI prompt is what makes the rerun replay the same
+    //   cache keys. Fall back to the parent's `Intake.raw_prompt`
+    //   (the LLM's echo) for legacy runs that pre-date the
+    //   `cli_prompt` field. Both produce the same cache hit for a
+    //   real LLM (the LLM would echo back the CLI prompt); the
+    //   `cli_prompt` field is the deterministic source.
+    // - `context_block`: the verbatim text intake prepended to the
+    //   prompt when `--context` was used. `Clarify` round-trips it
+    //   on the Brief sidecar (`brief.json#context_block`).
+    let raw_prompt = old_manifest
+        .cli_prompt
+        .clone()
+        .or_else(|| read_parent_raw_prompt(&home, run_id).ok())
+        .unwrap_or_default();
+    let context_block = read_parent_context_block(&home, run_id);
+
+    let cfg = Config::load().unwrap_or_default();
+    // Reruns always run the full pipeline from intake; there is no
+    // "skip intake" path. Building the pipeline through
+    // `run_full_pipeline` (the same helper `moagan run` uses)
+    // guarantees the new run dir ends up with the canonical
+    // `brief.json`, `intake.json`, ..., `final/portfolio.md` set.
+    //
+    // The parent manifest's `parent_run_id`, `shared_brief_hash`,
+    // `context_refs`, and `lineage_paths` are preserved on the
+    // stub so the post-pipeline rebuild round-trips them.
+    let final_manifest = super::run::run_full_pipeline(
+        home.clone(),
+        db.clone(),
+        &cfg,
+        None,
+        true,
+        new_manifest,
+        raw_prompt,
+        context_block,
+    )
+    .await?;
+    println!(
+        "moagan run {} mode={} provider={} -> {}",
+        final_manifest.run_id.short(),
+        final_manifest.mode,
+        final_manifest.provider,
+        new_run_dir.root().display()
+    );
     Ok(())
+}
+
+/// Read the parent's `final/intake.json` and return the verbatim
+/// `raw_prompt` the intake phase originally consumed. Missing
+/// intake sidecar (legacy / un-started parent) returns an empty
+/// prompt so the rerun still proceeds.
+fn read_parent_raw_prompt(home: &MoaganHome, parent_run_id: RunId) -> Result<String> {
+    let path = home.run_dir(parent_run_id).final_dir().join("intake.json");
+    if !path.is_file() {
+        return Ok(String::new());
+    }
+    let raw = fs::read_to_string(&path)?;
+    let intake: Intake = serde_json::from_str(&raw).map_err(|e| {
+        Error::InvalidState(format!(
+            "rerun: parent intake.json at {} is malformed: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(intake.raw_prompt)
+}
+
+/// Read the parent's `brief.json` and return the `context_block`
+/// Clarify round-tripped (only set when the original run used
+/// `--context`). `None` when the parent had no context.
+fn read_parent_context_block(home: &MoaganHome, parent_run_id: RunId) -> Option<String> {
+    let path = home.run_dir(parent_run_id).brief();
+    if !path.is_file() {
+        return None;
+    }
+    let raw = fs::read_to_string(&path).ok()?;
+    let brief: Brief = serde_json::from_str(&raw).ok()?;
+    brief.context_block
 }
 
 /// `moagan import <source_path> [--target-runs-dir <dir>]` —
@@ -570,16 +659,11 @@ pub(crate) fn build_canonical_for_resume(cfg: &Config, mode: super::Mode) -> Pip
     super::run::build_pipeline_for_mode(mode, cfg, true)
 }
 
-/// Parse the manifest's mode string into the `Mode` enum.
+/// Parse the manifest's mode string into the `Mode` enum. Re-export
+/// of `super::run::parse_mode` so the rest of the file can call
+/// it without a deeper `super::run::` prefix.
 pub(crate) fn parse_mode(s: &str) -> Result<super::Mode> {
-    match s {
-        "fast" => Ok(super::Mode::Fast),
-        "standard" => Ok(super::Mode::Standard),
-        "deep" => Ok(super::Mode::Deep),
-        "explore" => Ok(super::Mode::Explore),
-        "batch" => Ok(super::Mode::Batch),
-        other => Err(Error::InvalidState(format!("unknown mode {other:?}"))),
-    }
+    super::run::parse_mode(s)
 }
 
 /// Resolve an `--switch-api-key` spec. Forms:
