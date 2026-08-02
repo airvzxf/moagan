@@ -1526,10 +1526,7 @@ mod tests {
     fn brief_context_block_omitted_when_none() {
         let b = Brief::default();
         let j = serde_json::to_string(&b).unwrap();
-        assert!(
-            !j.contains("context_block"),
-            "leaked field: {j}"
-        );
+        assert!(!j.contains("context_block"), "leaked field: {j}");
     }
 
     /// Brief round-trips a v0.2 legacy sidecar (no
