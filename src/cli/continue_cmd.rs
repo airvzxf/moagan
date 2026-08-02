@@ -475,7 +475,7 @@ pub(crate) fn apply_matrix_override(manifest: &mut Manifest, raw: &str) -> Resul
 
 /// Recursive JSON merge: `patch` overrides `base`; nested objects
 /// are merged; non-object patches replace. Pure function (no IO).
-fn merge_value(base: &mut serde_json::Value, patch: &serde_json::Value) {
+pub fn merge_value(base: &mut serde_json::Value, patch: &serde_json::Value) {
     use serde_json::Value;
     if let Value::Object(patch_map) = patch
         && let Value::Object(base_map) = base

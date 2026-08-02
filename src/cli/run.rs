@@ -351,7 +351,7 @@ pub fn build_registry_for(
 /// `SynthesizePhase`. `fast` skips synthesis entirely so the flag is
 /// off there; the rest default to ON. The CLI flag
 /// `--no-replace-sources` overrides the per-mode default.
-pub(crate) fn build_pipeline_for_mode(
+pub fn build_pipeline_for_mode(
     mode: Mode,
     cfg: &Config,
     replace_sources_enabled: bool,

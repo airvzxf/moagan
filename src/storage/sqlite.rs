@@ -203,6 +203,8 @@ impl Db {
     }
 
     /// Register a new run. Returns the rowid (not used externally).
+    /// `shared_brief_hash` is the Phase J lineage column added in
+    /// migration v007 (NULL before J).
     pub fn register_run(
         &self,
         run_id: RunId,
@@ -210,14 +212,14 @@ impl Db {
         status: &str,
         client_version: &str,
         config_hash: Option<&str>,
-        brief_hash: Option<&str>,
+        shared_brief_hash: Option<&str>,
         parent: Option<RunId>,
     ) -> Result<()> {
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
             "INSERT OR REPLACE INTO runs \
-             (run_id, mode, status, created_unix, updated_unix, schema_version, client_version, parent_run_id, config_hash, brief_hash) \
+             (run_id, mode, status, created_unix, updated_unix, schema_version, client_version, parent_run_id, config_hash, shared_brief_hash) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run_id.to_string(),
@@ -229,7 +231,7 @@ impl Db {
                 client_version,
                 parent.map(|p| p.to_string()),
                 config_hash,
-                brief_hash,
+                shared_brief_hash,
             ],
         )?;
         Ok(())
@@ -397,7 +399,7 @@ impl Db {
     pub fn list_runs(&self, limit: u32) -> Result<Vec<RunRow>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id \
+            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id, shared_brief_hash \
              FROM runs ORDER BY created_unix DESC LIMIT ?",
         )?;
         let rows = stmt
@@ -410,6 +412,7 @@ impl Db {
                     updated_unix: r.get(4)?,
                     client_version: r.get(5)?,
                     parent_run_id: r.get(6)?,
+                    shared_brief_hash: r.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -420,7 +423,7 @@ impl Db {
     pub fn get_run(&self, run_id: RunId) -> Result<Option<RunRow>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id \
+            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id, shared_brief_hash \
              FROM runs WHERE run_id = ?",
         )?;
         let mut rows = stmt.query_map(params![run_id.to_string()], |r| {
@@ -432,6 +435,7 @@ impl Db {
                 updated_unix: r.get(4)?,
                 client_version: r.get(5)?,
                 parent_run_id: r.get(6)?,
+                shared_brief_hash: r.get(7)?,
             })
         })?;
         match rows.next() {
@@ -1229,6 +1233,10 @@ pub struct RunRow {
     pub client_version: String,
     /// Parent run id (if any).
     pub parent_run_id: Option<String>,
+    /// Phase J: SHA-256 of the canonical concatenation of every
+    /// loaded context text (the `shared_brief_hash`). Mirrors the
+    /// `runs.shared_brief_hash` column.
+    pub shared_brief_hash: Option<String>,
 }
 
 /// Derive the `calls.status` enum from the `http_status` and `error`
