@@ -54,7 +54,7 @@ pub struct ContinueOptions {
 /// the manifest's mode, calls `Pipeline::resume(canonical,
 /// last_phase)`, and runs it. Switch flags update the manifest
 /// before the pipeline starts.
-pub fn run_continue(run_id: RunId, opts: ContinueOptions) -> Result<()> {
+pub async fn run_continue(run_id: RunId, opts: ContinueOptions) -> Result<()> {
     let home = MoaganHome::resolve()?;
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
@@ -70,21 +70,21 @@ pub fn run_continue(run_id: RunId, opts: ContinueOptions) -> Result<()> {
         "moagan continue {}: resuming after phase {last_phase:?}",
         run_id.short()
     );
-    resume_pipeline(&home, &manifest, &last_phase)?;
+    resume_pipeline(&home, &manifest, &last_phase).await?;
     Ok(())
 }
 
 /// `moagan resume <run_id>` — same as `continue` but without the
 /// switch flags. Always errors when `last_phase` is `None`.
-pub fn run_resume(run_id: RunId) -> Result<()> {
-    run_continue(run_id, ContinueOptions::default())
+pub async fn run_resume(run_id: RunId) -> Result<()> {
+    run_continue(run_id, ContinueOptions::default()).await
 }
 
 /// `moagan rerun <run_id> [--matrix-override <json>] [--same-config]` —
 /// clone the manifest, mint a new run id, set `parent_run_id`,
 /// apply overrides, and dispatch to the resume path. Returns the
 /// new run id on stdout so callers can chain follow-ups.
-pub fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result<()> {
+pub async fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result<()> {
     let home = MoaganHome::resolve()?;
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
@@ -92,6 +92,23 @@ pub fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result<()> {
     let mut new_manifest = clone_manifest_for_rerun(&old_manifest);
     if let Some(raw) = matrix_override.as_deref() {
         apply_matrix_override(&mut new_manifest, raw)?;
+        let patch: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+        let mut applied = serde_json::json!({
+            "brief": {
+                "problem": new_manifest.brief_sha256,
+            },
+        });
+        merge_value(&mut applied, &patch);
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "applied": applied,
+            "at_unix": crate::time::now_unix_secs(),
+        }))
+        .map_err(Error::from)?;
+        crate::atomic::writer::AtomicWriter::new().write(
+            &home.run_dir(new_manifest.run_id).overrides_json_path(),
+            &bytes,
+        )?;
     }
     let new_run_id = new_manifest.run_id;
     write_manifest_to_disk(&home, &new_manifest)?;
@@ -111,7 +128,7 @@ pub fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result<()> {
         eprintln!("warn: failed to flip rerun status to running: {e}");
     }
     // Reruns always start from the beginning; nothing to skip.
-    resume_pipeline(&home, &new_manifest, "intake")?;
+    resume_pipeline(&home, &new_manifest, "intake").await?;
     Ok(())
 }
 
@@ -453,23 +470,16 @@ pub(crate) fn clone_manifest_for_rerun(old: &Manifest) -> Manifest {
 pub(crate) fn apply_matrix_override(manifest: &mut Manifest, raw: &str) -> Result<()> {
     let patch: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| Error::InvalidArgs(format!("invalid JSON: {e}")))?;
-    // The current Manifest schema doesn't have an `execution_policy`
-    // block (that lands in a later phase). We apply the patch on
-    // top of a synthetic merge target that contains the `brief`
-    // sub-tree; that lets `--matrix-override` patch brief fields
-    // today and keeps the door open for an execution_policy block.
     let mut target = serde_json::json!({
         "brief": {
             "problem": manifest.brief_sha256,
         },
     });
     merge_value(&mut target, &patch);
-    // If the patch set `brief.problem`, the spec's intent is
-    // "override the canonical brief problem statement". We surface
-    // it on the manifest via a stash that downstream phases may
-    // read; for now we record it as a manifest-level annotation
-    // (the brief.json itself is rewritten by the resume pipeline).
-    let _ = target;
+    manifest.brief_sha256 = target["brief"]["problem"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     Ok(())
 }
 
@@ -496,7 +506,7 @@ pub fn merge_value(base: &mut serde_json::Value, patch: &serde_json::Value) {
 /// pipeline for the manifest's mode, then filters via
 /// `Pipeline::resume(canonical, last_phase)`. The filtered list
 /// runs end-to-end.
-pub(crate) fn resume_pipeline(
+pub(crate) async fn resume_pipeline(
     home: &MoaganHome,
     manifest: &Manifest,
     last_phase: &str,
@@ -540,11 +550,7 @@ pub(crate) fn resume_pipeline(
         String::new(),
         manifest.mode.clone(),
     );
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::Provider(format!("tokio: {e}")))?;
-    let outcome = rt.block_on(async move { resumed.run(&ctx).await });
+    let outcome = resumed.run(&ctx).await;
     telemetry.flush()?;
     if let Err(e) = &outcome {
         eprintln!("moagan resume: pipeline failed: {e}");

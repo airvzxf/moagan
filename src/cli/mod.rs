@@ -497,14 +497,15 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                     switch_api_key,
                     skip_checkpoint,
                 },
-            )?;
+            )
+            .await?;
             Ok(0)
         }
         Cmd::Resume { run_id } => {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-            continue_cmd::run_resume(parsed)?;
+            continue_cmd::run_resume(parsed).await?;
             Ok(0)
         }
         Cmd::Rerun {
@@ -520,7 +521,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             // if both are set, prefer `--matrix-override` (the
             // spec-blessed name).
             let raw = matrix_override.or(override_json);
-            continue_cmd::run_rerun(parsed, raw)?;
+            continue_cmd::run_rerun(parsed, raw).await?;
             Ok(0)
         }
         Cmd::Import {
