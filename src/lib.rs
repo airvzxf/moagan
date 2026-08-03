@@ -31,7 +31,7 @@ pub mod telemetry;
 pub mod time;
 pub mod validators;
 
-pub use error::{Error, Result, exit_code};
+pub use error::{Error, ExitCode, Result, exit_code};
 
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {

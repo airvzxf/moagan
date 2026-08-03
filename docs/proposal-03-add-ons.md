@@ -807,6 +807,14 @@ ELEVENLABS_API_KEY=[a-f0-9]{32}
 
 (Inspirado en T16-06 §5.5; T20-01 §5.4; T18-06; T13-09 §11.1; T00-10; T00-08.)
 
+**Implementación Moagan (sub-fase L):** implementado en
+`src/redact/patterns.rs` con marcadores estables por patrón y tests
+unitarios de match/no-match para cada patrón nuevo. ElevenLabs usa
+límites de palabra alrededor de los 32 hex para no corromper hashes
+SHA-256 de telemetría. La expresión de IP privada usa alternativas con
+`\b` porque la crate `regex` de Rust no soporta look-around; cubre las
+mismas redes privadas sin consumir caracteres adyacentes.
+
 #### D.8.2. Sustitución por categoría de patrón
 
 ```rust
@@ -863,6 +871,13 @@ where Inner: Layer<S>, S: tracing::Subscriber
 
 (Inspirado en T05-02 §11.4; T19-07 §9.4.)
 
+**Implementación Moagan (sub-fase L):** `ReportingLayer` se integra
+como `MakeWriter` de `tracing_subscriber::fmt::Layer` y envuelve el
+writer con `RedactWriter`. Así se redactan el mensaje, los campos y el
+formato completo antes de escribir bytes al destino. `tracing::Event` es
+inmutable, por lo que el límite de salida es la alternativa segura a
+reconstruir el evento; los tests cubren claves Anthropic y emails.
+
 #### D.8.4. Redacción post-hoc con `moagan telemetry cleanup --redact-rewrite`
 
 ```rust
@@ -899,6 +914,13 @@ std::panic::set_hook(Box::new(|info| {
 ```
 
 (Inspirado en T08-10 §13.)
+
+**Implementación Moagan (sub-fase L):** `src/main.rs` instala el hook
+inmediatamente después de inicializar `tracing`, extrae payloads `&str`
+y `String`, conserva ubicación y aplica la política de redacción de
+telemetría antes de escribir a stderr. El test de integración ejecuta el
+binario real en debug y verifica que una clave Anthropic no aparece en la
+salida.
 
 #### D.8.7. Sanitización de `path` en errores
 
@@ -1061,6 +1083,13 @@ impl CancellationToken {
 - **Force**: run se marca `failed`, no se permite `continue`.
 
 (Inspirado en T01-03 §2.3; T19-07 §9.4.)
+
+**Implementación Moagan (sub-fase L):** `src/cancel.rs` añade
+`CancelTier::{Soft, Normal, Hard}` y `Cancel::cancel_with_tier`. En esta
+fase los tres tiers convergen deliberadamente en el token cooperativo
+existente: no hay todavía un `CancellationContext` ni un registro de
+procesos hijo desde el que enviar SIGTERM equivalente. La limitación
+queda cubierta por el contrato y el test de los tres tiers.
 
 #### D.10.2. Listeners de cancelación
 
@@ -1710,6 +1739,12 @@ impl serde::Serialize for ErrorCode { /* SCREAMING_SNAKE */ }
 
 (Inspirado en T15-01 §14.4; T18-06; T20-03 §14.3; T13-03 §12.4; T14-07 §12.4.)
 
+**Implementación Moagan (sub-fase L):** `src/error.rs` define
+`ExitCode` con discriminantes `repr(i32)` y `Error::exit_code()`. Los
+errores base conservan los códigos 0–8; provider/state/cache usan los
+códigos extendidos del catálogo. `cli::dispatch` convierte los errores a
+un `i32` de salida y mantiene un único mensaje de error en stderr.
+
 #### D.12.15. `PauseReason` tipado
 
 ```rust
@@ -1728,6 +1763,12 @@ pub enum PauseReason {
 ```
 
 (Inspirado en T18-09; T02-03 §2.2; T18-08 §2.1; T20-09 §5.1.)
+
+**Implementación Moagan (sub-fase L):** como el crate usa el módulo
+plano `src/domain.rs` en vez de `src/domain/run.rs`, `PauseReason` vive
+allí y serializa con `snake_case`. `CancelReason` implementa `From` hacia
+el estado de pausa más cercano, incluyendo timeout de fase/total, plan
+exhausted, provider error y user pause.
 
 #### D.12.16. `RunPaths::resolve()` con relative+absolute
 
