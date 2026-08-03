@@ -262,6 +262,7 @@ pub async fn run_full_pipeline(
 ) -> Result<Manifest> {
     let run_id = stub.run_id;
     let run_dir = home.run_dir(run_id);
+    let cfg_arc = Arc::new(cfg.clone());
     let mode = parse_mode(&stub.mode)?;
     let default_provider = if stub.provider.is_empty() {
         cfg.default_provider.clone()
@@ -275,11 +276,26 @@ pub async fn run_full_pipeline(
     )?);
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
-    let policy = RedactPolicy::default();
+    // W1: the redact policy is built from the loaded Config, NOT
+    // RedactPolicy::default(). The default has `telemetry: true`,
+    // `storage: true`, `export: true`, which matches the privacy-
+    // by-default contract — but it also ignored the user's
+    // `redact_in_telemetry = false` knob in `config.toml`. Building
+    // the policy from `cfg` honours the operator's choice; the
+    // other surfaces (storage, export) keep their defaults so a
+    // flipped `redact_in_telemetry = false` does NOT leak
+    // `manifest.json` or the export bundle.
+    let policy = RedactPolicy {
+        telemetry: cfg.redact_in_telemetry,
+        storage: true,
+        export: true,
+        prompts: false,
+        enabled_patterns: None,
+    };
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
     let parallelism = Parallelism::new(max_parallelism.unwrap_or(cfg.max_parallelism));
 
-    let ctx = RunContext::new(
+    let ctx = RunContext::new_with_config(
         run_id,
         Arc::clone(&home),
         providers,
@@ -289,9 +305,16 @@ pub async fn run_full_pipeline(
         telemetry.clone(),
         raw_prompt,
         stub.mode.clone(),
+        cfg_arc,
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
-    .with_interactive(!non_interactive)
+    // V4 §13.6 promises "no human pauses" for Mode::Batch. The
+    // `interactive` flag now reflects that contract: even if the
+    // operator forgets `--non-interactive`, batch runs skip every
+    // human checkpoint and persist a `<skipped:non_interactive>`
+    // marker for the audit trail. `--non-interactive` (any mode)
+    // keeps the existing behaviour.
+    .with_interactive(!non_interactive && !matches!(mode, Mode::Batch))
     .with_context(
         context_block,
         stub.parent_run_id,

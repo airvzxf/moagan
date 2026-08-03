@@ -648,6 +648,36 @@ mod tests {
         assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
     }
 
+    /// W1 fix: `RedactPolicy::allow_all()` (the runtime equivalent of
+    /// `Config::redact_in_telemetry = false`) must keep the raw
+    /// payload on disk. The `apply` helper short-circuits when
+    /// `is_enabled(surface) == false`, so the RedactWriter becomes a
+    /// pass-through; the bytes the operator wrote are the bytes that
+    /// land on disk.
+    #[test]
+    fn redact_in_telemetry_false_keeps_raw_secrets_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+        let run_dir = home.run_dir(RunId::new());
+        run_dir.ensure().unwrap();
+        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::allow_all(), None).unwrap();
+        let secret = "key=sk-cp-aaaaaaaaaaaaaaaaaaaa";
+        t.phase("intake", 1, "error", Some(secret)).unwrap();
+        t.flush().unwrap();
+        let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
+        assert!(
+            content.contains(secret),
+            "raw secret should remain visible when redact_in_telemetry=false"
+        );
+        assert!(
+            !content.contains("[REDACTED:"),
+            "no redaction marker should appear when the policy is disabled"
+        );
+    }
+
     #[test]
     fn warn_writes_jsonl_and_mirrors_to_sqlite() {
         let tmp = tempfile::tempdir().unwrap();
