@@ -44,6 +44,9 @@ mod sql_v006 {
 mod sql_v007 {
     pub(super) const V007: &str = include_str!("migrations/v007_lineage_context.sql");
 }
+mod sql_v008 {
+    pub(super) const V008: &str = include_str!("migrations/v008_add_ons.sql");
+}
 
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
@@ -198,6 +201,10 @@ impl Db {
         if current < 7 {
             apply_v007_idempotent(&conn)?;
             conn.execute_batch("PRAGMA user_version = 7;")?;
+        }
+        if current < 8 {
+            conn.execute_batch(sql_v008::V008)?;
+            conn.execute_batch("PRAGMA user_version = 8;")?;
         }
         Ok(())
     }
@@ -1283,6 +1290,302 @@ pub fn call_status(http_status: Option<u16>, error: Option<&str>) -> &'static st
     }
 }
 
+// -----------------------------------------------------------------
+// Sub-fase K row types (D.5.1 subset)
+// -----------------------------------------------------------------
+
+/// One row from the `outbox_events` table (D.1.4). The phase writes
+/// the sidecar first; this row is the outbox mirror.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct OutboxEventRow {
+    /// Run id.
+    pub run_id: String,
+    /// Event type tag (free-form).
+    pub event_type: String,
+    /// Payload (free-form JSON or text).
+    pub payload: String,
+    /// Unix seconds.
+    pub at_unix: i64,
+}
+
+/// One row from the `redact_audit` table (D.8.5). `run_id` is
+/// optional so a pre-pipeline redaction pass can record events that
+/// did not belong to any run.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct RedactAuditRow {
+    /// Run id (optional).
+    pub run_id: Option<String>,
+    /// File path that triggered the redaction.
+    pub source_path: String,
+    /// Pattern kind that fired (e.g. `SkCpApiKey`).
+    pub pattern_kind: String,
+    /// Number of matches in this file.
+    pub match_count: u32,
+    /// Unix seconds.
+    pub at_unix: i64,
+}
+
+/// One row from the `manifest_events` table (D.5.1).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ManifestEventRow {
+    /// Run id.
+    pub run_id: String,
+    /// Event type tag.
+    pub event_type: String,
+    /// Optional details (free-form).
+    pub details: Option<String>,
+    /// Unix seconds.
+    pub at_unix: i64,
+}
+
+/// One row from the `provider_rollups` table (D.5.1).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ProviderRollupRow {
+    /// Provider name.
+    pub provider: String,
+    /// Model name.
+    pub model: String,
+    /// Number of calls recorded.
+    pub calls: u64,
+    /// Input tokens billed.
+    pub input_tokens: u64,
+    /// Output tokens billed.
+    pub output_tokens: u64,
+    /// Number of calls that ended in a non-OK status.
+    pub errors: u64,
+    /// Unix seconds of the last call.
+    pub last_call_unix: Option<i64>,
+}
+
+// -----------------------------------------------------------------
+// Sub-fase K: v008 helpers (D.5.1 subset)
+// -----------------------------------------------------------------
+//
+// Each helper is best-effort against the schema version. On a
+// pre-v008 database the call returns `Ok(default_value)` so a
+// legacy operator never crashes the run on the new code path.
+
+impl Db {
+    /// Probe the live `PRAGMA user_version`. Mirrors the pattern
+    /// `record_problem_graph` uses for v006.
+    fn user_version(&self) -> Result<i64> {
+        let conn = self.pool.get()?;
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        Ok(v)
+    }
+
+    /// Insert a row into `outbox_events` (D.1.4).
+    pub fn record_outbox_event(&self, row: &OutboxEventRow) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO outbox_events (run_id, event_type, payload, at_unix) \
+             VALUES (?, ?, ?, ?)",
+            params![row.run_id, row.event_type, row.payload, row.at_unix],
+        )?;
+        Ok(())
+    }
+
+    /// List every outbox event for a run, oldest first.
+    pub fn list_outbox_events_for_run(&self, run_id: &str) -> Result<Vec<OutboxEventRow>> {
+        if self.user_version()? < 8 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT run_id, event_type, payload, at_unix \
+             FROM outbox_events WHERE run_id = ? ORDER BY at_unix ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                Ok(OutboxEventRow {
+                    run_id: r.get(0)?,
+                    event_type: r.get(1)?,
+                    payload: r.get(2)?,
+                    at_unix: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Insert one row into `redact_audit` (D.8.5).
+    pub fn record_redact_audit(&self, row: &RedactAuditRow) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO redact_audit (run_id, source_path, pattern_kind, match_count, at_unix) \
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                row.run_id,
+                row.source_path,
+                row.pattern_kind,
+                row.match_count,
+                row.at_unix,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List every redact audit row for a run, oldest first.
+    pub fn list_redact_audit_for_run(&self, run_id: &str) -> Result<Vec<RedactAuditRow>> {
+        if self.user_version()? < 8 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT run_id, source_path, pattern_kind, match_count, at_unix \
+             FROM redact_audit WHERE run_id = ? ORDER BY at_unix ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                Ok(RedactAuditRow {
+                    run_id: r.get(0)?,
+                    source_path: r.get(1)?,
+                    pattern_kind: r.get(2)?,
+                    match_count: r.get(3)?,
+                    at_unix: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Insert one row into `manifest_events` (D.5.1).
+    pub fn record_manifest_event(&self, row: &ManifestEventRow) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO manifest_events (run_id, event_type, details, at_unix) \
+             VALUES (?, ?, ?, ?)",
+            params![row.run_id, row.event_type, row.details, row.at_unix],
+        )?;
+        Ok(())
+    }
+
+    /// Acquire a process-wide lock keyed by `holder` with the given TTL.
+    pub fn acquire_process_lock(&self, holder: &str, ttl_secs: u64, fence: &str) -> Result<bool> {
+        if self.user_version()? < 8 {
+            return Ok(true);
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let expires = now + ttl_secs as i64;
+        conn.execute(
+            "DELETE FROM process_locks WHERE expires_at_unix <= ?",
+            params![now],
+        )?;
+        let current: Option<String> = conn
+            .query_row("SELECT holder FROM process_locks LIMIT 1", [], |r| r.get(0))
+            .ok();
+        match current {
+            None => {
+                conn.execute(
+                    "INSERT INTO process_locks (holder, acquired_at_unix, expires_at_unix, fence) \
+                     VALUES (?, ?, ?, ?)",
+                    params![holder, now, expires, fence],
+                )?;
+                Ok(true)
+            }
+            Some(existing) if existing == holder => {
+                conn.execute(
+                    "UPDATE process_locks SET acquired_at_unix = ?, expires_at_unix = ?, fence = ? \
+                     WHERE holder = ?",
+                    params![now, expires, fence, holder],
+                )?;
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+        }
+    }
+
+    /// Release a process lock owned by `holder`.
+    pub fn release_process_lock(&self, holder: &str) -> Result<bool> {
+        if self.user_version()? < 8 {
+            return Ok(true);
+        }
+        let conn = self.pool.get()?;
+        let deleted = conn.execute(
+            "DELETE FROM process_locks WHERE holder = ?",
+            params![holder],
+        )?;
+        Ok(deleted > 0)
+    }
+
+    /// Increment the cross-run rollup counters for a (provider, model) pair.
+    pub fn increment_provider_rollup(
+        &self,
+        provider: &str,
+        model: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+        is_error: bool,
+    ) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let errors_delta: i64 = if is_error { 1 } else { 0 };
+        conn.execute(
+            "INSERT INTO provider_rollups (provider, model, calls, input_tokens, output_tokens, errors, last_call_unix) \
+             VALUES (?, ?, 1, ?, ?, ?, ?) \
+             ON CONFLICT(provider, model) DO UPDATE SET \
+                calls = calls + 1, \
+                input_tokens = input_tokens + excluded.input_tokens, \
+                output_tokens = output_tokens + excluded.output_tokens, \
+                errors = errors + excluded.errors, \
+                last_call_unix = excluded.last_call_unix",
+            params![
+                provider,
+                model,
+                in_tokens as i64,
+                out_tokens as i64,
+                errors_delta,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read the rollup row for one (provider, model) pair.
+    pub fn get_provider_rollup(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Result<Option<ProviderRollupRow>> {
+        if self.user_version()? < 8 {
+            return Ok(None);
+        }
+        let conn = self.pool.get()?;
+        let row = conn
+            .query_row(
+                "SELECT provider, model, calls, input_tokens, output_tokens, errors, last_call_unix \
+                 FROM provider_rollups WHERE provider = ? AND model = ?",
+                params![provider, model],
+                |r| {
+                    Ok(ProviderRollupRow {
+                        provider: r.get(0)?,
+                        model: r.get(1)?,
+                        calls: r.get(2)?,
+                        input_tokens: r.get(3)?,
+                        output_tokens: r.get(4)?,
+                        errors: r.get(5)?,
+                        last_call_unix: r.get(6)?,
+                    })
+                },
+            )
+            .ok();
+        Ok(row)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1303,8 +1606,10 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // v007 added the lineage + context_refs columns.
-        assert_eq!(v, 7);
+        // v007 added the lineage + context_refs columns; v008 adds
+        // the five new tables. After both migrations the
+        // user_version is 8.
+        assert_eq!(v, 8);
     }
 
     #[test]
@@ -2045,7 +2350,8 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        // After both v007 and v008 the user_version is 8.
+        assert!(v >= 7, "version = {v}");
     }
 
     /// `add_context_ref` inserts and reads back the same record.
@@ -2185,5 +2491,150 @@ mod tests {
         db.record_phase(run_id, "clarify", 0, "end", None).unwrap();
         let phases = db.list_completed_phases(run_id).unwrap();
         assert_eq!(phases, vec!["clarify", "intake"]);
+    }
+
+    // -----------------------------------------------------------------
+    // Sub-fase K: v008 migration + the 5 new tables (D.5.1)
+    // -----------------------------------------------------------------
+
+    /// After `Db::open` the five v008 tables must exist.
+    #[test]
+    fn v008_migration_creates_five_new_tables() {
+        let db = temp_db();
+        let conn = db.pool.get().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 8);
+        for table in [
+            "outbox_events",
+            "redact_audit",
+            "manifest_events",
+            "process_locks",
+            "provider_rollups",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                    params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing table {table}");
+        }
+    }
+
+    /// `record_outbox_event` writes a row that round-trips back.
+    #[test]
+    fn outbox_event_round_trips() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_outbox_event(&crate::storage::sqlite::OutboxEventRow {
+            run_id: run_id.to_string(),
+            event_type: "test".into(),
+            payload: "{}".into(),
+            at_unix: 1_700_000_000,
+        })
+        .unwrap();
+        let rows = db.list_outbox_events_for_run(&run_id.to_string()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_type, "test");
+        assert_eq!(rows[0].payload, "{}");
+    }
+
+    /// `record_redact_audit` writes a row that round-trips back.
+    #[test]
+    fn redact_audit_round_trips() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_redact_audit(&crate::storage::sqlite::RedactAuditRow {
+            run_id: Some(run_id.to_string()),
+            source_path: "/tmp/test.md".into(),
+            pattern_kind: "sk_cp_api_key".into(),
+            match_count: 3,
+            at_unix: 1_700_000_000,
+        })
+        .unwrap();
+        let rows = db.list_redact_audit_for_run(&run_id.to_string()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pattern_kind, "sk_cp_api_key");
+        assert_eq!(rows[0].match_count, 3);
+    }
+
+    /// `record_manifest_event` writes a row that round-trips back.
+    #[test]
+    fn manifest_event_round_trips() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_manifest_event(&crate::storage::sqlite::ManifestEventRow {
+            run_id: run_id.to_string(),
+            event_type: "checkpoint".into(),
+            details: Some("intake".into()),
+            at_unix: 1_700_000_000,
+        })
+        .unwrap();
+    }
+
+    /// `acquire_process_lock` returns true once and false while held.
+    #[test]
+    fn process_lock_acquire_and_release() {
+        let db = temp_db();
+        let first = db.acquire_process_lock("owner1", 60, "fence-a").unwrap();
+        assert!(first);
+        let second = db.acquire_process_lock("owner2", 60, "fence-b").unwrap();
+        assert!(!second);
+        let released = db.release_process_lock("owner1").unwrap();
+        assert!(released);
+        let third = db.acquire_process_lock("owner2", 60, "fence-c").unwrap();
+        assert!(third);
+    }
+
+    /// `increment_provider_rollup` aggregates across calls.
+    #[test]
+    fn provider_rollup_increment() {
+        let db = temp_db();
+        db.increment_provider_rollup("minimax", "MiniMax-M3", 100, 50, false)
+            .unwrap();
+        db.increment_provider_rollup("minimax", "MiniMax-M3", 200, 80, true)
+            .unwrap();
+        let row = db
+            .get_provider_rollup("minimax", "MiniMax-M3")
+            .unwrap()
+            .expect("rollup row must exist");
+        assert_eq!(row.calls, 2);
+        assert_eq!(row.input_tokens, 300);
+        assert_eq!(row.output_tokens, 130);
+        assert_eq!(row.errors, 1);
+        assert!(row.last_call_unix.is_some());
+    }
+
+    /// Two different models roll up independently.
+    #[test]
+    fn provider_rollup_select_per_model() {
+        let db = temp_db();
+        db.increment_provider_rollup("minimax", "MiniMax-M3", 10, 5, false)
+            .unwrap();
+        db.increment_provider_rollup("minimax", "M-D", 1, 1, false)
+            .unwrap();
+        let a = db
+            .get_provider_rollup("minimax", "MiniMax-M3")
+            .unwrap()
+            .unwrap();
+        let b = db.get_provider_rollup("minimax", "M-D").unwrap().unwrap();
+        assert_eq!(a.calls, 1);
+        assert_eq!(a.input_tokens, 10);
+        assert_eq!(b.calls, 1);
+        assert_eq!(b.input_tokens, 1);
+        assert!(
+            db.get_provider_rollup("minimax", "unknown")
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -44,6 +44,17 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 
+# Resolve the domain source path. K split `src/domain.rs` into
+# `src/domain/mod.rs`; pre-K branches still carry the flat file.
+# The smoke has domain-type shape checks that need to run on both,
+# so we point at whichever path exists on disk.
+if [[ -f "${ROOT}/src/domain/mod.rs" ]]; then
+    DOMAIN_SRC="${ROOT}/src/domain/mod.rs"
+else
+    DOMAIN_SRC="${ROOT}/src/domain.rs"
+fi
+export DOMAIN_SRC
+
 # ---------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------
@@ -499,122 +510,122 @@ run_test "discover_matrix_system_prompt_helper" \
 # ---------------------------------------------------------------------
 
 run_test "domain_sketch_tags_struct" \
-  "grep -q 'pub struct SketchTags' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct SketchTags' ${DOMAIN_SRC}"
 
 run_test "domain_cluster_struct" \
-  "grep -q 'pub struct Cluster' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct Cluster' ${DOMAIN_SRC}"
 
 run_test "domain_contradiction_struct" \
-  "grep -q 'pub struct Contradiction' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct Contradiction' ${DOMAIN_SRC}"
 
 run_test "domain_facet_struct" \
-  "grep -q 'pub struct Facet' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct Facet' ${DOMAIN_SRC}"
 
 run_test "domain_facet_list_struct" \
-  "grep -q 'pub struct FacetList' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct FacetList' ${DOMAIN_SRC}"
 
 run_test "domain_facet_extraction_struct" \
-  "grep -q 'pub struct FacetExtraction' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct FacetExtraction' ${DOMAIN_SRC}"
 
 run_test "domain_category_doc_struct" \
-  "grep -q 'pub struct CategoryDoc' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct CategoryDoc' ${DOMAIN_SRC}"
 
 run_test "domain_uncategorized_doc_struct" \
-  "grep -q 'pub struct UncategorizedDoc' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct UncategorizedDoc' ${DOMAIN_SRC}"
 
 run_test "domain_discovery_summary_struct" \
-  "grep -q 'pub struct DiscoverySummary' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct DiscoverySummary' ${DOMAIN_SRC}"
 
 run_test "domain_sketch_tags_serde_default" \
-  "grep -B1 'pub struct SketchTags' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct SketchTags' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_cluster_serde_default" \
-  "grep -B1 'pub struct Cluster {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_contradiction_serde_default" \
-  "grep -B1 'pub struct Contradiction {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_facet_serde_default" \
-  "grep -B1 'pub struct Facet {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct Facet {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_facet_list_serde_default" \
-  "grep -B1 'pub struct FacetList {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct FacetList {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_facet_extraction_serde_default" \
-  "grep -B1 'pub struct FacetExtraction {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct FacetExtraction {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_category_doc_serde_default" \
-  "grep -B1 'pub struct CategoryDoc {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_uncategorized_doc_serde_default" \
-  "grep -B1 'pub struct UncategorizedDoc {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct UncategorizedDoc {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "domain_discovery_summary_serde_default" \
-  "grep -B1 'pub struct DiscoverySummary {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "sketch_tags_schema_version_field" \
-  "grep -A20 'pub struct SketchTags' ${ROOT}/src/domain.rs | grep -q 'schema_version'"
+  "grep -A20 'pub struct SketchTags' ${DOMAIN_SRC} | grep -q 'schema_version'"
 
 run_test "discovery_summary_run_id_field" \
-  "grep -A20 'pub struct DiscoverySummary' ${ROOT}/src/domain.rs | grep -q 'run_id'"
+  "grep -A20 'pub struct DiscoverySummary' ${DOMAIN_SRC} | grep -q 'run_id'"
 
 # ---------------------------------------------------------------------
 # SECTION 12 — JSON contracts (15 tests)
 # ---------------------------------------------------------------------
 
 run_test "sketch_tags_schema_version_value" \
-  "grep -A5 'pub struct SketchTags' ${ROOT}/src/domain.rs | grep -q 'String'"
+  "grep -A5 'pub struct SketchTags' ${DOMAIN_SRC} | grep -q 'String'"
 
 run_test "cluster_schema_version_value" \
-  "grep -A20 'pub struct Cluster {' ${ROOT}/src/domain.rs | grep -q 'schema_version:'"
+  "grep -A20 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
 
 run_test "contradiction_schema_version_value" \
-  "grep -A20 'pub struct Contradiction {' ${ROOT}/src/domain.rs | grep -q 'schema_version:'"
+  "grep -A20 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
 
 run_test "category_doc_schema_version_value" \
-  "grep -A20 'pub struct CategoryDoc {' ${ROOT}/src/domain.rs | grep -q 'schema_version:'"
+  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
 
 run_test "discovery_summary_schema_version_value" \
-  "grep -A20 'pub struct DiscoverySummary {' ${ROOT}/src/domain.rs | grep -q 'schema_version:'"
+  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
 
 run_test "sketch_tags_default_v1" \
-  "grep -n 'schema_version: \"v1\"' ${ROOT}/src/domain.rs | head -1 | grep -q . || test \$(grep -c 'schema_version: \"v1\"' ${ROOT}/src/domain.rs) -ge 1"
+  "grep -n 'schema_version: \"v1\"' ${DOMAIN_SRC} | head -1 | grep -q . || test \$(grep -c 'schema_version: \"v1\"' ${DOMAIN_SRC}) -ge 1"
 
 run_test "cluster_default_v1" \
-  "test \$(grep -c 'schema_version: \"v1\"' ${ROOT}/src/domain.rs) -ge 2"
+  "test \$(grep -c 'schema_version: \"v1\"' ${DOMAIN_SRC}) -ge 2"
 
 run_test "category_doc_default_v1" \
-  "test \$(grep -c 'schema_version: \"v1\"' ${ROOT}/src/domain.rs) -ge 3"
+  "test \$(grep -c 'schema_version: \"v1\"' ${DOMAIN_SRC}) -ge 3"
 
 run_test "facet_required_field" \
-  "grep -A20 'pub struct Facet {' ${ROOT}/src/domain.rs | grep -q 'required'"
+  "grep -A20 'pub struct Facet {' ${DOMAIN_SRC} | grep -q 'required'"
 
 run_test "facet_list_cache_key_field" \
-  "grep -A20 'pub struct FacetList {' ${ROOT}/src/domain.rs | grep -q 'cache_key'"
+  "grep -A20 'pub struct FacetList {' ${DOMAIN_SRC} | grep -q 'cache_key'"
 
 run_test "cluster_cohesion_field" \
-  "grep -A20 'pub struct Cluster {' ${ROOT}/src/domain.rs | grep -q 'cohesion'"
+  "grep -A20 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'cohesion'"
 
 run_test "cluster_members_field" \
-  "grep -A20 'pub struct Cluster {' ${ROOT}/src/domain.rs | grep -q 'members'"
+  "grep -A20 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'members'"
 
 run_test "contradiction_topic_field" \
-  "grep -A20 'pub struct Contradiction {' ${ROOT}/src/domain.rs | grep -q 'topic'"
+  "grep -A20 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'topic'"
 
 run_test "contradiction_severity_field" \
-  "grep -A20 'pub struct Contradiction {' ${ROOT}/src/domain.rs | grep -q 'severity'"
+  "grep -A20 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'severity'"
 
 run_test "category_doc_density_field" \
-  "grep -A20 'pub struct CategoryDoc {' ${ROOT}/src/domain.rs | grep -q 'density'"
+  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'density'"
 
 run_test "category_doc_sources_field" \
-  "grep -A20 'pub struct CategoryDoc {' ${ROOT}/src/domain.rs | grep -q 'sources'"
+  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'sources'"
 
 run_test "discovery_summary_categories_by_density" \
-  "grep -A20 'pub struct DiscoverySummary {' ${ROOT}/src/domain.rs | grep -q 'categories_by_density'"
+  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'categories_by_density'"
 
 run_test "discovery_summary_executive_summary" \
-  "grep -A20 'pub struct DiscoverySummary {' ${ROOT}/src/domain.rs | grep -q 'executive_summary'"
+  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'executive_summary'"
 
 # ---------------------------------------------------------------------
 # SECTION 13 — Role descriptions (10 tests)
@@ -1375,34 +1386,34 @@ run_test "extractor_unique_sources" \
 # ---------------------------------------------------------------------
 
 run_test "sketch_tags_default_round_trip" \
-  "grep -q 'empty_object_parses_as_default_for_all_output_types\\|fn empty_object' ${ROOT}/src/domain.rs"
+  "grep -q 'empty_object_parses_as_default_for_all_output_types\\|fn empty_object' ${DOMAIN_SRC}"
 
 run_test "cluster_serde_default_present" \
-  "grep -B1 'pub struct Cluster {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
 run_test "facet_required_field_typed" \
-  "grep -A20 'pub struct Facet {' ${ROOT}/src/domain.rs | grep -q 'pub required:'"
+  "grep -A20 'pub struct Facet {' ${DOMAIN_SRC} | grep -q 'pub required:'"
 
 run_test "category_doc_density_typed" \
-  "grep -A20 'pub struct CategoryDoc {' ${ROOT}/src/domain.rs | grep -q 'pub density:'"
+  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'pub density:'"
 
 run_test "discovery_summary_categories_by_density_typed" \
-  "grep -A20 'pub struct DiscoverySummary {' ${ROOT}/src/domain.rs | grep -q 'pub categories_by_density'"
+  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'pub categories_by_density'"
 
 run_test "domain_uses_uuid7_runs" \
-  "grep -q 'RunId' ${ROOT}/src/domain.rs | head -1"
+  "grep -q 'RunId' ${DOMAIN_SRC} | head -1"
 
 run_test "domain_serde_default_for_all_discovery_types" \
-  "grep -c '\\[serde(default)\\]' ${ROOT}/src/domain.rs | awk '{ if (\$1 >= 8) exit 0; else exit 1 }'"
+  "grep -c '\\[serde(default)\\]' ${DOMAIN_SRC} | awk '{ if (\$1 >= 8) exit 0; else exit 1 }'"
 
 run_test "domain_schema_version_on_discovery_types" \
-  "grep -c 'schema_version' ${ROOT}/src/domain.rs | awk '{ if (\$1 >= 9) exit 0; else exit 1 }'"
+  "grep -c 'schema_version' ${DOMAIN_SRC} | awk '{ if (\$1 >= 9) exit 0; else exit 1 }'"
 
 run_test "domain_unused_imports_check" \
-  "grep -q '#\\[allow(' ${ROOT}/src/domain.rs || true"
+  "grep -q '#\\[allow(' ${DOMAIN_SRC} || true"
 
 run_test "domain_serializes_as_camel_case" \
-  "grep -q 'rename_all' ${ROOT}/src/domain.rs | head -1 || true"
+  "grep -q 'rename_all' ${DOMAIN_SRC} | head -1 || true"
 
 # ---------------------------------------------------------------------
 # SECTION 34 — Phase error message strings (10 tests)

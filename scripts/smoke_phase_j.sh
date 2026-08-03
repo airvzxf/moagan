@@ -87,12 +87,14 @@ run_test "context_public_api" '
 '
 
 run_test "manifest_lineage_fields" '
-  grep -q "parent_run_id: Option<RunId>" '"$ROOT"'/src/domain.rs
-  grep -q "shared_brief_hash: Option<String>" '"$ROOT"'/src/domain.rs
-  grep -q "context_refs: Vec<crate::context::ContextRefRecord>" '"$ROOT"'/src/domain.rs
-  grep -q "lineage_paths: Option<LineagePaths>" '"$ROOT"'/src/domain.rs
-  grep -q "pub struct LineagePaths" '"$ROOT"'/src/domain.rs
-  grep -q "context_block: Option<String>" '"$ROOT"'/src/domain.rs
+  DOMAIN_FILE='"$ROOT"'/src/domain.rs
+  [[ -f "$DOMAIN_FILE" ]] || DOMAIN_FILE='"$ROOT"'/src/domain/mod.rs
+  grep -q "parent_run_id: Option<RunId>" "$DOMAIN_FILE"
+  grep -q "shared_brief_hash: Option<String>" "$DOMAIN_FILE"
+  grep -q "context_refs: Vec<crate::context::ContextRefRecord>" "$DOMAIN_FILE"
+  grep -q "lineage_paths: Option<LineagePaths>" "$DOMAIN_FILE"
+  grep -q "pub struct LineagePaths" "$DOMAIN_FILE"
+  grep -q "context_block: Option<String>" "$DOMAIN_FILE"
 '
 
 run_test "storage_v007_migration" '
