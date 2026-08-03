@@ -1,12 +1,15 @@
 //! `moagan run` — start a new run, build a pipeline, execute it, write
 //! the manifest, and print a summary.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::Mode;
 use crate::config::Config;
-use crate::domain::{Manifest, ManifestPhase, ManifestUsage};
+use crate::context::{
+    ContextRef, ContextScope, loader as context_loader, resolver as context_resolver,
+};
+use crate::domain::{LineagePaths, Manifest, ManifestPhase, ManifestUsage};
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
@@ -15,9 +18,10 @@ use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
     ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DecomposePhase, DeliverPhase, GatePhase,
     IntakePhase, JudgePhase, Pipeline, ProposePhase, RankPhase, RepairPhase, RoutePhase,
-    SketchPhase, SynthesizePhase, ValidatePhase,
+    RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
 };
 use crate::redact::RedactPolicy;
+use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::{PhaseEvent, Telemetry};
 
@@ -46,16 +50,22 @@ pub struct RunOptions {
     /// (V4 §5.13 "no sustituye automáticamente"). Default `false`
     /// (replacement ON for `standard`/`deep`/`batch`).
     pub no_replace_sources: bool,
+    /// Phase J: optional reference to an upstream context
+    /// (`--context`). Resolved into a `ContextRef` before the
+    /// pipeline starts.
+    pub context: Option<String>,
+    /// Phase J: scope used when loading the context. Defaults to
+    /// `Summary`; `SummaryFull` and `Full` are opt-in via the
+    /// `--context-summary` / `--context-full` flags.
+    pub context_scope: ContextScope,
 }
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
 pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
-    if let Some(ref home) = opts.home {
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", home);
-        }
-    }
-    let home = Arc::new(MoaganHome::resolve()?);
+    let home = Arc::new(match opts.home.clone() {
+        Some(path) => MoaganHome::at(path),
+        None => MoaganHome::resolve()?,
+    });
     home.ensure()?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
@@ -66,15 +76,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     } else {
         opts.provider.clone()
     };
-    let providers = Arc::new(build_registry_for(
-        cfg,
-        &default_provider,
-        opts.mock_dir.as_deref(),
-    )?);
-    let default_model = cfg.provider(&default_provider)?.model.clone();
 
-    let policy = RedactPolicy::default();
-    let default_model_for_manifest = default_model.clone();
     // Open the SQLite index under MOAGAN_HOME/meta.sqlite. The
     // pipeline mirrors every phase event and every LLM call into
     // the DB so `moagan inspect` returns live data.
@@ -82,44 +84,228 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let config_hash = Some(crate::ids::blake3_hex(
         crate::ids::canonical_hash(&[cfg.default_provider.as_str()]).as_bytes(),
     ));
+
+    // Phase J: resolve + load the upstream context (if any) BEFORE
+    // registering the run so the SQLite mirror carries the lineage
+    // from the start. The filesystem sidecar order matches:
+    // `brief.json` -> `manifest.json` -> SQLite index (T01-06 §1.1).
+    let loaded_context = match opts.context.as_deref() {
+        Some(raw) => {
+            let cref = context_resolver::resolve(&home, raw)?;
+            let mut loaded = context_loader::load(&home, &cref, opts.context_scope)?;
+            // If the loader didn't already attach a parent_run_id
+            // record (it does for run_id refs), we synthesise one
+            // from the resolved ContextRef so the manifest always
+            // has a record for "what kind of ref was this".
+            if loaded.context_refs.is_empty() {
+                if let ContextRef::RunId(id) = &cref {
+                    loaded.parent_run_id = Some(*id);
+                }
+                let now = crate::time::now_unix_secs();
+                loaded.context_refs.push(crate::context::ContextRefRecord {
+                    source_path: cref.source(),
+                    context_type: cref.kind().to_string(),
+                    shasum: crate::ids::blake3_hex(loaded.brief_excerpt.as_bytes()),
+                    bytes: loaded.brief_excerpt.len() as u64,
+                    added_unix: now,
+                });
+            }
+            Some((cref, loaded))
+        }
+        None => None,
+    };
+    let parent_run_id = loaded_context.as_ref().and_then(|(_, l)| l.parent_run_id);
+    let shared_brief_hash = loaded_context
+        .as_ref()
+        .and_then(|(_, l)| l.shared_brief_hash.clone());
+    let context_block = loaded_context
+        .as_ref()
+        .map(|(_, l)| l.brief_excerpt.clone());
+    let context_refs = loaded_context
+        .as_ref()
+        .map(|(_, l)| l.context_refs.clone())
+        .unwrap_or_default();
+
     db.register_run(
         run_id,
         opts.mode.as_str(),
         "running",
         env!("CARGO_PKG_VERSION"),
         config_hash.as_deref(),
-        None,
-        None,
+        shared_brief_hash.as_deref(),
+        parent_run_id,
     )?;
-    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    // CLI `--max-parallelism` overrides the config-file value.
-    // When neither is set the constructor falls back to 4 inside
-    // `cfg::Config::default`; `Parallelism::new` clamps to >= 1.
-    let max_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
-    let parallelism = Parallelism::new(max_parallelism);
+    // Mirror the context refs into SQLite so post-execution
+    // queries (e.g. `SELECT * FROM run_context_refs WHERE run_id = ?`)
+    // return them without re-reading the sidecar.
+    for record in &context_refs {
+        if let Err(e) = db.add_context_ref(run_id, record) {
+            tracing::warn!(
+                run_id = %run_id,
+                error = %e,
+                stage = "context.add_context_ref.error",
+                "failed to mirror context_refs row"
+            );
+        }
+    }
 
-    let ctx = crate::phases::RunContext::new(
+    // Build the lineage_paths block. The `relative` map is empty
+    // here; the manifest writer fills it after the pipeline runs
+    // (the `final/` and other directories exist on disk by then).
+    let lineage_paths = loaded_context.as_ref().map(|(cref, _loaded)| {
+        let mut paths = LineagePaths::default();
+        paths
+            .absolute
+            .insert(LineagePaths::LABEL_FINAL_DIR.into(), run_dir.final_dir());
+        if let ContextRef::RunId(parent) = cref {
+            let parent_dir = home.run_dir(*parent);
+            paths.relative.insert(
+                LineagePaths::LABEL_PARENT_RUN_DIR.into(),
+                format!("../{}", parent),
+            );
+            paths.absolute.insert(
+                LineagePaths::LABEL_PARENT_RUN_DIR.into(),
+                parent_dir.root().to_path_buf(),
+            );
+            let sketches = parent_dir.sketches();
+            if sketches.is_dir() {
+                paths
+                    .absolute
+                    .insert(LineagePaths::LABEL_PARENT_SKETCHES.into(), sketches);
+            }
+        }
+        paths
+    });
+
+    // Build a minimal manifest stub the pipeline helper can populate
+    // (the helper rebuilds it from telemetry after the pipeline
+    // finishes; the stub just carries the fields used by the
+    // lineage block).
+    let default_model = cfg.provider(&default_provider)?.model.clone();
+
+    let stub = Manifest {
+        schema_version: "v1".into(),
+        run_id,
+        mode: opts.mode.as_str().into(),
+        status: "running".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+        brief_sha256: String::new(),
+        brief_blake3: String::new(),
+        provider: default_provider.clone(),
+        model: default_model.clone(),
+        phases: Vec::new(),
+        usage: ManifestUsage::default(),
+        manifest_blake3: String::new(),
+        parent_run_id,
+        shared_brief_hash: shared_brief_hash.clone(),
+        context_refs: context_refs.clone(),
+        lineage_paths: lineage_paths.clone(),
+        cli_prompt: Some(opts.prompt.clone()),
+    };
+
+    let final_manifest = run_full_pipeline(
+        home.clone(),
+        db.clone(),
+        cfg,
+        opts.mock_dir.clone(),
+        opts.non_interactive,
+        stub,
+        opts.prompt.clone(),
+        context_block,
+        opts.max_parallelism,
+    )
+    .await?;
+
+    println!(
+        "moagan run {} mode={} provider={} -> {}",
+        final_manifest.run_id.short(),
+        final_manifest.mode,
+        final_manifest.provider,
+        run_dir.root().display()
+    );
+    Ok(final_manifest.run_id)
+}
+
+/// Run the full pipeline (intake → deliver) on a fresh run dir.
+///
+/// Both `moagan run` and `moagan rerun` dispatch through this helper.
+/// The caller prepares the manifest stub (with `run_id`, `mode`,
+/// `provider`, `model`, `parent_run_id`, `shared_brief_hash`,
+/// `context_refs`, `lineage_paths`) and provides the `raw_prompt` +
+/// optional `context_block`. The helper:
+///
+/// 1. Builds the provider registry.
+/// 2. Opens telemetry.
+/// 3. Builds the `RunContext` (with the context block, lineage, etc.).
+/// 4. Builds the canonical pipeline for the mode.
+/// 5. Runs the pipeline (with shutdown signal handling).
+/// 6. Flushes telemetry.
+/// 7. Rebuilds the manifest from telemetry.
+/// 8. Writes the manifest.
+/// 9. Updates the run status to "completed".
+///
+/// Returns the rebuilt manifest. The caller is responsible for
+/// printing the user-facing success message.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_full_pipeline(
+    home: Arc<MoaganHome>,
+    db: Db,
+    cfg: &Config,
+    mock_dir: Option<PathBuf>,
+    non_interactive: bool,
+    stub: Manifest,
+    raw_prompt: String,
+    context_block: Option<String>,
+    max_parallelism: Option<usize>,
+) -> Result<Manifest> {
+    let run_id = stub.run_id;
+    let run_dir = home.run_dir(run_id);
+    let mode = parse_mode(&stub.mode)?;
+    let default_provider = if stub.provider.is_empty() {
+        cfg.default_provider.clone()
+    } else {
+        stub.provider.clone()
+    };
+    let providers = Arc::new(build_registry_for(
+        cfg,
+        &default_provider,
+        mock_dir.as_deref(),
+    )?);
+    let default_model = cfg.provider(&default_provider)?.model.clone();
+
+    let policy = RedactPolicy::default();
+    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
+    let parallelism = Parallelism::new(max_parallelism.unwrap_or(cfg.max_parallelism));
+
+    let ctx = RunContext::new(
         run_id,
         Arc::clone(&home),
-        Arc::clone(&providers),
+        providers,
         default_provider.clone(),
-        default_model,
+        default_model.clone(),
         parallelism,
         telemetry.clone(),
-        opts.prompt.clone(),
-        opts.mode.as_str().to_owned(),
+        raw_prompt,
+        stub.mode.clone(),
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
-    .with_interactive(!opts.non_interactive);
+    .with_interactive(!non_interactive)
+    .with_context(
+        context_block,
+        stub.parent_run_id,
+        stub.shared_brief_hash.clone(),
+        stub.context_refs.clone(),
+        stub.lineage_paths.clone(),
+    );
 
     // Phase F: synthesis-replacement predicate is ON by default for
     // every mode that runs SynthesizePhase (`standard`/`deep`/`batch`).
-    // `fast` never runs synthesis so the flag would be a no-op there.
-    // The CLI opt-out (`--no-replace-sources`) flips it for the
-    // current run regardless of mode.
-    let replace_sources_enabled = !opts.no_replace_sources && !matches!(opts.mode, Mode::Fast);
+    // `fast` never runs synthesis so the flag is a no-op there.
+    let replace_sources_enabled = !matches!(mode, Mode::Fast);
+    let pipeline = build_pipeline_for_mode(mode, cfg, replace_sources_enabled);
 
-    let pipeline = build_pipeline_for_mode(opts.mode, cfg, replace_sources_enabled);
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
     let _outputs = tokio::select! {
@@ -137,27 +323,43 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // silently leaving the manifest with empty `phases`/`usage`.
     telemetry.flush()?;
 
-    let manifest = build_manifest(
+    let mut manifest = build_manifest(
         &run_id,
-        opts.mode.as_str(),
+        stub.mode.as_str(),
         "completed",
         &run_dir,
         &default_provider,
-        default_model_for_manifest.as_str(),
+        default_model.as_str(),
     )?;
+    // Preserve the lineage block the caller prepared. The builder
+    // defaults everything to empty; we re-attach the parent_run_id,
+    // shared_brief_hash, context_refs, and lineage_paths so they
+    // round-trip through the post-pipeline rebuild.
+    manifest.parent_run_id = stub.parent_run_id;
+    manifest.shared_brief_hash = stub.shared_brief_hash.clone();
+    manifest.context_refs = stub.context_refs.clone();
+    manifest.lineage_paths = stub.lineage_paths.clone();
+    manifest.cli_prompt = stub.cli_prompt.clone();
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
     if let Err(e) = db.update_run_status(run_id, "completed") {
         eprintln!("warn: failed to update run status: {e}");
     }
-    println!(
-        "moagan run {} mode={} provider={} -> {}",
-        run_id.short(),
-        opts.mode.as_str(),
-        default_provider,
-        run_dir.root().display()
-    );
-    Ok(run_id)
+    Ok(manifest)
+}
+
+/// Parse the manifest's mode string into the `Mode` enum. Mirrors
+/// the span from `super::continue_cmd::parse_mode`; the canonical
+/// home is here because the pipeline builder is the consumer.
+pub(crate) fn parse_mode(s: &str) -> Result<Mode> {
+    match s {
+        "fast" => Ok(Mode::Fast),
+        "standard" => Ok(Mode::Standard),
+        "deep" => Ok(Mode::Deep),
+        "explore" => Ok(Mode::Explore),
+        "batch" => Ok(Mode::Batch),
+        other => Err(Error::InvalidState(format!("unknown mode {other:?}"))),
+    }
 }
 
 async fn shutdown_signal() -> Result<()> {
@@ -187,10 +389,15 @@ pub fn build_registry_for(
     selected: &str,
     mock_dir: Option<&std::path::Path>,
 ) -> Result<ProviderRegistry> {
-    // Build a registry containing only the selected provider. The full
-    // cfg may declare other providers whose `from_config` requires an
-    // API key; we must not construct them when the user did not ask
-    // for them.
+    build_registry_for_with_api_key(cfg, selected, mock_dir, None)
+}
+
+pub(crate) fn build_registry_for_with_api_key(
+    cfg: &Config,
+    selected: &str,
+    mock_dir: Option<&std::path::Path>,
+    api_key: Option<&str>,
+) -> Result<ProviderRegistry> {
     let spec = cfg
         .providers
         .get(selected)
@@ -202,6 +409,15 @@ pub fn build_registry_for(
         let mock = crate::llm::MockProvider::from_dir(dir)?;
         let mut reg = ProviderRegistry::default();
         reg.insert(selected.to_owned(), Arc::new(mock));
+        return Ok(reg);
+    }
+    if spec.kind == "minimax"
+        && let Some(key) = api_key
+    {
+        let provider =
+            crate::llm::minimax::MinimaxProvider::new(&spec, SecretString::new(key.to_owned()))?;
+        let mut reg = ProviderRegistry::default();
+        reg.insert(selected.to_owned(), Arc::new(provider));
         return Ok(reg);
     }
     let mut spec_map = std::collections::BTreeMap::new();
@@ -233,7 +449,11 @@ pub fn build_registry_for(
 /// `SynthesizePhase`. `fast` skips synthesis entirely so the flag is
 /// off there; the rest default to ON. The CLI flag
 /// `--no-replace-sources` overrides the per-mode default.
-fn build_pipeline_for_mode(mode: Mode, cfg: &Config, replace_sources_enabled: bool) -> Pipeline {
+pub fn build_pipeline_for_mode(
+    mode: Mode,
+    cfg: &Config,
+    replace_sources_enabled: bool,
+) -> Pipeline {
     let (proposals, critics, judges, sketches) = match mode {
         Mode::Fast => (3u32, 2u32, 3u32, 0u32),
         Mode::Standard => (3u32, 3u32, 5u32, 4u32),
@@ -322,7 +542,7 @@ fn build_pipeline_for_mode(mode: Mode, cfg: &Config, replace_sources_enabled: bo
         .push(DeliverPhase)
 }
 
-fn build_manifest(
+pub(crate) fn build_manifest(
     run_id: &RunId,
     mode: &str,
     status: &str,
@@ -378,6 +598,11 @@ fn build_manifest(
         phases: manifest_phases,
         usage,
         manifest_blake3: String::new(),
+        parent_run_id: None,
+        shared_brief_hash: None,
+        context_refs: Vec::new(),
+        lineage_paths: None,
+        cli_prompt: None,
     };
 
     // 4. Compute the self-hash over the canonical JSON with

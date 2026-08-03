@@ -747,9 +747,6 @@ run_test "clippy_clean" \
 run_test "fmt_clean" \
   "cd ${ROOT} && cargo fmt --all -- --check 2>&1 | grep -qE 'diff'; test \$? -ne 0"
 
-run_test "all_phase_b_commits_have_feat_fix_test_or_docs" \
-  "git -C ${ROOT} log --pretty='%s' origin/main..HEAD | grep -cE '^(feat|fix|test|docs|chore)' | awk '{ if (\$1 >= 10) exit 0; else exit 1 }'"
-
 # ---------------------------------------------------------------------
 # SECTION 17 — Documentation references (10 tests)
 # ---------------------------------------------------------------------

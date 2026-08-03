@@ -13,6 +13,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::Cancel;
+use crate::context::ContextRefRecord;
+use crate::domain::LineagePaths;
 use crate::error::Result;
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
@@ -51,6 +53,24 @@ pub struct RunContext {
     /// (`true`) or auto-suppressed (`false`). Phase D opt-out;
     /// wired from `--non-interactive` and `Mode::Batch`.
     pub interactive: bool,
+    /// Phase J: the verbatim context block to prepend to the
+    /// intake LLM prompt when `--context <ref>` was used. `None`
+    /// for runs that stand on their own.
+    pub context_block: Option<String>,
+    /// Phase J: the parent run id when `--context <run_id>` was
+    /// used (or when this is a `rerun` of an existing run).
+    /// `None` for root runs.
+    pub parent_run_id: Option<RunId>,
+    /// Phase J: SHA-256 over the canonical concatenation of the
+    /// context texts that fed into `context_block`. Mirrored into
+    /// the SQLite `runs.shared_brief_hash` column.
+    pub shared_brief_hash: Option<String>,
+    /// Phase J: per-file hashes + byte counts for every context
+    /// reference. Mirrored into `run_context_refs`.
+    pub context_refs: Vec<ContextRefRecord>,
+    /// Phase J: filesystem locations the lineage walked through.
+    /// Used by `moagan rerun` to recover the parent dir.
+    pub lineage_paths: Option<LineagePaths>,
     cancel: Cancel,
     phase_timeout: Duration,
     total_timeout: Duration,
@@ -99,6 +119,11 @@ impl RunContext {
             mode,
             cache,
             interactive: true,
+            context_block: None,
+            parent_run_id: None,
+            shared_brief_hash: None,
+            context_refs: Vec::new(),
+            lineage_paths: None,
             cancel: Cancel::new(),
             phase_timeout: Duration::ZERO,
             total_timeout: Duration::ZERO,
@@ -110,6 +135,27 @@ impl RunContext {
     /// marker instead of blocking on stdin.
     pub fn with_interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Phase J: attach the context block + lineage fields that
+    /// `moagan run --context <ref>` pre-computes before the
+    /// pipeline starts. The intake phase prepends `context_block`
+    /// to the LLM prompt and the manifest persists the rest.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_context(
+        mut self,
+        context_block: Option<String>,
+        parent_run_id: Option<RunId>,
+        shared_brief_hash: Option<String>,
+        context_refs: Vec<ContextRefRecord>,
+        lineage_paths: Option<LineagePaths>,
+    ) -> Self {
+        self.context_block = context_block;
+        self.parent_run_id = parent_run_id;
+        self.shared_brief_hash = shared_brief_hash;
+        self.context_refs = context_refs;
+        self.lineage_paths = lineage_paths;
         self
     }
 

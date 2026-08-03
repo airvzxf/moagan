@@ -29,7 +29,9 @@ impl Phase for ClarifyPhase {
         let intake: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let user = serde_json::to_string(&intake).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Clarify).to_owned();
-        let brief: Brief = ctx.call_with_retry_parse(
+        let context_block = intake.get("context_block").cloned();
+        let mut brief: Brief = ctx
+            .call_with_retry_parse(
             Role::Clarify,
             system,
             user,
@@ -37,6 +39,9 @@ impl Phase for ClarifyPhase {
             5,
         )
         .await?;
+        if brief.context_block.is_none() {
+            brief.context_block = context_block.and_then(|value| value.as_str().map(str::to_owned));
+        }
         write_json(&ctx.run_dir().brief(), &brief)?;
 
         // Phase D checkpoint: a blocking ambiguity is signaled by the

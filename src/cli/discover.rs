@@ -104,12 +104,10 @@ pub struct DiscoverOptions {
 
 /// Run discovery end-to-end. Returns the run id on success.
 pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
-    if let Some(ref home) = opts.home {
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", home);
-        }
-    }
-    let home = Arc::new(MoaganHome::resolve()?);
+    let home = Arc::new(match opts.home.clone() {
+        Some(path) => MoaganHome::at(path),
+        None => MoaganHome::resolve()?,
+    });
     home.ensure()?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
