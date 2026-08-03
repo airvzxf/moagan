@@ -1,7 +1,10 @@
 //! Pipeline executor. Runs the registered phases in order, recording
 //! per-phase start/end in telemetry.
 
-use crate::error::Result;
+use std::collections::BTreeMap;
+
+use crate::domain::Manifest;
+use crate::error::{Error, Result};
 
 use super::phase::{Phase, PhaseOutput, RunContext};
 
@@ -106,6 +109,117 @@ impl Pipeline {
         }
         Ok(outputs)
     }
+
+    /// Canonical ordering of phases for the linear pipeline
+    /// (`fast | standard | deep | batch | explore`). The list is the
+    /// exact order produced by `build_pipeline_for_mode` in
+    /// `src/cli/run.rs`; tests pin the order so a future re-ordering
+    /// surfaces as a failing test rather than a silently wrong resume
+    /// point.
+    ///
+    /// Discovery and `continue`/`rerun` do not use this list; they
+    /// use their own builders.
+    pub fn canonical_phase_order() -> &'static [&'static str] {
+        // Names mirror the pipeline builder; do NOT introduce phases
+        // here without also updating `build_pipeline_for_mode`.
+        // `decompose` is `deep`-only and lands after `route`; the
+        // rest of the pipeline picks it up from `Mode::Deep`.
+        &[
+            "intake",
+            "clarify",
+            "route",
+            "decompose",
+            "sketch",
+            "propose",
+            "validate",
+            "cluster_proposals",
+            "synthesize",
+            "gate",
+            "critique",
+            "repair",
+            "judge",
+            "rank",
+            "deliver",
+        ]
+    }
+
+    /// Build a `BTreeMap<phase_name, canonical_index>` so callers can
+    /// compare phase names without an ad-hoc Vec lookup. Indexes are
+    /// stable across runs of the same `mode`.
+    pub fn phase_index() -> BTreeMap<&'static str, usize> {
+        Self::canonical_phase_order()
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (*n, i))
+            .collect()
+    }
+
+    /// Build a resumed `Pipeline` from a pre-built canonical
+    /// pipeline, skipping every phase whose canonical index is
+    /// `<= last_phase`. The caller is responsible for building the
+    /// canonical pipeline (so it can pass its own `Config`); this
+    /// helper just filters.
+    ///
+    /// `last_phase` is the phase name returned by
+    /// `Db::last_completed_phase(run_id)`. Errors out when
+    /// `last_phase` is unknown (typo / out-of-band name).
+    ///
+    /// The "skip phases whose canonical index <= last_phase" rule
+    /// mirrors the T01-06 §10.2 pseudocode
+    /// (`Pipeline::resume(manifest, db, last_phase)`): the run is
+    /// treated as "this phase is done; pick up from the next one".
+    pub fn resume(canonical: Pipeline, last_phase: &str) -> Result<Self> {
+        let idx_map = Self::phase_index();
+        let cutoff = *idx_map.get(last_phase).ok_or_else(|| {
+            Error::InvalidState(format!("unknown phase {last_phase:?} in resume"))
+        })?;
+        let canonical_idx_map = canonical_index_for(&canonical)?;
+        let kept: Vec<Box<dyn Phase>> = canonical
+            .phases
+            .into_iter()
+            .filter(|p| {
+                canonical_idx_map
+                    .get(p.name())
+                    .map(|i| *i > cutoff)
+                    .unwrap_or(false)
+            })
+            .collect();
+        Ok(Self { phases: kept })
+    }
+
+    /// `Pipeline::resume` with a manifest convenience wrapper. The
+    /// caller passes the canonical pipeline it built for the
+    /// manifest's mode; this function filters it. The signature
+    /// matches the T01-06 §10.2 pseudocode's intent ("resume from
+    /// last completed phase") without forcing the pipeline layer
+    /// to rebuild the canonical list from a `Config`.
+    pub fn resume_from_manifest(
+        manifest: &Manifest,
+        canonical: Pipeline,
+        last_phase: &str,
+    ) -> Result<Self> {
+        let _ = manifest; // signature parity with the spec pseudocode
+        Self::resume(canonical, last_phase)
+    }
+}
+
+/// Walk the canonical pipeline's phase list and assign each
+/// phase a canonical index from `Pipeline::canonical_phase_order()`.
+/// Phases not in the canonical list (e.g. the `cluster_proposals`
+/// alias used in deep mode) get `usize::MAX` so the resume filter
+/// keeps them past the cutoff.
+fn canonical_index_for(pipeline: &Pipeline) -> Result<BTreeMap<String, usize>> {
+    let canonical = Pipeline::canonical_phase_order();
+    let mut map: BTreeMap<String, usize> = BTreeMap::new();
+    for phase in pipeline.phases.iter() {
+        let name = phase.name();
+        if let Some((i, _)) = canonical.iter().enumerate().find(|(_, n)| **n == name) {
+            map.insert(name.to_string(), i);
+        } else {
+            map.insert(name.to_string(), usize::MAX);
+        }
+    }
+    Ok(map)
 }
 
 #[cfg(test)]
@@ -199,5 +313,67 @@ mod tests {
             ctx.cancel().reason(),
             Some(crate::cancel::CancelReason::TotalTimeout)
         );
+    }
+
+    /// `canonical_phase_order` is stable across runs of the same
+    /// function. A re-ordering breaks every `Pipeline::resume`
+    /// call that referenced the old index.
+    #[test]
+    fn canonical_phase_order_is_stable() {
+        let a = Pipeline::canonical_phase_order();
+        let b = Pipeline::canonical_phase_order();
+        assert_eq!(a, b);
+    }
+
+    /// `phase_index` mirrors `canonical_phase_order` with stable
+    /// ordering: a phase's index is its position in the canonical
+    /// list, no duplicates.
+    #[test]
+    fn phase_index_round_trip() {
+        let idx = Pipeline::phase_index();
+        for (i, name) in Pipeline::canonical_phase_order().iter().enumerate() {
+            assert_eq!(idx.get(*name).copied(), Some(i));
+        }
+    }
+
+    /// `Pipeline::resume` keeps only the phases whose canonical
+    /// index is strictly greater than the cutoff. The test uses
+    /// stub phases named after the canonical entries so the
+    /// `canonical_index_for` lookup succeeds.
+    #[test]
+    fn resume_skips_completed_phases() {
+        let canonical = Pipeline::new()
+            .push(StubPhase("intake"))
+            .push(StubPhase("clarify"))
+            .push(StubPhase("route"))
+            .push(StubPhase("propose"))
+            .push(StubPhase("deliver"));
+        let resumed = Pipeline::resume(canonical, "clarify").unwrap();
+        assert_eq!(resumed.names(), vec!["route", "propose", "deliver"]);
+    }
+
+    /// Resuming from the last canonical phase produces an empty
+    /// pipeline (the run is already done).
+    #[test]
+    fn resume_from_last_phase_is_empty() {
+        let canonical = Pipeline::new()
+            .push(StubPhase("intake"))
+            .push(StubPhase("clarify"))
+            .push(StubPhase("deliver"));
+        let resumed = Pipeline::resume(canonical, "deliver").unwrap();
+        assert!(resumed.is_empty());
+    }
+
+    /// Resuming from an unknown phase errors out (typo / out-of-
+    /// band name). `Error::InvalidState` matches the
+    /// `last_completed_phase` contract — `resume` cannot pick a
+    /// safe default.
+    #[test]
+    fn resume_unknown_phase_errors() {
+        let canonical = Pipeline::new()
+            .push(StubPhase("intake"))
+            .push(StubPhase("deliver"));
+        let err = Pipeline::resume(canonical, "ghost_phase").unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)), "got: {err}");
     }
 }

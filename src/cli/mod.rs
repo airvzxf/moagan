@@ -119,6 +119,13 @@ impl std::fmt::Display for Mode {
     long_about = None
 )]
 pub struct Cli {
+    /// Override the home directory. Globally available; defaults to
+    /// the resolved `MOAGAN_HOME` env var (`MOAGAN_RUNS_DIR` is also
+    /// honoured as a clap-level alias). Provided globally so
+    /// `continue`, `resume`, `rerun`, `refine`, `rerank`, `inspect`,
+    /// and `import` all share a single override path (D.14.5).
+    #[arg(long, global = true, env = "MOAGAN_RUNS_DIR")]
+    pub runs_dir: Option<std::path::PathBuf>,
     /// Subcommand.
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -183,12 +190,57 @@ pub enum Cmd {
         /// flag is a no-op there.
         #[arg(long, default_value_t = false)]
         no_replace_sources: bool,
+        /// Phase J: reference to an upstream context. Accepts a
+        /// UUID v7 (a previous `moagan run` id) or a filesystem
+        /// path to a `.md` file or a directory of them. The
+        /// resolved contents are prepended to the LLM prompt and
+        /// persisted on `manifest.json#parent_run_id` /
+        /// `#shared_brief_hash` / `#context_refs`. See T01-06
+        /// §3.4–§3.5 and §4.4.
+        #[arg(long, value_name = "REF")]
+        context: Option<String>,
+        /// Phase J: when `--context <run_id>` is set, request a
+        /// `SummaryFull` scope (final + sketches). When neither
+        /// `--context-summary` nor `--context-full` are set, the
+        /// default scope is `Summary` (final only). Errors out if
+        /// the flag is set without `--context`.
+        #[arg(long, default_value_t = false)]
+        context_summary: bool,
+        /// Phase J: when `--context <ref>` is set, request a `Full`
+        /// scope (every text-like file under the source). Cap 4 MiB
+        /// per file. Errors out if the flag is set without
+        /// `--context`.
+        #[arg(long, default_value_t = false)]
+        context_full: bool,
     },
     /// Continue a paused or failed run.
     Continue {
         /// Run id (defaults to the most recent run).
         #[arg(long)]
         run_id: Option<String>,
+        /// Phase J: switch the provider mid-run (e.g. `minimax` →
+        /// `mock`). The change is recorded in `provider_changes`
+        /// and on `manifest.json#provider`; the in-flight
+        /// pipeline picks up the new registry on the next phase.
+        #[arg(long)]
+        switch_provider: Option<String>,
+        /// Phase J: switch the API key the providers read at
+        /// startup. Accepted forms:
+        ///   - `env:VAR`     — read env var VAR (e.g. `env:OPENAI_API_KEY`)
+        ///   - `file:path`   — read first line of file (e.g. `file:~/.openai_key`)
+        ///   - literal       — the value itself (least safe; logged with a warning)
+        ///
+        /// Interactive (`prompt:`) is unavailable without
+        /// `dialoguer` and the AGENTS no-go list forbids it; the
+        /// spec calls for `dialoguer` but the runtime restriction
+        /// wins.
+        #[arg(long)]
+        switch_api_key: Option<String>,
+        /// Phase J: skip the resume checkpoint (the "are you sure?"
+        /// gate that prompts before re-running). Records a synthetic
+        /// provider-change event so the skip remains auditable.
+        #[arg(long, default_value_t = false)]
+        skip_checkpoint: bool,
     },
     /// Resume a run mid-phase (continue without switch flags).
     Resume {
@@ -201,9 +253,35 @@ pub enum Cmd {
         /// Source run id.
         #[arg(long)]
         run_id: String,
-        /// Partial JSON matrix of overrides.
+        /// Partial JSON matrix of overrides (deep-merged on top of
+        /// the original `manifest.execution_policy` + `manifest.brief`).
+        /// Alias of `--matrix-override`.
         #[arg(long)]
         override_json: Option<String>,
+        /// Alias of `--override-json`. Preferred name (T01-06 §10.4).
+        #[arg(long, value_name = "JSON")]
+        matrix_override: Option<String>,
+        /// Re-run with the original config (default). When this flag
+        /// is set the original `manifest.execution_policy` is
+        /// carried over verbatim; `--matrix-override` may still
+        /// patch specific fields without rebuilding the whole
+        /// pipeline.
+        #[arg(long, default_value_t = true)]
+        same_config: bool,
+    },
+    /// Import a run directory from another `MOAGAN_HOME` into
+    /// the current one. Phase J (T01-06 §10.6).
+    Import {
+        /// Source directory containing the `manifest.json` of the
+        /// run to import. The `run_id` is read from the manifest;
+        /// the destination is `<MOAGAN_HOME>/.runs/<run_id>`.
+        #[arg(long)]
+        source_path: std::path::PathBuf,
+        /// Optional destination runs directory. It must be the
+        /// current `<MOAGAN_HOME>/.runs` directory so imported runs
+        /// remain addressable by later commands.
+        #[arg(long)]
+        target_runs_dir: Option<std::path::PathBuf>,
     },
     /// Inspect runs.
     Inspect {
@@ -342,6 +420,7 @@ impl Cmd {
             Self::Continue { .. } => "Continue a paused or failed run",
             Self::Resume { .. } => "Resume a run mid-phase",
             Self::Rerun { .. } => "Rerun an existing run with overrides",
+            Self::Import { .. } => "Import a run directory from another MOAGAN_HOME",
             Self::Inspect { .. } => "Inspect runs",
             Self::Refine { .. } => "Re-run the deliver phase for one proposal",
             Self::Rerank { .. } => "Re-run the rank phase on existing evaluations",
@@ -353,10 +432,24 @@ impl Cmd {
     }
 }
 
-/// Dispatch the parsed CLI.
+/// Dispatch the parsed CLI and convert domain errors into process exit codes.
 pub async fn dispatch(cli: Cli) -> Result<i32> {
+    match dispatch_inner(cli).await {
+        Ok(rc) => Ok(rc),
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(e.exit_code() as i32)
+        }
+    }
+}
+
+async fn dispatch_inner(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
+    let global_home = match cli.runs_dir {
+        Some(path) => MoaganHome::at(path),
+        None => MoaganHome::resolve()?,
+    };
     match cli.cmd {
         Cmd::Run {
             mode,
@@ -367,18 +460,40 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             non_interactive,
             max_parallelism,
             no_replace_sources,
+            context,
+            context_summary,
+            context_full,
         } => {
+            // Phase J: validate the `--context-{summary,full}` flags
+            // are only useful with `--context`. Setting them without
+            // `--context` is a silent no-op today; we surface the
+            // mistake as `Error::InvalidArgs` so the operator does
+            // not debug a "missing context" run.
+            if (context_summary || context_full) && context.is_none() {
+                return Err(Error::InvalidArgs(
+                    "--context-summary / --context-full require --context <ref>".into(),
+                ));
+            }
+            let scope = if context_full {
+                crate::context::ContextScope::Full
+            } else if context_summary {
+                crate::context::ContextScope::SummaryFull
+            } else {
+                crate::context::ContextScope::Summary
+            };
             let cfg = Config::load()?;
             let run_id = run::run(
                 run::RunOptions {
                     mode,
                     provider,
                     prompt,
-                    home: runs_dir,
+                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir,
                     non_interactive,
                     max_parallelism,
                     no_replace_sources,
+                    context,
+                    context_scope: scope,
                 },
                 &cfg,
             )
@@ -386,25 +501,56 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             println!("run id: {run_id}");
             Ok(0)
         }
-        Cmd::Continue { run_id } => {
-            let id =
-                run_id.ok_or_else(|| Error::InvalidArgs("--run-id is required in v0.1".into()))?;
+        Cmd::Continue {
+            run_id,
+            switch_provider,
+            switch_api_key,
+            skip_checkpoint,
+        } => {
+            let id = run_id.ok_or_else(|| {
+                Error::InvalidArgs("--run-id is required for `moagan continue`".into())
+            })?;
             let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-            continue_cmd::run_continue(parsed)?;
+            continue_cmd::run_continue(
+                &global_home,
+                parsed,
+                continue_cmd::ContinueOptions {
+                    switch_provider,
+                    switch_api_key,
+                    skip_checkpoint,
+                },
+            )
+            .await?;
             Ok(0)
         }
         Cmd::Resume { run_id } => {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-            continue_cmd::run_resume(parsed)?;
+            continue_cmd::run_resume(&global_home, parsed).await?;
             Ok(0)
         }
-        Cmd::Rerun { run_id, .. } => {
+        Cmd::Rerun {
+            run_id,
+            override_json,
+            matrix_override,
+            same_config: _,
+        } => {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-            continue_cmd::run_rerun(parsed)?;
+            // `--override-json` and `--matrix-override` are aliases;
+            // if both are set, prefer `--matrix-override` (the
+            // spec-blessed name).
+            let raw = matrix_override.or(override_json);
+            continue_cmd::run_rerun(&global_home, parsed, raw).await?;
+            Ok(0)
+        }
+        Cmd::Import {
+            source_path,
+            target_runs_dir,
+        } => {
+            continue_cmd::run_import(&global_home, &source_path, target_runs_dir.as_deref())?;
             Ok(0)
         }
         Cmd::Inspect {
@@ -412,7 +558,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             run_id,
             verbose,
         } => {
-            let home = MoaganHome::resolve()?;
+            let home = &global_home;
             let db = Db::open(&home.meta_db_path())?;
             if let Some(id) = run_id {
                 let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
@@ -443,7 +589,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Cmd::Refine { run_id, proposal } => {
             let cfg = Config::load()?;
-            let home = Arc::new(MoaganHome::resolve()?);
+            let home = Arc::new(global_home.clone());
             continue_cmd::run_refine(
                 run_id
                     .parse()
@@ -458,7 +604,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Cmd::Rerank { run_id } => {
             let cfg = Config::load()?;
-            let home = Arc::new(MoaganHome::resolve()?);
+            let home = Arc::new(global_home.clone());
             continue_cmd::run_rerank(
                 run_id
                     .parse()
@@ -522,7 +668,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                 discover::DiscoverOptions {
                     provider,
                     prompt,
-                    home: runs_dir,
+                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir,
                     cardinality,
                     max_parallelism,

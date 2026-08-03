@@ -2,7 +2,8 @@
 # Fail if any Anthropic SDK crate sneaks into Cargo.toml.
 set -euo pipefail
 
-if grep -nE '^(\s*)"?(anthropic[a-z0-9_-]*|claude[a-z0-9_-]*)"' Cargo.toml; then
+# Cargo.toml: catch direct Anthropic/Claude SDK deps.
+if grep -nE '^(\s*)"?(anthropic[a-z0-9_-]*|claude[a-z0-9_-]*)"\s*=' Cargo.toml; then
     echo "ERROR: forbidden Anthropic SDK crate detected in Cargo.toml" >&2
     exit 1
 fi

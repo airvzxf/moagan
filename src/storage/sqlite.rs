@@ -41,6 +41,13 @@ mod sql_v006 {
     pub(super) const V006: &str = include_str!("migrations/v006_problem_graph.sql");
 }
 
+mod sql_v007 {
+    pub(super) const V007: &str = include_str!("migrations/v007_lineage_context.sql");
+}
+mod sql_v008 {
+    pub(super) const V008: &str = include_str!("migrations/v008_add_ons.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -59,6 +66,62 @@ impl From<SqliteError> for crate::Error {
             SqliteError::Pool(p) => crate::Error::Provider(format!("sqlite pool: {p}")),
         }
     }
+}
+
+/// Apply the v007 lineage-context migration idempotently. Each
+/// `ALTER TABLE` is gated on a `PRAGMA table_info` probe so the
+/// migration is safe to re-run on a DB that already has the
+/// columns (a defensive guard against operator error; the
+/// `user_version` check above normally prevents re-entry).
+fn apply_v007_idempotent(conn: &rusqlite::Connection) -> Result<()> {
+    use rusqlite::params;
+    // runs.shared_brief_hash
+    if !column_exists(conn, "runs", "shared_brief_hash")? {
+        conn.execute("ALTER TABLE runs ADD COLUMN shared_brief_hash TEXT", [])?;
+    }
+    // run_context_refs.context_type
+    if !column_exists(conn, "run_context_refs", "context_type")? {
+        conn.execute(
+            "ALTER TABLE run_context_refs ADD COLUMN context_type TEXT NOT NULL DEFAULT 'path'",
+            params![],
+        )?;
+    }
+    // run_siblings.relation
+    if !column_exists(conn, "run_siblings", "relation")? {
+        conn.execute(
+            "ALTER TABLE run_siblings ADD COLUMN relation TEXT NOT NULL DEFAULT 'rerun'",
+            params![],
+        )?;
+    }
+    // run_siblings.created_unix
+    if !column_exists(conn, "run_siblings", "created_unix")? {
+        conn.execute(
+            "ALTER TABLE run_siblings ADD COLUMN created_unix INTEGER NOT NULL DEFAULT 0",
+            params![],
+        )?;
+    }
+    // v007 also bumps any rows where the v001 column 'relation' was
+    // referenced implicitly (the CHECK constraint carried the
+    // vocabulary 'rerun'|'continue'|'import' but the column did not
+    // exist). v001 has no relation column, so nothing to backfill.
+    let _ = sql_v007::V007;
+    Ok(())
+}
+
+/// True when `column` exists on `table`. Probes via
+/// `PRAGMA table_info(<table>)` which is the canonical SQLite
+/// introspection idiom.
+fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    use rusqlite::params;
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query(params![])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Handle to the meta-database. Cheap to clone.
@@ -104,7 +167,10 @@ impl Db {
         &self.path
     }
 
-    /// Run pending migrations in order.
+    /// Run pending migrations in order. v007 (Phase J lineage) is
+    /// applied idempotently: the runner probes `PRAGMA table_info`
+    /// before each `ALTER TABLE` so a re-opened DB that was already
+    /// at v007 stays at v007 without an "duplicate column" error.
     pub fn run_migrations(&self) -> Result<()> {
         let conn = self.pool.get()?;
         let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -132,10 +198,20 @@ impl Db {
             conn.execute_batch(sql_v006::V006)?;
             conn.execute_batch("PRAGMA user_version = 6;")?;
         }
+        if current < 7 {
+            apply_v007_idempotent(&conn)?;
+            conn.execute_batch("PRAGMA user_version = 7;")?;
+        }
+        if current < 8 {
+            conn.execute_batch(sql_v008::V008)?;
+            conn.execute_batch("PRAGMA user_version = 8;")?;
+        }
         Ok(())
     }
 
     /// Register a new run. Returns the rowid (not used externally).
+    /// `shared_brief_hash` is the Phase J lineage column added in
+    /// migration v007 (NULL before J).
     pub fn register_run(
         &self,
         run_id: RunId,
@@ -143,14 +219,14 @@ impl Db {
         status: &str,
         client_version: &str,
         config_hash: Option<&str>,
-        brief_hash: Option<&str>,
+        shared_brief_hash: Option<&str>,
         parent: Option<RunId>,
     ) -> Result<()> {
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
             "INSERT OR REPLACE INTO runs \
-             (run_id, mode, status, created_unix, updated_unix, schema_version, client_version, parent_run_id, config_hash, brief_hash) \
+             (run_id, mode, status, created_unix, updated_unix, schema_version, client_version, parent_run_id, config_hash, shared_brief_hash) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run_id.to_string(),
@@ -162,7 +238,7 @@ impl Db {
                 client_version,
                 parent.map(|p| p.to_string()),
                 config_hash,
-                brief_hash,
+                shared_brief_hash,
             ],
         )?;
         Ok(())
@@ -330,7 +406,7 @@ impl Db {
     pub fn list_runs(&self, limit: u32) -> Result<Vec<RunRow>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id \
+            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id, shared_brief_hash \
              FROM runs ORDER BY created_unix DESC LIMIT ?",
         )?;
         let rows = stmt
@@ -343,6 +419,7 @@ impl Db {
                     updated_unix: r.get(4)?,
                     client_version: r.get(5)?,
                     parent_run_id: r.get(6)?,
+                    shared_brief_hash: r.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -353,7 +430,7 @@ impl Db {
     pub fn get_run(&self, run_id: RunId) -> Result<Option<RunRow>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id \
+            "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id, shared_brief_hash \
              FROM runs WHERE run_id = ?",
         )?;
         let mut rows = stmt.query_map(params![run_id.to_string()], |r| {
@@ -365,6 +442,7 @@ impl Db {
                 updated_unix: r.get(4)?,
                 client_version: r.get(5)?,
                 parent_run_id: r.get(6)?,
+                shared_brief_hash: r.get(7)?,
             })
         })?;
         match rows.next() {
@@ -637,6 +715,143 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows.into_iter().collect())
+    }
+
+    /// Phase J: mirror a single context reference into the
+    /// `run_context_refs` table. The `context_type` column carries
+    /// `"run_id" | "path" | "dir"` so a post-execution query can
+    /// filter by the kind of ref that fed into the brief.
+    ///
+    /// `INSERT OR REPLACE` keeps the call idempotent: a
+    /// re-registered run with the same `(run_id, source_path)`
+    /// just overwrites the previous row.
+    pub fn add_context_ref(
+        &self,
+        run_id: RunId,
+        record: &crate::context::ContextRefRecord,
+    ) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO run_context_refs \
+             (run_id, source_path, shasum, bytes, added_unix, context_type) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                run_id.to_string(),
+                record.source_path,
+                record.shasum,
+                record.bytes as i64,
+                record.added_unix,
+                record.context_type,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Phase J: link two runs as siblings. `relation` is `"rerun"`,
+    /// `"continue"`, or `"import"` (v007 made the column a real
+    /// TEXT NOT NULL with default `'rerun'`). The function is
+    /// best-effort: `INSERT OR IGNORE` so a repeated call doesn't
+    /// surface as a constraint failure.
+    pub fn add_run_sibling_relation(
+        &self,
+        primary: RunId,
+        sibling: RunId,
+        relation: &str,
+    ) -> Result<()> {
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        conn.execute(
+            "INSERT OR IGNORE INTO run_siblings \
+             (primary_run_id, sibling_run_id, relation, created_unix) \
+             VALUES (?, ?, ?, ?)",
+            params![primary.to_string(), sibling.to_string(), relation, now,],
+        )?;
+        Ok(())
+    }
+
+    /// Phase J: the canonical `runs.parent_run_id` setter.
+    /// `register_run` already writes `parent_run_id` on insert;
+    /// this method is for the cases where the parent is known
+    /// only after the run is created (e.g. `moagan rerun` which
+    /// assigns a fresh `run_id` first and then attaches the
+    /// lineage). `UPDATE` so the change is recorded in-place.
+    pub fn set_run_parent(&self, run_id: RunId, parent: RunId) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE runs SET parent_run_id = ?, updated_unix = ? WHERE run_id = ?",
+            params![
+                parent.to_string(),
+                crate::time::now_unix_secs(),
+                run_id.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Phase J: write `runs.shared_brief_hash` after the intake
+    /// phase finishes computing it. The migration runner added the
+    /// column in v007; the column is TEXT NULL so `None` is the
+    /// pre-J default.
+    pub fn set_shared_brief_hash(&self, run_id: RunId, shared_brief_hash: &str) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE runs SET shared_brief_hash = ?, updated_unix = ? WHERE run_id = ?",
+            params![
+                shared_brief_hash,
+                crate::time::now_unix_secs(),
+                run_id.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Phase J: the most recent phase that ended successfully for
+    /// `run_id`. Returns `None` when the run never recorded a
+    /// phase event, or when every recorded event had a non-`end`
+    /// status. Drives `moagan continue` / `Pipeline::resume` to
+    /// skip the work that already finished.
+    ///
+    /// Tie-break rule: when multiple phases ended at the same
+    /// `started_unix`, canonical pipeline order wins.
+    pub fn last_completed_phase(&self, run_id: RunId) -> Result<Option<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT phase FROM phases \
+             WHERE run_id = ? AND status = 'end' \
+             ORDER BY started_unix DESC, CASE phase \
+                 WHEN 'intake' THEN 0 WHEN 'clarify' THEN 1 WHEN 'route' THEN 2 \
+                 WHEN 'decompose' THEN 3 WHEN 'sketch' THEN 4 WHEN 'propose' THEN 5 \
+                 WHEN 'validate' THEN 6 WHEN 'cluster_proposals' THEN 7 \
+                 WHEN 'synthesize' THEN 8 WHEN 'gate' THEN 9 WHEN 'critique' THEN 10 \
+                 WHEN 'repair' THEN 11 WHEN 'judge' THEN 12 WHEN 'rank' THEN 13 \
+                 WHEN 'deliver' THEN 14 ELSE -1 END DESC \
+             LIMIT 1",
+        )?;
+
+        let mut rows = stmt.query(params![run_id.to_string()])?;
+        if let Some(row) = rows.next()? {
+            let phase: String = row.get(0)?;
+            Ok(Some(phase))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Phase J: every recorded phase that ended successfully for
+    /// `run_id`, ordered by `started_unix` descending. The list
+    /// drives `moagan inspect`'s per-phase progress view and is
+    /// the source for `last_completed_phase`.
+    pub fn list_completed_phases(&self, run_id: RunId) -> Result<Vec<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT phase FROM phases \
+             WHERE run_id = ? AND status = 'end' \
+             ORDER BY started_unix DESC, phase ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id.to_string()], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 }
 
@@ -1031,6 +1246,10 @@ pub struct RunRow {
     pub client_version: String,
     /// Parent run id (if any).
     pub parent_run_id: Option<String>,
+    /// Phase J: SHA-256 of the canonical concatenation of every
+    /// loaded context text (the `shared_brief_hash`). Mirrors the
+    /// `runs.shared_brief_hash` column.
+    pub shared_brief_hash: Option<String>,
 }
 
 /// Derive the `calls.status` enum from the `http_status` and `error`
@@ -1071,6 +1290,302 @@ pub fn call_status(http_status: Option<u16>, error: Option<&str>) -> &'static st
     }
 }
 
+// -----------------------------------------------------------------
+// Sub-fase K row types (D.5.1 subset)
+// -----------------------------------------------------------------
+
+/// One row from the `outbox_events` table (D.1.4). The phase writes
+/// the sidecar first; this row is the outbox mirror.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct OutboxEventRow {
+    /// Run id.
+    pub run_id: String,
+    /// Event type tag (free-form).
+    pub event_type: String,
+    /// Payload (free-form JSON or text).
+    pub payload: String,
+    /// Unix seconds.
+    pub at_unix: i64,
+}
+
+/// One row from the `redact_audit` table (D.8.5). `run_id` is
+/// optional so a pre-pipeline redaction pass can record events that
+/// did not belong to any run.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct RedactAuditRow {
+    /// Run id (optional).
+    pub run_id: Option<String>,
+    /// File path that triggered the redaction.
+    pub source_path: String,
+    /// Pattern kind that fired (e.g. `SkCpApiKey`).
+    pub pattern_kind: String,
+    /// Number of matches in this file.
+    pub match_count: u32,
+    /// Unix seconds.
+    pub at_unix: i64,
+}
+
+/// One row from the `manifest_events` table (D.5.1).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ManifestEventRow {
+    /// Run id.
+    pub run_id: String,
+    /// Event type tag.
+    pub event_type: String,
+    /// Optional details (free-form).
+    pub details: Option<String>,
+    /// Unix seconds.
+    pub at_unix: i64,
+}
+
+/// One row from the `provider_rollups` table (D.5.1).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ProviderRollupRow {
+    /// Provider name.
+    pub provider: String,
+    /// Model name.
+    pub model: String,
+    /// Number of calls recorded.
+    pub calls: u64,
+    /// Input tokens billed.
+    pub input_tokens: u64,
+    /// Output tokens billed.
+    pub output_tokens: u64,
+    /// Number of calls that ended in a non-OK status.
+    pub errors: u64,
+    /// Unix seconds of the last call.
+    pub last_call_unix: Option<i64>,
+}
+
+// -----------------------------------------------------------------
+// Sub-fase K: v008 helpers (D.5.1 subset)
+// -----------------------------------------------------------------
+//
+// Each helper is best-effort against the schema version. On a
+// pre-v008 database the call returns `Ok(default_value)` so a
+// legacy operator never crashes the run on the new code path.
+
+impl Db {
+    /// Probe the live `PRAGMA user_version`. Mirrors the pattern
+    /// `record_problem_graph` uses for v006.
+    fn user_version(&self) -> Result<i64> {
+        let conn = self.pool.get()?;
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        Ok(v)
+    }
+
+    /// Insert a row into `outbox_events` (D.1.4).
+    pub fn record_outbox_event(&self, row: &OutboxEventRow) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO outbox_events (run_id, event_type, payload, at_unix) \
+             VALUES (?, ?, ?, ?)",
+            params![row.run_id, row.event_type, row.payload, row.at_unix],
+        )?;
+        Ok(())
+    }
+
+    /// List every outbox event for a run, oldest first.
+    pub fn list_outbox_events_for_run(&self, run_id: &str) -> Result<Vec<OutboxEventRow>> {
+        if self.user_version()? < 8 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT run_id, event_type, payload, at_unix \
+             FROM outbox_events WHERE run_id = ? ORDER BY at_unix ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                Ok(OutboxEventRow {
+                    run_id: r.get(0)?,
+                    event_type: r.get(1)?,
+                    payload: r.get(2)?,
+                    at_unix: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Insert one row into `redact_audit` (D.8.5).
+    pub fn record_redact_audit(&self, row: &RedactAuditRow) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO redact_audit (run_id, source_path, pattern_kind, match_count, at_unix) \
+             VALUES (?, ?, ?, ?, ?)",
+            params![
+                row.run_id,
+                row.source_path,
+                row.pattern_kind,
+                row.match_count,
+                row.at_unix,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List every redact audit row for a run, oldest first.
+    pub fn list_redact_audit_for_run(&self, run_id: &str) -> Result<Vec<RedactAuditRow>> {
+        if self.user_version()? < 8 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT run_id, source_path, pattern_kind, match_count, at_unix \
+             FROM redact_audit WHERE run_id = ? ORDER BY at_unix ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                Ok(RedactAuditRow {
+                    run_id: r.get(0)?,
+                    source_path: r.get(1)?,
+                    pattern_kind: r.get(2)?,
+                    match_count: r.get(3)?,
+                    at_unix: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Insert one row into `manifest_events` (D.5.1).
+    pub fn record_manifest_event(&self, row: &ManifestEventRow) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO manifest_events (run_id, event_type, details, at_unix) \
+             VALUES (?, ?, ?, ?)",
+            params![row.run_id, row.event_type, row.details, row.at_unix],
+        )?;
+        Ok(())
+    }
+
+    /// Acquire a process-wide lock keyed by `holder` with the given TTL.
+    pub fn acquire_process_lock(&self, holder: &str, ttl_secs: u64, fence: &str) -> Result<bool> {
+        if self.user_version()? < 8 {
+            return Ok(true);
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let expires = now + ttl_secs as i64;
+        conn.execute(
+            "DELETE FROM process_locks WHERE expires_at_unix <= ?",
+            params![now],
+        )?;
+        let current: Option<String> = conn
+            .query_row("SELECT holder FROM process_locks LIMIT 1", [], |r| r.get(0))
+            .ok();
+        match current {
+            None => {
+                conn.execute(
+                    "INSERT INTO process_locks (holder, acquired_at_unix, expires_at_unix, fence) \
+                     VALUES (?, ?, ?, ?)",
+                    params![holder, now, expires, fence],
+                )?;
+                Ok(true)
+            }
+            Some(existing) if existing == holder => {
+                conn.execute(
+                    "UPDATE process_locks SET acquired_at_unix = ?, expires_at_unix = ?, fence = ? \
+                     WHERE holder = ?",
+                    params![now, expires, fence, holder],
+                )?;
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+        }
+    }
+
+    /// Release a process lock owned by `holder`.
+    pub fn release_process_lock(&self, holder: &str) -> Result<bool> {
+        if self.user_version()? < 8 {
+            return Ok(true);
+        }
+        let conn = self.pool.get()?;
+        let deleted = conn.execute(
+            "DELETE FROM process_locks WHERE holder = ?",
+            params![holder],
+        )?;
+        Ok(deleted > 0)
+    }
+
+    /// Increment the cross-run rollup counters for a (provider, model) pair.
+    pub fn increment_provider_rollup(
+        &self,
+        provider: &str,
+        model: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+        is_error: bool,
+    ) -> Result<()> {
+        if self.user_version()? < 8 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let errors_delta: i64 = if is_error { 1 } else { 0 };
+        conn.execute(
+            "INSERT INTO provider_rollups (provider, model, calls, input_tokens, output_tokens, errors, last_call_unix) \
+             VALUES (?, ?, 1, ?, ?, ?, ?) \
+             ON CONFLICT(provider, model) DO UPDATE SET \
+                calls = calls + 1, \
+                input_tokens = input_tokens + excluded.input_tokens, \
+                output_tokens = output_tokens + excluded.output_tokens, \
+                errors = errors + excluded.errors, \
+                last_call_unix = excluded.last_call_unix",
+            params![
+                provider,
+                model,
+                in_tokens as i64,
+                out_tokens as i64,
+                errors_delta,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read the rollup row for one (provider, model) pair.
+    pub fn get_provider_rollup(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Result<Option<ProviderRollupRow>> {
+        if self.user_version()? < 8 {
+            return Ok(None);
+        }
+        let conn = self.pool.get()?;
+        let row = conn
+            .query_row(
+                "SELECT provider, model, calls, input_tokens, output_tokens, errors, last_call_unix \
+                 FROM provider_rollups WHERE provider = ? AND model = ?",
+                params![provider, model],
+                |r| {
+                    Ok(ProviderRollupRow {
+                        provider: r.get(0)?,
+                        model: r.get(1)?,
+                        calls: r.get(2)?,
+                        input_tokens: r.get(3)?,
+                        output_tokens: r.get(4)?,
+                        errors: r.get(5)?,
+                        last_call_unix: r.get(6)?,
+                    })
+                },
+            )
+            .ok();
+        Ok(row)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1091,8 +1606,10 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // v006 added the `problem_graphs` table.
-        assert_eq!(v, 6);
+        // v007 added the lineage + context_refs columns; v008 adds
+        // the five new tables. After both migrations the
+        // user_version is 8.
+        assert_eq!(v, 8);
     }
 
     #[test]
@@ -1472,7 +1989,9 @@ mod tests {
     }
 
     /// Phase G: opening a fresh DB applies the v006 migration
-    /// (the `problem_graphs` table exists and `user_version = 6`).
+    /// (the `problem_graphs` table exists and `user_version >= 6`).
+    /// We assert >= 6 so future migrations (Phase J bumped it to 7)
+    /// do not break this test.
     #[test]
     fn v006_migration_creates_problem_graphs_table() {
         let db = temp_db();
@@ -1480,7 +1999,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert!(version >= 6, "version = {version}");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='problem_graphs'",
@@ -1766,5 +2285,356 @@ mod tests {
         let db = temp_db();
         let rows = db.recent_runs_for_provider("nonexistent", 5).unwrap();
         assert!(rows.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Phase J (v0.3 «tercera etapa», sub-fase J) migration v007 +
+    // lineage helpers.
+    // -----------------------------------------------------------------
+
+    use crate::context::ContextRefRecord;
+
+    fn fake_record(path: &str, kind: &str) -> ContextRefRecord {
+        ContextRefRecord {
+            source_path: path.into(),
+            context_type: kind.into(),
+            shasum: "deadbeef".into(),
+            bytes: 42,
+            added_unix: 1_700_000_000,
+        }
+    }
+
+    /// Migration v007 adds the four columns. We probe
+    /// `PRAGMA table_info` to assert their presence.
+    #[test]
+    fn migration_v007_adds_lineage_columns() {
+        let db = temp_db();
+        let conn = db.pool.get().unwrap();
+        let runs_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('runs')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            runs_cols.iter().any(|c| c == "shared_brief_hash"),
+            "missing runs.shared_brief_hash; got {runs_cols:?}"
+        );
+        let ctx_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('run_context_refs')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            ctx_cols.iter().any(|c| c == "context_type"),
+            "missing run_context_refs.context_type; got {ctx_cols:?}"
+        );
+        let sib_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('run_siblings')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            sib_cols.iter().any(|c| c == "relation"),
+            "missing run_siblings.relation; got {sib_cols:?}"
+        );
+        assert!(
+            sib_cols.iter().any(|c| c == "created_unix"),
+            "missing run_siblings.created_unix; got {sib_cols:?}"
+        );
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        // After both v007 and v008 the user_version is 8.
+        assert!(v >= 7, "version = {v}");
+    }
+
+    /// `add_context_ref` inserts and reads back the same record.
+    /// A second insert with the same `(run_id, source_path)`
+    /// replaces the previous row.
+    #[test]
+    fn add_context_ref_inserts_and_replaces() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.add_context_ref(run_id, &fake_record("/tmp/a.md", "path"))
+            .unwrap();
+        db.add_context_ref(run_id, &fake_record("/tmp/a.md", "dir"))
+            .unwrap();
+        let conn = db.pool.get().unwrap();
+        let (kind, bytes): (String, i64) = conn
+            .query_row(
+                "SELECT context_type, bytes FROM run_context_refs \
+                 WHERE run_id = ? AND source_path = ?",
+                rusqlite::params![run_id.to_string(), "/tmp/a.md"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "dir");
+        assert_eq!(bytes, 42);
+    }
+
+    /// `add_run_sibling_relation` writes the row and `IGNORE`s a
+    /// repeat of the same `(primary, sibling)` pair.
+    #[test]
+    fn add_run_sibling_relation_is_idempotent() {
+        let db = temp_db();
+        let a = RunId::new();
+        let b = RunId::new();
+        db.register_run(a, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.register_run(b, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.add_run_sibling_relation(a, b, "rerun").unwrap();
+        db.add_run_sibling_relation(a, b, "rerun").unwrap();
+        let conn = db.pool.get().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_siblings \
+                 WHERE primary_run_id = ? AND sibling_run_id = ?",
+                rusqlite::params![a.to_string(), b.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// `set_run_parent` updates the column after the run was
+    /// registered without a parent. Useful for `rerun` which mints
+    /// a new run id first and then attaches the lineage.
+    #[test]
+    fn set_run_parent_updates_column() {
+        let db = temp_db();
+        let child = RunId::new();
+        let parent = RunId::new();
+        db.register_run(parent, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.register_run(child, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.set_run_parent(child, parent).unwrap();
+        let row = db.get_run(child).unwrap().unwrap();
+        assert_eq!(
+            row.parent_run_id.as_deref(),
+            Some(parent.to_string().as_str())
+        );
+    }
+
+    /// `set_shared_brief_hash` updates the column.
+    #[test]
+    fn set_shared_brief_hash_updates_column() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.set_shared_brief_hash(run_id, "abc123").unwrap();
+        let conn = db.pool.get().unwrap();
+        let h: String = conn
+            .query_row(
+                "SELECT shared_brief_hash FROM runs WHERE run_id = ?",
+                rusqlite::params![run_id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(h, "abc123");
+    }
+
+    /// `last_completed_phase` returns the most recent phase that
+    /// ended successfully. Earlier errored phases are ignored.
+    #[test]
+    fn last_completed_phase_returns_latest_end() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "standard", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_phase(run_id, "intake", 0, "start", None).unwrap();
+        db.record_phase(run_id, "intake", 0, "end", None).unwrap();
+        db.record_phase(run_id, "clarify", 0, "start", None)
+            .unwrap();
+        db.record_phase(run_id, "clarify", 0, "end", None).unwrap();
+        db.record_phase(run_id, "route", 0, "start", None).unwrap();
+        db.record_phase(run_id, "route", 0, "error", Some("boom"))
+            .unwrap();
+        let last = db.last_completed_phase(run_id).unwrap();
+        assert_eq!(last.as_deref(), Some("clarify"));
+    }
+
+    /// `last_completed_phase` is `None` for a run with no
+    /// recorded phase events.
+    #[test]
+    fn last_completed_phase_none_when_no_end_events() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_phase(run_id, "intake", 0, "start", None).unwrap();
+        assert!(db.last_completed_phase(run_id).unwrap().is_none());
+    }
+
+    /// `list_completed_phases` returns every phase that ended
+    /// successfully, ordered by `started_unix` DESC.
+    #[test]
+    fn list_completed_phases_returns_every_end() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "standard", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_phase(run_id, "intake", 0, "start", None).unwrap();
+        db.record_phase(run_id, "intake", 0, "end", None).unwrap();
+        db.record_phase(run_id, "clarify", 0, "start", None)
+            .unwrap();
+        db.record_phase(run_id, "clarify", 0, "end", None).unwrap();
+        let phases = db.list_completed_phases(run_id).unwrap();
+        assert_eq!(phases, vec!["clarify", "intake"]);
+    }
+
+    // -----------------------------------------------------------------
+    // Sub-fase K: v008 migration + the 5 new tables (D.5.1)
+    // -----------------------------------------------------------------
+
+    /// After `Db::open` the five v008 tables must exist.
+    #[test]
+    fn v008_migration_creates_five_new_tables() {
+        let db = temp_db();
+        let conn = db.pool.get().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 8);
+        for table in [
+            "outbox_events",
+            "redact_audit",
+            "manifest_events",
+            "process_locks",
+            "provider_rollups",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                    params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing table {table}");
+        }
+    }
+
+    /// `record_outbox_event` writes a row that round-trips back.
+    #[test]
+    fn outbox_event_round_trips() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_outbox_event(&crate::storage::sqlite::OutboxEventRow {
+            run_id: run_id.to_string(),
+            event_type: "test".into(),
+            payload: "{}".into(),
+            at_unix: 1_700_000_000,
+        })
+        .unwrap();
+        let rows = db.list_outbox_events_for_run(&run_id.to_string()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_type, "test");
+        assert_eq!(rows[0].payload, "{}");
+    }
+
+    /// `record_redact_audit` writes a row that round-trips back.
+    #[test]
+    fn redact_audit_round_trips() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_redact_audit(&crate::storage::sqlite::RedactAuditRow {
+            run_id: Some(run_id.to_string()),
+            source_path: "/tmp/test.md".into(),
+            pattern_kind: "sk_cp_api_key".into(),
+            match_count: 3,
+            at_unix: 1_700_000_000,
+        })
+        .unwrap();
+        let rows = db.list_redact_audit_for_run(&run_id.to_string()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pattern_kind, "sk_cp_api_key");
+        assert_eq!(rows[0].match_count, 3);
+    }
+
+    /// `record_manifest_event` writes a row that round-trips back.
+    #[test]
+    fn manifest_event_round_trips() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.3.0", None, None, None)
+            .unwrap();
+        db.record_manifest_event(&crate::storage::sqlite::ManifestEventRow {
+            run_id: run_id.to_string(),
+            event_type: "checkpoint".into(),
+            details: Some("intake".into()),
+            at_unix: 1_700_000_000,
+        })
+        .unwrap();
+    }
+
+    /// `acquire_process_lock` returns true once and false while held.
+    #[test]
+    fn process_lock_acquire_and_release() {
+        let db = temp_db();
+        let first = db.acquire_process_lock("owner1", 60, "fence-a").unwrap();
+        assert!(first);
+        let second = db.acquire_process_lock("owner2", 60, "fence-b").unwrap();
+        assert!(!second);
+        let released = db.release_process_lock("owner1").unwrap();
+        assert!(released);
+        let third = db.acquire_process_lock("owner2", 60, "fence-c").unwrap();
+        assert!(third);
+    }
+
+    /// `increment_provider_rollup` aggregates across calls.
+    #[test]
+    fn provider_rollup_increment() {
+        let db = temp_db();
+        db.increment_provider_rollup("minimax", "MiniMax-M3", 100, 50, false)
+            .unwrap();
+        db.increment_provider_rollup("minimax", "MiniMax-M3", 200, 80, true)
+            .unwrap();
+        let row = db
+            .get_provider_rollup("minimax", "MiniMax-M3")
+            .unwrap()
+            .expect("rollup row must exist");
+        assert_eq!(row.calls, 2);
+        assert_eq!(row.input_tokens, 300);
+        assert_eq!(row.output_tokens, 130);
+        assert_eq!(row.errors, 1);
+        assert!(row.last_call_unix.is_some());
+    }
+
+    /// Two different models roll up independently.
+    #[test]
+    fn provider_rollup_select_per_model() {
+        let db = temp_db();
+        db.increment_provider_rollup("minimax", "MiniMax-M3", 10, 5, false)
+            .unwrap();
+        db.increment_provider_rollup("minimax", "M-D", 1, 1, false)
+            .unwrap();
+        let a = db
+            .get_provider_rollup("minimax", "MiniMax-M3")
+            .unwrap()
+            .unwrap();
+        let b = db.get_provider_rollup("minimax", "M-D").unwrap().unwrap();
+        assert_eq!(a.calls, 1);
+        assert_eq!(a.input_tokens, 10);
+        assert_eq!(b.calls, 1);
+        assert_eq!(b.input_tokens, 1);
+        assert!(
+            db.get_provider_rollup("minimax", "unknown")
+                .unwrap()
+                .is_none()
+        );
     }
 }
