@@ -318,6 +318,43 @@ async fn dispatch(
                     .join(format!("run_{}_{}.{}", run_id.short(), level, format));
                 let result: ExportResult =
                     export::export_run(&run_dir, run_id, level, format, &dest).map_err(internal)?;
+                // Stream the binary archive instead of a JSON
+                // summary. The pre-fix code returned the
+                // `result.archive_path` and a `file_count` etc.,
+                // which made the endpoint useless for a browser
+                // (no way to download the file). The `/export-info`
+                // endpoint below preserves the old shape for
+                // backwards-compat consumers.
+                let body = std::fs::read(&result.archive_path).map_err(internal)?;
+                let content_type = match format {
+                    ExportFormat::TarGz => "application/gzip",
+                    ExportFormat::Tar => "application/x-tar",
+                    ExportFormat::Zip => "application/zip",
+                };
+                return Ok(binary_response(200, content_type, body));
+            }
+            Some("export-info") => {
+                // Backwards-compat endpoint: returns the JSON
+                // summary that the `/export` endpoint used to
+                // emit. Useful for callers that want to know
+                // `file_count` / `archive_sha256` without
+                // downloading the whole payload. The new
+                // `/export` returns the binary itself.
+                let level = parse_query_export_level(query).map_err(|e| (400, format!("{e}")))?;
+                let format = parse_query_export_format(query).map_err(|e| (400, format!("{e}")))?;
+                let run_dir = cfg.home.run_dir(run_id);
+                if !run_dir.root().exists() {
+                    return Err((
+                        404,
+                        format!("run dir not found at {}", run_dir.root().display()),
+                    ));
+                }
+                let tmp = tempfile::tempdir().map_err(internal)?;
+                let dest = tmp
+                    .path()
+                    .join(format!("run_{}_{}.{}", run_id.short(), level, format));
+                let result: ExportResult =
+                    export::export_run(&run_dir, run_id, level, format, &dest).map_err(internal)?;
                 let body = serde_json::json!({
                     "archive_path": result.archive_path,
                     "file_count": result.file_count,
@@ -367,6 +404,18 @@ fn plain_text(status: u16, body: &str) -> Response {
     }
 }
 
+/// Build a binary `Response` (no charset). Used by the export
+/// endpoint to stream an `application/gzip` / `application/x-tar`
+/// / `application/zip` payload to the client instead of a JSON
+/// summary.
+fn binary_response(status: u16, content_type: &'static str, body: Vec<u8>) -> Response {
+    Response {
+        status,
+        content_type,
+        body,
+    }
+}
+
 /// Minimal HTML index page that points at the JSON endpoints.
 /// Keeps the dashboard useful even without a separate SPA.
 const DASHBOARD_INDEX: &str = "\
@@ -380,6 +429,7 @@ JSON endpoints:
   GET /api/runs/<id>/provider_usage
   GET /api/runs/<id>/hashes
   GET /api/runs/<id>/export?level=summary|full&format=tar.gz|tar|zip
+  GET /api/runs/<id>/export-info?level=summary|full&format=tar.gz|tar|zip
 ";
 
 /// One row in the per-run hashes endpoint. Pure read-only; the
@@ -756,9 +806,36 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resp.status, 200);
+        // The endpoint must stream a valid gzip stream, not a
+        // JSON summary. The first two bytes are the gzip magic
+        // 0x1f 0x8b; the body must be parseable as a non-empty
+        // tarball.
+        assert_eq!(resp.content_type, "application/gzip");
+        assert!(resp.body.len() > 2, "gzip body too small: {} bytes", resp.body.len());
+        assert_eq!(&resp.body[..2], &[0x1f, 0x8b], "missing gzip magic");
+    }
+
+    #[tokio::test]
+    async fn dispatch_export_info_endpoint_returns_json() {
+        // Backwards-compat: the new `/export-info` endpoint
+        // preserves the old JSON shape for callers that only want
+        // the summary fields (file_count, archive_sha256, ...).
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let id = RunId::new();
+        seed_run(&tmp, id);
+        let resp = dispatch(
+            &format!("/api/runs/{id}/export-info"),
+            "level=summary&format=tar.gz",
+            &cfg,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.content_type, "application/json; charset=utf-8");
         let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
         assert!(v["file_count"].as_u64().unwrap() >= 2);
-        assert!(v["archive_sha256"].as_str().unwrap().len() == 64);
+        assert_eq!(v["archive_sha256"].as_str().unwrap().len(), 64);
     }
 
     #[tokio::test]
