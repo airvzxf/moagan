@@ -100,6 +100,10 @@ pub struct DiscoverOptions {
     pub cluster_threshold: f32,
     /// Output directory for the run. Defaults to MOAGAN_HOME resolution.
     pub out_dir: Option<PathBuf>,
+    /// Non-interactive: every checkpoint is a `<skipped:non_interactive>`
+    /// marker instead of blocking on stdin. Required for CI / smoke
+    /// runs where stdin is not a TTY.
+    pub non_interactive: bool,
 }
 
 /// Run discovery end-to-end. Returns the run id on success.
@@ -151,7 +155,8 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         opts.prompt.clone(),
         "discover".to_owned(),
     )
-    .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs);
+    .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
+    .with_interactive(!opts.non_interactive);
 
     let pipeline = build_discovery_pipeline(&opts);
     let pipeline_future = pipeline.run(&ctx);

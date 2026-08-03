@@ -241,12 +241,23 @@ pub enum Cmd {
         /// provider-change event so the skip remains auditable.
         #[arg(long, default_value_t = false)]
         skip_checkpoint: bool,
+        /// Non-interactive: every checkpoint is a
+        /// `<skipped:non_interactive>` marker instead of blocking
+        /// on stdin. Useful for CI runs that drive `continue` from
+        /// a non-TTY stdin.
+        #[arg(long, default_value_t = false)]
+        non_interactive: bool,
     },
     /// Resume a run mid-phase (continue without switch flags).
     Resume {
         /// Run id.
         #[arg(long)]
         run_id: String,
+        /// Non-interactive: every checkpoint is a
+        /// `<skipped:non_interactive>` marker instead of blocking
+        /// on stdin. Useful for CI runs.
+        #[arg(long, default_value_t = false)]
+        non_interactive: bool,
     },
     /// Rerun an existing run with optional overrides.
     Rerun {
@@ -354,6 +365,12 @@ pub enum Cmd {
         /// SimHash threshold for clustering (0..=1). Default 0.7.
         #[arg(long, default_value_t = 0.7)]
         cluster_threshold: f32,
+        /// Non-interactive: no prompts. Every checkpoint becomes a
+        /// `<skipped:non_interactive>` marker. Required for CI / smoke
+        /// runs where stdin is not a TTY (otherwise `discover` would
+        /// hang on `intake`'s yes/no prompt).
+        #[arg(long, default_value_t = false)]
+        non_interactive: bool,
     },
     /// `moagan telemetry` — read-only inspection, dashboard, export,
     /// verify, and retention. v0.3 sub-fase I (T01-06 §10.7 + §10.8
@@ -506,6 +523,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             switch_provider,
             switch_api_key,
             skip_checkpoint,
+            non_interactive,
         } => {
             let id = run_id.ok_or_else(|| {
                 Error::InvalidArgs("--run-id is required for `moagan continue`".into())
@@ -518,16 +536,20 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     switch_provider,
                     switch_api_key,
                     skip_checkpoint,
+                    non_interactive,
                 },
             )
             .await?;
             Ok(0)
         }
-        Cmd::Resume { run_id } => {
+        Cmd::Resume {
+            run_id,
+            non_interactive,
+        } => {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-            continue_cmd::run_resume(&global_home, parsed).await?;
+            continue_cmd::run_resume(&global_home, parsed, non_interactive).await?;
             Ok(0)
         }
         Cmd::Rerun {
@@ -657,6 +679,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             dimensions,
             facets_per_dimension,
             cluster_threshold,
+            non_interactive,
         } => {
             if cardinality < 80 {
                 return Err(Error::InvalidArgs(format!(
@@ -676,6 +699,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     facets_per_dimension,
                     cluster_threshold,
                     out_dir: None,
+                    non_interactive,
                 },
                 &cfg,
             )
