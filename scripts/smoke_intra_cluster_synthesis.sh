@@ -96,22 +96,22 @@ run_pipeline() {
 # ---------------------------------------------------------------------
 
 run_test "domain_has_SynthesizedProposal" \
-  "grep -q 'pub struct SynthesizedProposal' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct SynthesizedProposal' ${ROOT}/src/domain/mod.rs"
 
 run_test "SynthesizedProposal_has_source_proposals_field" \
-  "grep -A 20 'pub struct SynthesizedProposal' ${ROOT}/src/domain.rs | grep -q 'pub source_proposals'"
+  "grep -A 20 'pub struct SynthesizedProposal' ${ROOT}/src/domain/mod.rs | grep -q 'pub source_proposals'"
 
 run_test "SynthesizedProposal_has_cluster_id_field" \
-  "grep -A 20 'pub struct SynthesizedProposal' ${ROOT}/src/domain.rs | grep -q 'pub cluster_id'"
+  "grep -A 20 'pub struct SynthesizedProposal' ${ROOT}/src/domain/mod.rs | grep -q 'pub cluster_id'"
 
 run_test "SynthesizedProposal_has_synthesis_strategy" \
-  "grep -A 20 'pub struct SynthesizedProposal' ${ROOT}/src/domain.rs | grep -q 'pub synthesis_strategy'"
+  "grep -A 20 'pub struct SynthesizedProposal' ${ROOT}/src/domain/mod.rs | grep -q 'pub synthesis_strategy'"
 
 run_test "SynthesizedProposal_has_summary" \
-  "grep -A 25 'pub struct SynthesizedProposal' ${ROOT}/src/domain.rs | grep -q 'pub summary'"
+  "grep -A 25 'pub struct SynthesizedProposal' ${ROOT}/src/domain/mod.rs | grep -q 'pub summary'"
 
 run_test "SynthesizedProposal_has_approach" \
-  "grep -A 25 'pub struct SynthesizedProposal' ${ROOT}/src/domain.rs | grep -q 'pub approach'"
+  "grep -A 25 'pub struct SynthesizedProposal' ${ROOT}/src/domain/mod.rs | grep -q 'pub approach'"
 
 # ---------------------------------------------------------------------
 # SECTION S2 — Synthesizer prompt (4 tests)

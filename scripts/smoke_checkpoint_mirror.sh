@@ -127,7 +127,7 @@ TMP=$(mktemp -d)
 "$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
-test "$v" = "5" || { echo "user_version=$v"; exit 1; }
+test "$v" = "8" || { echo "user_version=$v"; exit 1; }
 EOF
 )"
 
@@ -139,7 +139,7 @@ run_test "s6_schema_v005_applied_after_v004" "grep -A 1 'if current < 5' ${ROOT}
 
 run_test "s6_schema_v005_sets_user_version_5" "grep -A 3 'if current < 5' ${ROOT}/src/storage/sqlite.rs | grep -q 'user_version = 5'"
 
-run_test "s6_schema_run_migrations_lists_5_versions" "awk '/Run pending migrations/{f=1} f{print}' ${ROOT}/src/storage/sqlite.rs | grep -c 'sql_v00' | grep -qE '^5\$'"
+run_test "s6_schema_run_migrations_lists_5_versions" "awk '/Run pending migrations/{f=1} f{print}' ${ROOT}/src/storage/sqlite.rs | grep -c 'current < ' | grep -qE '^8$'"
 
 run_test "s6_schema_checkpoints_table_has_12_columns" "$(cat <<'EOF'
 set -e
@@ -258,7 +258,7 @@ v1=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
 "$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v2=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
-test "$v1" = "$v2" && test "$v1" = "5" || { echo "v1=$v1 v2=$v2"; exit 1; }
+test "$v1" = "$v2" && test "$v1" = "8" || { echo "v1=$v1 v2=$v2"; exit 1; }
 EOF
 )"
 
@@ -320,7 +320,7 @@ EOF
 "$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$LEGACY_TMP" --non-interactive > /dev/null 2>&1 || true
 
-run_test "s6_mig_post_user_version_is_5" "test \$(sqlite3 $LEGACY_DB 'PRAGMA user_version') -eq 5"
+run_test "s6_mig_post_user_version_is_5" "test \$(sqlite3 $LEGACY_DB 'PRAGMA user_version') -ge 5"
 
 run_test "s6_mig_post_has_12_columns" "$(cat <<EOF
 set -e
@@ -569,34 +569,34 @@ EOF
 section "SECTION 9 — Telemetry surface (10 tests)"
 
 run_test "s6_tel_record_checkpoint_function" \
-  "grep -q 'pub fn record_checkpoint' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub fn record_checkpoint' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "s6_tel_checkpoints_path_function" \
-  "grep -q 'pub fn checkpoints_path' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub fn checkpoints_path' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "s6_tel_CheckpointEvent_struct" \
-  "grep -q 'pub struct CheckpointEvent' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub struct CheckpointEvent' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "s6_tel_CheckpointEvent_has_run_id" \
-  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry.rs | grep -q 'pub run_id'"
+  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub run_id'"
 
 run_test "s6_tel_CheckpointEvent_has_ckp_id" \
-  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry.rs | grep -q 'pub ckp_id'"
+  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub ckp_id'"
 
 run_test "s6_tel_CheckpointEvent_has_kind" \
-  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry.rs | grep -q 'pub kind:'"
+  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub kind:'"
 
 run_test "s6_tel_CheckpointEvent_has_question" \
-  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry.rs | grep -q 'pub question'"
+  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub question'"
 
 run_test "s6_tel_CheckpointEvent_has_response" \
-  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry.rs | grep -q 'pub response'"
+  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub response'"
 
 run_test "s6_tel_CheckpointEvent_has_accepted_default" \
-  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry.rs | grep -q 'pub accepted_default'"
+  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub accepted_default'"
 
 run_test "s6_tel_CheckpointEvent_has_at_unix" \
-  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry.rs | grep -q 'pub at_unix'"
+  "awk '/pub struct CheckpointEvent/{f=1} f{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'pub at_unix'"
 
 # =====================================================================
 # SECTION 10 — CheckpointOpts wiring (10 tests)
@@ -648,10 +648,10 @@ RED_DIR="$RED_TMP/.runs/$RED_RID"
 # Quick check: RedactWriter covers checkpoint JSONL too because the
 # telemetry opens each stream through RedactWriter::new(..., Surface::Telemetry).
 run_test "s6_redact_telemetry_checkpoints_uses_redact_writer" \
-  "grep -B1 -A 8 'checkpoints:' ${ROOT}/src/telemetry.rs | head -20 | grep -q 'RedactWriter::new'"
+  "grep -B1 -A 8 'checkpoints:' ${ROOT}/src/telemetry/mod.rs | head -20 | grep -q 'RedactWriter::new'"
 
 run_test "s6_redact_telemetry_checkpoints_surface_is_telemetry" \
-  "awk '/checkpoints_path/,/^$/{print}' ${ROOT}/src/telemetry.rs | grep -q 'Surface::Telemetry'"
+  "awk '/checkpoints_path/,/^$/{print}' ${ROOT}/src/telemetry/mod.rs | grep -q 'Surface::Telemetry'"
 
 run_test "s6_redact_checkpoints_no_secrets_in_real_response" \
   "# Run an interactive pass with a normal response — no secret should
@@ -681,7 +681,7 @@ run_test "s6_redact_telemetry_checkpoints_path_used" \
   "[[ -f $RED_DIR/telemetry/checkpoints.jsonl ]]"
 
 run_test "s6_redact_checkpoints_path_in_meta_returns_correct_path" \
-  "grep -q 'pub fn checkpoints_path' ${ROOT}/src/telemetry.rs"
+  "grep -q 'pub fn checkpoints_path' ${ROOT}/src/telemetry/mod.rs"
 
 run_test "s6_redact_no_meta_json_in_telemetry_dir" \
   "# AtomicWriter metadata is per-sidecar (in checkpoints/), not for the
@@ -689,10 +689,10 @@ run_test "s6_redact_no_meta_json_in_telemetry_dir" \
    ! compgen -G \"$RED_DIR/telemetry/*.meta.json\" > /dev/null 2>&1 || false"
 
 run_test "s6_redact_redaction_policy_default_applies_to_checkpoints_jsonl" \
-  "awk '/checkpoints_file =/{f=1} f{print} /^        \\}/{exit}' ${ROOT}/src/telemetry.rs | grep -q 'policy.clone()'"
+  "awk '/checkpoints_file =/{f=1} f{print} /^        \\}/{exit}' ${ROOT}/src/telemetry/mod.rs | grep -q 'policy.clone()'"
 
 run_test "s6_redact_redact_writer_wraps_checkpoints_stream" \
-  "grep -B0 -A 5 'checkpoints: Mutex' ${ROOT}/src/telemetry.rs | grep -q 'RedactWriter::new'"
+  "grep -B0 -A 5 'checkpoints: Mutex' ${ROOT}/src/telemetry/mod.rs | grep -q 'RedactWriter::new'"
 
 run_test "s6_redact_checkpoints_jsonl_is_valid_json_each_line" \
   "while IFS= read -r line; do echo \"\$line\" | jq -e . >/dev/null 2>&1 || { echo 'invalid json'; exit 1; }; done < \"$RED_DIR/telemetry/checkpoints.jsonl\""

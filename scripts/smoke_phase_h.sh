@@ -86,10 +86,10 @@ run_test "stability_config_in_config_rs" '
 '
 
 run_test "ranking_stability_fields_in_domain" '
-  grep -q "stability_score" '"$ROOT"'/src/domain.rs
-  grep -q "stability_label" '"$ROOT"'/src/domain.rs
-  grep -q "stability_sigma" '"$ROOT"'/src/domain.rs
-  grep -q "pub enum StabilityLabel" '"$ROOT"'/src/domain.rs
+  grep -q "stability_score" '"$ROOT"'/src/domain/mod.rs
+  grep -q "stability_label" '"$ROOT"'/src/domain/mod.rs
+  grep -q "stability_sigma" '"$ROOT"'/src/domain/mod.rs
+  grep -q "pub enum StabilityLabel" '"$ROOT"'/src/domain/mod.rs
 '
 
 run_test "fs_layout_problem_graph_helper" '

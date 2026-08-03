@@ -90,19 +90,19 @@ run_pipeline() {
 # ---------------------------------------------------------------------
 
 run_test "domain_has_AdversaryReport" \
-  "grep -q 'pub struct AdversaryReport' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs"
 
 run_test "AdversaryReport_has_disagreement_score" \
-  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain.rs | grep -q 'pub disagreement_score'"
+  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs | grep -q 'pub disagreement_score'"
 
 run_test "AdversaryReport_has_score_delta" \
-  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain.rs | grep -q 'pub score_delta'"
+  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs | grep -q 'pub score_delta'"
 
 run_test "AdversaryReport_has_weaknesses" \
-  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain.rs | grep -q 'pub weaknesses'"
+  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs | grep -q 'pub weaknesses'"
 
 run_test "AdversaryReport_has_consensus_check" \
-  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain.rs | grep -q 'pub consensus_check'"
+  "grep -A 25 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs | grep -q 'pub consensus_check'"
 
 # ---------------------------------------------------------------------
 # SECTION A2 — Adversary role + prompt + sampling (5 tests)
@@ -287,10 +287,10 @@ run_test "D12_adversary_call_bounded_by_disagreement_threshold" \
   "grep -A 4 'disagreement_score' ${ROOT}/src/phases/judge.rs | grep -q 'threshold'"
 
 run_test "D13_adversary_report_has_required_fields" \
-  "grep -A 30 'pub struct AdversaryReport' ${ROOT}/src/domain.rs | grep -q 'pub consensus_check'"
+  "grep -A 30 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs | grep -q 'pub consensus_check'"
 
 run_test "D14_adversary_report_score_delta_is_number" \
-  "grep -A 30 'pub struct AdversaryReport' ${ROOT}/src/domain.rs | grep -q 'pub score_delta: f32\\|f64'"
+  "grep -A 30 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs | grep -q 'pub score_delta: f32\\|f64'"
 
 run_test "D15_adversary_only_fires_when_threshold_exceeded" \
   "grep -B 2 -A 6 'disagreement_score' ${ROOT}/src/phases/judge.rs | grep -q 'threshold'"
@@ -303,7 +303,7 @@ run_test "L1_synthesis_can_be_adversary_target" \
   "[[ -d $ADV_DIR/adversaries ]]"
 
 run_test "L2_adversary_target_must_have_required_fields" \
-  "grep -A 30 'pub struct AdversaryReport' ${ROOT}/src/domain.rs | grep -q 'pub proposal_id'"
+  "grep -A 30 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs | grep -q 'pub proposal_id'"
 
 run_test "L3_synthesis_evaluation_has_zero_adversary_delta_when_no_adversary" \
   "jq -e '.adversary_delta == 0' $ADV_DIR/evaluations/s_00.json 2>/dev/null"

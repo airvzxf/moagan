@@ -97,13 +97,13 @@ run_pipeline() {
 # ---------------------------------------------------------------------
 
 run_test "domain_has_HumanCheckpoint" \
-  "grep -q 'pub struct HumanCheckpoint' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct HumanCheckpoint' ${ROOT}/src/domain/mod.rs"
 
 run_test "HumanCheckpoint_has_phase_field" \
-  "grep -A 5 'pub struct HumanCheckpoint' ${ROOT}/src/domain.rs | grep -q 'pub phase'"
+  "grep -A 5 'pub struct HumanCheckpoint' ${ROOT}/src/domain/mod.rs | grep -q 'pub phase'"
 
 run_test "HumanCheckpoint_has_response_field" \
-  "grep -A 12 'pub struct HumanCheckpoint' ${ROOT}/src/domain.rs | grep -q 'pub response'"
+  "grep -A 12 'pub struct HumanCheckpoint' ${ROOT}/src/domain/mod.rs | grep -q 'pub response'"
 
 # ---------------------------------------------------------------------
 # SECTION H2 — Checkpoint module shape (10 tests; from §6)

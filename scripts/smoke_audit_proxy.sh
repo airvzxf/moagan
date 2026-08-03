@@ -44,14 +44,14 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 
-# Resolve the domain source path. K split `src/domain.rs` into
+# Resolve the domain source path. K split `src/domain/mod.rs` into
 # `src/domain/mod.rs`; pre-K branches still carry the flat file.
 # The smoke has domain-type shape checks that need to run on both,
 # so we point at whichever path exists on disk.
 if [[ -f "${ROOT}/src/domain/mod.rs" ]]; then
     DOMAIN_SRC="${ROOT}/src/domain/mod.rs"
 else
-    DOMAIN_SRC="${ROOT}/src/domain.rs"
+    DOMAIN_SRC="${ROOT}/src/domain/mod.rs"
 fi
 export DOMAIN_SRC
 
@@ -193,7 +193,7 @@ run_test "cardinality_zero_dimensions_rejected_or_warns" \
 # was a Phase-B-era pinned assertion that became stale when Phase D
 # added `Synthesizer` and `Adversary` (count is now 16). The same
 # invariant is covered by:
-#   - `src/llm/role.rs:268 fn all_roles_are_count_sixteen()` (cargo test)
+#   - `src/llm/role.rs:268 fn all_roles_are_count_twenty()` (cargo test)
 #   - `scripts/smoke_phase_d.sh:166 role_count_is_sixteen` (cargo grep)
 # ---------------------------------------------------------------------
 

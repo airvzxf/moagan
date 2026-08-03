@@ -16,6 +16,10 @@ checks=(
   'grep -q "Decision table v0.3 patch" "$ROOT/docs/proposal-03-add-ons.md"'
 )
 for check in "${checks[@]}"; do
-  bash -c "$check"
+  # Export ROOT so the subshell inherits it for the inline command.
+  # Without this, single-quoted strings like "$ROOT/src/llm/role.rs"
+  # interpolate as the literal text "$ROOT", which the subshell
+  # cannot resolve and the check fails.
+  env ROOT="$ROOT" bash -c "$check"
 done
 printf '%d smoke checks passed\n' "${#checks[@]}"

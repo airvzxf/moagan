@@ -104,8 +104,8 @@ run_test "int_role_Synthesizer_defined" \
 run_test "int_role_Synthesizer_str_is_synthesizer" \
   "grep -A 1 'Self::Synthesizer =>' ${ROOT}/src/llm/role.rs | grep -q '\"synthesizer\"'"
 
-run_test "int_role_count_is_sixteen" \
-  "grep -q 'all_roles_are_count_sixteen' ${ROOT}/src/llm/role.rs"
+run_test "int_role_count_is_twenty" \
+  "grep -q 'all_roles_are_count_twenty' ${ROOT}/src/llm/role.rs"
 
 run_test "int_role_FromStr_handles_synthesizer" \
   "grep -B 2 -A 30 'fn from_str' ${ROOT}/src/llm/role.rs | grep -q '\"synthesizer\" =>'"
@@ -363,8 +363,8 @@ run_test "guard_no_anthropic_sdk" \
 run_test "guard_no_forbidden_crates" \
   "! grep -E '^secrecy|^axum|^hyper|^sqlx|^governor|^figment|^refinery|^askama|^handlebars|^lettre|^inquire|^time\\b' ${ROOT}/Cargo.toml"
 
-run_test "guard_role_count_is_sixteen" \
-  "grep -q 'all_roles_are_count_sixteen' ${ROOT}/src/llm/role.rs"
+run_test "guard_role_count_is_twenty" \
+  "grep -q 'all_roles_are_count_twenty' ${ROOT}/src/llm/role.rs"
 
 run_test "guard_judge_unit_test_passes" \
   "[[ -f ${ROOT}/src/phases/judge.rs ]] && grep -q 'mod tests' ${ROOT}/src/phases/judge.rs"
@@ -664,7 +664,7 @@ run_test "P6_db_provider_usage_exists" \
   "sqlite3 $P_DB '.tables' | grep -q 'provider_usage' || true"
 
 run_test "P7_db_meta_user_version_5" \
-  "sqlite3 $P_DB 'PRAGMA user_version' | grep -qE '^5$'"
+  "sqlite3 $P_DB 'PRAGMA user_version' | grep -qE '^8$'"
 
 run_test "P8_db_meta_wal_mode" \
   "sqlite3 $P_DB 'PRAGMA journal_mode' | grep -qE 'wal'"
@@ -742,13 +742,13 @@ run_test "S8_adversary_prompt_exists" \
   "[[ -f ${ROOT}/src/llm/prompts/judge_adversary.md ]]"
 
 run_test "S9_synthesized_proposal_in_domain" \
-  "grep -q 'pub struct SynthesizedProposal' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct SynthesizedProposal' ${ROOT}/src/domain/mod.rs"
 
 run_test "S10_adversary_report_in_domain" \
-  "grep -q 'pub struct AdversaryReport' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct AdversaryReport' ${ROOT}/src/domain/mod.rs"
 
 run_test "S11_human_checkpoint_in_domain" \
-  "grep -q 'pub struct HumanCheckpoint' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct HumanCheckpoint' ${ROOT}/src/domain/mod.rs"
 
 run_test "S12_synthesized_dir_path_helper" \
   "grep -q 'fn synthesized' ${ROOT}/src/fs_layout.rs"
