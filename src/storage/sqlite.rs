@@ -362,6 +362,21 @@ impl Db {
         Ok(())
     }
 
+    /// Return the next available `seq` value for a new
+    /// `provider_changes` row. The previous code derived the seq
+    /// from `manifest.phases.len()` which collided when the same
+    /// run issued multiple `continue`/`rerun` actions that each
+    /// recorded a provider change.
+    pub fn next_provider_change_seq(&self, run_id: RunId) -> Result<i64> {
+        let conn = self.pool.get()?;
+        let next: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM provider_changes WHERE run_id = ?",
+            params![run_id.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(next)
+    }
+
     /// Upsert accumulated token usage for a provider+model.
     #[allow(clippy::too_many_arguments)]
     pub fn accumulate_usage(

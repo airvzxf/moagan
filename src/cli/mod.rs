@@ -315,6 +315,12 @@ pub enum Cmd {
         /// Proposal id.
         #[arg(long)]
         proposal: String,
+        /// Mock responses directory. Required when the original run
+        /// used `--provider mock` so the deliver re-run can replay
+        /// the canned responses (the cache layer covers cache hits
+        /// but a cache miss still needs the mock fixtures).
+        #[arg(long)]
+        mock_dir: Option<std::path::PathBuf>,
     },
     /// Re-rank using the current judges and existing proposals.
     Rerank {
@@ -609,7 +615,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Cmd::Refine { run_id, proposal } => {
+        Cmd::Refine {
+            run_id,
+            proposal,
+            mock_dir,
+        } => {
             let cfg = Config::load()?;
             let home = Arc::new(global_home.clone());
             continue_cmd::run_refine(
@@ -619,6 +629,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 &proposal,
                 &cfg,
                 &home,
+                mock_dir.as_deref(),
             )
             .await?;
             println!("refined proposal {proposal} for run {run_id}");
