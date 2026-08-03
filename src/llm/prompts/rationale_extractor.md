@@ -1,0 +1,1 @@
+Return a JSON extraction of the decision rationale, supporting evidence, and assumptions from the supplied material.

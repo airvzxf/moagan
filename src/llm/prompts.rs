@@ -8,6 +8,44 @@ use crate::ids::blake3_hex;
 
 use super::role::Role;
 
+/// Sampling settings registered for an opt-in role.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoleSettings {
+    /// Sampling temperature.
+    pub temperature: f32,
+    /// Nucleus sampling threshold.
+    pub top_p: f32,
+    /// Output token ceiling.
+    pub max_tokens: u32,
+    /// Whether the role requires JSON output.
+    pub json_mode: bool,
+}
+
+/// Return the catalogue settings for a role.
+pub fn role_settings(role: Role) -> Option<RoleSettings> {
+    match role {
+        Role::MergeSynthesizer => Some(RoleSettings {
+            temperature: 0.2,
+            top_p: 0.7,
+            max_tokens: 4000,
+            json_mode: true,
+        }),
+        Role::RecoveryExplainer => Some(RoleSettings {
+            temperature: 0.0,
+            top_p: 0.1,
+            max_tokens: 1000,
+            json_mode: true,
+        }),
+        Role::RationaleExtractor => Some(RoleSettings {
+            temperature: 0.2,
+            top_p: 0.7,
+            max_tokens: 1500,
+            json_mode: true,
+        }),
+        _ => None,
+    }
+}
+
 const INTAKE_PROMPT: &str = include_str!("prompts/intake.md");
 const CLARIFY_PROMPT: &str = include_str!("prompts/clarify.md");
 const ROUTE_PROMPT: &str = include_str!("prompts/route.md");
@@ -26,6 +64,9 @@ const DISCOVER_MATRIX_PROMPT: &str = include_str!("prompts/discover_matrix.md");
 const SYNTHESIZE_PROMPT: &str = include_str!("prompts/synthesize.md");
 const JUDGE_ADVERSARY_PROMPT: &str = include_str!("prompts/judge_adversary.md");
 const DECOMPOSE_PROMPT: &str = include_str!("prompts/decompose.md");
+const MERGE_SYNTHESIZER_PROMPT: &str = include_str!("prompts/merge_synthesizer.md");
+const RECOVERY_EXPLAINER_PROMPT: &str = include_str!("prompts/recovery_explainer.md");
+const RATIONALE_EXTRACTOR_PROMPT: &str = include_str!("prompts/rationale_extractor.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -53,6 +94,9 @@ pub fn prompt_set_hash() -> String {
                 SYNTHESIZE_PROMPT,
                 JUDGE_ADVERSARY_PROMPT,
                 DECOMPOSE_PROMPT,
+                MERGE_SYNTHESIZER_PROMPT,
+                RECOVERY_EXPLAINER_PROMPT,
+                RATIONALE_EXTRACTOR_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -80,6 +124,9 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Synthesizer => SYNTHESIZE_PROMPT,
         Role::Adversary => JUDGE_ADVERSARY_PROMPT,
         Role::Decomposer => DECOMPOSE_PROMPT,
+        Role::MergeSynthesizer => MERGE_SYNTHESIZER_PROMPT,
+        Role::RecoveryExplainer => RECOVERY_EXPLAINER_PROMPT,
+        Role::RationaleExtractor => RATIONALE_EXTRACTOR_PROMPT,
     }
 }
 
@@ -93,6 +140,21 @@ pub fn discover_matrix_system_prompt() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_synthesizer_prompt_file_exists_and_is_non_empty() {
+        assert!(!MERGE_SYNTHESIZER_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn recovery_explainer_prompt_file_exists_and_is_non_empty() {
+        assert!(!RECOVERY_EXPLAINER_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn rationale_extractor_prompt_file_exists_and_is_non_empty() {
+        assert!(!RATIONALE_EXTRACTOR_PROMPT.trim().is_empty());
+    }
 
     #[test]
     fn prompt_set_hash_is_stable() {
