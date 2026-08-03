@@ -659,6 +659,7 @@ pub(crate) async fn resume_pipeline(
         &run_id,
         &manifest.mode,
         status,
+        home,
         &run_dir,
         &default_provider,
         &default_model,

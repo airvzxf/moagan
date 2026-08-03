@@ -374,11 +374,14 @@ pub struct Manifest {
     /// `run_context_refs` table.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_refs: Vec<crate::context::ContextRefRecord>,
-    /// Phase J: filesystem locations the lineage walked through.
-    /// The `relative` map is for human-readable paths
-    /// (`parent_run_dir`, `final`, `sketches`); the `absolute` map
-    /// stores the resolved `PathBuf`s for re-entry. `None` when
-    /// the run had no context.
+    /// Phase M (D.12.16): filesystem locations the lineage walked
+    /// through. Populated from `RunPaths::resolve(home, run_id)` in
+    /// `build_manifest` so every run ships with a typed table of its
+    /// own well-known paths. The `relative` map is for human-readable
+    /// paths (`brief`, `final`, `manifest`, ...); the `absolute`
+    /// map stores the resolved `PathBuf`s for re-entry. `None`
+    /// for runs that pre-date the field (legacy readers parse
+    /// it as `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_paths: Option<LineagePaths>,
     /// D.14.6: the verbatim CLI prompt the user passed to
@@ -396,8 +399,8 @@ pub struct Manifest {
     pub cli_prompt: Option<String>,
 }
 
-/// Phase J lineage path block. Stored as two parallel maps so the
-/// JSON sidecar remains human-readable while the in-memory
+/// Lineage path block. Stored as two parallel maps so the JSON
+/// sidecar remains human-readable while the in-memory
 /// representation keeps `PathBuf` semantics.
 ///
 /// The key type is `String` (not `&'static str`) so the sidecar
@@ -405,16 +408,17 @@ pub struct Manifest {
 /// deserialised because the deserialiser borrows from a `'de`
 /// lifetime, not `'static`. Callers that want a typed label can
 /// use the `well_known` constants below.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineagePaths {
     /// Stable relative labels → on-disk relative paths (e.g.
-    /// `"parent_run_dir" -> "../019f..."`). Used by the dashboard
-    /// to render clickable breadcrumb links.
+    /// `"brief" -> "brief.json"`). Used by the dashboard to render
+    /// clickable breadcrumb links.
     pub relative: std::collections::HashMap<String, String>,
     /// Stable absolute labels → on-disk absolute paths (e.g.
-    /// `"parent_run_dir" -> "/home/wolf/.../019f..."`). Used by
-    /// `moagan rerun` to re-open the parent.
+    /// `"brief" -> "/home/wolf/.../019f.../brief.json"`). Used
+    /// by `moagan rerun` and the inspect surface to re-open the
+    /// parent.
     pub absolute: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
@@ -425,6 +429,17 @@ impl LineagePaths {
     pub const LABEL_FINAL_DIR: &'static str = "final_dir";
     /// Well-known label for the `sketches/` directory of the parent run.
     pub const LABEL_PARENT_SKETCHES: &'static str = "parent_sketches_dir";
+
+    /// Convert a `RunPaths` (from `fs_layout::RunPaths::resolve`,
+    /// sub-fase M's catalog) into a `LineagePaths` suitable for
+    /// the `Manifest.lineage_paths` field. The two structs share
+    /// the same dual-map shape; this adapter keeps them in sync
+    /// after the M sub-fase merged in.
+    pub fn from_run_paths(rp: &crate::fs_layout::RunPaths) -> Self {
+        let relative = rp.relative.clone().into_iter().collect();
+        let absolute = rp.absolute.clone().into_iter().collect();
+        Self { relative, absolute }
+    }
 }
 
 /// One row in `Manifest.phases`.
@@ -1672,5 +1687,52 @@ mod tests {
                 "/tmp/.runs/019f0000-0000-7000-8000-000000000001"
             ))
         );
+    }
+
+    // -- Phase M (D.12.16) — Manifest.lineage_paths populated from RunPaths
+
+    /// A populated `lineage_paths` (built from
+    /// `RunPaths::resolve(...)`) round-trips through serde
+    /// unchanged. Pins that the M populate code (`build_manifest`
+    /// in `src/cli/run.rs`) and the JSON sidecar agree on the
+    /// shape.
+    #[test]
+    fn manifest_with_lineage_paths_round_trips() {
+        use crate::fs_layout::{MoaganHome, RunPaths};
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = MoaganHome::resolve().unwrap();
+        let paths = RunPaths::resolve(&home, RunId::new());
+        let lineage = LineagePaths::from_run_paths(&paths);
+        let m = Manifest {
+            schema_version: "v1".into(),
+            run_id: RunId::new(),
+            mode: "fast".into(),
+            status: "completed".into(),
+            created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+            updated_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+            client_version: "0.3.0".into(),
+            brief_sha256: String::new(),
+            brief_blake3: String::new(),
+            provider: "mock".into(),
+            model: "mock-1".into(),
+            phases: Vec::new(),
+            usage: crate::domain::ManifestUsage::default(),
+            manifest_blake3: String::new(),
+            parent_run_id: None,
+            shared_brief_hash: None,
+            context_refs: Vec::new(),
+            lineage_paths: Some(lineage.clone()),
+            cli_prompt: None,
+        };
+        let j = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&j).unwrap();
+        let lp = back.lineage_paths.expect("lineage_paths preserved");
+        assert_eq!(lp, lineage);
+        // Spot-check the keys.
+        assert!(lp.relative.contains_key("brief"));
+        assert!(lp.absolute.contains_key("final"));
     }
 }

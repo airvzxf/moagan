@@ -17,6 +17,7 @@ pub mod context;
 pub mod discovery;
 pub mod domain;
 pub mod error;
+pub mod error_code;
 pub mod execution;
 pub mod fs_layout;
 pub mod ids;
