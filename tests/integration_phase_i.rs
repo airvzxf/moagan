@@ -534,8 +534,31 @@ async fn dashboard_serves_seeded_run_over_http() {
         &format!("/api/runs/{run_id}/export?level=summary&format=tar.gz"),
     )
     .await;
-    assert!(resp.starts_with("HTTP/1.1 200 OK"));
-    assert!(resp.contains("archive_sha256"));
+    // The pre-fix `/export` returned a JSON summary that included
+    // 'archive_sha256'. The new `/export` streams the binary
+    // archive and `/export-info` returns the JSON. We hit the
+    // latter to keep the same `archive_sha256` shape check.
+    let resp_info = reqwest_get(
+        port,
+        &format!("/api/runs/{run_id}/export-info?level=summary&format=tar.gz"),
+    )
+    .await;
+    assert!(resp_info.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_info.contains("archive_sha256"));
+    // The binary endpoint returns the gzip magic in the body and
+    // 'application/gzip' in the Content-Type header. We can't
+    // pull the raw bytes through the String-returning
+    // 'reqwest_get' helper (it would lossy-decode the gzip
+    // header because 0x8b is not valid UTF-8), so the assertion
+    // is on the response headers only. A separate unit test in
+    // 'src/telemetry/dashboard.rs' validates the body magic via
+    // a Vec<u8>-typed response.
+    assert!(resp.contains("Content-Type: application/gzip"));
+    assert!(resp.contains("HTTP/1.1 200 OK"));
+    assert!(
+        resp.contains("Content-Length: ") && !resp.contains("Content-Length: 0"),
+        "binary export body must be non-empty"
+    );
 
     handle.shutdown().await.unwrap();
 }
