@@ -146,7 +146,7 @@ impl Phase for DiscoverSummaryPhase {
             .count();
 
         let summary = DiscoverySummary {
-            run_id: RunId::default(),
+            run_id: ctx.run_id,
             total_sketches,
             category_count: docs.len(),
             uncategorized_count,
