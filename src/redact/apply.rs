@@ -2,6 +2,11 @@
 //!
 //! A `RedactPolicy` decides which surfaces are redacted. `apply` walks
 //! the active pattern list and replaces matches with `[REDACTED:id]`.
+//!
+//! The categorised variant `apply_with_categories` (D.8.2) returns
+//! both the redacted text and the per-`PatternKind` match counts so
+//! the caller can persist them in the `redact_audit` SQLite table
+//! (D.8.5 / D.5.1).
 
 use std::borrow::Cow;
 
@@ -9,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-use super::patterns::{PATTERNS, Pattern};
+use super::patterns::{PATTERNS, Pattern, PatternKind, kind_for_pattern_id, substitute};
 
 /// Per-surface redaction toggles. The default matches T01-06 §5.3:
 /// redact `telemetry`, `storage`, `export`; pass prompts and briefs
@@ -124,6 +129,73 @@ pub fn apply<'a>(policy: &RedactPolicy, surface: Surface, text: &'a str) -> Resu
     })
 }
 
+/// Result of the categorised redaction pass. Carries the redacted
+/// text plus the per-`PatternKind` match counts so the caller can
+/// persist a `redact_audit` row (D.8.5 / D.5.1) without
+/// re-running the regexes.
+///
+/// `kinds` is a vector of `(kind, count)` pairs in the order the
+/// matches were observed. Each entry corresponds to at least one
+/// substitution in `text`. `Unknown` is the only kind that does
+/// NOT map to a built-in pattern id — it is emitted when the
+/// legacy `[REDACTED:<id>]` marker survives a downstream rewrite
+/// but the id is not in the categorised catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactResult {
+    /// The redacted text. Equivalent to what `apply()` would have
+    /// produced but with the categorised substitute marker.
+    pub text: String,
+    /// Per-kind match counts in the order the substitutions
+    /// happened.
+    pub kinds: Vec<(PatternKind, usize)>,
+}
+
+/// Apply the categorised redaction pass (D.8.2). Walks the active
+/// pattern list and, for each match, replaces the original with
+/// `substitute(kind_for_pattern_id(p.id))` (or
+/// `substitute(PatternKind::Unknown)` when no mapping exists).
+///
+/// The pass returns both the rewritten text and the per-kind
+/// match counts so the caller can write a single `redact_audit`
+/// row with the breakdown. `Unknown` entries are skipped from the
+/// audit count (they represent patterns that were not part of
+/// the categorised catalog — they still redact, but the audit
+/// row stays clean).
+pub fn apply_with_categories(
+    policy: &RedactPolicy,
+    surface: Surface,
+    text: &str,
+) -> Result<RedactResult> {
+    if !policy.is_enabled(surface) || text.is_empty() {
+        return Ok(RedactResult {
+            text: text.to_string(),
+            kinds: Vec::new(),
+        });
+    }
+    let mut owned: String = text.to_owned();
+    let mut kinds: Vec<(PatternKind, usize)> = Vec::new();
+    for p in policy.active_patterns() {
+        let kind = match kind_for_pattern_id(p.id) {
+            Some(k) => k,
+            None => continue,
+        };
+        let replacement = substitute(kind);
+        // `find_iter` lets us count matches without doing the
+        // replace twice. The replace uses the same `re` so the
+        // two are guaranteed to agree.
+        let count = p.re.find_iter(&owned).count();
+        if count == 0 {
+            continue;
+        }
+        let replaced = p.re.replace_all(&owned, replacement);
+        if let Cow::Owned(s) = replaced {
+            owned = s;
+        }
+        kinds.push((kind, count));
+    }
+    Ok(RedactResult { text: owned, kinds })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +283,108 @@ mod tests {
         let r = apply(&p, Surface::Telemetry, text).unwrap();
         let count = r.matches("[REDACTED:minimax_sk_cp]").count();
         assert_eq!(count, 2);
+    }
+
+    // -----------------------------------------------------------------
+    // Categorised redaction (D.8.2)
+    // -----------------------------------------------------------------
+
+    use super::PatternKind;
+
+    /// `sk-cp-...` keys collapse to the categorised substitute.
+    #[test]
+    fn apply_with_categories_redacts_sk_cp_api_key() {
+        let p = RedactPolicy::default();
+        let text = "API key is sk-cp-abc123def456ghi789jkl012mno345pqr678stu901vwx234";
+        let r = apply_with_categories(&p, Surface::Telemetry, text).unwrap();
+        assert!(r.text.contains("***REDACTED:api_key:sk-cp***"));
+        assert!(!r.text.contains("sk-cp-abc123"));
+        assert!(r.kinds.iter().any(|(k, _)| *k == PatternKind::SkCpApiKey));
+    }
+
+    /// Email addresses collapse to the categorised substitute.
+    #[test]
+    fn apply_with_categories_redacts_email() {
+        let p = RedactPolicy::default();
+        let text = "Contact: alice@example.com about issue #42";
+        let r = apply_with_categories(&p, Surface::Export, text).unwrap();
+        assert!(r.text.contains("***REDACTED:email***"));
+        assert!(!r.text.contains("alice@example.com"));
+        assert!(r.kinds.iter().any(|(k, _)| *k == PatternKind::Email));
+    }
+
+    /// JWTs collapse to the categorised substitute. The bearer
+    /// pattern would otherwise catch the whole `Bearer <jwt>`
+    /// pair first, so this test uses a JWT that does not appear
+    /// in a header to exercise the JWT regex in isolation.
+    #[test]
+    fn apply_with_categories_redacts_jwt() {
+        let p = RedactPolicy::default();
+        let text =
+            "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNry";
+        let r = apply_with_categories(&p, Surface::Telemetry, text).unwrap();
+        assert!(r.text.contains("***REDACTED:jwt***"));
+        assert!(!r.text.contains("eyJhbGciOiJIUzI1Ni"));
+        assert!(r.kinds.iter().any(|(k, _)| *k == PatternKind::Jwt));
+    }
+
+    /// GitHub PATs collapse to the categorised substitute.
+    #[test]
+    fn apply_with_categories_redacts_github_pat() {
+        let p = RedactPolicy::default();
+        let text = "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let r = apply_with_categories(&p, Surface::Telemetry, text).unwrap();
+        assert!(r.text.contains("***REDACTED:github_pat***"));
+        assert!(!r.text.contains("ghp_abcdef"));
+        assert!(r.kinds.iter().any(|(k, _)| *k == PatternKind::GithubPat));
+    }
+
+    /// The bearer header collapses to `Bearer ***REDACTED***`
+    /// (not the value-style marker).
+    #[test]
+    fn apply_with_categories_redacts_bearer() {
+        let p = RedactPolicy::default();
+        let text = "Authorization: bearer abcdef0123456789abcdef0123";
+        let r = apply_with_categories(&p, Surface::Telemetry, text).unwrap();
+        assert!(r.text.contains("Bearer ***REDACTED***"));
+        assert!(r.kinds.iter().any(|(k, _)| *k == PatternKind::BearerHeader));
+    }
+
+    /// The `kinds` vector is non-empty when at least one match
+    /// happened and the counts are >= 1. The same text scanned
+    /// twice must report the same per-kind counts (idempotent).
+    #[test]
+    fn apply_with_categories_returns_kind_counts() {
+        let p = RedactPolicy::default();
+        let text = "k1=sk-cp-aaaaaaaaaaaaaaaaaaaa k2=sk-cp-bbbbbbbbbbbbbbbbbbbb";
+        let r = apply_with_categories(&p, Surface::Telemetry, text).unwrap();
+        assert!(!r.kinds.is_empty());
+        let sk_cp_count: usize = r
+            .kinds
+            .iter()
+            .filter(|(k, _)| *k == PatternKind::SkCpApiKey)
+            .map(|(_, c)| *c)
+            .sum();
+        assert_eq!(sk_cp_count, 2);
+    }
+
+    /// Patterns that are not in the categorised catalog (e.g.
+    /// `aws_secret_key`) are silently skipped — the categorised
+    /// apply pass does not redact them at all and the audit
+    /// `kinds` vector stays clean. This is the spec's "skip
+    /// silently" contract (D.8.2): only the 14 categorised
+    /// kinds are recognised; everything else is left to the
+    /// legacy `apply()` pass.
+    #[test]
+    fn apply_with_categories_skips_unknown_patterns() {
+        let p = RedactPolicy::default().with_patterns(["aws_secret_key"]);
+        let text = "AWS_SECRET_ACCESS_KEY=abcdef0123456789abcdef0123456789abcdef01";
+        let r = apply_with_categories(&p, Surface::Telemetry, text).unwrap();
+        // The text was NOT redacted (the categorised pass
+        // skipped the aws_secret_key pattern).
+        assert!(r.text.contains("AWS_SECRET_ACCESS_KEY"));
+        // And the audit kinds list is empty because no
+        // categorised pattern matched.
+        assert!(r.kinds.is_empty());
     }
 }

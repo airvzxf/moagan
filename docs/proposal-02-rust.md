@@ -677,6 +677,47 @@ Cuando `moagan run --mode deep --context run_disc`:
 - Los hashes se anexan al `brief_hash` del nuevo run (campo `shared_brief_hash` en `runs`).
 - En `runs`, `parent_run_id` se setea con el run origen.
 
+#### 3.4.1. Implementación (v0.3 sub-fase J)
+
+El resolver vive en `src/context/resolver.rs` y exporta tres
+tipos / funciones públicas:
+
+- `enum ContextRef { RunId(RunId), FilePath(PathBuf), DirPath(PathBuf) }`
+- `fn resolve_classify(input: &str, home: &MoaganHome) -> Result<ContextRef>`
+  — clasifica el input. UUID v7 primero (parse barato, sin IO);
+  si falla, prueba si es un path que existe. Si no es nada,
+  `Error::InvalidArgs`.
+- `fn resolve(home: &MoaganHome, raw: &str) -> Result<ContextRef>`
+  — además valida que un `RunId` apunte a un directorio
+  `<home>/.runs/<id>/` que existe.
+
+El loader vive en `src/context/loader.rs`:
+
+- `enum ContextScope { Summary | SummaryFull | Full }`
+  (default `Summary`).
+- `fn load_from_run_id(home, run_id, scope) -> Result<LoadedContext>`
+  — scope `Summary` lee `final/*.md`; `SummaryFull` añade
+  `sketches/*.json`; `Full` camina todo el run dir con cap 4 MiB
+  por archivo.
+- `fn load_from_path(path, scope) -> Result<LoadedContext>`
+  — archivo `.md` o directorio caminado recursivamente.
+- `fn compute_shared_brief_hash(texts: &[String]) -> String`
+  — SHA-256 de la concatenación canónica separada por `\x1f`.
+- `fn brief_excerpt(texts, max_chars) -> String` — primer
+  `max_chars` caracteres de la concatenación, con `…` al final si
+  se trunca.
+
+`LoadedContext { parent_run_id, shared_brief_hash, brief_excerpt, context_refs }`
+se pasa al `RunContext` mediante el builder `with_context(...)`. La
+fase `IntakePhase` prepende un bloque `[context]...[/context]`
+al prompt del LLM y estampa el bloque verbatim sobre
+`brief.json#context_block` para que un revisor post-ejecución
+pueda reconstruir el input exacto del modelo.
+
+`--context-summary` y `--context-full` son flags de scope; sin
+`--context` ambos devuelven `Error::InvalidArgs` para evitar el
+foot-gun del no-op silencioso.
+
 ### 3.5. Cadenas de referencia
 
 ```text
@@ -1865,9 +1906,44 @@ pub async fn continue_run(cli: ContinueArgs) -> Result<()> {
 }
 ```
 
+#### 10.2.1. Implementación (v0.3 sub-fase J)
+
+`moagan continue` reemplaza el stub v0.2 con una implementación
+real:
+
+1. Resolver `MOAGAN_HOME` y abrir el SQLite (`Db::open`).
+2. Cargar el `manifest.json` del run vía
+   `continue_cmd::load_manifest`.
+3. Si `--switch-provider <name>` está presente, estampar el
+   cambio sobre `manifest.provider` y registrar una fila en
+   `provider_changes` con la razón `'user --switch-provider'`.
+4. Si `--switch-api-key <spec>` está presente, resolver via
+   `resolve_api_key_spec` (acepta `env:VAR`, `file:path`, o
+   literal; rechaza `prompt:` por la no-go list de AGENTS). El
+   valor resuelto se redacta para stderr (`head***tail`) y se
+   logea el prefijo SHA-256 de 8 chars para auditoría.
+5. Si `--skip-checkpoint` está presente, registrar un evento
+   sintético `checkpoint:skipped` en `provider_changes`.
+6. `Db::last_completed_phase(run_id)` devuelve la última fase
+   con `status='end'`. Si no hay ninguna, `Error::InvalidState`.
+7. `Pipeline::resume(canonical, last_phase)` filtra el pipeline
+   canónico para saltarse las fases cuyo índice canónico sea
+   `<= last_phase`.
+8. Re-correr el pipeline filtrado.
+
+El resultado se persiste en `manifest.json` antes de empezar el
+pipeline (sidecar atómico via `AtomicWriter`).
+
 ### 10.3. `moagan resume`
 
 Igual que `continue` pero sin flags de switch. Asume estado consistente.
+
+#### 10.3.1. Implementación (v0.3 sub-fase J)
+
+`moagan resume <run_id>` se implementa como `run_continue(run_id,
+ContinueOptions::default())` — el mismo camino pero sin los
+flags de switch. Esto evita duplicación: cualquier futura mejora
+a `continue` se aplica automáticamente a `resume`.
 
 ### 10.4. `moagan rerun`
 
@@ -1896,6 +1972,33 @@ pub async fn rerun(cli: RerunArgs) -> Result<()> {
     pipeline.run().await
 }
 ```
+
+#### 10.4.1. Implementación (v0.3 sub-fase J)
+
+`moagan rerun <run_id> [--matrix-override <json>] [--same-config]`:
+
+1. Cargar el manifest del run origen vía
+   `continue_cmd::load_manifest`.
+2. `clone_manifest_for_rerun` clona el manifest con un
+   `run_id` fresco (UUID v7), `parent_run_id = old.run_id`,
+   `status = "created"`, `phases = []`, `usage = default()`.
+3. Si `--matrix-override <json>` está presente, se aplica
+   `merge_value` (deep-merge recursivo de `serde_json::Value`)
+   sobre un target sintético que contiene `brief.problem` y otros
+   placeholders. Esto deja la puerta abierta para un bloque
+   `execution_policy` futuro sin romper el contrato actual.
+4. `write_manifest_to_disk` persiste el manifest atómicamente.
+5. `db.register_run` inserta la fila nueva en `runs` con el
+   `shared_brief_hash` y `parent_run_id` heredados.
+6. `db.add_run_sibling_relation(old, new, "rerun")` enlaza los
+   dos runs via `run_siblings` con `relation = 'rerun'`.
+7. `db.update_run_status(new, "running")` voltea el status.
+8. `resume_pipeline(&home, &new, "intake")` arranca el pipeline
+   desde el principio (rerun no resume; re-ejecuta).
+
+`--override-json` y `--matrix-override` son alias; si ambos
+están presentes, `--matrix-override` gana (es el nombre bendecido
+por el spec).
 
 ### 10.5. `moagan inspect`
 
@@ -1945,6 +2048,30 @@ pub async fn import(cli: ImportArgs) -> Result<()> {
     Ok(())
 }
 ```
+
+#### 10.6.1. Implementación (v0.3 sub-fase J)
+
+`moagan import --source-path <dir> [--target-runs-dir <dir>]`:
+
+1. Validar que `<source>/manifest.json` exista. Si no,
+   `Error::InvalidArgs("source manifest not found at ...")`.
+2. Parsear el manifest vía `serde_json::from_slice`. Esto valida
+   el `run_id` y el resto del contrato.
+3. Resolver el destino: `--target-runs-dir` si se da, si no
+   `<MOAGAN_HOME>/.runs`.
+4. Si el destino ya existe, `Error::InvalidState` (no se
+   sobreescribe — el operador debe hacer `moagan rerun` o borrar
+   primero).
+5. `move_dir` mueve el directorio: `fs::rename` en el mismo
+   filesystem, fallback a `copy_dir_recursive + remove_dir_all`
+   cuando `EXDEV` (cross-device).
+6. `db.register_run` reinserta la fila con `parent_run_id`,
+   `shared_brief_hash`, y demás metadata preservada.
+7. `db.add_context_ref` re-mirror cada `ContextRefRecord` del
+   manifest en la tabla `run_context_refs`.
+
+Resultado: el manifest queda en `<MOAGAN_HOME>/.runs/<id>/` y
+el SQLite index contiene la fila para `moagan inspect`.
 
 ### 10.7. `moagan telemetry`
 
