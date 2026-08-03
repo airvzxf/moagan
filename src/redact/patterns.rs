@@ -6,6 +6,7 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 /// A named pattern with a human-readable replacement marker.
 pub struct Pattern {
@@ -171,6 +172,109 @@ pub fn builtin_patterns() -> Vec<Pattern> {
 /// All built-in patterns, lazily compiled once.
 pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(builtin_patterns);
 
+// -----------------------------------------------------------------
+// Categorised redaction (proposal-03 §D.8.2)
+//
+// The categorised substitute replaces the legacy `[REDACTED:id]`
+// marker with a shorter `***REDACTED:slug***` shape that makes it
+// easier for an operator to grep the redaction log without
+// needing the full pattern id. The enum mirrors the 14 kinds
+// from the spec; `Unknown` is the catch-all the categorised
+// apply pass falls back to when none of the named regexes
+// matched.
+// -----------------------------------------------------------------
+
+/// Categorised patterns the categorised redaction helper
+/// (D.8.2) substitutes in place of the original token. The
+/// serialisation is `snake_case` so the JSON sidecars stay
+/// human-friendly; the underlying SQLite audit row stores the
+/// same string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternKind {
+    /// MiniMax / OpenRouter `sk-cp-...` API key.
+    SkCpApiKey,
+    /// GitHub personal access token (`ghp_...`, `gho_...`,
+    /// `ghu_...`, `ghs_...`).
+    GithubPat,
+    /// AWS access key id (`AKIA...`).
+    AwsAccessKey,
+    /// JWT (`eyJ...`).
+    Jwt,
+    /// `Authorization: Bearer <token>` header.
+    BearerHeader,
+    /// `password=` / `passwd=` / `pwd=` key-value pair.
+    PasswordKv,
+    /// RFC-5322-ish email address.
+    Email,
+    /// Private IPv4 / IPv6 literal.
+    PrivateIp,
+    /// Credit-card-shaped number (Luhn-free heuristic).
+    CreditCard,
+    /// PEM-encoded private key block.
+    PrivateKey,
+    /// Postgres / MySQL / Mongo / Redis / AMQP connection string.
+    ConnString,
+    /// Anthropic API key (`sk-ant-...`).
+    AnthropicApiKey,
+    /// OpenAI API key (`sk-...` 20+).
+    OpenaiApiKey,
+    /// Gemini API key (`AIza...`).
+    GeminiApiKey,
+    /// Catch-all for matches that did not fit any named kind.
+    Unknown,
+}
+
+/// Return the categorised substitute string for `kind`. The
+/// shape mirrors the spec table: `***REDACTED:<slug>***` for
+/// values, `Bearer ***REDACTED***` for the `Authorization`
+/// header so the replacement reads as a complete header value.
+///
+/// Compliance: proposal-03 §D.8.2 (T20-01; T13-09).
+pub fn substitute(kind: PatternKind) -> &'static str {
+    match kind {
+        PatternKind::SkCpApiKey => "***REDACTED:api_key:sk-cp***",
+        PatternKind::GithubPat => "***REDACTED:github_pat***",
+        PatternKind::AwsAccessKey => "***REDACTED:aws_access_key***",
+        PatternKind::Jwt => "***REDACTED:jwt***",
+        PatternKind::BearerHeader => "Bearer ***REDACTED***",
+        PatternKind::PasswordKv => "***REDACTED:password***",
+        PatternKind::Email => "***REDACTED:email***",
+        PatternKind::PrivateIp => "***REDACTED:ip***",
+        PatternKind::CreditCard => "***REDACTED:cc***",
+        PatternKind::PrivateKey => "***REDACTED:private_key***",
+        PatternKind::ConnString => "***REDACTED:connstring***",
+        PatternKind::AnthropicApiKey => "***REDACTED:api_key:sk-ant***",
+        PatternKind::OpenaiApiKey => "***REDACTED:api_key:sk***",
+        PatternKind::GeminiApiKey => "***REDACTED:api_key:AIza***",
+        PatternKind::Unknown => "***REDACTED***",
+    }
+}
+
+/// Map a built-in `Pattern` id to its categorised `PatternKind`.
+/// Returns `None` for ids that are not part of the categorised
+/// catalog (the categorised apply pass skips them silently).
+///
+/// The mapping is intentionally explicit — every entry maps a
+/// legacy `[REDACTED:id]` marker to one of the 14 kinds above.
+pub fn kind_for_pattern_id(id: &str) -> Option<PatternKind> {
+    match id {
+        "minimax_sk_cp" => Some(PatternKind::SkCpApiKey),
+        "openai_key" => Some(PatternKind::OpenaiApiKey),
+        "anthropic_key" => Some(PatternKind::AnthropicApiKey),
+        "gemini_key" => Some(PatternKind::GeminiApiKey),
+        "github_pat" | "github_oauth" | "github_app" => Some(PatternKind::GithubPat),
+        "aws_access_key" => Some(PatternKind::AwsAccessKey),
+        "bearer" => Some(PatternKind::BearerHeader),
+        "jwt" => Some(PatternKind::Jwt),
+        "pem_private_key" => Some(PatternKind::PrivateKey),
+        "ip_v4" => Some(PatternKind::PrivateIp),
+        "credit_card" => Some(PatternKind::CreditCard),
+        "email" => Some(PatternKind::Email),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +403,122 @@ mod tests {
         }
         assert!(!pattern.re.is_match("172.15.0.1"));
         assert!(!pattern.re.is_match("172.32.0.1"));
+    }
+
+    #[test]
+    fn substitute_returns_correct_string_for_each_kind() {
+        assert_eq!(
+            substitute(PatternKind::SkCpApiKey),
+            "***REDACTED:api_key:sk-cp***"
+        );
+        assert_eq!(
+            substitute(PatternKind::GithubPat),
+            "***REDACTED:github_pat***"
+        );
+        assert_eq!(
+            substitute(PatternKind::AwsAccessKey),
+            "***REDACTED:aws_access_key***"
+        );
+        assert_eq!(substitute(PatternKind::Jwt), "***REDACTED:jwt***");
+        assert_eq!(
+            substitute(PatternKind::BearerHeader),
+            "Bearer ***REDACTED***"
+        );
+        assert_eq!(
+            substitute(PatternKind::PasswordKv),
+            "***REDACTED:password***"
+        );
+        assert_eq!(substitute(PatternKind::Email), "***REDACTED:email***");
+        assert_eq!(substitute(PatternKind::PrivateIp), "***REDACTED:ip***");
+        assert_eq!(substitute(PatternKind::CreditCard), "***REDACTED:cc***");
+        assert_eq!(
+            substitute(PatternKind::PrivateKey),
+            "***REDACTED:private_key***"
+        );
+        assert_eq!(
+            substitute(PatternKind::ConnString),
+            "***REDACTED:connstring***"
+        );
+        assert_eq!(
+            substitute(PatternKind::AnthropicApiKey),
+            "***REDACTED:api_key:sk-ant***"
+        );
+        assert_eq!(
+            substitute(PatternKind::OpenaiApiKey),
+            "***REDACTED:api_key:sk***"
+        );
+        assert_eq!(
+            substitute(PatternKind::GeminiApiKey),
+            "***REDACTED:api_key:AIza***"
+        );
+        assert_eq!(substitute(PatternKind::Unknown), "***REDACTED***");
+    }
+
+    /// The serialised form is `snake_case` so the JSON sidecars
+    /// stay human-friendly; the SQL audit row mirrors the same
+    /// string.
+    #[test]
+    fn pattern_kind_serializes_to_snake_case() {
+        let k = PatternKind::SkCpApiKey;
+        let j = serde_json::to_string(&k).unwrap();
+        assert_eq!(j, "\"sk_cp_api_key\"");
+        let back: PatternKind = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, k);
+
+        let k = PatternKind::AwsAccessKey;
+        let j = serde_json::to_string(&k).unwrap();
+        assert_eq!(j, "\"aws_access_key\"");
+    }
+
+    #[test]
+    fn kind_for_pattern_id_maps_known_patterns() {
+        assert_eq!(
+            kind_for_pattern_id("minimax_sk_cp"),
+            Some(PatternKind::SkCpApiKey)
+        );
+        assert_eq!(
+            kind_for_pattern_id("openai_key"),
+            Some(PatternKind::OpenaiApiKey)
+        );
+        assert_eq!(
+            kind_for_pattern_id("anthropic_key"),
+            Some(PatternKind::AnthropicApiKey)
+        );
+        assert_eq!(
+            kind_for_pattern_id("gemini_key"),
+            Some(PatternKind::GeminiApiKey)
+        );
+        assert_eq!(
+            kind_for_pattern_id("github_pat"),
+            Some(PatternKind::GithubPat)
+        );
+        assert_eq!(
+            kind_for_pattern_id("github_oauth"),
+            Some(PatternKind::GithubPat)
+        );
+        assert_eq!(
+            kind_for_pattern_id("github_app"),
+            Some(PatternKind::GithubPat)
+        );
+        assert_eq!(
+            kind_for_pattern_id("aws_access_key"),
+            Some(PatternKind::AwsAccessKey)
+        );
+        assert_eq!(
+            kind_for_pattern_id("bearer"),
+            Some(PatternKind::BearerHeader)
+        );
+        assert_eq!(kind_for_pattern_id("jwt"), Some(PatternKind::Jwt));
+        assert_eq!(
+            kind_for_pattern_id("pem_private_key"),
+            Some(PatternKind::PrivateKey)
+        );
+        assert_eq!(kind_for_pattern_id("ip_v4"), Some(PatternKind::PrivateIp));
+        assert_eq!(
+            kind_for_pattern_id("credit_card"),
+            Some(PatternKind::CreditCard)
+        );
+        assert_eq!(kind_for_pattern_id("email"), Some(PatternKind::Email));
+        assert_eq!(kind_for_pattern_id("unknown_pattern"), None);
     }
 }
