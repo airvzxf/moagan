@@ -123,6 +123,15 @@ pub enum TelemetryCmd {
         #[arg(long)]
         path: std::path::PathBuf,
     },
+    /// `moagan telemetry config` — print the effective configuration
+    /// (providers, parallelism, timeouts, privacy, telemetry level).
+    /// API keys are NEVER printed — they are visible only via the
+    /// `SecretString::expose()` path inside the registry.
+    Config {
+        /// Optional override for `MOAGAN_HOME`.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Export level. Mirrors T01-06 §10.9 + V4 §9.1.
@@ -205,6 +214,7 @@ impl TelemetryCmd {
             Self::Export { .. } => export::run(&self).map(|_| 0),
             Self::Cleanup { .. } => cleanup::run(&self).map(|_| 0),
             Self::Verify { .. } => verify::run(&self).map(|_| 0),
+            Self::Config { .. } => config::run(&self).map(|_| 0),
         }
     }
 
@@ -942,6 +952,86 @@ mod verify {
         } else {
             Ok(())
         }
+    }
+}
+
+mod config {
+    //! `moagan telemetry config` — print the effective configuration.
+    //!
+    //! Mirrors T01-06 §10.7 and V4 §2.7. API keys are NEVER printed;
+    //! the operator can grep the registry code path if they need the
+    //! resolved value.
+    use super::{Result, TelemetryCmd};
+    use crate::config::Config;
+
+    pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
+        let cfg = Config::load()?;
+        println!("=== providers ===");
+        let mut names: Vec<&String> = cfg.providers.keys().collect();
+        names.sort();
+        for name in names {
+            let spec = cfg
+                .providers
+                .get(name)
+                .expect("provider present in same map we just iterated");
+            println!(
+                "{name:20} kind={:10} model={:24} endpoint={}",
+                spec.kind, spec.model, spec.endpoint,
+            );
+        }
+        println!();
+        println!("=== parallelism ===");
+        println!("max_parallelism={}", cfg.max_parallelism);
+        println!();
+        println!("=== timeouts ===");
+        println!(
+            "sketch={}s phase={}s total={}s (0 means infinite)",
+            cfg.sketch_timeout_secs, cfg.phase_timeout_secs, cfg.total_timeout_secs,
+        );
+        println!();
+        println!("=== privacy (redact policy) ===");
+        println!("redact_in_telemetry={}", cfg.redact_in_telemetry);
+        println!();
+        println!("=== stability (Phase H) ===");
+        println!(
+            "enabled={} n_perturbations={} sensitive_threshold={} seed={:#x}",
+            cfg.stability.enabled,
+            cfg.stability.n_perturbations,
+            cfg.stability.sensitive_threshold,
+            cfg.stability.seed,
+        );
+        println!();
+        println!("=== export ===");
+        println!(
+            "format={} compression={}",
+            cfg.export_format, cfg.export_compression
+        );
+        println!();
+        println!("=== gate ===");
+        println!(
+            "min_length={} max_length={}",
+            cfg.gate_min_length, cfg.gate_max_length
+        );
+        println!("forbidden_techs={:?}", cfg.gate_forbidden_techs);
+        println!();
+        println!("=== server (dashboard) ===");
+        println!(
+            "port={} host={} io_timeout_secs={} ensure_home={}",
+            cfg.server.port, cfg.server.host, cfg.server.io_timeout_secs, cfg.server.ensure_home,
+        );
+        println!();
+        println!("=== retention ===");
+        println!(
+            "keep_runs_days={} keep_runs_count={} max_storage_bytes={} policy={}",
+            cfg.retention.keep_runs_days,
+            cfg.retention.keep_runs_count,
+            cfg.retention.max_storage_bytes,
+            cfg.retention.policy,
+        );
+        println!();
+        println!("=== default_provider ===");
+        println!("{}", cfg.default_provider);
+        Ok(())
     }
 }
 
