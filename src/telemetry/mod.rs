@@ -482,6 +482,36 @@ impl Telemetry {
         {
             tracing::warn!(call_id, phase, error = %e, "SQLite call mirror failed");
         }
+        // U1: emit outbox_events + provider_rollups for every real
+        // call (cache hits are skipped so the rollup counts reflect
+        // actual LLM traffic). Both writes are best-effort: a SQLite
+        // failure is logged and never aborts the call. Schema is
+        // v008_add_ons.sql.
+        if let Some(db) = &self.inner.db {
+            if !cache_hit {
+                if let Err(e) = db.record_outbox_event(
+                    &crate::storage::sqlite::OutboxEventRow {
+                        run_id: self.inner.run_id.to_string(),
+                        event_type: "call.completed".into(),
+                        payload: format!(
+                            "{{\"call_id\":\"{call_id}\",\"phase\":\"{phase}\",\"role\":\"{role}\",\"input_tokens\":{input_tokens},\"output_tokens\":{output_tokens}}}"
+                        ),
+                        at_unix: ended_unix,
+                    },
+                ) {
+                    tracing::warn!(call_id, error = %e, "outbox_events write failed");
+                }
+                if let Err(e) = db.increment_provider_rollup(
+                    provider,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    error.is_some(),
+                ) {
+                    tracing::warn!(call_id, error = %e, "provider_rollups write failed");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -549,6 +579,25 @@ impl Telemetry {
             ) {
                 tracing::warn!(code = ev.code, error = %e, "SQLite warning mirror failed");
             }
+            // U1.3: when the message contains a known secret pattern,
+            // mirror the categorised match into redact_audit so the
+            // dashboard's "leaks per run" view can answer without
+            // re-scanning the filesystem. We use the legacy `apply`
+            // (not the categorised pass) because the message is a
+            // single string; the policy already covered it.
+            if let Some(kind) = detect_redact_kind(&ev.message) {
+                if let Err(e) = db.record_redact_audit(
+                    &crate::storage::sqlite::RedactAuditRow {
+                        run_id: Some(self.inner.run_id.to_string()),
+                        source_path: format!("telemetry/warnings.jsonl#{}", ev.code),
+                        pattern_kind: kind.to_string(),
+                        match_count: 1,
+                        at_unix: ev.at_unix_ms / 1000,
+                    },
+                ) {
+                    tracing::warn!(code = ev.code, error = %e, "redact_audit write failed");
+                }
+            }
         }
         Ok(())
     }
@@ -566,6 +615,51 @@ impl Telemetry {
         }
         Ok(())
     }
+}
+
+/// Best-effort pattern kind detector for a single string.
+/// Walks the active pattern set and returns the first match's
+/// `PatternKind` (or `None` if nothing matched). Used by the
+/// `warn` path to populate `redact_audit` without re-running
+/// the categorised pass.
+#[allow(dead_code)]
+fn detect_redact_kind(text: &str) -> Option<&'static str> {
+    use crate::redact::apply::{RedactPolicy, Surface, apply};
+    let policy = RedactPolicy::default();
+    // The fastest possible detection: if the text wasn't redacted
+    // at all under the default policy, it has no secret pattern.
+    if apply(&policy, Surface::Telemetry, text)
+        .ok()
+        .map(|c| matches!(c, std::borrow::Cow::Borrowed(_)))
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    // Match each pattern id and return the first mapped kind.
+    for p in policy.active_patterns() {
+        if p.re.is_match(text) {
+            return Some(match p.id {
+                "minimax_sk_cp" => "sk_cp_api_key",
+                "anthropic_key" => "anthropic_api_key",
+                "openai_key" => "openai_api_key",
+                "gemini_key" => "gemini_api_key",
+                "github_pat" | "github_oauth" | "github_app" => "github_pat",
+                "huggingface_token" => "huggingface_token",
+                "aws_access_key" | "aws_secret_key" => "aws_access_key",
+                "bearer" => "bearer_header",
+                "jwt" => "jwt",
+                "ssh_private_key" | "pem_certificate" => "private_key",
+                "connection_string" => "conn_string",
+                "slack_token" => "slack_token",
+                "credit_card" => "credit_card",
+                "email" => "email",
+                "private_ip" | "ip_v4" => "private_ip",
+                "ssn_like" => "ssn_like",
+                _ => continue,
+            });
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -628,6 +722,143 @@ mod tests {
         t.flush().unwrap();
         let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
         assert!(content.contains("intake"));
+    }
+
+    /// U1: every real (non-cache-hit) LLM call must produce a row in
+    /// `outbox_events` and increment the (provider, model) rollup in
+    /// `provider_rollups`. Cache hits must NOT inflate the rollup.
+    #[test]
+    fn call_emits_outbox_event_and_provider_rollup() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+        let db = Db::open(&home.meta_db_path()).unwrap();
+        db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        let t = Telemetry::open(
+            run_id,
+            &run_dir,
+            RedactPolicy::default(),
+            Some(db.clone()),
+        )
+        .unwrap();
+        // Real call: should write outbox + rollup.
+        t.call(
+            "call-1",
+            "intake",
+            "intake",
+            "minimax",
+            "MiniMax-M3",
+            "ck-1",
+            Some("hash1"),
+            false,
+            Some(200),
+            100,
+            50,
+            0,
+            0,
+            1,
+            2,
+            None,
+        )
+        .unwrap();
+        t.flush().unwrap();
+        let ob_count = db.list_outbox_events_for_run(&run_id.to_string()).unwrap().len();
+        assert_eq!(ob_count, 1, "expected one outbox_events row");
+        // Check the provider rollup via a public read path. The
+        // public surface for rollups is the `provider_usage_for_run`
+        // view per-run; for the global rollup we use a small
+        // public helper below.
+        let rollup = db
+            .get_provider_rollup("minimax", "MiniMax-M3")
+            .unwrap()
+            .expect("rollup must exist");
+        assert_eq!(rollup.calls, 1);
+        assert_eq!(rollup.input_tokens, 100);
+        assert_eq!(rollup.output_tokens, 50);
+
+        // Cache hit: must NOT add another outbox row or rollup tick.
+        t.call(
+            "call-2",
+            "intake",
+            "intake",
+            "minimax",
+            "MiniMax-M3",
+            "ck-2",
+            Some("hash2"),
+            true,
+            Some(200),
+            100,
+            50,
+            0,
+            0,
+            3,
+            4,
+            None,
+        )
+        .unwrap();
+        t.flush().unwrap();
+        let ob_after_hit = db.list_outbox_events_for_run(&run_id.to_string()).unwrap().len();
+        assert_eq!(
+            ob_after_hit, 1,
+            "cache hit must not produce a second outbox row"
+        );
+        let rollup2 = db
+            .get_provider_rollup("minimax", "MiniMax-M3")
+            .unwrap()
+            .expect("rollup must exist");
+        assert_eq!(rollup2.calls, 1, "cache hit must not bump the rollup");
+    }
+
+    /// U1.3: a warning whose message contains a known secret pattern
+    /// must land a row in `redact_audit` with the matching
+    /// `pattern_kind`.
+    #[test]
+    fn warn_writes_redact_audit_row_when_message_contains_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+        let db = Db::open(&home.meta_db_path()).unwrap();
+        db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
+            .unwrap();
+        let t = Telemetry::open(
+            run_id,
+            &run_dir,
+            RedactPolicy::default(),
+            Some(db.clone()),
+        )
+        .unwrap();
+        t.warn(
+            "secret_in_payload",
+            "error",
+            "API key=sk-cp-aaaaaaaaaaaaaaaaaaaa leaked into the prompt",
+            serde_json::Value::Null,
+            WarningContext {
+                phase: Some("intake".into()),
+                role: Some("intake".into()),
+                call_id: Some("call-x".into()),
+                attempt: Some(1),
+            },
+        )
+        .unwrap();
+        t.flush().unwrap();
+        let count = db
+            .list_redact_audit_for_run(&run_id.to_string())
+            .unwrap()
+            .iter()
+            .filter(|r| r.pattern_kind == "sk_cp_api_key")
+            .count();
+        assert_eq!(count, 1, "expected one redact_audit row for sk_cp_api_key");
     }
 
     #[test]
