@@ -162,6 +162,15 @@ pub trait WireTransform: Send + Sync {
 - `Embedder` trait con `HashingEmbedder` (sin deps) y `RemoteEmbedder` (HTTP) (T09-02; T18-09 §7.7; T09-08 §7.7; T03-07 §2054-2060; T06-04 §8.3).
 - Razón: T01-06 §9.5 solo tiene `cluster_simhash`. Ofrecer embeddings como alternativa documentada.
 
+> **Implementación v0.4 — sub-fase K.2 (commit `861c660`).**
+> `src/llm/embed/mod.rs` ships the `Embedder` trait and a
+> dependency-free `HashingEmbedder` (256-dim by default, FNV-1a
+> 32-bit on alphanumeric tokens, L2-normalised, parking_lot::Mutex
+> term-frequency cache). The `RemoteEmbedder` and `fastembed`
+> adapters remain opt-in follow-ups. 13 unit tests pin the
+> deterministic / normalised / cache / similarity / FNV-1a
+> canonical vectors.
+
 #### D.1.4. `src/storage/outbox.rs` (transaccional outbox)
 - Patrón outbox con tabla `outbox_events(id, run_id, kind, payload, attempts, last_error, next_attempt_at, flushed_at)` y worker que vacía cada 5s (T16-06 §1.2; T18-06 §8.2).
 - Razón: T01-06 §2.5 tiene "consistencia eventual" para `phases.jsonl.gz`. El outbox lo hace explícito.
@@ -332,6 +341,20 @@ T01-06 §0.5 tiene 20 filas. Las 23 filas siguientes son **extensiones** (no sus
 ### D.5. §2 SQLite schema (tablas y columnas nuevas)
 
 T01-06 §2.1 tiene 8 tablas. Las siguientes tablas/columnas se **agregan** sin romper nada:
+
+> **Implementación v0.4 — sub-fase K.5 (commit `7696754`).**
+> La migración `v008_add_ons.sql` ships `outbox_events`,
+> `redact_audit`, `manifest_events`, `process_locks`, y
+> `provider_rollups` con los índices exactos del spec. Los helpers
+> en `src/storage/sqlite.rs` (`record_outbox_event`,
+> `list_outbox_events_for_run`, `record_redact_audit`,
+> `list_redact_audit_for_run`, `record_manifest_event`,
+> `acquire_process_lock`, `release_process_lock`,
+> `increment_provider_rollup`, `get_provider_rollup`) son
+> best-effort contra `PRAGMA user_version`: en una DB pre-v008
+> son no-op, así que ningún run existente rompe con el nuevo
+> código. 9 unit tests cubren round-trips, idempotencia, y
+> las semánticas single-row del process lock.
 
 #### D.5.1. Tablas nuevas
 
@@ -784,6 +807,14 @@ ELEVENLABS_API_KEY=[a-f0-9]{32}
 
 (Inspirado en T16-06 §5.5; T20-01 §5.4; T18-06; T13-09 §11.1; T00-10; T00-08.)
 
+**Implementación Moagan (sub-fase L):** implementado en
+`src/redact/patterns.rs` con marcadores estables por patrón y tests
+unitarios de match/no-match para cada patrón nuevo. ElevenLabs usa
+límites de palabra alrededor de los 32 hex para no corromper hashes
+SHA-256 de telemetría. La expresión de IP privada usa alternativas con
+`\b` porque la crate `regex` de Rust no soporta look-around; cubre las
+mismas redes privadas sin consumir caracteres adyacentes.
+
 #### D.8.2. Sustitución por categoría de patrón
 
 ```rust
@@ -807,6 +838,21 @@ pub fn substitute(kind: PatternKind) -> &'static str {
 
 (Inspirado en T20-01; T13-09.)
 
+> **Implementación v0.4 — sub-fase K.7 (commit `6cf6bea`).**
+> `src/redact/patterns.rs` ships el `PatternKind` enum con 14
+> variantes (las 11 del spec + `AnthropicApiKey`, `OpenaiApiKey`,
+> `GeminiApiKey` que faltaban en el listado original, + `Unknown`
+> como catch-all). La función `substitute(kind)` reproduce
+> exactamente los marcadores del spec, con `BearerHeader` devolviendo
+> `Bearer ***REDACTED***` para que el header se lea como valor
+> completo. `apply_with_categories(policy, surface, text)` en
+> `src/redact/apply.rs` recorre los patrones activos y devuelve un
+> `RedactResult { text, kinds: Vec<(PatternKind, usize)> }` listo
+> para persistir en la tabla `redact_audit` (D.8.5 / D.5.1). 5 unit
+> tests cubren cada variante nombrada; los patrones sin mapeo al
+> catálogo categorizado se saltan silenciosamente (la `apply()`
+> legacy sigue cubriéndolos).
+
 #### D.8.3. Redacción en `ReportingLayer` de `tracing`
 
 ```rust
@@ -824,6 +870,13 @@ where Inner: Layer<S>, S: tracing::Subscriber
 ```
 
 (Inspirado en T05-02 §11.4; T19-07 §9.4.)
+
+**Implementación Moagan (sub-fase L):** `ReportingLayer` se integra
+como `MakeWriter` de `tracing_subscriber::fmt::Layer` y envuelve el
+writer con `RedactWriter`. Así se redactan el mensaje, los campos y el
+formato completo antes de escribir bytes al destino. `tracing::Event` es
+inmutable, por lo que el límite de salida es la alternativa segura a
+reconstruir el evento; los tests cubren claves Anthropic y emails.
 
 #### D.8.4. Redacción post-hoc con `moagan telemetry cleanup --redact-rewrite`
 
@@ -861,6 +914,13 @@ std::panic::set_hook(Box::new(|info| {
 ```
 
 (Inspirado en T08-10 §13.)
+
+**Implementación Moagan (sub-fase L):** `src/main.rs` instala el hook
+inmediatamente después de inicializar `tracing`, extrae payloads `&str`
+y `String`, conserva ubicación y aplica la política de redacción de
+telemetría antes de escribir a stderr. El test de integración ejecuta el
+binario real en debug y verifica que una clave Anthropic no aparece en la
+salida.
 
 #### D.8.7. Sanitización de `path` en errores
 
@@ -1023,6 +1083,13 @@ impl CancellationToken {
 - **Force**: run se marca `failed`, no se permite `continue`.
 
 (Inspirado en T01-03 §2.3; T19-07 §9.4.)
+
+**Implementación Moagan (sub-fase L):** `src/cancel.rs` añade
+`CancelTier::{Soft, Normal, Hard}` y `Cancel::cancel_with_tier`. En esta
+fase los tres tiers convergen deliberadamente en el token cooperativo
+existente: no hay todavía un `CancellationContext` ni un registro de
+procesos hijo desde el que enviar SIGTERM equivalente. La limitación
+queda cubierta por el contrato y el test de los tres tiers.
 
 #### D.10.2. Listeners de cancelación
 
@@ -1672,6 +1739,12 @@ impl serde::Serialize for ErrorCode { /* SCREAMING_SNAKE */ }
 
 (Inspirado en T15-01 §14.4; T18-06; T20-03 §14.3; T13-03 §12.4; T14-07 §12.4.)
 
+**Implementación Moagan (sub-fase L):** `src/error.rs` define
+`ExitCode` con discriminantes `repr(i32)` y `Error::exit_code()`. Los
+errores base conservan los códigos 0–8; provider/state/cache usan los
+códigos extendidos del catálogo. `cli::dispatch` convierte los errores a
+un `i32` de salida y mantiene un único mensaje de error en stderr.
+
 #### D.12.15. `PauseReason` tipado
 
 ```rust
@@ -1690,6 +1763,12 @@ pub enum PauseReason {
 ```
 
 (Inspirado en T18-09; T02-03 §2.2; T18-08 §2.1; T20-09 §5.1.)
+
+**Implementación Moagan (sub-fase L):** como el crate usa el módulo
+plano `src/domain.rs` en vez de `src/domain/run.rs`, `PauseReason` vive
+allí y serializa con `snake_case`. `CancelReason` implementa `From` hacia
+el estado de pausa más cercano, incluyendo timeout de fase/total, plan
+exhausted, provider error y user pause.
 
 #### D.12.16. `RunPaths::resolve()` con relative+absolute
 
@@ -3107,6 +3186,20 @@ pub fn apply_budget_pressure(state: &mut RunState, deficit: u64) -> BudgetAction
 | `discovery` | 1 | 1 | 0 | 0 | 1 | 0 |
 
 (Inspirado en T16-06 §2.5.)
+
+> **Implementación v0.4 — sub-fase K.9 (commit `861c660`,
+> agrupado con K.2).** `src/llm/retry_budget.rs` ships
+> `pub enum RetryReason { Transport, RateLimit, Parse, Schema,
+> Timeout, Truncated }`, `pub struct RetryBudget { max_attempts,
+> use_json_repair }`, y la función pura `pub fn budget_for(mode,
+> reason) -> RetryBudget` que reproduce la matriz del spec
+> verbatim. `phase.rs::call_with_retry_parse` mantiene su
+> `n_attempts = 5` hard-coded por ahora; el siguiente paso de
+> integración (sub-fase L o un sub-fase K.10) substituirá la
+> constante por `budget_for(current_mode, current_reason)`. 10
+> unit tests pinea los valores del spec (Deep+Parse=2 con
+> json_repair, Deep+RateLimit=3, Fast=1 siempre, Standard+Parse=1
+> con json_repair, etc.).
 
 #### D.21.7. Quorum de judges por modo (D40)
 

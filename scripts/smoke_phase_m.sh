@@ -135,10 +135,19 @@ run_test "run_paths_resolves_eight_documented_keys" '
 '
 
 run_test "manifest_carries_lineage_paths" '
-  grep -q "pub lineage_paths" '"$ROOT"'/src/domain.rs
-  grep -q "RunPaths" '"$ROOT"'/src/domain.rs
-  grep -q "skip_serializing_if" '"$ROOT"'/src/domain.rs
-  grep -q "Option<.*RunPaths" '"$ROOT"'/src/domain.rs
+  DOMAIN_FILE=""
+  for candidate in '"$ROOT"'/src/domain/mod.rs '"$ROOT"'/src/domain.rs; do
+    if [[ -f "$candidate" ]]; then
+      DOMAIN_FILE="$candidate"
+      break
+    fi
+  done
+  [[ -n "$DOMAIN_FILE" ]] || { echo "no domain module found"; exit 1; }
+  grep -q "pub lineage_paths" "$DOMAIN_FILE"
+  grep -q "RunPaths" "$DOMAIN_FILE"
+  grep -q "skip_serializing_if" "$DOMAIN_FILE"
+  # Either RunPaths or LineagePaths (post-J) should appear in the Option type.
+  grep -qE "Option<(crate::fs_layout::RunPaths|LineagePaths)>" "$DOMAIN_FILE"
 '
 
 run_test "build_manifest_populates_lineage_paths" '

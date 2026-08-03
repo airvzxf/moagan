@@ -131,11 +131,15 @@ impl RunDir<'_> {
         self.root.join("manifest.json")
     }
 
+    /// `overrides.json` — optional rerun matrix override sidecar.
+    pub fn overrides_json_path(&self) -> PathBuf {
+        self.root.join("overrides.json")
+    }
+
     /// `brief.json` — canonical brief produced by intake/clarify.
     pub fn brief(&self) -> PathBuf {
         self.root.join("brief.json")
     }
-
     /// `sketches/` directory — short, opinionated hypotheses emitted
     /// by the `SketchPhase` (v0.2). Empty for `fast` mode.
     pub fn sketches(&self) -> PathBuf {
