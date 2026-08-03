@@ -152,10 +152,11 @@ impl Phase for DiscoverFacetPhase {
                 let user = DiscoverFacetPhase::user_payload(&cluster, &brief);
                 let raw: FacetDerivation = ctx
                     .call_with_retry_parse(
-                        crate::llm::Role::Tagger,
-                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger).to_owned(),
+                        crate::llm::Role::FacetDeriver,
+                        crate::llm::prompts::system_prompt(crate::llm::Role::FacetDeriver)
+                            .to_owned(),
                         user,
-                        crate::llm::prompts::system_prompt(crate::llm::Role::Tagger),
+                        crate::llm::prompts::system_prompt(crate::llm::Role::FacetDeriver),
                         3,
                     )
                     .await

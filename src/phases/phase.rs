@@ -684,6 +684,10 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // Discovery (Plan B sub-phase B). Per docs/v0.2-status.md and
         // proposal-01-concept.md §6.5–§6.10.
         Role::Tagger => 512,
+        // T01-06 §4.2: facet_deriver has a 1024-token budget — larger
+        // than tagger's 512 because the output carries 3-6 facet
+        // triples (name + description + required).
+        Role::FacetDeriver => 1024,
         Role::Extractor => 3000,
         Role::Integrator => 4000,
         // Phase D (Plan B sub-phase D). Synthesizer reuses the
@@ -749,6 +753,9 @@ fn temperature_for_role(role: Role) -> f32 {
         // deterministic; the extractor and integrator balance
         // variance against prose coherence.
         Role::Tagger => 0.0,
+        // FacetDeriver is deterministic for cache stability (the
+        // facet list feeds `sha256(brief + category_id)`).
+        Role::FacetDeriver => 0.0,
         Role::Extractor => 0.4,
         Role::Integrator => 0.4,
         // Phase D: synthesizer balances prose fluency (0.4) against
