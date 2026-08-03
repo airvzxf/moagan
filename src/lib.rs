@@ -13,6 +13,7 @@ pub mod cancel;
 pub mod checkpoint;
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod discovery;
 pub mod domain;
 pub mod error;

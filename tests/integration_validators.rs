@@ -371,6 +371,7 @@ fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Res
         non_goals: vec![],
         acceptance: vec![],
         risks: vec![],
+        context_block: None,
     };
     write_json(&run_dir.brief(), &brief)?;
 
