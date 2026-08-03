@@ -662,7 +662,7 @@ impl CacheScope {
 
 ### D.7. §4 LLM contract (enriquecer schemas y roles)
 
-#### D.7.1. Nuevos roles en `prompts/registry.rs`
+#### D.7.1. Nuevos roles en `prompts/registry.rs` (P — ✅ catálogo registrado)
 
 T01-06 §4.2 tiene 19 roles. Se proponen los siguientes **sin romper los existentes**:
 
@@ -735,7 +735,7 @@ impl Default for Rubric {
 
 (Inspirado en T00-03 §1087-1098; T15-02 §9.3; T05-06; T07-07; T05-09; T00-01 §3.6.)
 
-#### D.7.5. JSONL gzip stream-friendly
+#### D.7.5. JSONL gzip stream-friendly (P — ✅ `compress_or_report` para None/Gz/Zst)
 
 ```rust
 // src/storage/compression.rs (extender)
@@ -876,7 +876,7 @@ IoPath { path: PathBuf, source: std::io::Error },
 
 ### D.9. §6 Parallelism (mejoras)
 
-#### D.9.1. `ParallelismGate` con permisos `acquire_many_owned`
+#### D.9.1. `ParallelismGate` con permisos `acquire_many_owned` (P — ✅ API exacta)
 
 ```rust
 // src/execution/parallelism.rs (extender Parallelism)
@@ -3970,3 +3970,17 @@ El siguiente paso recomendado es **priorizar** las adiciones y aplicar solo las 
 2. **Semana 1**: `SecretString`, `circuit_breaker`, `rate_limiter`, `WireFormat`, `prompt_set_hash`, `tiktoken-rs`.
 3. **Mes 1**: `moagan doctor`, `moagan diff`, `moagan repair`, `moagan validate`, dashboard.html estático, heartbeat + recovery.
 4. **Mes 2+**: cgroup v2, seccomp opt-in, focused continuation, streaming responses, `Embedder` trait con `HashingEmbedder`.
+
+---
+
+## Decision table v0.3 patch
+
+| Patch | Decision |
+|---|---|
+| J | `Pipeline::resume(last_phase)` skips phases up to and including `last_phase`; canonical order comes from `phase_index()`. `rerun` runs the full pipeline from `intake`. |
+| K | `HARD_INCOMPATIBILITIES` is enforced at `SynthesizePhase` only, not at `ProposePhase`, because the proposal catalogue is too coarse for tag-level enforcement. |
+| L | `ReportingLayer` for tracing is best-effort; the inner layer is the source of truth and the dispatcher is invoked in `on_event` after the inner layer forwards. |
+| M | `ErrorCode` is additive on top of `Error`; existing `Error` variants remain and `code()` maps them to a stable public-facing code. |
+| N | `strip_secrets` is applied to args before spawn; stdin redaction is a follow-up. |
+| O | `Rubric` is a reference table; the LLM is not forced to use it and `evaluate_with_rubric` remains opt-in. |
+| P | Three new roles are added to the registry but not wired into any phase; they are opt-in for callers. |
