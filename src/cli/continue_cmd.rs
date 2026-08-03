@@ -46,8 +46,7 @@ pub struct ContinueOptions {
     /// we surface a friendly error when the operator tries.
     pub switch_api_key: Option<String>,
     /// Skip the resume checkpoint (the "are you sure?" gate).
-    /// Records a warning on `manifest.json#warnings` so the skip
-    /// stays auditable.
+    /// Records a synthetic provider-change event for auditability.
     pub skip_checkpoint: bool,
 }
 
@@ -56,12 +55,11 @@ pub struct ContinueOptions {
 /// the manifest's mode, calls `Pipeline::resume(canonical,
 /// last_phase)`, and runs it. Switch flags update the manifest
 /// before the pipeline starts.
-pub async fn run_continue(run_id: RunId, opts: ContinueOptions) -> Result<()> {
-    let home = MoaganHome::resolve()?;
+pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOptions) -> Result<()> {
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
-    let manifest = load_manifest(&home, run_id)?;
-    let manifest = apply_continue_options(&home, manifest, &opts, &db)?;
+    let manifest = load_manifest(home, run_id)?;
+    let (manifest, api_key) = apply_continue_options(home, manifest, &opts, &db)?;
 
     let last_phase = db.last_completed_phase(run_id)?.ok_or_else(|| {
         Error::InvalidState(format!(
@@ -72,14 +70,14 @@ pub async fn run_continue(run_id: RunId, opts: ContinueOptions) -> Result<()> {
         "moagan continue {}: resuming after phase {last_phase:?}",
         run_id.short()
     );
-    resume_pipeline(&home, &manifest, &last_phase).await?;
+    resume_pipeline(home, &manifest, &last_phase, api_key.as_deref()).await?;
     Ok(())
 }
 
 /// `moagan resume <run_id>` — same as `continue` but without the
 /// switch flags. Always errors when `last_phase` is `None`.
-pub async fn run_resume(run_id: RunId) -> Result<()> {
-    run_continue(run_id, ContinueOptions::default()).await
+pub async fn run_resume(home: &MoaganHome, run_id: RunId) -> Result<()> {
+    run_continue(home, run_id, ContinueOptions::default()).await
 }
 
 /// `moagan rerun <run_id> [--matrix-override <json>] [--same-config]` —
@@ -90,8 +88,12 @@ pub async fn run_resume(run_id: RunId) -> Result<()> {
 /// `--matrix-override` JSON is folded into the cloned manifest
 /// before the pipeline runs. Returns the new run id on stdout so
 /// callers can chain follow-ups.
-pub async fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result<()> {
-    let home = Arc::new(MoaganHome::resolve()?);
+pub async fn run_rerun(
+    home: &MoaganHome,
+    run_id: RunId,
+    matrix_override: Option<String>,
+) -> Result<()> {
+    let home = Arc::new(home.clone());
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
     let old_manifest = load_manifest(&home, run_id)?;
@@ -177,6 +179,7 @@ pub async fn run_rerun(run_id: RunId, matrix_override: Option<String>) -> Result
         new_manifest,
         raw_prompt,
         context_block,
+        None,
     )
     .await?;
     println!(
@@ -245,6 +248,12 @@ pub fn run_import(
         Some(d) => d.to_path_buf(),
         None => home.runs_dir(),
     };
+    if target_runs != home.runs_dir() {
+        return Err(Error::InvalidArgs(format!(
+            "target runs directory must be {} so imported runs remain addressable",
+            home.runs_dir().display()
+        )));
+    }
     let dest = target_runs.join(manifest.run_id.to_string());
     if dest.exists() {
         return Err(Error::InvalidState(format!(
@@ -466,7 +475,12 @@ pub(crate) fn apply_continue_options(
     mut manifest: Manifest,
     opts: &ContinueOptions,
     db: &Db,
-) -> Result<Manifest> {
+) -> Result<(Manifest, Option<String>)> {
+    let api_key = opts
+        .switch_api_key
+        .as_deref()
+        .map(resolve_api_key_spec)
+        .transpose()?;
     if let Some(provider) = opts.switch_provider.as_deref() {
         // The CLI flag controls the in-memory provider, but the
         // actual registry still comes from the Config file. We
@@ -486,17 +500,14 @@ pub(crate) fn apply_continue_options(
             eprintln!("warn: failed to record provider change: {e}");
         }
     }
-    if let Some(spec) = opts.switch_api_key.as_deref() {
-        // Resolve `env:VAR` or `file:path`; interactive is
-        // unavailable without dialoguer and the AGENTS no-go list
-        // forbids it. A literal is accepted as-is but logged with
-        // a warning.
-        let value = resolve_api_key_spec(spec)?;
-        let redacted = redact_api_key(&value);
+    if let Some(value) = api_key.as_deref() {
+        let redacted = redact_api_key(value);
         eprintln!("moagan continue: api key redaction: {redacted}");
-        // No field on Manifest carries the api key directly;
-        // record the change on the provider_changes table for
-        // auditability.
+        let source = opts
+            .switch_api_key
+            .as_deref()
+            .map(api_key_source)
+            .unwrap_or("unknown");
         if let Err(e) = db.record_provider_change(
             manifest.run_id,
             (manifest.phases.len() as i64) + 1,
@@ -504,18 +515,14 @@ pub(crate) fn apply_continue_options(
             None,
             &manifest.provider,
             Some(&format!(
-                "api_key:spec={spec}, sha256_of_secret={}",
-                short_sha256(&value)
+                "api_key:source={source}, sha256_of_secret={}",
+                short_sha256(value)
             )),
         ) {
             eprintln!("warn: failed to record api-key change: {e}");
         }
     }
     if opts.skip_checkpoint {
-        // Phase J: append a structured warning so the operator can
-        // audit the skip later. The Manifest has no `warnings`
-        // field today; we surface the skip via stderr AND via the
-        // provider_changes timeline as a synthetic event.
         eprintln!("moagan continue: --skip-checkpoint set; resuming without human pause");
         if let Err(e) = db.record_provider_change(
             manifest.run_id,
@@ -529,7 +536,7 @@ pub(crate) fn apply_continue_options(
         }
     }
     write_manifest_to_disk(home, &manifest)?;
-    Ok(manifest)
+    Ok((manifest, api_key))
 }
 
 /// `moagan rerun` — clone the source manifest with a fresh
@@ -599,6 +606,7 @@ pub(crate) async fn resume_pipeline(
     home: &MoaganHome,
     manifest: &Manifest,
     last_phase: &str,
+    api_key: Option<&str>,
 ) -> Result<()> {
     let mode = parse_mode(&manifest.mode)?;
     let cfg = Config::load().unwrap_or_default();
@@ -615,10 +623,11 @@ pub(crate) async fn resume_pipeline(
     } else {
         manifest.provider.clone()
     };
-    let providers = Arc::new(super::run::build_registry_for(
+    let providers = Arc::new(super::run::build_registry_for_with_api_key(
         &cfg,
         &default_provider,
         None,
+        api_key,
     )?);
     let default_model = cfg
         .provider(&default_provider)
@@ -632,8 +641,8 @@ pub(crate) async fn resume_pipeline(
         run_id,
         Arc::new(home.clone()),
         providers,
-        default_provider,
-        default_model,
+        default_provider.clone(),
+        default_model.clone(),
         parallelism,
         telemetry.clone(),
         String::new(),
@@ -641,14 +650,29 @@ pub(crate) async fn resume_pipeline(
     );
     let outcome = resumed.run(&ctx).await;
     telemetry.flush()?;
-    if let Err(e) = &outcome {
-        eprintln!("moagan resume: pipeline failed: {e}");
-    }
-    if let Err(e) = db.update_run_status(run_id, "completed") {
+    let status = if outcome.is_ok() {
+        "completed"
+    } else {
+        "failed"
+    };
+    let mut rebuilt = super::run::build_manifest(
+        &run_id,
+        &manifest.mode,
+        status,
+        &run_dir,
+        &default_provider,
+        &default_model,
+    )?;
+    rebuilt.parent_run_id = manifest.parent_run_id;
+    rebuilt.shared_brief_hash = manifest.shared_brief_hash.clone();
+    rebuilt.context_refs = manifest.context_refs.clone();
+    rebuilt.lineage_paths = manifest.lineage_paths.clone();
+    rebuilt.cli_prompt = manifest.cli_prompt.clone();
+    write_manifest_to_disk(home, &rebuilt)?;
+    if let Err(e) = db.update_run_status(run_id, status) {
         eprintln!("warn: failed to update run status: {e}");
     }
-    outcome?;
-    Ok(())
+    outcome.map(|_| ())
 }
 
 /// Build the canonical pipeline for `mode`. Mirrors
@@ -693,6 +717,16 @@ fn resolve_api_key_spec(spec: &str) -> Result<String> {
         ));
     }
     Ok(spec.to_string())
+}
+
+fn api_key_source(spec: &str) -> &'static str {
+    if spec.starts_with("env:") {
+        "env"
+    } else if spec.starts_with("file:") {
+        "file"
+    } else {
+        "literal"
+    }
 }
 
 /// Redact an API key for stderr: keep the first 4 + last 2 chars,

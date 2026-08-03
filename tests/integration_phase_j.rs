@@ -448,6 +448,7 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
         stub,
         parent_manifest.cli_prompt.clone().unwrap_or_default(),
         None,
+        None,
     )
     .await?;
 

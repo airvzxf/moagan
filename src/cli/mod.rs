@@ -237,9 +237,8 @@ pub enum Cmd {
         #[arg(long)]
         switch_api_key: Option<String>,
         /// Phase J: skip the resume checkpoint (the "are you sure?"
-        /// gate that prompts before re-running). Records a warning
-        /// on `manifest.json#warnings` so the operator can audit
-        /// the skip later.
+        /// gate that prompts before re-running). Records a synthetic
+        /// provider-change event so the skip remains auditable.
         #[arg(long, default_value_t = false)]
         skip_checkpoint: bool,
     },
@@ -278,8 +277,9 @@ pub enum Cmd {
         /// the destination is `<MOAGAN_HOME>/.runs/<run_id>`.
         #[arg(long)]
         source_path: std::path::PathBuf,
-        /// Optional override for the destination `runs` directory.
-        /// Defaults to the current `MOAGAN_HOME/.runs`.
+        /// Optional destination runs directory. It must be the
+        /// current `<MOAGAN_HOME>/.runs` directory so imported runs
+        /// remain addressable by later commands.
         #[arg(long)]
         target_runs_dir: Option<std::path::PathBuf>,
     },
@@ -434,22 +434,11 @@ impl Cmd {
 
 /// Dispatch the parsed CLI.
 pub async fn dispatch(cli: Cli) -> Result<i32> {
-    // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
-    // D.14.5: when the global `--runs-dir` is set, mirror it into the
-    // `MOAGAN_HOME` env var so every subcommand that calls
-    // `MoaganHome::resolve()` (continue, resume, rerun, refine,
-    // rerank, inspect, import) reads the same override. Setting the
-    // env var at the top of `dispatch` is the single chokepoint and
-    // avoids threading an explicit `home` parameter through every
-    // subcommand handler in `continue_cmd.rs`. The env var is the
-    // source of truth for `MoaganHome::resolve()` already; clap only
-    // accepts the flag as a CLI-level convenience.
-    if let Some(ref runs_dir) = cli.runs_dir {
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", runs_dir);
-        }
-    }
+    let global_home = match cli.runs_dir {
+        Some(path) => MoaganHome::at(path),
+        None => MoaganHome::resolve()?,
+    };
     match cli.cmd {
         Cmd::Run {
             mode,
@@ -487,7 +476,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                     mode,
                     provider,
                     prompt,
-                    home: runs_dir,
+                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir,
                     non_interactive,
                     max_parallelism,
@@ -512,6 +501,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             })?;
             let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
             continue_cmd::run_continue(
+                &global_home,
                 parsed,
                 continue_cmd::ContinueOptions {
                     switch_provider,
@@ -526,7 +516,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-            continue_cmd::run_resume(parsed).await?;
+            continue_cmd::run_resume(&global_home, parsed).await?;
             Ok(0)
         }
         Cmd::Rerun {
@@ -542,15 +532,14 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             // if both are set, prefer `--matrix-override` (the
             // spec-blessed name).
             let raw = matrix_override.or(override_json);
-            continue_cmd::run_rerun(parsed, raw).await?;
+            continue_cmd::run_rerun(&global_home, parsed, raw).await?;
             Ok(0)
         }
         Cmd::Import {
             source_path,
             target_runs_dir,
         } => {
-            let home = crate::fs_layout::MoaganHome::resolve()?;
-            continue_cmd::run_import(&home, &source_path, target_runs_dir.as_deref())?;
+            continue_cmd::run_import(&global_home, &source_path, target_runs_dir.as_deref())?;
             Ok(0)
         }
         Cmd::Inspect {
@@ -558,7 +547,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             run_id,
             verbose,
         } => {
-            let home = MoaganHome::resolve()?;
+            let home = &global_home;
             let db = Db::open(&home.meta_db_path())?;
             if let Some(id) = run_id {
                 let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
@@ -589,7 +578,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Cmd::Refine { run_id, proposal } => {
             let cfg = Config::load()?;
-            let home = Arc::new(MoaganHome::resolve()?);
+            let home = Arc::new(global_home.clone());
             continue_cmd::run_refine(
                 run_id
                     .parse()
@@ -604,7 +593,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Cmd::Rerank { run_id } => {
             let cfg = Config::load()?;
-            let home = Arc::new(MoaganHome::resolve()?);
+            let home = Arc::new(global_home.clone());
             continue_cmd::run_rerank(
                 run_id
                     .parse()
@@ -668,7 +657,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                 discover::DiscoverOptions {
                     provider,
                     prompt,
-                    home: runs_dir,
+                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir,
                     cardinality,
                     max_parallelism,

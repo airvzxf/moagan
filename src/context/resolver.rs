@@ -6,12 +6,9 @@
 //! - `ContextRef::FilePath(PathBuf)` — a single `.md` file on disk.
 //! - `ContextRef::DirPath(PathBuf)` — a directory walked for `.md`s.
 //!
-//! `resolve_classify` is the entry point: it tries the UUID first
-//! (cheap parse), and falls back to a path probe (cheap stat). The
-//! ambiguity between "UUID-shaped" file paths is moot because UUIDs
-//! cannot be valid POSIX paths — a path like `/foo/...uuid...` will
-//! still classify as `FilePath` because the resolver tests the
-//! filesystem path first after the UUID parse succeeds as a string.
+//! `resolve_classify` is the entry point: it probes an existing path
+//! first, then parses a UUID when no path exists. This keeps a file or
+//! directory whose literal name is UUID-shaped addressable as a path.
 //!
 //! Both variants must resolve to something that exists on disk; an
 //! unknown UUID or a missing path is a hard `Error::InvalidArgs`.
@@ -70,10 +67,9 @@ pub fn classify_no_io(input: &str) -> Result<ContextRef> {
     )))
 }
 
-/// Try to classify `input` as a UUID first, and fall back to a
-/// filesystem probe on the literal string. Returns
-/// `Error::InvalidArgs` for "neither a known UUID nor an existing
-/// path on disk".
+/// Try to classify `input` as an existing filesystem path first, then
+/// as a UUID. Returns `Error::InvalidArgs` for "neither a known UUID
+/// nor an existing path on disk".
 ///
 /// The function deliberately does NOT check that the UUID resolves
 /// to an existing run dir — that's the caller's responsibility
@@ -81,18 +77,16 @@ pub fn classify_no_io(input: &str) -> Result<ContextRef> {
 /// and side-effect-free so `run` can persist the classification
 /// before deciding whether to load the actual contents.
 pub fn resolve_classify(input: &str, home: &MoaganHome) -> Result<ContextRef> {
-    // 1. UUID first — cheap parse, no IO.
+    if let Some(path_ref) = resolve_path(Path::new(input)) {
+        return Ok(path_ref);
+    }
     if let Ok(uuid) = uuid::Uuid::parse_str(input) {
         return Ok(ContextRef::RunId(RunId::from_uuid(uuid)));
     }
-    // 2. Path probe — file or directory.
-    let path = PathBuf::from(input);
-    resolve_path(&path).ok_or_else(|| {
-        let run_dir = home.runs_dir().join(input).display().to_string();
-        Error::InvalidArgs(format!(
-            "context {input:?} is neither a valid run id (looked for {run_dir}) nor an existing path"
-        ))
-    })
+    let run_dir = home.runs_dir().join(input).display().to_string();
+    Err(Error::InvalidArgs(format!(
+        "context {input:?} is neither a valid run id (looked for {run_dir}) nor an existing path"
+    )))
 }
 
 /// Pure path probe. Returns `Some` only when the path exists and

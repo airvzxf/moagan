@@ -7,8 +7,7 @@ use std::sync::Arc;
 use crate::cli::Mode;
 use crate::config::Config;
 use crate::context::{
-    ContextRef, ContextScope, compute_shared_brief_hash, loader as context_loader,
-    resolver as context_resolver,
+    ContextRef, ContextScope, loader as context_loader, resolver as context_resolver,
 };
 use crate::domain::{LineagePaths, Manifest, ManifestPhase, ManifestUsage};
 use crate::error::{Error, Result};
@@ -22,6 +21,7 @@ use crate::phases::{
     RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
 };
 use crate::redact::RedactPolicy;
+use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::{PhaseEvent, Telemetry};
 
@@ -62,12 +62,10 @@ pub struct RunOptions {
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
 pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
-    if let Some(ref home) = opts.home {
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", home);
-        }
-    }
-    let home = Arc::new(MoaganHome::resolve()?);
+    let home = Arc::new(match opts.home.clone() {
+        Some(path) => MoaganHome::at(path),
+        None => MoaganHome::resolve()?,
+    });
     home.ensure()?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
@@ -107,13 +105,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
                 loaded.context_refs.push(crate::context::ContextRefRecord {
                     source_path: cref.source(),
                     context_type: cref.kind().to_string(),
-                    shasum: compute_shared_brief_hash(
-                        &loaded
-                            .brief_excerpt
-                            .chars()
-                            .map(|c| c.to_string())
-                            .collect::<Vec<_>>(),
-                    ),
+                    shasum: crate::ids::blake3_hex(loaded.brief_excerpt.as_bytes()),
                     bytes: loaded.brief_excerpt.len() as u64,
                     added_unix: now,
                 });
@@ -222,6 +214,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         stub,
         opts.prompt.clone(),
         context_block,
+        opts.max_parallelism,
     )
     .await?;
 
@@ -255,6 +248,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
 ///
 /// Returns the rebuilt manifest. The caller is responsible for
 /// printing the user-facing success message.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_full_pipeline(
     home: Arc<MoaganHome>,
     db: Db,
@@ -264,6 +258,7 @@ pub async fn run_full_pipeline(
     stub: Manifest,
     raw_prompt: String,
     context_block: Option<String>,
+    max_parallelism: Option<usize>,
 ) -> Result<Manifest> {
     let run_id = stub.run_id;
     let run_dir = home.run_dir(run_id);
@@ -282,7 +277,7 @@ pub async fn run_full_pipeline(
 
     let policy = RedactPolicy::default();
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    let parallelism = Parallelism::new(cfg.max_parallelism);
+    let parallelism = Parallelism::new(max_parallelism.unwrap_or(cfg.max_parallelism));
 
     let ctx = RunContext::new(
         run_id,
@@ -394,10 +389,15 @@ pub fn build_registry_for(
     selected: &str,
     mock_dir: Option<&std::path::Path>,
 ) -> Result<ProviderRegistry> {
-    // Build a registry containing only the selected provider. The full
-    // cfg may declare other providers whose `from_config` requires an
-    // API key; we must not construct them when the user did not ask
-    // for them.
+    build_registry_for_with_api_key(cfg, selected, mock_dir, None)
+}
+
+pub(crate) fn build_registry_for_with_api_key(
+    cfg: &Config,
+    selected: &str,
+    mock_dir: Option<&std::path::Path>,
+    api_key: Option<&str>,
+) -> Result<ProviderRegistry> {
     let spec = cfg
         .providers
         .get(selected)
@@ -409,6 +409,15 @@ pub fn build_registry_for(
         let mock = crate::llm::MockProvider::from_dir(dir)?;
         let mut reg = ProviderRegistry::default();
         reg.insert(selected.to_owned(), Arc::new(mock));
+        return Ok(reg);
+    }
+    if spec.kind == "minimax"
+        && let Some(key) = api_key
+    {
+        let provider =
+            crate::llm::minimax::MinimaxProvider::new(&spec, SecretString::new(key.to_owned()))?;
+        let mut reg = ProviderRegistry::default();
+        reg.insert(selected.to_owned(), Arc::new(provider));
         return Ok(reg);
     }
     let mut spec_map = std::collections::BTreeMap::new();
@@ -533,7 +542,7 @@ pub fn build_pipeline_for_mode(
         .push(DeliverPhase)
 }
 
-fn build_manifest(
+pub(crate) fn build_manifest(
     run_id: &RunId,
     mode: &str,
     status: &str,
