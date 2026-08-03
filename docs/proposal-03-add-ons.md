@@ -1246,11 +1246,18 @@ Verifica con `shlex::split(cmd)` que no aparezca ningún denylist como argv. (In
 
 ```rust
 // src/sandbox/process.rs
-const MAX_STDOUT_BYTES: usize = 4 * 1024;
-const MAX_STDERR_BYTES: usize = 4 * 1024;
+pub const DEFAULT_OUTPUT_CAP_BYTES: usize = 64 * 1024;
+pub const MAX_STDOUT_BYTES: usize = DEFAULT_OUTPUT_CAP_BYTES;
+pub const MAX_STDERR_BYTES: usize = DEFAULT_OUTPUT_CAP_BYTES;
 ```
 
 Truncar en `SandboxResult.stdout_summary`. (Inspirado en T08-10 §5.5; T00-06 §11.3.)
+
+**N status (implemented):** `DEFAULT_OUTPUT_CAP_BYTES` is 64 KiB.
+The sandbox drains stdout and stderr independently, kills the child when
+either stream exceeds its cap, and returns
+`SandboxError::OutputTruncated` instead of silently accepting a partial
+result. `SandboxConfig::with_max_capture` remains the per-run override.
 
 #### D.11.5. Per-command config
 
@@ -1285,6 +1292,12 @@ network = "deny"
 
 (Inspirado en T05-01; T20-01.)
 
+**N status (implemented):** `COMMAND_CONFIGS` provides the four static
+profiles (`rust`, `python`, `typescript`, `sql`) and `config_for(name)`
+performs the logical-name lookup. Each profile records argument limits,
+per-stream output cap, timeout, and network metadata without adding a
+configuration dependency.
+
 #### D.11.6. `strip_secrets()` antes de spawn
 
 ```rust
@@ -1302,6 +1315,13 @@ pub fn strip_secrets(env: &mut HashMap<String, String>) {
 ```
 
 (Inspirado en T03-01; T00-06 §11.2.)
+
+**N status (implemented):** `strip_secrets(&[String])` runs the shared
+redaction policy over secret-looking argv values immediately before
+`Command::spawn`. It preserves the argument layout and covers MiniMax,
+Anthropic, generic OpenAI-style, Gemini, Hugging Face, Replicate,
+GitHub, Slack, and Bearer prefixes. The existing environment scrubber
+continues to run independently.
 
 #### D.11.7. `seccomp` whitelist (Linux, opt-in)
 
@@ -1455,6 +1475,12 @@ pub fn ensure_in_allowlist(program: &str) -> Result<()> {
 ```
 
 (Inspirado en T20-01; T07-07 §10.1.)
+
+**N status (implemented):** `verify_binary_exists` resolves absolute paths
+and PATH entries before spawn and returns the typed
+`SandboxError::BinaryNotFound(String)` when resolution fails. The
+legacy `SandboxStatus::NotFound` result is retained for validator
+compatibility and for a binary disappearing between preflight and spawn.
 
 ---
 
