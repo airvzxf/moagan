@@ -811,7 +811,11 @@ mod tests {
         // 0x1f 0x8b; the body must be parseable as a non-empty
         // tarball.
         assert_eq!(resp.content_type, "application/gzip");
-        assert!(resp.body.len() > 2, "gzip body too small: {} bytes", resp.body.len());
+        assert!(
+            resp.body.len() > 2,
+            "gzip body too small: {} bytes",
+            resp.body.len()
+        );
         assert_eq!(&resp.body[..2], &[0x1f, 0x8b], "missing gzip magic");
     }
 
