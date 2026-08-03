@@ -87,7 +87,7 @@ run_test "context_public_api" '
 '
 
 run_test "manifest_lineage_fields" '
-  DOMAIN_FILE='"$ROOT"'/src/domain.rs
+  DOMAIN_FILE='"$ROOT"'/src/domain/mod.rs
   [[ -f "$DOMAIN_FILE" ]] || DOMAIN_FILE='"$ROOT"'/src/domain/mod.rs
   grep -q "parent_run_id: Option<RunId>" "$DOMAIN_FILE"
   grep -q "shared_brief_hash: Option<String>" "$DOMAIN_FILE"

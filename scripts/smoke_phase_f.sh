@@ -133,13 +133,13 @@ run_test "rank_phase_reuses_pareto_dominates" \
   "grep -q 'crate::ranking::pareto::dominates' ${ROOT}/src/phases/replace.rs"
 
 run_test "domain_proposal_has_replaced_by" \
-  "grep -q 'pub replaced_by' ${ROOT}/src/domain.rs"
+  "grep -q 'pub replaced_by' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_proposal_replaced_by_is_option_string" \
-  "grep -q 'pub replaced_by: Option<String>' ${ROOT}/src/domain.rs"
+  "grep -q 'pub replaced_by: Option<String>' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_proposal_replaced_by_skip_if_none" \
-  "grep -B 1 'pub replaced_by: Option<String>' ${ROOT}/src/domain.rs | grep -q 'skip_serializing_if'"
+  "grep -B 1 'pub replaced_by: Option<String>' ${ROOT}/src/domain/mod.rs | grep -q 'skip_serializing_if'"
 
 run_test "run_options_has_no_replace_sources" \
   "grep -q 'no_replace_sources' ${ROOT}/src/cli/run.rs"
@@ -232,19 +232,19 @@ run_test "Proposal_replaced_by_field_in_synth_to_proposal" \
   "grep -B 2 -A 1 'replaced_by' ${ROOT}/src/phases/synthesize.rs | grep -q 'replaced_by: None'"
 
 run_test "Proposal_replaced_by_in_proposal_struct" \
-  "grep -B 7 'pub replaced_by' ${ROOT}/src/domain.rs | grep -q 'Phase F'"
+  "grep -B 7 'pub replaced_by' ${ROOT}/src/domain/mod.rs | grep -q 'Phase F'"
 
 run_test "SynthesizedProposal_source_proposals_field" \
-  "grep -q 'pub source_proposals' ${ROOT}/src/domain.rs"
+  "grep -q 'pub source_proposals' ${ROOT}/src/domain/mod.rs"
 
 run_test "Ranking_has_representatives_field" \
-  "grep -q 'pub representatives' ${ROOT}/src/domain.rs"
+  "grep -q 'pub representatives' ${ROOT}/src/domain/mod.rs"
 
 run_test "Ranking_has_winner_field" \
-  "grep -q 'pub winner' ${ROOT}/src/domain.rs"
+  "grep -q 'pub winner' ${ROOT}/src/domain/mod.rs"
 
 run_test "SynthesizedProposal_cluster_id_field" \
-  "grep -q 'pub cluster_id' ${ROOT}/src/domain.rs"
+  "grep -q 'pub cluster_id' ${ROOT}/src/domain/mod.rs"
 
 run_test "synthesized_dir_exists_layout" \
   "grep -q 'pub fn synthesized' ${ROOT}/src/fs_layout.rs"
@@ -259,7 +259,7 @@ run_test "evaluations_dir_exists_layout" \
   "grep -q 'pub fn evaluations' ${ROOT}/src/fs_layout.rs"
 
 run_test "SynthesizedProposal_schema_version_v1" \
-  "grep -B 1 -A 1 'schema_version' ${ROOT}/src/domain.rs | grep -q 'v1'"
+  "grep -B 1 -A 1 'schema_version' ${ROOT}/src/domain/mod.rs | grep -q 'v1'"
 
 run_test "Aggregated_has_correctness_field" \
   "grep -q 'pub correctness' ${ROOT}/src/phases/judge.rs"
@@ -573,7 +573,7 @@ run_test "f_synthesized_dir_path_helper" \
   "grep -q 'fn synthesized' ${ROOT}/src/fs_layout.rs"
 
 run_test "f_replaced_by_field_has_serde_attr" \
-  "grep -B 1 'pub replaced_by' ${ROOT}/src/domain.rs | head -1 | grep -q '#\\[serde'"
+  "grep -B 1 'pub replaced_by' ${ROOT}/src/domain/mod.rs | head -1 | grep -q '#\\[serde'"
 
 run_test "f_doc_module_level_present" \
   "head -1 ${ROOT}/src/phases/replace.rs | grep -q '!'"

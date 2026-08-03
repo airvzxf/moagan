@@ -136,7 +136,7 @@ run_test "run_paths_resolves_eight_documented_keys" '
 
 run_test "manifest_carries_lineage_paths" '
   DOMAIN_FILE=""
-  for candidate in '"$ROOT"'/src/domain/mod.rs '"$ROOT"'/src/domain.rs; do
+  for candidate in '"$ROOT"'/src/domain/mod.rs '"$ROOT"'/src/domain/mod.rs; do
     if [[ -f "$candidate" ]]; then
       DOMAIN_FILE="$candidate"
       break

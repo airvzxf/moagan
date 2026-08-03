@@ -485,34 +485,34 @@ run_test "discover_matrix_system_prompt_helper" \
 # ---------------------------------------------------------------------
 
 run_test "domain_sketch_tags_struct" \
-  "grep -q 'pub struct SketchTags' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct SketchTags' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_cluster_struct" \
-  "grep -q 'pub struct Cluster' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct Cluster' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_contradiction_struct" \
-  "grep -q 'pub struct Contradiction' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct Contradiction' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_facet_struct" \
-  "grep -q 'pub struct Facet' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct Facet' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_facet_list_struct" \
-  "grep -q 'pub struct FacetList' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct FacetList' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_facet_extraction_struct" \
-  "grep -q 'pub struct FacetExtraction' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct FacetExtraction' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_category_doc_struct" \
-  "grep -q 'pub struct CategoryDoc' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct CategoryDoc' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_uncategorized_doc_struct" \
-  "grep -q 'pub struct UncategorizedDoc' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct UncategorizedDoc' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_discovery_summary_struct" \
-  "grep -q 'pub struct DiscoverySummary' ${ROOT}/src/domain.rs"
+  "grep -q 'pub struct DiscoverySummary' ${ROOT}/src/domain/mod.rs"
 
 run_test "domain_discovery_types_serde_default" \
-  "grep -B1 'pub struct SketchTags {' ${ROOT}/src/domain.rs | grep -q 'serde.default'"
+  "grep -B1 'pub struct SketchTags {' ${ROOT}/src/domain/mod.rs | grep -q 'serde.default'"
 
 # ---------------------------------------------------------------------
 # 11. Role temperatures (8 tests)
@@ -536,8 +536,8 @@ run_test "max_tokens_extractor_3000" \
 run_test "max_tokens_integrator_4000" \
   "grep -B0 -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => 4000'"
 
-run_test "role_count_is_14" \
-  "grep -B0 -A20 'fn all_roles_are_count_fourteen' ${ROOT}/src/llm/role.rs | grep -q '14'"
+run_test "role_count_is_20" \
+  "grep -B0 -A20 'fn all_roles_are_count_twenty' ${ROOT}/src/llm/role.rs | grep -q '20'"
 
 run_test "role_all_includes_discovery" \
   "grep -A20 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Tagger' && grep -A20 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Extractor' && grep -A20 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Integrator'"
@@ -680,19 +680,19 @@ run_test "summary_exec_present" \
 # ---------------------------------------------------------------------
 
 run_test "sketch_tags_schema_version" \
-  "grep -A20 'pub struct SketchTags' ${ROOT}/src/domain.rs | grep -q 'schema_version'"
+  "grep -A20 'pub struct SketchTags' ${ROOT}/src/domain/mod.rs | grep -q 'schema_version'"
 
 run_test "cluster_schema_version" \
-  "grep -A20 'pub struct Cluster {' ${ROOT}/src/domain.rs | grep -q 'schema_version'"
+  "grep -A20 'pub struct Cluster {' ${ROOT}/src/domain/mod.rs | grep -q 'schema_version'"
 
 run_test "contradiction_schema_version" \
-  "grep -A20 'pub struct Contradiction {' ${ROOT}/src/domain.rs | grep -q 'schema_version'"
+  "grep -A20 'pub struct Contradiction {' ${ROOT}/src/domain/mod.rs | grep -q 'schema_version'"
 
 run_test "category_doc_schema_version" \
-  "grep -A20 'pub struct CategoryDoc {' ${ROOT}/src/domain.rs | grep -q 'schema_version'"
+  "grep -A20 'pub struct CategoryDoc {' ${ROOT}/src/domain/mod.rs | grep -q 'schema_version'"
 
 run_test "discovery_summary_schema_version" \
-  "grep -A20 'pub struct DiscoverySummary {' ${ROOT}/src/domain.rs | grep -q 'schema_version'"
+  "grep -A20 'pub struct DiscoverySummary {' ${ROOT}/src/domain/mod.rs | grep -q 'schema_version'"
 
 # ---------------------------------------------------------------------
 # 20. Schema description in role (5 tests)
