@@ -80,7 +80,14 @@ impl Phase for DiscoverExtractPhase {
         let mut facet_paths: Vec<PathBuf> = std::fs::read_dir(&facets_dir)?
             .filter_map(|r| r.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter(|p| {
+                p.extension().and_then(|s| s.to_str()) == Some("json")
+                    && !p
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.ends_with(".meta.json"))
+                        .unwrap_or(false)
+            })
             .collect();
         facet_paths.sort();
 
@@ -90,10 +97,73 @@ impl Phase for DiscoverExtractPhase {
             let list: FacetList = read_json(facet_path)?;
             // Resolve the cluster.
             let cluster_path = clusters_dir.join(format!("{}.json", list.cluster_id));
-            let cluster: Cluster = read_json(&cluster_path)?;
+            // If the cluster file is missing or malformed, skip this
+            // facet list rather than aborting the whole phase. A
+            // missing cluster is a benign divergence (the tagger
+            // pass survived but the cluster pass did not), not a
+            // fatal error.
+            let cluster: Cluster = match read_json::<Cluster>(&cluster_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = ctx.telemetry.warn(
+                        "phase.discover_extract.missing_cluster",
+                        "warn",
+                        "facet list references a missing or malformed cluster; skipping",
+                        serde_json::json!({
+                            "facet_path": facet_path.display().to_string(),
+                            "cluster_id": list.cluster_id,
+                            "error": e.to_string(),
+                        }),
+                        crate::telemetry::WarningContext {
+                            phase: Some("discover_extract".into()),
+                            role: Some("extractor".into()),
+                            ..Default::default()
+                        },
+                    );
+                    continue;
+                }
+            };
+            // Skip clusters whose member list is empty or points at
+            // sketch ids that don't exist on disk. The empty-member
+            // case happens when the cluster pass drops members for
+            // some reason; the missing-sketch case happens when the
+            // tagger pass produces more clusters than the sketch
+            // generator actually emitted.
+            if cluster.members.is_empty()
+                || cluster.members.iter().any(|id| {
+                    id.is_empty() || !ctx.run_dir().sketches().join(format!("{id}.json")).exists()
+                })
+            {
+                let _ = ctx.telemetry.warn(
+                    "phase.discover_extract.skip_empty_cluster",
+                    "warn",
+                    "cluster has empty or missing member sketches; skipping",
+                    serde_json::json!({
+                        "cluster_id": list.cluster_id,
+                        "members": cluster.members.len(),
+                    }),
+                    crate::telemetry::WarningContext {
+                        phase: Some("discover_extract".into()),
+                        role: Some("extractor".into()),
+                        ..Default::default()
+                    },
+                );
+                continue;
+            }
             let sketches = DiscoverExtractPhase::read_member_sketches(ctx, &cluster.members)?;
             let cat_dir = extractions_dir.join(&list.category_id);
-            let _ = std::fs::create_dir_all(&cat_dir);
+            // Propagate directory-creation failures instead of
+            // silently swallowing them. The pre-fix code did
+            // `let _ = std::fs::create_dir_all(&cat_dir);` and then
+            // tried to write into a directory that might not exist,
+            // which produced a cryptic `io: No such file or
+            // directory` later in the file write.
+            std::fs::create_dir_all(&cat_dir).map_err(|e| {
+                Error::Io(crate::error::IoError::CreateDir {
+                    path: cat_dir.clone(),
+                    source: e,
+                })
+            })?;
 
             let futures = list.facets.iter().map(|f| {
                 let cat_id = list.category_id.clone();
@@ -145,6 +215,17 @@ impl Phase for DiscoverExtractPhase {
                     };
                     let md = render_body(&ext);
                     let path = cat_dir.join(format!("faceta_{}.md", slug(&facet_id)));
+                    // `cat_dir` was created above, but a defensive
+                    // `create_dir_all` here makes the write survive
+                    // a hypothetical cat_dir cleanup between phases.
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            Error::Io(crate::error::IoError::CreateDir {
+                                path: parent.to_path_buf(),
+                                source: e,
+                            })
+                        })?;
+                    }
                     std::fs::write(&path, &md)?;
                     let json_path = cat_dir.join(format!("faceta_{}.json", slug(&facet_id)));
                     write_json(&json_path, &ext)?;

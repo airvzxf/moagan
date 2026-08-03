@@ -80,7 +80,14 @@ impl Phase for DiscoverIntegratePhase {
         let mut facet_paths: Vec<PathBuf> = std::fs::read_dir(&facets_dir)?
             .filter_map(|r| r.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter(|p| {
+                p.extension().and_then(|s| s.to_str()) == Some("json")
+                    && !p
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.ends_with(".meta.json"))
+                        .unwrap_or(false)
+            })
             .collect();
         facet_paths.sort();
 
@@ -114,6 +121,35 @@ impl Phase for DiscoverIntegratePhase {
             async move {
                 let _permit = ctx.parallelism.acquire().await?;
                 let list: FacetList = read_json(&facet_path)?;
+                // Skip facet lists whose category has no
+                // extractions — happens when `discover_extract`
+                // skipped the corresponding cluster (empty / missing
+                // member sketches). The integrator would otherwise
+                // bubble up an `io: No such file or directory` on
+                // its `read_dir(extractions/<cat_id>)` call.
+                let extractions_dir = ctx.run_dir().extractions().join(&list.category_id);
+                if !extractions_dir.exists() {
+                    let _ = ctx.telemetry.warn(
+                        "phase.discover_integrate.skip_empty_category",
+                        "warn",
+                        "category has no extractions; skipping integration",
+                        serde_json::json!({
+                            "category_id": list.category_id,
+                            "extractions_dir": extractions_dir.display().to_string(),
+                        }),
+                        crate::telemetry::WarningContext {
+                            phase: Some("discover_integrate".into()),
+                            role: Some("integrator".into()),
+                            ..Default::default()
+                        },
+                    );
+                    // Sentinel path under a directory that the
+                    // phase never creates. The post-loop filter
+                    // uses `path.exists()` to discard it.
+                    return Ok::<PathBuf, crate::error::Error>(
+                        ctx.run_dir().final_dir().join("_SKIPPED/skip.md"),
+                    );
+                }
                 let cluster_path = ctx
                     .run_dir()
                     .clusters()
@@ -212,7 +248,8 @@ impl Phase for DiscoverIntegratePhase {
         let results = join_all(futures).await;
         for r in results {
             match r {
-                Ok(p) => paths.push(p),
+                Ok(p) if p.exists() => paths.push(p),
+                Ok(_) => { /* skipped: integration did not produce artifacts */ }
                 Err(e) => {
                     let _ = ctx.telemetry.warn(
                         "phase.discover_integrate.skipped",
