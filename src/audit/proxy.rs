@@ -790,7 +790,22 @@ fn resolve_log_path_blocking(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
     }
     let runs_root = cfg.runs_dir.join(".runs");
     std::fs::create_dir_all(&runs_root)?;
-    let mut wait_ms: u64 = 50;
+    // Backoff schedule starts at 5ms (not 50ms) because the
+    // typical e2e tests + CI runs have moagan create the run dir
+    // and immediately fire the first LLM call within ~5-10ms. A
+    // 50ms initial window was empirically the cause of
+    // `audit_e2e_deep_run_has_exact_external_coverage` flaking
+    // 2/15 times: 2-4 LLM calls from `intake` / `route` arrived at
+    // the proxy before the first 50ms poll, the proxy answered
+    // 503 `no active run`, and moagan retried the call after the
+    // proxy had already cached the run_id. The 503 path leaves a
+    // record in `calls.jsonl` with `cache_hit=false` but no
+    // matching entry in the audit log, so `audit verify` reports
+    // `unmatched_internal_count > 0`. Starting at 5ms and ramping
+    // up (5, 10, 20, 50, 100, 200, 400, 800, 1000, 1000, ...)
+    // catches the run dir inside the first tick on every CI
+    // machine tested so far.
+    let mut wait_ms: u64 = 5;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let run_id = loop {
         if let Some(id) = pick_latest_run(&runs_root)? {
