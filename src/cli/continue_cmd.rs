@@ -306,6 +306,7 @@ pub async fn run_refine(
     proposal_id: &str,
     cfg: &Config,
     home: &Arc<MoaganHome>,
+    mock_dir: Option<&std::path::Path>,
 ) -> Result<PathBuf> {
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
@@ -314,6 +315,14 @@ pub async fn run_refine(
             home.runs_dir().display()
         )));
     }
+
+    // Read the manifest so we can use the same provider the run was
+    // created with. Without this, a run launched with
+    // `--provider mock` would try to refresh the deliver through
+    // the configured `default_provider` (typically `minimax`),
+    // which fails with a network error and forces the operator to
+    // have the upstream LLM available just to refine a local run.
+    let manifest = load_manifest(home, run_id)?;
 
     // Resolve the proposal (prefer the repair if available).
     let proposal_path = run_dir.proposals().join(format!("{proposal_id}.json"));
@@ -337,9 +346,13 @@ pub async fn run_refine(
     // registered; otherwise `RunContext::provider()` panics on the
     // first call. The model name comes from the spec, not the
     // hard-coded "minimax" string (which is the provider alias).
-    let default_provider = cfg.default_provider.clone();
+    let default_provider = if manifest.provider.is_empty() || manifest.provider == "unknown" {
+        cfg.default_provider.clone()
+    } else {
+        manifest.provider.clone()
+    };
     let providers = Arc::new(
-        super::run::build_registry_for(cfg, &default_provider, None)
+        super::run::build_registry_for(cfg, &default_provider, mock_dir)
             .map_err(|e| Error::InvalidState(format!("refine: {e}")))?,
     );
     let default_model = cfg
@@ -400,6 +413,12 @@ pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> 
             home.runs_dir().display()
         )));
     }
+    // Read the manifest so we use the same provider the run was
+    // created with. The pre-fix code hard-coded
+    // `cfg.default_provider` (typically `minimax`) which made a
+    // rerank of a `--provider mock` run attempt to call the
+    // upstream LLM and fail with a network error.
+    let manifest = load_manifest(home, run_id)?;
     let cfg_arc = Arc::new(cfg.clone());
     // Phase F: `continue` re-runs `RankPhase` on the existing
     // evaluations; we keep replacement ON by default. `continue` does
@@ -413,11 +432,15 @@ pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> 
     let policy = crate::redact::RedactPolicy::default();
     let telemetry = Telemetry::open(run_id, &run_dir, policy, None)?;
     let parallelism = crate::execution::Parallelism::new(cfg.max_parallelism);
-    // Same fix as `run_refine`: build a real registry so `RankPhase`
-    // does not panic if it ever needs to call the model (today the
-    // rank phase is pure compute, but defensive construction keeps the
-    // provider/model fields aligned with the rest of the binary).
-    let default_provider = cfg.default_provider.clone();
+    // Build a real registry so `RankPhase` does not panic if it ever
+    // needs to call the model (today the rank phase is pure compute,
+    // but defensive construction keeps the provider/model fields
+    // aligned with the rest of the binary).
+    let default_provider = if manifest.provider.is_empty() || manifest.provider == "unknown" {
+        cfg.default_provider.clone()
+    } else {
+        manifest.provider.clone()
+    };
     let providers = Arc::new(
         super::run::build_registry_for(cfg, &default_provider, None)
             .map_err(|e| Error::InvalidState(format!("rerank: {e}")))?,
@@ -489,9 +512,14 @@ pub(crate) fn apply_continue_options(
         // see the timeline.
         let from = manifest.provider.clone();
         manifest.provider = provider.to_string();
+        // Allocate a fresh `seq` from SQLite instead of deriving it
+        // from `manifest.phases.len()` — the latter collided with
+        // the (run_id, seq) PK when `continue` was issued multiple
+        // times against the same run.
+        let base_seq = db.next_provider_change_seq(manifest.run_id).unwrap_or(1);
         if let Err(e) = db.record_provider_change(
             manifest.run_id,
-            manifest.phases.len() as i64,
+            base_seq,
             "continue",
             Some(&from),
             provider,
@@ -508,9 +536,13 @@ pub(crate) fn apply_continue_options(
             .as_deref()
             .map(api_key_source)
             .unwrap_or("unknown");
+        // Same dynamic-seq fix as above; avoids UNIQUE constraint
+        // failures when both flags are passed together or when the
+        // same run was already continued before.
+        let base_seq = db.next_provider_change_seq(manifest.run_id).unwrap_or(1);
         if let Err(e) = db.record_provider_change(
             manifest.run_id,
-            (manifest.phases.len() as i64) + 1,
+            base_seq,
             "continue",
             None,
             &manifest.provider,
@@ -524,9 +556,10 @@ pub(crate) fn apply_continue_options(
     }
     if opts.skip_checkpoint {
         eprintln!("moagan continue: --skip-checkpoint set; resuming without human pause");
+        let base_seq = db.next_provider_change_seq(manifest.run_id).unwrap_or(1);
         if let Err(e) = db.record_provider_change(
             manifest.run_id,
-            (manifest.phases.len() as i64) + 2,
+            base_seq,
             "continue",
             None,
             &manifest.provider,
