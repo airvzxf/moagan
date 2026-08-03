@@ -408,7 +408,7 @@ pub struct Manifest {
 /// deserialised because the deserialiser borrows from a `'de`
 /// lifetime, not `'static`. Callers that want a typed label can
 /// use the `well_known` constants below.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineagePaths {
     /// Stable relative labels → on-disk relative paths (e.g.
@@ -1721,7 +1721,11 @@ mod tests {
             phases: Vec::new(),
             usage: crate::domain::ManifestUsage::default(),
             manifest_blake3: String::new(),
+            parent_run_id: None,
+            shared_brief_hash: None,
+            context_refs: Vec::new(),
             lineage_paths: Some(lineage.clone()),
+            cli_prompt: None,
         };
         let j = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&j).unwrap();

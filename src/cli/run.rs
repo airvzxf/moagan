@@ -335,11 +335,19 @@ pub async fn run_full_pipeline(
     // Preserve the lineage block the caller prepared. The builder
     // defaults everything to empty; we re-attach the parent_run_id,
     // shared_brief_hash, context_refs, and lineage_paths so they
-    // round-trip through the post-pipeline rebuild.
+    // round-trip through the post-pipeline rebuild. For
+    // `lineage_paths` we keep the J-supplied value when the caller
+    // built one (e.g. `--context <parent_run_id>` populated the
+    // `parent_run_dir` label); otherwise we fall back to the
+    // `RunPaths::resolve(...)` catalog that `build_manifest` set up,
+    // so every run ships with a typed table of its own well-known
+    // paths even when no context was loaded (sub-fase M, D.12.16).
     manifest.parent_run_id = stub.parent_run_id;
     manifest.shared_brief_hash = stub.shared_brief_hash.clone();
     manifest.context_refs = stub.context_refs.clone();
-    manifest.lineage_paths = stub.lineage_paths.clone();
+    if stub.lineage_paths.is_some() {
+        manifest.lineage_paths = stub.lineage_paths.clone();
+    }
     manifest.cli_prompt = stub.cli_prompt.clone();
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
