@@ -19,13 +19,89 @@ use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
-use flate2::Compression;
+use std::path::PathBuf;
+
+use flate2::Compression as GzipCompression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 
 use crate::error::{Error, IoError, Result};
 
-/// Open a file in append mode behind `MemberGzWriter`. Each call to
+/// Compression format for whole-file output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    /// No compression.
+    None,
+    /// Gzip compression.
+    Gz,
+    /// Zstandard compression.
+    Zst,
+}
+
+/// Error raised while compressing a file.
+#[derive(Debug, thiserror::Error)]
+pub enum CompressionError {
+    /// Input/output failure with the relevant path.
+    #[error("{path:?}: {source}")]
+    Io {
+        /// Path involved in the operation.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+    /// Compression codec failure.
+    #[error("compression: {0}")]
+    Codec(String),
+}
+
+/// Compress `src` into `dst` and return the output byte count.
+pub fn compress_or_report(
+    src: &Path,
+    dst: &Path,
+    c: Compression,
+) -> std::result::Result<u64, CompressionError> {
+    let input = std::fs::read(src).map_err(|source| CompressionError::Io {
+        path: src.to_path_buf(),
+        source,
+    })?;
+    let out = match c {
+        Compression::None => input,
+        Compression::Gz => {
+            let mut encoder = GzEncoder::new(Vec::new(), GzipCompression::default());
+            encoder
+                .write_all(&input)
+                .map_err(|source| CompressionError::Io {
+                    path: dst.to_path_buf(),
+                    source,
+                })?;
+            encoder.finish().map_err(|source| CompressionError::Io {
+                path: dst.to_path_buf(),
+                source,
+            })?
+        }
+        Compression::Zst => {
+            let mut encoder = zstd::Encoder::new(Vec::new(), 0)
+                .map_err(|source| CompressionError::Codec(source.to_string()))?;
+            encoder
+                .write_all(&input)
+                .map_err(|source| CompressionError::Io {
+                    path: dst.to_path_buf(),
+                    source,
+                })?;
+            encoder.finish().map_err(|source| CompressionError::Io {
+                path: dst.to_path_buf(),
+                source,
+            })?
+        }
+    };
+    let count = out.len() as u64;
+    std::fs::write(dst, &out).map_err(|source| CompressionError::Io {
+        path: dst.to_path_buf(),
+        source,
+    })?;
+    Ok(count)
+}
+
 /// `flush()` completes the current gzip member (header + deflate
 /// blocks + CRC32 + length trailer) so the on-disk file is always a
 /// valid sequence of gzip members readable by `MultiGzDecoder`.
@@ -115,7 +191,7 @@ impl MemberGzWriter {
     fn encoder(&mut self) -> io::Result<&mut GzEncoder<File>> {
         if self.current.is_none() {
             let f = self.file.try_clone()?;
-            self.current = Some(GzEncoder::new(f, Compression::default()));
+            self.current = Some(GzEncoder::new(f, GzipCompression::default()));
         }
         Ok(self.current.as_mut().expect("just initialised"))
     }
@@ -155,6 +231,41 @@ impl Drop for MemberGzWriter {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn compress_or_report_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("source");
+        let dst = tmp.path().join("output");
+        std::fs::write(&src, b"plain").unwrap();
+        assert_eq!(
+            compress_or_report(&src, &dst, Compression::None).unwrap(),
+            5
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"plain");
+    }
+
+    #[test]
+    fn compress_or_report_gz() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("source");
+        let dst = tmp.path().join("output.gz");
+        std::fs::write(&src, b"gzip payload").unwrap();
+        let count = compress_or_report(&src, &dst, Compression::Gz).unwrap();
+        assert_eq!(count, std::fs::metadata(&dst).unwrap().len());
+        assert!(!std::fs::read(&dst).unwrap().is_empty());
+    }
+
+    #[test]
+    fn compress_or_report_zst() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("source");
+        let dst = tmp.path().join("output.zst");
+        std::fs::write(&src, b"zstd payload").unwrap();
+        let count = compress_or_report(&src, &dst, Compression::Zst).unwrap();
+        assert_eq!(count, std::fs::metadata(&dst).unwrap().len());
+        assert!(!std::fs::read(&dst).unwrap().is_empty());
+    }
 
     #[test]
     fn round_trip_writes_and_reads() {
