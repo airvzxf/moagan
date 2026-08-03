@@ -15,11 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{CategoryDoc, DiscoverySummary, UncategorizedDoc};
 use crate::error::{Error, Result};
-// `RunId` was previously used to default `summary.run_id`; the
-// production code now uses `ctx.run_id` (real uuid) instead, so the
-// import became dead. Kept as a commented reference for the next
-// audit pass.
-// use crate::ids::RunId;
+// `RunId` is referenced in the unit tests; the import is dead in the
+// production build but the test module re-exports it.
+#[allow(unused_imports)]
+use crate::ids::RunId;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::write_json;
 

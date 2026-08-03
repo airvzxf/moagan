@@ -417,11 +417,9 @@ mod tests {
     #[tokio::test]
     async fn gate_phase_uses_ctx_config_forbidden_techs() {
         use crate::phases::util::write_json;
-        let home = std::sync::Arc::new(
-            crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
-                "/tmp/moagan-gate-test-uses-config",
-            )),
-        );
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
+            "/tmp/moagan-gate-test-uses-config",
+        )));
         home.ensure().unwrap();
         let run_id = crate::ids::RunId::new();
         let run_dir = home.run_dir(run_id);
@@ -442,8 +440,10 @@ mod tests {
         };
         write_json(&run_dir.proposals().join("p_001.json"), &proposal).unwrap();
 
-        let mut cfg = Config::default();
-        cfg.gate_forbidden_techs = vec!["postgres".into()];
+        let cfg = Config {
+            gate_forbidden_techs: vec!["postgres".into()],
+            ..Config::default()
+        };
         let providers = std::sync::Arc::new(crate::llm::ProviderRegistry::default());
         let telemetry = crate::telemetry::Telemetry::noop();
         let parallelism = crate::execution::Parallelism::new(1);
@@ -462,7 +462,11 @@ mod tests {
         GatePhase.execute(&ctx).await.unwrap();
         drop(home);
         let gate_path = validation_path.join("p_001.json");
-        assert!(gate_path.exists(), "gate sidecar missing (run_dir={:?})", run_dir_path);
+        assert!(
+            gate_path.exists(),
+            "gate sidecar missing (run_dir={:?})",
+            run_dir_path
+        );
         let gate: crate::domain::Gate =
             serde_json::from_str(&std::fs::read_to_string(&gate_path).unwrap()).unwrap();
         assert!(
