@@ -99,7 +99,19 @@ impl Phase for DeliverPhase {
                 stdin_override: None,
                 telemetry: Some(ctx.telemetry.clone()),
             };
-            let _ = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
+            // V4 §5.14 ships the portfolio only on Approved. Reject
+            // aborts the run with Error::Cancelled so the operator
+            // gets a non-zero exit and the manifest status flips to
+            // 'failed'.
+            match crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)? {
+                crate::checkpoint::Resolution::Approved
+                | crate::checkpoint::Resolution::Modify(_) => {}
+                crate::checkpoint::Resolution::Rejected => {
+                    return Err(crate::error::Error::Cancelled(
+                        "user rejected the final portfolio".into(),
+                    ));
+                }
+            }
         }
 
         Ok(PhaseOutput::Deliver(md_path))

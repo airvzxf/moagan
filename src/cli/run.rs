@@ -293,7 +293,13 @@ pub async fn run_full_pipeline(
         cfg_arc,
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
-    .with_interactive(!non_interactive)
+    // V4 §13.6 promises "no human pauses" for Mode::Batch. The
+    // `interactive` flag now reflects that contract: even if the
+    // operator forgets `--non-interactive`, batch runs skip every
+    // human checkpoint and persist a `<skipped:non_interactive>`
+    // marker for the audit trail. `--non-interactive` (any mode)
+    // keeps the existing behaviour.
+    .with_interactive(!non_interactive && !matches!(mode, Mode::Batch))
     .with_context(
         context_block,
         stub.parent_run_id,

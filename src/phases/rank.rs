@@ -303,7 +303,7 @@ impl Phase for RankPhase {
         // do not prompt; `checkpoint::skip` writes the
         // `<skipped:non_interactive>` marker for audit.
         if stability_label == Some(StabilityLabel::Sensitive) {
-            use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
+            use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts, Resolution};
             let top_score = ranking
                 .stability_score
                 .as_ref()
@@ -323,7 +323,18 @@ impl Phase for RankPhase {
                 telemetry: Some(ctx.telemetry.clone()),
             };
             let checkpoints_dir = ctx.run_dir().checkpoints();
-            let _ = crate::checkpoint::ask(&cp, &checkpoints_dir, &opts);
+            // Reject aborts the pipeline with Error::Cancelled so the
+            // operator gets a non-zero exit and the run flips to
+            // 'failed'. The V4 §5.14 second trigger is therefore
+            // terminal — same contract as the Final checkpoint.
+            match crate::checkpoint::ask(&cp, &checkpoints_dir, &opts)? {
+                Resolution::Approved | Resolution::Modify(_) => {}
+                Resolution::Rejected => {
+                    return Err(crate::error::Error::Cancelled(
+                        "user rejected the sensitive ranking".into(),
+                    ));
+                }
+            }
         }
 
         Ok(PhaseOutput::Ranking(out_path))

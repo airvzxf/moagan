@@ -60,14 +60,22 @@ impl Phase for ClarifyPhase {
                 telemetry: Some(ctx.telemetry.clone()),
             };
             let resolution = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
-            if let crate::checkpoint::Resolution::Modify(text) = resolution {
-                // The user added an extra constraint. Persist it as
-                // a brief-level assumption so downstream phases can
-                // read it via `brief.json#assumptions`. Cheap hack:
-                // re-read, append, re-write.
-                let mut brief = brief.clone();
-                brief.assumptions.push(text);
-                write_json(&ctx.run_dir().brief(), &brief)?;
+            match resolution {
+                crate::checkpoint::Resolution::Approved => {}
+                crate::checkpoint::Resolution::Modify(text) => {
+                    // The user added an extra constraint. Persist it as
+                    // a brief-level assumption so downstream phases can
+                    // read it via `brief.json#assumptions`. Cheap hack:
+                    // re-read, append, re-write.
+                    let mut brief = brief.clone();
+                    brief.assumptions.push(text);
+                    write_json(&ctx.run_dir().brief(), &brief)?;
+                }
+                crate::checkpoint::Resolution::Rejected => {
+                    return Err(crate::error::Error::Cancelled(
+                        "user rejected the clarify checkpoint".into(),
+                    ));
+                }
             }
         }
 
