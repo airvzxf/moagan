@@ -768,8 +768,7 @@ mod tests {
     fn cli_prompt_redaction_replaces_api_keys() {
         let policy = RedactPolicy::default();
         let raw = "test-secret-sk-cp-zNY4VDNCchb7_Cv4Hx2I8Y6cW6gDel1Mw3ObZPw";
-        let redacted =
-            redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
+        let redacted = redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
         assert!(
             !redacted.contains("zNY4VDNCchb7"),
             "raw API key leaked: {redacted}"
@@ -784,8 +783,7 @@ mod tests {
     fn cli_prompt_redaction_replaces_bearer_headers() {
         let policy = RedactPolicy::default();
         let raw = "Authorization: Bearer abcdefghij1234567890";
-        let redacted =
-            redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
+        let redacted = redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
         assert!(
             !redacted.contains("abcdefghij1234567890"),
             "raw bearer token leaked: {redacted}"
@@ -796,8 +794,7 @@ mod tests {
     fn cli_prompt_redaction_preserves_non_secret_text() {
         let policy = RedactPolicy::default();
         let raw = "design a CLI for batch CSV processing";
-        let redacted =
-            redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
+        let redacted = redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
         assert_eq!(redacted, raw, "non-secret text should be unchanged");
     }
 }
