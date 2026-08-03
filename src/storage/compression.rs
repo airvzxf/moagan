@@ -19,89 +19,13 @@ use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
-use std::path::PathBuf;
-
-use flate2::Compression as GzipCompression;
+use flate2::Compression as FlateCompression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 
 use crate::error::{Error, IoError, Result};
 
-/// Compression format for whole-file output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compression {
-    /// No compression.
-    None,
-    /// Gzip compression.
-    Gz,
-    /// Zstandard compression.
-    Zst,
-}
-
-/// Error raised while compressing a file.
-#[derive(Debug, thiserror::Error)]
-pub enum CompressionError {
-    /// Input/output failure with the relevant path.
-    #[error("{path:?}: {source}")]
-    Io {
-        /// Path involved in the operation.
-        path: PathBuf,
-        /// Underlying I/O error.
-        source: std::io::Error,
-    },
-    /// Compression codec failure.
-    #[error("compression: {0}")]
-    Codec(String),
-}
-
-/// Compress `src` into `dst` and return the output byte count.
-pub fn compress_or_report(
-    src: &Path,
-    dst: &Path,
-    c: Compression,
-) -> std::result::Result<u64, CompressionError> {
-    let input = std::fs::read(src).map_err(|source| CompressionError::Io {
-        path: src.to_path_buf(),
-        source,
-    })?;
-    let out = match c {
-        Compression::None => input,
-        Compression::Gz => {
-            let mut encoder = GzEncoder::new(Vec::new(), GzipCompression::default());
-            encoder
-                .write_all(&input)
-                .map_err(|source| CompressionError::Io {
-                    path: dst.to_path_buf(),
-                    source,
-                })?;
-            encoder.finish().map_err(|source| CompressionError::Io {
-                path: dst.to_path_buf(),
-                source,
-            })?
-        }
-        Compression::Zst => {
-            let mut encoder = zstd::Encoder::new(Vec::new(), 0)
-                .map_err(|source| CompressionError::Codec(source.to_string()))?;
-            encoder
-                .write_all(&input)
-                .map_err(|source| CompressionError::Io {
-                    path: dst.to_path_buf(),
-                    source,
-                })?;
-            encoder.finish().map_err(|source| CompressionError::Io {
-                path: dst.to_path_buf(),
-                source,
-            })?
-        }
-    };
-    let count = out.len() as u64;
-    std::fs::write(dst, &out).map_err(|source| CompressionError::Io {
-        path: dst.to_path_buf(),
-        source,
-    })?;
-    Ok(count)
-}
-
+/// Open a file in append mode behind `MemberGzWriter`. Each call to
 /// `flush()` completes the current gzip member (header + deflate
 /// blocks + CRC32 + length trailer) so the on-disk file is always a
 /// valid sequence of gzip members readable by `MultiGzDecoder`.
@@ -191,7 +115,7 @@ impl MemberGzWriter {
     fn encoder(&mut self) -> io::Result<&mut GzEncoder<File>> {
         if self.current.is_none() {
             let f = self.file.try_clone()?;
-            self.current = Some(GzEncoder::new(f, GzipCompression::default()));
+            self.current = Some(GzEncoder::new(f, FlateCompression::default()));
         }
         Ok(self.current.as_mut().expect("just initialised"))
     }
@@ -227,45 +151,63 @@ impl Drop for MemberGzWriter {
     }
 }
 
+// =====================================================================
+// D.7.5 — Compression enum + reader
+// =====================================================================
+//
+// Three modes: `None`, `Gz`, `Zst`. The reader returns a
+// `Box<dyn Read>` so callers can stream without caring about the
+// underlying format. This is an additive layer on top of the
+// `MemberGzWriter` / `open_gz_read` API above; the new helpers
+// are meant for tooling (export, verify) that needs to switch on
+// extension without knowing the file is multi-member gz.
+
+/// Compression mode of a sidecar file (D.7.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    /// Plain bytes (`.jsonl`, `.txt`, etc.).
+    None,
+    /// Single-stream gzip (`.gz`). Reads use the standard
+    /// `GzDecoder`, not the multi-member decoder, because the enum
+    /// is for tooling that opens a single stream.
+    Gz,
+    /// Zstandard (`.zst`).
+    Zst,
+}
+
+impl Compression {
+    /// Detect the compression mode from a file path's extension.
+    /// Returns `None` for any non-recognized extension.
+    pub fn from_extension(path: &Path) -> Self {
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        match ext {
+            "gz" => Self::Gz,
+            "zst" => Self::Zst,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Open a file behind a `Box<dyn Read>` that transparently decodes
+/// the selected compression format. Plain files are wrapped in a
+/// `BufReader`; `.gz` is decoded with `flate2::GzDecoder`; `.zst`
+/// is decoded with `zstd::Decoder`.
+///
+/// Refs: D.7.5, T16-06 §5.5, T11-04 §D2.
+pub fn reader(path: &Path, c: Compression) -> io::Result<Box<dyn Read>> {
+    let f = File::open(path)?;
+    let buf = BufReader::new(f);
+    Ok(match c {
+        Compression::None => Box::new(buf),
+        Compression::Gz => Box::new(flate2::read::GzDecoder::new(buf)),
+        Compression::Zst => Box::new(zstd::Decoder::new(buf)?),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn compress_or_report_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("source");
-        let dst = tmp.path().join("output");
-        std::fs::write(&src, b"plain").unwrap();
-        assert_eq!(
-            compress_or_report(&src, &dst, Compression::None).unwrap(),
-            5
-        );
-        assert_eq!(std::fs::read(&dst).unwrap(), b"plain");
-    }
-
-    #[test]
-    fn compress_or_report_gz() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("source");
-        let dst = tmp.path().join("output.gz");
-        std::fs::write(&src, b"gzip payload").unwrap();
-        let count = compress_or_report(&src, &dst, Compression::Gz).unwrap();
-        assert_eq!(count, std::fs::metadata(&dst).unwrap().len());
-        assert!(!std::fs::read(&dst).unwrap().is_empty());
-    }
-
-    #[test]
-    fn compress_or_report_zst() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("source");
-        let dst = tmp.path().join("output.zst");
-        std::fs::write(&src, b"zstd payload").unwrap();
-        let count = compress_or_report(&src, &dst, Compression::Zst).unwrap();
-        assert_eq!(count, std::fs::metadata(&dst).unwrap().len());
-        assert!(!std::fs::read(&dst).unwrap().is_empty());
-    }
 
     #[test]
     fn round_trip_writes_and_reads() {
@@ -322,5 +264,82 @@ mod tests {
         assert!(is_gz_path(Path::new("calls.jsonl.gz")));
         assert!(!is_gz_path(Path::new("calls.jsonl")));
         assert!(!is_gz_path(Path::new("manifest.json")));
+    }
+
+    // ---- D.7.5 — Compression enum + reader (Phase O) --------------
+
+    #[test]
+    fn compression_from_extension_gz() {
+        assert_eq!(
+            Compression::from_extension(Path::new("calls.jsonl.gz")),
+            Compression::Gz,
+        );
+        assert_eq!(
+            Compression::from_extension(Path::new("/var/log/x.gz")),
+            Compression::Gz,
+        );
+    }
+
+    #[test]
+    fn compression_from_extension_zst() {
+        assert_eq!(
+            Compression::from_extension(Path::new("calls.jsonl.zst")),
+            Compression::Zst,
+        );
+        assert_eq!(
+            Compression::from_extension(Path::new("/var/log/x.zst")),
+            Compression::Zst,
+        );
+    }
+
+    #[test]
+    fn compression_from_extension_none() {
+        assert_eq!(
+            Compression::from_extension(Path::new("manifest.json")),
+            Compression::None,
+        );
+        assert_eq!(
+            Compression::from_extension(Path::new("calls.jsonl")),
+            Compression::None,
+        );
+        // No extension at all
+        assert_eq!(
+            Compression::from_extension(Path::new("Makefile")),
+            Compression::None,
+        );
+        // Unknown extension falls back to None (caller decides)
+        assert_eq!(
+            Compression::from_extension(Path::new("data.br")),
+            Compression::None,
+        );
+    }
+
+    #[test]
+    fn reader_returns_none_for_uncompressed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.jsonl");
+        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
+        let mut r = reader(&path, Compression::None).unwrap();
+        let mut buf = String::new();
+        r.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf.lines().count(), 2);
+        assert!(buf.contains("\"a\":2"));
+    }
+
+    #[test]
+    fn reader_returns_gunzip_for_gz() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.jsonl.gz");
+        // Encode the same content using the existing gz append path
+        // so we exercise the same writer callers will use elsewhere.
+        let mut w = open_gz_append(&path).unwrap();
+        writeln!(w, "{{\"phase\":\"gzip\"}}").unwrap();
+        w.flush().ok();
+        drop(w);
+        // The new reader must decode it transparently.
+        let mut r = reader(&path, Compression::Gz).unwrap();
+        let mut buf = String::new();
+        r.read_to_string(&mut buf).unwrap();
+        assert!(buf.contains("\"phase\":\"gzip\""));
     }
 }

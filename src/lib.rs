@@ -13,9 +13,11 @@ pub mod cancel;
 pub mod checkpoint;
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod discovery;
 pub mod domain;
 pub mod error;
+pub mod error_code;
 pub mod execution;
 pub mod fs_layout;
 pub mod ids;
@@ -30,7 +32,7 @@ pub mod telemetry;
 pub mod time;
 pub mod validators;
 
-pub use error::{Error, Result, exit_code};
+pub use error::{Error, ExitCode, Result, exit_code};
 
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {

@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, IoError, Result};
 use crate::ids::RunId;
 
@@ -129,11 +131,15 @@ impl RunDir<'_> {
         self.root.join("manifest.json")
     }
 
+    /// `overrides.json` — optional rerun matrix override sidecar.
+    pub fn overrides_json_path(&self) -> PathBuf {
+        self.root.join("overrides.json")
+    }
+
     /// `brief.json` — canonical brief produced by intake/clarify.
     pub fn brief(&self) -> PathBuf {
         self.root.join("brief.json")
     }
-
     /// `sketches/` directory — short, opinionated hypotheses emitted
     /// by the `SketchPhase` (v0.2). Empty for `fast` mode.
     pub fn sketches(&self) -> PathBuf {
@@ -293,6 +299,85 @@ impl RunDir<'_> {
             std::fs::create_dir_all(&d)?;
         }
         Ok(())
+    }
+}
+
+/// Stable, well-known paths for a run, exposed both as
+/// run-relative strings and as absolute paths (D.12.16).
+///
+/// `relative` survives the run being moved or archived
+/// (`brief.json` is always relative to the run root). `absolute`
+/// is the resolved-on-disk path for the current `MoaganHome`,
+/// which is what the dashboard / inspect surface consume to fetch
+/// the actual files. The two maps share the same keys so a caller
+/// can pull either form by the same logical id.
+///
+/// Keys cover the seven spec-stabilised artefacts:
+/// - `brief`: canonical brief produced by intake/clarify
+/// - `final`: directory holding `portfolio.md` and per-proposal
+///   exports
+/// - `manifest`: run-level parameterisation + state
+/// - `ranking`: ranked proposals JSON
+/// - `calls`: per-call telemetry (JSONL gzipped)
+/// - `phases`: per-phase events (JSONL gzipped)
+/// - `warnings`: warnings log (plain JSONL)
+/// - `checkpoints`: human-checkpoint log (plain JSONL)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunPaths {
+    /// Run-relative paths. Survives a move / archive.
+    pub relative: std::collections::BTreeMap<String, String>,
+    /// Absolute paths. Resolved against `MoaganHome`.
+    pub absolute: std::collections::BTreeMap<String, PathBuf>,
+}
+
+impl RunPaths {
+    /// Resolve the standard set of run paths for `run_id` under
+    /// `home`. Returns a `RunPaths` with both maps populated.
+    /// Idempotent: does not touch the filesystem.
+    pub fn resolve(home: &MoaganHome, run_id: RunId) -> Self {
+        let run_dir = home.run_dir(run_id);
+        let root = run_dir.root().to_path_buf();
+        let entries: [(&str, &str); 8] = [
+            ("brief", "brief.json"),
+            ("final", "final"),
+            ("manifest", "manifest.json"),
+            ("ranking", "rankings/ranking.json"),
+            ("calls", "telemetry/calls.jsonl.gz"),
+            ("phases", "telemetry/phases.jsonl.gz"),
+            ("warnings", "telemetry/warnings.jsonl"),
+            ("checkpoints", "telemetry/checkpoints.jsonl"),
+        ];
+        let mut relative = std::collections::BTreeMap::new();
+        let mut absolute = std::collections::BTreeMap::new();
+        for (key, sub) in entries {
+            relative.insert(key.to_string(), sub.to_string());
+            absolute.insert(key.to_string(), root.join(sub));
+        }
+        Self { relative, absolute }
+    }
+
+    /// Look up an absolute path by key. Returns `None` if the
+    /// key is not in the catalog.
+    pub fn absolute(&self, key: &str) -> Option<&PathBuf> {
+        self.absolute.get(key)
+    }
+
+    /// Look up a run-relative path by key. Returns `None` if the
+    /// key is not in the catalog.
+    pub fn relative_str(&self, key: &str) -> Option<&str> {
+        self.relative.get(key).map(String::as_str)
+    }
+
+    /// Number of catalog entries. Always 8 by construction.
+    pub fn len(&self) -> usize {
+        self.relative.len()
+    }
+
+    /// True when no entries are present. Should never happen for
+    /// a `RunPaths` returned by `resolve`; the method exists so
+    /// callers can `is_empty()` defensively after deserialising.
+    pub fn is_empty(&self) -> bool {
+        self.relative.is_empty()
     }
 }
 
@@ -473,5 +558,123 @@ mod tests {
         let r = h.run_dir(RunId::new());
         assert!(r.cluster_proposals_dir().ends_with("cluster_proposals"));
         assert!(r.adversaries().ends_with("adversaries"));
+    }
+
+    // -- Phase M (D.12.16) — RunPaths::resolve() -------------------------
+
+    /// `resolve` returns both maps populated for the standard
+    /// eight keys (D.12.16).
+    #[test]
+    fn run_paths_resolve_returns_both_maps() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let id = RunId::new();
+        let paths = RunPaths::resolve(&h, id);
+        assert_eq!(paths.relative.len(), 8);
+        assert_eq!(paths.absolute.len(), 8);
+        assert_eq!(paths.len(), 8);
+        assert!(!paths.is_empty());
+    }
+
+    /// Every documented key is present in both maps.
+    #[test]
+    fn run_paths_resolve_contains_all_documented_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let paths = RunPaths::resolve(&h, RunId::new());
+        for key in [
+            "brief",
+            "final",
+            "manifest",
+            "ranking",
+            "calls",
+            "phases",
+            "warnings",
+            "checkpoints",
+        ] {
+            assert!(
+                paths.relative.contains_key(key),
+                "missing relative key: {key}"
+            );
+            assert!(
+                paths.absolute.contains_key(key),
+                "missing absolute key: {key}"
+            );
+        }
+    }
+
+    /// Relative paths are pure suffixes (no leading slash,
+    /// never absolute).
+    #[test]
+    fn run_paths_relative_are_run_relative() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let paths = RunPaths::resolve(&h, RunId::new());
+        for (key, rel) in &paths.relative {
+            assert!(!rel.starts_with('/'), "{key}: relative starts with /");
+            assert!(!rel.contains(".."), "{key}: relative contains ..");
+        }
+    }
+
+    /// Absolute paths point at the run dir + the relative suffix.
+    /// After `run_dir.ensure()`, the directory branches exist
+    /// (brief/manifest/ranking paths are files we create on
+    /// demand, but the parent dirs exist).
+    #[test]
+    fn run_paths_absolute_resolve_to_existing_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let id = RunId::new();
+        let rd = h.run_dir(id);
+        rd.ensure().unwrap();
+        let paths = RunPaths::resolve(&h, id);
+
+        // The directory keys must point at directories that exist
+        // after `ensure()`.
+        for key in ["final", "calls", "phases", "warnings", "checkpoints"] {
+            let p = paths
+                .absolute(key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert!(p.parent().unwrap().is_dir(), "{key} parent missing: {p:?}");
+        }
+        // File keys must point inside the run dir, even though
+        // the file itself has not been written yet.
+        for key in ["brief", "manifest", "ranking"] {
+            let p = paths
+                .absolute(key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert!(
+                p.starts_with(rd.root()),
+                "{key}: absolute {p:?} not under run root {:?}",
+                rd.root()
+            );
+        }
+    }
+
+    /// RunPaths round-trips through serde so it can live inside
+    /// `Manifest.lineage_paths` (M.5) without bespoke plumbing.
+    #[test]
+    fn run_paths_round_trips_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let h = MoaganHome::resolve().unwrap();
+        let paths = RunPaths::resolve(&h, RunId::new());
+        let j = serde_json::to_string(&paths).unwrap();
+        let back: RunPaths = serde_json::from_str(&j).unwrap();
+        assert_eq!(paths, back);
     }
 }

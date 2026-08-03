@@ -5,12 +5,14 @@
 pub mod budget;
 pub mod cache;
 pub mod circuit_breaker;
+pub mod embed;
 pub mod http;
 pub mod minimax;
 pub mod mock;
 pub mod prompts;
 pub mod provider;
 pub mod rate_limiter;
+pub mod retry_budget;
 pub mod role;
 pub mod wire;
 pub mod wire_format;
