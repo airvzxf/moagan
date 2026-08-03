@@ -178,6 +178,7 @@ async fn discovery_pipeline_composes_all_seven_phases() {
         facets_per_dimension: 2,
         cluster_threshold: 0.7,
         out_dir: None,
+        non_interactive: true,
     };
     let pipeline = build_discovery_pipeline(&opts);
     let names = pipeline.names();

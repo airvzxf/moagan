@@ -50,6 +50,12 @@ pub enum Role {
     /// sketch into a primary category with subcategory + difficulty.
     /// Uses temperature 0.0 and top_p 0.2 for determinism.
     Tagger,
+    /// FacetDeriver — discovery mode. Reads a cluster's tagger
+    /// output and the cluster summary, then proposes 3-6 facets
+    /// the category document should cover. Uses temperature 0.0
+    /// and top_p 0.2 for determinism (T01-06 §4.2 role table:
+    /// max_tokens=1024, distinct from `tagger`'s 512).
+    FacetDeriver,
     /// Extractor — discovery mode. Pulls the per-facet markdown
     /// out of a cluster's sketches. Uses temperature 0.4 and top_p
     /// 0.8 for variation across facets.
@@ -99,6 +105,7 @@ impl Role {
             Self::Rank => "rank",
             Self::Deliver => "deliver",
             Self::Tagger => "tagger",
+            Self::FacetDeriver => "facet_deriver",
             Self::Extractor => "extractor",
             Self::Integrator => "integrator",
             Self::Synthesizer => "synthesizer",
@@ -142,6 +149,7 @@ impl Role {
             Self::Tagger => {
                 "SketchTags: {sketch_id, primary, secondary[], subcategory, difficulty, similarity_to_category, notes}"
             }
+            Self::FacetDeriver => "Facets: {facets[]: {name, description, required}}",
             Self::Extractor => "FacetExtraction: {facet_id, category_id, body, sources[]}",
             Self::Integrator => "CategoryDoc: {category_id, cluster_id, body, sources[], density}",
             Self::Synthesizer => {
@@ -197,6 +205,13 @@ impl Role {
             Self::Tagger => {
                 serde_json::from_value::<crate::domain::SketchTags>(value.clone()).map(|_| ())
             }
+            Self::FacetDeriver => {
+                // The deriver returns the same shape as `DiscoverFacetPhase`
+                // (a `FacetList` with `facets: Vec<Facet>`) so a successful
+                // validate here means the cluster also passes the
+                // facet-cache schema. We tolerate unknown fields.
+                serde_json::from_value::<crate::domain::FacetList>(value.clone()).map(|_| ())
+            }
             Self::Extractor => {
                 serde_json::from_value::<crate::domain::FacetExtraction>(value.clone()).map(|_| ())
             }
@@ -237,6 +252,7 @@ impl Role {
             Self::Rank,
             Self::Deliver,
             Self::Tagger,
+            Self::FacetDeriver,
             Self::Extractor,
             Self::Integrator,
             Self::Synthesizer,
@@ -272,6 +288,7 @@ impl FromStr for Role {
             "rank" => Ok(Self::Rank),
             "deliver" => Ok(Self::Deliver),
             "tagger" => Ok(Self::Tagger),
+            "facet_deriver" => Ok(Self::FacetDeriver),
             "extractor" => Ok(Self::Extractor),
             "integrator" => Ok(Self::Integrator),
             "synthesizer" => Ok(Self::Synthesizer),
@@ -305,8 +322,8 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty() {
-        assert_eq!(Role::all().len(), 20);
+    fn all_roles_are_count_twenty_one() {
+        assert_eq!(Role::all().len(), 21);
     }
 
     #[test]
@@ -361,7 +378,8 @@ mod tests {
                     || desc.starts_with("Decomposer:")
                     || desc.starts_with("MergeSynthesizer:")
                     || desc.starts_with("RecoveryExplainer:")
-                    || desc.starts_with("RationaleExtractor:"),
+                    || desc.starts_with("RationaleExtractor:")
+                    || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
             );

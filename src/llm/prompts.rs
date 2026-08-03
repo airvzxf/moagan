@@ -58,6 +58,7 @@ const JUDGE_PROMPT: &str = include_str!("prompts/judge.md");
 const RANK_PROMPT: &str = include_str!("prompts/rank.md");
 const DELIVER_PROMPT: &str = include_str!("prompts/deliver.md");
 const TAGGER_PROMPT: &str = include_str!("prompts/tag.md");
+const FACET_DERIVER_PROMPT: &str = include_str!("prompts/facet_deriver.md");
 const EXTRACTOR_PROMPT: &str = include_str!("prompts/extract.md");
 const INTEGRATOR_PROMPT: &str = include_str!("prompts/integrate.md");
 const DISCOVER_MATRIX_PROMPT: &str = include_str!("prompts/discover_matrix.md");
@@ -88,6 +89,7 @@ pub fn prompt_set_hash() -> String {
                 RANK_PROMPT,
                 DELIVER_PROMPT,
                 TAGGER_PROMPT,
+                FACET_DERIVER_PROMPT,
                 EXTRACTOR_PROMPT,
                 INTEGRATOR_PROMPT,
                 DISCOVER_MATRIX_PROMPT,
@@ -119,6 +121,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Rank => RANK_PROMPT,
         Role::Deliver => DELIVER_PROMPT,
         Role::Tagger => TAGGER_PROMPT,
+        Role::FacetDeriver => FACET_DERIVER_PROMPT,
         Role::Extractor => EXTRACTOR_PROMPT,
         Role::Integrator => INTEGRATOR_PROMPT,
         Role::Synthesizer => SYNTHESIZE_PROMPT,

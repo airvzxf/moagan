@@ -48,6 +48,12 @@ pub struct ContinueOptions {
     /// Skip the resume checkpoint (the "are you sure?" gate).
     /// Records a synthetic provider-change event for auditability.
     pub skip_checkpoint: bool,
+    /// Non-interactive: every checkpoint (intake, deliver,
+    /// stability-sensitive rank) becomes a `<skipped:non_interactive>`
+    /// marker instead of blocking on stdin. Default `false`
+    /// (interactive operator). Use this when driving `resume`
+    /// from a non-TTY stdin (CI, smoke tests).
+    pub non_interactive: bool,
 }
 
 /// Real `moagan continue`. Loads the manifest, finds the last
@@ -70,14 +76,27 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
         "moagan continue {}: resuming after phase {last_phase:?}",
         run_id.short()
     );
-    resume_pipeline(home, &manifest, &last_phase, api_key.as_deref()).await?;
+    resume_pipeline(
+        home,
+        &manifest,
+        &last_phase,
+        api_key.as_deref(),
+        opts.non_interactive,
+    )
+    .await?;
     Ok(())
 }
 
-/// `moagan resume <run_id>` — same as `continue` but without the
-/// switch flags. Always errors when `last_phase` is `None`.
-pub async fn run_resume(home: &MoaganHome, run_id: RunId) -> Result<()> {
-    run_continue(home, run_id, ContinueOptions::default()).await
+/// `moagan resume <run_id> [--non-interactive]` — same as `continue`
+/// but without the switch flags. Always errors when `last_phase` is
+/// `None`. `--non-interactive` is forwarded so CI runs that drive
+/// `resume` from a non-TTY stdin don't hang on the intake yes/no.
+pub async fn run_resume(home: &MoaganHome, run_id: RunId, non_interactive: bool) -> Result<()> {
+    let opts = ContinueOptions {
+        non_interactive,
+        ..ContinueOptions::default()
+    };
+    run_continue(home, run_id, opts).await
 }
 
 /// `moagan rerun <run_id> [--matrix-override <json>] [--same-config]` —
@@ -607,6 +626,7 @@ pub(crate) async fn resume_pipeline(
     manifest: &Manifest,
     last_phase: &str,
     api_key: Option<&str>,
+    non_interactive: bool,
 ) -> Result<()> {
     let mode = parse_mode(&manifest.mode)?;
     let cfg = Config::load().unwrap_or_default();
@@ -647,7 +667,8 @@ pub(crate) async fn resume_pipeline(
         telemetry.clone(),
         String::new(),
         manifest.mode.clone(),
-    );
+    )
+    .with_interactive(!non_interactive);
     let outcome = resumed.run(&ctx).await;
     telemetry.flush()?;
     let status = if outcome.is_ok() {
