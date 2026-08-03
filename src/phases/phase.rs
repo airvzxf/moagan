@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::Cancel;
+use crate::config::Config;
 use crate::context::ContextRefRecord;
 use crate::domain::LineagePaths;
 use crate::error::Result;
@@ -49,6 +50,14 @@ pub struct RunContext {
     /// successful call so subsequent runs of the same prompt reuse
     /// the cached response (compliance with T01-06 §3.3).
     pub cache: Cache,
+    /// Loaded `Config` for the run. Phases that take user-tunable
+    /// knobs (gate forbidden-techs / min / max length, validate
+    /// sandbox timeout, etc.) MUST read from this field instead of
+    /// `Config::defaults()` so changes in `~/.config/moagan/config.toml`
+    /// actually take effect. Cloned at the `cli::run` boundary and
+    /// shared across every phase via `Arc` so the cost is one
+    /// `clone()` of the (small) struct.
+    pub config: Arc<Config>,
     /// Whether the human-in-the-loop checkpoints are interactive
     /// (`true`) or auto-suppressed (`false`). Phase D opt-out;
     /// wired from `--non-interactive` and `Mode::Batch`.
@@ -102,6 +111,37 @@ impl RunContext {
         raw_prompt: String,
         mode: String,
     ) -> Self {
+        Self::new_with_config(
+            run_id,
+            home,
+            providers,
+            default_provider,
+            default_model,
+            parallelism,
+            telemetry,
+            raw_prompt,
+            mode,
+            Arc::new(Config::default()),
+        )
+    }
+
+    /// Build a new run context with an explicit `Config`. Preferred
+    /// over `new()` from the `cli::run` boundary so user-tunable
+    /// knobs (gate forbidden-techs, validate sandbox timeout, etc.)
+    /// reach the phases that consume them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_config(
+        run_id: RunId,
+        home: Arc<MoaganHome>,
+        providers: Arc<ProviderRegistry>,
+        default_provider: String,
+        default_model: String,
+        parallelism: Parallelism,
+        telemetry: Telemetry,
+        raw_prompt: String,
+        mode: String,
+        config: Arc<Config>,
+    ) -> Self {
         let cache = Cache::new(CacheConfig {
             root: home.cross_run_cache_dir(),
             cross_run: true,
@@ -118,6 +158,7 @@ impl RunContext {
             raw_prompt,
             mode,
             cache,
+            config,
             interactive: true,
             context_block: None,
             parent_run_id: None,

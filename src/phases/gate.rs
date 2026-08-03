@@ -16,7 +16,6 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use crate::config::Config;
 use crate::domain::{Brief, Gate, Proposal};
 use crate::error::Result;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
@@ -35,10 +34,10 @@ impl Phase for GatePhase {
         let proposals_dir = ctx.run_dir().proposals();
         let validation_dir = ctx.run_dir().validation();
         std::fs::create_dir_all(&validation_dir)?;
-        let cfg = Config::defaults();
-        let min_len = cfg.gate_min_length;
-        let max_len = cfg.gate_max_length;
-        let forbidden: Vec<String> = cfg
+        let min_len = ctx.config.gate_min_length;
+        let max_len = ctx.config.gate_max_length;
+        let forbidden: Vec<String> = ctx
+            .config
             .gate_forbidden_techs
             .iter()
             .map(|s| s.to_lowercase())
@@ -280,6 +279,7 @@ fn pick_needle(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     fn empty_brief() -> Brief {
         Brief::default()
@@ -407,6 +407,68 @@ mod tests {
         assert_eq!(
             pick_needle("must not use relational").unwrap(),
             "relational"
+        );
+    }
+
+    /// Phase A fix Q1: `GatePhase::execute` must read the loaded
+    /// `Config` (not `Config::defaults()`) so user-tunable
+    /// `gate_forbidden_techs` from `~/.config/moagan/config.toml`
+    /// actually take effect.
+    #[tokio::test]
+    async fn gate_phase_uses_ctx_config_forbidden_techs() {
+        use crate::phases::util::write_json;
+        let home = std::sync::Arc::new(
+            crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
+                "/tmp/moagan-gate-test-uses-config",
+            )),
+        );
+        home.ensure().unwrap();
+        let run_id = crate::ids::RunId::new();
+        let run_dir = home.run_dir(run_id);
+        let run_dir_path = run_dir.root().to_path_buf();
+        let validation_path = run_dir.validation().to_path_buf();
+        run_dir.ensure().unwrap();
+        std::fs::create_dir_all(run_dir.proposals()).unwrap();
+        std::fs::create_dir_all(run_dir.validation()).unwrap();
+
+        let proposal = Proposal {
+            id: "p_001".into(),
+            summary: "ok".into(),
+            approach: "Use postgres for storage".into(),
+            tradeoffs: vec!["a".into()],
+            evidence: vec!["b".into()],
+            source_sketch: String::new(),
+            ..Proposal::default()
+        };
+        write_json(&run_dir.proposals().join("p_001.json"), &proposal).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.gate_forbidden_techs = vec!["postgres".into()];
+        let providers = std::sync::Arc::new(crate::llm::ProviderRegistry::default());
+        let telemetry = crate::telemetry::Telemetry::noop();
+        let parallelism = crate::execution::Parallelism::new(1);
+        let ctx = RunContext::new_with_config(
+            run_id,
+            std::sync::Arc::clone(&home),
+            providers,
+            "mock".into(),
+            "mock-model".into(),
+            parallelism,
+            telemetry,
+            String::new(),
+            "fast".into(),
+            std::sync::Arc::new(cfg),
+        );
+        GatePhase.execute(&ctx).await.unwrap();
+        drop(home);
+        let gate_path = validation_path.join("p_001.json");
+        assert!(gate_path.exists(), "gate sidecar missing (run_dir={:?})", run_dir_path);
+        let gate: crate::domain::Gate =
+            serde_json::from_str(&std::fs::read_to_string(&gate_path).unwrap()).unwrap();
+        assert!(
+            gate.issues.iter().any(|i| i.contains("forbidden")),
+            "expected forbidden_tech issue, got {:?}",
+            gate.issues
         );
     }
 }

@@ -262,6 +262,7 @@ pub async fn run_full_pipeline(
 ) -> Result<Manifest> {
     let run_id = stub.run_id;
     let run_dir = home.run_dir(run_id);
+    let cfg_arc = Arc::new(cfg.clone());
     let mode = parse_mode(&stub.mode)?;
     let default_provider = if stub.provider.is_empty() {
         cfg.default_provider.clone()
@@ -279,7 +280,7 @@ pub async fn run_full_pipeline(
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
     let parallelism = Parallelism::new(max_parallelism.unwrap_or(cfg.max_parallelism));
 
-    let ctx = RunContext::new(
+    let ctx = RunContext::new_with_config(
         run_id,
         Arc::clone(&home),
         providers,
@@ -289,6 +290,7 @@ pub async fn run_full_pipeline(
         telemetry.clone(),
         raw_prompt,
         stub.mode.clone(),
+        cfg_arc,
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
     .with_interactive(!non_interactive)
