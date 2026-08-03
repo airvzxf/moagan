@@ -20,7 +20,7 @@ use crate::phases::{
     IntakePhase, JudgePhase, Pipeline, ProposePhase, RankPhase, RepairPhase, RoutePhase,
     RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
 };
-use crate::redact::RedactPolicy;
+use crate::redact::{self, RedactPolicy};
 use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::{PhaseEvent, Telemetry};
@@ -349,6 +349,22 @@ pub async fn run_full_pipeline(
         manifest.lineage_paths = stub.lineage_paths.clone();
     }
     manifest.cli_prompt = stub.cli_prompt.clone();
+    // Redact the verbatim CLI prompt before it lands on disk. The
+    // default policy redacts on Storage; the pattern catalog covers
+    // API keys (sk-cp-, sk-, ghp_, …), JWTs, Bearer headers, and
+    // generic password/secret= assignments. Users routinely paste
+    // real keys into prompts; persisting them unredacted on the
+    // manifest sidecar defeats every other privacy control in the
+    // pipeline (calls.jsonl.gz, intake.json, etc. all redact).
+    if let Some(p) = manifest.cli_prompt.as_ref()
+        && let Ok(redacted) = redact::apply(
+            &redact::RedactPolicy::default(),
+            redact::Surface::Storage,
+            p,
+        )
+    {
+        manifest.cli_prompt = Some(redacted.into_owned());
+    }
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
     if let Err(e) = db.update_run_status(run_id, "completed") {
@@ -736,4 +752,52 @@ fn aggregate_usage(primary: &Path, legacy: &Path) -> ManifestUsage {
             .unwrap_or(0);
     }
     usage
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::redact::{RedactPolicy, Surface};
+
+    /// Direct test of the redaction policy that protects
+    /// `manifest.cli_prompt`. The production path (run_full_pipeline
+    /// → serde_json → AtomicWriter) is covered by the integration
+    /// smoke; this unit test pins the policy choice so a future
+    /// refactor cannot silently turn it off.
+    #[test]
+    fn cli_prompt_redaction_replaces_api_keys() {
+        let policy = RedactPolicy::default();
+        let raw = "test-secret-sk-cp-zNY4VDNCchb7_Cv4Hx2I8Y6cW6gDel1Mw3ObZPw";
+        let redacted =
+            redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
+        assert!(
+            !redacted.contains("zNY4VDNCchb7"),
+            "raw API key leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("[REDACTED:") || redacted.contains("***REDACTED"),
+            "redaction marker missing: {redacted}"
+        );
+    }
+
+    #[test]
+    fn cli_prompt_redaction_replaces_bearer_headers() {
+        let policy = RedactPolicy::default();
+        let raw = "Authorization: Bearer abcdefghij1234567890";
+        let redacted =
+            redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
+        assert!(
+            !redacted.contains("abcdefghij1234567890"),
+            "raw bearer token leaked: {redacted}"
+        );
+    }
+
+    #[test]
+    fn cli_prompt_redaction_preserves_non_secret_text() {
+        let policy = RedactPolicy::default();
+        let raw = "design a CLI for batch CSV processing";
+        let redacted =
+            redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
+        assert_eq!(redacted, raw, "non-secret text should be unchanged");
+    }
 }

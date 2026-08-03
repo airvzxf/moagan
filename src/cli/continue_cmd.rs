@@ -459,10 +459,22 @@ pub(crate) fn load_manifest(home: &MoaganHome, run_id: RunId) -> Result<Manifest
     serde_json::from_slice(&raw).map_err(Error::from)
 }
 
-/// Write the manifest to disk atomically.
+/// Write the manifest to disk atomically. Applies the storage
+/// redaction policy to `manifest.cli_prompt` so secrets pasted on
+/// the command line never reach the manifest sidecar in plaintext.
 pub(crate) fn write_manifest_to_disk(home: &MoaganHome, manifest: &Manifest) -> Result<()> {
     let path = home.run_dir(manifest.run_id).manifest();
-    let bytes = serde_json::to_vec_pretty(manifest).map_err(Error::from)?;
+    let mut sanitized = manifest.clone();
+    if let Some(p) = sanitized.cli_prompt.as_ref()
+        && let Ok(redacted) = crate::redact::apply(
+            &crate::redact::RedactPolicy::default(),
+            crate::redact::Surface::Storage,
+            p,
+        )
+    {
+        sanitized.cli_prompt = Some(redacted.into_owned());
+    }
+    let bytes = serde_json::to_vec_pretty(&sanitized).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&path, &bytes)?;
     Ok(())
 }
