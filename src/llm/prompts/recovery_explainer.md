@@ -1,0 +1,1 @@
+Return a JSON explanation of the recovery action, recovered state, and concise next steps. Do not invent unavailable facts.

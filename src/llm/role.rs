@@ -75,6 +75,12 @@ pub enum Role {
     /// T01-06 §4.2 role table. Skipped entirely when the brief does
     /// not meet the `should_decompose` ladder (`Proposal::trivial`).
     Decomposer,
+    /// Optional merge synthesis role.
+    MergeSynthesizer,
+    /// Optional recovery explanation role.
+    RecoveryExplainer,
+    /// Optional rationale extraction role.
+    RationaleExtractor,
 }
 
 impl Role {
@@ -98,6 +104,9 @@ impl Role {
             Self::Synthesizer => "synthesizer",
             Self::Adversary => "adversary",
             Self::Decomposer => "decomposer",
+            Self::MergeSynthesizer => "merge_synthesizer",
+            Self::RecoveryExplainer => "recovery_explainer",
+            Self::RationaleExtractor => "rationale_extractor",
         }
     }
 
@@ -143,6 +152,15 @@ impl Role {
             }
             Self::Decomposer => {
                 "Decomposer: {should_decompose, nodes[]{id, question, expected_output, constraints[], dependencies[], validation_method}, integration_rules[]{from, to, description}, critical_path[]}"
+            }
+            Self::MergeSynthesizer => {
+                "MergeSynthesizer: {summary, approach, tradeoffs[], evidence[], sources[]}"
+            }
+            Self::RecoveryExplainer => {
+                "RecoveryExplainer: {explanation, recovered_state, next_steps[]}"
+            }
+            Self::RationaleExtractor => {
+                "RationaleExtractor: {rationale, evidence[], assumptions[]}"
             }
         }
     }
@@ -192,6 +210,7 @@ impl Role {
             Self::Decomposer => {
                 serde_json::from_value::<crate::domain::ProblemGraph>(value.clone()).map(|_| ())
             }
+            Self::MergeSynthesizer | Self::RecoveryExplainer | Self::RationaleExtractor => Ok(()),
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -223,6 +242,9 @@ impl Role {
             Self::Synthesizer,
             Self::Adversary,
             Self::Decomposer,
+            Self::MergeSynthesizer,
+            Self::RecoveryExplainer,
+            Self::RationaleExtractor,
         ]
     }
 }
@@ -255,6 +277,9 @@ impl FromStr for Role {
             "synthesizer" => Ok(Self::Synthesizer),
             "adversary" => Ok(Self::Adversary),
             "decomposer" => Ok(Self::Decomposer),
+            "merge_synthesizer" => Ok(Self::MergeSynthesizer),
+            "recovery_explainer" => Ok(Self::RecoveryExplainer),
+            "rationale_extractor" => Ok(Self::RationaleExtractor),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -280,12 +305,23 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_seventeen() {
-        // v0.2 added the `sketch` role between route and propose (10→11).
-        // Sub-phase B added tagger, extractor, integrator (11→14).
-        // Sub-phase D added synthesizer and adversary (14→16).
-        // v0.3 sub-fase G added the decomposer (16→17).
-        assert_eq!(Role::all().len(), 17);
+    fn all_roles_are_count_twenty() {
+        assert_eq!(Role::all().len(), 20);
+    }
+
+    #[test]
+    fn merge_synthesizer_role_variant_exists() {
+        assert_eq!(Role::MergeSynthesizer.as_str(), "merge_synthesizer");
+    }
+
+    #[test]
+    fn recovery_explainer_role_variant_exists() {
+        assert_eq!(Role::RecoveryExplainer.as_str(), "recovery_explainer");
+    }
+
+    #[test]
+    fn rationale_extractor_role_variant_exists() {
+        assert_eq!(Role::RationaleExtractor.as_str(), "rationale_extractor");
     }
 
     #[test]
@@ -322,7 +358,10 @@ mod tests {
                     || desc.starts_with("CategoryDoc:")
                     || desc.starts_with("Synthesizer:")
                     || desc.starts_with("Adversary:")
-                    || desc.starts_with("Decomposer:"),
+                    || desc.starts_with("Decomposer:")
+                    || desc.starts_with("MergeSynthesizer:")
+                    || desc.starts_with("RecoveryExplainer:")
+                    || desc.starts_with("RationaleExtractor:"),
                 "{:?} description does not start with its name: {desc}",
                 r
             );

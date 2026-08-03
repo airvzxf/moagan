@@ -12,6 +12,20 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::Result;
 
+/// Failure while acquiring a fixed number of permits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcquireError {
+    /// The request exceeds the configured cap.
+    TooManyPermits {
+        /// Number requested.
+        requested: usize,
+        /// Configured cap.
+        cap: usize,
+    },
+    /// The semaphore was closed.
+    Closed,
+}
+
 /// Handle to the process-wide concurrency cap.
 #[derive(Debug, Clone)]
 pub struct Parallelism {
@@ -55,6 +69,32 @@ impl Parallelism {
             permit: Some(permit),
             in_use: self.inner.in_use.clone(),
         })
+    }
+
+    /// Acquire exactly `n` owned permits without clamping to the cap.
+    pub async fn acquire_many_owned(
+        &self,
+        n: usize,
+    ) -> std::result::Result<Vec<OwnedSemaphorePermit>, AcquireError> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let cap = self.max();
+        if n > cap {
+            return Err(AcquireError::TooManyPermits { requested: n, cap });
+        }
+        let mut permits = Vec::with_capacity(n);
+        for _ in 0..n {
+            let permit = self
+                .inner
+                .sem
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| AcquireError::Closed)?;
+            permits.push(permit);
+        }
+        Ok(permits)
     }
 
     /// Acquire up to `n` permits (clamped to the global cap). Returns
@@ -138,6 +178,30 @@ impl Drop for PermitsGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn acquire_many_owned_zero() {
+        let permits = Parallelism::new(2).acquire_many_owned(0).await.unwrap();
+        assert!(permits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn acquire_many_owned_exceeds_cap_returns_error() {
+        let err = Parallelism::new(2).acquire_many_owned(3).await.unwrap_err();
+        assert_eq!(
+            err,
+            AcquireError::TooManyPermits {
+                requested: 3,
+                cap: 2
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_many_owned_within_cap() {
+        let permits = Parallelism::new(3).acquire_many_owned(2).await.unwrap();
+        assert_eq!(permits.len(), 2);
+    }
 
     #[tokio::test]
     async fn acquire_respects_cap() {

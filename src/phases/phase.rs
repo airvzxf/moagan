@@ -696,6 +696,9 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // round up to 4096 so the JSON can carry a multi-node
         // graph without truncating the `dependencies` arrays.
         Role::Decomposer => 4096,
+        Role::MergeSynthesizer => 4000,
+        Role::RecoveryExplainer => 1000,
+        Role::RationaleExtractor => 1500,
     }
 }
 
@@ -761,6 +764,9 @@ fn temperature_for_role(role: Role) -> f32 {
         // `ProblemGraph::topological_layers` rejects anything that
         // doesn't form a valid DAG.
         Role::Decomposer => 0.3,
+        Role::MergeSynthesizer => 0.2,
+        Role::RecoveryExplainer => 0.0,
+        Role::RationaleExtractor => 0.2,
     }
 }
 

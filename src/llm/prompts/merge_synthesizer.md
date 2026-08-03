@@ -1,0 +1,1 @@
+Return a JSON merge plan that combines compatible proposals, preserves evidence, and identifies unresolved tradeoffs.
