@@ -5,10 +5,11 @@
 
 pub mod constraint;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::ids::RunId;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Output of the intake phase.
 ///
@@ -685,6 +686,77 @@ pub struct SynthesizedProposal {
     pub schema_version: String,
 }
 
+/// Output of the `Role::MergeSynthesizer` role (catalog D.7.1).
+/// Captures the merge plan the model produced plus the lineage of
+/// sources that fed it. Used by `SynthesizePhase` to gate the
+/// synthesis against the `HARD_INCOMPATIBILITIES` predicate and
+/// to stamp the resulting `synthesized/s_<NN>.json` sidecar.
+///
+/// V1: this is the new MergeSynthesizer role's output shape. It
+/// supersedes the legacy `SynthesizedProposal` contract: the
+/// `hard_constraint_check` map is the structured replacement for
+/// the `evidence: ["<key>:<ok>"]` pattern that `SynthesizedProposal`
+/// used, and the `sources` list is now mandatory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MergePlan {
+    /// Executive summary (1-3 sentences).
+    pub summary: String,
+    /// Merged approach (2-5 sentences).
+    pub approach: String,
+    /// Trade-offs preserved from the cluster.
+    pub tradeoffs: Vec<String>,
+    /// Per-source evidence excerpts.
+    pub evidence: Vec<String>,
+    /// Source proposal ids that fed this merge.
+    pub sources: Vec<String>,
+    /// Map of hard constraint key -> satisfied flag.
+    pub hard_constraint_check: BTreeMap<String, bool>,
+    /// Operator note on how to verify the merge locally.
+    pub expected_validation: String,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// Output of the `Role::RecoveryExplainer` role (catalog D.7.1).
+/// Captures the cause, the recovered state, and concrete next
+/// steps. Used by the audit trail when a recovery event is logged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecoveryReport {
+    /// 1-2 sentence headline.
+    pub summary: String,
+    /// 2-4 sentence root-cause analysis.
+    pub cause: String,
+    /// What the system did to recover (free text; "automatic" for
+    /// auto-recovered events).
+    pub recovered: String,
+    /// Per-key evidence excerpts from the event payload.
+    pub evidence: Vec<String>,
+    /// Concrete next steps, ordered, free of speculation.
+    pub next_steps: Vec<String>,
+    /// Schema version.
+    pub schema_version: String,
+}
+
+/// Output of the `Role::RationaleExtractor` role (catalog D.7.1).
+/// Distils decision rationale + supporting evidence + implicit
+/// assumptions from the supplied material.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RationaleExtract {
+    /// The decision being rationalised (1-2 sentences).
+    pub decision: String,
+    /// Reasons ordered by influence on the decision.
+    pub reasons: Vec<String>,
+    /// Per-key evidence excerpts from the material.
+    pub evidence: Vec<String>,
+    /// Unstated context the decision depends on. Empty list valid
+    /// when the decision is self-evident.
+    pub assumptions: Vec<String>,
+    /// Schema version.
+    pub schema_version: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.

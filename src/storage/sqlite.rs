@@ -47,6 +47,9 @@ mod sql_v007 {
 mod sql_v008 {
     pub(super) const V008: &str = include_str!("migrations/v008_add_ons.sql");
 }
+mod sql_v009 {
+    pub(super) const V009: &str = include_str!("migrations/v009_stability.sql");
+}
 
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
@@ -105,6 +108,25 @@ fn apply_v007_idempotent(conn: &rusqlite::Connection) -> Result<()> {
     // vocabulary 'rerun'|'continue'|'import' but the column did not
     // exist). v001 has no relation column, so nothing to backfill.
     let _ = sql_v007::V007;
+    Ok(())
+}
+
+/// v009 adds three columns to the `runs` table that the W2 fix
+/// needs to mirror the ranking-stability verdict (Phase H,
+/// T01-06 §8.4.3). Like v007 the migration is idempotent so a
+/// re-opened DB that already has the columns stays at v009 without
+/// an "duplicate column" error.
+fn apply_v009_idempotent(conn: &rusqlite::Connection) -> Result<()> {
+    if !column_exists(conn, "runs", "stability_score")? {
+        conn.execute("ALTER TABLE runs ADD COLUMN stability_score REAL", [])?;
+    }
+    if !column_exists(conn, "runs", "stability_label")? {
+        conn.execute("ALTER TABLE runs ADD COLUMN stability_label TEXT", [])?;
+    }
+    if !column_exists(conn, "runs", "stability_sigma")? {
+        conn.execute("ALTER TABLE runs ADD COLUMN stability_sigma REAL", [])?;
+    }
+    let _ = sql_v009::V009;
     Ok(())
 }
 
@@ -206,6 +228,10 @@ impl Db {
             conn.execute_batch(sql_v008::V008)?;
             conn.execute_batch("PRAGMA user_version = 8;")?;
         }
+        if current < 9 {
+            apply_v009_idempotent(&conn)?;
+            conn.execute_batch("PRAGMA user_version = 9;")?;
+        }
         Ok(())
     }
 
@@ -253,6 +279,56 @@ impl Db {
             params![status, now, run_id.to_string()],
         )?;
         Ok(())
+    }
+
+    /// W2: persist the ranking-stability verdict on the `runs` row
+    /// (v009 column add). Best-effort: a pre-v009 DB without the
+    /// columns gets the migration via `run_migrations`, and a write
+    /// before that lands is a no-op (the column check below returns
+    /// `Ok(())` rather than aborting the run).
+    pub fn record_run_stability(
+        &self,
+        run_id: RunId,
+        score: f32,
+        label: &str,
+        sigma: f32,
+    ) -> Result<()> {
+        if self.user_version()? < 9 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        conn.execute(
+            "UPDATE runs SET stability_score = ?, stability_label = ?, stability_sigma = ?, updated_unix = ? \
+             WHERE run_id = ?",
+            params![score, label, sigma, now, run_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// W2: read the stored stability verdict (used by the dashboard's
+    /// "stability per run" view). Returns `None` when the run predates
+    /// v009 or was written before the perturbation loop ran.
+    pub fn get_run_stability(&self, run_id: RunId) -> Result<Option<RunStabilityRow>> {
+        if self.user_version()? < 9 {
+            return Ok(None);
+        }
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT stability_score, stability_label, stability_sigma \
+             FROM runs WHERE run_id = ?",
+        )?;
+        let mut rows = stmt.query(params![run_id.to_string()])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(RunStabilityRow {
+                run_id,
+                score: row.get(0)?,
+                label: row.get(1)?,
+                sigma: row.get(2)?,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Record a phase event.
@@ -1353,6 +1429,21 @@ pub struct ManifestEventRow {
     pub at_unix: i64,
 }
 
+/// W2: the per-run stability verdict persisted by
+/// `record_run_stability`. Read by the dashboard's "stability per
+/// run" view (D.5.1) and by `moagan inspect`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunStabilityRow {
+    /// Run id.
+    pub run_id: RunId,
+    /// Top-1 stability score in `[0.0, 1.0]`.
+    pub score: Option<f64>,
+    /// `stable` | `sensitive` (lowercase).
+    pub label: Option<String>,
+    /// Sigma actually used for the perturbation loop.
+    pub sigma: Option<f64>,
+}
+
 /// One row from the `provider_rollups` table (D.5.1).
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ProviderRollupRow {
@@ -1622,9 +1713,9 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         // v007 added the lineage + context_refs columns; v008 adds
-        // the five new tables. After both migrations the
-        // user_version is 8.
-        assert_eq!(v, 8);
+        // the five new tables; v009 adds the runs.stability_*
+        // columns. After all three migrations the user_version is 9.
+        assert_eq!(v, 9);
     }
 
     #[test]
@@ -2520,7 +2611,8 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8);
+        // v008 ships the five new tables; v009 keeps it at 9.
+        assert_eq!(v, 9);
         for table in [
             "outbox_events",
             "redact_audit",
@@ -2651,5 +2743,35 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// W2: v009 adds the stability columns and `record_run_stability`
+    /// round-trips through them. The pre-v009 helper path returns
+    /// `Ok(())` silently so a DB opened before the migration still
+    /// loads.
+    #[test]
+    fn record_run_stability_round_trips_through_v009() {
+        let db = temp_db();
+        // Force the v009 migration to run before the test body
+        // (register_run would otherwise leave the DB at the post-v008
+        // version that some threads see under parallel test runners).
+        db.run_migrations().unwrap();
+        assert!(db.user_version().unwrap() >= 9);
+        let run_id = RunId::new();
+        db.register_run(run_id, "standard", "running", "0.1.0", None, None, None)
+            .unwrap();
+        db.record_run_stability(run_id, 0.92, "stable", 0.05)
+            .unwrap();
+        let row = db
+            .get_run_stability(run_id)
+            .unwrap()
+            .expect("stability row must exist");
+        // The values round-trip as f64 (SQLite REAL widens f32); the
+        // tolerance here is generous to absorb the cast.
+        let score = row.score.unwrap();
+        assert!((score - 0.92).abs() < 0.001, "score={score}");
+        assert_eq!(row.label.as_deref(), Some("stable"));
+        let sigma = row.sigma.unwrap();
+        assert!((sigma - 0.05).abs() < 0.001, "sigma={sigma}");
     }
 }
