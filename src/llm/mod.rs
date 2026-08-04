@@ -12,6 +12,8 @@ pub mod minimax;
 pub mod mock;
 pub mod openai_compat;
 pub mod opencode_go;
+pub mod opencode_go_anthropic;
+pub mod opencode_go_responses;
 pub mod prompts;
 pub mod provider;
 pub mod rate_limiter;
