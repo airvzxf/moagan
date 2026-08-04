@@ -212,6 +212,16 @@ pub enum Cmd {
         /// `--context`.
         #[arg(long, default_value_t = false)]
         context_full: bool,
+        /// Override the model on the resolved provider. Useful when
+        /// the 4 canonical MiniMax models (M3, M2.7, M2.7-highspeed,
+        /// M2.5) are already registered as provider entries but
+        /// the operator wants to point at a different alias without
+        /// editing `config.toml`. Equivalent to
+        /// `MOAGAN_MINIMAX_MODEL` and applied after env overrides
+        /// (CLI wins on conflict). Empty / whitespace values are
+        /// ignored, matching `MOAGAN_MINIMAX_ENDPOINT`.
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
     },
     /// Continue a paused or failed run.
     Continue {
@@ -486,6 +496,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             context,
             context_summary,
             context_full,
+            model,
         } => {
             // Phase J: validate the `--context-{summary,full}` flags
             // are only useful with `--context`. Setting them without
@@ -504,7 +515,28 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             } else {
                 crate::context::ContextScope::Summary
             };
-            let cfg = Config::load()?;
+            let mut cfg = Config::load()?;
+            // Q5: `--model <name>` overrides the model on the resolved
+            // provider. Applied AFTER `apply_env_overrides()` (which
+            // runs inside `Config::load()`) so the CLI wins on conflict
+            // with `MOAGAN_MINIMAX_MODEL`. The override mutates the
+            // provider spec so every phase that reads
+            // `cfg.provider(name).model` (including the manifest stub
+            // and `RunContext::default_model`) sees the new value
+            // without any further plumbing.
+            if let Some(m) = model.as_deref()
+                && !m.trim().is_empty()
+            {
+                let selected = if provider.is_empty() {
+                    cfg.default_provider.clone()
+                } else {
+                    provider.clone()
+                };
+                let spec = cfg.providers.get_mut(&selected).ok_or_else(|| {
+                    Error::InvalidArgs(format!("--model: provider '{selected}' is not in config"))
+                })?;
+                spec.model = m.trim().to_owned();
+            }
             let run_id = run::run(
                 run::RunOptions {
                     mode,

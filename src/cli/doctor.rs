@@ -34,7 +34,7 @@ impl Status {
 }
 
 struct Check {
-    name: &'static str,
+    name: String,
     status: Status,
     detail: String,
 }
@@ -59,13 +59,13 @@ fn check_api_key(cfg: &Config) -> Check {
     }
     if missing.is_empty() {
         Check {
-            name: "api_key",
+            name: "api_key".to_string(),
             status: Status::Ok,
             detail: "MINIMAX_API_KEY set (or no provider needs it)".into(),
         }
     } else {
         Check {
-            name: "api_key",
+            name: "api_key".to_string(),
             status: Status::Fail,
             detail: format!(
                 "MINIMAX_API_KEY not set; needed for providers: {}",
@@ -86,26 +86,26 @@ fn check_home() -> Check {
                     Ok(()) => {
                         let _ = std::fs::remove_file(&probe);
                         Check {
-                            name: "home",
+                            name: "home".to_string(),
                             status: Status::Ok,
                             detail: format!("writable at {}", path.display()),
                         }
                     }
                     Err(e) => Check {
-                        name: "home",
+                        name: "home".to_string(),
                         status: Status::Fail,
                         detail: format!("MOAGAN_HOME={} is not writable: {e}", path.display()),
                     },
                 }
             }
             Err(e) => Check {
-                name: "home",
+                name: "home".to_string(),
                 status: Status::Fail,
                 detail: format!("MOAGAN_HOME ensure failed: {e}"),
             },
         },
         Err(e) => Check {
-            name: "home",
+            name: "home".to_string(),
             status: Status::Fail,
             detail: format!("MOAGAN_HOME could not be resolved: {e}"),
         },
@@ -117,7 +117,7 @@ fn check_sqlite() -> Check {
         Ok(h) => h,
         Err(_) => {
             return Check {
-                name: "sqlite",
+                name: "sqlite".to_string(),
                 status: Status::Warn,
                 detail: "skipped: MOAGAN_HOME not resolvable".into(),
             };
@@ -125,12 +125,12 @@ fn check_sqlite() -> Check {
     };
     match Db::open(&home.meta_db_path()) {
         Ok(_db) => Check {
-            name: "sqlite",
+            name: "sqlite".to_string(),
             status: Status::Ok,
             detail: format!("opened at {}", home.meta_db_path().display()),
         },
         Err(e) => Check {
-            name: "sqlite",
+            name: "sqlite".to_string(),
             status: Status::Fail,
             detail: format!("open failed: {e}"),
         },
@@ -140,16 +140,43 @@ fn check_sqlite() -> Check {
 fn check_provider_config(cfg: &Config) -> Check {
     if cfg.providers.is_empty() {
         return Check {
-            name: "providers",
+            name: "providers".to_string(),
             status: Status::Warn,
             detail: "no providers registered".into(),
         };
     }
     Check {
-        name: "providers",
+        name: "providers".to_string(),
         status: Status::Ok,
         detail: format!("{} provider(s) configured", cfg.providers.len()),
     }
+}
+
+/// Build the per-kind model summary. Returns a vector of
+/// `(label, models)` pairs in stable (alphabetical) order; the caller
+/// prints them with the standard check-line format. Q5: surfaces the
+/// canonical MiniMax models (M3, M2.7, M2.7-highspeed, M2.5) so
+/// operators know what `--provider minimax-m2.5` resolves to without
+/// grepping the source. `kind` is the implementation name (e.g.
+/// `minimax`, `mock`); `models` is the sorted list of distinct
+/// `model` values across every provider entry of that kind.
+fn models_per_provider(cfg: &Config) -> Vec<(String, Vec<String>)> {
+    use std::collections::BTreeMap;
+    let mut by_kind: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for spec in cfg.providers.values() {
+        by_kind
+            .entry(spec.kind.clone())
+            .or_default()
+            .push(spec.model.clone());
+    }
+    by_kind
+        .into_iter()
+        .map(|(kind, mut models)| {
+            models.sort();
+            models.dedup();
+            (format!("models for provider '{kind}'"), models)
+        })
+        .collect()
 }
 
 /// Run every check and return 0 if everything is OK, 1 otherwise.
@@ -158,6 +185,24 @@ pub fn run() -> Result<i32> {
     let mut any_fail = false;
     let mut any_warn = false;
     emit(check_provider_config(&cfg), &mut any_fail, &mut any_warn);
+    // Q5: per-kind model listing. Printed in the same `[OK]` /
+    // status-tag style as the other checks for grep-friendliness.
+    for (label, models) in models_per_provider(&cfg) {
+        let status = if models.is_empty() {
+            Status::Warn
+        } else {
+            Status::Ok
+        };
+        emit(
+            Check {
+                name: label,
+                status,
+                detail: models.join(", "),
+            },
+            &mut any_fail,
+            &mut any_warn,
+        );
+    }
     emit(check_api_key(&cfg), &mut any_fail, &mut any_warn);
     emit(check_home(), &mut any_fail, &mut any_warn);
     emit(check_sqlite(), &mut any_fail, &mut any_warn);
@@ -179,11 +224,74 @@ pub fn run() -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProviderConfig;
 
     #[test]
     fn status_tags_are_stable() {
         assert_eq!(Status::Ok.tag(), "[OK]");
         assert_eq!(Status::Warn.tag(), "[WARN]");
         assert_eq!(Status::Fail.tag(), "[FAIL]");
+    }
+
+    /// Q5: `models_per_provider` returns one (label, models) pair per
+    /// distinct provider kind, with the model list sorted /
+    /// deduplicated. The label follows the `models for provider
+    /// '<kind>'` contract that operators grep against in the doctor
+    /// output.
+    #[test]
+    fn models_per_provider_groups_by_kind_and_dedupes() {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "minimax".into(),
+            ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: "MiniMax-M3".into(),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "minimax-m2.7".into(),
+            ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: "MiniMax-M2.7".into(),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "minimax-dup".into(),
+            ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                // Duplicate model; must be deduped.
+                model: "MiniMax-M3".into(),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "mock".into(),
+            ProviderConfig {
+                kind: "mock".into(),
+                endpoint: "mock://local".into(),
+                model: "mock-model".into(),
+                ..ProviderConfig::default()
+            },
+        );
+        let cfg = Config {
+            providers,
+            ..Config::default()
+        };
+
+        let entries = models_per_provider(&cfg);
+        // Alphabetical by kind: minimax before mock.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "models for provider 'minimax'");
+        assert_eq!(
+            entries[0].1,
+            vec!["MiniMax-M2.7".to_owned(), "MiniMax-M3".to_owned()]
+        );
+        assert_eq!(entries[1].0, "models for provider 'mock'");
+        assert_eq!(entries[1].1, vec!["mock-model".to_owned()]);
     }
 }
