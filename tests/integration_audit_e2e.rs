@@ -54,6 +54,22 @@ fn parse_proxy_port(line: &str) -> u16 {
         .unwrap_or_else(|| panic!("could not parse proxy port from {line:?}"))
 }
 
+async fn wait_for_proxy_port<R>(lines: &mut tokio::io::Lines<R>) -> u16
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    loop {
+        let line = lines
+            .next_line()
+            .await
+            .expect("read proxy stderr")
+            .expect("proxy exited before announcing address");
+        if line.contains("proxy listening") {
+            return parse_proxy_port(&line);
+        }
+    }
+}
+
 fn try_latest_run(root: &Path) -> Option<RunId> {
     std::fs::read_dir(root.join(".runs"))
         .ok()?
@@ -127,12 +143,9 @@ async fn sidecar_survives_a_sigkill_of_moagan_run() {
         .unwrap();
     let stderr = proxy.stderr.take().unwrap();
     let mut lines = tokio::io::BufReader::new(stderr).lines();
-    let first_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let port = tokio::time::timeout(Duration::from_secs(5), wait_for_proxy_port(&mut lines))
         .await
-        .unwrap()
-        .unwrap()
         .unwrap();
-    let port = parse_proxy_port(&first_line);
     let stderr_drain =
         tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
 
@@ -257,13 +270,9 @@ async fn audit_e2e_deep_run_has_exact_external_coverage() {
         .expect("spawn audit proxy");
     let stderr = proxy.stderr.take().expect("proxy stderr pipe");
     let mut lines = tokio::io::BufReader::new(stderr).lines();
-    let first_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let port = tokio::time::timeout(Duration::from_secs(5), wait_for_proxy_port(&mut lines))
         .await
-        .expect("proxy startup timeout")
-        .expect("read proxy stderr")
-        .expect("proxy exited before announcing address");
-    assert!(first_line.contains("proxy listening"), "{first_line}");
-    let port = parse_proxy_port(&first_line);
+        .expect("proxy startup timeout");
     let stderr_drain = tokio::spawn(async move {
         let mut output = String::new();
         while let Ok(Some(line)) = lines.next_line().await {

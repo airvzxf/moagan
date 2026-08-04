@@ -1,6 +1,16 @@
 use anyhow::Result;
 
 fn main() -> Result<()> {
+    // Best-effort .env autoload. dotenvy silently does nothing if no
+    // .env is found, and never overrides env vars that are already set
+    // (12-factor compatible: explicit env wins over .env). This makes
+    // `moagan doctor` and friends work out-of-the-box when the operator
+    // keeps their secrets in `.env` in the current directory.
+    if let Ok(path) = dotenvy::dotenv()
+        && std::env::var_os("MOAGAN_QUIET").is_none()
+    {
+        eprintln!("[moagan] loaded .env from {}", path.display());
+    }
     init_tracing();
     install_panic_hook();
     #[cfg(debug_assertions)]
