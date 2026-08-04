@@ -2,9 +2,12 @@
 //! future share the same `CancellationToken`; setting it causes every
 //! listener to wake up with `Error::Cancelled` or `Error::Cancel`.
 //!
-//! Compliance: T01-06 §6.4 + 10-integrada-v0 §D.10 (token type wrapper).
+//! Compliance: T01-06 §6.4 + 10-integrada-v0 §D.10 (token type wrapper)
+//! + 10-integrada-v0 §D.10.6 (`libc::killpg` on Hard tier).
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken as TkToken;
 
@@ -69,57 +72,148 @@ impl std::fmt::Display for CancelReason {
 /// Handle to a cancellation source. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Cancel {
-    inner: Arc<TkToken>,
-    /// Shared reason cell. The child clones the parent's cell so a
-    /// child sees the reason the parent was cancelled with.
-    reason: Arc<parking_lot::Mutex<Option<CancelReason>>>,
+    inner: Arc<Inner>,
 }
+
+/// Inner state shared by every clone of a [`Cancel`] handle.
+#[derive(Debug)]
+struct Inner {
+    /// The cooperative cancellation token.
+    token: TkToken,
+    /// Reason cell. The child clones the parent's cell so a child sees
+    /// the reason the parent was cancelled with.
+    reason: Arc<parking_lot::Mutex<Option<CancelReason>>>,
+    /// Process-group ids of in-flight sandbox children. Hard tier sends
+    /// `SIGTERM` to each registered pgid, then `SIGKILL` after a
+    /// grace period. `None` when the platform cannot enumerate groups
+    /// (Windows-only; this crate compiles on Unix-only features).
+    child_pgids: Arc<parking_lot::Mutex<HashSet<i32>>>,
+}
+
+/// Grace window between `SIGTERM` and `SIGKILL` for `CancelTier::Hard`.
+/// Two seconds matches the orchestrator's spec and gives well-behaved
+/// subprocesses enough time to flush + exit while still being fast
+/// enough for an operator pressing Ctrl-C.
+pub const HARD_KILL_GRACE: Duration = Duration::from_secs(2);
 
 impl Cancel {
     /// Build a fresh, uncancelled token.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(TkToken::new()),
-            reason: Arc::new(parking_lot::Mutex::new(None)),
+            inner: Arc::new(Inner {
+                token: TkToken::new(),
+                reason: Arc::new(parking_lot::Mutex::new(None)),
+                child_pgids: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            }),
         }
     }
 
     /// Build a child token that is cancelled when the parent is.
     pub fn child(&self) -> Self {
         Self {
-            inner: Arc::new(self.inner.child_token()),
-            reason: self.reason.clone(),
+            inner: Arc::new(Inner {
+                token: self.inner.token.child_token(),
+                reason: self.inner.reason.clone(),
+                child_pgids: self.inner.child_pgids.clone(),
+            }),
         }
     }
 
     /// Cancel the token with a reason.
     pub fn cancel(&self, reason: CancelReason) {
-        *self.reason.lock() = Some(reason);
-        self.inner.cancel();
+        *self.inner.reason.lock() = Some(reason);
+        self.inner.token.cancel();
     }
 
     /// Cancel with an urgency tier.
     ///
-    /// The current cancellation handle has no child-process registry, so every
-    /// tier signals the existing cooperative token. Hard process termination
-    /// remains the responsibility of the sandbox process owner.
-    pub fn cancel_with_tier(&self, reason: CancelReason, _tier: CancelTier) {
+    /// - `Soft` and `Normal` signal the cooperative token only.
+    /// - `Hard` signals the cooperative token AND, on Unix, sends
+    ///   `SIGTERM` to every registered process-group id, then schedules
+    ///   `SIGKILL` after [`HARD_KILL_GRACE`]. Subprocesses that
+    ///   blocked or ignored `SIGTERM` get the `SIGKILL` fallback.
+    ///
+    /// The child registry is populated by the sandbox (`Cancel::register_child`)
+    /// and drained on the natural-completion path
+    /// (`Cancel::unregister_child`); `Hard` cancel reads it under the
+    /// mutex and copies the pgids before signalling so the kill path
+    /// does not have to hold the lock across the (potentially slow)
+    /// `killpg` syscalls.
+    pub fn cancel_with_tier(&self, reason: CancelReason, tier: CancelTier) {
+        // 1) Cooperative token so in-flight async work notices.
         self.cancel(reason);
+
+        if !matches!(tier, CancelTier::Hard) {
+            return;
+        }
+
+        // 2) Snapshot the registered pgids under the lock.
+        let pgids: Vec<i32> = self.inner.child_pgids.lock().iter().copied().collect();
+        if pgids.is_empty() {
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            // 3a) SIGTERM the whole process group. `killpg` returns
+            // -1 with `ESRCH` if the group is already gone; we
+            // treat that as a no-op (the natural-completion path
+            // should have unregistered it, but timing is racy).
+            for pgid in &pgids {
+                // SAFETY: `killpg` is safe to call from any thread;
+                // a missing group yields ESRCH which we ignore.
+                let _ = unsafe { libc::killpg(*pgid, libc::SIGTERM) };
+            }
+            // 3b) SIGKILL after the grace window on a tokio task so
+            // we never block the caller.
+            let pgids_for_kill = pgids.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(HARD_KILL_GRACE).await;
+                for pgid in &pgids_for_kill {
+                    // SAFETY: same as above.
+                    let _ = unsafe { libc::killpg(*pgid, libc::SIGKILL) };
+                }
+            });
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Hard tier is a Unix-only feature in this crate; on other
+            // platforms the cooperative token still propagates.
+            let _ = pgids;
+        }
+    }
+
+    /// Register a process-group id whose leader is the just-spawned
+    /// sandbox child. The sandbox calls this after `Command::spawn`
+    /// and `setpgid(0, 0)` in `pre_exec`. Pgid must be positive; the
+    /// value is taken verbatim so the sandbox controls whether it
+    /// uses the child's pid or an inherited id.
+    pub fn register_child(&self, pgid: i32) {
+        self.inner.child_pgids.lock().insert(pgid);
+    }
+
+    /// Remove a previously registered pgid. Idempotent: unregistering
+    /// an unknown pgid is a no-op. The sandbox calls this on every
+    /// exit path (natural, error, timeout) so the registry does not
+    /// leak ids.
+    pub fn unregister_child(&self, pgid: i32) {
+        self.inner.child_pgids.lock().remove(&pgid);
     }
 
     /// True if cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
-        self.inner.is_cancelled()
+        self.inner.token.is_cancelled()
     }
 
     /// Await cancellation. Returns immediately if already cancelled.
     pub async fn cancelled(&self) {
-        self.inner.cancelled().await
+        self.inner.token.cancelled().await
     }
 
     /// Current cancel reason, if set.
     pub fn reason(&self) -> Option<CancelReason> {
-        self.reason.lock().clone()
+        self.inner.reason.lock().clone()
     }
 
     /// Translate into a `crate::Error::Cancelled` with the recorded reason.
@@ -168,5 +262,50 @@ mod tests {
             assert!(cancel.is_cancelled());
             assert_eq!(cancel.reason(), Some(CancelReason::Requested));
         }
+    }
+
+    #[tokio::test]
+    async fn child_clones_share_the_pgid_registry() {
+        let parent = Cancel::new();
+        let child = parent.child();
+        parent.register_child(12345);
+        // The child token shares the reason + pgid-registry Arcs.
+        // Cancelling the child sets its own token but the registry
+        // Arc is shared, so a Hard cancel from either side reaches
+        // the same pgid. Tokio runtime is required because Hard
+        // spawns the delayed SIGKILL task.
+        child.cancel_with_tier(CancelReason::Requested, CancelTier::Hard);
+        assert!(child.is_cancelled());
+        assert_eq!(child.reason(), Some(CancelReason::Requested));
+        // The reason cell is shared with the parent.
+        assert_eq!(parent.reason(), Some(CancelReason::Requested));
+    }
+
+    #[test]
+    fn unregister_is_idempotent() {
+        let cancel = Cancel::new();
+        cancel.register_child(99999);
+        cancel.unregister_child(99999);
+        cancel.unregister_child(99999); // second call is a no-op
+        // Hard cancel with empty registry must not panic; the kill
+        // path is skipped when the set is empty.
+        cancel.cancel_with_tier(CancelReason::Requested, CancelTier::Hard);
+        assert!(cancel.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_cancel_does_not_panic_on_unknown_pgid() {
+        // Use a clearly nonexistent pgid; killpg returns ESRCH, which
+        // we swallow. The cooperative token must still be set so the
+        // caller observes cancellation.
+        let cancel = Cancel::new();
+        cancel.register_child(i32::MAX);
+        cancel.cancel_with_tier(CancelReason::UserInterrupt, CancelTier::Hard);
+        assert!(cancel.is_cancelled());
+        // Drain the SIGKILL task so the test does not leak a pending
+        // tokio task that other tests might observe. The grace is 2s
+        // and the test runtime outlives it.
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

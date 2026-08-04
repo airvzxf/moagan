@@ -1591,6 +1591,7 @@ dependencies = [
  "indicatif",
  "insta",
  "jsonschema",
+ "libc",
  "memchr",
  "once_cell",
  "parking_lot",
