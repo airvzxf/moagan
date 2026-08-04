@@ -541,10 +541,25 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     provider.clone()
                 };
                 let raw = m.trim();
-                // Resolve the alias form first (e.g. `minimax-m3`) by
-                // looking up the matching provider entry's model.
-                // Releases the immutable borrow before mutating `spec`.
-                let resolved = if cfg.providers.contains_key(raw) {
+                // Validation-2026-08-04 fix #2 (alias resolution):
+                // when `--model` matches a registered provider name AND
+                // the resolved provider is the same as the user's
+                // selected provider, translate the lowercase alias
+                // (`minimax-m3`) to the canonical model (`MiniMax-M3`).
+                // When the user explicitly targets a different provider
+                // (e.g. `--provider opencode_go --model minimax-m3`),
+                // the alias is NOT translated because `minimax-m3` is
+                // the legitimate OpenCode Go model id on the /messages
+                // endpoint (see Fix #4).
+                let resolved = if cfg.providers.contains_key(raw)
+                    && (raw == selected || cfg.providers.get(raw).map(|s| s.kind.as_str())
+                        == Some(
+                            cfg.providers
+                                .get(&selected)
+                                .map(|s| s.kind.as_str())
+                                .unwrap_or(""),
+                        ))
+                {
                     cfg.providers
                         .get(raw)
                         .map(|s| s.model.clone())

@@ -60,10 +60,29 @@ pub fn temperature_override_for(model: &str) -> Option<f32> {
         .map(|(_, t)| *t)
 }
 
+/// Endpoint path for a model on OpenCode Go, derived from the
+/// operator's 2026-08-04 model roster. Returns `None` for models
+/// that are not on the OpenCode Go subscription.
+pub fn endpoint_path_for(model: &str) -> Option<&'static str> {
+    match model {
+        // /v1/responses (OpenAI Responses API)
+        "gpt-5.6-luna" => Some("responses"),
+        // /v1/messages (Anthropic-compatible)
+        "minimax-m3" | "minimax-m2.7" | "minimax-m2.5" | "qwen3.8-max" | "qwen3.7-max"
+        | "qwen3.7-plus" | "qwen3.6-plus" => Some("messages"),
+        // /v1/chat/completions (OpenAI-compatible)
+        "glm-5.1" | "glm-5.2" | "kimi-k3" | "kimi-k2.7-code" | "kimi-k2.6"
+        | "deepseek-v4-pro" | "deepseek-v4-flash" | "mimo-v2.5" | "mimo-v2.5-pro" | "hy3" => {
+            Some("chat/completions")
+        }
+        _ => None,
+    }
+}
+
 /// Dispatcher. Picks the right concrete provider based on the model
-/// and endpoint in the spec. The dispatcher is the only entry point
-/// the registry uses; the concrete providers above are constructor-
-/// only from outside tests.
+/// in the spec. The dispatcher is the only entry point the registry
+/// uses; the concrete providers above are constructor-only from
+/// outside tests.
 pub struct OpenCodeGoProvider {
     inner: Box<dyn Provider>,
 }
@@ -71,7 +90,10 @@ pub struct OpenCodeGoProvider {
 impl OpenCodeGoProvider {
     /// Build from an OpenCode Go provider config and a resolved API
     /// key. Routes to the appropriate wire-format provider based on
-    /// the endpoint path.
+    /// the model name: each model on the operator's 2026-08-04 roster
+    /// has a known endpoint path. The `spec.endpoint` is used as the
+    /// base (default `https://opencode.ai/zen/go/v1`) and the
+    /// model-specific path is appended.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
         if spec.kind != "opencode_go" {
             return Err(Error::InvalidArgs(format!(
@@ -85,13 +107,27 @@ impl OpenCodeGoProvider {
                 spec.model
             )));
         }
-        let base = spec.endpoint.trim_end_matches('/');
-        let provider: Box<dyn Provider> = if base.ends_with("/messages") {
-            Box::new(OpenCodeGoAnthropicProvider::new(spec, api_key)?)
-        } else if base.ends_with("/responses") {
-            Box::new(OpenCodeGoResponsesProvider::new(spec, api_key)?)
+        let path = endpoint_path_for(&spec.model).ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "model '{}' is not on the OpenCode Go model roster",
+                spec.model
+            ))
+        })?;
+        // Build a synthetic spec with the base endpoint so the concrete
+        // provider's URL builder appends the path exactly once. The
+        // concrete providers (OpenCodeGoAnthropic,
+        // OpenCodeGoResponses, OpenAiCompat) all have url helpers that
+        // handle the `base + path` join themselves.
+        let routed_spec = ProviderConfig {
+            endpoint: spec.endpoint.trim_end_matches('/').to_owned(),
+            ..spec.clone()
+        };
+        let provider: Box<dyn Provider> = if path == "messages" {
+            Box::new(OpenCodeGoAnthropicProvider::new(&routed_spec, api_key)?)
+        } else if path == "responses" {
+            Box::new(OpenCodeGoResponsesProvider::new(&routed_spec, api_key)?)
         } else {
-            Box::new(OpenAiCompatProvider::new(spec, api_key)?)
+            Box::new(OpenAiCompatProvider::new(&routed_spec, api_key)?)
         };
         Ok(Self { inner: provider })
     }
@@ -272,13 +308,12 @@ mod tests {
             OpenCodeGoProvider::new(&config(), SecretString::new("dummy".into())).unwrap();
         assert_eq!(provider.name(), "opencode_go");
         assert_eq!(provider.model(), "kimi-k2.7-code");
-        assert!(provider.endpoint().ends_with("/v1"));
+        assert!(provider.endpoint().ends_with("/v1/chat/completions"));
     }
 
     #[test]
-    fn provider_routes_to_anthropic_for_messages_endpoint() {
+    fn provider_routes_to_anthropic_for_messages_model() {
         let cfg = ProviderConfig {
-            endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
             model: "qwen3.7-max".into(),
             ..config()
         };
@@ -288,14 +323,63 @@ mod tests {
     }
 
     #[test]
-    fn provider_routes_to_responses_for_responses_endpoint() {
+    fn provider_routes_to_responses_for_responses_model() {
         let cfg = ProviderConfig {
-            endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             model: "gpt-5.6-luna".into(),
             ..config()
         };
         let provider =
             OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
         assert!(provider.endpoint().ends_with("/v1/responses"));
+    }
+
+    #[test]
+    fn provider_routes_to_chat_completions_for_chat_model() {
+        let cfg = ProviderConfig {
+            model: "mimo-v2.5".into(),
+            ..config()
+        };
+        let provider =
+            OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
+        assert!(provider.endpoint().ends_with("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn dispatcher_does_not_double_append_path() {
+        // Fix #4 regression: the dispatcher used to construct
+        // `endpoint = base + path`, then the concrete provider's
+        // url builder appended the path again, producing
+        // `/v1/messages/v1/messages`.
+        let cfg = ProviderConfig {
+            model: "qwen3.7-max".into(),
+            endpoint: "https://opencode.ai/zen/go/v1".into(),
+            ..config()
+        };
+        let provider =
+            OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
+        let ep = provider.endpoint();
+        assert_eq!(ep, "https://opencode.ai/zen/go/v1/messages");
+    }
+
+    #[test]
+    fn provider_rejects_model_not_on_roster() {
+        let cfg = ProviderConfig {
+            model: "unsupported-model".into(),
+            ..config()
+        };
+        let result = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into()));
+        assert!(matches!(result, Err(Error::InvalidArgs(_))));
+    }
+
+    #[test]
+    fn endpoint_path_for_known_models() {
+        assert_eq!(endpoint_path_for("gpt-5.6-luna"), Some("responses"));
+        assert_eq!(endpoint_path_for("minimax-m3"), Some("messages"));
+        assert_eq!(endpoint_path_for("qwen3.7-max"), Some("messages"));
+        assert_eq!(endpoint_path_for("kimi-k2.7-code"), Some("chat/completions"));
+        assert_eq!(endpoint_path_for("mimo-v2.5-pro"), Some("chat/completions"));
+        assert_eq!(endpoint_path_for("hy3"), Some("chat/completions"));
+        assert_eq!(endpoint_path_for("deepseek-v4-flash"), Some("chat/completions"));
+        assert_eq!(endpoint_path_for("unknown"), None);
     }
 }
