@@ -1,7 +1,0 @@
-{
-  "model": "deepseek-v4-flash",
-  "route_json_present": false,
-  "duration_s": 0,
-  "schema_violation_warning": "",
-  "stderr_tail": "uire deep architectural exploration, so fast mode is appropriate. The output will follow standard ROYGBIV order.\"; full raw follows:\n{\"mode\":\"fast\",\"reason\":\"Simple enumeration task\",\"sketches\":0,\"proposals\":3,\"judges\":3}\n\nThis brief is a straightforward enumeration task that doesn't require deep architectural exploration, so fast mode is appropriate. The output will follow standard ROYGBIV order."
-}

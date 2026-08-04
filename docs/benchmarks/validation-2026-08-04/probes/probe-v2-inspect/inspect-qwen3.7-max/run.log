@@ -1,7 +1,0 @@
-[2m2026-08-04T16:56:40.034277Z[0m [34mDEBUG[0m [2mmoagan::phases::phase[0m[2m:[0m LLM call stage [3mcall_id[0m[2m=[0m019fcdb4-b562-7783-a258-b56e393f474d [3mphase[0m[2m=[0m"propose" [3mstage[0m[2m=[0m"provider.send.started"
-[2m2026-08-04T16:56:40.034951Z[0m [34mDEBUG[0m [2mmoagan::llm::opencode_go_anthropic[0m[2m:[0m Provider HTTP stage [3mprovider[0m[2m=[0m"opencode_go" [3mattempt[0m[2m=[0m1 [3mstage[0m[2m=[0m"http.request.started"
-[2m2026-08-04T16:56:40.035795Z[0m [34mDEBUG[0m [2mmoagan::phases::phase[0m[2m:[0m LLM call stage [3mcall_id[0m[2m=[0m019fcdb4-b563-7b81-8094-9f2ffc15d004 [3mphase[0m[2m=[0m"propose" [3mstage[0m[2m=[0m"provider.send.started"
-[2m2026-08-04T16:56:40.035988Z[0m [34mDEBUG[0m [2mmoagan::llm::opencode_go_anthropic[0m[2m:[0m Provider HTTP stage [3mprovider[0m[2m=[0m"opencode_go" [3mattempt[0m[2m=[0m1 [3mstage[0m[2m=[0m"http.request.started"
-[2m2026-08-04T16:56:40.036595Z[0m [34mDEBUG[0m [2mmoagan::phases::phase[0m[2m:[0m LLM call stage [3mcall_id[0m[2m=[0m019fcdb4-b564-70f3-99c9-cad38a40cee6 [3mphase[0m[2m=[0m"propose" [3mstage[0m[2m=[0m"provider.send.started"
-[2m2026-08-04T16:56:40.036807Z[0m [34mDEBUG[0m [2mmoagan::llm::opencode_go_anthropic[0m[2m:[0m Provider HTTP stage [3mprovider[0m[2m=[0m"opencode_go" [3mattempt[0m[2m=[0m1 [3mstage[0m[2m=[0m"http.request.started"
-error: cancelled: user interrupt

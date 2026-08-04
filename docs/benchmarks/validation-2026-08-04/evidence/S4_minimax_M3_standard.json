@@ -1,8 +1,0 @@
-{
-  "model": "MiniMax-M3",
-  "status": "ok",
-  "duration_s": 169,
-  "route_json_present": true,
-  "schema_violation_warning": "",
-  "stderr_tail": "m\u001b[2m=\u001b[0m019fcc61-00b2-71c1-afb9-50134dc1f614 \u001b[3mphase\u001b[0m\u001b[2m=\u001b[0m\"deliver\" \u001b[3mstage\u001b[0m\u001b[2m=\u001b[0m\"cache.store.completed\" \u001b[3melapsed_ms\u001b[0m\u001b[2m=\u001b[0m0\n\u001b[2m2026-08-04T10:45:42.185868Z\u001b[0m \u001b[34mDEBUG\u001b[0m \u001b[2mmoagan::phases::phase\u001b[0m\u001b[2m:\u001b[0m LLM call stage \u001b[3mcall_id\u001b[0m\u001b[2m=\u001b[0m019fcc61-00b2-71c1-afb9-50134dc1f614 \u001b[3mphase\u001b[0m\u001b[2m=\u001b[0m\"deliver\" \u001b[3mstage\u001b[0m\u001b[2m=\u001b[0m\"telemetry.call.completed\""
-}

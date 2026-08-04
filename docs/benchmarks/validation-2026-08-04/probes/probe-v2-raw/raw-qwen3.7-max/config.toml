@@ -1,4 +1,0 @@
-[providers.opencode_go]
-kind = "opencode_go"
-endpoint = "http://127.0.0.1:30501"
-model = "x"

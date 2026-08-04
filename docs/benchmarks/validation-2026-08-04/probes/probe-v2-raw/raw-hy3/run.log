@@ -1,3 +1,0 @@
-[2m2026-08-04T16:25:55.606669Z[0m [34mDEBUG[0m [2mmoagan::phases::phase[0m[2m:[0m LLM call stage [3mcall_id[0m[2m=[0m019fcd98-9096-7471-8674-96a0e89dd486 [3mphase[0m[2m=[0m"intake" [3mstage[0m[2m=[0m"provider.send.started"
-[2m2026-08-04T16:25:59.058705Z[0m [34mDEBUG[0m [2mmoagan::phases::phase[0m[2m:[0m LLM call stage [3mcall_id[0m[2m=[0m019fcd98-9096-7471-8674-96a0e89dd486 [3mphase[0m[2m=[0m"intake" [3mstage[0m[2m=[0m"provider.send.completed" [3melapsed_ms[0m[2m=[0m3452 [3msuccess[0m[2m=[0mfalse
-error: provider error: openai-compat: HTTP 400 after 3 attempts: {"error":{"type":"server_error","message":"Error from provider (Console Go): Upstream request failed: [400] Provider returned error"}}
