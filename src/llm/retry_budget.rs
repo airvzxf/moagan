@@ -17,6 +17,7 @@
 //!   can plausibly fix without re-issuing the call.
 
 use crate::cli::Mode;
+use crate::error::Error;
 
 /// Why the retry loop is being consulted. Mirrors the failure
 /// classification used by `phase.rs::call_with_retry_parse` and
@@ -101,6 +102,47 @@ pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
             max_attempts: 1,
             use_json_repair: matches!(reason, Parse | Schema),
         },
+    }
+}
+
+/// Map a provider / call error to the closest `RetryReason`. The
+/// retry loop in `phase.rs::call_with_retry_parse` consults this on
+/// the failure path so the budget can be looked up per-attempt.
+///
+/// Mapping rationale (D.21.6, best-effort):
+///
+/// - `Timeout` -> `Timeout` (deadline-driven retry, 1 extra attempt
+///   in Standard).
+/// - `PlanExhausted` -> `RateLimit` (semantically the same: the
+///   provider refused to keep serving this account / model until
+///   the quota resets; the operator action is "wait and retry").
+/// - `SchemaViolation` -> `Schema` (validated output failed the
+///   contract; the JSON itself parsed).
+/// - `Provider`, `Cache`, `Io` -> `Transport` (catch-all bucket
+///   for network / disk / upstream blips; the retry loop treats
+///   them identically and relies on the budget matrix for the
+///   per-mode cap).
+/// - `MockExhausted` -> `Truncated` (the mock ran out of canned
+///   responses; a real retry would not help, so this is the
+///   closest "non-actionable" bucket — `Truncated` is also
+///   non-actionable in production).
+/// - Everything else (`InvalidArgs`, `InvalidApiKey`,
+///   `InvalidState`, `Cancelled`, `Cancel`) -> `Transport` (the
+///   classification is moot because the retry loop bails on the
+///   first error in these cases, but a deterministic mapping
+///   keeps the matrix total over `Error`).
+pub fn reason_from_error(err: &Error) -> RetryReason {
+    match err {
+        Error::Timeout(_) => RetryReason::Timeout,
+        Error::PlanExhausted(_) => RetryReason::RateLimit,
+        Error::SchemaViolation(_) => RetryReason::Schema,
+        Error::Provider(_) | Error::Cache(_) | Error::Io(_) => RetryReason::Transport,
+        Error::MockExhausted => RetryReason::Truncated,
+        Error::InvalidArgs(_)
+        | Error::InvalidApiKey(_)
+        | Error::InvalidState(_)
+        | Error::Cancelled(_)
+        | Error::Cancel(_) => RetryReason::Transport,
     }
 }
 
@@ -215,5 +257,143 @@ mod tests {
         let b = budget_for(Mode::Standard, RetryReason::Timeout);
         assert_eq!(b.max_attempts, 2);
         assert!(!b.use_json_repair);
+    }
+
+    // --- reason_from_error classification -----------------------------
+    // The retry loop in phase.rs consults this helper on the
+    // failure path to look up the per-(mode, reason) budget. Each
+    // pin below corresponds to a row of the spec's Error ->
+    // RetryReason mapping (D.21.6).
+
+    /// `Error::Timeout` maps to `RetryReason::Timeout` so the
+    /// Standard path takes its single retry slot on deadline
+    /// failures.
+    #[test]
+    fn reason_from_error_timeout_maps_to_timeout_reason() {
+        assert_eq!(
+            reason_from_error(&Error::Timeout("x".into())),
+            RetryReason::Timeout,
+        );
+    }
+
+    /// `Error::SchemaViolation` maps to `RetryReason::Schema` so
+    /// the budget looks up the parse / schema row (one attempt
+    /// with `use_json_repair = true` in Standard, two in Deep).
+    #[test]
+    fn reason_from_error_schema_violation_maps_to_schema_reason() {
+        assert_eq!(
+            reason_from_error(&Error::SchemaViolation("x".into())),
+            RetryReason::Schema,
+        );
+    }
+
+    /// `Error::Provider` is the generic catch-all for HTTP
+    /// failures; the retry loop collapses it onto
+    /// `RetryReason::Transport` so the budget matrix stays
+    /// total over `Error`.
+    #[test]
+    fn reason_from_error_provider_maps_to_transport_reason() {
+        assert_eq!(
+            reason_from_error(&Error::Provider("x".into())),
+            RetryReason::Transport,
+        );
+    }
+
+    /// `Error::PlanExhausted` is the rate-limit analogue: the
+    /// provider refused to keep serving. The retry loop
+    /// surfaces it as `RetryReason::RateLimit` so Deep mode
+    /// takes its 3-attempt slot.
+    #[test]
+    fn reason_from_error_plan_exhausted_maps_to_rate_limit_reason() {
+        assert_eq!(
+            reason_from_error(&Error::PlanExhausted("x".into())),
+            RetryReason::RateLimit,
+        );
+    }
+
+    /// `Error::MockExhausted` is a non-actionable failure: the
+    /// mock provider ran out of canned responses. A real retry
+    /// would not help, so the helper maps to
+    /// `RetryReason::Truncated` (the closest "no retry
+    /// possible" bucket).
+    #[test]
+    fn reason_from_error_mock_exhausted_maps_to_truncated_reason() {
+        assert_eq!(
+            reason_from_error(&Error::MockExhausted),
+            RetryReason::Truncated,
+        );
+    }
+
+    /// `Error::Cancelled` / `Error::Cancel` are operator /
+    /// signal failures; the retry loop bails on the first
+    /// error in either case, but the classification is
+    /// deterministic so the budget lookup is total.
+    #[test]
+    fn reason_from_error_cancellation_maps_to_transport_reason() {
+        assert_eq!(
+            reason_from_error(&Error::Cancelled("x".into())),
+            RetryReason::Transport,
+        );
+        assert_eq!(
+            reason_from_error(&Error::Cancel(crate::error::CancelSignal)),
+            RetryReason::Transport,
+        );
+    }
+
+    /// `Error::Io` and `Error::Cache` both share the transport
+    /// bucket: the retry loop treats them identically and lets
+    /// the per-mode budget decide the cap.
+    #[test]
+    fn reason_from_error_io_and_cache_map_to_transport_reason() {
+        assert_eq!(
+            reason_from_error(&Error::Io(crate::error::IoError::Raw(
+                std::io::Error::other("x"),
+            ))),
+            RetryReason::Transport,
+        );
+        assert_eq!(
+            reason_from_error(&Error::Cache("x".into())),
+            RetryReason::Transport,
+        );
+    }
+
+    /// Operator errors (`InvalidArgs`, `InvalidApiKey`,
+    /// `InvalidState`) never reach the retry loop in practice
+    /// (they're surfaced before the first provider call), but
+    /// the mapping is deterministic so the helper stays
+    /// total over `Error`.
+    #[test]
+    fn reason_from_error_operator_errors_map_to_transport_reason() {
+        assert_eq!(
+            reason_from_error(&Error::InvalidArgs("x".into())),
+            RetryReason::Transport,
+        );
+        assert_eq!(
+            reason_from_error(&Error::InvalidApiKey("x".into())),
+            RetryReason::Transport,
+        );
+        assert_eq!(
+            reason_from_error(&Error::InvalidState("x".into())),
+            RetryReason::Transport,
+        );
+    }
+
+    /// Sanity: composing `reason_from_error` with `budget_for`
+    /// yields the per-mode cap the spec wants. Standard +
+    /// transport = 2 attempts, the legacy behaviour for the
+    /// common transient 5xx case.
+    #[test]
+    fn reason_from_error_then_budget_for_round_trips_through_matrix() {
+        let cases = [
+            (Error::Timeout("x".into()), Mode::Standard, 2),
+            (Error::Provider("x".into()), Mode::Standard, 2),
+            (Error::PlanExhausted("x".into()), Mode::Deep, 3),
+            (Error::SchemaViolation("x".into()), Mode::Deep, 2),
+            (Error::Provider("x".into()), Mode::Fast, 1),
+        ];
+        for (err, mode, expected) in cases {
+            let b = budget_for(mode, reason_from_error(&err));
+            assert_eq!(b.max_attempts, expected, "err={err:?} mode={mode:?}");
+        }
     }
 }
