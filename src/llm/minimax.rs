@@ -253,4 +253,36 @@ mod tests {
         let r = MinimaxProvider::from_config(&cfg);
         assert!(matches!(r, Err(Error::InvalidApiKey(_))));
     }
+
+    /// Q5 pin: every canonical MiniMax model name must round-trip
+    /// through `MinimaxProvider::new` and the resulting provider's
+    /// `model()` accessor. This is the contract the smoke script
+    /// depends on (`--provider minimax-m2.5` and `--model
+    /// MiniMax-M2.7` both reach the wire carrying the right model
+    /// identifier).
+    #[test]
+    fn new_round_trips_each_canonical_model() {
+        let canonical = [
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+        ];
+        for model in canonical {
+            let cfg = ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: model.into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            };
+            let p = MinimaxProvider::new(&cfg, SecretString::new("dummy".into()))
+                .expect("MinimaxProvider::new should accept every canonical model");
+            assert_eq!(p.model(), model, "model name did not round-trip");
+            assert_eq!(p.name(), "minimax");
+            assert_eq!(p.endpoint(), "https://api.minimax.io/anthropic/v1");
+        }
+    }
 }

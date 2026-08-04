@@ -430,6 +430,15 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("MOAGAN_MINIMAX_MODEL")
+            && !v.trim().is_empty()
+        {
+            for spec in self.providers.values_mut() {
+                if spec.kind == "minimax" {
+                    spec.model = v.clone();
+                }
+            }
+        }
         if let Ok(v) = std::env::var("MOAGAN_REPAIR_MAX_ROUNDS")
             && let Ok(n) = v.parse()
         {
@@ -571,5 +580,92 @@ mod tests {
             "http://localhost:8086/x"
         );
         assert_eq!(cfg.providers.get("mock").unwrap().endpoint, "mock://local");
+    }
+
+    /// `MOAGAN_MINIMAX_MODEL` mirrors the existing `MOAGAN_MINIMAX_ENDPOINT`
+    /// override: applied to every provider whose kind is `minimax`, leaves
+    /// non-minimax providers alone. Operators use it to retarget the
+    /// default model without registering a new provider entry in
+    /// `config.toml` (parity with Q5: 4 canonical models are already
+    /// registered, but env-driven override lets tests + CI pin a
+    /// different default).
+    #[test]
+    fn env_overrides_minimax_model() {
+        let mut cfg = Config::default();
+        // Baseline: every minimax provider carries its canonical model.
+        assert_eq!(cfg.providers.get("minimax").unwrap().model, "MiniMax-M3");
+        assert_eq!(
+            cfg.providers.get("minimax-m2.7").unwrap().model,
+            "MiniMax-M2.7"
+        );
+
+        unsafe {
+            std::env::set_var("MOAGAN_MINIMAX_MODEL", "MiniMax-M2.5");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_MINIMAX_MODEL");
+        }
+
+        // Every minimax provider reflects the env value.
+        for name in [
+            "minimax",
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.7-highspeed",
+            "minimax-m2.5",
+        ] {
+            assert_eq!(
+                cfg.providers.get(name).unwrap().model,
+                "MiniMax-M2.5",
+                "provider {name} should pick up MOAGAN_MINIMAX_MODEL"
+            );
+        }
+        // The mock provider must not be touched.
+        assert_eq!(cfg.providers.get("mock").unwrap().model, "mock-model");
+    }
+
+    /// Empty / whitespace env values are ignored, so a stale export in
+    /// the shell does not blank the configured model. Mirrors the
+    /// `MOAGAN_MINIMAX_ENDPOINT` handling.
+    #[test]
+    fn env_overrides_minimax_model_ignores_blank() {
+        let mut cfg = Config::default();
+        unsafe {
+            std::env::set_var("MOAGAN_MINIMAX_MODEL", "   ");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_MINIMAX_MODEL");
+        }
+        assert_eq!(cfg.providers.get("minimax").unwrap().model, "MiniMax-M3");
+    }
+
+    /// Q5 pin: the 4 canonical MiniMax models must all be exposed as
+    /// separate provider entries in `default_providers()`. This is the
+    /// contract the smoke script depends on
+    /// (`--provider minimax-m2.5` is a recognised alias of
+    /// `MiniMax-M2.5`).
+    #[test]
+    fn default_providers_lists_four_canonical_minimax_models() {
+        let cfg = Config::default();
+        let canonical = [
+            ("minimax", "MiniMax-M3"),
+            ("minimax-m3", "MiniMax-M3"),
+            ("minimax-m2.7", "MiniMax-M2.7"),
+            ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed"),
+            ("minimax-m2.5", "MiniMax-M2.5"),
+        ];
+        for (alias, model) in canonical {
+            let spec = cfg
+                .providers
+                .get(alias)
+                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+            assert_eq!(spec.kind, "minimax", "alias {alias} should map to minimax");
+            assert_eq!(
+                spec.model, model,
+                "alias {alias} should carry canonical model {model}"
+            );
+        }
     }
 }
