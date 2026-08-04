@@ -267,6 +267,16 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         hard_incompatibilities: vec![],
     };
     m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
+    let make_opencode_go = |model: &str| ProviderConfig {
+        kind: "opencode_go".to_owned(),
+        endpoint: "https://opencode.ai/zen/go/v1".to_owned(),
+        model: model.to_owned(),
+        max_tokens: Some(8192),
+        temperature: Some(1.0),
+        top_p: Some(0.95),
+        hard_incompatibilities: vec![],
+    };
+    m.insert("opencode_go".to_owned(), make_opencode_go("kimi-k2.7-code"));
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
@@ -674,6 +684,20 @@ mod tests {
         assert_eq!(spec.kind, "deepseek");
         assert_eq!(spec.model, "deepseek-v4-flash");
         assert_eq!(spec.endpoint, "https://api.deepseek.com/v1");
+    }
+
+    /// Q7 pin: OpenCode Go is exposed with the operator-default
+    /// non-MiniMax / non-Direct-DeepSeek model (kimi-k2.7-code).
+    #[test]
+    fn default_providers_lists_opencode_go() {
+        let cfg = Config::default();
+        let spec = cfg
+            .providers
+            .get("opencode_go")
+            .expect("opencode_go missing from default providers");
+        assert_eq!(spec.kind, "opencode_go");
+        assert_eq!(spec.model, "kimi-k2.7-code");
+        assert_eq!(spec.endpoint, "https://opencode.ai/zen/go/v1");
     }
 
     /// Q5 pin: the 4 canonical MiniMax models must all be exposed as

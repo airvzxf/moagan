@@ -103,17 +103,27 @@ impl ProviderRegistry {
 pub fn registry_from_config(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
 ) -> Result<ProviderRegistry> {
+    use super::opencode_go::OpenCodeGoProvider;
     let mut registry = ProviderRegistry::default();
     for (name, spec) in cfg {
         let provider: Arc<dyn Provider> = match spec.kind.as_str() {
             "deepseek" => Arc::new(super::deepseek::DeepSeekProvider::from_config(spec)?),
             "minimax" => Arc::new(super::minimax::MinimaxProvider::from_config(spec)?),
             "mock" => Arc::new(super::mock::MockProvider::empty()),
+            "opencode_go" => {
+                if OpenCodeGoProvider::is_blocked(&spec.model) {
+                    return Err(crate::Error::InvalidArgs(format!(
+                        "model '{}' is blocked for opencode_go; use direct minimax provider instead",
+                        spec.model
+                    )));
+                }
+                Arc::new(OpenCodeGoProvider::from_config(spec)?)
+            }
             // Other provider kinds are not implemented in v0.1.
             other => {
                 return Err(crate::Error::InvalidArgs(format!(
                     "provider kind '{other}' is not implemented in MVP v0.1; \
-                     only 'deepseek', 'minimax', and 'mock' are supported"
+                     only 'deepseek', 'minimax', 'mock', and 'opencode_go' are supported"
                 )));
             }
         };
@@ -134,5 +144,42 @@ mod tests {
         assert!(r.get("mock").is_some());
         assert!(r.get("nope").is_none());
         assert_eq!(r.len(), 1);
+    }
+
+    /// Q7 pin: `registry_from_config` must refuse to wire any of the
+    /// operator-blocked minimax-* model aliases via the opencode_go
+    /// subscription. This is the runtime guard that pairs with the
+    /// compile-time `BLOCKED_MODELS` list in `opencode_go.rs`.
+    #[test]
+    fn registry_from_config_rejects_blocked_opencode_go_models() {
+        unsafe {
+            std::env::set_var("OPENCODE_GO_API_KEY", "dummy-for-test");
+        }
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "opencode_go".into(),
+            crate::config::ProviderConfig {
+                kind: "opencode_go".into(),
+                endpoint: "https://opencode.ai/zen/go/v1".into(),
+                model: "minimax-m3".into(),
+                max_tokens: Some(8192),
+                temperature: Some(0.6),
+                top_p: Some(0.95),
+                hard_incompatibilities: vec![],
+            },
+        );
+        let result = registry_from_config(&cfg);
+        unsafe {
+            std::env::remove_var("OPENCODE_GO_API_KEY");
+        }
+        match result {
+            Err(crate::Error::InvalidArgs(msg)) => {
+                assert!(
+                    msg.contains("minimax-m3") && msg.contains("blocked"),
+                    "unexpected InvalidArgs message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidArgs, got {other:?}"),
+        }
     }
 }
