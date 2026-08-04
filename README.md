@@ -33,6 +33,8 @@ export MINIMAX_API_KEY=sk-cp-...
     --provider minimax
 ```
 
+At startup, Moagan best-effort loads the first `.env` found from the current working directory upward. Existing environment variables are never overwritten, so values explicitly set in the shell take precedence over `.env`. A successful load reports the file path on stderr; set `MOAGAN_QUIET=1` to suppress that notice without disabling loading. A missing `.env` is silently ignored.
+
 ## Architecture
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module layout, persistence model, and provider/prompt contracts.
