@@ -28,6 +28,8 @@
 //! The `s_` prefix avoids collision with `p_<NN>` ids in `proposals/`
 //! and lets `DeliverPhase` badge these as "synthesis" entries.
 
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -387,7 +389,7 @@ impl Phase for SynthesizePhase {
                         3,
                     )
                     .await?;
-                let mut parsed = merge_plan_to_synthesized(plan, &cluster, &target_id);
+                let parsed = merge_plan_to_synthesized(plan, &cluster, &target_id);
                 let path = dir.join(format!("{}.json", parsed.id));
                 write_json(&path, &parsed)?;
 
@@ -488,16 +490,16 @@ mod tests {
     /// see why a synthesis was rejected.
     #[test]
     fn merge_plan_to_synthesized_carries_fields_and_hard_constraints() {
-        let mut plan = MergePlan::default();
-        plan.summary = "summary text".into();
-        plan.approach = "## Approach\n\nbody".into();
-        plan.tradeoffs = vec!["t1".into()];
-        plan.evidence = vec!["sk_001".into()];
-        plan.sources = vec!["p_001".into(), "p_002".into()];
-        plan
-            .hard_constraint_check
-            .insert("single_binary".into(), true);
-        plan.expected_validation = "unit tests pass".into();
+        let plan = MergePlan {
+            summary: "summary text".into(),
+            approach: "## Approach\n\nbody".into(),
+            tradeoffs: vec!["t1".into()],
+            evidence: vec!["sk_001".into()],
+            sources: vec!["p_001".into(), "p_002".into()],
+            hard_constraint_check: BTreeMap::from([("single_binary".into(), true)]),
+            expected_validation: "unit tests pass".into(),
+            ..MergePlan::default()
+        };
         let cluster = crate::phases::cluster_proposals::ProposalCluster {
             schema_version: "v1".into(),
             id: "cp_00".into(),
@@ -505,6 +507,7 @@ mod tests {
             cluster_text_sample: String::new(),
             created_unix: 0,
         };
+        let _ = cluster;
         let s = merge_plan_to_synthesized(plan, &cluster, "s_00");
         assert_eq!(s.id, "s_00");
         assert_eq!(s.summary, "summary text");

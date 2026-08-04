@@ -396,14 +396,12 @@ pub async fn run_full_pipeline(
     // U1: emit a manifest_events row so the dashboard's "run.completed"
     // timeline has the canonical anchor (the manifest sidecar is
     // small; this table keeps the lifecycle event out of it).
-    if let Err(e) = db.record_manifest_event(
-        &crate::storage::sqlite::ManifestEventRow {
-            run_id: run_id.to_string(),
-            event_type: "run.completed".into(),
-            details: Some(manifest.status.clone()),
-            at_unix: crate::time::now_unix_secs(),
-        },
-    ) {
+    if let Err(e) = db.record_manifest_event(&crate::storage::sqlite::ManifestEventRow {
+        run_id: run_id.to_string(),
+        event_type: "run.completed".into(),
+        details: Some(manifest.status.clone()),
+        at_unix: crate::time::now_unix_secs(),
+    }) {
         eprintln!("warn: failed to record run.completed manifest event: {e}");
     }
     Ok(manifest)

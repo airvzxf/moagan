@@ -487,30 +487,32 @@ impl Telemetry {
         // actual LLM traffic). Both writes are best-effort: a SQLite
         // failure is logged and never aborts the call. Schema is
         // v008_add_ons.sql.
-        if let Some(db) = &self.inner.db {
-            if !cache_hit {
-                if let Err(e) = db.record_outbox_event(
-                    &crate::storage::sqlite::OutboxEventRow {
-                        run_id: self.inner.run_id.to_string(),
-                        event_type: "call.completed".into(),
-                        payload: format!(
-                            "{{\"call_id\":\"{call_id}\",\"phase\":\"{phase}\",\"role\":\"{role}\",\"input_tokens\":{input_tokens},\"output_tokens\":{output_tokens}}}"
-                        ),
-                        at_unix: ended_unix,
-                    },
-                ) {
-                    tracing::warn!(call_id, error = %e, "outbox_events write failed");
-                }
-                if let Err(e) = db.increment_provider_rollup(
-                    provider,
-                    model,
-                    input_tokens,
-                    output_tokens,
-                    error.is_some(),
-                ) {
-                    tracing::warn!(call_id, error = %e, "provider_rollups write failed");
-                }
-            }
+        if let Some(db) = &self.inner.db
+            && !cache_hit
+            && let Err(e) = db.record_outbox_event(
+                &crate::storage::sqlite::OutboxEventRow {
+                    run_id: self.inner.run_id.to_string(),
+                    event_type: "call.completed".into(),
+                    payload: format!(
+                        "{{\"call_id\":\"{call_id}\",\"phase\":\"{phase}\",\"role\":\"{role}\",\"input_tokens\":{input_tokens},\"output_tokens\":{output_tokens}}}"
+                    ),
+                    at_unix: ended_unix,
+                },
+            )
+        {
+            tracing::warn!(call_id, error = %e, "outbox_events write failed");
+        }
+        if let Some(db) = &self.inner.db
+            && !cache_hit
+            && let Err(e) = db.increment_provider_rollup(
+                provider,
+                model,
+                input_tokens,
+                output_tokens,
+                error.is_some(),
+            )
+        {
+            tracing::warn!(call_id, error = %e, "provider_rollups write failed");
         }
         Ok(())
     }
@@ -585,18 +587,16 @@ impl Telemetry {
             // re-scanning the filesystem. We use the legacy `apply`
             // (not the categorised pass) because the message is a
             // single string; the policy already covered it.
-            if let Some(kind) = detect_redact_kind(&ev.message) {
-                if let Err(e) = db.record_redact_audit(
-                    &crate::storage::sqlite::RedactAuditRow {
-                        run_id: Some(self.inner.run_id.to_string()),
-                        source_path: format!("telemetry/warnings.jsonl#{}", ev.code),
-                        pattern_kind: kind.to_string(),
-                        match_count: 1,
-                        at_unix: ev.at_unix_ms / 1000,
-                    },
-                ) {
-                    tracing::warn!(code = ev.code, error = %e, "redact_audit write failed");
-                }
+            if let Some(kind) = detect_redact_kind(&ev.message)
+                && let Err(e) = db.record_redact_audit(&crate::storage::sqlite::RedactAuditRow {
+                    run_id: Some(self.inner.run_id.to_string()),
+                    source_path: format!("telemetry/warnings.jsonl#{}", ev.code),
+                    pattern_kind: kind.to_string(),
+                    match_count: 1,
+                    at_unix: ev.at_unix_ms / 1000,
+                })
+            {
+                tracing::warn!(code = ev.code, error = %e, "redact_audit write failed");
             }
         }
         Ok(())
@@ -740,13 +740,8 @@ mod tests {
         let db = Db::open(&home.meta_db_path()).unwrap();
         db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
             .unwrap();
-        let t = Telemetry::open(
-            run_id,
-            &run_dir,
-            RedactPolicy::default(),
-            Some(db.clone()),
-        )
-        .unwrap();
+        let t =
+            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone())).unwrap();
         // Real call: should write outbox + rollup.
         t.call(
             "call-1",
@@ -768,7 +763,10 @@ mod tests {
         )
         .unwrap();
         t.flush().unwrap();
-        let ob_count = db.list_outbox_events_for_run(&run_id.to_string()).unwrap().len();
+        let ob_count = db
+            .list_outbox_events_for_run(&run_id.to_string())
+            .unwrap()
+            .len();
         assert_eq!(ob_count, 1, "expected one outbox_events row");
         // Check the provider rollup via a public read path. The
         // public surface for rollups is the `provider_usage_for_run`
@@ -803,7 +801,10 @@ mod tests {
         )
         .unwrap();
         t.flush().unwrap();
-        let ob_after_hit = db.list_outbox_events_for_run(&run_id.to_string()).unwrap().len();
+        let ob_after_hit = db
+            .list_outbox_events_for_run(&run_id.to_string())
+            .unwrap()
+            .len();
         assert_eq!(
             ob_after_hit, 1,
             "cache hit must not produce a second outbox row"
@@ -831,13 +832,8 @@ mod tests {
         let db = Db::open(&home.meta_db_path()).unwrap();
         db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
             .unwrap();
-        let t = Telemetry::open(
-            run_id,
-            &run_dir,
-            RedactPolicy::default(),
-            Some(db.clone()),
-        )
-        .unwrap();
+        let t =
+            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone())).unwrap();
         t.warn(
             "secret_in_payload",
             "error",

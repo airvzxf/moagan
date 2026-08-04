@@ -265,10 +265,27 @@ impl Phase for RankPhase {
                     } else {
                         self.config.stability.sigma_default
                     };
-                    // Log the verdict via tracing so the operator can
-                    // see it in the run log; the SQLite mirror lives in
-                    // a follow-up commit so this one stays scoped to the
-                    // pure ranking-phase wiring.
+                    // W2: mirror the verdict into SQLite via the
+                    // `runs` row (v009). Best-effort: a pre-v009
+                    // DB returns Ok(()) silently and the sidecar
+                    // path stays as the canonical source.
+                    if let Some(db) = ctx.telemetry.db() {
+                        let label_str = match label {
+                            crate::domain::StabilityLabel::Stable => "stable",
+                            crate::domain::StabilityLabel::Sensitive => "sensitive",
+                        };
+                        // `score` is the per-proposal stability HashMap.
+                        // Persist the top-1 score (the winner's) so the
+                        // dashboard's "stability per run" view shows
+                        // the same number the operator sees in the
+                        // sensitive-checkpoint question.
+                        let top_score = score.values().copied().reduce(f32::max).unwrap_or(0.0);
+                        if let Err(e) =
+                            db.record_run_stability(ctx.run_id, top_score, label_str, sigma_used)
+                        {
+                            tracing::warn!(error = %e, "stability mirror to runs failed");
+                        }
+                    }
                     tracing::info!(
                         run_id = %ctx.run_id,
                         sigma = sigma_used,

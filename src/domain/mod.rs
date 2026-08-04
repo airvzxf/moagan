@@ -7,9 +7,9 @@ pub mod constraint;
 
 use std::collections::BTreeMap;
 
+use crate::ids::RunId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::ids::RunId;
 
 /// Output of the intake phase.
 ///
@@ -691,6 +691,12 @@ pub struct SynthesizedProposal {
 /// sources that fed it. Used by `SynthesizePhase` to gate the
 /// synthesis against the `HARD_INCOMPATIBILITIES` predicate and
 /// to stamp the resulting `synthesized/s_<NN>.json` sidecar.
+///
+/// V1: this is the new MergeSynthesizer role's output shape. It
+/// supersedes the legacy `SynthesizedProposal` contract: the
+/// `hard_constraint_check` map is the structured replacement for
+/// the `evidence: ["<key>:<ok>"]` pattern that `SynthesizedProposal`
+/// used, and the `sources` list is now mandatory.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MergePlan {
@@ -751,6 +757,9 @@ pub struct RationaleExtract {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the adversarial judge pass. Only emitted when the
+/// disagreement_score between normal judges exceeds the configured
+/// threshold; otherwise the proposal is left alone.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdversaryReport {
