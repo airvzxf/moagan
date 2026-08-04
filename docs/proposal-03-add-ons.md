@@ -776,6 +776,8 @@ impl Default for Rubric {
 
 #### D.7.5. JSONL gzip stream-friendly (P — ✅ `compress_or_report` para None/Gz/Zst)
 
+[partial] Shipped as API in src/storage/compression.rs (PR #39, sub-fase P, recovered by 6f9e2d8). Sin consumidor en hot path de producción; uso previsto: export surface. Anotación propuesta en docs/q1-v0.3-status-sync.
+
 > **Estado (v0.3 sub-fase O, ✅ merged en `feat/v0.4-phase-o-rubric-compression`):**
 > implementado en `src/storage/compression.rs` como capa
 > aditiva. `pub enum Compression { None, Gz, Zst }` +
@@ -2058,6 +2060,8 @@ pub async fn integrate(extractions: HashMap<FacetId, Markdown>, brief: &Canonica
 
 #### D.13.15. `HARD_INCOMPATIBILITIES` constant
 
+[x] Shipped: src/domain/constraint.rs (PR #49, fix(b)). 10 pares en la const; consumido por SynthesizePhase::cluster_conflict. Anotación propuesta en docs/q1-v0.3-status-sync.
+
 ```rust
 // src/domain/constraint.rs
 pub const HARD_INCOMPATIBILITIES: &[(&str, &str)] = &[
@@ -3235,6 +3239,8 @@ pub fn apply_budget_pressure(state: &mut RunState, deficit: u64) -> BudgetAction
 (Inspirado en T02-04 D3; T04-10; T03-05 §4.1.)
 
 #### D.21.6. Per-mode retry budget matrix
+
+[partial — module shipped, wire-up pending] Módulo en src/llm/retry_budget.rs (PR #29, sub-fase K). Wire-up al retry loop en phases/phase.rs::call_with_retry_parse se aplaza a PR #52 (sub-fase Q2). Anotación propuesta en docs/q1-v0.3-status-sync.
 
 | Mode | transport | rate-limit | parse | schema | timeout | truncated |
 |---|---:|---:|---:|---:|---:|---:|
