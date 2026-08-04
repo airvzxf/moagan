@@ -165,10 +165,21 @@ impl Cancel {
                 let _ = unsafe { libc::killpg(*pgid, libc::SIGTERM) };
             }
             // 3b) SIGKILL after the grace window on a tokio task so
-            // we never block the caller.
+            // we never block the caller. The task is parented to the
+            // cooperative `CancellationToken` (AGENTS.md §"No-go list":
+            // no `tokio::spawn` without a `JoinHandle` recorded or a
+            // `CancellationToken` parent). When the token is already
+            // cancelled (e.g. a second Hard cancel arrives during the
+            // grace window, or the orchestrator shuts down), the
+            // `select!` resolves immediately and SIGKILL fires without
+            // waiting another 2 s.
             let pgids_for_kill = pgids.clone();
+            let token = self.inner.token.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(HARD_KILL_GRACE).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(HARD_KILL_GRACE) => {}
+                    _ = token.cancelled() => {}
+                }
                 for pgid in &pgids_for_kill {
                     // SAFETY: same as above.
                     let _ = unsafe { libc::killpg(*pgid, libc::SIGKILL) };

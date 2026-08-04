@@ -80,7 +80,17 @@ check_sandbox_pre_exec_setpgid() {
 
 check_sandbox_register_unregister_pgid() {
     grep -qF 'cancel.register_child(pgid)' "${ROOT}/src/sandbox/process.rs"
-    grep -qF 'cancel.unregister_child(pgid)' "${ROOT}/src/sandbox/process.rs"
+    # Either the direct call in the function body or the RAII-guarded
+    # call in the `Drop` impl satisfies the registry-cleanup contract.
+    grep -qE 'unregister_child\((self\.)?pgid\)' "${ROOT}/src/sandbox/process.rs"
+}
+
+check_sandbox_raii_registered_child_guard() {
+    # The RAII guard centralises unregister on Drop so the future-drop
+    # case (orchestrator shutdown, cancellation mid-flight) cannot
+    # leak the pgid from the cancel registry.
+    grep -qF 'struct RegisteredChild' "${ROOT}/src/sandbox/process.rs"
+    grep -qF 'impl Drop for RegisteredChild' "${ROOT}/src/sandbox/process.rs"
 }
 
 # ----------------------------------------------------------------------
@@ -133,6 +143,7 @@ run_check "sandbox_cancel_field_optional" check_sandbox_cancel_field
 run_check "sandbox_with_cancel_builder" check_sandbox_with_cancel_builder
 run_check "sandbox_pre_exec_setpgid" check_sandbox_pre_exec_setpgid
 run_check "sandbox_register_unregister_pgid" check_sandbox_register_unregister_pgid
+run_check "sandbox_raii_registered_child_guard" check_sandbox_raii_registered_child_guard
 run_check "validate_phase_wires_ctx_cancel" check_validate_wires_cancel
 run_check "cancel_unit_tests" check_unit_tests_cancel
 run_check "sandbox_unit_tests" check_unit_tests_sandbox

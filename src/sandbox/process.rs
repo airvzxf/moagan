@@ -346,6 +346,27 @@ pub struct Sandbox {
     cancel: Option<Cancel>,
 }
 
+/// RAII guard that owns the pgid registration against a [`Cancel`]
+/// handle for the lifetime of an in-flight sandbox child.
+///
+/// Construction registers the pgid; `Drop` unregisters it. Because
+/// Rust drops locals on every exit path — natural completion, error
+/// return, timeout, output-truncated, AND future drop from
+/// orchestrator shutdown — the guard is the single source of truth
+/// for unregistration. Call sites never call `unregister_child`
+/// directly, so the cancel registry cannot leak pgids even when the
+/// caller drops the future mid-flight.
+struct RegisteredChild<'a> {
+    cancel: &'a Cancel,
+    pgid: i32,
+}
+
+impl Drop for RegisteredChild<'_> {
+    fn drop(&mut self) {
+        self.cancel.unregister_child(self.pgid);
+    }
+}
+
 impl Sandbox {
     /// Build a new sandbox with the supplied configuration.
     pub fn new(config: SandboxConfig) -> Result<Self> {
@@ -577,22 +598,22 @@ impl Sandbox {
         };
 
         // Register the pgid (== the child pid) so Hard-tier cancel
-        // can killpg it. Unregister on every exit branch below.
-        let registered_pgid: Option<i32> = if let Some(cancel) = &self.cancel {
-            match child.id() {
-                Some(pid) => {
-                    let pgid = i32::try_from(pid).ok();
-                    if let Some(pgid) = pgid {
-                        cancel.register_child(pgid);
-                        Some(pgid)
-                    } else {
-                        None
-                    }
+        // can killpg it. The `RegisteredChild` RAII guard owns the
+        // registration for the rest of `run_in_with_limits`; its
+        // `Drop` impl unregisters the pgid on every exit branch
+        // (natural, error, timeout, output-truncated, AND future
+        // drop from orchestrator shutdown). The guard is the single
+        // source of truth for unregistration — no call site duplicates
+        // it, so the cancel registry cannot leak.
+        let _pgid_guard: Option<RegisteredChild<'_>> = match (&self.cancel, child.id()) {
+            (Some(cancel), Some(pid)) => match i32::try_from(pid) {
+                Ok(pgid) => {
+                    cancel.register_child(pgid);
+                    Some(RegisteredChild { cancel, pgid })
                 }
-                None => None,
-            }
-        } else {
-            None
+                Err(_) => None,
+            },
+            _ => None,
         };
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -645,11 +666,12 @@ impl Sandbox {
         };
 
         // Every exit branch (natural, error, timeout, output-truncated)
-        // converges here. Drain the pgid registry so Hard-tier cancel
-        // does not try to killpg a finished child.
-        if let (Some(cancel), Some(pgid)) = (&self.cancel, registered_pgid) {
-            cancel.unregister_child(pgid);
-        }
+        // converges here. The `RegisteredChild` guard's `Drop` impl
+        // unregisters the pgid from the cancel registry as the stack
+        // unwinds — including the case where the caller drops the
+        // future mid-flight. The guard, not the call sites, is the
+        // source of truth for unregistration.
+        drop(_pgid_guard);
 
         let stdout_result = await_reader(stdout_handle).await;
         let stderr_result = await_reader(stderr_handle).await;
