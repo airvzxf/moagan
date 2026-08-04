@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 
 use crate::domain::constraint::{HARD_INCOMPATIBILITIES, find_conflicts};
-use crate::domain::{Proposal, SynthesizedProposal};
+use crate::domain::{MergePlan, Proposal, SynthesizedProposal};
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
@@ -94,6 +94,52 @@ pub fn synth_to_proposal(synth: &SynthesizedProposal) -> Proposal {
         artifacts: Vec::new(),
         replaced_by: None,
         source_nodes: Vec::new(),
+    }
+}
+
+/// Convert a `MergePlan` (the new MergeSynthesizer role output) into
+/// the existing `SynthesizedProposal` shape that the downstream
+/// pipeline already understands. The two structures are equivalent
+/// modulo the richer `hard_constraint_check` field on the plan,
+/// which we keep on the plan and surface as an extra `evidence`
+/// line on the proposal (the schema for downstream phases doesn't
+/// need the structured map).
+pub fn merge_plan_to_synthesized(
+    plan: MergePlan,
+    cluster: &crate::phases::cluster_proposals::ProposalCluster,
+    target_id: &str,
+) -> SynthesizedProposal {
+    let now = now_unix_secs();
+    let sources: Vec<String> = if plan.sources.is_empty() {
+        cluster.member_proposals.clone()
+    } else {
+        plan.sources
+    };
+    let evidence = if plan.hard_constraint_check.is_empty() {
+        plan.evidence
+    } else {
+        let mut evidence = plan.evidence;
+        let hard = plan
+            .hard_constraint_check
+            .iter()
+            .map(|(k, ok)| format!("hard:{}={}", k, ok))
+            .collect::<Vec<_>>()
+            .join(", ");
+        evidence.push(format!("hard_constraints[{hard}]"));
+        evidence
+    };
+    SynthesizedProposal {
+        id: target_id.to_string(),
+        source_proposals: cluster.member_proposals.clone(),
+        cluster_id: cluster.id.clone(),
+        synthesis_strategy: "merge_invariants".into(),
+        summary: plan.summary,
+        approach: plan.approach,
+        tradeoffs: plan.tradeoffs,
+        evidence,
+        sources,
+        created_unix: now,
+        schema_version: "v1".into(),
     }
 }
 
@@ -323,30 +369,25 @@ impl Phase for SynthesizePhase {
                     &target_id,
                     &proposals,
                 );
-                let system = system_prompt(Role::Synthesizer).to_owned();
-                let parsed: SynthesizedProposal = ctx
+                // V1: route the intra-cluster merge through the
+                // catalog role `MergeSynthesizer` (D.7.1) instead
+                // of the legacy `Synthesizer`. The new role returns
+                // a `MergePlan` with a stricter schema (sources
+                // array, hard_constraint_check, evidence per
+                // source); the phase converts it to the
+                // `SynthesizedProposal` shape the downstream
+                // pipeline already consumes.
+                let system = system_prompt(Role::MergeSynthesizer).to_owned();
+                let plan: MergePlan = ctx
                     .call_with_retry_parse(
-                        Role::Synthesizer,
+                        Role::MergeSynthesizer,
                         system,
                         user,
-                        "SynthesizedProposal: {id, source_proposals[], cluster_id, synthesis_strategy, summary, approach, tradeoffs[], evidence[], sources[]}",
+                        "MergePlan: {summary, approach, tradeoffs[], evidence[], sources[], hard_constraint_check{...}, expected_validation}",
                         3,
                     )
                     .await?;
-                let mut parsed = parsed;
-                if parsed.id.is_empty() {
-                    parsed.id = target_id.clone();
-                }
-                if parsed.cluster_id.is_empty() {
-                    parsed.cluster_id = cluster.id.clone();
-                }
-                if parsed.source_proposals.is_empty() {
-                    parsed.source_proposals = cluster.member_proposals.clone();
-                }
-                if parsed.sources.is_empty() {
-                    parsed.sources = cluster.member_proposals.clone();
-                }
-                parsed.created_unix = now_unix_secs();
+                let mut parsed = merge_plan_to_synthesized(plan, &cluster, &target_id);
                 let path = dir.join(format!("{}.json", parsed.id));
                 write_json(&path, &parsed)?;
 
@@ -439,5 +480,43 @@ mod tests {
         };
         let p = synth_to_proposal(&s);
         assert_eq!(p.source_sketch, "syn_from_cp_99");
+    }
+
+    /// V1: `merge_plan_to_synthesized` carries the MergePlan fields
+    /// forward and merges `hard_constraint_check` into the evidence
+    /// stream so downstream phases (Gate, Critique, etc.) can still
+    /// see why a synthesis was rejected.
+    #[test]
+    fn merge_plan_to_synthesized_carries_fields_and_hard_constraints() {
+        let mut plan = MergePlan::default();
+        plan.summary = "summary text".into();
+        plan.approach = "## Approach\n\nbody".into();
+        plan.tradeoffs = vec!["t1".into()];
+        plan.evidence = vec!["sk_001".into()];
+        plan.sources = vec!["p_001".into(), "p_002".into()];
+        plan
+            .hard_constraint_check
+            .insert("single_binary".into(), true);
+        plan.expected_validation = "unit tests pass".into();
+        let cluster = crate::phases::cluster_proposals::ProposalCluster {
+            schema_version: "v1".into(),
+            id: "cp_00".into(),
+            member_proposals: vec!["p_001".into(), "p_002".into()],
+            cluster_text_sample: String::new(),
+            created_unix: 0,
+        };
+        let s = merge_plan_to_synthesized(plan, &cluster, "s_00");
+        assert_eq!(s.id, "s_00");
+        assert_eq!(s.summary, "summary text");
+        assert_eq!(s.sources, vec!["p_001".to_string(), "p_002".into()]);
+        assert_eq!(s.cluster_id, "cp_00");
+        assert_eq!(s.synthesis_strategy, "merge_invariants");
+        // hard_constraint_check is surfaced as a single extra
+        // evidence line so the downstream pipeline can show it.
+        assert!(
+            s.evidence.iter().any(|e| e.contains("hard_constraints[")),
+            "evidence should carry hard_constraints line, got {:?}",
+            s.evidence
+        );
     }
 }

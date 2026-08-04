@@ -12,8 +12,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, Proposal, Repair, Route,
-    Sketch, SynthesizedProposal,
+    AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, MergePlan, Proposal,
+    RationaleExtract, RecoveryReport, Repair, Route, Sketch, SynthesizedProposal,
 };
 use crate::error::{Error, Result};
 
@@ -225,7 +225,15 @@ impl Role {
             Self::Decomposer => {
                 serde_json::from_value::<crate::domain::ProblemGraph>(value.clone()).map(|_| ())
             }
-            Self::MergeSynthesizer | Self::RecoveryExplainer | Self::RationaleExtractor => Ok(()),
+            Self::MergeSynthesizer => {
+                serde_json::from_value::<MergePlan>(value.clone()).map(|_| ())
+            }
+            Self::RecoveryExplainer => {
+                serde_json::from_value::<RecoveryReport>(value.clone()).map(|_| ())
+            }
+            Self::RationaleExtractor => {
+                serde_json::from_value::<RationaleExtract>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -436,5 +444,12 @@ mod tests {
         assert!(Role::Judge.validate_json(&empty).is_ok());
         assert!(Role::Deliver.validate_json(&empty).is_ok());
         assert!(Role::Sketch.validate_json(&empty).is_ok());
+        // V1: the three P roles (MergeSynthesizer, RecoveryExplainer,
+        // RationaleExtractor) now have real domain types with
+        // `#[serde(default)]`. Default-filled instances round-trip
+        // from {} cleanly.
+        assert!(Role::MergeSynthesizer.validate_json(&empty).is_ok());
+        assert!(Role::RecoveryExplainer.validate_json(&empty).is_ok());
+        assert!(Role::RationaleExtractor.validate_json(&empty).is_ok());
     }
 }
