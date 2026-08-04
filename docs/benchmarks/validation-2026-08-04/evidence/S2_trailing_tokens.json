@@ -1,0 +1,8 @@
+{
+  "fixture": "trailing_tokens",
+  "route_json_present": false,
+  "duration_s": 0,
+  "route_json": "",
+  "schema_violation_warning": "",
+  "stderr_tail": "umeration\\\",\\\"sketches\\\":0,\\\"proposals\\\":3,\\\"judges\\\":3}\\n\\nEXPLANATION: this brief is a simple enumeration task that doesn't require deep analysis, so fast mode is appropriate.\"; full raw follows:\n{\"mode\":\"fast\",\"reason\":\"Simple enumeration\",\"sketches\":0,\"proposals\":3,\"judges\":3}\n\nEXPLANATION: this brief is a simple enumeration task that doesn't require deep analysis, so fast mode is appropriate."
+}

@@ -1,0 +1,5 @@
+fix1_role_requires_json	PASS	helper function role_requires_json present
+fix2_alias_resolution_code	PASS	alias resolution in cli/mod.rs
+fix3_switch_provider_validation_code	PASS	switch-provider validation in continue_cmd.rs
+fix1_real_kimi_fast	FAIL	see /tmp/out.log
+fix2_real_minimax_alias	FAIL	no run id

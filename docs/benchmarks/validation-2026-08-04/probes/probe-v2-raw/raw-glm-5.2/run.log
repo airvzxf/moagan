@@ -1,0 +1,2 @@
+[2m2026-08-04T16:23:00.810147Z[0m [34mDEBUG[0m [2mmoagan::phases::phase[0m[2m:[0m LLM call stage [3mcall_id[0m[2m=[0m019fcd95-e5ca-7d80-bf2b-570c9209d260 [3mphase[0m[2m=[0m"intake" [3mstage[0m[2m=[0m"provider.send.started"
+error: cancelled: user interrupt

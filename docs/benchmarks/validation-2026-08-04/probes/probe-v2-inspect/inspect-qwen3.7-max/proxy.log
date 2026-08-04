@@ -1,0 +1,7 @@
+proxy listening on http://127.0.0.1:43863 -> https://opencode.ai/zen/go/v1
+run id: auto
+runs dir: /tmp/opencode/validation-2026-08-04/probe-v2-inspect/inspect-qwen3.7-max
+warn: audit proxy connection failed: io: Broken pipe (os error 32)
+warn: audit proxy connection failed: io: Broken pipe (os error 32)
+warn: audit proxy connection failed: io: Broken pipe (os error 32)
+proxy shut down; audit logs under /tmp/opencode/validation-2026-08-04/probe-v2-inspect/inspect-qwen3.7-max/.runs/

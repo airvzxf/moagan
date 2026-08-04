@@ -1,0 +1,8 @@
+{
+  "fixture": "comments",
+  "route_json_present": false,
+  "duration_s": 1,
+  "route_json": "",
+  "schema_violation_warning": "",
+  "stderr_tail": "y.call.completed\"\nerror: schema violation: model output is not valid JSON after repair: expected value at line 1 column 1; len=110 bytes; tail=\"// Route decision follows.\\n{\\\"mode\\\":\\\"fast\\\",\\\"reason\\\":\\\"Simple enumeration\\\",\\\"sketches\\\":0,\\\"proposals\\\":3,\\\"judges\\\":3}\"; full raw follows:\n// Route decision follows.\n{\"mode\":\"fast\",\"reason\":\"Simple enumeration\",\"sketches\":0,\"proposals\":3,\"judges\":3}"
+}

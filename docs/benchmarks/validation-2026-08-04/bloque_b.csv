@@ -1,0 +1,40 @@
+s1_fast_with_proxy	PASS	run_ok verify=2_mock_no_traffic (0s)	2026-08-04T04:35:58-06:00
+s1_standard_with_proxy	PASS	run_ok verify=2_mock_no_traffic (1s)	2026-08-04T04:35:59-06:00
+s1_explore_with_proxy	PASS	run_ok verify=2_mock_no_traffic (0s)	2026-08-04T04:35:59-06:00
+s1_batch_with_proxy	PASS	run_ok verify=2_mock_no_traffic (0s)	2026-08-04T04:36:00-06:00
+s1_fast_no_proxy_baseline	PASS	run_ok verify=2_mock_no_traffic (0s)	2026-08-04T04:36:01-06:00
+s1_deep_with_proxy	PASS	run_ok verify=2_mock_no_traffic (1s)	2026-08-04T04:36:02-06:00
+s1_fast_mp1	PASS	run_ok verify=2_mock_no_traffic (1s)	2026-08-04T04:36:03-06:00
+s1_fast_mp8	PASS	run_ok verify=2_mock_no_traffic (0s)	2026-08-04T04:36:03-06:00
+s1_batch_mp4	PASS	run_ok verify=2_mock_no_traffic (0s)	2026-08-04T04:36:04-06:00
+s1_standard_noreplace	PASS	run_ok verify=2_mock_no_traffic (0s)	2026-08-04T04:36:05-06:00
+s2_context_runid	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:06-06:00
+s2_context_summary	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:07-06:00
+s2_context_full	PASS	run_ok verify=2 (1s)	2026-08-04T04:36:08-06:00
+s2_context_file	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:08-06:00
+s2_context_dir	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:09-06:00
+s2_context_dir_full	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:10-06:00
+s2_context_file_summary	PASS	run_ok verify=2 (1s)	2026-08-04T04:36:11-06:00
+s2_context_mp2	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:12-06:00
+s2_context_deep	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:13-06:00
+s2_context_runid_deep	PASS	run_ok verify=2 (0s)	2026-08-04T04:36:14-06:00
+s3_continue_minimax	PASS	ok (0s)	2026-08-04T04:36:15-06:00
+s3_continue_deepseek	PASS	ok (0s)	2026-08-04T04:36:16-06:00
+s3_continue_opencode_go	PASS	ok (0s)	2026-08-04T04:36:17-06:00
+s3_resume	PASS	ok (0s)	2026-08-04T04:36:18-06:00
+s3_rerun	PASS	ok (0s)	2026-08-04T04:36:19-06:00
+s3_rerun_matrix	PASS	ok (0s)	2026-08-04T04:36:20-06:00
+s3_import	PASS	ok (0s)	2026-08-04T04:36:21-06:00
+s3_continue_apikey_env	PASS	ok (1s)	2026-08-04T04:36:22-06:00
+s3_continue_apikey_devnull	PASS	expected_error_match (exit=3, 0s)	2026-08-04T04:36:22-06:00
+s3_refine	PASS	ok (0s)	2026-08-04T04:36:23-06:00
+s4_discover_card80_d2	PASS	run_exit=80 verify=2 (0s) - mock_fixture_mismatch_ok	2026-08-04T04:36:24-06:00
+s4_discover_card160_d4	PASS	run_exit=80 verify=2 (1s) - mock_fixture_mismatch_ok	2026-08-04T04:36:27-06:00
+s4_discover_cluster_threshold	PASS	run_exit=80 verify=2 (1s) - mock_fixture_mismatch_ok	2026-08-04T04:36:28-06:00
+s4_discover_max_parallelism	PASS	run_exit=80 verify=2 (0s) - mock_fixture_mismatch_ok	2026-08-04T04:36:29-06:00
+s4_discover_non_interactive	PASS	run_exit=2 verify=2 (0s) - mock_fixture_mismatch_ok	2026-08-04T04:36:30-06:00
+s4_discover_card79	PASS	expected_error_match (exit=2, 0s)	2026-08-04T04:36:31-06:00
+s4_discover_card0	PASS	expected_error_match (exit=2, 0s)	2026-08-04T04:36:31-06:00
+s4_discover_card500	PASS	run_exit=80 verify=2 (8s) - mock_fixture_mismatch_ok	2026-08-04T04:36:41-06:00
+s4_discover_deepseek	PASS	expected_error_match (exit=3, 0s)	2026-08-04T04:36:42-06:00
+s4_discover_opencode_go	PASS	expected_error_match (exit=3, 0s)	2026-08-04T04:36:42-06:00
