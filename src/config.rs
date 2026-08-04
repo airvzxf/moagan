@@ -269,11 +269,13 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
     // OpenCode Go models per the 2026-08-04 operator roster. The
     // dispatcher in `src/llm/opencode_go.rs` selects the right wire
-    // format based on the endpoint. The default temperature is 1.0
-    // because the operator's primary kimi family (kimi-k2.7-code)
-    // only accepts that value on this subscription; per-model
-    // overrides live in `MODEL_TEMPERATURE_OVERRIDES` for the rare
-    // model that requires a different value.
+    // format based on the model name (`endpoint_path_for`) and appends
+    // the model-specific path to the stable base URL stored here. The
+    // default temperature is 1.0 because the operator's primary kimi
+    // family (kimi-k2.7-code) only accepts that value on this
+    // subscription; per-model overrides live in
+    // `MODEL_TEMPERATURE_OVERRIDES` for the rare model that requires a
+    // different value.
     let make_opencode_go = |model: &str, endpoint: &str| ProviderConfig {
         kind: "opencode_go".to_owned(),
         endpoint: endpoint.to_owned(),
@@ -283,71 +285,75 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
     };
+    // All 18 OpenCode Go providers share the same base URL. The
+    // dispatcher (`OpenCodeGoProvider::new`) appends the model-specific
+    // path (`/v1/chat/completions`, `/v1/messages`, or `/v1/responses`)
+    // at construction time via the concrete provider's URL builder.
+    // Storing the base URL keeps the `Provider::endpoint()` contract
+    // stable across the three wire formats.
+    let oc_base = "https://opencode.ai/zen/go/v1";
     // `/v1/chat/completions` (OpenAI-compatible) — 10 models.
-    let oc_chat = "https://opencode.ai/zen/go/v1";
     m.insert(
         "opencode_go".to_owned(),
-        make_opencode_go("kimi-k2.7-code", oc_chat),
+        make_opencode_go("kimi-k2.7-code", oc_base),
     );
-    m.insert("kimi-k3".to_owned(), make_opencode_go("kimi-k3", oc_chat));
+    m.insert("kimi-k3".to_owned(), make_opencode_go("kimi-k3", oc_base));
     m.insert(
         "kimi-k2.6".to_owned(),
-        make_opencode_go("kimi-k2.6", oc_chat),
+        make_opencode_go("kimi-k2.6", oc_base),
     );
-    m.insert("glm-5.1".to_owned(), make_opencode_go("glm-5.1", oc_chat));
-    m.insert("glm-5.2".to_owned(), make_opencode_go("glm-5.2", oc_chat));
+    m.insert("glm-5.1".to_owned(), make_opencode_go("glm-5.1", oc_base));
+    m.insert("glm-5.2".to_owned(), make_opencode_go("glm-5.2", oc_base));
     m.insert(
         "deepseek-v4-pro".to_owned(),
-        make_opencode_go("deepseek-v4-pro", oc_chat),
+        make_opencode_go("deepseek-v4-pro", oc_base),
     );
     m.insert(
         "deepseek-v4-flash".to_owned(),
-        make_opencode_go("deepseek-v4-flash", oc_chat),
+        make_opencode_go("deepseek-v4-flash", oc_base),
     );
     m.insert(
         "mimo-v2.5".to_owned(),
-        make_opencode_go("mimo-v2.5", oc_chat),
+        make_opencode_go("mimo-v2.5", oc_base),
     );
     m.insert(
         "mimo-v2.5-pro".to_owned(),
-        make_opencode_go("mimo-v2.5-pro", oc_chat),
+        make_opencode_go("mimo-v2.5-pro", oc_base),
     );
-    m.insert("hy3".to_owned(), make_opencode_go("hy3", oc_chat));
+    m.insert("hy3".to_owned(), make_opencode_go("hy3", oc_base));
     // `/v1/messages` (Anthropic-compatible) — 7 models.
-    let oc_messages = "https://opencode.ai/zen/go/v1/messages";
     m.insert(
         "minimax-m3".to_owned(),
-        make_opencode_go("minimax-m3", oc_messages),
+        make_opencode_go("minimax-m3", oc_base),
     );
     m.insert(
         "minimax-m2.7".to_owned(),
-        make_opencode_go("minimax-m2.7", oc_messages),
+        make_opencode_go("minimax-m2.7", oc_base),
     );
     m.insert(
         "minimax-m2.5".to_owned(),
-        make_opencode_go("minimax-m2.5", oc_messages),
+        make_opencode_go("minimax-m2.5", oc_base),
     );
     m.insert(
         "qwen3.8-max".to_owned(),
-        make_opencode_go("qwen3.8-max", oc_messages),
+        make_opencode_go("qwen3.8-max", oc_base),
     );
     m.insert(
         "qwen3.7-max".to_owned(),
-        make_opencode_go("qwen3.7-max", oc_messages),
+        make_opencode_go("qwen3.7-max", oc_base),
     );
     m.insert(
         "qwen3.7-plus".to_owned(),
-        make_opencode_go("qwen3.7-plus", oc_messages),
+        make_opencode_go("qwen3.7-plus", oc_base),
     );
     m.insert(
         "qwen3.6-plus".to_owned(),
-        make_opencode_go("qwen3.6-plus", oc_messages),
+        make_opencode_go("qwen3.6-plus", oc_base),
     );
     // `/v1/responses` (OpenAI Responses) — 1 model.
-    let oc_responses = "https://opencode.ai/zen/go/v1/responses";
     m.insert(
         "gpt-5.6-luna".to_owned(),
-        make_opencode_go("gpt-5.6-luna", oc_responses),
+        make_opencode_go("gpt-5.6-luna", oc_base),
     );
     m.insert(
         "mock".to_owned(),

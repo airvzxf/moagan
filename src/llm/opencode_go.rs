@@ -432,4 +432,42 @@ mod tests {
         );
         assert_eq!(endpoint_path_for("unknown"), None);
     }
+
+    /// Track A.4 contract pin: every default `ProviderConfig` for an
+    /// OpenCode Go model registered in `src/config.rs::default_providers`
+    /// carries the stable base URL — never the routed path. The path
+    /// (`/v1/messages`, `/v1/responses`, `/v1/chat/completions`) is
+    /// selected by the dispatcher at construction time, not stored on
+    /// the config. The URL builders in `opencode_go_anthropic`,
+    /// `opencode_go_responses`, and `openai_compat` already accept both
+    /// forms, so this test pins the contract on the config side.
+    #[test]
+    fn registry_default_endpoints_are_bases() {
+        use crate::config::Config;
+        let cfg = Config::default();
+        let oc_base = "https://opencode.ai/zen/go/v1";
+        // One representative model from each wire-format group.
+        let representatives = [
+            ("opencode_go", "kimi-k2.7-code"), // /v1/chat/completions
+            ("minimax-m3", "minimax-m3"),      // /v1/messages
+            ("qwen3.7-max", "qwen3.7-max"),    // /v1/messages
+            ("qwen3.7-plus", "qwen3.7-plus"),  // /v1/messages
+            ("gpt-5.6-luna", "gpt-5.6-luna"),  // /v1/responses
+        ];
+        for (alias, expected_model) in representatives {
+            let spec = cfg
+                .providers
+                .get(alias)
+                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+            assert_eq!(
+                spec.endpoint, oc_base,
+                "OpenCode Go default for {alias} must be the base URL, got: {}",
+                spec.endpoint
+            );
+            assert_eq!(
+                spec.model, expected_model,
+                "OpenCode Go default for {alias} must carry model {expected_model}"
+            );
+        }
+    }
 }
