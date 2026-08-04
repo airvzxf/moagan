@@ -60,6 +60,7 @@ zeroize = "1.7"
 tiktoken-rs = "0.5"
 tokio-util = { version = "0.7", features = ["rt"] }
 tempfile = "3.10"
+libc = "0.2"
 
 [dev-dependencies]
 assert_fs = "1.1"

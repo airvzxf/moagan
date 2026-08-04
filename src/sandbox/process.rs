@@ -26,6 +26,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time;
 
+use crate::cancel::Cancel;
 use crate::error::{Error, Result};
 use crate::redact::{RedactPolicy, Surface, apply};
 
@@ -337,6 +338,33 @@ impl SandboxResult {
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     config: SandboxConfig,
+    /// Optional cancellation handle. When set, every spawned child is
+    /// placed in its own process group (`pre_exec` calls `setpgid`)
+    /// and its pgid is registered on the [`Cancel`] so a Hard-tier
+    /// cancel can `killpg` it. `None` means sandbox calls are
+    /// cooperative-only; `kill_on_drop` remains the cleanup guarantee.
+    cancel: Option<Cancel>,
+}
+
+/// RAII guard that owns the pgid registration against a [`Cancel`]
+/// handle for the lifetime of an in-flight sandbox child.
+///
+/// Construction registers the pgid; `Drop` unregisters it. Because
+/// Rust drops locals on every exit path — natural completion, error
+/// return, timeout, output-truncated, AND future drop from
+/// orchestrator shutdown — the guard is the single source of truth
+/// for unregistration. Call sites never call `unregister_child`
+/// directly, so the cancel registry cannot leak pgids even when the
+/// caller drops the future mid-flight.
+struct RegisteredChild<'a> {
+    cancel: &'a Cancel,
+    pgid: i32,
+}
+
+impl Drop for RegisteredChild<'_> {
+    fn drop(&mut self) {
+        self.cancel.unregister_child(self.pgid);
+    }
 }
 
 impl Sandbox {
@@ -347,12 +375,26 @@ impl Sandbox {
                 "sandbox timeout must be > 0; use no_timeout() to opt out explicitly".into(),
             ));
         }
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            cancel: None,
+        })
     }
 
     /// Borrow the current configuration.
     pub fn config(&self) -> &SandboxConfig {
         &self.config
+    }
+
+    /// Attach a cancellation handle. Every spawned child registers its
+    /// process-group id on the handle so `CancelTier::Hard` can
+    /// `SIGTERM` + delayed `SIGKILL` the whole subtree. Idempotent:
+    /// the latest handle wins (the previous one is dropped, which is
+    /// a no-op because `Cancel::register_child` requires a live handle
+    /// to find its registry — a new handle starts with an empty set).
+    pub fn with_cancel(mut self, cancel: Cancel) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     /// Allocate a fresh scratch directory owned by the caller.
@@ -501,6 +543,30 @@ impl Sandbox {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // When a cancel handle is attached, place the child in its
+        // own process group so `killpg` reaches the whole subtree
+        // (cargo invokes rustc, tsc invokes tslib helpers, etc.).
+        // `setpgid(0, 0)` is the canonical "I am the new group
+        // leader" form: the child's pid becomes the pgid.
+        #[cfg(unix)]
+        if self.cancel.is_some() {
+            // SAFETY: `tokio::process::Command::pre_exec` runs the
+            // closure in the child between fork and exec. `setpgid(0, 0)`
+            // only mutates the child's own process-group membership.
+            // A non-zero return surfaces as `std::io::Error` and aborts
+            // the spawn; we keep it non-fatal because `kill_on_drop`
+            // is the backstop cleanup for this crate.
+            let _ = unsafe {
+                command.pre_exec(|| {
+                    if libc::setpgid(0, 0) != 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                })
+            };
+        }
+
         let env = self.build_env(work_dir);
         command.env_clear();
         for (key, value) in &env {
@@ -529,6 +595,25 @@ impl Sandbox {
                     command_str,
                 ));
             }
+        };
+
+        // Register the pgid (== the child pid) so Hard-tier cancel
+        // can killpg it. The `RegisteredChild` RAII guard owns the
+        // registration for the rest of `run_in_with_limits`; its
+        // `Drop` impl unregisters the pgid on every exit branch
+        // (natural, error, timeout, output-truncated, AND future
+        // drop from orchestrator shutdown). The guard is the single
+        // source of truth for unregistration — no call site duplicates
+        // it, so the cancel registry cannot leak.
+        let _pgid_guard: Option<RegisteredChild<'_>> = match (&self.cancel, child.id()) {
+            (Some(cancel), Some(pid)) => match i32::try_from(pid) {
+                Ok(pgid) => {
+                    cancel.register_child(pgid);
+                    Some(RegisteredChild { cancel, pgid })
+                }
+                Err(_) => None,
+            },
+            _ => None,
         };
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -579,6 +664,14 @@ impl Sandbox {
                 }
             }
         };
+
+        // Every exit branch (natural, error, timeout, output-truncated)
+        // converges here. The `RegisteredChild` guard's `Drop` impl
+        // unregisters the pgid from the cancel registry as the stack
+        // unwinds — including the case where the caller drops the
+        // future mid-flight. The guard, not the call sites, is the
+        // source of truth for unregistration.
+        drop(_pgid_guard);
 
         let stdout_result = await_reader(stdout_handle).await;
         let stderr_result = await_reader(stderr_handle).await;
@@ -699,6 +792,32 @@ mod tests {
         assert_eq!(result.status, SandboxStatus::Pass);
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello"));
+    }
+
+    /// Attaching a `Cancel` handle must not change the observable
+    /// behaviour of a normal sandbox call. The pre_exec `setpgid`
+    /// runs in the child (between fork and exec) and the pgid
+    /// registry is drained on the natural-completion path, so the
+    /// end state is identical to the cancel-less baseline.
+    #[tokio::test]
+    async fn with_cancel_does_not_change_pass_outcome() {
+        use crate::cancel::Cancel;
+        let cancel = Cancel::new();
+        let sandbox = Sandbox::new(SandboxConfig::new())
+            .unwrap()
+            .with_cancel(cancel.clone());
+        let result = sandbox.run("echo", &["hello"]).await.unwrap();
+        assert_eq!(result.status, SandboxStatus::Pass);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("hello"));
+        // No pgid should remain in the registry after natural exit.
+        cancel.cancel_with_tier(
+            crate::cancel::CancelReason::Requested,
+            crate::cancel::CancelTier::Hard,
+        );
+        // Just verify it doesn't panic; the pgid set is drained by
+        // the sandbox's unregister_child call.
+        assert!(cancel.is_cancelled());
     }
 
     #[tokio::test]

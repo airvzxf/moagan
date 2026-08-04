@@ -112,7 +112,8 @@ impl Phase for ValidatePhase {
         let sandbox = Sandbox::new(
             SandboxConfig::new()
                 .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs)),
-        )?;
+        )?
+        .with_cancel(ctx.cancel().clone());
 
         // Read the brief once so the constraints validator sees the
         // real hard constraints instead of the no-op trait path.
