@@ -16,6 +16,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
 use super::wire::{Request, Response, Usage};
 
@@ -56,7 +57,7 @@ impl OpenAiCompatProvider {
     }
 
     /// Compute the URL for chat completions.
-    fn chat_url(&self) -> String {
+    pub fn chat_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
         if base.ends_with("/chat/completions") {
             base.to_owned()
@@ -261,6 +262,12 @@ impl Provider for OpenAiCompatProvider {
                 }
             }
         }
+    }
+}
+
+impl OpenCodeGoDispatch for OpenAiCompatProvider {
+    fn url(&self) -> String {
+        self.chat_url()
     }
 }
 

@@ -24,6 +24,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
 use super::wire::{Request, Response, Usage};
 
@@ -73,7 +74,7 @@ impl OpenCodeGoResponsesProvider {
     }
 
     /// Compute the URL for the responses endpoint.
-    fn responses_url(&self) -> String {
+    pub fn responses_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
         if base.ends_with("/responses") {
             base.to_owned()
@@ -272,6 +273,12 @@ impl Provider for OpenCodeGoResponsesProvider {
                 }
             }
         }
+    }
+}
+
+impl OpenCodeGoDispatch for OpenCodeGoResponsesProvider {
+    fn url(&self) -> String {
+        self.responses_url()
     }
 }
 

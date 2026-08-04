@@ -60,6 +60,25 @@ pub fn temperature_override_for(model: &str) -> Option<f32> {
         .map(|(_, t)| *t)
 }
 
+/// Sub-trait used by the dispatcher to retrieve the routed URL.
+/// All three concrete OpenCode Go providers (Anthropic-compatible,
+/// OpenAI Responses, OpenAI Chat Completions) implement this; the
+/// dispatcher keeps an `OpenCodeGoDispatch` instead of a plain
+/// `Provider` so its `url()` method can be called without
+/// downcasting.
+///
+/// `url()` returns the request URL (base + model-routed path). The
+/// `Provider::endpoint()` contract is the stable identifier and only
+/// carries the base; the path component is dispatcher-specific and
+/// lives on this sub-trait.
+pub trait OpenCodeGoDispatch: Provider {
+    /// Fully-routed HTTP URL the provider will POST to on a `send()`
+    /// call. Built by the inner provider's URL helper from the base
+    /// endpoint plus the model-specific path (`/v1/messages`,
+    /// `/v1/responses`, or `/v1/chat/completions`).
+    fn url(&self) -> String;
+}
+
 /// Endpoint path for a model on OpenCode Go, derived from the
 /// operator's 2026-08-04 model roster. Returns `None` for models
 /// that are not on the OpenCode Go subscription.
@@ -82,7 +101,7 @@ pub fn endpoint_path_for(model: &str) -> Option<&'static str> {
 /// uses; the concrete providers above are constructor-only from
 /// outside tests.
 pub struct OpenCodeGoProvider {
-    inner: Box<dyn Provider>,
+    inner: Box<dyn OpenCodeGoDispatch>,
 }
 
 impl OpenCodeGoProvider {
@@ -120,7 +139,7 @@ impl OpenCodeGoProvider {
             endpoint: spec.endpoint.trim_end_matches('/').to_owned(),
             ..spec.clone()
         };
-        let provider: Box<dyn Provider> = if path == "messages" {
+        let provider: Box<dyn OpenCodeGoDispatch> = if path == "messages" {
             Box::new(OpenCodeGoAnthropicProvider::new(&routed_spec, api_key)?)
         } else if path == "responses" {
             Box::new(OpenCodeGoResponsesProvider::new(&routed_spec, api_key)?)
@@ -154,6 +173,14 @@ impl OpenCodeGoProvider {
     /// True when the given model name is in the blocked list.
     pub fn is_blocked(model: &str) -> bool {
         Self::BLOCKED_MODELS.contains(&model)
+    }
+
+    /// Fully-routed HTTP URL the dispatcher will POST to on a `send()`
+    /// call. Built by the inner provider's URL helper (see
+    /// [`OpenCodeGoDispatch`]) from the base endpoint plus the
+    /// model-specific path.
+    pub fn url(&self) -> String {
+        self.inner.url()
     }
 }
 
@@ -307,7 +334,15 @@ mod tests {
             OpenCodeGoProvider::new(&config(), SecretString::new("dummy".into())).unwrap();
         assert_eq!(provider.name(), "opencode_go");
         assert_eq!(provider.model(), "kimi-k2.7-code");
-        assert!(provider.endpoint().ends_with("/v1/chat/completions"));
+        // `Provider::endpoint()` returns the stable base; the
+        // model-routed path is appended by the inner provider's URL
+        // helper and exposed via `OpenCodeGoProvider::url()`.
+        let base = provider.endpoint();
+        assert_eq!(base, "https://opencode.ai/zen/go/v1");
+        assert_eq!(
+            provider.url(),
+            "https://opencode.ai/zen/go/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -317,7 +352,8 @@ mod tests {
             ..config()
         };
         let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
-        assert!(provider.endpoint().ends_with("/v1/messages"));
+        assert_eq!(provider.endpoint(), "https://opencode.ai/zen/go/v1");
+        assert_eq!(provider.url(), "https://opencode.ai/zen/go/v1/messages");
     }
 
     #[test]
@@ -327,7 +363,8 @@ mod tests {
             ..config()
         };
         let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
-        assert!(provider.endpoint().ends_with("/v1/responses"));
+        assert_eq!(provider.endpoint(), "https://opencode.ai/zen/go/v1");
+        assert_eq!(provider.url(), "https://opencode.ai/zen/go/v1/responses");
     }
 
     #[test]
@@ -337,23 +374,35 @@ mod tests {
             ..config()
         };
         let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
-        assert!(provider.endpoint().ends_with("/v1/chat/completions"));
+        assert_eq!(provider.endpoint(), "https://opencode.ai/zen/go/v1");
+        assert_eq!(
+            provider.url(),
+            "https://opencode.ai/zen/go/v1/chat/completions"
+        );
     }
 
     #[test]
     fn dispatcher_does_not_double_append_path() {
         // Fix #4 regression: the dispatcher used to construct
-        // `endpoint = base + path`, then the concrete provider's
-        // url builder appended the path again, producing
-        // `/v1/messages/v1/messages`.
+        // `endpoint = base + path`, then the concrete provider's url
+        // builder appended the path again, producing
+        // `/v1/messages/v1/messages`. The base must stay as the base;
+        // the routed path must appear exactly once in `url()`.
         let cfg = ProviderConfig {
             model: "qwen3.7-max".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             ..config()
         };
         let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
-        let ep = provider.endpoint();
-        assert_eq!(ep, "https://opencode.ai/zen/go/v1/messages");
+        assert_eq!(provider.endpoint(), "https://opencode.ai/zen/go/v1");
+        assert_eq!(provider.url(), "https://opencode.ai/zen/go/v1/messages");
+        // No double append: count the routed-path occurrences.
+        assert_eq!(
+            provider.url().matches("/v1/messages").count(),
+            1,
+            "routed path must appear exactly once, got: {}",
+            provider.url()
+        );
     }
 
     #[test]

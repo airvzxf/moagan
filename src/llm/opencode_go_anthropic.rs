@@ -27,6 +27,7 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::http::{body_from_request, build_client, build_headers, classify_status, retry_after};
+use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
 use super::wire::{Request, Response, Usage};
 
@@ -81,7 +82,7 @@ impl OpenCodeGoAnthropicProvider {
     }
 
     /// Compute the URL for the messages endpoint.
-    fn messages_url(&self) -> String {
+    pub fn messages_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
         if base.ends_with("/v1/messages") {
             base.to_owned()
@@ -194,6 +195,12 @@ impl Provider for OpenCodeGoAnthropicProvider {
                 }
             }
         }
+    }
+}
+
+impl OpenCodeGoDispatch for OpenCodeGoAnthropicProvider {
+    fn url(&self) -> String {
+        self.messages_url()
     }
 }
 
