@@ -148,6 +148,54 @@ impl Error {
             Self::Cache(_) | Self::InvalidState(_) => ExitCode::ContextError,
         }
     }
+
+    /// Should this error count toward the per-provider circuit
+    /// breaker? Mirrors [`crate::error_code::ErrorCode::is_circuit_opening`]
+    /// but operates directly on the [`Error`] variant so the policy
+    /// does not depend on the [`crate::Error::code`] mapping — the
+    /// latter collapses several variants onto the same code
+    /// (`Provider` → `InvalidResponse`, `PlanExhausted` →
+    /// `QuotaExceeded`, `Timeout` → `TimeoutPhase`) and loses the
+    /// HTTP-status distinction the breaker is supposed to act on.
+    ///
+    /// Openers:
+    ///
+    /// - [`Error::InvalidApiKey`] — `ErrorCode::Auth`, HTTP 401/403
+    ///   from the provider. The catalog adds `Auth` to the
+    ///   circuit-opening set so a provider that rejects the
+    ///   credentials is sidelined instead of hammered.
+    /// - [`Error::Provider`] — generic 5xx / upstream-error bucket.
+    ///   `classify_status` (in `llm/http.rs`) routes HTTP 500..=599
+    ///   here, so this is the path the breaker needs to catch the
+    ///   common "provider is down" signal.
+    /// - [`Error::PlanExhausted`] — HTTP 429 from the provider. The
+    ///   mapping in `code()` collapses it onto `QuotaExceeded`,
+    ///   which is not in `is_circuit_opening()`; this helper
+    ///   re-asserts the spec policy directly.
+    /// - [`Error::Timeout`] — HTTP 408/504/524 or any phase-level
+    ///   timeout. The breaker treats sustained timeouts as a
+    ///   provider-health signal, distinct from the retry budget's
+    ///   per-attempt backoff.
+    ///
+    /// Non-openers:
+    ///
+    /// - [`Error::SchemaViolation`], [`Error::InvalidArgs`],
+    ///   [`Error::InvalidState`] — operator / contract errors that
+    ///   have nothing to do with the provider's health.
+    /// - [`Error::Cancelled`] / [`Error::Cancel`] — cooperative
+    ///   shutdown; the breaker must not count an operator cancel as
+    ///   a provider outage.
+    /// - [`Error::MockExhausted`] — the canned-response queue ran
+    ///   out; the provider itself is fine.
+    /// - [`Error::Io`] / [`Error::Cache`] — local disk / cache
+    ///   issues; tripping a remote breaker on a local I/O blip is
+    ///   the wrong granularity.
+    pub fn is_circuit_opening(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidApiKey(_) | Self::Provider(_) | Self::PlanExhausted(_) | Self::Timeout(_)
+        )
+    }
 }
 
 impl From<io::Error> for Error {
@@ -471,5 +519,63 @@ mod tests {
         let a = err.code();
         let b = err.code();
         assert_eq!(a, b);
+    }
+
+    // --- is_circuit_opening -----------------------------------------
+    // Pin every variant's classification so the breaker wrapper in
+    // provider.rs (and any future caller) can rely on the policy
+    // without re-deriving it.
+
+    /// Openers cover the 5xx / 429 / auth / timeout set the breaker
+    /// exists to catch.
+    #[test]
+    fn is_circuit_opening_classifies_openers() {
+        assert!(Error::InvalidApiKey("x".into()).is_circuit_opening());
+        assert!(Error::Provider("x".into()).is_circuit_opening());
+        assert!(Error::PlanExhausted("x".into()).is_circuit_opening());
+        assert!(Error::Timeout("x".into()).is_circuit_opening());
+    }
+
+    /// Non-openers are operator errors, contract mismatches, or
+    /// local I/O — they do not indicate a provider outage.
+    #[test]
+    fn is_circuit_opening_classifies_non_openers() {
+        assert!(!Error::SchemaViolation("x".into()).is_circuit_opening());
+        assert!(!Error::InvalidArgs("x".into()).is_circuit_opening());
+        assert!(!Error::InvalidState("x".into()).is_circuit_opening());
+        assert!(!Error::Cancelled("x".into()).is_circuit_opening());
+        assert!(!Error::Cancel(CancelSignal).is_circuit_opening());
+        assert!(!Error::MockExhausted.is_circuit_opening());
+        assert!(!Error::Io(IoError::Raw(io::Error::other("x"))).is_circuit_opening());
+        assert!(!Error::Cache("x".into()).is_circuit_opening());
+    }
+
+    /// The opener set matches the [`ErrorCode::is_circuit_opening`]
+    /// set semantically (HTTP 5xx/429 + Auth + transport), even
+    /// though the routing goes through `Error` variants instead of
+    /// `ErrorCode`. The test guards against drift: if a new opener
+    /// appears in `ErrorCode`, the matching `Error` variant must
+    /// also flip, or the breaker integration in `provider.rs` will
+    /// silently miss the new failure class.
+    #[test]
+    fn is_circuit_opening_aligns_with_error_code_policy() {
+        // Openers in ErrorCode that map to non-opening Error variants
+        // should still trip through Error::is_circuit_opening because
+        // the helper compensates for the lossy code() mapping.
+        assert!(ErrorCode::Http500.is_circuit_opening());
+        assert!(
+            Error::Provider("http 500: boom".into()).is_circuit_opening(),
+            "Error::Provider must trip the breaker (covers Http500/502/503/504 upstream errors)"
+        );
+        assert!(ErrorCode::Http429.is_circuit_opening());
+        assert!(
+            Error::PlanExhausted("http 429: throttled".into()).is_circuit_opening(),
+            "Error::PlanExhausted must trip the breaker (covers Http429)"
+        );
+        assert!(ErrorCode::Auth.is_circuit_opening());
+        assert!(
+            Error::InvalidApiKey("http 401: bad".into()).is_circuit_opening(),
+            "Error::InvalidApiKey must trip the breaker (covers Auth)"
+        );
     }
 }

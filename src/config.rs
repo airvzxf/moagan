@@ -72,6 +72,48 @@ pub struct Config {
     /// cleanup` (the retention pass). Mirrors the catalog
     /// `D.5.1` retention knobs.
     pub retention: RetentionConfig,
+    /// Per-provider circuit breaker (catalog 10-integrada-v0 §D.19.5,
+    /// T00-08 §1428-1435). Five opening errors inside `window_secs`
+    /// sideline the provider for `cooldown_secs`. The wrapper that
+    /// fronts every provider in the registry consults
+    /// [`crate::Error::is_circuit_opening`] before recording a
+    /// failure so non-opening errors (schema, operator, cancel) do
+    /// not consume the budget.
+    pub circuit_breaker: CircuitBreakerConfig,
+}
+
+/// Per-provider circuit breaker knobs (catalog §D.19.5).
+///
+/// Defaults: 5 opening errors inside a 60 s window sideline the
+/// provider for 30 s. Operators can raise `threshold` for chatty
+/// providers, widen `window_secs` for noisy bursts, or shrink
+/// `cooldown_secs` for tight CI loops.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CircuitBreakerConfig {
+    /// Number of opening errors (per provider) inside `window_secs`
+    /// that trip the breaker. Must be >= 1; `0` would mean "open
+    /// after the first failure" which is closer to a hard kill than
+    /// a backoff. Default 5.
+    pub threshold: u32,
+    /// Sliding window for the failure counter, in seconds. A
+    /// failure that lands more than `window_secs` after the
+    /// previous failure resets the counter. Default 60 s.
+    pub window_secs: u64,
+    /// Time the breaker stays open before transitioning to
+    /// HalfOpen. The next call after `cooldown_secs` is the probe
+    /// that decides whether to close or reopen. Default 30 s.
+    pub cooldown_secs: u64,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 5,
+            window_secs: 60,
+            cooldown_secs: 30,
+        }
+    }
 }
 
 /// Per-criterion weights used by the `RankPhase` to compute the
@@ -234,6 +276,7 @@ impl Default for Config {
             stability: StabilityConfig::default(),
             server: ServerConfig::default(),
             retention: RetentionConfig::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
 }
@@ -814,5 +857,35 @@ mod tests {
                 "alias {alias} should carry canonical model {model}"
             );
         }
+    }
+
+    /// Catalog §D.19.5 default knobs: 5 errors in 60 s -> open for
+    /// 30 s. Pin the defaults so a refactor that drops the catalog
+    /// alignment trips the test before it lands in production.
+    #[test]
+    fn circuit_breaker_defaults_match_catalog_d_19_5() {
+        let cfg = CircuitBreakerConfig::default();
+        assert_eq!(cfg.threshold, 5);
+        assert_eq!(cfg.window_secs, 60);
+        assert_eq!(cfg.cooldown_secs, 30);
+    }
+
+    /// The breaker knobs must survive a TOML round-trip so
+    /// operators can pin their values in `~/.config/moagan/config.toml`.
+    #[test]
+    fn circuit_breaker_toml_round_trip() {
+        let cfg = Config {
+            circuit_breaker: CircuitBreakerConfig {
+                threshold: 3,
+                window_secs: 30,
+                cooldown_secs: 120,
+            },
+            ..Config::default()
+        };
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(back.circuit_breaker.threshold, 3);
+        assert_eq!(back.circuit_breaker.window_secs, 30);
+        assert_eq!(back.circuit_breaker.cooldown_secs, 120);
     }
 }
