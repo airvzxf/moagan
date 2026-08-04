@@ -138,7 +138,13 @@ impl Provider for OpenCodeGoAnthropicProvider {
                 stage = "http.request.started",
                 "Provider HTTP stage"
             );
-            let result = self.client.post(&url).headers(headers).json(&body).send().await;
+            let result = self
+                .client
+                .post(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await;
             match result {
                 Ok(resp) => {
                     let status = resp.status();
@@ -351,7 +357,11 @@ mod tests {
         let parsed: OpenCodeGoMessagesResponseBody = serde_json::from_str(body).unwrap();
         let resp = parsed.into_response();
         assert_eq!(resp.usage.input_tokens, 165);
-        assert!(resp.text.contains("\"mode\":\"fast\""), "got text: {:?}", resp.text);
+        assert!(
+            resp.text.contains("\"mode\":\"fast\""),
+            "got text: {:?}",
+            resp.text
+        );
     }
 
     #[test]
@@ -369,10 +379,7 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .unwrap();
-        assert_eq!(
-            p.messages_url(),
-            "https://opencode.ai/zen/go/v1/messages"
-        );
+        assert_eq!(p.messages_url(), "https://opencode.ai/zen/go/v1/messages");
     }
 
     #[test]
@@ -390,10 +397,7 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .unwrap();
-        assert_eq!(
-            p.messages_url(),
-            "https://opencode.ai/zen/go/v1/messages"
-        );
+        assert_eq!(p.messages_url(), "https://opencode.ai/zen/go/v1/messages");
     }
 
     #[test]

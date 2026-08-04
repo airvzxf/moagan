@@ -552,14 +552,14 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 // the legitimate OpenCode Go model id on the /messages
                 // endpoint (see Fix #4).
                 let resolved = if cfg.providers.contains_key(raw)
-                    && (raw == selected || cfg.providers.get(raw).map(|s| s.kind.as_str())
-                        == Some(
-                            cfg.providers
-                                .get(&selected)
-                                .map(|s| s.kind.as_str())
-                                .unwrap_or(""),
-                        ))
-                {
+                    && (raw == selected
+                        || cfg.providers.get(raw).map(|s| s.kind.as_str())
+                            == Some(
+                                cfg.providers
+                                    .get(&selected)
+                                    .map(|s| s.kind.as_str())
+                                    .unwrap_or(""),
+                            )) {
                     cfg.providers
                         .get(raw)
                         .map(|s| s.model.clone())

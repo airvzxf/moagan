@@ -285,28 +285,70 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     };
     // `/v1/chat/completions` (OpenAI-compatible) — 10 models.
     let oc_chat = "https://opencode.ai/zen/go/v1";
-    m.insert("opencode_go".to_owned(), make_opencode_go("kimi-k2.7-code", oc_chat));
+    m.insert(
+        "opencode_go".to_owned(),
+        make_opencode_go("kimi-k2.7-code", oc_chat),
+    );
     m.insert("kimi-k3".to_owned(), make_opencode_go("kimi-k3", oc_chat));
-    m.insert("kimi-k2.6".to_owned(), make_opencode_go("kimi-k2.6", oc_chat));
+    m.insert(
+        "kimi-k2.6".to_owned(),
+        make_opencode_go("kimi-k2.6", oc_chat),
+    );
     m.insert("glm-5.1".to_owned(), make_opencode_go("glm-5.1", oc_chat));
     m.insert("glm-5.2".to_owned(), make_opencode_go("glm-5.2", oc_chat));
-    m.insert("deepseek-v4-pro".to_owned(), make_opencode_go("deepseek-v4-pro", oc_chat));
-    m.insert("deepseek-v4-flash".to_owned(), make_opencode_go("deepseek-v4-flash", oc_chat));
-    m.insert("mimo-v2.5".to_owned(), make_opencode_go("mimo-v2.5", oc_chat));
-    m.insert("mimo-v2.5-pro".to_owned(), make_opencode_go("mimo-v2.5-pro", oc_chat));
+    m.insert(
+        "deepseek-v4-pro".to_owned(),
+        make_opencode_go("deepseek-v4-pro", oc_chat),
+    );
+    m.insert(
+        "deepseek-v4-flash".to_owned(),
+        make_opencode_go("deepseek-v4-flash", oc_chat),
+    );
+    m.insert(
+        "mimo-v2.5".to_owned(),
+        make_opencode_go("mimo-v2.5", oc_chat),
+    );
+    m.insert(
+        "mimo-v2.5-pro".to_owned(),
+        make_opencode_go("mimo-v2.5-pro", oc_chat),
+    );
     m.insert("hy3".to_owned(), make_opencode_go("hy3", oc_chat));
     // `/v1/messages` (Anthropic-compatible) — 7 models.
     let oc_messages = "https://opencode.ai/zen/go/v1/messages";
-    m.insert("minimax-m3".to_owned(), make_opencode_go("minimax-m3", oc_messages));
-    m.insert("minimax-m2.7".to_owned(), make_opencode_go("minimax-m2.7", oc_messages));
-    m.insert("minimax-m2.5".to_owned(), make_opencode_go("minimax-m2.5", oc_messages));
-    m.insert("qwen3.8-max".to_owned(), make_opencode_go("qwen3.8-max", oc_messages));
-    m.insert("qwen3.7-max".to_owned(), make_opencode_go("qwen3.7-max", oc_messages));
-    m.insert("qwen3.7-plus".to_owned(), make_opencode_go("qwen3.7-plus", oc_messages));
-    m.insert("qwen3.6-plus".to_owned(), make_opencode_go("qwen3.6-plus", oc_messages));
+    m.insert(
+        "minimax-m3".to_owned(),
+        make_opencode_go("minimax-m3", oc_messages),
+    );
+    m.insert(
+        "minimax-m2.7".to_owned(),
+        make_opencode_go("minimax-m2.7", oc_messages),
+    );
+    m.insert(
+        "minimax-m2.5".to_owned(),
+        make_opencode_go("minimax-m2.5", oc_messages),
+    );
+    m.insert(
+        "qwen3.8-max".to_owned(),
+        make_opencode_go("qwen3.8-max", oc_messages),
+    );
+    m.insert(
+        "qwen3.7-max".to_owned(),
+        make_opencode_go("qwen3.7-max", oc_messages),
+    );
+    m.insert(
+        "qwen3.7-plus".to_owned(),
+        make_opencode_go("qwen3.7-plus", oc_messages),
+    );
+    m.insert(
+        "qwen3.6-plus".to_owned(),
+        make_opencode_go("qwen3.6-plus", oc_messages),
+    );
     // `/v1/responses` (OpenAI Responses) — 1 model.
     let oc_responses = "https://opencode.ai/zen/go/v1/responses";
-    m.insert("gpt-5.6-luna".to_owned(), make_opencode_go("gpt-5.6-luna", oc_responses));
+    m.insert(
+        "gpt-5.6-luna".to_owned(),
+        make_opencode_go("gpt-5.6-luna", oc_responses),
+    );
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
@@ -745,7 +787,11 @@ mod tests {
         let canonical = [
             // Direct MiniMax (kind="minimax")
             ("minimax", "minimax", "MiniMax-M3"),
-            ("minimax-m2.7-highspeed", "minimax", "MiniMax-M2.7-highspeed"),
+            (
+                "minimax-m2.7-highspeed",
+                "minimax",
+                "MiniMax-M2.7-highspeed",
+            ),
             // OpenCode Go subscription (kind="opencode_go")
             ("minimax-m3", "opencode_go", "minimax-m3"),
             ("minimax-m2.7", "opencode_go", "minimax-m2.7"),

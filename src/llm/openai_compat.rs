@@ -190,7 +190,9 @@ impl Provider for OpenAiCompatProvider {
                 top_p: req.top_p,
                 stream: false,
                 response_format: if role_requires_json(req.role) {
-                    Some(ResponseFormat { kind: "json_object" })
+                    Some(ResponseFormat {
+                        kind: "json_object",
+                    })
                 } else {
                     None
                 },

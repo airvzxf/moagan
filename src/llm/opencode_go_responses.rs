@@ -294,10 +294,7 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .unwrap();
-        assert_eq!(
-            p.responses_url(),
-            "https://opencode.ai/zen/go/v1/responses"
-        );
+        assert_eq!(p.responses_url(), "https://opencode.ai/zen/go/v1/responses");
     }
 
     #[test]
@@ -315,10 +312,7 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .unwrap();
-        assert_eq!(
-            p.responses_url(),
-            "https://opencode.ai/zen/go/v1/responses"
-        );
+        assert_eq!(p.responses_url(), "https://opencode.ai/zen/go/v1/responses");
     }
 
     #[test]

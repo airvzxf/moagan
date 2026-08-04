@@ -71,10 +71,8 @@ pub fn endpoint_path_for(model: &str) -> Option<&'static str> {
         "minimax-m3" | "minimax-m2.7" | "minimax-m2.5" | "qwen3.8-max" | "qwen3.7-max"
         | "qwen3.7-plus" | "qwen3.6-plus" => Some("messages"),
         // /v1/chat/completions (OpenAI-compatible)
-        "glm-5.1" | "glm-5.2" | "kimi-k3" | "kimi-k2.7-code" | "kimi-k2.6"
-        | "deepseek-v4-pro" | "deepseek-v4-flash" | "mimo-v2.5" | "mimo-v2.5-pro" | "hy3" => {
-            Some("chat/completions")
-        }
+        "glm-5.1" | "glm-5.2" | "kimi-k3" | "kimi-k2.7-code" | "kimi-k2.6" | "deepseek-v4-pro"
+        | "deepseek-v4-flash" | "mimo-v2.5" | "mimo-v2.5-pro" | "hy3" => Some("chat/completions"),
         _ => None,
     }
 }
@@ -297,7 +295,8 @@ mod tests {
         // Negative case: regular 400 without temperature mention
         let body2 = r#"{"error":"model not found"}"#;
         let lower2 = body2.to_ascii_lowercase();
-        let hits2 = (lower2.contains("invalid temperature") || lower2.contains("only 1 is allowed"))
+        let hits2 = (lower2.contains("invalid temperature")
+            || lower2.contains("only 1 is allowed"))
             && lower2.contains("temperature");
         assert!(!hits2);
     }
@@ -317,8 +316,7 @@ mod tests {
             model: "qwen3.7-max".into(),
             ..config()
         };
-        let provider =
-            OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
+        let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
         assert!(provider.endpoint().ends_with("/v1/messages"));
     }
 
@@ -328,8 +326,7 @@ mod tests {
             model: "gpt-5.6-luna".into(),
             ..config()
         };
-        let provider =
-            OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
+        let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
         assert!(provider.endpoint().ends_with("/v1/responses"));
     }
 
@@ -339,8 +336,7 @@ mod tests {
             model: "mimo-v2.5".into(),
             ..config()
         };
-        let provider =
-            OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
+        let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
         assert!(provider.endpoint().ends_with("/v1/chat/completions"));
     }
 
@@ -355,8 +351,7 @@ mod tests {
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             ..config()
         };
-        let provider =
-            OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
+        let provider = OpenCodeGoProvider::new(&cfg, SecretString::new("dummy".into())).unwrap();
         let ep = provider.endpoint();
         assert_eq!(ep, "https://opencode.ai/zen/go/v1/messages");
     }
@@ -376,10 +371,16 @@ mod tests {
         assert_eq!(endpoint_path_for("gpt-5.6-luna"), Some("responses"));
         assert_eq!(endpoint_path_for("minimax-m3"), Some("messages"));
         assert_eq!(endpoint_path_for("qwen3.7-max"), Some("messages"));
-        assert_eq!(endpoint_path_for("kimi-k2.7-code"), Some("chat/completions"));
+        assert_eq!(
+            endpoint_path_for("kimi-k2.7-code"),
+            Some("chat/completions")
+        );
         assert_eq!(endpoint_path_for("mimo-v2.5-pro"), Some("chat/completions"));
         assert_eq!(endpoint_path_for("hy3"), Some("chat/completions"));
-        assert_eq!(endpoint_path_for("deepseek-v4-flash"), Some("chat/completions"));
+        assert_eq!(
+            endpoint_path_for("deepseek-v4-flash"),
+            Some("chat/completions")
+        );
         assert_eq!(endpoint_path_for("unknown"), None);
     }
 }
