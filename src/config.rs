@@ -257,6 +257,16 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         make_minimax("MiniMax-M2.7-highspeed"),
     );
     m.insert("minimax-m2.5".to_owned(), make_minimax("MiniMax-M2.5"));
+    let make_deepseek = |model: &str| ProviderConfig {
+        kind: "deepseek".to_owned(),
+        endpoint: "https://api.deepseek.com/v1".to_owned(),
+        model: model.to_owned(),
+        max_tokens: Some(8192),
+        temperature: Some(0.6),
+        top_p: Some(0.95),
+        hard_incompatibilities: vec![],
+    };
+    m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
@@ -381,6 +391,13 @@ impl Config {
     /// Load configuration from `~/.config/moagan/config.toml` if it
     /// exists, then apply `MOAGAN_*` env overrides. Returns defaults if
     /// no file is present.
+    ///
+    /// When the user's TOML overrides the `[providers]` table, we merge
+    /// it with `default_providers()`: any provider in the user's TOML
+    /// replaces the default with the same name; providers absent from
+    /// the user's TOML keep their built-in defaults. This way adding a
+    /// new default provider (Q6 deepseek, Q7 opencode-go, etc.) doesn't
+    /// break existing operator configs that only override a subset.
     pub fn load() -> Result<Self> {
         let path = default_config_path();
         let mut cfg = if path.exists() {
@@ -391,6 +408,11 @@ impl Config {
         } else {
             Self::default()
         };
+        // Merge user's [providers] table with the defaults: user entries win.
+        let defaults = default_providers();
+        for (name, default_spec) in defaults {
+            cfg.providers.entry(name).or_insert(default_spec);
+        }
         cfg.apply_env_overrides();
         Ok(cfg)
     }
@@ -639,6 +661,19 @@ mod tests {
             std::env::remove_var("MOAGAN_MINIMAX_MODEL");
         }
         assert_eq!(cfg.providers.get("minimax").unwrap().model, "MiniMax-M3");
+    }
+
+    /// Q6 pin: DeepSeek is exposed with its canonical default model.
+    #[test]
+    fn default_providers_lists_deepseek() {
+        let cfg = Config::default();
+        let spec = cfg
+            .providers
+            .get("deepseek")
+            .expect("deepseek missing from default providers");
+        assert_eq!(spec.kind, "deepseek");
+        assert_eq!(spec.model, "deepseek-v4-flash");
+        assert_eq!(spec.endpoint, "https://api.deepseek.com/v1");
     }
 
     /// Q5 pin: the 4 canonical MiniMax models must all be exposed as
