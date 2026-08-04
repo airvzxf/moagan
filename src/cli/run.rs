@@ -481,7 +481,7 @@ pub(crate) fn build_registry_for_with_api_key(
     }
     let mut spec_map = std::collections::BTreeMap::new();
     spec_map.insert(selected.to_owned(), spec);
-    registry_from_config(&spec_map)
+    registry_from_config(&spec_map, &cfg.circuit_breaker)
 }
 
 /// Build the canonical pipeline for a given mode. The cardinality
