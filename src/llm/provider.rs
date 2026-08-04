@@ -97,24 +97,23 @@ impl ProviderRegistry {
 }
 
 /// Build a registry from a map of provider configurations. The
-/// `minimax` configuration is wired against the `minimax` provider
-/// implementation; everything else falls back to `MockProvider` with an
-/// explicit-not-implemented error unless the user explicitly opts in.
+/// `minimax` and `deepseek` configurations are wired to their provider
+/// implementations; everything else returns an explicit-not-implemented
+/// error unless the user explicitly opts in.
 pub fn registry_from_config(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
 ) -> Result<ProviderRegistry> {
     let mut registry = ProviderRegistry::default();
     for (name, spec) in cfg {
         let provider: Arc<dyn Provider> = match spec.kind.as_str() {
+            "deepseek" => Arc::new(super::deepseek::DeepSeekProvider::from_config(spec)?),
             "minimax" => Arc::new(super::minimax::MinimaxProvider::from_config(spec)?),
             "mock" => Arc::new(super::mock::MockProvider::empty()),
-            // Other provider kinds are not implemented in v0.1. They
-            // must be explicitly enabled by the user in a future
-            // release; the MVP only ships minimax + mock.
+            // Other provider kinds are not implemented in v0.1.
             other => {
                 return Err(crate::Error::InvalidArgs(format!(
                     "provider kind '{other}' is not implemented in MVP v0.1; \
-                     only 'minimax' and 'mock' are supported"
+                     only 'deepseek', 'minimax', and 'mock' are supported"
                 )));
             }
         };
