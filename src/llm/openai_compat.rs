@@ -28,6 +28,13 @@ pub struct OpenAiCompatProvider {
     api_key: SecretString,
     client: Client,
     max_retries: u32,
+    /// Per-provider hard cap on `max_tokens` (set from
+    /// `ProviderConfig::max_tokens`). OpenAI-compat backends vary
+    /// wildly on this — DeepSeek accepts 8192, Moonshot accepts
+    /// 32k, OpenCode Go proxies typically 8k. When the per-role
+    /// `max_tokens_for_role` exceeds this cap, we clamp on the way
+    /// out so the upstream doesn't reject the request with 400.
+    provider_max_tokens: Option<u32>,
 }
 
 impl OpenAiCompatProvider {
@@ -44,6 +51,7 @@ impl OpenAiCompatProvider {
             api_key,
             client,
             max_retries: 3,
+            provider_max_tokens: spec.max_tokens,
         })
     }
 
@@ -187,6 +195,19 @@ impl Provider for OpenAiCompatProvider {
                     None
                 },
             };
+            // Apply per-provider max_tokens cap. Done AFTER the
+            // body construction so the cap is visible regardless of
+            // upstream choice. The default of 8192 covers DeepSeek
+            // v4 (max 8k) and OpenCode Go (max 8k per the user
+            // roster). Propose (32k) and Repair (16k) roles are
+            // clamped.
+            let body = match self.provider_max_tokens {
+                Some(cap) if body.max_tokens > cap => ChatRequest {
+                    max_tokens: cap,
+                    ..body
+                },
+                _ => body,
+            };
             let result = self
                 .client
                 .post(&url)
@@ -275,6 +296,27 @@ mod tests {
             provider("https://api.deepseek.com").chat_url(),
             "https://api.deepseek.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn serializes_chat_request_with_provider_cap() {
+        // DeepSeek caps at 8192. The propose role asks for 32768
+        // tokens; the provider must clamp to 8192 so the upstream
+        // doesn't reject the request with 400.
+        let p = OpenAiCompatProvider::new(
+            &ProviderConfig {
+                kind: "deepseek".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-v4-flash".into(),
+                max_tokens: Some(8192),
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(p.provider_max_tokens, Some(8192));
     }
 
     #[test]
