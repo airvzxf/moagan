@@ -404,6 +404,13 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db))?;
     let parallelism = Parallelism::new(1);
 
+    // Deep mode: the retry budget permits 2 attempts on parse /
+    // schema failures, which is what this test exercises (the
+    // first response is broken, the second is well-formed). In
+    // fast or standard mode the per-(mode, reason) budget pins
+    // the parse-failure cap to 1 attempt because the local JSON
+    // repair pass already runs inline inside `parse_model_json`,
+    // so the second mock response would never be consumed.
     let ctx = RunContext::new(
         run_id,
         Arc::clone(&home),
@@ -413,7 +420,7 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
         parallelism,
         telemetry,
         "x".into(),
-        "fast".into(),
+        "deep".into(),
     );
 
     // First response is broken; parse would fail. The retry should
@@ -499,10 +506,16 @@ fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
 
 // --- warnings-stream integration tests --------------------------------
 
+/// Build a one-role run context for the warnings / retry tests.
+/// The `mode` parameter lets the retry tests pick `deep` so the
+/// per-(mode, reason) budget permits the 2 attempts on parse /
+/// schema failures that those tests exercise; other tests stay
+/// on `fast` because they do not rely on the retry budget.
 fn single_role_ctx(
     home: Arc<MoaganHome>,
     provider: Arc<MockProvider>,
     run_id: RunId,
+    mode: &str,
 ) -> (RunContext, moagan::storage::sqlite::Db) {
     let mut registry = ProviderRegistry::default();
     let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
@@ -512,7 +525,7 @@ fn single_role_ctx(
     let db = moagan::storage::sqlite::Db::open(&home.meta_db_path()).expect("open db");
     db.register_run(
         run_id,
-        "fast",
+        mode,
         "running",
         env!("CARGO_PKG_VERSION"),
         None,
@@ -532,7 +545,7 @@ fn single_role_ctx(
         parallelism,
         telemetry,
         "x".into(),
-        "fast".into(),
+        mode.to_string(),
     );
     (ctx, db)
 }
@@ -553,7 +566,7 @@ fn truncated_response_emits_model_response_truncated_warning() -> Result<()> {
     mp.set_cycle(false);
 
     let run_id = RunId::new();
-    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "fast");
 
     let _ =
         pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
@@ -588,7 +601,7 @@ fn json_repair_emits_model_json_repair_applied_warning() -> Result<()> {
     mp.set_cycle(false);
 
     let run_id = RunId::new();
-    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "fast");
 
     // The parser will:
     // 1. Direct parse fails (truncated).
@@ -638,7 +651,10 @@ fn retry_recovery_emits_retry_and_recovery_warnings() -> Result<()> {
     mp.set_cycle(false);
 
     let run_id = RunId::new();
-    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    // Deep mode: the retry budget permits 2 attempts on parse /
+    // schema failures, which is what this test exercises (the
+    // first response is broken, the second is well-formed).
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "deep");
 
     let parsed: moagan::domain::Proposal = pollster::block_on(ctx.call_with_retry_parse(
         moagan::llm::Role::Propose,
@@ -680,7 +696,7 @@ fn inspect_summarize_run_returns_codes() -> Result<()> {
     mp.set_cycle(false);
 
     let run_id = RunId::new();
-    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "fast");
     let _ =
         pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
     ctx.telemetry.flush()?;
@@ -713,7 +729,7 @@ fn warnings_jsonl_file_is_created_even_when_empty() -> Result<()> {
 
     let mp = MockProvider::empty();
     let run_id = RunId::new();
-    let (ctx, _db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    let (ctx, _db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "fast");
     ctx.telemetry.flush()?;
 
     // Even with no calls, the warnings stream should be present
@@ -751,7 +767,7 @@ fn second_identical_call_is_served_from_cache() -> Result<()> {
     mp.set_cycle(false);
 
     let run_id = RunId::new();
-    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "fast");
 
     let r1 =
         pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
@@ -808,7 +824,10 @@ fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
     mp.set_cycle(false);
 
     let run_id = RunId::new();
-    let (ctx, _db) = single_role_ctx(home.clone(), Arc::new(mp), run_id);
+    // Deep mode: the retry budget permits 2 attempts on parse /
+    // schema failures, which is what this test exercises (the
+    // first response is broken, the second is well-formed).
+    let (ctx, _db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "deep");
 
     let parsed: moagan::domain::Proposal = pollster::block_on(ctx.call_with_retry_parse(
         moagan::llm::Role::Propose,

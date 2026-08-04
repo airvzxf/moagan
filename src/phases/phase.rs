@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::Cancel;
+use crate::cli::Mode;
 use crate::config::Config;
 use crate::context::ContextRefRecord;
 use crate::domain::LineagePaths;
@@ -587,6 +588,28 @@ impl RunContext {
     /// bracket-repair + validator), so retries show up in the call-level
     /// metrics just like any other LLM call.
     ///
+    /// The retry cap is now driven by
+    /// [`crate::llm::retry_budget::budget_for`] (D.21.6). The
+    /// `max_retries` argument is kept as a **hard ceiling**: the
+    /// loop's actual cap is `min(budget.max_attempts, max_retries + 1)`.
+    /// In practice this means:
+    ///
+    /// - `Fast`, `Explore`, `Batch`: exactly 1 attempt regardless
+    ///   of `max_retries` (the budget wins).
+    /// - `Standard` transport / rate-limit / timeout / truncated:
+    ///   2 attempts (was 6 with the legacy hard-coded cap).
+    /// - `Standard` parse / schema: 1 attempt with the JSON repair
+    ///   pass; the repair runs inline in `parse_model_json` so the
+    ///   budget's `use_json_repair` flag is reported on the
+    ///   warning payload but not re-applied.
+    /// - `Deep` rate-limit: 3 attempts.
+    /// - `Deep` parse / schema: 2 attempts with repair.
+    ///
+    /// Callers that explicitly want more attempts (e.g. tests that
+    /// exercise the retry loop with a 6-deep mock queue) can pass
+    /// a larger `max_retries`; the ceiling is a safety net, not a
+    /// guarantee.
+    ///
     /// Every retry, recovery, and parse failure is recorded as a
     /// structured warning (`model.retry_parse`, `model.retry_provider`,
     /// `model.recovered_after_retry`) so the post-execution review
@@ -602,8 +625,24 @@ impl RunContext {
     where
         T: serde::de::DeserializeOwned,
     {
+        use crate::llm::retry_budget::{self, RetryBudget, RetryReason};
+
         let phase_name = role.as_str();
-        for attempt in 0..=max_retries {
+        let mode = parse_mode_str(&self.mode);
+        // The legacy `max_retries` parameter is now a hard ceiling.
+        // The actual cap is `min(budget.max_attempts, ceiling + 1)`.
+        let ceiling = max_retries;
+
+        // The budget is computed on the FIRST error (see the
+        // `unwrap_or_else` below) and then frozen for the rest of
+        // the loop. Mixing budgets across attempts would surface a
+        // different `RetryReason` mid-loop, which would confuse
+        // the post-execution review and produce inconsistent
+        // telemetry for what is logically the same failure.
+        let mut budget: Option<RetryBudget> = None;
+        let mut attempt: u32 = 0;
+
+        loop {
             // First attempt uses the cached path so re-running the
             // same prompt reuses the prior response. Retries bypass
             // the cache so a previously cached broken response does
@@ -621,7 +660,8 @@ impl RunContext {
                 call_id: None,
                 attempt: Some(attempt),
             };
-            match response {
+
+            let decision = match response {
                 Ok(resp) => match self.parse_model_json::<T>(role, &resp.text, schema_hint) {
                     Ok(v) => {
                         if attempt > 0 {
@@ -637,40 +677,99 @@ impl RunContext {
                         }
                         return Ok(v);
                     }
-                    Err(e) if attempt < max_retries => {
+                    Err(e) => {
+                        // `parse_model_json` always wraps its
+                        // failure in `Error::SchemaViolation`, so we
+                        // re-check the raw payload: parseable as a
+                        // generic `serde_json::Value` means the
+                        // failure is a schema mismatch (the JSON
+                        // shape did not match the role's contract);
+                        // not parseable means the failure is a
+                        // genuine parse error.
+                        let reason =
+                            if serde_json::from_str::<serde_json::Value>(&resp.text).is_ok() {
+                                RetryReason::Schema
+                            } else {
+                                RetryReason::Parse
+                            };
+                        let b = budget.unwrap_or_else(|| retry_budget::budget_for(mode, reason));
+                        budget = Some(b);
+                        let max_attempts = b.max_attempts.min(ceiling + 1);
+                        if attempt + 1 >= max_attempts {
+                            return Err(e);
+                        }
                         let _ = self.telemetry.warn(
                             "model.retry_parse",
                             "warn",
                             "model response parse failed; retrying",
                             serde_json::json!({
                                 "attempt": attempt + 1,
-                                "max_attempts": max_retries + 1,
+                                "max_attempts": max_attempts,
+                                "use_json_repair": b.use_json_repair,
                                 "error": e.to_string(),
                             }),
                             warn_ctx(),
                         );
-                        continue;
+                        Decision::Retry
                     }
-                    Err(e) => return Err(e),
                 },
-                Err(e) if attempt < max_retries => {
+                Err(e) => {
+                    let reason = retry_budget::reason_from_error(&e);
+                    let b = budget.unwrap_or_else(|| retry_budget::budget_for(mode, reason));
+                    budget = Some(b);
+                    let max_attempts = b.max_attempts.min(ceiling + 1);
+                    if attempt + 1 >= max_attempts {
+                        return Err(e);
+                    }
                     let _ = self.telemetry.warn(
                         "model.retry_provider",
                         "warn",
                         "model call failed; retrying",
                         serde_json::json!({
                             "attempt": attempt + 1,
-                            "max_attempts": max_retries + 1,
+                            "max_attempts": max_attempts,
+                            "use_json_repair": b.use_json_repair,
                             "error": e.to_string(),
                         }),
                         warn_ctx(),
                     );
-                    continue;
+                    Decision::Retry
                 }
-                Err(e) => return Err(e),
+            };
+
+            if matches!(decision, Decision::Retry) {
+                attempt += 1;
             }
         }
-        unreachable!()
+    }
+}
+
+/// Internal loop-control flag for `call_with_retry_parse`. The
+/// loop only ever needs two states — retry or fall through — but
+/// naming the case makes the match arms above easier to read and
+/// reserves room for a future "abort" branch (e.g. cancellation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    /// Schedule the next attempt; the per-attempt error has been
+    /// reported through the warnings stream.
+    Retry,
+}
+
+/// Map the run's mode string (the same value stored in the
+/// manifest) to the [`Mode`] enum so the retry budget lookup is
+/// type-driven. Mirrors `cli::run::parse_mode`; duplicated here
+/// because the canonical helper is `pub(crate)` to the cli
+/// module and the retry loop lives in `phases::phase`. Unknown
+/// strings fall back to `Mode::Standard` (the documented default)
+/// so a corrupted manifest cannot crash the pipeline.
+fn parse_mode_str(s: &str) -> Mode {
+    match s {
+        "fast" => Mode::Fast,
+        "standard" => Mode::Standard,
+        "deep" => Mode::Deep,
+        "explore" => Mode::Explore,
+        "batch" => Mode::Batch,
+        _ => Mode::Standard,
     }
 }
 
