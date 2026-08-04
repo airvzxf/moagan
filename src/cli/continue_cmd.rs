@@ -65,6 +65,21 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
     let manifest = load_manifest(home, run_id)?;
+    // Validation-2026-08-04 fix #3: validate `--switch-provider`
+    // against the configured provider registry BEFORE stamping the
+    // change on the manifest. Previously any string was accepted
+    // silently and the bad provider would only surface later when
+    // the pipeline tried to use it (or never, on a completed run).
+    if let Some(provider) = opts.switch_provider.as_deref() {
+        let cfg = crate::config::Config::load().unwrap_or_default();
+        if !cfg.providers.contains_key(provider) {
+            return Err(Error::InvalidArgs(format!(
+                "--switch-provider '{}' is not in the configured providers; available: {}",
+                provider,
+                cfg.providers.keys().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
     let (manifest, api_key) = apply_continue_options(home, manifest, &opts, &db)?;
 
     let last_phase = db.last_completed_phase(run_id)?.ok_or_else(|| {

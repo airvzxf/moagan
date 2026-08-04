@@ -810,9 +810,14 @@ fn parse_mode_str(s: &str) -> Mode {
 /// write more, let it; when it wants less, it returns less.
 fn max_tokens_for_role(role: Role) -> u32 {
     match role {
-        Role::Intake => 1024,
+        // Reasoning models (DeepSeek v4, qwen3.x, kimi) consume
+        // 400-700 tokens on chain-of-thought before the JSON
+        // envelope. 1024 was enough for MiniMax M3 but truncates
+        // reasoning models mid-string. 2048 covers the
+        // reasoning+envelope for both families.
+        Role::Intake => 2048,
         Role::Clarify => 2048,
-        Role::Route => 512,
+        Role::Route => 2048,
         Role::Sketch => 1024,
         Role::Propose => 32768,
         Role::Gate => 1024,

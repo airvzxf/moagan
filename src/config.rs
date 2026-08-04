@@ -267,16 +267,94 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         hard_incompatibilities: vec![],
     };
     m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
-    let make_opencode_go = |model: &str| ProviderConfig {
+    // OpenCode Go models per the 2026-08-04 operator roster. The
+    // dispatcher in `src/llm/opencode_go.rs` selects the right wire
+    // format based on the model name (`endpoint_path_for`) and appends
+    // the model-specific path to the stable base URL stored here. The
+    // default temperature is 1.0 because the operator's primary kimi
+    // family (kimi-k2.7-code) only accepts that value on this
+    // subscription; per-model overrides live in
+    // `MODEL_TEMPERATURE_OVERRIDES` for the rare model that requires a
+    // different value.
+    let make_opencode_go = |model: &str, endpoint: &str| ProviderConfig {
         kind: "opencode_go".to_owned(),
-        endpoint: "https://opencode.ai/zen/go/v1".to_owned(),
+        endpoint: endpoint.to_owned(),
         model: model.to_owned(),
         max_tokens: Some(8192),
         temperature: Some(1.0),
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
     };
-    m.insert("opencode_go".to_owned(), make_opencode_go("kimi-k2.7-code"));
+    // All 18 OpenCode Go providers share the same base URL. The
+    // dispatcher (`OpenCodeGoProvider::new`) appends the model-specific
+    // path (`/v1/chat/completions`, `/v1/messages`, or `/v1/responses`)
+    // at construction time via the concrete provider's URL builder.
+    // Storing the base URL keeps the `Provider::endpoint()` contract
+    // stable across the three wire formats.
+    let oc_base = "https://opencode.ai/zen/go/v1";
+    // `/v1/chat/completions` (OpenAI-compatible) — 10 models.
+    m.insert(
+        "opencode_go".to_owned(),
+        make_opencode_go("kimi-k2.7-code", oc_base),
+    );
+    m.insert("kimi-k3".to_owned(), make_opencode_go("kimi-k3", oc_base));
+    m.insert(
+        "kimi-k2.6".to_owned(),
+        make_opencode_go("kimi-k2.6", oc_base),
+    );
+    m.insert("glm-5.1".to_owned(), make_opencode_go("glm-5.1", oc_base));
+    m.insert("glm-5.2".to_owned(), make_opencode_go("glm-5.2", oc_base));
+    m.insert(
+        "deepseek-v4-pro".to_owned(),
+        make_opencode_go("deepseek-v4-pro", oc_base),
+    );
+    m.insert(
+        "deepseek-v4-flash".to_owned(),
+        make_opencode_go("deepseek-v4-flash", oc_base),
+    );
+    m.insert(
+        "mimo-v2.5".to_owned(),
+        make_opencode_go("mimo-v2.5", oc_base),
+    );
+    m.insert(
+        "mimo-v2.5-pro".to_owned(),
+        make_opencode_go("mimo-v2.5-pro", oc_base),
+    );
+    m.insert("hy3".to_owned(), make_opencode_go("hy3", oc_base));
+    // `/v1/messages` (Anthropic-compatible) — 7 models.
+    m.insert(
+        "minimax-m3".to_owned(),
+        make_opencode_go("minimax-m3", oc_base),
+    );
+    m.insert(
+        "minimax-m2.7".to_owned(),
+        make_opencode_go("minimax-m2.7", oc_base),
+    );
+    m.insert(
+        "minimax-m2.5".to_owned(),
+        make_opencode_go("minimax-m2.5", oc_base),
+    );
+    m.insert(
+        "qwen3.8-max".to_owned(),
+        make_opencode_go("qwen3.8-max", oc_base),
+    );
+    m.insert(
+        "qwen3.7-max".to_owned(),
+        make_opencode_go("qwen3.7-max", oc_base),
+    );
+    m.insert(
+        "qwen3.7-plus".to_owned(),
+        make_opencode_go("qwen3.7-plus", oc_base),
+    );
+    m.insert(
+        "qwen3.6-plus".to_owned(),
+        make_opencode_go("qwen3.6-plus", oc_base),
+    );
+    // `/v1/responses` (OpenAI Responses) — 1 model.
+    m.insert(
+        "gpt-5.6-luna".to_owned(),
+        make_opencode_go("gpt-5.6-luna", oc_base),
+    );
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
@@ -624,11 +702,11 @@ mod tests {
     #[test]
     fn env_overrides_minimax_model() {
         let mut cfg = Config::default();
-        // Baseline: every minimax provider carries its canonical model.
+        // Baseline: every direct-minimax provider carries its canonical model.
         assert_eq!(cfg.providers.get("minimax").unwrap().model, "MiniMax-M3");
         assert_eq!(
-            cfg.providers.get("minimax-m2.7").unwrap().model,
-            "MiniMax-M2.7"
+            cfg.providers.get("minimax-m2.7-highspeed").unwrap().model,
+            "MiniMax-M2.7-highspeed"
         );
 
         unsafe {
@@ -639,18 +717,22 @@ mod tests {
             std::env::remove_var("MOAGAN_MINIMAX_MODEL");
         }
 
-        // Every minimax provider reflects the env value.
-        for name in [
-            "minimax",
-            "minimax-m3",
-            "minimax-m2.7",
-            "minimax-m2.7-highspeed",
-            "minimax-m2.5",
-        ] {
+        // Only direct-minimax providers (kind="minimax") reflect the env
+        // value. The opencode_go entries (minimax-m3/m2.7/m2.5) are
+        // routed through OpenCode Go and must NOT be touched by the
+        // MOAGAN_MINIMAX_MODEL env override.
+        for name in ["minimax", "minimax-m2.7-highspeed"] {
             assert_eq!(
                 cfg.providers.get(name).unwrap().model,
                 "MiniMax-M2.5",
                 "provider {name} should pick up MOAGAN_MINIMAX_MODEL"
+            );
+        }
+        for name in ["minimax-m3", "minimax-m2.7", "minimax-m2.5"] {
+            assert_eq!(
+                cfg.providers.get(name).unwrap().model,
+                name,
+                "opencode_go provider {name} must NOT pick up MOAGAN_MINIMAX_MODEL"
             );
         }
         // The mock provider must not be touched.
@@ -700,27 +782,33 @@ mod tests {
         assert_eq!(spec.endpoint, "https://opencode.ai/zen/go/v1");
     }
 
-    /// Q5 pin: the 4 canonical MiniMax models must all be exposed as
-    /// separate provider entries in `default_providers()`. This is the
-    /// contract the smoke script depends on
-    /// (`--provider minimax-m2.5` is a recognised alias of
-    /// `MiniMax-M2.5`).
+    /// Q5 + 2026-08-04 pin: the canonical MiniMax models are exposed
+    /// as separate provider entries under `kind="minimax"` (direct)
+    /// or `kind="opencode_go"` (subscription, on the `/v1/messages`
+    /// endpoint). The split matches the operator's 2026-08-04 model
+    /// roster: minimax-m3/m2.7/m2.5 are routed through OpenCode Go.
     #[test]
     fn default_providers_lists_four_canonical_minimax_models() {
         let cfg = Config::default();
         let canonical = [
-            ("minimax", "MiniMax-M3"),
-            ("minimax-m3", "MiniMax-M3"),
-            ("minimax-m2.7", "MiniMax-M2.7"),
-            ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed"),
-            ("minimax-m2.5", "MiniMax-M2.5"),
+            // Direct MiniMax (kind="minimax")
+            ("minimax", "minimax", "MiniMax-M3"),
+            (
+                "minimax-m2.7-highspeed",
+                "minimax",
+                "MiniMax-M2.7-highspeed",
+            ),
+            // OpenCode Go subscription (kind="opencode_go")
+            ("minimax-m3", "opencode_go", "minimax-m3"),
+            ("minimax-m2.7", "opencode_go", "minimax-m2.7"),
+            ("minimax-m2.5", "opencode_go", "minimax-m2.5"),
         ];
-        for (alias, model) in canonical {
+        for (alias, kind, model) in canonical {
             let spec = cfg
                 .providers
                 .get(alias)
                 .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
-            assert_eq!(spec.kind, "minimax", "alias {alias} should map to minimax");
+            assert_eq!(spec.kind, kind, "alias {alias} should map to {kind}");
             assert_eq!(
                 spec.model, model,
                 "alias {alias} should carry canonical model {model}"

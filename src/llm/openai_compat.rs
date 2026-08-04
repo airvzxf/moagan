@@ -16,6 +16,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
 use super::wire::{Request, Response, Usage};
 
@@ -28,6 +29,13 @@ pub struct OpenAiCompatProvider {
     api_key: SecretString,
     client: Client,
     max_retries: u32,
+    /// Per-provider hard cap on `max_tokens` (set from
+    /// `ProviderConfig::max_tokens`). OpenAI-compat backends vary
+    /// wildly on this — DeepSeek accepts 8192, Moonshot accepts
+    /// 32k, OpenCode Go proxies typically 8k. When the per-role
+    /// `max_tokens_for_role` exceeds this cap, we clamp on the way
+    /// out so the upstream doesn't reject the request with 400.
+    provider_max_tokens: Option<u32>,
 }
 
 impl OpenAiCompatProvider {
@@ -44,11 +52,12 @@ impl OpenAiCompatProvider {
             api_key,
             client,
             max_retries: 3,
+            provider_max_tokens: spec.max_tokens,
         })
     }
 
     /// Compute the URL for chat completions.
-    fn chat_url(&self) -> String {
+    pub fn chat_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
         if base.ends_with("/chat/completions") {
             base.to_owned()
@@ -70,6 +79,47 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
     stream: bool,
+    /// OpenAI-style JSON output mode. Sent only when the role
+    /// requires machine-readable JSON (Route, Propose, Judge, etc.)
+    /// so the upstream API returns a parseable object instead of
+    /// free-form text. Optional so non-JSON roles (e.g. proposals
+    /// that produce markdown) skip the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+/// Roles that produce structured JSON output. The OpenAI-compat
+/// providers (DeepSeek, OpenCode Go) get `response_format` set to
+/// `json_object` for these roles so the JSON parser in `parse_model_json`
+/// stops hitting the trailing-token / missing-brace pathologies
+/// reported by the Q8 multi-model benchmark. Markdown-only roles
+/// (Propose delivers markdown but parses a JSON header; the
+/// actual markdown body is not autostructured) and free-text roles
+/// (Sketch, FinalReport) are NOT in this list.
+fn role_requires_json(role: crate::llm::Role) -> bool {
+    use crate::llm::Role::*;
+    matches!(
+        role,
+        Intake
+            | Clarify
+            | Route
+            | Gate
+            | Critique
+            | Repair
+            | Rank
+            | Synthesizer
+            | Adversary
+            | Decomposer
+            | MergeSynthesizer
+            | RecoveryExplainer
+            | RationaleExtractor
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +190,26 @@ impl Provider for OpenAiCompatProvider {
                 temperature: req.temperature,
                 top_p: req.top_p,
                 stream: false,
+                response_format: if role_requires_json(req.role) {
+                    Some(ResponseFormat {
+                        kind: "json_object",
+                    })
+                } else {
+                    None
+                },
+            };
+            // Apply per-provider max_tokens cap. Done AFTER the
+            // body construction so the cap is visible regardless of
+            // upstream choice. The default of 8192 covers DeepSeek
+            // v4 (max 8k) and OpenCode Go (max 8k per the user
+            // roster). Propose (32k) and Repair (16k) roles are
+            // clamped.
+            let body = match self.provider_max_tokens {
+                Some(cap) if body.max_tokens > cap => ChatRequest {
+                    max_tokens: cap,
+                    ..body
+                },
+                _ => body,
             };
             let result = self
                 .client
@@ -195,6 +265,12 @@ impl Provider for OpenAiCompatProvider {
     }
 }
 
+impl OpenCodeGoDispatch for OpenAiCompatProvider {
+    fn url(&self) -> String {
+        self.chat_url()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +308,27 @@ mod tests {
     }
 
     #[test]
+    fn serializes_chat_request_with_provider_cap() {
+        // DeepSeek caps at 8192. The propose role asks for 32768
+        // tokens; the provider must clamp to 8192 so the upstream
+        // doesn't reject the request with 400.
+        let p = OpenAiCompatProvider::new(
+            &ProviderConfig {
+                kind: "deepseek".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-v4-flash".into(),
+                max_tokens: Some(8192),
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(p.provider_max_tokens, Some(8192));
+    }
+
+    #[test]
     fn serializes_chat_request_correctly() {
         let request = ChatRequest {
             model: "deepseek-v4-flash",
@@ -249,6 +346,7 @@ mod tests {
             temperature: None,
             top_p: None,
             stream: false,
+            response_format: None,
         };
         assert_eq!(
             serde_json::to_value(request).unwrap(),
