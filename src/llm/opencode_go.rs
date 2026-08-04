@@ -139,17 +139,38 @@ impl Provider for OpenCodeGoProvider {
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         // Fix #5, B (per-model map): apply MODEL_TEMPERATURE_OVERRIDES
-        // before forwarding the request. The retry path (Fix #5, A)
-        // in `phase.rs::call_with_retry_parse` recovers from the
-        // unknown-model case where the upstream rejects with 400.
-        let effective_req = match temperature_override_for(req.model.as_str()) {
+        // before forwarding the request. Unknown models keep the
+        // per-role temperature.
+        let mut effective_req = match temperature_override_for(req.model.as_str()) {
             Some(t) if req.temperature.is_none() || req.temperature != Some(t) => Request {
                 temperature: Some(t),
                 ..req.clone()
             },
             _ => req.clone(),
         };
-        self.inner.send(&effective_req).await
+        let first = self.inner.send(&effective_req).await;
+        // Fix #5, A (retry safety net): if the upstream rejects with
+        // a 400 whose body mentions a temperature restriction
+        // ("only 1 is allowed for this model", etc.) retry with
+        // `temperature=1.0`. This catches models that are added to
+        // OpenCode Go after the map is updated — the operator can
+        // extend MODEL_TEMPERATURE_OVERRIDES later without losing
+        // runtime coverage.
+        if let Err(Error::Provider(body)) = &first {
+            let lower = body.to_ascii_lowercase();
+            let temp_blocked = (lower.contains("invalid temperature")
+                || lower.contains("only 1 is allowed")
+                || lower.contains("temperature must be"))
+                && lower.contains("temperature");
+            if temp_blocked && effective_req.temperature != Some(1.0) {
+                effective_req = Request {
+                    temperature: Some(1.0),
+                    ..effective_req
+                };
+                return self.inner.send(&effective_req).await;
+            }
+        }
+        first
     }
 }
 
@@ -227,6 +248,22 @@ mod tests {
         assert_eq!(temperature_override_for("kimi-k2.7-code"), None);
         assert_eq!(temperature_override_for("gpt-5.6-luna"), None);
         assert_eq!(temperature_override_for("qwen3.7-max"), None);
+    }
+
+    #[test]
+    fn detect_temperature_rejection_patterns() {
+        // Fix #5, A: the retry safety net triggers on these phrasings.
+        let body = r#"{"error":"invalid temperature: only 1 is allowed for this model"}"#;
+        let lower = body.to_ascii_lowercase();
+        let hits = (lower.contains("invalid temperature") || lower.contains("only 1 is allowed"))
+            && lower.contains("temperature");
+        assert!(hits);
+        // Negative case: regular 400 without temperature mention
+        let body2 = r#"{"error":"model not found"}"#;
+        let lower2 = body2.to_ascii_lowercase();
+        let hits2 = (lower2.contains("invalid temperature") || lower2.contains("only 1 is allowed"))
+            && lower2.contains("temperature");
+        assert!(!hits2);
     }
 
     #[test]
