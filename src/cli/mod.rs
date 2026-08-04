@@ -524,6 +524,14 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // `cfg.provider(name).model` (including the manifest stub
             // and `RunContext::default_model`) sees the new value
             // without any further plumbing.
+            //
+            // Validation-2026-08-04 fix #2: `--model` accepts the
+            // canonical model name (`MiniMax-M3`) AND the lowercase
+            // provider-alias form (`minimax-m3`). The alias form
+            // resolves to the canonical config.provider entry's
+            // model so the upstream API receives a valid model id
+            // instead of the alias string verbatim (which causes
+            // upstream 4xx errors).
             if let Some(m) = model.as_deref()
                 && !m.trim().is_empty()
             {
@@ -532,10 +540,22 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 } else {
                     provider.clone()
                 };
+                let raw = m.trim();
+                // Resolve the alias form first (e.g. `minimax-m3`) by
+                // looking up the matching provider entry's model.
+                // Releases the immutable borrow before mutating `spec`.
+                let resolved = if cfg.providers.contains_key(raw) {
+                    cfg.providers
+                        .get(raw)
+                        .map(|s| s.model.clone())
+                        .unwrap_or_else(|| raw.to_owned())
+                } else {
+                    raw.to_owned()
+                };
                 let spec = cfg.providers.get_mut(&selected).ok_or_else(|| {
                     Error::InvalidArgs(format!("--model: provider '{selected}' is not in config"))
                 })?;
-                spec.model = m.trim().to_owned();
+                spec.model = resolved;
             }
             let run_id = run::run(
                 run::RunOptions {

@@ -70,6 +70,47 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
     stream: bool,
+    /// OpenAI-style JSON output mode. Sent only when the role
+    /// requires machine-readable JSON (Route, Propose, Judge, etc.)
+    /// so the upstream API returns a parseable object instead of
+    /// free-form text. Optional so non-JSON roles (e.g. proposals
+    /// that produce markdown) skip the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+/// Roles that produce structured JSON output. The OpenAI-compat
+/// providers (DeepSeek, OpenCode Go) get `response_format` set to
+/// `json_object` for these roles so the JSON parser in `parse_model_json`
+/// stops hitting the trailing-token / missing-brace pathologies
+/// reported by the Q8 multi-model benchmark. Markdown-only roles
+/// (Propose delivers markdown but parses a JSON header; the
+/// actual markdown body is not autostructured) and free-text roles
+/// (Sketch, FinalReport) are NOT in this list.
+fn role_requires_json(role: crate::llm::Role) -> bool {
+    use crate::llm::Role::*;
+    matches!(
+        role,
+        Intake
+            | Clarify
+            | Route
+            | Gate
+            | Critique
+            | Repair
+            | Rank
+            | Synthesizer
+            | Adversary
+            | Decomposer
+            | MergeSynthesizer
+            | RecoveryExplainer
+            | RationaleExtractor
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +181,11 @@ impl Provider for OpenAiCompatProvider {
                 temperature: req.temperature,
                 top_p: req.top_p,
                 stream: false,
+                response_format: if role_requires_json(req.role) {
+                    Some(ResponseFormat { kind: "json_object" })
+                } else {
+                    None
+                },
             };
             let result = self
                 .client
@@ -249,6 +295,7 @@ mod tests {
             temperature: None,
             top_p: None,
             stream: false,
+            response_format: None,
         };
         assert_eq!(
             serde_json::to_value(request).unwrap(),
