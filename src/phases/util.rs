@@ -5,9 +5,11 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use thiserror::Error;
 
 use crate::atomic::writer::AtomicWriter;
 use crate::error::Result;
+use crate::llm::json_extractor;
 
 /// Which repair pass actually changed the model output. Surfaced
 /// through `parse_model_json_traced` so the warnings stream can
@@ -150,6 +152,28 @@ pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
 /// which m3 pathology was triggered (colon / separator / bracket).
 /// The callback is invoked at most once per repair pass, in
 /// pipeline order.
+///
+/// After PR D1 the recovery chain wires up Path B (tolerant
+/// extraction via [`json_extractor::extract_tolerant_json`]) as an
+/// intermediate step between the direct parse and the M3 repair
+/// chain. Recovery order, with each step only attempted when the
+/// previous one failed:
+///
+/// 1. **Direct parse** on the trimmed input.
+/// 2. **Tolerant extraction (Path B)** — carves out the first
+///    balanced JSON value, dropping prose prefix/suffix, JS
+///    comments, and a leading BOM. If the candidate parses, return.
+/// 3. **M3 repair on the extracted candidate** — the bracket /
+///    separator / colon chain runs on the Path B candidate; each
+///    repair pass that fires emits a [`RepairEvent`] via `sink`.
+/// 4. **M3 repair on the full input** — the same chain runs on the
+///    trimmed input as the final fallback; events fire via `sink`.
+///
+/// The Path B step itself does not emit `RepairEvent`s because it
+/// does not modify the input — it only selects a substring. The
+/// companion helper [`parse_json_with_recovery`] exposes the same
+/// recovery chain without an external sink (it emits
+/// `tracing::debug!` events instead).
 pub fn parse_model_json_traced<T, F>(raw: &str, mut sink: F) -> Result<T>
 where
     T: DeserializeOwned,
@@ -158,6 +182,25 @@ where
     let trimmed = strip_code_fence(raw);
     if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
         return Ok(v);
+    }
+    if let Ok((start, end)) = json_extractor::extract_tolerant_json(&trimmed) {
+        let candidate = &trimmed[start..end];
+        if let Ok(v) = serde_json::from_str::<T>(candidate) {
+            return Ok(v);
+        }
+        let (repaired, repairs) = repair_m3_brackets_with_trace(candidate);
+        if let Some(repaired) = repaired {
+            for r in &repairs {
+                sink(RepairEvent {
+                    kind: r.kind,
+                    bytes_before: r.bytes_before,
+                    bytes_after: r.bytes_after,
+                });
+            }
+            if let Ok(v) = serde_json::from_str::<T>(&repaired) {
+                return Ok(v);
+            }
+        }
     }
     let (repaired, repairs) = repair_m3_brackets_with_trace(&trimmed);
     let Some(repaired) = repaired else {
@@ -188,6 +231,79 @@ where
             repaired
         ))
     })
+}
+
+/// Errors returned by [`parse_json_with_recovery`]. The wrapper
+/// exhausts every strategy before reporting a failure, so the only
+/// variant is "all strategies failed". The raw payload and tail are
+/// preserved by the caller's error message.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ParseError {
+    /// Direct parse, tolerant extraction, M3 repair on the extracted
+    /// candidate, and M3 repair on the full input all failed.
+    #[error(
+        "all JSON parsing strategies failed (direct, tolerant extraction, M3 repair on extracted candidate, M3 repair on full input)"
+    )]
+    AllStrategiesFailed,
+}
+
+/// Multi-strategy JSON recovery pipeline. The same recovery chain
+/// that [`parse_model_json_traced`] runs inline is exposed here
+/// without the per-pass `FnMut(RepairEvent)` sink — this helper is
+/// intended for callers that want the recovered value without the
+/// telemetry hook (e.g. tests, single-shot diagnostic flows).
+/// Strategy order, with each step only attempted when the previous
+/// one failed:
+///
+/// 1. **Direct parse** — `serde_json::from_str` on the raw input.
+/// 2. **Tolerant extraction (Path B)** —
+///    [`json_extractor::extract_tolerant_json`], which strips JS
+///    line/block comments, BOM, and prose prefix/suffix around the
+///    first balanced `{` or `[`. The returned substring is then
+///    parsed again.
+/// 3. **M3 repair on the extracted candidate** — same bracket /
+///    separator / colon chain as step 4, applied only to the JSON
+///    the tolerant extractor isolated. This lets M3 repair run on
+///    prose-wrapped payloads that the tolerant extractor trimmed
+///    down to a balanced fragment, but where the fragment still has
+///    m3 pathologies.
+/// 4. **M3 repair on the full input** — last-resort fallback. Same
+///    chain as step 3, applied to the whole input.
+///
+/// Returns the first strategy that yields a valid JSON value, or
+/// [`ParseError::AllStrategiesFailed`] if every strategy failed.
+/// Each strategy that fires emits a `tracing::debug!` event so
+/// post-execution reviewers can see which strategy recovered the
+/// payload.
+pub fn parse_json_with_recovery(input: &str) -> std::result::Result<serde_json::Value, ParseError> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(input) {
+        tracing::trace!("parse_json_with_recovery: direct parse ok");
+        return Ok(v);
+    }
+    if let Ok((start, end)) = json_extractor::extract_tolerant_json(input) {
+        let candidate = &input[start..end];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
+            tracing::debug!(
+                start,
+                end,
+                "parse_json_with_recovery: tolerant extraction ok"
+            );
+            return Ok(v);
+        }
+        if let Some(repaired) = repair_m3_brackets(candidate)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired)
+        {
+            tracing::debug!("parse_json_with_recovery: m3 after extraction ok");
+            return Ok(v);
+        }
+    }
+    if let Some(repaired) = repair_m3_brackets(input)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired)
+    {
+        tracing::debug!("parse_json_with_recovery: m3 full ok");
+        return Ok(v);
+    }
+    Err(ParseError::AllStrategiesFailed)
 }
 
 /// Repair two narrow cases we have observed in the MiniMax-M3
@@ -1052,9 +1168,11 @@ mod tests {
     #[test]
     fn traced_reports_colon_and_bracket_repair() {
         // `"b"[1,2]` — missing colon between the key string and the
-        // array value, plus missing closing `]}` at the end. Triggers
-        // both the colon and bracket passes. We parse as a generic
-        // Value because the colon-virus inputs don't fit `Sample`.
+        // array value, plus missing closing `]}` at the end. The
+        // tolerant extractor returns UnbalancedBraces (no balanced
+        // end), so the wrapper falls through to the M3-on-full-input
+        // path; both colon and bracket passes fire and the `FnMut`
+        // sink records them in pipeline order.
         let s = r#"{"a":1,"b"[1,2"#;
         let mut kinds: Vec<RepairKind> = Vec::new();
         let v: serde_json::Value = parse_model_json_traced(s, |ev| {
@@ -1067,14 +1185,18 @@ mod tests {
     }
 
     #[test]
-    fn traced_reports_separator_repair() {
+    fn traced_reports_separator_repair_on_extracted_candidate() {
+        // The tolerant extractor carves out the balanced `[…]`, then
+        // the M3 chain runs on the candidate to fix the missing
+        // commas. The separator pass fires inside the Path B branch
+        // and the `FnMut` sink records it.
         let s = r#"["a" "b" "c"]"#;
         let mut kinds: Vec<RepairKind> = Vec::new();
         let v: serde_json::Value = parse_model_json_traced(s, |ev| {
             kinds.push(ev.kind);
         })
         .unwrap();
-        assert!(v.is_array());
+        assert_eq!(v, serde_json::json!(["a", "b", "c"]));
         assert!(kinds.contains(&RepairKind::Separator));
     }
 
@@ -1115,6 +1237,132 @@ mod tests {
         // No repair events were emitted because the chain refused to
         // write the unterminated input.
         assert!(kinds.is_empty());
+    }
+
+    // --- parse_json_with_recovery tests --------------------------------
+
+    #[test]
+    fn parse_json_with_recovery_direct_parse_succeeds() {
+        // Clean JSON: the wrapper must short-circuit on the direct
+        // parse and never reach the tolerant extractor.
+        let v: serde_json::Value = parse_json_with_recovery(r#"{"a":1,"b":"x"}"#).unwrap();
+        assert_eq!(v["a"], serde_json::json!(1));
+        assert_eq!(v["b"], serde_json::json!("x"));
+    }
+
+    #[test]
+    fn parse_json_with_recovery_tolerant_extraction_succeeds_on_prose_prefix() {
+        // Direct parse fails because of the prose prefix. The
+        // tolerant extractor (Path B) finds the balanced `{...}`
+        // substring and the wrapper parses the candidate.
+        let input = "Sure! Here is the JSON you requested:\n{\"answer\": 42}";
+        let v: serde_json::Value = parse_json_with_recovery(input).unwrap();
+        assert_eq!(v["answer"], serde_json::json!(42));
+    }
+
+    #[test]
+    fn parse_json_with_recovery_m3_after_extraction_succeeds() {
+        // Tolerant extraction succeeds and the candidate still has an
+        // m3 pathology (missing commas between array elements). M3
+        // repair on the candidate restores parseability.
+        let input = "prose prefix [\"a\" \"b\" \"c\"] prose suffix";
+        let v: serde_json::Value = parse_json_with_recovery(input).unwrap();
+        assert_eq!(v, serde_json::json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn parse_json_with_recovery_returns_error_on_truly_invalid_json() {
+        // No JSON delimiter at all -> tolerant extractor fails ->
+        // M3-on-full sees nothing to repair -> AllStrategiesFailed.
+        let input = "this is plain prose with no JSON at all";
+        let r = parse_json_with_recovery(input);
+        assert!(r.is_err());
+        let err = r.unwrap_err();
+        assert_eq!(err, ParseError::AllStrategiesFailed);
+    }
+
+    #[test]
+    fn parse_json_with_recovery_handles_js_comments() {
+        // The tolerant extractor strips JS line comments before
+        // looking for the JSON delimiter. The wrapper then parses
+        // the cleaned candidate directly.
+        let input = "// header comment\n{\"answer\": 42}";
+        let v: serde_json::Value = parse_json_with_recovery(input).unwrap();
+        assert_eq!(v["answer"], serde_json::json!(42));
+
+        // Block comment variant.
+        let input = "/* block */ {\"answer\": 7}";
+        let v: serde_json::Value = parse_json_with_recovery(input).unwrap();
+        assert_eq!(v["answer"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn parse_json_with_recovery_preserves_extraction_metadata_via_tracing() {
+        // Set up a tracing subscriber that captures every event into
+        // an in-memory buffer. Run the wrapper on a payload that
+        // requires the tolerant extraction step, then assert that
+        // the recovery succeeded AND that the wrapper emitted the
+        // `tracing::debug!` event that documents the extraction
+        // byte range. This pins the tracing instrumentation: if a
+        // future refactor drops the `tracing::debug!` call, this
+        // test fails.
+        use std::io;
+        use std::sync::{Arc, Mutex};
+
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for SharedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|_| io::Error::other("shared tracing buffer poisoned"))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for SharedBuf {
+            type Writer = SharedWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                SharedWriter(self.0.clone())
+            }
+        }
+
+        let buf = SharedBuf::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let input = "noise prefix {\"answer\": 42} noise suffix";
+            let v = parse_json_with_recovery(input).unwrap();
+            assert_eq!(v["answer"], serde_json::json!(42));
+        });
+
+        let captured =
+            String::from_utf8(buf.0.lock().map(|b| b.clone()).unwrap_or_default()).unwrap();
+        assert!(
+            captured.contains("parse_json_with_recovery"),
+            "tracing log not captured: {captured}"
+        );
+        assert!(
+            captured.contains("tolerant extraction"),
+            "tolerant extraction event missing: {captured}"
+        );
     }
 
     /// Regression: naive `&s[s.len()-500..]` panicked with
