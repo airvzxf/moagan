@@ -344,6 +344,18 @@ pub enum IoError {
         source: io::Error,
     },
 
+    /// Sidecar / config file failed to parse. Used by the profile
+    /// loader (TOML) so the error travels with the offending path
+    /// instead of bubbling through `Error::InvalidArgs`.
+    #[error("parse {path}: {source}")]
+    Parse {
+        /// Path that failed to parse.
+        path: PathBuf,
+        /// Underlying parse error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// Sidecar metadata failed to serialize.
     #[error("serialize meta: {0}")]
     SerializeMeta(#[source] serde_json::Error),
