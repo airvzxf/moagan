@@ -21,6 +21,7 @@ pub mod doctor;
 pub mod forbidden;
 pub mod inspect;
 pub mod pause_cmd;
+pub mod rate;
 pub mod repair;
 pub mod run;
 pub mod telemetry_cmd;
@@ -520,6 +521,35 @@ pub enum Cmd {
         #[arg(long, default_value_t = false)]
         paused: bool,
     },
+    /// `moagan rate <run_id> <proposal_id> <score>` — record a
+    /// user-driven rating for a proposal. PR C.5 (K.3b). No-op
+    /// when `MOAGAN_LEARNING` is unset.
+    Rate {
+        /// Run id (UUID v7) that produced the proposal.
+        #[arg(value_name = "RUN_ID")]
+        run_id: String,
+        /// Proposal id (e.g. `p_001` or `s_001`).
+        #[arg(value_name = "PROPOSAL_ID")]
+        proposal_id: String,
+        /// Score in `[0.0, 1.0]`. `0.0` = worst, `1.0` = best.
+        #[arg(value_name = "SCORE")]
+        score: String,
+    },
+}
+
+/// Inputs for `rate::run`. Mirrors the positional args on
+/// `Cmd::Rate { .. }` but stays as a `String`/`String`/`String`
+/// shape so the dispatcher can construct it from clap's parsed
+/// output without losing the parse-failure semantics of clap.
+#[derive(Debug, Clone)]
+pub struct RateArgs {
+    /// Run id (UUID v7).
+    pub run_id: String,
+    /// Proposal id.
+    pub proposal_id: String,
+    /// Score in `[0.0, 1.0]`, kept as a string so the dispatcher
+    /// can surface the original value in error messages.
+    pub score: String,
 }
 
 /// Subcommands of `moagan audit`.
@@ -609,6 +639,7 @@ impl Cmd {
                 "Serialise current run state to paused.json (cross-process hibernation)"
             }
             Self::List { .. } => "List runs (filter by --paused)",
+            Self::Rate { .. } => "Record a user rating for a proposal (opt-in learning loop)",
         }
     }
 }
@@ -1045,6 +1076,18 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 ));
             }
             let code = pause_cmd::run_list(&global_home, pause_cmd::ListArgs {})?;
+            Ok(code)
+        }
+        Cmd::Rate {
+            run_id,
+            proposal_id,
+            score,
+        } => {
+            let code = rate::run(RateArgs {
+                run_id,
+                proposal_id,
+                score,
+            })?;
             Ok(code)
         }
     }
