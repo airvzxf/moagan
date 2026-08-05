@@ -2,26 +2,39 @@
 //! `moagan list --paused` — cross-process hibernation CLI surface.
 //!
 //! Pause serialises the current run state into `<run_dir>/paused.json`
-//! via [`PausePoint`]. Continue reads that file and (in a later PR)
-//! skips the upstream phases that have already produced artefacts on
-//! disk. List enumerates every run directory that currently carries
-//! a `paused.json`.
+//! via [`PausePoint`]. Continue reads that file, filters the canonical
+//! pipeline through [`Pipeline::resume`] using the persisted
+//! `paused_at_phase`, and cleans up the pause artefacts on success.
+//! List enumerates every run directory that currently carries a
+//! `paused.json`.
 //!
 //! The lockfile (`paused.lock`, TTL 5 min) prevents two pauses from
 //! racing on the same run; the TTL also bounds how long a crashed
 //! pause can keep a run wedged before a fresh pause can take over.
 //!
-//! PR C.3 (K.2b) defines this CLI surface. The actual resume-loop
-//! integration lands in PR C.5 (K.2 wires `continue_cmd.rs`); this
-//! module only logs the resume plan today.
+//! PR #131 (Sesión C) shipped the CLI surface with a hard-coded
+//! `paused_at_phase = "synthesize"` and a hard-coded `completed_phases`
+//! list. PR D3 (K.2) replaces the hard-code with the live SQLite
+//! index: `paused_at_phase` is derived from
+//! [`crate::discovery::resume::derive_paused_at_phase`], and
+//! `completed_phases` is derived from
+//! [`crate::discovery::resume::derive_completed_phases`]. Operators
+//! can still override both via `--phase` and `--completed`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::config::Config;
 use crate::discovery::pause::PausePoint;
+use crate::discovery::resume;
 use crate::error::{Error, IoError, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
+use crate::phases::Pipeline;
+use crate::storage::sqlite::Db;
+
+#[cfg(test)]
+use crate::domain::Manifest;
 
 /// Name of the lockfile that guards against two pauses racing on
 /// the same run. Sits next to `paused.json` inside `<run_dir>/`.
@@ -38,17 +51,37 @@ const LOCK_TTL_SECS_DEFAULT: u64 = 300;
 pub struct PauseArgs {
     /// Run id to pause.
     pub run_id: RunId,
+    /// Override the `paused_at_phase` field on the persisted
+    /// `paused.json`. Defaults to the live DB's
+    /// `last_completed_phase`, or
+    /// [`resume::DEFAULT_PAUSED_AT_PHASE`] when the run is not in
+    /// the index.
+    pub phase: Option<String>,
+    /// Override the `completed_phases` list on the persisted
+    /// `paused.json`. Defaults to the live DB's
+    /// `list_completed_phases(run_id)`, or
+    /// [`resume::DEFAULT_COMPLETED_PHASES`] when the run is not in
+    /// the index.
+    pub completed: Option<Vec<String>>,
 }
 
 /// Inputs for [`run_list`].
 #[derive(Debug, Clone)]
 pub struct ListArgs {}
 
-/// `moagan pause <run_id>` — write a [`PausePoint`] for the run and
-/// stamp a lockfile with a TTL so a second pause within the window
-/// is rejected. The "phase the pause was issued at" is hard-coded
-/// to `"synthesize"` for now; PR C.5 will receive the real phase
-/// from the pipeline boundary that called into this CLI.
+/// `moagan pause <run_id> [--phase <name>] [--completed <csv>]`
+///
+/// Writes a [`PausePoint`] for the run and stamps a lockfile with a
+/// TTL so a second pause within the window is rejected.
+///
+/// The phase boundary and completed-phases list come from the live
+/// SQLite index when the run is registered (PR D3, K.2); operators
+/// can override either with `--phase` and `--completed`. A run
+/// whose index row is missing (paused before `db.register_run(...)`
+/// had a chance to commit, or imported from a wiped meta.sqlite)
+/// falls back to [`resume::DEFAULT_PAUSED_AT_PHASE`] and
+/// [`resume::DEFAULT_COMPLETED_PHASES`] so the pause still produces
+/// a readable `paused.json`.
 pub fn run_pause(home: &MoaganHome, args: PauseArgs) -> Result<i32> {
     let run_dir = home.run_dir(args.run_id);
     if !run_dir.root().exists() {
@@ -59,29 +92,83 @@ pub fn run_pause(home: &MoaganHome, args: PauseArgs) -> Result<i32> {
         )));
     }
     acquire_lock(run_dir.root(), LOCK_TTL_SECS_DEFAULT)?;
+
+    let (paused_at_phase, completed_phases) = resolve_pause_state(home, &args)?;
     let pp = PausePoint::new(
         args.run_id,
-        "synthesize".to_owned(),
-        vec![
-            "intake".to_owned(),
-            "clarify".to_owned(),
-            "sketch".to_owned(),
-            "propose".to_owned(),
-            "gate".to_owned(),
-        ],
+        paused_at_phase.clone(),
+        completed_phases,
         serde_json::json!({"resumable": true}),
         format!("paused at {}", crate::time::now_unix_secs()),
     );
     pp.save(run_dir.root())?;
-    println!("paused run {} at phase 'synthesize'", args.run_id);
+    println!(
+        "paused run {} at phase '{}' ({} completed phases)",
+        args.run_id,
+        paused_at_phase,
+        pp.completed_phases.len()
+    );
     Ok(0)
 }
 
-/// `moagan continue --from-pause` — load the persisted [`PausePoint`]
-/// and log a human-readable resume plan. The actual loop skip lands
-/// in PR C.5 (K.2 wires `continue_cmd.rs`); for now we only confirm
-/// the file is present + readable + the schema matches.
-pub fn run_continue_from_pause(home: &MoaganHome, run_id: RunId) -> Result<i32> {
+/// Resolve the `(paused_at_phase, completed_phases)` pair the pause
+/// will persist. Operator overrides win; otherwise the live DB is
+/// consulted; otherwise the legacy default list is used.
+///
+/// The DB is opened lazily so `pause` on a run whose index has not
+/// been committed (no `meta.sqlite` row yet) still succeeds — the
+/// open failure falls through to the default branch.
+fn resolve_pause_state(home: &MoaganHome, args: &PauseArgs) -> Result<(String, Vec<String>)> {
+    let db = Db::open(&home.meta_db_path()).ok();
+    let registered = db
+        .as_ref()
+        .and_then(|d| resume::run_is_registered(d, args.run_id).ok())
+        .unwrap_or(false);
+
+    let paused_at_phase = match args.phase.clone() {
+        Some(p) => p,
+        None => match db.as_ref() {
+            Some(d) if registered => resume::derive_paused_at_phase(d, args.run_id)?,
+            _ => resume::DEFAULT_PAUSED_AT_PHASE.to_string(),
+        },
+    };
+
+    let completed_phases = match args.completed.clone() {
+        Some(c) => c,
+        None => match db.as_ref() {
+            Some(d) if registered => {
+                let derived = resume::derive_completed_phases(d, args.run_id)?;
+                if derived.is_empty() {
+                    // Live DB registered the run but no phase ended
+                    // yet — e.g. an imported run with an empty
+                    // history. Fall back to the default list rather
+                    // than persist an empty `completed_phases`,
+                    // which would make `continue --from-pause`
+                    // re-run the whole pipeline from intake.
+                    resume::DEFAULT_COMPLETED_PHASES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect()
+                } else {
+                    derived
+                }
+            }
+            _ => resume::DEFAULT_COMPLETED_PHASES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        },
+    };
+
+    Ok((paused_at_phase, completed_phases))
+}
+
+/// `moagan continue --from-pause` — load the persisted [`PausePoint`],
+/// filter the canonical pipeline via [`Pipeline::resume`], run the
+/// remaining phases, and clean up `paused.json` + `paused.lock` on
+/// success. On failure the pause artefacts are kept so the operator
+/// can inspect or retry.
+pub async fn run_continue_from_pause(home: &MoaganHome, run_id: RunId) -> Result<i32> {
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
         return Err(Error::InvalidArgs(format!(
@@ -89,27 +176,101 @@ pub fn run_continue_from_pause(home: &MoaganHome, run_id: RunId) -> Result<i32> 
             run_dir.root().display()
         )));
     }
-    match PausePoint::load(run_dir.root())? {
-        Some(pp) => {
-            println!(
-                "resume plan for run {}: paused at phase '{}', {} completed phases, summary: {}",
-                run_id,
-                pp.paused_at_phase,
-                pp.completed_phases.len(),
-                pp.summary
-            );
-            tracing::info!(
-                run_id = %run_id,
-                paused_at_phase = %pp.paused_at_phase,
-                completed_phases = ?pp.completed_phases,
-                "continue --from-pause: loaded PausePoint (full integration lands in K.2)"
-            );
-            Ok(0)
-        }
-        None => Err(Error::InvalidArgs(format!(
+    let pp = PausePoint::load(run_dir.root())?.ok_or_else(|| {
+        Error::InvalidArgs(format!(
             "no paused.json for run {run_id}; nothing to resume"
-        ))),
+        ))
+    })?;
+
+    println!(
+        "resume plan for run {}: paused at phase '{}', {} completed phases, summary: {}",
+        run_id,
+        pp.paused_at_phase,
+        pp.completed_phases.len(),
+        pp.summary
+    );
+    tracing::info!(
+        run_id = %run_id,
+        paused_at_phase = %pp.paused_at_phase,
+        completed_phases = ?pp.completed_phases,
+        "continue --from-pause: resuming pipeline from paused state"
+    );
+
+    let outcome = resume_paused_run(home, run_id, &pp).await;
+    finalize_resume(run_dir.root(), outcome.is_ok())?;
+    outcome.map(|_| 0)
+}
+
+/// Build the resumed pipeline (filtered via [`Pipeline::resume`])
+/// and run the remaining phases through the canonical `resume_pipeline`
+/// helper. The helper takes care of provider / telemetry /
+/// parallelism wiring; the pause layer just hands it the manifest
+/// and the persisted `paused_at_phase`.
+async fn resume_paused_run(home: &MoaganHome, run_id: RunId, pp: &PausePoint) -> Result<()> {
+    let manifest = super::continue_cmd::load_manifest(home, run_id)?;
+    let mode = super::continue_cmd::parse_mode(&manifest.mode)?;
+    let cfg = Config::load().unwrap_or_default();
+    let canonical = super::continue_cmd::build_canonical_for_resume(&cfg, mode);
+    let resumed = Pipeline::resume(canonical, &pp.paused_at_phase)?;
+    if resumed.is_empty() {
+        tracing::info!(
+            run_id = %run_id,
+            paused_at_phase = %pp.paused_at_phase,
+            "continue --from-pause: nothing left to do after paused phase"
+        );
+        return Ok(());
     }
+    super::continue_cmd::resume_pipeline(home, &manifest, &pp.paused_at_phase, None, true).await
+}
+
+/// Decide whether the pause artefacts should be removed and act on
+/// it. On success both `paused.json` and `paused.lock` are deleted
+/// so the next `moagan pause` on the same run starts clean. On
+/// failure the artefacts are kept so the operator can inspect the
+/// state without re-deriving it.
+///
+/// Errors during cleanup are surfaced but do not mask the resume
+/// outcome: a successful resume that fails to delete the lockfile
+/// returns `Ok(0)` plus a warning, while a failed resume keeps
+/// the artefacts regardless.
+fn finalize_resume(run_dir: &Path, success: bool) -> Result<()> {
+    if !success {
+        tracing::info!(
+            run_dir = %run_dir.display(),
+            "resume failed; keeping paused.json + paused.lock for inspection"
+        );
+        return Ok(());
+    }
+    PausePoint::delete(run_dir)?;
+    let lock_path = run_dir.join(LOCK_FILENAME);
+    if lock_path.exists() {
+        std::fs::remove_file(&lock_path).map_err(|e| {
+            Error::Io(IoError::Raw(std::io::Error::other(format!(
+                "failed to remove {}: {e}",
+                lock_path.display()
+            ))))
+        })?;
+    }
+    Ok(())
+}
+
+/// Compute the resumed pipeline (filter applied, never executed) for
+/// the pause artefacts on disk. Pure function over the filesystem:
+/// reads `paused.json` + `manifest.json`, returns a [`Pipeline`] that
+/// has been filtered via [`Pipeline::resume`]. Test-only entry
+/// point that exercises the same code path as
+/// [`run_continue_from_pause`] without spinning up the provider
+/// registry.
+#[cfg(test)]
+pub(crate) fn planned_resumed_pipeline(home: &MoaganHome, run_id: RunId) -> Result<Pipeline> {
+    let run_dir = home.run_dir(run_id);
+    let pp = PausePoint::load(run_dir.root())?
+        .ok_or_else(|| Error::InvalidArgs(format!("no paused.json for run {run_id}")))?;
+    let manifest = super::continue_cmd::load_manifest(home, run_id)?;
+    let mode = super::continue_cmd::parse_mode(&manifest.mode)?;
+    let cfg = Config::load().unwrap_or_default();
+    let canonical = super::continue_cmd::build_canonical_for_resume(&cfg, mode);
+    Pipeline::resume(canonical, &pp.paused_at_phase)
 }
 
 /// `moagan list --paused` — enumerate every run directory under
@@ -139,7 +300,7 @@ pub fn run_list(home: &MoaganHome, _args: ListArgs) -> Result<i32> {
 /// stale locks so a crashed previous pause cannot wedge the run
 /// forever.
 fn acquire_lock(run_dir: &Path, ttl_secs: u64) -> Result<()> {
-    let lock_path = run_dir.join(LOCK_FILENAME);
+    let lock_path: PathBuf = run_dir.join(LOCK_FILENAME);
     if lock_path.exists()
         && let Ok(meta) = lock_path.metadata()
         && let Ok(modified) = meta.modified()
@@ -162,31 +323,241 @@ fn acquire_lock(run_dir: &Path, ttl_secs: u64) -> Result<()> {
     Ok(())
 }
 
+/// Test-only helper: register a run in the SQLite index with the
+/// given completed phases. Mirrors the order the pipeline writes
+/// them (start + end per phase) so the resume path picks them up
+/// identically to a live run.
+#[cfg(test)]
+fn seed_db_completed_phases(db: &Db, run_id: RunId, mode: &str, phases: &[&str]) {
+    db.register_run(run_id, mode, "running", "0.4.0", None, None, None)
+        .unwrap();
+    for phase in phases {
+        db.record_phase(run_id, phase, 0, "start", None).unwrap();
+        db.record_phase(run_id, phase, 0, "end", None).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::SystemTime;
 
-    /// `run_pause` writes both `paused.json` and `paused.lock` into
-    /// the run directory. Verifies the happy path end-to-end.
+    /// `run_pause` writes `paused.json` and `paused.lock` for a
+    /// registered run. When the DB has a recorded completed-phase
+    /// history the persisted list MUST mirror it instead of the
+    /// legacy hard-coded constant.
     #[test]
-    fn pause_writes_paused_json_for_existing_run() {
+    fn pause_uses_db_completed_phases_when_run_active() {
         let tmp = tempfile::tempdir().unwrap();
         let home = MoaganHome::at(tmp.path().to_path_buf());
         let run_id = RunId::new();
         std::fs::create_dir_all(home.run_dir(run_id).root()).unwrap();
 
-        let code = run_pause(&home, PauseArgs { run_id }).unwrap();
+        // Seed the DB with a partial history that differs from the
+        // legacy hard-coded list (no `sketch` / `propose` / `gate`).
+        let db = Db::open(&home.meta_db_path()).unwrap();
+        seed_db_completed_phases(&db, run_id, "standard", &["intake", "clarify"]);
+
+        let code = run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap();
         assert_eq!(code, 0);
-        assert!(home.run_dir(run_id).root().join("paused.json").exists());
-        assert!(home.run_dir(run_id).root().join("paused.lock").exists());
 
         let loaded = PausePoint::load(home.run_dir(run_id).root())
             .unwrap()
             .expect("paused.json must round-trip");
-        assert_eq!(loaded.run_id, run_id);
+        assert_eq!(loaded.paused_at_phase, "clarify");
+        // `list_completed_phases` returns rows in
+        // `started_unix DESC, phase ASC` order; `clarify` was
+        // recorded after `intake` so it lands first.
+        assert_eq!(
+            loaded.completed_phases,
+            vec!["clarify".to_string(), "intake".to_string()]
+        );
+    }
+
+    /// `run_pause` falls back to the legacy defaults when the run
+    /// is not in the SQLite index. This covers paused-before-commit
+    /// and the import-from-clean-DB cases.
+    #[test]
+    fn pause_falls_back_to_default_when_run_not_in_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        let run_id = RunId::new();
+        std::fs::create_dir_all(home.run_dir(run_id).root()).unwrap();
+
+        let code = run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+
+        let loaded = PausePoint::load(home.run_dir(run_id).root())
+            .unwrap()
+            .expect("paused.json must round-trip");
         assert_eq!(loaded.paused_at_phase, "synthesize");
-        assert_eq!(loaded.completed_phases.len(), 5);
+        let expected: Vec<String> = resume::DEFAULT_COMPLETED_PHASES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(loaded.completed_phases, expected);
+    }
+
+    /// Operator overrides on `--phase` and `--completed` win over
+    /// both the live DB and the legacy fallback. Useful when the
+    /// operator pauses a run that has already drifted from the
+    /// SQLite index (e.g. `meta.sqlite` was rebuilt manually).
+    #[test]
+    fn pause_respects_explicit_phase_and_completed_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        let run_id = RunId::new();
+        std::fs::create_dir_all(home.run_dir(run_id).root()).unwrap();
+
+        let code = run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: Some("deliver".to_string()),
+                completed: Some(vec!["intake".to_string(), "rank".to_string()]),
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+
+        let loaded = PausePoint::load(home.run_dir(run_id).root())
+            .unwrap()
+            .expect("paused.json must round-trip");
+        assert_eq!(loaded.paused_at_phase, "deliver");
+        assert_eq!(
+            loaded.completed_phases,
+            vec!["intake".to_string(), "rank".to_string()]
+        );
+    }
+
+    /// `run_continue_from_pause` reads `paused.json`, filters the
+    /// canonical pipeline via `Pipeline::resume`, and the resumed
+    /// pipeline contains only the phases strictly after the
+    /// persisted `paused_at_phase`. The provider / telemetry
+    /// machinery is bypassed in this test by calling
+    /// [`planned_resumed_pipeline`] directly, which exercises the
+    /// same code path with stubbed manifest + paused.json.
+    #[test]
+    fn resume_skips_completed_phases_in_pipeline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        let run_id = RunId::new();
+        let run_root = home.run_dir(run_id).root().to_path_buf();
+        std::fs::create_dir_all(&run_root).unwrap();
+
+        // Drop a manifest so `load_manifest` succeeds. The
+        // `mode = "fast"` selects a real (small) canonical
+        // pipeline; the actual phase names are read off the
+        // `Pipeline::canonical_phase_order()` static list.
+        let manifest = Manifest {
+            run_id,
+            mode: "fast".to_string(),
+            ..Default::default()
+        };
+        std::fs::write(
+            run_root.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        PausePoint::new(
+            run_id,
+            "intake".to_string(),
+            vec!["intake".to_string()],
+            serde_json::json!({}),
+            "paused after intake".to_string(),
+        )
+        .save(&run_root)
+        .unwrap();
+
+        let resumed = planned_resumed_pipeline(&home, run_id).unwrap();
+        let names: Vec<&str> = resumed.names();
+        assert!(
+            names.contains(&"deliver"),
+            "resumed pipeline must include the post-intake phases; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"intake"),
+            "resumed pipeline must drop the paused phase; got {names:?}"
+        );
+    }
+
+    /// `finalize_resume` deletes both `paused.json` and `paused.lock`
+    /// when the resume reports success.
+    #[test]
+    fn resume_deletes_paused_json_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path();
+        PausePoint::new(
+            RunId::new(),
+            "intake".to_string(),
+            vec!["intake".to_string()],
+            serde_json::json!({}),
+            "to be deleted".to_string(),
+        )
+        .save(run_dir)
+        .unwrap();
+        std::fs::write(run_dir.join(LOCK_FILENAME), b"locked").unwrap();
+
+        assert!(run_dir.join("paused.json").exists());
+        assert!(run_dir.join(LOCK_FILENAME).exists());
+
+        finalize_resume(run_dir, true).unwrap();
+
+        assert!(
+            !run_dir.join("paused.json").exists(),
+            "paused.json must be gone after a successful resume"
+        );
+        assert!(
+            !run_dir.join(LOCK_FILENAME).exists(),
+            "paused.lock must be gone after a successful resume"
+        );
+    }
+
+    /// `finalize_resume` keeps both `paused.json` and `paused.lock`
+    /// when the resume reports failure. The operator can inspect or
+    /// retry the run without losing the persisted plan.
+    #[test]
+    fn resume_keeps_paused_json_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path();
+        PausePoint::new(
+            RunId::new(),
+            "intake".to_string(),
+            vec!["intake".to_string()],
+            serde_json::json!({}),
+            "kept on failure".to_string(),
+        )
+        .save(run_dir)
+        .unwrap();
+        std::fs::write(run_dir.join(LOCK_FILENAME), b"locked").unwrap();
+
+        finalize_resume(run_dir, false).unwrap();
+
+        assert!(
+            run_dir.join("paused.json").exists(),
+            "paused.json must remain after a failed resume"
+        );
+        assert!(
+            run_dir.join(LOCK_FILENAME).exists(),
+            "paused.lock must remain after a failed resume"
+        );
     }
 
     /// `run_pause` rejects a run id whose directory does not exist.
@@ -198,7 +569,15 @@ mod tests {
         let home = MoaganHome::at(tmp.path().to_path_buf());
         let run_id = RunId::new();
 
-        let err = run_pause(&home, PauseArgs { run_id }).unwrap_err();
+        let err = run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap_err();
         match err {
             Error::InvalidArgs(msg) => {
                 assert!(msg.contains("not found"), "got: {msg}");
@@ -223,8 +602,24 @@ mod tests {
         std::fs::create_dir_all(home.run_dir(run_id_1).root()).unwrap();
         std::fs::create_dir_all(home.run_dir(run_id_2).root()).unwrap();
         std::fs::create_dir_all(home.run_dir(run_id_unpaused).root()).unwrap();
-        run_pause(&home, PauseArgs { run_id: run_id_1 }).unwrap();
-        run_pause(&home, PauseArgs { run_id: run_id_2 }).unwrap();
+        run_pause(
+            &home,
+            PauseArgs {
+                run_id: run_id_1,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap();
+        run_pause(
+            &home,
+            PauseArgs {
+                run_id: run_id_2,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap();
 
         let code = run_list(&home, ListArgs {}).unwrap();
         assert_eq!(code, 0);
@@ -261,11 +656,27 @@ mod tests {
         let run_id = RunId::new();
         std::fs::create_dir_all(home.run_dir(run_id).root()).unwrap();
 
-        run_pause(&home, PauseArgs { run_id }).unwrap();
+        run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap();
         let original =
             std::fs::read_to_string(home.run_dir(run_id).root().join("paused.json")).unwrap();
 
-        let err = run_pause(&home, PauseArgs { run_id }).unwrap_err();
+        let err = run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap_err();
         match err {
             Error::InvalidArgs(msg) => {
                 assert!(msg.contains("paused.lock held"), "got: {msg}");
@@ -292,7 +703,15 @@ mod tests {
         let run_id = RunId::new();
         std::fs::create_dir_all(home.run_dir(run_id).root()).unwrap();
 
-        run_pause(&home, PauseArgs { run_id }).unwrap();
+        run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap();
 
         let lock_path = home.run_dir(run_id).root().join(LOCK_FILENAME);
         let aged = SystemTime::now()
@@ -303,7 +722,15 @@ mod tests {
             .set_modified(aged)
             .unwrap();
 
-        let code = run_pause(&home, PauseArgs { run_id }).unwrap();
+        let code = run_pause(
+            &home,
+            PauseArgs {
+                run_id,
+                phase: None,
+                completed: None,
+            },
+        )
+        .unwrap();
         assert_eq!(code, 0, "stale lock must be replaced, not rejected");
         assert!(lock_path.exists());
     }
