@@ -11,6 +11,7 @@
 
 pub mod clusterer;
 pub mod contradiction;
+pub mod epistemic_legacy;
 pub mod extractor;
 pub mod facet;
 pub mod facet_cache;

@@ -4,6 +4,7 @@
 
 use std::sync::OnceLock;
 
+use crate::discovery::epistemic_legacy::EpistemicLegacy;
 use crate::ids::blake3_hex;
 
 use super::role::Role;
@@ -206,6 +207,23 @@ pub fn discover_matrix_system_prompt() -> &'static str {
     DISCOVER_MATRIX_PROMPT
 }
 
+/// Placeholder token that prompts embed when they want the current
+/// epistemic legacy rendered inline. Substitute via
+/// [`inject_epistemic_legacy`].
+pub const EPISTEMIC_LEGACY_PLACEHOLDER: &str = "${epistemic_legacy}";
+
+/// Substitute [`EPISTEMIC_LEGACY_PLACEHOLDER`] in `prompt` with the
+/// rendered view of the current [`EpistemicLegacy`] loaded from
+/// `<MOAGAN_HOME>/epistemic_legacy.json`. If the placeholder is not
+/// present, `prompt` is returned unchanged.
+pub fn inject_epistemic_legacy(prompt: &str) -> String {
+    if !prompt.contains(EPISTEMIC_LEGACY_PLACEHOLDER) {
+        return prompt.to_owned();
+    }
+    let legacy = EpistemicLegacy::load();
+    prompt.replace(EPISTEMIC_LEGACY_PLACEHOLDER, &legacy.render_markdown())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +300,23 @@ mod tests {
         for r in Role::all() {
             assert!(!system_prompt(*r).is_empty(), "empty prompt for {r}");
         }
+    }
+
+    #[test]
+    fn inject_epistemic_legacy_substitutes_placeholder() {
+        let template = "Hello\n${epistemic_legacy}\nWorld";
+        let injected = inject_epistemic_legacy(template);
+        // Empty legacy still renders the heading; placeholder must be gone.
+        assert!(!injected.contains(EPISTEMIC_LEGACY_PLACEHOLDER));
+        assert!(injected.contains("# Epistemic legacy"));
+        assert!(injected.starts_with("Hello\n"));
+        assert!(injected.ends_with("\nWorld"));
+    }
+
+    #[test]
+    fn inject_epistemic_legacy_returns_unchanged_when_no_placeholder() {
+        let template = "no placeholder here, only prose";
+        let injected = inject_epistemic_legacy(template);
+        assert_eq!(injected, template);
     }
 }
