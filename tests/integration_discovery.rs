@@ -29,7 +29,7 @@ use moagan::discovery::facet_cache::{DEFAULT_TTL_SECS, FacetCache};
 use moagan::discovery::integrator::{
     COVERAGE_RATIO_MIN, PRESERVED_CITATIONS_MIN, meets_safeguards,
 };
-use moagan::error::Result;
+use moagan::error::{Error, Result};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
@@ -663,4 +663,167 @@ fn facet_cache_invalidate_clears_entry() {
     assert!(cache.lookup(&list.cache_key).unwrap().is_some());
     cache.invalidate(&list.cache_key).unwrap();
     assert!(cache.lookup(&list.cache_key).unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// D.13.21 — discovery abort when more than half of the sketch attempts fail.
+//
+// Each test builds a single-cell matrix with `sketches_per_cell = total` so
+// the fan-out is exactly `total` calls. The mock pushes `ok_count` valid
+// sketch responses and uses `set_cycle(false)` so calls `ok_count+1..total`
+// fail with `MockExhausted`. The retry budget for the `MockExhausted`
+// reason in Standard mode is 2 attempts, so every "failed" call ends up
+// returning `Error::MockExhausted` to the phase and is counted as a
+// failure by the abort logic.
+// ---------------------------------------------------------------------------
+
+fn abort_mock(ok_count: usize) -> Arc<MockProvider> {
+    let mut p = MockProvider::empty();
+    for _ in 0..ok_count {
+        p.push(MockResponse::plain(sketch_json()));
+    }
+    // No further responses: with cycle=false every remaining call fails.
+    p.set_cycle(false);
+    Arc::new(p)
+}
+
+fn build_matrix_with_n_sketches(total: usize) -> moagan::phases::DiscoverMatrixPhase {
+    use moagan::discovery::matrix::ExplorationMatrix;
+    let matrix = ExplorationMatrix {
+        sketches_per_cell: total,
+        dimensions: vec![moagan::discovery::matrix::Dimension {
+            id: "test".into(),
+            label: "test dim".into(),
+            facets: vec![moagan::discovery::matrix::Facet {
+                id: "f1".into(),
+                label: "F1".into(),
+            }],
+        }],
+    };
+    moagan::phases::DiscoverMatrixPhase { matrix }
+}
+
+async fn run_matrix_with_mock(
+    mock: Arc<MockProvider>,
+    total: usize,
+) -> (Result<moagan::phases::PhaseOutput>, Arc<MoaganHome>) {
+    let _guard = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve().unwrap());
+    home.ensure().unwrap();
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().unwrap();
+    build_brief(&run_dir).unwrap();
+
+    let registry = Arc::new(build_registry_with_mock(mock));
+    let parallelism = Parallelism::new(1);
+    let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).unwrap();
+    let ctx = RunContext::new(
+        run_id,
+        Arc::clone(&home),
+        registry,
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "Design a multi-agent backend".into(),
+        "discover".into(),
+    );
+
+    let matrix = build_matrix_with_n_sketches(total);
+    let result = matrix.execute(&ctx).await;
+    (result, home)
+}
+
+#[tokio::test]
+async fn discovery_aborts_when_more_than_half_sketches_fail() {
+    // 10 attempts, 6 fail → 6 * 2 = 12 >= 10 AND total >= 4 → abort.
+    let mock = abort_mock(4);
+    let (result, _home) = run_matrix_with_mock(mock, 10).await;
+    let err = result.expect_err("must abort when >50% sketches fail");
+    match err {
+        Error::DiscoveryQualityTooLow {
+            failed,
+            total,
+            threshold_pct,
+        } => {
+            assert_eq!(failed, 6, "6 of 10 attempts should be counted as failed");
+            assert_eq!(total, 10);
+            assert_eq!(threshold_pct, 50);
+        }
+        other => panic!("expected DiscoveryQualityTooLow, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn discovery_continues_when_minority_fails() {
+    // 10 attempts, 4 fail → 4 * 2 = 8 < 10 → continue.
+    let mock = abort_mock(6);
+    let (result, _home) = run_matrix_with_mock(mock, 10).await;
+    assert!(
+        result.is_ok(),
+        "must continue when only 40% of sketches fail: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn discovery_does_not_abort_with_few_attempts() {
+    // 3 attempts, 2 fail → 2 * 2 = 4 >= 3 BUT total < 4 → continue
+    // (minimum-attempts guard prevents aborting on tiny runs).
+    let mock = abort_mock(1);
+    let (result, _home) = run_matrix_with_mock(mock, 3).await;
+    assert!(
+        result.is_ok(),
+        "must continue when total attempts is below the minimum threshold: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn discovery_aborts_at_exact_threshold() {
+    // 10 attempts, 5 fail → 5 * 2 = 10 >= 10 AND total >= 4 → abort
+    // (uses `>=` so the half-failure boundary still triggers the gate).
+    let mock = abort_mock(5);
+    let (result, _home) = run_matrix_with_mock(mock, 10).await;
+    let err = result.expect_err("must abort at the exact 50% threshold");
+    match err {
+        Error::DiscoveryQualityTooLow {
+            failed,
+            total,
+            threshold_pct,
+        } => {
+            assert_eq!(failed, 5);
+            assert_eq!(total, 10);
+            assert_eq!(threshold_pct, 50);
+        }
+        other => panic!("expected DiscoveryQualityTooLow, got {other:?}"),
+    }
+}
+
+#[test]
+fn error_discovery_quality_too_low_serializes_with_counts() {
+    let err = Error::DiscoveryQualityTooLow {
+        failed: 6,
+        total: 10,
+        threshold_pct: 50,
+    };
+    // Display form carries the counts so logs / telemetry surfaces
+    // the numbers without needing the structured payload.
+    let s = err.to_string();
+    assert!(s.contains("6"), "display must include failed count: {s}");
+    assert!(s.contains("10"), "display must include total: {s}");
+    assert!(s.contains("50"), "display must include threshold: {s}");
+
+    // Exit code is the ContextError bucket (80) so CI scripts branch
+    // the same way as for the existing "zero sketches" abort.
+    assert_eq!(err.exit_code(), moagan::error::ExitCode::ContextError);
+    // The stable wire code stays inside the InvalidState bucket.
+    assert_eq!(
+        err.code().stable(),
+        "INVALID_STATE",
+        "DiscoveryQualityTooLow must map to INVALID_STATE"
+    );
 }

@@ -142,6 +142,7 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::InvalidApiKey(_)
         | Error::InvalidState(_)
         | Error::NeedsInput(_)
+        | Error::DiscoveryQualityTooLow { .. }
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
     }

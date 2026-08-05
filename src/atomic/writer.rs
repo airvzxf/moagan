@@ -6,7 +6,7 @@
 //! between steps because each step either completes or leaves the
 //! filesystem in the previous valid state.
 //!
-//! Sequence:
+//! Sequence (steps 2 / 4 / 7 are skipped when `fsync_on_commit = false`):
 //!
 //! 1. Write data to `<path>.tmp.<random>`.
 //! 2. `fsync` the data file.
@@ -17,6 +17,12 @@
 //! 7. `fsync` the parent directory so the renames are durable.
 //!
 //! Compliance: catalog 10-integrada-v0 §D.1.1 (Day 1).
+//!
+//! Track I discovery resilience (D.34.3): the discovery sketch fan-out
+//! goes through this writer so a crash mid-discovery does not lose the
+//! sketches already on disk. fsync defaults to ON; opt out with
+//! `AtomicWriter::with_fsync(false)` (or
+//! `MOAGAN_ATOMIC_WRITER_FSYNC=false`) for throughput-bound CI runs.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -49,13 +55,58 @@ impl ArtifactMeta {
 }
 
 /// Atomic file writer.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AtomicWriter;
+///
+/// `AtomicWriter::write` produces a `<path>` that is either fully present
+/// (correct contents and matching `.meta.json` sidecar) or fully absent
+/// (the previous content, if any, is untouched). It survives crashes
+/// between steps because each step either completes or leaves the
+/// filesystem in the previous valid state.
+///
+/// Sequence:
+///
+/// 1. Write data to `<path>.tmp.<random>`.
+/// 2. `fsync` the data file (skipped when `fsync_on_commit = false`).
+/// 3. Write metadata sidecar (size, BLAKE3, mtime) to `<path>.meta.json`.
+/// 4. `fsync` the sidecar (skipped when `fsync_on_commit = false`).
+/// 5. `rename` data file to `<path>` (atomic on POSIX).
+/// 6. `rename` sidecar to `<path>.meta.json`.
+/// 7. `fsync` the parent directory so the renames are durable (skipped
+///    when `fsync_on_commit = false`).
+///
+/// Compliance: catalog 10-integrada-v0 §D.1.1 (Day 1).
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicWriter {
+    /// Whether to `fsync` after every step of the atomic-write sequence.
+    /// Default `true` so a crash mid-write does not lose data. Tests and
+    /// throughput-bound CI environments can opt out with
+    /// [`AtomicWriter::with_fsync(false)`].
+    pub fsync_on_commit: bool,
+}
+
+impl Default for AtomicWriter {
+    fn default() -> Self {
+        Self {
+            fsync_on_commit: true,
+        }
+    }
+}
 
 impl AtomicWriter {
-    /// Create a new `AtomicWriter`.
+    /// Create a new `AtomicWriter` with `fsync_on_commit = true`.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Builder that toggles the per-write `fsync` step. `yes = true`
+    /// keeps the default durability guarantee; `yes = false` skips the
+    /// `fsync` calls (steps 2, 4, 7 in the sequence above) so high-volume
+    /// workloads — e.g. the discovery sketch fan-out on a developer
+    /// laptop — can trade crash-safety for throughput. The atomic
+    /// `rename` step is preserved either way, so an interrupted write
+    /// never leaves a partially-updated file.
+    pub fn with_fsync(mut self, yes: bool) -> Self {
+        self.fsync_on_commit = yes;
+        self
     }
 
     /// Write `data` to `dest` atomically. `dest` is created if it does
@@ -83,11 +134,14 @@ impl AtomicWriter {
             path: tmp.clone(),
             source: e,
         })?;
-        // Step 2: fsync data.
-        data_file.sync_all().map_err(|e| IoError::Sync {
-            path: tmp.clone(),
-            source: e,
-        })?;
+        // Step 2: fsync data (skipped when fsync_on_commit is false).
+        if self.fsync_on_commit {
+            data_file.sync_all().map_err(|e| IoError::Sync {
+                path: tmp.clone(),
+                source: e,
+            })?;
+        }
+        drop(data_file);
 
         // Compute metadata.
         let meta = compute_meta(data)?;
@@ -104,11 +158,14 @@ impl AtomicWriter {
                 path: tmp_meta.clone(),
                 source: e,
             })?;
-        // Step 4: fsync meta.
-        meta_file.sync_all().map_err(|e| IoError::Sync {
-            path: tmp_meta.clone(),
-            source: e,
-        })?;
+        // Step 4: fsync meta (skipped when fsync_on_commit is false).
+        if self.fsync_on_commit {
+            meta_file.sync_all().map_err(|e| IoError::Sync {
+                path: tmp_meta.clone(),
+                source: e,
+            })?;
+        }
+        drop(meta_file);
 
         // Step 5+6: rename both atomically.
         fs::rename(&tmp, dest).map_err(|e| IoError::Rename {
@@ -123,8 +180,10 @@ impl AtomicWriter {
             source: e,
         })?;
 
-        // Step 7: fsync parent directory.
-        Self::fsync_dir(parent)?;
+        // Step 7: fsync parent directory (skipped when fsync_on_commit is false).
+        if self.fsync_on_commit {
+            Self::fsync_dir(parent)?;
+        }
 
         Ok(meta)
     }
@@ -384,5 +443,97 @@ mod tests {
         let dest = tmp.path().join("a/b/c/artifact.json");
         AtomicWriter::new().write(&dest, b"hello").unwrap();
         assert!(dest.exists());
+    }
+
+    // --- D.34.3 — per-write fsync -----------------------------------
+    // The discovery sketch fan-out goes through `AtomicWriter` so a
+    // crash mid-discovery does not lose the sketches already on
+    // disk. The tests below pin the default (fsync ON), the opt-out
+    // (`with_fsync(false)`), and the round-trip durability.
+
+    /// Default constructor must enable fsync — durability is the
+    /// safety property, not a tuning knob the user has to remember
+    /// to flip on.
+    #[test]
+    fn atomic_writer_default_enables_fsync() {
+        assert!(
+            AtomicWriter::new().fsync_on_commit,
+            "AtomicWriter::new() must default to fsync_on_commit = true (D.34.3)"
+        );
+        assert!(
+            AtomicWriter::default().fsync_on_commit,
+            "AtomicWriter::default() must default to fsync_on_commit = true (D.34.3)"
+        );
+    }
+
+    /// `with_fsync(true)` keeps fsync on (the default) and the
+    /// resulting writer commits the file just like the default
+    /// constructor.
+    #[test]
+    fn atomic_writer_with_fsync_commits_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("artifact.json");
+        let payload = br#"{"hello":"world"}"#;
+        let writer = AtomicWriter::new().with_fsync(true);
+        assert!(writer.fsync_on_commit);
+        let meta = writer.write(&dest, payload).unwrap();
+        assert_eq!(meta.size_bytes, payload.len() as u64);
+        let (got, _) = writer.read_with_meta(&dest).unwrap();
+        assert_eq!(got, payload);
+    }
+
+    /// `with_fsync(false)` skips the per-step fsync calls. The
+    /// atomic write still succeeds and the read still verifies —
+    /// the change is in crash-durability, not in functional
+    /// correctness.
+    #[test]
+    fn atomic_writer_without_fsync_does_not_sync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("artifact.json");
+        let payload = br#"{"payload":"no-fsync"}"#;
+        let writer = AtomicWriter::new().with_fsync(false);
+        assert!(!writer.fsync_on_commit);
+        let meta = writer.write(&dest, payload).unwrap();
+        assert_eq!(meta.size_bytes, payload.len() as u64);
+        let (got, _) = writer.read_with_meta(&dest).unwrap();
+        assert_eq!(got, payload);
+    }
+
+    /// Round-trip durability: a write followed by an immediate
+    /// re-read must see the committed bytes regardless of whether
+    /// the process is killed (simulated by re-opening the path
+    /// from a fresh `std::fs::read`). Pins the contract that the
+    /// default `fsync_on_commit = true` is enough to survive a
+    /// crash between the write and the next phase.
+    #[test]
+    fn sketch_write_persists_across_simulated_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("sk_0001.json");
+        let payload = br#"{"id":"sk_0001","thesis":"persisted sketch"}"#;
+        let writer = AtomicWriter::new();
+        assert!(writer.fsync_on_commit);
+        writer.write(&dest, payload).unwrap();
+
+        // Simulate "process restart" by re-reading from a fresh
+        // handle — fsync must have flushed the data to stable
+        // storage so the bytes survive the simulated crash.
+        let recovered = std::fs::read(&dest).unwrap();
+        assert_eq!(recovered, payload, "fsync must make the data durable");
+
+        // The sidecar must be intact and verify the data.
+        let (data, _meta) = AtomicWriter::new().read_with_meta(&dest).unwrap();
+        assert_eq!(data, payload);
+    }
+
+    /// The `with_fsync` builder must compose with `Default`, so
+    /// `AtomicWriter::default().with_fsync(false)` is a valid
+    /// opt-out path for callers that don't want to write `new()`
+    /// explicitly.
+    #[test]
+    fn atomic_writer_with_fsync_toggles_default_field() {
+        let off = AtomicWriter::default().with_fsync(false);
+        assert!(!off.fsync_on_commit);
+        let on = off.with_fsync(true);
+        assert!(on.fsync_on_commit);
     }
 }

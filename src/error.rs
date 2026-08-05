@@ -116,6 +116,25 @@ pub enum Error {
     /// exit code 10.
     #[error("needs input: {0}")]
     NeedsInput(String),
+
+    /// The discovery phase produced too many failed sketches to be
+    /// trustworthy. Triggered when more than half of the planned
+    /// attempts fail (with a minimum-attempts guard so small runs
+    /// do not abort prematurely). Maps to
+    /// [`ExitCode::ContextError`] because the run context
+    /// (`run_dir`) is in a degraded state and continuing would
+    /// persist low-quality proposals downstream.
+    #[error(
+        "discovery quality too low: {failed}/{total} attempts failed (threshold {threshold_pct}%)"
+    )]
+    DiscoveryQualityTooLow {
+        /// Number of attempts that produced no usable sketch.
+        failed: usize,
+        /// Total number of attempts the phase issued.
+        total: usize,
+        /// Threshold percentage that triggered the abort.
+        threshold_pct: usize,
+    },
 }
 
 impl Error {
@@ -139,6 +158,7 @@ impl Error {
             Self::Cache(_) => ErrorCode::Io,
             Self::Cancel(_) => ErrorCode::Cancelled,
             Self::NeedsInput(_) => ErrorCode::NeedsInput,
+            Self::DiscoveryQualityTooLow { .. } => ErrorCode::InvalidState,
         }
     }
 
@@ -155,6 +175,7 @@ impl Error {
             Self::MockExhausted | Self::Provider(_) => ExitCode::ProviderError,
             Self::Cache(_) | Self::InvalidState(_) => ExitCode::ContextError,
             Self::NeedsInput(_) => ExitCode::NeedsInput,
+            Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
         }
     }
 
@@ -410,6 +431,15 @@ mod tests {
             Error::InvalidState("x".into()).exit_code(),
             ExitCode::ContextError
         );
+        assert_eq!(
+            Error::DiscoveryQualityTooLow {
+                failed: 6,
+                total: 10,
+                threshold_pct: 50,
+            }
+            .exit_code(),
+            ExitCode::ContextError
+        );
     }
     #[test]
     fn compatibility_exit_code_function_returns_numeric_code() {
@@ -467,6 +497,15 @@ mod tests {
         assert_eq!(Error::MockExhausted.code(), ErrorCode::NeedsInput);
         assert_eq!(Error::Cache("x".into()).code(), ErrorCode::Io);
         assert_eq!(Error::Cancel(CancelSignal).code(), ErrorCode::Cancelled);
+        assert_eq!(
+            Error::DiscoveryQualityTooLow {
+                failed: 6,
+                total: 10,
+                threshold_pct: 50,
+            }
+            .code(),
+            ErrorCode::InvalidState
+        );
     }
 
     /// The code form must round-trip through serde unchanged so
@@ -557,6 +596,15 @@ mod tests {
         assert!(!Error::MockExhausted.is_circuit_opening());
         assert!(!Error::Io(IoError::Raw(io::Error::other("x"))).is_circuit_opening());
         assert!(!Error::Cache("x".into()).is_circuit_opening());
+        assert!(!Error::NeedsInput("x".into()).is_circuit_opening());
+        assert!(
+            !Error::DiscoveryQualityTooLow {
+                failed: 6,
+                total: 10,
+                threshold_pct: 50,
+            }
+            .is_circuit_opening()
+        );
     }
 
     /// The opener set matches the [`ErrorCode::is_circuit_opening`]
