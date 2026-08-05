@@ -156,6 +156,13 @@ in v0.6+ if at all.
 3. **User preference learning** (medium cost, requires opt-in UX work).
 4. **External research** (heaviest; deferred to v0.6+).
 
+## Status (Sesión C, 2026-08-05)
+
+- **K.1 Per-domain profiles** ✅ implemented in PR #125.
+- **K.2 Cross-process hibernation** ✅ implemented in PRs #126 (schema) + #131 (CLI).
+- **K.3 User preference learning** ✅ implemented in PRs #133 (cache) + #135 (integration + moagan rate CLI).
+- **K.4 External research** ✅ implemented narrower in PR #137 (4-host allowlist, 3 URLs/call, 4 KB/response, 5s timeout). PDFs, JS rendering, auth, advanced rate-limiting deferred to v0.6+.
+
 ## Closing
 
 This proposal is documentation, not commitment. Each item can be
