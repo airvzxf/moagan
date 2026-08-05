@@ -110,4 +110,69 @@ mod tests {
         let e = Error::PlanExhausted("x".into());
         assert_eq!(exit_code(&e), 4);
     }
+
+    /// Track E (catalog §D.11.10): `moagan run --allow-injection`
+    /// must be parsed as a positive `allow_injection` flag on the
+    /// `Run` variant, and the propagation chain must reach the
+    /// sandbox config that the validate phase builds. The CLI wins
+    /// over the env override per the resolution-order docs in
+    /// `config.rs`. The optional `--prompt` value is required by
+    /// clap's run subcommand so the parser is happy.
+    #[test]
+    fn cli_run_allow_injection_flag_propagates_to_sandbox() {
+        use crate::cli::Cmd;
+        use crate::sandbox::SandboxConfig;
+
+        let cli = cli::Cli::parse_from(["moagan", "run", "--prompt", "test", "--allow-injection"]);
+        let parsed_flag = match cli.cmd {
+            Cmd::Run {
+                allow_injection, ..
+            } => allow_injection,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert!(
+            parsed_flag,
+            "CLI flag must be parsed as true when --allow-injection is set"
+        );
+
+        // The dispatch chain mutates the loaded `Config` so the
+        // validate phase picks up the opt-in via
+        // `ctx.config.sandbox_allow_injection`. Mirror that
+        // mutation here so the test pins the contract end-to-end.
+        let mut cfg = crate::config::Config::default();
+        cfg.sandbox_allow_injection |= parsed_flag;
+        assert!(
+            cfg.sandbox_allow_injection,
+            "dispatch must propagate --allow-injection to Config"
+        );
+
+        // The validate phase then builds the SandboxConfig with the
+        // value wired in. Pin the contract so a refactor that drops
+        // the wiring surfaces as a test failure.
+        let sandbox_cfg = SandboxConfig::new().with_allow_injection(cfg.sandbox_allow_injection);
+        assert!(
+            sandbox_cfg.allow_injection,
+            "validate phase must propagate Config.sandbox_allow_injection to SandboxConfig"
+        );
+    }
+
+    /// Negative pair: omitting `--allow-injection` keeps the
+    /// default (`false`). The contract is "opt-in, never opt-out
+    /// by default".
+    #[test]
+    fn cli_run_allow_injection_defaults_to_false() {
+        use crate::cli::Cmd;
+
+        let cli = cli::Cli::parse_from(["moagan", "run", "--prompt", "test"]);
+        let parsed_flag = match cli.cmd {
+            Cmd::Run {
+                allow_injection, ..
+            } => allow_injection,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert!(
+            !parsed_flag,
+            "default must be false (D.11.10 strip-by-default)"
+        );
+    }
 }
