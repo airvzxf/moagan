@@ -15,6 +15,7 @@
 //! [`allowlist`] for the command policy.
 
 pub mod allowlist;
+pub mod cgroup;
 pub mod policy;
 pub mod process;
 pub mod seccomp;
@@ -22,6 +23,7 @@ pub mod seccomp;
 pub use allowlist::{
     Allowlist, DEFAULT_ALLOWLIST, DEFAULT_DENYLIST, Denylist, contains_deny_token, is_allowed,
 };
+pub use cgroup::{CgroupBackend, CgroupLimits, apply as apply_cgroup, cgroup_v2_available};
 pub use policy::NetworkPolicy;
 pub use process::{
     COMMAND_CONFIGS, Command, CommandConfig, MoaSandbox, Sandbox, SandboxConfig, SandboxError,

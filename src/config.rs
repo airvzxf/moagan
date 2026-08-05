@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::sandbox::{NetworkPolicy, SeccompPolicyKind};
+use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
 
 /// Top-level configuration record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +127,18 @@ pub struct Config {
     /// subprocess is filtered.
     #[serde(default)]
     pub sandbox_seccomp: SeccompPolicyKind,
+    /// Track E (catalog §D.11.1): opt-in cgroup v2 resource
+    /// isolation for the sandbox subprocess. `None` means no
+    /// kernel-level resource cap (the default so existing runs are
+    /// unaffected). Operators opt in via
+    /// `MOAGAN_SANDBOX_CGROUP=enabled` (with the canonical default
+    /// profile) or by setting `sandbox_cgroup = { cpu_max = "...",
+    /// memory_max_bytes = ..., pids_max = ... }` in
+    /// `~/.config/moagan/config.toml`. The sandbox creates the
+    /// child cgroup in its `pre_exec` hook; when cgroup v2 is
+    /// unavailable it falls back to per-process `libc::prlimit`.
+    #[serde(default)]
+    pub sandbox_cgroup: Option<CgroupLimits>,
 }
 
 fn default_startup_reconcile() -> bool {
@@ -333,6 +345,7 @@ impl Default for Config {
             sandbox_network_policy: NetworkPolicy::default(),
             sandbox_allow_injection: false,
             sandbox_seccomp: SeccompPolicyKind::default(),
+            sandbox_cgroup: None,
         }
     }
 }
@@ -702,7 +715,34 @@ impl Config {
         {
             self.sandbox_seccomp = kind;
         }
+        if let Ok(v) = std::env::var("MOAGAN_SANDBOX_CGROUP") {
+            // Catalog §D.11.1. The env var accepts:
+            // - `enabled` / `1` / `true` / `on` → opt in with the
+            //   canonical default profile.
+            // - a JSON object with `cpu_max` / `memory_max_bytes` /
+            //   `pids_max` → opt in with a custom profile.
+            // - anything else (including empty / whitespace) → leave
+            //   the existing knob alone so a stale export does not
+            //   silently flip the default.
+            let normalised = v.trim();
+            if matches!(
+                normalised.to_ascii_lowercase().as_str(),
+                "enabled" | "1" | "true" | "yes" | "on"
+            ) {
+                self.sandbox_cgroup = Some(CgroupLimits::default());
+            } else if let Some(limits) = parse_cgroup_limits_env(normalised) {
+                self.sandbox_cgroup = Some(limits);
+            }
+        }
     }
+}
+
+/// Parse the `MOAGAN_SANDBOX_CGROUP` env var (when it does not look
+/// like a truthy flag) into a [`CgroupLimits`] profile. Returns
+/// `None` for any value that does not parse; the caller is
+/// expected to leave the existing knob alone in that case.
+fn parse_cgroup_limits_env(s: &str) -> Option<CgroupLimits> {
+    serde_json::from_str::<CgroupLimits>(s).ok()
 }
 
 /// Parse the `MOAGAN_SANDBOX_SECCOMP` env var into a
@@ -1462,6 +1502,142 @@ mod tests {
             matches!(back.sandbox_seccomp, SeccompPolicyKind::StrictRustBuild),
             "TOML round-trip must preserve StrictRustBuild, got {:?}",
             back.sandbox_seccomp
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // D.11.1 — cgroup v2 + prlimit fallback tests.
+    //
+    // Each test below covers one of the env-override / TOML wire
+    // contracts spelled out in the PR-B.1 spec. The default value
+    // test is synchronous so it runs even when the tokio runtime is
+    // unavailable; the env-var / TOML round-trip tests acquire
+    // `TEST_ENV_LOCK` so they cannot race each other on the same
+    // `MOAGAN_SANDBOX_CGROUP` variable.
+    // ----------------------------------------------------------------
+
+    /// Catalog §D.11.1: the default value of `sandbox_cgroup` is
+    /// `None` (no kernel-level resource cap) so the default install
+    /// is unaffected by this PR. Pin the default so a refactor that
+    /// flips it trips the test before it lands in production.
+    #[test]
+    fn config_sandbox_cgroup_default_is_none() {
+        let cfg = Config::default();
+        assert!(
+            cfg.sandbox_cgroup.is_none(),
+            "sandbox_cgroup must default to None (D.11.1 off-by-default), got {:?}",
+            cfg.sandbox_cgroup
+        );
+    }
+
+    /// Catalog §D.11.1: `MOAGAN_SANDBOX_CGROUP=enabled` flips the
+    /// knob to `Some(CgroupLimits::default())` so operators can opt
+    /// in without editing `config.toml`. Locked against the JSON /
+    /// garbage tests below because they all mutate the same env var.
+    #[test]
+    fn config_env_var_cgroup_enabled_overrides_default() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_CGROUP", "enabled");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_CGROUP");
+        }
+        assert!(
+            cfg.sandbox_cgroup.is_some(),
+            "MOAGAN_SANDBOX_CGROUP=enabled must opt in, got {:?}",
+            cfg.sandbox_cgroup
+        );
+        let limits = cfg.sandbox_cgroup.expect("Some after opt-in");
+        assert_eq!(limits.cpu_max.as_deref(), Some("100000 100000"));
+        assert_eq!(limits.memory_max_bytes, Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(limits.pids_max, Some(512));
+    }
+
+    /// Catalog §D.11.1: truthy aliases (`1` / `true` / `yes` / `on`)
+    /// all opt in. Pin the parser contract so a refactor that
+    /// tightens it surfaces as a test failure.
+    #[test]
+    fn config_env_var_cgroup_truthy_aliases_opt_in() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            unsafe {
+                std::env::set_var("MOAGAN_SANDBOX_CGROUP", value);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert!(
+                cfg.sandbox_cgroup.is_some(),
+                "MOAGAN_SANDBOX_CGROUP={value} must opt in, got {:?}",
+                cfg.sandbox_cgroup
+            );
+        }
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_CGROUP");
+        }
+    }
+
+    /// Catalog §D.11.1: the env var also accepts a JSON object so
+    /// operators can scope the limits without editing `config.toml`.
+    #[test]
+    fn config_env_var_cgroup_json_overrides_default() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let json = r#"{"cpu_max":"50000 100000","memory_max_bytes":1073741824,"pids_max":64}"#;
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_CGROUP", json);
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_CGROUP");
+        }
+        let limits = cfg.sandbox_cgroup.expect("Some after JSON opt-in");
+        assert_eq!(limits.cpu_max.as_deref(), Some("50000 100000"));
+        assert_eq!(limits.memory_max_bytes, Some(1_073_741_824));
+        assert_eq!(limits.pids_max, Some(64));
+    }
+
+    /// Catalog §D.11.1: garbage / whitespace env values are ignored
+    /// so a stale / malformed export does not silently flip the
+    /// default.
+    #[test]
+    fn config_env_var_cgroup_garbage_is_ignored() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_CGROUP", "   ");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_CGROUP");
+        }
+        assert!(
+            cfg.sandbox_cgroup.is_none(),
+            "garbage env must not flip the default None, got {:?}",
+            cfg.sandbox_cgroup
+        );
+    }
+
+    /// Catalog §D.11.1: TOML round-trip preserves `sandbox_cgroup`
+    /// so operators can pin their choice in
+    /// `~/.config/moagan/config.toml`.
+    #[test]
+    fn config_sandbox_cgroup_toml_round_trip() {
+        let cfg = Config {
+            sandbox_cgroup: Some(CgroupLimits {
+                cpu_max: Some("25000 100000".into()),
+                memory_max_bytes: Some(512 * 1024 * 1024),
+                pids_max: Some(64),
+            }),
+            ..Config::default()
+        };
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            back.sandbox_cgroup, cfg.sandbox_cgroup,
+            "TOML round-trip must preserve sandbox_cgroup"
         );
     }
 }

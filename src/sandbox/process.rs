@@ -32,6 +32,7 @@ use crate::error::{Error, Result};
 use crate::redact::{RedactPolicy, Surface, apply};
 
 use super::allowlist::{Allowlist, Denylist, contains_deny_token, is_allowed};
+use super::cgroup::{self, CgroupLimits};
 use super::policy::NetworkPolicy;
 use super::seccomp::{self, SeccompPolicyKind};
 
@@ -248,6 +249,17 @@ pub struct SandboxConfig {
     /// `sandbox_seccomp = "strict_rust_build"` in
     /// `~/.config/moagan/config.toml`.
     pub seccomp: SeccompPolicyKind,
+    /// Opt-in cgroup v2 resource limits applied to the subprocess
+    /// in its `pre_exec` hook. Catalog §D.11.1. `None` means no
+    /// kernel-level resource cap; existing runs are unaffected.
+    /// Operators opt in via `MOAGAN_SANDBOX_CGROUP=enabled` (with
+    /// the canonical default profile) or by setting
+    /// `sandbox_cgroup = { cpu_max = "...",
+    /// memory_max_bytes = ..., pids_max = ... }` in
+    /// `~/.config/moagan/config.toml`. When cgroup v2 is
+    /// unavailable the sandbox falls back to per-process
+    /// `libc::prlimit`; on non-Unix hosts the knob is a no-op.
+    pub cgroup: Option<CgroupLimits>,
 }
 
 impl SandboxConfig {
@@ -265,6 +277,7 @@ impl SandboxConfig {
             network_policy: NetworkPolicy::Off,
             allow_injection: false,
             seccomp: SeccompPolicyKind::Permissive,
+            cgroup: None,
         }
     }
 
@@ -362,6 +375,30 @@ impl SandboxConfig {
     /// Rust from scratch.
     pub fn with_seccomp(mut self, kind: SeccompPolicyKind) -> Self {
         self.seccomp = kind;
+        self
+    }
+
+    /// Opt in to cgroup v2 resource limits with a custom
+    /// [`CgroupLimits`] profile. Catalog §D.11.1. `None` removes
+    /// the cap (the default). When the kernel does not expose
+    /// cgroup v2, the sandbox falls back to `libc::prlimit`; on
+    /// non-Unix hosts the knob is a no-op. Use [`Self::with_cgroup`]
+    /// to opt in with the default profile; use
+    /// [`Self::with_cgroup_limits`] for a custom one.
+    pub fn with_cgroup(mut self, enable: bool) -> Self {
+        self.cgroup = if enable {
+            Some(CgroupLimits::default())
+        } else {
+            None
+        };
+        self
+    }
+
+    /// Replace the [`CgroupLimits`] profile. Pass `None` to disable
+    /// cgroup enforcement; pass `Some(limits)` to opt in with a
+    /// custom `cpu_max` / `memory_max_bytes` / `pids_max` triple.
+    pub fn with_cgroup_limits(mut self, limits: Option<CgroupLimits>) -> Self {
+        self.cgroup = limits;
         self
     }
 
@@ -1162,6 +1199,48 @@ impl Sandbox {
             let _ = unsafe {
                 command.pre_exec(move || -> std::result::Result<(), std::io::Error> {
                     seccomp::apply(kind).map_err(|error| std::io::Error::other(error.to_string()))
+                })
+            };
+        }
+
+        // Catalog §D.11.1: apply cgroup v2 / prlimit resource limits
+        // in the child between fork and exec. The hook is a no-op
+        // when `SandboxConfig::cgroup` is `None` (the default), so
+        // existing runs are unaffected. When the kernel has cgroup
+        // v2, `apply` creates a child cgroup scoped to the run,
+        // writes the configured limits, and moves the PID into it.
+        // When cgroup v2 is unavailable, the hook falls back to
+        // `libc::prlimit` on the child. The chosen backend is
+        // logged via `tracing::info!` for observability; a failure
+        // is logged at warn and the run proceeds without limits
+        // (`kill_on_drop` remains the backstop cleanup).
+        #[cfg(unix)]
+        if let Some(limits) = self.config.cgroup.clone() {
+            // SAFETY: `pre_exec` runs in the child between fork and
+            // exec. A non-zero return surfaces as `Err` and aborts
+            // the spawn, but we swallow it because cgroup setup is
+            // best-effort by design (the parent must not break on a
+            // kernel that does not expose the controller).
+            let _ = unsafe {
+                command.pre_exec(move || -> std::result::Result<(), std::io::Error> {
+                    match cgroup::apply(&limits) {
+                        Ok(backend) => {
+                            tracing::info!(
+                                sandbox = "moa",
+                                backend = %backend,
+                                "applied sandbox resource limits",
+                            );
+                            Ok(())
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                sandbox = "moa",
+                                error = %error,
+                                "sandbox resource limits failed; proceeding without caps",
+                            );
+                            Ok(())
+                        }
+                    }
                 })
             };
         }
