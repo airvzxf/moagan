@@ -25,8 +25,9 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
-use crate::cancel::Cancel;
+use crate::cancel::{Cancel, HARD_KILL_GRACE};
 use crate::error::{Error, Result};
 use crate::redact::{RedactPolicy, Surface, apply};
 
@@ -608,6 +609,86 @@ impl Drop for RegisteredChild<'_> {
     }
 }
 
+/// Watchdog that kills a process tree on timeout or cancellation.
+///
+/// `kill_on_drop` on `tokio::process::Command` only kills the immediate
+/// child PID, leaving grandchildren (e.g. `cargo` → `rustc` → `linker`,
+/// `tsc` → helper processes) as zombies after the parent dies. The
+/// watchdog closes that gap: it relies on `setpgid(0, 0)` in the
+/// sandbox's `pre_exec` so the spawned child forms its own process
+/// group, and on `timeout`/`cancel` it sends `SIGTERM` to the whole
+/// group, waits [`Self::grace`], then falls back to `SIGKILL`.
+///
+/// Catalog §D.11.11.
+#[allow(dead_code)]
+pub struct Watchdog {
+    /// Process-group id to signal. Mirrors the watchdog's `killpg`
+    /// target.
+    pub pgid: i32,
+    /// Wall-clock deadline before the watchdog fires `SIGTERM`.
+    pub timeout: Duration,
+    /// Grace window between `SIGTERM` and `SIGKILL`.
+    pub grace: Duration,
+    /// Cooperative cancel token. Cancelling wakes the watchdog from
+    /// its initial sleep.
+    pub cancel: CancellationToken,
+}
+
+impl Watchdog {
+    /// Spawn a watchdog task that watches `pgid`. The returned
+    /// `JoinHandle` resolves after the task has finished its
+    /// `SIGTERM` + grace + `SIGKILL` sequence on the natural-completion
+    /// path; on the timeout path it fires `SIGTERM` at `timeout` and
+    /// `SIGKILL` at `timeout + grace`.
+    ///
+    /// The `cancel` token wakes the task from its initial sleep:
+    /// cancelling it is the caller's signal that the child has already
+    /// exited and the watchdog is no longer needed. The task still
+    /// runs the `SIGTERM` + grace + `SIGKILL` sequence so that any
+    /// orphaned grandchildren (the original motivation for D.11.11)
+    /// are still reaped.
+    ///
+    /// On Unix the watchdog fires `libc::killpg(-pgid, SIGTERM)` then
+    /// `libc::killpg(-pgid, SIGKILL)`. Missing groups yield `ESRCH`
+    /// which is ignored, so the natural-completion path is silent.
+    /// On non-Unix platforms the watchdog is a documented no-op: the
+    /// spawned task completes immediately and `kill_on_drop` remains
+    /// the cleanup guarantee.
+    ///
+    /// The spawned task is parented to `cancel` (AGENTS.md §"No-go
+    /// list": no `tokio::spawn` without a `JoinHandle` recorded or a
+    /// `CancellationToken` parent). The `JoinHandle` returned here
+    /// satisfies the recorded-handle alternative; callers may drop it
+    /// to detach the task once `cancel` has been signalled.
+    pub fn spawn(
+        pgid: i32,
+        timeout: Duration,
+        grace: Duration,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        #[cfg(unix)]
+        {
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(timeout) => {}
+                    _ = cancel.cancelled() => {}
+                }
+                // SAFETY: `killpg` is safe to call from any thread; a
+                // missing group yields `ESRCH` which we ignore so the
+                // natural-completion path stays silent.
+                let _ = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
+                tokio::time::sleep(grace).await;
+                let _ = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (pgid, timeout, grace, cancel);
+            tokio::spawn(async move {})
+        }
+    }
+}
+
 impl Sandbox {
     /// Build a new sandbox with the supplied configuration.
     pub fn new(config: SandboxConfig) -> Result<Self> {
@@ -1065,14 +1146,12 @@ impl Sandbox {
         // drop from orchestrator shutdown). The guard is the single
         // source of truth for unregistration — no call site duplicates
         // it, so the cancel registry cannot leak.
-        let _pgid_guard: Option<RegisteredChild<'_>> = match (&self.cancel, child.id()) {
-            (Some(cancel), Some(pid)) => match i32::try_from(pid) {
-                Ok(pgid) => {
-                    cancel.register_child(pgid);
-                    Some(RegisteredChild { cancel, pgid })
-                }
-                Err(_) => None,
-            },
+        let pgid: Option<i32> = child.id().and_then(|pid| i32::try_from(pid).ok());
+        let _pgid_guard: Option<RegisteredChild<'_>> = match (&self.cancel, pgid) {
+            (Some(cancel), Some(pgid)) => {
+                cancel.register_child(pgid);
+                Some(RegisteredChild { cancel, pgid })
+            }
             _ => None,
         };
 
@@ -1107,6 +1186,24 @@ impl Sandbox {
             ));
         }
         let remaining = effective_timeout.saturating_sub(started.elapsed());
+
+        // Spawn the Watchdog when the child is in its own process group
+        // (i.e. a `Cancel` handle is attached, so `setpgid(0, 0)` ran in
+        // `pre_exec`). The watchdog's `select!` resolves on the first of
+        // `timeout` (the wall-clock deadline) or `cancel` (the child
+        // exited, signalled by the cancel below). Either way it fires
+        // `SIGTERM` at the pgid, waits `grace`, then `SIGKILL`. The
+        // natural-completion path's `SIGTERM` lands on a defunct pgid
+        // and yields `ESRCH` (no-op). Catalog §D.11.11.
+        let watchdog_token = CancellationToken::new();
+        let _watchdog_handle = if self.cancel.is_some() {
+            pgid.map(|pgid| {
+                Watchdog::spawn(pgid, remaining, HARD_KILL_GRACE, watchdog_token.clone())
+            })
+        } else {
+            None
+        };
+
         let deadline = time::sleep(remaining);
         tokio::pin!(deadline);
         let mut events_open = true;
@@ -1138,13 +1235,15 @@ impl Sandbox {
             }
         };
 
-        // Every exit branch (natural, error, timeout, output-truncated)
-        // converges here. The `RegisteredChild` guard's `Drop` impl
-        // unregisters the pgid from the cancel registry as the stack
-        // unwinds — including the case where the caller drops the
-        // future mid-flight. The guard, not the call sites, is the
-        // source of truth for unregistration.
+        // Cancellation synchronisation point: the child has exited on
+        // every branch (natural, error, timeout, output-truncated).
+        // Cancelling the watchdog's token wakes its task from the
+        // initial sleep so it does not sit on a stale timer, and the
+        // watchdog's `SIGTERM` + grace + `SIGKILL` sequence reaps any
+        // orphaned grandchildren (the original D.11.11 motivation).
+        watchdog_token.cancel();
         drop(_pgid_guard);
+        drop(_watchdog_handle);
 
         let stdout_result = await_reader(stdout_handle).await;
         let stderr_result = await_reader(stderr_handle).await;
@@ -1958,5 +2057,229 @@ mod tests {
         let cmd = Command::new(binary, &[]);
         let hosts = extract_hosts(&cmd);
         assert_eq!(hosts, vec!["host.example.com".to_owned()]);
+    }
+
+    // ----------------------------------------------------------------
+    // D.11.11 — Watchdog kills process tree on timeout / cancel.
+    //
+    // Each test below covers one of the acceptance criteria spelled
+    // out in the PR-F spec. The Unix-only tests use `spawn_in_new_pgid`
+    // to put the child in its own process group (mirroring the
+    // sandbox's `pre_exec` `setpgid(0, 0)`) so the watchdog's `killpg`
+    // targets the right group. The non-unix test is gated
+    // `#[cfg(not(unix))]` and asserts the documented no-op behavior.
+    // ----------------------------------------------------------------
+
+    /// Spawn `binary args` in a fresh process group by setting
+    /// `setpgid(0, 0)` in `pre_exec`. Mirrors the sandbox's `pre_exec`
+    /// hook so the watchdog's `killpg(-pgid, ...)` reaches the whole
+    /// subtree. Unix-only.
+    #[cfg(unix)]
+    fn spawn_in_new_pgid(binary: &str, args: &[&str]) -> tokio::process::Child {
+        let mut cmd = TokioCommand::new(binary);
+        cmd.args(args);
+        // SAFETY: `pre_exec` runs in the child between fork and exec.
+        // `setpgid(0, 0)` only mutates the child's own process-group
+        // membership; a non-zero return surfaces as `Err` and aborts
+        // the spawn.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        cmd.spawn().expect("spawn in new pgid")
+    }
+
+    /// D.11.11: the watchdog must fire `SIGTERM` at the supplied pgid
+    /// when the timeout elapses. The test spawns a `sleep` in a fresh
+    /// pgid, hands the watchdog that pgid, and asserts the child is
+    /// terminated by a signal (exit code `None` under tokio's wait).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watchdog_spawns_with_correct_pgid() {
+        let mut child = spawn_in_new_pgid("sh", &["-c", "sleep 60"]);
+        let pid = child.id().expect("child pid") as i32;
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        let _handle = Watchdog::spawn(
+            pid,
+            Duration::from_millis(200),
+            Duration::from_millis(100),
+            cancel.clone(),
+        );
+        let status = child.wait().await.expect("child wait");
+        let elapsed = started.elapsed();
+        // The watchdog killed the child via SIGTERM. `tokio::process::Child::wait`
+        // surfaces `code() == None` when the kernel reports a
+        // signal-terminated process.
+        assert!(
+            status.code().is_none(),
+            "child must be signal-terminated, got code {:?}",
+            status.code()
+        );
+        // The kill must not happen before the timeout (the watchdog's
+        // `select!` resolves on `timeout`, not immediately).
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "must wait at least the timeout, got {elapsed:?}"
+        );
+        // And it should not take much longer than timeout + grace.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "must kill within timeout + grace, got {elapsed:?}"
+        );
+    }
+
+    /// D.11.11: the watchdog must kill the whole process tree, not
+    /// just the immediate child. The test spawns a shell that spawns a
+    /// `sleep` grandchild and waits; the watchdog's `killpg` must
+    /// terminate the shell. The grandchild is reaped as a side effect
+    /// of the parent shell's death (and by the SIGKILL fallback).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watchdog_kills_pgid_on_timeout() {
+        let mut child = spawn_in_new_pgid("sh", &["-c", "sleep 60 & wait"]);
+        let pid = child.id().expect("child pid") as i32;
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        let _handle = Watchdog::spawn(
+            pid,
+            Duration::from_millis(500),
+            Duration::from_millis(200),
+            cancel.clone(),
+        );
+        let status = child.wait().await.expect("child wait");
+        let elapsed = started.elapsed();
+        assert!(
+            status.code().is_none(),
+            "whole tree must be signal-terminated, got code {:?}",
+            status.code()
+        );
+        // Total elapsed must be at least the timeout (the watchdog did
+        // not fire prematurely) and bounded by timeout + grace + slack.
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "must wait at least timeout, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "must kill within timeout + grace, got {elapsed:?}"
+        );
+    }
+
+    /// D.11.11: when the child exits naturally before the watchdog's
+    /// timeout fires, the watchdog must not leave any unrelated process
+    /// behind. The test cancels the watchdog's token (the sandbox does
+    /// this on every exit branch) and verifies that the watchdog's
+    /// `SIGTERM` + grace + `SIGKILL` sequence is harmless because the
+    /// pgid is already gone. Concretely: the join handle completes
+    /// without panic, and a witness process in a separate pgid is
+    /// untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watchdog_does_not_kill_when_child_exits_normally() {
+        let mut child = spawn_in_new_pgid("true", &[]);
+        let pid = child.id().expect("child pid") as i32;
+        let status = child.wait().await.expect("child wait");
+        assert!(status.success(), "`true` exits 0, got {status:?}");
+
+        // Spawn a witness in its own pgid. The watchdog's SIGTERM must
+        // not reach it because the watchdog only knows the dead
+        // child's pgid.
+        let mut witness = spawn_in_new_pgid("sleep", &["3"]);
+        let witness_pid = witness.id().expect("witness pid") as i32;
+
+        let cancel = CancellationToken::new();
+        let handle = Watchdog::spawn(
+            pid,
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            cancel.clone(),
+        );
+        cancel.cancel();
+        handle.await.expect("watchdog completes");
+
+        // The witness must still be alive. `kill(pid, 0)` returns 0 if
+        // the process exists. SAFETY: `kill` with signal 0 is a
+        // pure-existence probe.
+        let alive = unsafe { libc::kill(witness_pid as libc::pid_t, 0) } == 0;
+        assert!(
+            alive,
+            "witness must be alive after the watchdog's cancel path"
+        );
+
+        // Clean up the witness so the test does not leak a sleep.
+        let _ = witness.kill().await;
+        let _ = witness.wait().await;
+    }
+
+    /// D.11.11: the watchdog must wait the configured grace period
+    /// between SIGTERM and SIGKILL. The test spawns a shell that
+    /// ignores SIGTERM (via `trap '' TERM`) and loops forever, so the
+    /// only thing that can kill it is the watchdog's SIGKILL. The
+    /// elapsed time from watchdog spawn to child death must therefore
+    /// be approximately `timeout + grace`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watchdog_respects_grace_period_before_sigkill() {
+        let mut child = spawn_in_new_pgid("sh", &["-c", "trap '' TERM; while :; do sleep 1; done"]);
+        let pid = child.id().expect("child pid") as i32;
+        let grace = Duration::from_millis(500);
+        let timeout = Duration::from_millis(200);
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        let _handle = Watchdog::spawn(pid, timeout, grace, cancel.clone());
+        let status = child.wait().await.expect("child wait");
+        let elapsed = started.elapsed();
+        // The shell ignores SIGTERM (`trap '' TERM`), so the SIGTERM
+        // is a no-op and the watchdog's SIGKILL is what kills it.
+        // Expected elapsed: timeout + grace (with scheduler jitter).
+        let lower = timeout
+            .checked_add(grace)
+            .unwrap()
+            .saturating_sub(Duration::from_millis(100));
+        let upper = timeout
+            .checked_add(grace)
+            .unwrap()
+            .saturating_add(Duration::from_secs(3));
+        assert!(
+            elapsed >= lower,
+            "elapsed must be >= timeout + grace - 100ms, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < upper,
+            "elapsed must be < timeout + grace + 3s, got {elapsed:?}"
+        );
+        assert!(
+            status.code().is_none(),
+            "child must be signal-killed, got code {:?}",
+            status.code()
+        );
+    }
+
+    /// D.11.11: the watchdog is a documented no-op on non-Unix
+    /// platforms. The spawned task completes immediately without
+    /// touching any process tree; `kill_on_drop` remains the cleanup
+    /// guarantee on Windows.
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn watchdog_is_noop_on_non_unix() {
+        let cancel = CancellationToken::new();
+        let handle = Watchdog::spawn(
+            12345,
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+            cancel.clone(),
+        );
+        // The handle must complete without panic and within a small
+        // budget so the test does not hang.
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("watchdog handle completes within 1s")
+            .expect("watchdog handle does not panic");
     }
 }
