@@ -514,7 +514,7 @@ mod summary {
     }
 }
 
-mod compare {
+pub(crate) mod compare {
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::{Db, RunAggregate, RunRow};
@@ -567,7 +567,16 @@ mod compare {
         Ok(())
     }
 
-    fn print_side_by_side(a: &RunRow, agg_a: &RunAggregate, b: &RunRow, agg_b: &RunAggregate) {
+    /// Side-by-side summary used by both `moagan telemetry compare`
+    /// and `moagan diff` (D.14.2). Exposed at `pub(crate)` so the
+    /// top-level `diff` module can reuse the rendering without
+    /// duplicating the columnar printer.
+    pub(crate) fn print_side_by_side(
+        a: &RunRow,
+        agg_a: &RunAggregate,
+        b: &RunRow,
+        agg_b: &RunAggregate,
+    ) {
         let id_a = short(&a.run_id);
         let id_b = short(&b.run_id);
         println!("{:<22}  {:<30}  {:<30}", "", id_a, id_b);
@@ -586,7 +595,11 @@ mod compare {
         );
     }
 
-    fn print_diff(label: &str, a: i64, b: i64) {
+    /// One row of `(a, b, b - a)` for the eleven baseline metrics the
+    /// `compare` subcommand emits. Exposed at `pub(crate)` so `diff`
+    /// can extend the list with filesystem-aware metrics without
+    /// duplicating the formatter.
+    pub(crate) fn print_diff(label: &str, a: i64, b: i64) {
         let delta = b - a;
         let sign = if delta > 0 { "+" } else { "" };
         println!(

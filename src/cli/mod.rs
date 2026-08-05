@@ -15,6 +15,7 @@ use crate::storage::sqlite::Db;
 
 pub mod audit;
 pub mod continue_cmd;
+pub mod diff;
 pub mod discover;
 pub mod doctor;
 pub mod forbidden;
@@ -353,6 +354,27 @@ pub enum Cmd {
         #[arg(long)]
         mode: Option<Mode>,
     },
+    /// `moagan diff <run_a> <run_b>` — cross-run comparison (D.14.2).
+    /// Wraps `telemetry compare` with filesystem-aware metrics
+    /// (proposals / evaluations / phases_visited / ranking delta)
+    /// and three output formats (`text`, `md`, `json`). Useful for
+    /// `continue` + original or two reruns under different modes
+    /// without opening SQLite by hand.
+    Diff {
+        /// First run id (UUID v7).
+        #[arg(value_name = "RUN_A")]
+        run_a: String,
+        /// Second run id (UUID v7).
+        #[arg(value_name = "RUN_B")]
+        run_b: String,
+        /// Output format. Defaults to `text` when omitted.
+        #[arg(long, value_enum)]
+        format: Option<diff::DiffFormat>,
+        /// Emit per-proposal breakdown for the ranking delta.
+        /// Defaults to a one-line summary without it.
+        #[arg(long, default_value_t = false)]
+        include_proposals: bool,
+    },
     /// Check the local environment (API key, writability).
     Doctor,
     /// External, transparent HTTP recorder and verifier. The
@@ -477,6 +499,7 @@ impl Cmd {
             Self::Discover { .. } => "Discovery mode (knowledge base by category)",
             Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
             Self::Validate { .. } => "Validate a brief without running the pipeline",
+            Self::Diff { .. } => "Compare two runs side-by-side (params, artefacts, scores)",
         }
     }
 }
@@ -805,5 +828,16 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         Cmd::Validate { brief_path, mode } => {
             validate::run(validate::ValidateArgs { brief_path, mode })
         }
+        Cmd::Diff {
+            run_a,
+            run_b,
+            format,
+            include_proposals,
+        } => diff::run(diff::DiffArgs {
+            run_a,
+            run_b,
+            format,
+            include_proposals,
+        }),
     }
 }
