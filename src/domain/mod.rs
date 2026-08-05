@@ -757,6 +757,30 @@ pub struct RationaleExtract {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the `Role::TiefighterCritic` role (D.7.1 catalog).
+///
+/// Carries the proposal the critic is attacking plus the structured
+/// adversarial findings. The critic is deterministic (T=0.0, top_p=0.1,
+/// max_tokens=2048), so two runs against the same input produce the
+/// same payload. `#[serde(default)]` keeps the validator accepting
+/// empty objects (the same contract as the other P-role types).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TiefighterCriticReport {
+    /// The proposal text the critic is attacking (echoed for
+    /// downstream phases that want to correlate critique -> source).
+    pub proposal: String,
+    /// Verdict headline (e.g. "weak", "mixed", "strong").
+    pub verdict: String,
+    /// Concrete weaknesses the critic surfaced, ordered by impact.
+    pub weaknesses: Vec<String>,
+    /// Concrete suggestions for closing the weaknesses.
+    pub suggestions: Vec<String>,
+    /// Per-evidence key -> excerpt pairs from the proposal.
+    pub evidence: Vec<String>,
+    /// Schema version.
+    pub schema_version: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.

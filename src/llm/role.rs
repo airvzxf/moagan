@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{
     AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, MergePlan, Proposal,
     RationaleExtract, RecoveryReport, Repair, Route, Sketch, SynthesizedProposal,
+    TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -87,6 +88,12 @@ pub enum Role {
     RecoveryExplainer,
     /// Optional rationale extraction role.
     RationaleExtractor,
+    /// TiefighterCritic — D.7.1 catalog role. Adversarial critic
+    /// that targets the weakest spot of a proposal. Deterministic
+    /// (`T=0.0, top_p=0.1, max_tokens=2048`) so two runs against the
+    /// same input produce the same critique. Opt-in: no phase calls
+    /// it automatically; callers wire it up explicitly.
+    TiefighterCritic,
 }
 
 impl Role {
@@ -114,6 +121,7 @@ impl Role {
             Self::MergeSynthesizer => "merge_synthesizer",
             Self::RecoveryExplainer => "recovery_explainer",
             Self::RationaleExtractor => "rationale_extractor",
+            Self::TiefighterCritic => "tiefighter_critic",
         }
     }
 
@@ -169,6 +177,9 @@ impl Role {
             }
             Self::RationaleExtractor => {
                 "RationaleExtractor: {rationale, evidence[], assumptions[]}"
+            }
+            Self::TiefighterCritic => {
+                "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=2048)"
             }
         }
     }
@@ -234,6 +245,9 @@ impl Role {
             Self::RationaleExtractor => {
                 serde_json::from_value::<RationaleExtract>(value.clone()).map(|_| ())
             }
+            Self::TiefighterCritic => {
+                serde_json::from_value::<TiefighterCriticReport>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -269,6 +283,7 @@ impl Role {
             Self::MergeSynthesizer,
             Self::RecoveryExplainer,
             Self::RationaleExtractor,
+            Self::TiefighterCritic,
         ]
     }
 }
@@ -305,6 +320,7 @@ impl FromStr for Role {
             "merge_synthesizer" => Ok(Self::MergeSynthesizer),
             "recovery_explainer" => Ok(Self::RecoveryExplainer),
             "rationale_extractor" => Ok(Self::RationaleExtractor),
+            "tiefighter_critic" => Ok(Self::TiefighterCritic),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -330,8 +346,12 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_one() {
-        assert_eq!(Role::all().len(), 21);
+    fn all_roles_are_count_twenty_two() {
+        // Track H batch-1: tiefighter_critic added (D.7.1 catalog,
+        // adversarial critic; T=0.0, top_p=0.1, max_tokens=2048).
+        // Two more catalog roles (persona_picker, angle_picker)
+        // land in subsequent commits of this batch.
+        assert_eq!(Role::all().len(), 22);
     }
 
     #[test]
@@ -347,6 +367,32 @@ mod tests {
     #[test]
     fn rationale_extractor_role_variant_exists() {
         assert_eq!(Role::RationaleExtractor.as_str(), "rationale_extractor");
+    }
+
+    #[test]
+    fn tiefighter_critic_round_trip() {
+        // The catalog uses lowercase snake_case on the wire; the
+        // round-trip through `FromStr` must preserve the variant.
+        let s = Role::TiefighterCritic.as_str();
+        assert_eq!(s, "tiefighter_critic");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::TiefighterCritic, back);
+    }
+
+    #[test]
+    fn tiefighter_critic_validate_json_accepts_valid_payload() {
+        // The D.7.1 catalog schema for this role is the proposal
+        // being criticized. `#[serde(default)]` on the domain type
+        // also makes {} acceptable (documented contract).
+        let raw = serde_json::json!({
+            "proposal": "Use a sharded ledger keyed by tenant id"
+        });
+        assert!(Role::TiefighterCritic.validate_json(&raw).is_ok());
+        assert!(
+            Role::TiefighterCritic
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -387,6 +433,7 @@ mod tests {
                     || desc.starts_with("MergeSynthesizer:")
                     || desc.starts_with("RecoveryExplainer:")
                     || desc.starts_with("RationaleExtractor:")
+                    || desc.starts_with("TiefighterCritic:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -451,5 +498,8 @@ mod tests {
         assert!(Role::MergeSynthesizer.validate_json(&empty).is_ok());
         assert!(Role::RecoveryExplainer.validate_json(&empty).is_ok());
         assert!(Role::RationaleExtractor.validate_json(&empty).is_ok());
+        // Track H batch-1: tiefighter_critic carries its own domain
+        // type with `#[serde(default)]`, so {} parses cleanly.
+        assert!(Role::TiefighterCritic.validate_json(&empty).is_ok());
     }
 }
