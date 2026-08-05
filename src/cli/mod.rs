@@ -831,7 +831,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     )
                 })?;
                 let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-                let code = pause_cmd::run_continue_from_pause(&global_home, parsed)?;
+                let code = pause_cmd::run_continue_from_pause(&global_home, parsed).await?;
                 return Ok(code);
             }
             let id = run_id.ok_or_else(|| {
@@ -1066,7 +1066,14 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run_id}': {e}")))?;
-            let code = pause_cmd::run_pause(&global_home, pause_cmd::PauseArgs { run_id: parsed })?;
+            let code = pause_cmd::run_pause(
+                &global_home,
+                pause_cmd::PauseArgs {
+                    run_id: parsed,
+                    phase: None,
+                    completed: None,
+                },
+            )?;
             Ok(code)
         }
         Cmd::List { paused } => {

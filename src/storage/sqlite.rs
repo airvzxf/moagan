@@ -1092,6 +1092,22 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Track K.2 (resume from persisted phase): true when the run
+    /// has a row in the `runs` table. `moagan pause` uses this to
+    /// decide between "derive state from the live SQLite index"
+    /// and "fall back to the legacy hard-coded list" (the latter
+    /// for runs that were paused before `db.register_run(...)`
+    /// had a chance to commit).
+    pub fn has_run(&self, run_id: RunId) -> Result<bool> {
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?",
+            params![run_id.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
 }
 
 /// Aggregated counters for a single run. Computed from the
