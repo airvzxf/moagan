@@ -34,6 +34,19 @@ pub mod validators;
 
 pub use error::{Error, ExitCode, Result, exit_code};
 
+/// Process-wide guard for tests that mutate the `MOAGAN_HOME`
+/// env var. Two tests running in parallel that both set
+/// `MOAGAN_HOME` can interleave with each other under the OS
+/// scheduler and end up reading each other's home directory,
+/// which surfaces as a `Provider("sqlite: duplicate column
+/// name: …")` panic when the second open of the same
+/// `meta.sqlite` re-applies a non-idempotent migration
+/// (v003, v005, v007). Every test that touches `MOAGAN_HOME`
+/// must acquire this lock for the duration of its env-var
+/// mutation + the dispatcher call that consumes it.
+#[cfg(test)]
+pub static TEST_MOAGAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;

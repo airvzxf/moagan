@@ -20,6 +20,7 @@ pub mod discover;
 pub mod doctor;
 pub mod forbidden;
 pub mod inspect;
+pub mod repair;
 pub mod run;
 pub mod telemetry_cmd;
 pub mod validate;
@@ -375,6 +376,42 @@ pub enum Cmd {
         #[arg(long, default_value_t = false)]
         include_proposals: bool,
     },
+    /// `moagan repair` — reconcile filesystem vs SQLite (D.14.3 +
+    /// D.28.1/3/4/5). Three orthogonal operations, each gated by
+    /// its own flag:
+    ///   --cleanup-orphans    D.28.3 — remove `*.tmp.<uuid>` and
+    ///                                stale `*.lock` files.
+    ///   --reindex-artifacts  D.28.5 — sync the per-kind artefact
+    ///                                count cache.
+    ///   --recover-zombies    D.28.4 — mark stale `running` runs
+    ///                                as `interrupted`.
+    /// At least one of the three is required. `--run <id>` scopes
+    /// every operation to a single run; without it, the dispatch
+    /// walks every run in the SQLite index. `--dry-run` prints the
+    /// plan without touching disk or SQLite. `--yes` confirms a
+    /// destructive plan; without it, a non-empty plan returns
+    /// `Error::NeedsInput` (exit 10).
+    Repair {
+        /// D.28.3: clean `*.tmp.<uuid>` and stale `*.lock` files.
+        #[arg(long, default_value_t = false)]
+        cleanup_orphans: bool,
+        /// D.28.5: reconcile the per-kind artefact count cache.
+        #[arg(long, default_value_t = false)]
+        reindex_artifacts: bool,
+        /// D.28.4: mark stale `running` runs as `interrupted`.
+        #[arg(long, default_value_t = false)]
+        recover_zombies: bool,
+        /// Confirm a destructive plan; without it the dispatcher
+        /// returns `Error::NeedsInput`.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+        /// Optional single-run scope (defaults to every run).
+        #[arg(long, value_name = "RUN_ID")]
+        run: Option<String>,
+        /// Print the plan without touching disk or SQLite.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
     /// Check the local environment (API key, writability).
     Doctor,
     /// External, transparent HTTP recorder and verifier. The
@@ -500,6 +537,7 @@ impl Cmd {
             Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
             Self::Validate { .. } => "Validate a brief without running the pipeline",
             Self::Diff { .. } => "Compare two runs side-by-side (params, artefacts, scores)",
+            Self::Repair { .. } => "Reconcile filesystem vs SQLite",
         }
     }
 }
@@ -839,5 +877,31 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             format,
             include_proposals,
         }),
+        Cmd::Repair {
+            cleanup_orphans,
+            reindex_artifacts,
+            recover_zombies,
+            yes,
+            run,
+            dry_run,
+        } => {
+            let parsed_run = match run.as_deref() {
+                None => None,
+                Some(raw) => Some(
+                    raw.parse::<crate::ids::RunId>()
+                        .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")))?,
+                ),
+            };
+            let code = repair::run(repair::RepairArgs {
+                cleanup_orphans,
+                reindex_artifacts,
+                recover_zombies,
+                yes,
+                run: parsed_run,
+                dry_run,
+                home_override: None,
+            })?;
+            Ok(code)
+        }
     }
 }

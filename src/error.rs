@@ -109,6 +109,13 @@ pub enum Error {
     /// Cancellation propagated.
     #[error(transparent)]
     Cancel(#[from] CancelSignal),
+
+    /// The dispatcher needs an explicit confirmation to proceed
+    /// (e.g. a destructive plan without `--yes`). Mirrors the
+    /// `ExitCode::NeedsInput` value so CI scripts can branch on
+    /// exit code 10.
+    #[error("needs input: {0}")]
+    NeedsInput(String),
 }
 
 impl Error {
@@ -131,6 +138,7 @@ impl Error {
             Self::MockExhausted => ErrorCode::NeedsInput,
             Self::Cache(_) => ErrorCode::Io,
             Self::Cancel(_) => ErrorCode::Cancelled,
+            Self::NeedsInput(_) => ErrorCode::NeedsInput,
         }
     }
 
@@ -146,6 +154,7 @@ impl Error {
             Self::Io(_) => ExitCode::IoError,
             Self::MockExhausted | Self::Provider(_) => ExitCode::ProviderError,
             Self::Cache(_) | Self::InvalidState(_) => ExitCode::ContextError,
+            Self::NeedsInput(_) => ExitCode::NeedsInput,
         }
     }
 
