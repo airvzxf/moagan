@@ -15,6 +15,10 @@
 //! of catalog 10-integrada-v0 §D.11. The remaining hardened variants
 //! (`cgroup`, `unshare`, `seccomp`) are still opt-in catalog overlays.
 
+#[path = "namespace.rs"]
+pub mod namespace;
+pub use namespace::NamespaceFlags;
+
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -202,6 +206,17 @@ pub fn verify_binary_exists(binary: &str) -> std::result::Result<(), SandboxErro
     Err(SandboxError::BinaryNotFound(binary.to_owned()))
 }
 
+fn namespace_result_or_warn(flags: NamespaceFlags, result: std::io::Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            sandbox = "moa",
+            namespaces = %flags,
+            error = %error,
+            "sandbox namespace isolation failed; proceeding without namespace isolation",
+        );
+    }
+}
+
 /// Compile-time configuration for the sandbox. Cheap to clone (every
 /// internal collection is small).
 #[derive(Debug, Clone)]
@@ -241,6 +256,12 @@ pub struct SandboxConfig {
     /// cases where the operator wants to see exactly what bytes were
     /// passed. Catalog §D.11.10.
     pub allow_injection: bool,
+    /// Opt-in Linux namespace isolation applied to the subprocess in
+    /// its `pre_exec` hook. Catalog §D.11.2. The empty default leaves
+    /// existing runs unchanged. Operators select mount, PID, network,
+    /// UTS, and IPC namespaces through `MOAGAN_SANDBOX_NAMESPACES` or
+    /// the `sandbox_namespaces` configuration field.
+    pub namespaces: NamespaceFlags,
     /// Opt-in seccomp syscall whitelist applied to the subprocess
     /// in its `pre_exec` hook. Catalog §D.11.7. Default
     /// [`SeccompPolicyKind::Permissive`] so the sandbox is
@@ -276,6 +297,7 @@ impl SandboxConfig {
             allow_network: false,
             network_policy: NetworkPolicy::Off,
             allow_injection: false,
+            namespaces: NamespaceFlags::empty(),
             seccomp: SeccompPolicyKind::Permissive,
             cgroup: None,
         }
@@ -364,6 +386,13 @@ impl SandboxConfig {
     /// subprocess verbatim. Catalog §D.11.10.
     pub fn with_allow_injection(mut self, allow: bool) -> Self {
         self.allow_injection = allow;
+        self
+    }
+
+    /// Replace the Linux namespaces applied before executing the child.
+    /// The empty set disables namespace isolation.
+    pub fn with_namespaces(mut self, namespaces: NamespaceFlags) -> Self {
+        self.namespaces = namespaces;
         self
     }
 
@@ -1177,6 +1206,20 @@ impl Sandbox {
             };
         }
 
+        #[cfg(unix)]
+        if !self.config.namespaces.is_empty() {
+            let flags = self.config.namespaces;
+            // SAFETY: `pre_exec` runs in the child between fork and
+            // exec. Namespace setup is best-effort: failures are logged
+            // and the child continues without namespace isolation.
+            let _ = unsafe {
+                command.pre_exec(move || {
+                    namespace_result_or_warn(flags, namespace::apply(flags));
+                    Ok(())
+                })
+            };
+        }
+
         // Catalog §D.11.7: install the seccomp BPF filter in the
         // child between fork and exec. `pre_exec` is a sync closure
         // that runs in the child, so this is the canonical place to
@@ -1586,6 +1629,20 @@ mod tests {
 
     fn sb() -> Sandbox {
         Sandbox::new(SandboxConfig::new()).expect("sandbox builds")
+    }
+
+    #[test]
+    fn namespace_apply_failure_logs_warning_does_not_panic() {
+        let result = std::panic::catch_unwind(|| {
+            namespace_result_or_warn(
+                NamespaceFlags::NET,
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "namespace unavailable",
+                )),
+            );
+        });
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

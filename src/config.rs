@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
 
 /// Top-level configuration record.
@@ -117,6 +118,13 @@ pub struct Config {
     /// runs `strip_secrets` over argv before spawning; when `true`,
     /// raw args are passed to the subprocess verbatim.
     pub sandbox_allow_injection: bool,
+    /// Track E (catalog §D.11.2): opt-in Linux namespace isolation
+    /// for sandbox subprocesses. Defaults to no namespaces so existing
+    /// runs are unaffected. Operators select a comma-separated list
+    /// through `MOAGAN_SANDBOX_NAMESPACES=mount,pid,net` or set
+    /// `sandbox_namespaces` in `config.toml`.
+    #[serde(default)]
+    pub sandbox_namespaces: NamespaceFlags,
     /// Track E (catalog §D.11.7): opt-in seccomp syscall whitelist
     /// for the sandbox subprocess. Default
     /// [`SeccompPolicyKind::Permissive`] (no-op). Operators opt in
@@ -344,6 +352,7 @@ impl Default for Config {
             sandbox_allow_network: false,
             sandbox_network_policy: NetworkPolicy::default(),
             sandbox_allow_injection: false,
+            sandbox_namespaces: NamespaceFlags::default(),
             sandbox_seccomp: SeccompPolicyKind::default(),
             sandbox_cgroup: None,
         }
@@ -709,6 +718,11 @@ impl Config {
             && let Some(policy) = parse_network_policy_env(&v)
         {
             self.sandbox_network_policy = policy;
+        }
+        if let Ok(v) = std::env::var("MOAGAN_SANDBOX_NAMESPACES")
+            && let Ok(flags) = v.parse()
+        {
+            self.sandbox_namespaces = flags;
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_SECCOMP")
             && let Some(kind) = parse_seccomp_policy_env(&v)
@@ -1401,6 +1415,28 @@ mod tests {
             ),
             other => panic!("expected AllowList after round-trip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn config_sandbox_namespaces_default_is_empty() {
+        assert!(Config::default().sandbox_namespaces.is_empty());
+    }
+
+    #[test]
+    fn config_env_var_sandbox_namespaces_parses_csv() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_NAMESPACES", "mount,pid,net");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_NAMESPACES");
+        }
+        assert_eq!(
+            cfg.sandbox_namespaces,
+            NamespaceFlags::MOUNT | NamespaceFlags::PID | NamespaceFlags::NET
+        );
     }
 
     /// Catalog §D.11.7: the default value of `sandbox_seccomp` is
