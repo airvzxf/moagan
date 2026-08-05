@@ -878,6 +878,33 @@ pub struct CandidateEntry {
     /// Approach the candidate is taking (mirrors `Proposal::approach`).
     pub approach: String,
 }
+/// Output of the `Role::JsonRepairV2` role (D.7.1 catalog).
+///
+/// Optional second-pass LLM call used when the local heuristic
+/// in `src/phases/util.rs::repair_m3_brackets` cannot turn a
+/// malformed model output into valid JSON. The repair is
+/// mechanical (T=0.0, top_p=0.5, max_tokens=1024), so two runs
+/// against the same malformed text must produce the same
+/// `repaired` payload. `#[serde(default)]` keeps the validator
+/// accepting empty objects.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JsonRepairV2Report {
+    /// Echo of the raw text that failed to parse (kept for audit
+    /// and snapshot tests).
+    pub malformed: String,
+    /// Role name whose shape we are repairing to. Must be one of
+    /// `Role::as_str()` (e.g. `propose`, `judge`).
+    pub target_schema: String,
+    /// Repaired JSON string the caller can hand back to
+    /// `serde_json::from_str` to deserialize into the target
+    /// schema's domain type.
+    pub repaired: String,
+    /// Short note describing the edits the repair made.
+    pub notes: String,
+    /// Schema version.
+    pub schema_version: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.

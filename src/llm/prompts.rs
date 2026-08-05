@@ -69,6 +69,17 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: 1536,
             json_mode: true,
         }),
+        // Track H batch-2 (commit 2): LLM re-call for malformed
+        // JSON. Deterministic (T=0.0) so re-runs against the same
+        // malformed text produce the same repair; top_p=0.5 leaves
+        // a small headroom for tokens the local heuristic cannot
+        // guess.
+        Role::JsonRepairV2 => Some(RoleSettings {
+            temperature: 0.0,
+            top_p: 0.5,
+            max_tokens: 1024,
+            json_mode: true,
+        }),
         _ => None,
     }
 }
@@ -99,6 +110,7 @@ const TIEFIGHTER_CRITIC_PROMPT: &str = include_str!("prompts/tiefighter_critic.m
 const PERSONA_PICKER_PROMPT: &str = include_str!("prompts/persona_picker.md");
 const ANGLE_PICKER_PROMPT: &str = include_str!("prompts/angle_picker.md");
 const FINAL_DISAGREEMENT_PROMPT: &str = include_str!("prompts/final_disagreement.md");
+const JSON_REPAIR_V2_PROMPT: &str = include_str!("prompts/json_repair_v2.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -134,6 +146,7 @@ pub fn prompt_set_hash() -> String {
                 PERSONA_PICKER_PROMPT,
                 ANGLE_PICKER_PROMPT,
                 FINAL_DISAGREEMENT_PROMPT,
+                JSON_REPAIR_V2_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -169,6 +182,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::PersonaPicker => PERSONA_PICKER_PROMPT,
         Role::AnglePicker => ANGLE_PICKER_PROMPT,
         Role::FinalDisagreement => FINAL_DISAGREEMENT_PROMPT,
+        Role::JsonRepairV2 => JSON_REPAIR_V2_PROMPT,
     }
 }
 
@@ -224,6 +238,14 @@ mod tests {
         // Track H batch-2: the D.7.1 catalog entry for the judge
         // tiebreaker ships with a real placeholder prompt.
         assert!(!FINAL_DISAGREEMENT_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn json_repair_v2_prompt_file_exists_and_is_non_empty() {
+        // Track H batch-2 (commit 2): the D.7.1 catalog entry for
+        // the LLM re-call on malformed JSON ships with a real
+        // placeholder prompt.
+        assert!(!JSON_REPAIR_V2_PROMPT.trim().is_empty());
     }
 
     #[test]

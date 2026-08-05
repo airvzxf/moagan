@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     AdversaryReport, AnglePickerReport, Brief, Critique, FinalDisagreementReport, FinalReport,
-    Intake, JudgeScore, MergePlan, PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport,
-    Repair, Route, Sketch, SynthesizedProposal, TiefighterCriticReport,
+    Intake, JsonRepairV2Report, JudgeScore, MergePlan, PersonaPickerReport, Proposal,
+    RationaleExtract, RecoveryReport, Repair, Route, Sketch, SynthesizedProposal,
+    TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -111,6 +112,15 @@ pub enum Role {
     /// temperature (`T=0.2, top_p=0.85, max_tokens=1536`) keeps
     /// the call stable so snapshot diffs are meaningful. Opt-in.
     FinalDisagreement,
+    /// JsonRepairV2 — D.7.1 catalog role. Optional second-pass
+    /// LLM call used when the local heuristic in
+    /// `src/phases/util.rs::repair_m3_brackets` cannot turn a
+    /// malformed model output into valid JSON. Deterministic
+    /// (`T=0.0, top_p=0.5, max_tokens=1024`) so re-runs against
+    /// the same malformed text produce the same repair.
+    /// Opt-in: no phase invokes it automatically; Track G keeps
+    /// the local heuristic as the only repair path.
+    JsonRepairV2,
 }
 
 impl Role {
@@ -142,6 +152,7 @@ impl Role {
             Self::PersonaPicker => "persona_picker",
             Self::AnglePicker => "angle_picker",
             Self::FinalDisagreement => "final_disagreement",
+            Self::JsonRepairV2 => "json_repair_v2",
         }
     }
 
@@ -209,6 +220,9 @@ impl Role {
             }
             Self::FinalDisagreement => {
                 "FinalDisagreement: {judge_scores[], candidates[], winner_id, margin, rationale} (judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1536)"
+            }
+            Self::JsonRepairV2 => {
+                "JsonRepairV2: {malformed, target_schema, repaired, notes} (LLM re-call for malformed JSON; T=0.0, top_p=0.5, max_tokens=1024)"
             }
         }
     }
@@ -286,6 +300,9 @@ impl Role {
             Self::FinalDisagreement => {
                 serde_json::from_value::<FinalDisagreementReport>(value.clone()).map(|_| ())
             }
+            Self::JsonRepairV2 => {
+                serde_json::from_value::<JsonRepairV2Report>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -325,6 +342,7 @@ impl Role {
             Self::PersonaPicker,
             Self::AnglePicker,
             Self::FinalDisagreement,
+            Self::JsonRepairV2,
         ]
     }
 }
@@ -365,6 +383,7 @@ impl FromStr for Role {
             "persona_picker" => Ok(Self::PersonaPicker),
             "angle_picker" => Ok(Self::AnglePicker),
             "final_disagreement" => Ok(Self::FinalDisagreement),
+            "json_repair_v2" => Ok(Self::JsonRepairV2),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -390,11 +409,12 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_five() {
-        // Track H batch-2: final_disagreement added (D.7.1 catalog,
-        // judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1536).
-        // Count moves from 24 to 25.
-        assert_eq!(Role::all().len(), 25);
+    fn all_roles_are_count_twenty_six() {
+        // Track H batch-2: final_disagreement and json_repair_v2
+        // both added (D.7.1 catalog). Count moves from 24 to 26.
+        // The third role of this batch (hostile_prompt_detector)
+        // lands in commit 3 and bumps to 27.
+        assert_eq!(Role::all().len(), 26);
     }
 
     #[test]
@@ -530,6 +550,36 @@ mod tests {
     }
 
     #[test]
+    fn json_repair_v2_round_trip() {
+        // The catalog uses lowercase snake_case on the wire; the
+        // round-trip through `FromStr` must preserve the variant.
+        let s = Role::JsonRepairV2.as_str();
+        assert_eq!(s, "json_repair_v2");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::JsonRepairV2, back);
+    }
+
+    #[test]
+    fn json_repair_v2_validate_json_accepts_valid_payload() {
+        // D.7.1 catalog schema: raw malformed text plus the
+        // target schema name and the repaired JSON string.
+        // `#[serde(default)]` on the domain type also makes {}
+        // acceptable (documented contract).
+        let raw = serde_json::json!({
+            "malformed": "{ \"id\": \"p-1\", \"summary\": \"Foo, \"approach\": \"Bar\" }",
+            "target_schema": "propose",
+            "repaired": "{\"id\":\"p-1\",\"summary\":\"Foo\",\"approach\":\"Bar\"}",
+            "notes": "Closed the unescaped quote in summary; balanced the trailing brace."
+        });
+        assert!(Role::JsonRepairV2.validate_json(&raw).is_ok());
+        assert!(
+            Role::JsonRepairV2
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn serde_round_trip() {
         let r = Role::Gate;
         let j = serde_json::to_string(&r).unwrap();
@@ -571,6 +621,7 @@ mod tests {
                     || desc.starts_with("PersonaPicker:")
                     || desc.starts_with("AnglePicker:")
                     || desc.starts_with("FinalDisagreement:")
+                    || desc.starts_with("JsonRepairV2:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -650,5 +701,9 @@ mod tests {
         // domain type with `#[serde(default)]`, so {} parses
         // cleanly.
         assert!(Role::FinalDisagreement.validate_json(&empty).is_ok());
+        // Track H batch-2 (commit 2): json_repair_v2 carries its
+        // own domain type with `#[serde(default)]`, so {} parses
+        // cleanly.
+        assert!(Role::JsonRepairV2.validate_json(&empty).is_ok());
     }
 }
