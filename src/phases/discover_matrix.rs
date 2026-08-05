@@ -152,11 +152,14 @@ impl Phase for DiscoverMatrixPhase {
         });
 
         let results = join_all(futures).await;
+        let total_attempts = results.len();
         let mut paths = Vec::with_capacity(results.len());
+        let mut failed_count: usize = 0;
         for r in results {
             let sketch = match r {
                 Ok(s) => s,
                 Err(e) => {
+                    failed_count += 1;
                     let _ = ctx.telemetry.warn(
                         "phase.discover_matrix.skipped",
                         "warn",
@@ -178,6 +181,18 @@ impl Phase for DiscoverMatrixPhase {
             let path = sketches_dir.join(format!("{id}.json"));
             write_json(&path, &sketch)?;
             paths.push(path);
+        }
+
+        // Quality gate (D.13.21): if more than half of the attempts
+        // failed, the surviving sketches are likely garbage and the
+        // pipeline must not advance. A minimum-attempts guard of 4
+        // keeps small runs from aborting on a single bad sample.
+        if failed_count * 2 >= total_attempts && total_attempts >= 4 {
+            return Err(Error::DiscoveryQualityTooLow {
+                failed: failed_count,
+                total: total_attempts,
+                threshold_pct: 50,
+            });
         }
 
         if paths.is_empty() {
