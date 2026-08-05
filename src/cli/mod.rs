@@ -225,6 +225,18 @@ pub enum Cmd {
         /// ignored, matching `MOAGAN_MINIMAX_ENDPOINT`.
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
+        /// Track E (catalog §D.11.10): opt out of the
+        /// secret-stripping pass inside the sandbox. Useful for
+        /// debugging / repro cases where the operator wants to see
+        /// exactly what bytes were passed to the subprocess. The
+        /// default behaviour (`flag omitted`) is to strip secrets
+        /// before spawn; this flag forwards to
+        /// `Config::sandbox_allow_injection` so the validate-phase
+        /// sandbox inherits the opt-in. Equivalent to the env var
+        /// `MOAGAN_SANDBOX_ALLOW_INJECTION=true` (CLI wins on
+        /// conflict).
+        #[arg(long, default_value_t = false)]
+        allow_injection: bool,
     },
     /// Continue a paused or failed run.
     Continue {
@@ -608,6 +620,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             context_summary,
             context_full,
             model,
+            allow_injection,
         } => {
             // Phase J: validate the `--context-{summary,full}` flags
             // are only useful with `--context`. Setting them without
@@ -627,6 +640,13 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 crate::context::ContextScope::Summary
             };
             let mut cfg = Config::load()?;
+            // Track E (catalog §D.11.10): `--allow-injection` opts
+            // out of the sandbox's argv-side secret-stripping pass.
+            // The flag wins on conflict with the env override so the
+            // operator gets the explicit CLI behaviour they asked
+            // for. The validate phase reads the cfg knob and wires
+            // it into the Sandbox via `with_allow_injection`.
+            cfg.sandbox_allow_injection |= allow_injection;
             // Q5: `--model <name>` overrides the model on the resolved
             // provider. Applied AFTER `apply_env_overrides()` (which
             // runs inside `Config::load()`) so the CLI wins on conflict

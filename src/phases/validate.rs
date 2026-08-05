@@ -111,7 +111,17 @@ impl Phase for ValidatePhase {
 
         let sandbox = Sandbox::new(
             SandboxConfig::new()
-                .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs)),
+                .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs))
+                // Track E (catalog §D.11.9): default sandbox is
+                // off-by-default for network. Operators opt in via
+                // `MOAGAN_SANDBOX_ALLOW_NETWORK=true` or by setting
+                // `sandbox_allow_network = true` in `config.toml`.
+                .with_allow_network(ctx.config.sandbox_allow_network)
+                // Track E (catalog §D.11.10): default behaviour is
+                // to strip secrets from argv. Operators opt out via
+                // `moagan run --allow-injection` or
+                // `MOAGAN_SANDBOX_ALLOW_INJECTION=true`.
+                .with_allow_injection(ctx.config.sandbox_allow_injection),
         )?
         .with_cancel(ctx.cancel().clone());
 
