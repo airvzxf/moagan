@@ -80,6 +80,17 @@ pub struct Config {
     /// failure so non-opening errors (schema, operator, cancel) do
     /// not consume the budget.
     pub circuit_breaker: CircuitBreakerConfig,
+    /// Track F: whether `moagan run` / `moagan continue` /
+    /// `moagan discover` should auto-run the reconcile pass at
+    /// startup (D.28.3 + D.28.4: cleanup atomic-write leftovers
+    /// and recover zombie `running` runs). Default `true`.
+    /// Overridable via `MOAGAN_STARTUP_RECONCILE=false`.
+    #[serde(default = "default_startup_reconcile")]
+    pub startup_reconcile: bool,
+}
+
+fn default_startup_reconcile() -> bool {
+    true
 }
 
 /// Per-provider circuit breaker knobs (catalog §D.19.5).
@@ -277,6 +288,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             retention: RetentionConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
+            startup_reconcile: default_startup_reconcile(),
         }
     }
 }
@@ -602,6 +614,18 @@ impl Config {
         {
             self.gate_forbidden_techs = v.split(',').map(|s| s.trim().to_owned()).collect();
         }
+        if let Ok(v) = std::env::var("MOAGAN_STARTUP_RECONCILE") {
+            // Accept the canonical `true` / `false` (case-insensitive)
+            // and the bash-style `1` / `0` aliases. Anything else
+            // (whitespace, garbage) leaves the existing value alone so
+            // a stale export does not silently disable the boot pass.
+            let normalised = v.trim().to_ascii_lowercase();
+            match normalised.as_str() {
+                "true" | "1" | "yes" | "on" => self.startup_reconcile = true,
+                "false" | "0" | "no" | "off" => self.startup_reconcile = false,
+                _ => {}
+            }
+        }
     }
 }
 
@@ -887,5 +911,75 @@ mod tests {
         assert_eq!(back.circuit_breaker.threshold, 3);
         assert_eq!(back.circuit_breaker.window_secs, 30);
         assert_eq!(back.circuit_breaker.cooldown_secs, 120);
+    }
+
+    /// `Config::startup_reconcile` defaults to `true`. Track F
+    /// (D.28.3 + D.28.4) auto-runs the reconcile pass at the top
+    /// of every dispatcher entry unless the operator opts out.
+    #[test]
+    fn startup_reconcile_default_is_true() {
+        let cfg = Config::default();
+        assert!(cfg.startup_reconcile);
+    }
+
+    /// Per-test mutex shared by the env-override tests so they
+    /// cannot race each other on the same `MOAGAN_*` variable.
+    /// Lives next to the tests for documentation visibility.
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `MOAGAN_STARTUP_RECONCILE=false` flips the flag via the
+    /// env-override path so a CI shell can opt out without
+    /// editing `config.toml`. The mutex lock avoids a parallel
+    /// race with `env_var_startup_reconcile_true_is_noop` (both
+    /// mutate the same env var).
+    #[test]
+    fn env_var_startup_reconcile_false_disables() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_STARTUP_RECONCILE", "false");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_STARTUP_RECONCILE");
+        }
+        assert!(!cfg.startup_reconcile);
+    }
+
+    /// `MOAGAN_STARTUP_RECONCILE=true` is the no-op path; a
+    /// TOML-default `true` survives the env round-trip. Locked
+    /// against the `false` test above (parallel runs otherwise
+    /// race the env var).
+    #[test]
+    fn env_var_startup_reconcile_true_is_noop() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_STARTUP_RECONCILE", "true");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_STARTUP_RECONCILE");
+        }
+        assert!(cfg.startup_reconcile);
+    }
+
+    /// Garbage / whitespace env values are ignored so a stale
+    /// export does not silently flip the flag.
+    #[test]
+    fn env_var_startup_reconcile_garbage_is_ignored() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_STARTUP_RECONCILE", "   ");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_STARTUP_RECONCILE");
+        }
+        assert!(
+            cfg.startup_reconcile,
+            "garbage env must not flip the default"
+        );
     }
 }
