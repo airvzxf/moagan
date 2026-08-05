@@ -215,8 +215,11 @@ fn cache_path(user: &str) -> Option<PathBuf> {
 
 /// Current Unix time in seconds. Returns `0` if the system clock
 /// is before the epoch — the cache then treats every rating as
-/// "fresh", which is a safe over-approximation.
-fn unix_now() -> i64 {
+/// "fresh", which is a safe over-approximation. Exposed so other
+/// modules (e.g. the auto-record path in
+/// `preferences::integration`) can stamp `Rating::rated_unix` with
+/// the same clock the cache uses internally.
+pub fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -226,13 +229,7 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::TEST_MOAGAN_HOME_LOCK;
 
     fn unique_tmp(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -269,7 +266,9 @@ mod tests {
 
     #[test]
     fn cache_disabled_is_noop() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let previous = std::env::var("MOAGAN_LEARNING").ok();
         unsafe {
             std::env::remove_var("MOAGAN_LEARNING");
@@ -296,7 +295,9 @@ mod tests {
 
     #[test]
     fn cache_save_then_load_round_trip() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let previous_home = std::env::var("MOAGAN_HOME").ok();
         let previous_learning = std::env::var("MOAGAN_LEARNING").ok();
         let tmp = unique_tmp("roundtrip");
@@ -337,7 +338,9 @@ mod tests {
 
     #[test]
     fn cache_recent_filters_by_decay_weight() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let now = unix_now();
         let day = SECONDS_PER_DAY as i64;
         let cache = PreferenceCache {
@@ -365,7 +368,9 @@ mod tests {
 
     #[test]
     fn cache_decay_removes_old_ratings() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let now = unix_now();
         let day = SECONDS_PER_DAY as i64;
         let mut cache = PreferenceCache {
@@ -386,7 +391,9 @@ mod tests {
 
     #[test]
     fn cache_caps_at_max_ratings() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let previous_learning = std::env::var("MOAGAN_LEARNING").ok();
         unsafe {
             std::env::set_var("MOAGAN_LEARNING", "true");

@@ -224,6 +224,24 @@ pub fn inject_epistemic_legacy(prompt: &str) -> String {
     prompt.replace(EPISTEMIC_LEGACY_PLACEHOLDER, &legacy.render_markdown())
 }
 
+/// Placeholder token that prompts embed when they want the user's
+/// top-N preference ratings rendered inline. Substitute via
+/// [`inject_epistemic_preferences`]. PR C.5 (K.3b).
+pub const EPISTEMIC_PREFERENCES_PLACEHOLDER: &str = "${epistemic_preferences}";
+
+/// Substitute [`EPISTEMIC_PREFERENCES_PLACEHOLDER`] in `prompt` with
+/// the rendered Markdown view of the user's top-3 recent preference
+/// ratings (or empty when the learning loop is disabled / the cache
+/// is empty). If the placeholder is not present, `prompt` is
+/// returned unchanged.
+pub fn inject_epistemic_preferences(prompt: &str, user: &str) -> String {
+    if !prompt.contains(EPISTEMIC_PREFERENCES_PLACEHOLDER) {
+        return prompt.to_owned();
+    }
+    let block = crate::preferences::integration::render_preferences_block(user, 3);
+    prompt.replace(EPISTEMIC_PREFERENCES_PLACEHOLDER, &block)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

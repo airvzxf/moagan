@@ -2,4 +2,5 @@
 //! [`PreferenceCache`] for the on-disk shape and the opt-in gate.
 
 pub mod cache;
+pub mod integration;
 pub use cache::{PreferenceCache, Rating};
