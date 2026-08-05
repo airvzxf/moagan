@@ -474,19 +474,23 @@ mod tests {
             std::fs::write(proposals.join(format!("p_{n:03}.json")), b"{}").unwrap();
         }
 
-        let guard = lock_env(&tmp);
+        // Bypass MOAGAN_HOME: route every Db::open through home_override so the
+        // dispatcher cannot race another test that mutates MOAGAN_HOME between
+        // the prime and the dispatch call. Same pattern as
+        // reindex_missing_in_db_catches_up below.
+        let home = crate::fs_layout::MoaganHome::at(tmp.clone());
         // Prime the cache directly via the DB so we only open
         // the connection once.
-        let home = crate::fs_layout::MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
         let _ = db
             .reindex_proposals(&run_id, &run_dir_root)
             .expect("prime cache");
         drop(db);
         // Dispatcher: must report zero diffs and exit 0.
-        let rc = run(args_with(&["reindex", "dry"])).expect("reindex must not error");
+        let mut args = args_with(&["reindex", "dry"]);
+        args.home_override = Some(home);
+        let rc = run(args).expect("reindex must not error");
         assert_eq!(rc, 0);
-        unlock_env(guard);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
