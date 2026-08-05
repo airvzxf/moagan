@@ -804,6 +804,31 @@ pub struct PersonaPickerReport {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the `Role::AnglePicker` role (D.7.1 catalog).
+///
+/// Picks which exploration angle a downstream phase should chase
+/// for the current problem. Higher variance than `PersonaPicker`
+/// (T=0.7, top_p=0.95) because the picker is meant to escape the
+/// obvious angles and surface the *next* one — the caller's
+/// `existing_angles` list deliberately anchors the model away from
+/// the obvious. `#[serde(default)]` keeps the validator accepting
+/// empty objects.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnglePickerReport {
+    /// Problem statement the picker is anchoring against (echoed
+    /// for downstream phases that want to correlate angle -> brief).
+    pub problem: String,
+    /// Existing angles the caller already tried (echoed for
+    /// audit; the picker is expected to *not* repeat them).
+    pub existing_angles: Vec<String>,
+    /// The next exploration angle the picker recommends.
+    pub selected: String,
+    /// One-line rationale: why this angle vs the existing set.
+    pub rationale: String,
+    /// Schema version.
+    pub schema_version: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.

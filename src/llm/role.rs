@@ -12,9 +12,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, MergePlan,
-    PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport, Repair, Route, Sketch,
-    SynthesizedProposal, TiefighterCriticReport,
+    AdversaryReport, AnglePickerReport, Brief, Critique, FinalReport, Intake, JudgeScore,
+    MergePlan, PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport, Repair, Route,
+    Sketch, SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -99,6 +99,12 @@ pub enum Role {
     /// for the current run. Sampling (T=0.3, top_p=0.9,
     /// max_tokens=512). Opt-in.
     PersonaPicker,
+    /// AnglePicker — D.7.1 catalog role. Picks the next
+    /// exploration angle a downstream phase should chase. Higher
+    /// variance (T=0.7, top_p=0.95, max_tokens=1024) so the
+    /// picker escapes the obvious angles and surfaces the *next*
+    /// one. Opt-in.
+    AnglePicker,
 }
 
 impl Role {
@@ -128,6 +134,7 @@ impl Role {
             Self::RationaleExtractor => "rationale_extractor",
             Self::TiefighterCritic => "tiefighter_critic",
             Self::PersonaPicker => "persona_picker",
+            Self::AnglePicker => "angle_picker",
         }
     }
 
@@ -189,6 +196,9 @@ impl Role {
             }
             Self::PersonaPicker => {
                 "PersonaPicker: {candidates[]} (persona selector; T=0.3, top_p=0.9, max_tokens=512)"
+            }
+            Self::AnglePicker => {
+                "AnglePicker: {problem, existing_angles[]} (exploration angle selector; T=0.7, top_p=0.95, max_tokens=1024)"
             }
         }
     }
@@ -260,6 +270,9 @@ impl Role {
             Self::PersonaPicker => {
                 serde_json::from_value::<PersonaPickerReport>(value.clone()).map(|_| ())
             }
+            Self::AnglePicker => {
+                serde_json::from_value::<AnglePickerReport>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -297,6 +310,7 @@ impl Role {
             Self::RationaleExtractor,
             Self::TiefighterCritic,
             Self::PersonaPicker,
+            Self::AnglePicker,
         ]
     }
 }
@@ -335,6 +349,7 @@ impl FromStr for Role {
             "rationale_extractor" => Ok(Self::RationaleExtractor),
             "tiefighter_critic" => Ok(Self::TiefighterCritic),
             "persona_picker" => Ok(Self::PersonaPicker),
+            "angle_picker" => Ok(Self::AnglePicker),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -360,12 +375,11 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_three() {
-        // Track H batch-1 progress:
-        //   * commit 1: tiefighter_critic added
-        //   * commit 2: persona_picker added
-        //   * commit 3: angle_picker adds the third role
-        assert_eq!(Role::all().len(), 23);
+    fn all_roles_are_count_twenty_four() {
+        // Track H batch-1 closed: three catalog roles (D.7.1)
+        // wired — tiefighter_critic, persona_picker, angle_picker.
+        // Count jumps from 21 to 24.
+        assert_eq!(Role::all().len(), 24);
     }
 
     #[test]
@@ -436,6 +450,33 @@ mod tests {
     }
 
     #[test]
+    fn angle_picker_round_trip() {
+        let s = Role::AnglePicker.as_str();
+        assert_eq!(s, "angle_picker");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::AnglePicker, back);
+    }
+
+    #[test]
+    fn angle_picker_validate_json_accepts_valid_payload() {
+        // D.7.1 catalog schema: a problem statement plus a list
+        // of already-explored angles; the picker proposes the next
+        // angle. The empty-object case is also accepted.
+        let raw = serde_json::json!({
+            "problem": "How to scale auth across multi-region tenants",
+            "existing_angles": ["JWT with rotating keys", "mTLS per pod"],
+            "selected": "Per-tenant JWKS endpoint with regional caching",
+            "rationale": "Complements JWT without overlapping mTLS"
+        });
+        assert!(Role::AnglePicker.validate_json(&raw).is_ok());
+        assert!(
+            Role::AnglePicker
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn serde_round_trip() {
         let r = Role::Gate;
         let j = serde_json::to_string(&r).unwrap();
@@ -475,6 +516,7 @@ mod tests {
                     || desc.starts_with("RationaleExtractor:")
                     || desc.starts_with("TiefighterCritic:")
                     || desc.starts_with("PersonaPicker:")
+                    || desc.starts_with("AnglePicker:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -546,5 +588,9 @@ mod tests {
         // own domain type with `#[serde(default)]`, so {} parses
         // cleanly.
         assert!(Role::PersonaPicker.validate_json(&empty).is_ok());
+        // Track H batch-1 (commit 3): angle_picker carries its
+        // own domain type with `#[serde(default)]`, so {} parses
+        // cleanly.
+        assert!(Role::AnglePicker.validate_json(&empty).is_ok());
     }
 }

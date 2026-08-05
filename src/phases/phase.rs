@@ -856,6 +856,9 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // persona_picker is a short routing decision; the 512-token
         // ceiling matches its role_settings (see prompts.rs).
         Role::PersonaPicker => 512,
+        // angle_picker is a routing decision with a one-line
+        // rationale; the 1024-token ceiling matches role_settings.
+        Role::AnglePicker => 1024,
     }
 }
 
@@ -935,6 +938,10 @@ fn temperature_for_role(role: Role) -> f32 {
         // (T=0.3) to break ties between close candidates without
         // flipping picks across runs of the same brief.
         Role::PersonaPicker => 0.3,
+        // angle_picker runs at T=0.7 so the picker escapes the
+        // obvious angles and surfaces the *next* one; the high
+        // variance is intentional, not noise.
+        Role::AnglePicker => 0.7,
     }
 }
 
