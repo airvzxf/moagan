@@ -39,7 +39,10 @@ use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxResult, SandboxStatus};
 
 use super::rust_validator::tail;
-use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator, capture_tool_version};
+use super::{
+    CodeArtifact, FailureKind, ValidationEvidence, ValidationFailure, ValidationStatus, Validator,
+    capture_tool_version,
+};
 
 /// Local alias for the parser's `Result` so the public entry
 /// points can stay typed as `Result<_, ParseError>` regardless
@@ -119,8 +122,15 @@ impl SqlValidator {
         }
 
         if !parse_failures.is_empty() {
-            let mut evidence = ValidationEvidence::fail("sql", "parser rejected statements");
-            evidence.failed_checks.extend(parse_failures);
+            let mut evidence = ValidationEvidence {
+                validator: "sql".into(),
+                status: ValidationStatus::Fail,
+                ..ValidationEvidence::default()
+            };
+            evidence.checks_run.push("sql parser".into());
+            for msg in parse_failures {
+                evidence.record_failure(ValidationFailure::new(FailureKind::SqlSyntaxError, msg));
+            }
             return Ok(evidence);
         }
 
@@ -137,10 +147,16 @@ impl SqlValidator {
                     return Ok(evidence);
                 }
                 Err(e) => {
-                    return Ok(ValidationEvidence::fail(
-                        "sql",
+                    let mut evidence = ValidationEvidence {
+                        validator: "sql".into(),
+                        status: ValidationStatus::Fail,
+                        ..ValidationEvidence::default()
+                    };
+                    evidence.record_failure(ValidationFailure::new(
+                        FailureKind::SqlSemanticError,
                         format!("failed to spawn sqlite3: {e}"),
                     ));
+                    return Ok(evidence);
                 }
             }
         }
@@ -1256,9 +1272,10 @@ fn sqlite_evidence(result: SandboxResult, parse_ok: usize) -> ValidationEvidence
         .checks_run
         .push("sqlite3 :memory: execution".into());
     if status != ValidationStatus::Pass {
-        evidence
-            .failed_checks
-            .push("sqlite3 refused to execute the script".into());
+        evidence.record_failure(ValidationFailure::new(
+            FailureKind::SqlSemanticError,
+            "sqlite3 refused to execute the script",
+        ));
     }
     evidence
 }

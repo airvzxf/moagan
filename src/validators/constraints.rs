@@ -11,12 +11,16 @@
 //! Compliance: T01-06 §5.6 ("Restricciones duras no se compensan con
 //! scores altos"). The proposal does not need to repeat the
 //! constraint verbatim; the validator is a soft signal, not a gate.
+//!
+//! D.11.14: every constraint miss is emitted as a typed
+//! [`FailureKind::HardConstraintMissing`] failure (with `Warn`
+//! status so the deliver phase can still surface the proposal).
 
 use crate::domain::Proposal;
 use crate::error::Result;
 use crate::sandbox::Sandbox;
 
-use super::{ValidationEvidence, ValidationStatus, Validator};
+use super::{FailureKind, ValidationEvidence, ValidationFailure, ValidationStatus, Validator};
 
 /// Constraints validator. Stateless; reuse freely.
 #[derive(Debug, Default, Clone, Copy)]
@@ -70,9 +74,13 @@ impl ConstraintsValidator {
                 if evidence.status == ValidationStatus::Pass {
                     evidence.status = ValidationStatus::Warn;
                 }
-                evidence
-                    .failed_checks
-                    .push(format!("{label} not echoed in proposal"));
+                evidence.record_failure(
+                    ValidationFailure::new(
+                        FailureKind::HardConstraintMissing,
+                        format!("{label} not echoed in proposal"),
+                    )
+                    .with_field("approach"),
+                );
             }
         }
 

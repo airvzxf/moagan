@@ -27,7 +27,9 @@
 use crate::error::Result;
 use crate::sandbox::Sandbox;
 
-use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator};
+use super::{
+    CodeArtifact, FailureKind, ValidationEvidence, ValidationFailure, ValidationStatus, Validator,
+};
 
 /// Schema validator. Stateless; reuse freely.
 #[derive(Debug, Default, Clone, Copy)]
@@ -109,7 +111,8 @@ impl SchemaValidator {
             }
             Err(detail) => {
                 evidence.status = ValidationStatus::Fail;
-                evidence.failed_checks.push(detail);
+                evidence
+                    .record_failure(ValidationFailure::new(FailureKind::SchemaViolation, detail));
             }
         }
 

@@ -36,7 +36,10 @@ use std::fs;
 use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxResult, SandboxStatus};
 
-use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator, capture_tool_version};
+use super::{
+    CodeArtifact, FailureKind, ValidationEvidence, ValidationFailure, ValidationStatus, Validator,
+    capture_tool_version,
+};
 
 /// Rust validator. Stateless; reuse freely.
 #[derive(Debug, Default, Clone, Copy)]
@@ -272,7 +275,7 @@ fn write_minimal_crate(root: &std::path::Path, artifact: &CodeArtifact) -> Resul
 /// Record one toolchain step into the running evidence. The first
 /// command + exit + stdout/stderr reported is from the failing
 /// step (or the last step if every step passed).
-fn record_step(
+pub(super) fn record_step(
     evidence: &mut ValidationEvidence,
     label: &str,
     status: ValidationStatus,
@@ -290,9 +293,18 @@ fn record_step(
         ValidationStatus::Pass | ValidationStatus::Warn => {}
         ValidationStatus::Fail => {
             evidence.status = ValidationStatus::Fail;
-            evidence
-                .failed_checks
-                .push(format!("{label} returned non-zero exit"));
+            // Tests on the test step (`cargo test`) emit a
+            // `RustTestFailure`; every other Rust step is a compile
+            // error.
+            let kind = if label.contains("test") {
+                FailureKind::RustTestFailure
+            } else {
+                FailureKind::RustCompileError
+            };
+            evidence.record_failure(ValidationFailure::new(
+                kind,
+                format!("{label} returned non-zero exit"),
+            ));
         }
         ValidationStatus::Skipped | ValidationStatus::Error => {
             if evidence.status == ValidationStatus::Pass {
