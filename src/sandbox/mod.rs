@@ -19,6 +19,7 @@ pub mod cgroup;
 pub mod policy;
 pub mod process;
 pub mod seccomp;
+pub mod seccomp_allowlist;
 
 pub use allowlist::{
     Allowlist, DEFAULT_ALLOWLIST, DEFAULT_DENYLIST, Denylist, contains_deny_token, is_allowed,
