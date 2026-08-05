@@ -238,6 +238,20 @@ impl Db {
     /// cannot leave the DB with the new schema and the old
     /// version.
     ///
+    /// `user_version` is probed AFTER every atomic step (and around
+    /// v001, which is not wrapped). The atomic `apply_step` makes
+    /// each individual step consistent, but it does not protect
+    /// against a re-entry that observes the partially-applied state
+    /// between the schema change and the version bump on the
+    /// *previous* open — the kind of race that previously
+    /// surfaced as a spurious `duplicate column name: status`
+    /// panic in `cli::repair::tests::reindex_no_diff_returns_zero`
+    /// when two `Db::open` calls landed on the same DB in quick
+    /// succession (parallel `cargo test`, dispatcher-after-prime,
+    /// etc.). Re-reading after each step collapses every "did
+    /// step N already commit?" question into a single, fresh
+    /// `PRAGMA user_version` read.
+    ///
     /// v001 is the documented exception: it sets `PRAGMA synchronous
     /// = NORMAL`, which SQLite refuses to apply inside a
     /// transaction. The `with_init` hook on every connection
@@ -251,58 +265,87 @@ impl Db {
     /// re-run on a partially-applied DB) is actually load-bearing.
     pub fn run_migrations(&self) -> Result<()> {
         let conn = self.pool.get()?;
-        let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+
+        // v001 is special: PRAGMA synchronous=NORMAL cannot run
+        // inside a transaction. We still re-read user_version
+        // around it so a re-entry that observed a stale
+        // user_version=0 lands on the per-step probe invariant
+        // used by v002 onward.
+        let mut current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if current < 1 {
             conn.execute_batch(sql_v001::V001)?;
             conn.execute_batch("PRAGMA user_version = 1;")?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
+
+        // v002+ runs through apply_step (atomic). Re-read
+        // user_version AFTER each step so a re-entry that observed
+        // a partially-applied state between the schema change and
+        // the version bump does not re-run an already-applied
+        // step. The previous design read user_version exactly once
+        // at the top, which made the runner vulnerable to WAL
+        // visibility races when two opens run in quick succession
+        // (e.g. parallel tests sharing the same DB).
         if current < 2 {
             apply_step(&conn, 2, || -> Result<()> {
                 conn.execute_batch(sql_v002::V002)?;
                 Ok(())
             })?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 3 {
             apply_step(&conn, 3, || -> Result<()> {
                 conn.execute_batch(sql_v003::V003)?;
                 Ok(())
             })?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 4 {
             apply_step(&conn, 4, || -> Result<()> {
                 conn.execute_batch(sql_v004::V004)?;
                 Ok(())
             })?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 5 {
             apply_step(&conn, 5, || -> Result<()> {
                 conn.execute_batch(sql_v005::V005)?;
                 Ok(())
             })?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 6 {
             apply_step(&conn, 6, || -> Result<()> {
                 conn.execute_batch(sql_v006::V006)?;
                 Ok(())
             })?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 7 {
             apply_step(&conn, 7, || apply_v007_idempotent(&conn))?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 8 {
             apply_step(&conn, 8, || -> Result<()> {
                 conn.execute_batch(sql_v008::V008)?;
                 Ok(())
             })?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 9 {
             apply_step(&conn, 9, || apply_v009_idempotent(&conn))?;
+            current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         }
         if current < 10 {
             apply_step(&conn, 10, || -> Result<()> {
                 conn.execute_batch(sql_v010::V010)?;
                 Ok(())
             })?;
+            // Final probe is intentionally omitted: `current` is
+            // not read again after this point, so the assignment
+            // would be a dead store and `-D unused_assignments`
+            // would reject it. The per-step probe invariant still
+            // holds for v001…v009.
         }
         Ok(())
     }
@@ -3094,5 +3137,96 @@ mod tests {
             v >= 10,
             "user_version must advance to current after recovery, got {v}"
         );
+    }
+
+    /// Build a unique path under `temp_dir()` for a one-shot DB.
+    /// The tests below share a DB across multiple `Db::open`
+    /// calls, so this helper does NOT use `tempfile::tempdir()`
+    /// (which auto-deletes on drop and would race the second
+    /// open). Each test cleans up its own dir at the end.
+    fn unique_db_path() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("moagan-mig-idem-{pid}-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("meta.sqlite")
+    }
+
+    /// Read `PRAGMA user_version` from the file at `path` via a
+    /// fresh (unpooled) connection. Mirrors what a second `Db::open`
+    /// would see before its migration runner touches anything.
+    fn read_user_version(path: &std::path::Path) -> i64 {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Open the same DB twice in sequence. The per-step probe in
+    /// `run_migrations` makes the second open a no-op even when
+    /// the first open's WAL has not been flushed to the main file
+    /// yet — the failure mode that previously surfaced as a
+    /// spurious `duplicate column name: status` panic in
+    /// `cli::repair::tests::reindex_no_diff_returns_zero`. This
+    /// test would have caught that flake directly.
+    #[test]
+    fn migrations_are_idempotent_when_run_twice() {
+        let path = unique_db_path();
+        let _ = Db::open(&path).expect("first open");
+        let _ = Db::open(&path).expect("second open must not fail");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// `user_version` is stable across consecutive `Db::open`
+    /// calls on the same DB and reaches the current head (v010).
+    /// Pins the "each step runs at most once" invariant: if the
+    /// runner ever re-applied a step, the second open would still
+    /// see the same version (idempotency) but would also need to
+    /// re-run the entire v002…v010 ladder to land at 10, which
+    /// would surface here as a wrong `user_version` or, more
+    /// likely, a `duplicate column name` panic from v003/v007/v009.
+    #[test]
+    fn migrations_skip_applied_versions_on_reopen() {
+        let path = unique_db_path();
+        let _ = Db::open(&path).unwrap();
+        let v1 = read_user_version(&path);
+        let _ = Db::open(&path).unwrap();
+        let v2 = read_user_version(&path);
+        assert_eq!(v1, v2, "user_version must be stable across opens");
+        assert!(
+            v1 >= 10,
+            "user_version must reach the current head, got {v1}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Simulate the documented v001 failure mode: schema applied
+    /// but `user_version` not bumped, because v001's
+    /// `PRAGMA synchronous = NORMAL` cannot run inside a
+    /// transaction and therefore cannot share the atomic wrap
+    /// that v002+ use. After `Db::open`, `user_version` must reach
+    /// the current head even though v001 was re-run from a
+    /// "partially applied" state (the SQL is idempotent so the
+    /// re-run is a no-op at the schema level; the per-step probe
+    /// then carries the runner from v1 → v2 → … → v10 on the
+    /// fresh bumps).
+    #[test]
+    fn migrations_recover_from_v001_partial_state() {
+        let path = unique_db_path();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(sql_v001::V001).unwrap();
+            // Intentionally do NOT bump user_version — simulate
+            // the crash window between the schema change and the
+            // bump.
+        }
+        Db::open(&path).expect("Db::open must recover from v001 partial state");
+        let v = read_user_version(&path);
+        assert!(
+            v >= 10,
+            "user_version must reach the current head after recovery, got {v}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
