@@ -237,6 +237,17 @@ pub enum Cmd {
         /// conflict).
         #[arg(long, default_value_t = false)]
         allow_injection: bool,
+        /// Track K (catalog §D.21): apply a domain-specific profile
+        /// on top of the loaded `Config`. Looks up `<name>.toml`
+        /// under `$MOAGAN_HOME/profiles/` and falls back to
+        /// `~/.config/moagan/profiles/`. Supports `extends`
+        /// inheritance (child overrides parent). Applied AFTER
+        /// `Config::load()` + env overrides so the CLI wins on
+        /// conflict. Empty / whitespace values are ignored to
+        /// match the convention used by `--model` and
+        /// `--runs-dir`.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Continue a paused or failed run.
     Continue {
@@ -621,6 +632,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             context_full,
             model,
             allow_injection,
+            profile,
         } => {
             // Phase J: validate the `--context-{summary,full}` flags
             // are only useful with `--context`. Setting them without
@@ -647,6 +659,21 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // for. The validate phase reads the cfg knob and wires
             // it into the Sandbox via `with_allow_injection`.
             cfg.sandbox_allow_injection |= allow_injection;
+            // Track K (catalog §D.21): `--profile <name>` loads a
+            // domain-specific profile from
+            // `$MOAGAN_HOME/profiles/<name>.toml` (with the
+            // `~/.config/moagan/profiles/` fallback) and applies
+            // it on top of the loaded `Config`. Applied AFTER
+            // env overrides so the CLI wins on conflict, but the
+            // operator can also resolve the profile entirely via
+            // env vars by leaving the flag empty. Whitespace-only
+            // values are ignored to keep the flag ergonomic.
+            if let Some(name) = profile.as_deref()
+                && !name.trim().is_empty()
+            {
+                let profile = Config::load_profile(name.trim())?;
+                cfg.apply_profile(&profile);
+            }
             // Q5: `--model <name>` overrides the model on the resolved
             // provider. Applied AFTER `apply_env_overrides()` (which
             // runs inside `Config::load()`) so the CLI wins on conflict

@@ -15,6 +15,9 @@ use crate::Result;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
 
+pub mod profile;
+pub use profile::Profile;
+
 /// Top-level configuration record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -59,6 +62,18 @@ pub struct Config {
     pub gate_min_length: usize,
     /// Maximum proposal length (chars) for the gate length check.
     pub gate_max_length: usize,
+    /// Per-role temperature overrides sourced from the active
+    /// domain profile. Populated by `Config::apply_profile`; key
+    /// is the role name (e.g. `rust_competitive`), value is the
+    /// sampling temperature. Phases consult this map when present.
+    #[serde(default)]
+    pub profile_temperature_overrides: std::collections::HashMap<String, f32>,
+    /// Per-mode judge quorum overrides sourced from the active
+    /// domain profile. Populated by `Config::apply_profile`; key
+    /// is the mode name (e.g. `fast`), value is the desired judge
+    /// count for that mode.
+    #[serde(default)]
+    pub profile_judge_quorum_overrides: std::collections::HashMap<String, usize>,
     /// Phase H: knobs for the ranking-stability check. See
     /// [`StabilityConfig`] for the field semantics. Default config
     /// runs 8 perturbations at sigma 0.05 (non-interactive) / 0.10
@@ -344,6 +359,8 @@ impl Default for Config {
             gate_forbidden_techs: Vec::new(),
             gate_min_length: 50,
             gate_max_length: 5000,
+            profile_temperature_overrides: std::collections::HashMap::new(),
+            profile_judge_quorum_overrides: std::collections::HashMap::new(),
             stability: StabilityConfig::default(),
             server: ServerConfig::default(),
             retention: RetentionConfig::default(),
@@ -624,6 +641,50 @@ impl Config {
         }
         cfg.apply_env_overrides();
         Ok(cfg)
+    }
+
+    /// Load a domain-specific profile by name.
+    ///
+    /// Thin wrapper around [`Profile::load`] so callers can stay on
+    /// `Config::load_profile(...)`. The profile is NOT applied to
+    /// the live `Config` here — use [`Config::apply_profile`] when
+    /// the caller wants the merges to take effect (e.g. after a
+    /// `--profile <name>` CLI flag resolves).
+    pub fn load_profile(name: &str) -> Result<Profile> {
+        Profile::load(name)
+    }
+
+    /// Apply a profile on top of this `Config` in place.
+    ///
+    /// Mirrors the merge semantics of [`Profile::merge_with`]:
+    /// forbidden-tech lists are unioned (deduped), child scalars
+    /// win on `gate_min_length` / `gate_max_length`, and the
+    /// temperature / judge-quorum override maps are recorded on
+    /// the config for downstream phases that opt to read them.
+    /// An empty profile is a no-op so the CLI's `--profile ""`
+    /// sentinel stays harmless.
+    pub fn apply_profile(&mut self, profile: &Profile) {
+        if profile.is_empty() {
+            return;
+        }
+        let mut forbidden: Vec<String> = self.gate_forbidden_techs.clone();
+        forbidden.extend(profile.gate_forbidden_techs.iter().cloned());
+        forbidden.sort();
+        forbidden.dedup();
+        self.gate_forbidden_techs = forbidden;
+        if let Some(v) = profile.gate_min_length {
+            self.gate_min_length = v;
+        }
+        if let Some(v) = profile.gate_max_length {
+            self.gate_max_length = v;
+        }
+        // Profile-defined temperature / judge-quorum overrides are
+        // stored alongside the run config so any phase that wants
+        // them can consult `Config::profile_*` without re-loading
+        // the TOML. Future phases (per-role temperature wiring,
+        // per-mode judge counts) read these maps directly.
+        self.profile_temperature_overrides = profile.temperature_overrides.clone();
+        self.profile_judge_quorum_overrides = profile.judge_quorum_overrides.clone();
     }
 
     /// Apply `MOAGAN_*` environment overrides. Any override that fails
