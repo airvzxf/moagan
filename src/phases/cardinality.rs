@@ -320,6 +320,24 @@ pub fn judge_quorum(mode: Mode) -> usize {
     }
 }
 
+/// Quorum of judges required for the mode, with profile-level
+/// overrides applied first. Spec D.6 / D.21.7: the per-mode
+/// judge-quorum baseline lives in [`judge_quorum`]; when the
+/// active domain profile (`Config.profile_judge_quorum_overrides`)
+/// defines an entry for the mode, that value wins. Profiles that
+/// don't override a mode fall through to the spec baseline.
+///
+/// This is the helper `cli::run::build_pipeline_for_mode` should
+/// call so that `--profile <name>` actually changes the judge
+/// panel size (the previous table hard-coded the numbers and
+/// ignored the profile entirely).
+pub fn judge_quorum_for_mode(mode: Mode, cfg: &crate::config::Config) -> usize {
+    if let Some(v) = cfg.profile_judge_quorum_overrides.get(mode.as_str()) {
+        return *v;
+    }
+    judge_quorum(mode)
+}
+
 /// Heuristic: derive a token-feature set from an id's
 /// `Debug` representation. Cheap, deterministic, and good enough
 /// for Jaccard-based distance. The caller can layer richer
@@ -588,6 +606,33 @@ mod tests {
     fn judge_quorum_explore_and_batch_return_one() {
         assert_eq!(judge_quorum(Mode::Explore), 1);
         assert_eq!(judge_quorum(Mode::Batch), 1);
+    }
+
+    /// Profile-supplied judge-quorum overrides take precedence
+    /// over the spec baseline (D.6 + D.21.7). Without an
+    /// override `judge_quorum_for_mode(fast, cfg) == 1`; with
+    /// `{"fast": 3}` the helper returns 3. Pins the precedence
+    /// contract so future refactors cannot silently route around
+    /// the profile.
+    #[test]
+    fn profile_judge_quorum_override_takes_precedence_over_mode_default() {
+        let mut cfg = crate::config::Config::default();
+        // Baseline, no profile: spec D.21.7 values.
+        assert_eq!(judge_quorum_for_mode(Mode::Fast, &cfg), 1);
+        assert_eq!(judge_quorum_for_mode(Mode::Deep, &cfg), 5);
+        // Profile applies: 3 judges on fast even though the spec
+        // baseline is 1.
+        cfg.profile_judge_quorum_overrides
+            .insert("fast".to_owned(), 3);
+        assert_eq!(judge_quorum_for_mode(Mode::Fast, &cfg), 3);
+        // Untouched modes still use the spec baseline.
+        assert_eq!(judge_quorum_for_mode(Mode::Deep, &cfg), 5);
+        // Profile that overrides a different mode is a no-op for
+        // the queried mode — pins the key-matching contract.
+        cfg.profile_judge_quorum_overrides
+            .insert("standard".to_owned(), 7);
+        assert_eq!(judge_quorum_for_mode(Mode::Deep, &cfg), 5);
+        assert_eq!(judge_quorum_for_mode(Mode::Standard, &cfg), 7);
     }
 
     /// `jaccard_distance` is a pure function: identical sets → 0;
