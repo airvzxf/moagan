@@ -42,6 +42,24 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: 1500,
             json_mode: true,
         }),
+        Role::TiefighterCritic => Some(RoleSettings {
+            temperature: 0.0,
+            top_p: 0.1,
+            max_tokens: 2048,
+            json_mode: true,
+        }),
+        Role::PersonaPicker => Some(RoleSettings {
+            temperature: 0.3,
+            top_p: 0.9,
+            max_tokens: 512,
+            json_mode: true,
+        }),
+        Role::AnglePicker => Some(RoleSettings {
+            temperature: 0.7,
+            top_p: 0.95,
+            max_tokens: 1024,
+            json_mode: true,
+        }),
         _ => None,
     }
 }
@@ -68,6 +86,9 @@ const DECOMPOSE_PROMPT: &str = include_str!("prompts/decompose.md");
 const MERGE_SYNTHESIZER_PROMPT: &str = include_str!("prompts/merge_synthesizer.md");
 const RECOVERY_EXPLAINER_PROMPT: &str = include_str!("prompts/recovery_explainer.md");
 const RATIONALE_EXTRACTOR_PROMPT: &str = include_str!("prompts/rationale_extractor.md");
+const TIEFIGHTER_CRITIC_PROMPT: &str = include_str!("prompts/tiefighter_critic.md");
+const PERSONA_PICKER_PROMPT: &str = include_str!("prompts/persona_picker.md");
+const ANGLE_PICKER_PROMPT: &str = include_str!("prompts/angle_picker.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -99,6 +120,9 @@ pub fn prompt_set_hash() -> String {
                 MERGE_SYNTHESIZER_PROMPT,
                 RECOVERY_EXPLAINER_PROMPT,
                 RATIONALE_EXTRACTOR_PROMPT,
+                TIEFIGHTER_CRITIC_PROMPT,
+                PERSONA_PICKER_PROMPT,
+                ANGLE_PICKER_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -130,6 +154,9 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::MergeSynthesizer => MERGE_SYNTHESIZER_PROMPT,
         Role::RecoveryExplainer => RECOVERY_EXPLAINER_PROMPT,
         Role::RationaleExtractor => RATIONALE_EXTRACTOR_PROMPT,
+        Role::TiefighterCritic => TIEFIGHTER_CRITIC_PROMPT,
+        Role::PersonaPicker => PERSONA_PICKER_PROMPT,
+        Role::AnglePicker => ANGLE_PICKER_PROMPT,
     }
 }
 
@@ -157,6 +184,27 @@ mod tests {
     #[test]
     fn rationale_extractor_prompt_file_exists_and_is_non_empty() {
         assert!(!RATIONALE_EXTRACTOR_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn tiefighter_critic_prompt_file_exists_and_is_non_empty() {
+        // Track H batch-1: the D.7.1 catalog entry for the
+        // adversarial critic ships with a real placeholder prompt.
+        assert!(!TIEFIGHTER_CRITIC_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn persona_picker_prompt_file_exists_and_is_non_empty() {
+        // Track H batch-1 (commit 2): persona selector carries its
+        // own placeholder prompt.
+        assert!(!PERSONA_PICKER_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn angle_picker_prompt_file_exists_and_is_non_empty() {
+        // Track H batch-1 (commit 3): exploration angle selector
+        // carries its own placeholder prompt.
+        assert!(!ANGLE_PICKER_PROMPT.trim().is_empty());
     }
 
     #[test]

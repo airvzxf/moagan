@@ -757,6 +757,78 @@ pub struct RationaleExtract {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the `Role::TiefighterCritic` role (D.7.1 catalog).
+///
+/// Carries the proposal the critic is attacking plus the structured
+/// adversarial findings. The critic is deterministic (T=0.0, top_p=0.1,
+/// max_tokens=2048), so two runs against the same input produce the
+/// same payload. `#[serde(default)]` keeps the validator accepting
+/// empty objects (the same contract as the other P-role types).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TiefighterCriticReport {
+    /// The proposal text the critic is attacking (echoed for
+    /// downstream phases that want to correlate critique -> source).
+    pub proposal: String,
+    /// Verdict headline (e.g. "weak", "mixed", "strong").
+    pub verdict: String,
+    /// Concrete weaknesses the critic surfaced, ordered by impact.
+    pub weaknesses: Vec<String>,
+    /// Concrete suggestions for closing the weaknesses.
+    pub suggestions: Vec<String>,
+    /// Per-evidence key -> excerpt pairs from the proposal.
+    pub evidence: Vec<String>,
+    /// Schema version.
+    pub schema_version: String,
+}
+/// Output of the `Role::PersonaPicker` role (D.7.1 catalog).
+///
+/// Picks which persona (system prompt variant) a downstream phase
+/// should adopt for the current run. Sampling contract
+/// (T=0.3, top_p=0.9, max_tokens=512) balances determinism with
+/// enough variance to escape obvious ties; callers that want a
+/// hard lock can re-run with T=0.0 in `role_settings`.
+/// `#[serde(default)]` keeps the validator accepting empty
+/// objects.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersonaPickerReport {
+    /// Candidate persona ids supplied by the caller (echoed for
+    /// downstream phases that want to audit which pool the picker
+    /// saw).
+    pub candidates: Vec<String>,
+    /// Persona id the picker selected (must be one of `candidates`).
+    pub selected: String,
+    /// One-line rationale for the selection.
+    pub rationale: String,
+    /// Schema version.
+    pub schema_version: String,
+}
+/// Output of the `Role::AnglePicker` role (D.7.1 catalog).
+///
+/// Picks which exploration angle a downstream phase should chase
+/// for the current problem. Higher variance than `PersonaPicker`
+/// (T=0.7, top_p=0.95) because the picker is meant to escape the
+/// obvious angles and surface the *next* one — the caller's
+/// `existing_angles` list deliberately anchors the model away from
+/// the obvious. `#[serde(default)]` keeps the validator accepting
+/// empty objects.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnglePickerReport {
+    /// Problem statement the picker is anchoring against (echoed
+    /// for downstream phases that want to correlate angle -> brief).
+    pub problem: String,
+    /// Existing angles the caller already tried (echoed for
+    /// audit; the picker is expected to *not* repeat them).
+    pub existing_angles: Vec<String>,
+    /// The next exploration angle the picker recommends.
+    pub selected: String,
+    /// One-line rationale: why this angle vs the existing set.
+    pub rationale: String,
+    /// Schema version.
+    pub schema_version: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.

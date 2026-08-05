@@ -12,8 +12,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, MergePlan, Proposal,
-    RationaleExtract, RecoveryReport, Repair, Route, Sketch, SynthesizedProposal,
+    AdversaryReport, AnglePickerReport, Brief, Critique, FinalReport, Intake, JudgeScore,
+    MergePlan, PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport, Repair, Route,
+    Sketch, SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -87,6 +88,23 @@ pub enum Role {
     RecoveryExplainer,
     /// Optional rationale extraction role.
     RationaleExtractor,
+    /// TiefighterCritic — D.7.1 catalog role. Adversarial critic
+    /// that targets the weakest spot of a proposal. Deterministic
+    /// (`T=0.0, top_p=0.1, max_tokens=2048`) so two runs against the
+    /// same input produce the same critique. Opt-in: no phase calls
+    /// it automatically; callers wire it up explicitly.
+    TiefighterCritic,
+    /// PersonaPicker — D.7.1 catalog role. Picks which persona
+    /// (system prompt variant) a downstream phase should adopt
+    /// for the current run. Sampling (T=0.3, top_p=0.9,
+    /// max_tokens=512). Opt-in.
+    PersonaPicker,
+    /// AnglePicker — D.7.1 catalog role. Picks the next
+    /// exploration angle a downstream phase should chase. Higher
+    /// variance (T=0.7, top_p=0.95, max_tokens=1024) so the
+    /// picker escapes the obvious angles and surfaces the *next*
+    /// one. Opt-in.
+    AnglePicker,
 }
 
 impl Role {
@@ -114,6 +132,9 @@ impl Role {
             Self::MergeSynthesizer => "merge_synthesizer",
             Self::RecoveryExplainer => "recovery_explainer",
             Self::RationaleExtractor => "rationale_extractor",
+            Self::TiefighterCritic => "tiefighter_critic",
+            Self::PersonaPicker => "persona_picker",
+            Self::AnglePicker => "angle_picker",
         }
     }
 
@@ -169,6 +190,15 @@ impl Role {
             }
             Self::RationaleExtractor => {
                 "RationaleExtractor: {rationale, evidence[], assumptions[]}"
+            }
+            Self::TiefighterCritic => {
+                "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=2048)"
+            }
+            Self::PersonaPicker => {
+                "PersonaPicker: {candidates[]} (persona selector; T=0.3, top_p=0.9, max_tokens=512)"
+            }
+            Self::AnglePicker => {
+                "AnglePicker: {problem, existing_angles[]} (exploration angle selector; T=0.7, top_p=0.95, max_tokens=1024)"
             }
         }
     }
@@ -234,6 +264,15 @@ impl Role {
             Self::RationaleExtractor => {
                 serde_json::from_value::<RationaleExtract>(value.clone()).map(|_| ())
             }
+            Self::TiefighterCritic => {
+                serde_json::from_value::<TiefighterCriticReport>(value.clone()).map(|_| ())
+            }
+            Self::PersonaPicker => {
+                serde_json::from_value::<PersonaPickerReport>(value.clone()).map(|_| ())
+            }
+            Self::AnglePicker => {
+                serde_json::from_value::<AnglePickerReport>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -269,6 +308,9 @@ impl Role {
             Self::MergeSynthesizer,
             Self::RecoveryExplainer,
             Self::RationaleExtractor,
+            Self::TiefighterCritic,
+            Self::PersonaPicker,
+            Self::AnglePicker,
         ]
     }
 }
@@ -305,6 +347,9 @@ impl FromStr for Role {
             "merge_synthesizer" => Ok(Self::MergeSynthesizer),
             "recovery_explainer" => Ok(Self::RecoveryExplainer),
             "rationale_extractor" => Ok(Self::RationaleExtractor),
+            "tiefighter_critic" => Ok(Self::TiefighterCritic),
+            "persona_picker" => Ok(Self::PersonaPicker),
+            "angle_picker" => Ok(Self::AnglePicker),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -330,8 +375,11 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_one() {
-        assert_eq!(Role::all().len(), 21);
+    fn all_roles_are_count_twenty_four() {
+        // Track H batch-1 closed: three catalog roles (D.7.1)
+        // wired — tiefighter_critic, persona_picker, angle_picker.
+        // Count jumps from 21 to 24.
+        assert_eq!(Role::all().len(), 24);
     }
 
     #[test]
@@ -347,6 +395,85 @@ mod tests {
     #[test]
     fn rationale_extractor_role_variant_exists() {
         assert_eq!(Role::RationaleExtractor.as_str(), "rationale_extractor");
+    }
+
+    #[test]
+    fn tiefighter_critic_round_trip() {
+        // The catalog uses lowercase snake_case on the wire; the
+        // round-trip through `FromStr` must preserve the variant.
+        let s = Role::TiefighterCritic.as_str();
+        assert_eq!(s, "tiefighter_critic");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::TiefighterCritic, back);
+    }
+
+    #[test]
+    fn tiefighter_critic_validate_json_accepts_valid_payload() {
+        // The D.7.1 catalog schema for this role is the proposal
+        // being criticized. `#[serde(default)]` on the domain type
+        // also makes {} acceptable (documented contract).
+        let raw = serde_json::json!({
+            "proposal": "Use a sharded ledger keyed by tenant id"
+        });
+        assert!(Role::TiefighterCritic.validate_json(&raw).is_ok());
+        assert!(
+            Role::TiefighterCritic
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn persona_picker_round_trip() {
+        let s = Role::PersonaPicker.as_str();
+        assert_eq!(s, "persona_picker");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::PersonaPicker, back);
+    }
+
+    #[test]
+    fn persona_picker_validate_json_accepts_valid_payload() {
+        // D.7.1 catalog schema: a list of persona candidates the
+        // picker will choose between. The empty-object case is
+        // also accepted (default-filled).
+        let raw = serde_json::json!({
+            "candidates": ["architect", "reviewer", "skeptic"],
+            "selected": "skeptic",
+            "rationale": "Brief asks for adversarial analysis"
+        });
+        assert!(Role::PersonaPicker.validate_json(&raw).is_ok());
+        assert!(
+            Role::PersonaPicker
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn angle_picker_round_trip() {
+        let s = Role::AnglePicker.as_str();
+        assert_eq!(s, "angle_picker");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::AnglePicker, back);
+    }
+
+    #[test]
+    fn angle_picker_validate_json_accepts_valid_payload() {
+        // D.7.1 catalog schema: a problem statement plus a list
+        // of already-explored angles; the picker proposes the next
+        // angle. The empty-object case is also accepted.
+        let raw = serde_json::json!({
+            "problem": "How to scale auth across multi-region tenants",
+            "existing_angles": ["JWT with rotating keys", "mTLS per pod"],
+            "selected": "Per-tenant JWKS endpoint with regional caching",
+            "rationale": "Complements JWT without overlapping mTLS"
+        });
+        assert!(Role::AnglePicker.validate_json(&raw).is_ok());
+        assert!(
+            Role::AnglePicker
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -387,6 +514,9 @@ mod tests {
                     || desc.starts_with("MergeSynthesizer:")
                     || desc.starts_with("RecoveryExplainer:")
                     || desc.starts_with("RationaleExtractor:")
+                    || desc.starts_with("TiefighterCritic:")
+                    || desc.starts_with("PersonaPicker:")
+                    || desc.starts_with("AnglePicker:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -451,5 +581,16 @@ mod tests {
         assert!(Role::MergeSynthesizer.validate_json(&empty).is_ok());
         assert!(Role::RecoveryExplainer.validate_json(&empty).is_ok());
         assert!(Role::RationaleExtractor.validate_json(&empty).is_ok());
+        // Track H batch-1: tiefighter_critic carries its own domain
+        // type with `#[serde(default)]`, so {} parses cleanly.
+        assert!(Role::TiefighterCritic.validate_json(&empty).is_ok());
+        // Track H batch-1 (commit 2): persona_picker carries its
+        // own domain type with `#[serde(default)]`, so {} parses
+        // cleanly.
+        assert!(Role::PersonaPicker.validate_json(&empty).is_ok());
+        // Track H batch-1 (commit 3): angle_picker carries its
+        // own domain type with `#[serde(default)]`, so {} parses
+        // cleanly.
+        assert!(Role::AnglePicker.validate_json(&empty).is_ok());
     }
 }

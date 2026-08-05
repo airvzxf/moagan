@@ -848,6 +848,17 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::MergeSynthesizer => 4000,
         Role::RecoveryExplainer => 1000,
         Role::RationaleExtractor => 1500,
+        // Track H batch-1: D.7.1 catalog opt-in roles. Each carries
+        // its own sampling contract (see `role_settings` in
+        // `src/llm/prompts.rs`); these are the runtime ceilings
+        // used when the catalog role is invoked outside any phase.
+        Role::TiefighterCritic => 2048,
+        // persona_picker is a short routing decision; the 512-token
+        // ceiling matches its role_settings (see prompts.rs).
+        Role::PersonaPicker => 512,
+        // angle_picker is a routing decision with a one-line
+        // rationale; the 1024-token ceiling matches role_settings.
+        Role::AnglePicker => 1024,
     }
 }
 
@@ -919,6 +930,18 @@ fn temperature_for_role(role: Role) -> f32 {
         Role::MergeSynthesizer => 0.2,
         Role::RecoveryExplainer => 0.0,
         Role::RationaleExtractor => 0.2,
+        // Track H batch-1: TiefighterCritic is fully deterministic
+        // (T=0.0) per D.7.1 so re-runs against the same proposal
+        // produce identical critiques (useful for snapshot diffs).
+        Role::TiefighterCritic => 0.0,
+        // persona_picker needs a small amount of variance
+        // (T=0.3) to break ties between close candidates without
+        // flipping picks across runs of the same brief.
+        Role::PersonaPicker => 0.3,
+        // angle_picker runs at T=0.7 so the picker escapes the
+        // obvious angles and surfaces the *next* one; the high
+        // variance is intentional, not noise.
+        Role::AnglePicker => 0.7,
     }
 }
 
