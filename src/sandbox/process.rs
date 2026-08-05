@@ -90,7 +90,7 @@ pub static COMMAND_CONFIGS: &[CommandConfig] = &[
         max_arg_len: 1024,
         max_output_bytes: 64 * 1024,
         timeout_secs: 180,
-        allow_network: true,
+        allow_network: false,
     },
     CommandConfig {
         name: "python",
@@ -198,17 +198,32 @@ pub struct SandboxConfig {
     /// Cap stdout/stderr capture. `None` means use [`MAX_STDOUT_BYTES`]
     /// / [`MAX_STDERR_BYTES`].
     pub max_capture_bytes: Option<usize>,
+    /// Whether the subprocess can reach the network. Default `false`
+    /// (off-by-default, catalog §D.11.9). When `false`, the sandbox
+    /// sets `CARGO_NET_OFFLINE=true` in the subprocess env so cargo
+    /// cannot fetch crates from the network. Callers that need
+    /// network must opt in explicitly via [`SandboxConfig::with_allow_network`].
+    pub allow_network: bool,
+    /// Whether to skip the secret-stripping pass over argv. Default
+    /// `false` (strip). When `true`, the raw args are passed to the
+    /// subprocess without redaction. Useful for debugging / repro
+    /// cases where the operator wants to see exactly what bytes were
+    /// passed. Catalog §D.11.10.
+    pub allow_injection: bool,
 }
 
 impl SandboxConfig {
     /// Build a config with the project defaults:
-    /// `timeout = 30s`, default allowlist + denylist.
+    /// `timeout = 30s`, default allowlist + denylist, network
+    /// disabled, secret stripping enabled.
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(30),
             allowlist: Allowlist::default(),
             denylist: Denylist::default(),
             max_capture_bytes: None,
+            allow_network: false,
+            allow_injection: false,
         }
     }
 
@@ -244,6 +259,23 @@ impl SandboxConfig {
     /// Cap stdout/stderr capture per stream.
     pub fn with_max_capture(mut self, bytes: usize) -> Self {
         self.max_capture_bytes = Some(bytes);
+        self
+    }
+
+    /// Opt in to network access for the subprocess. Default is
+    /// `false` (off-by-default). When `true`, the sandbox does NOT
+    /// set `CARGO_NET_OFFLINE=true` so cargo can fetch crates from
+    /// the registry. Catalog §D.11.9.
+    pub fn with_allow_network(mut self, allow: bool) -> Self {
+        self.allow_network = allow;
+        self
+    }
+
+    /// Opt out of the secret-stripping pass over argv. Default is
+    /// `false` (strip). When `true`, the raw args are passed to the
+    /// subprocess verbatim. Catalog §D.11.10.
+    pub fn with_allow_injection(mut self, allow: bool) -> Self {
+        self.allow_injection = allow;
         self
     }
 
@@ -493,7 +525,16 @@ impl Sandbox {
     ) -> std::result::Result<SandboxResult, SandboxError> {
         let started = Instant::now();
         let raw_args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-        let sanitized_args = strip_secrets(&raw_args);
+        // Catalog §D.11.10: when `allow_injection` is opted in, the
+        // raw args are passed to the subprocess verbatim and the
+        // argv-side secret-stripping pass is skipped. The visible
+        // `command_str` (used by telemetry / sidecars) also reflects
+        // the unredacted args so the operator sees exactly what ran.
+        let sanitized_args = if self.config.allow_injection {
+            raw_args.clone()
+        } else {
+            strip_secrets(&raw_args)
+        };
         let policy_argv: Vec<String> = std::iter::once(cmd.to_owned())
             .chain(raw_args.iter().cloned())
             .collect();
@@ -702,6 +743,11 @@ impl Sandbox {
     ///   `cargo`) remain reachable.
     /// - Force `HOME` to the scratch directory so the child cannot
     ///   leak the real user's home contents.
+    /// - When `allow_network == false` (the default, catalog §D.11.9),
+    ///   inject `CARGO_NET_OFFLINE=true` so cargo refuses to fetch
+    ///   crates from the registry. The flag is the canonical
+    ///   cargo-respected hint; we do not attempt network namespaces
+    ///   here because that requires CAP_SYS_ADMIN on the host.
     fn build_env(&self, work_path: &Path) -> std::collections::HashMap<String, String> {
         let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
         self.config.strip_secrets_env(&mut env);
@@ -714,6 +760,9 @@ impl Sandbox {
             format!("/usr/local/bin:/usr/bin:/bin:{inherited_path}"),
         );
         env.insert("HOME".into(), work_path.to_string_lossy().into_owned());
+        if !self.config.allow_network {
+            env.insert("CARGO_NET_OFFLINE".into(), "true".into());
+        }
         env
     }
 }
@@ -870,7 +919,10 @@ mod tests {
         assert_eq!(config.max_arg_len, 1024);
         assert_eq!(config.max_output_bytes, 64 * 1024);
         assert_eq!(config.timeout_secs, 180);
-        assert!(config.allow_network);
+        // Catalog §D.11.9: the rust command config is off-by-default
+        // for network. Callers that need to fetch crates must opt in
+        // via `SandboxConfig::with_allow_network(true)`.
+        assert!(!config.allow_network);
     }
 
     #[test]
@@ -952,5 +1004,84 @@ mod tests {
     async fn command_string_includes_full_argv() {
         let result = sb().run("echo", &["a", "b", "c"]).await.unwrap();
         assert_eq!(result.command, "echo a b c");
+    }
+
+    /// Catalog §D.11.9: the default `SandboxConfig` must forbid
+    /// network access for the subprocess. The sandbox enforces that
+    /// by injecting `CARGO_NET_OFFLINE=true` in the env, so the
+    /// observable contract is "default cargo runs offline".
+    #[tokio::test]
+    async fn sandbox_default_does_not_allow_network() {
+        let cfg = SandboxConfig::new();
+        assert!(!cfg.allow_network, "default must opt out of network");
+        let sandbox = Sandbox::new(cfg).unwrap();
+        let result = sandbox
+            .run("sh", &["-c", "echo ${CARGO_NET_OFFLINE:-unset}"])
+            .await
+            .unwrap();
+        assert_eq!(result.status, SandboxStatus::Pass);
+        assert!(
+            result.stdout.contains("true"),
+            "CARGO_NET_OFFLINE must be 'true' by default, got {:?}",
+            result.stdout
+        );
+    }
+
+    /// Catalog §D.11.9: `with_allow_network(true)` opts in. The
+    /// sandbox must NOT set `CARGO_NET_OFFLINE` so cargo can fetch
+    /// crates from the registry.
+    #[tokio::test]
+    async fn sandbox_opt_in_allows_network() {
+        let cfg = SandboxConfig::new().with_allow_network(true);
+        let sandbox = Sandbox::new(cfg).unwrap();
+        let result = sandbox
+            .run("sh", &["-c", "echo ${CARGO_NET_OFFLINE:-unset}"])
+            .await
+            .unwrap();
+        assert_eq!(result.status, SandboxStatus::Pass);
+        assert!(
+            result.stdout.contains("unset"),
+            "CARGO_NET_OFFLINE must be unset when network is allowed, got {:?}",
+            result.stdout
+        );
+    }
+
+    /// Catalog §D.11.10: the default `SandboxConfig` runs the
+    /// secret-stripping pass over argv. The visible `command_str`
+    /// must NOT contain the raw secret.
+    #[tokio::test]
+    async fn sandbox_default_strips_secrets() {
+        let sandbox = Sandbox::new(SandboxConfig::new()).unwrap();
+        let secret = "sk-cp-fake_default_strip_secret_xyz";
+        let result = sandbox.run("echo", &[secret]).await.unwrap();
+        assert_eq!(result.status, SandboxStatus::Pass);
+        assert!(
+            !result.command.contains(secret),
+            "raw secret leaked into command string: {}",
+            result.command
+        );
+        assert!(
+            result.command.contains("REDACTED"),
+            "expected REDACTED marker in command string, got: {}",
+            result.command
+        );
+    }
+
+    /// Catalog §D.11.10: with `allow_injection=true`, the raw args
+    /// are passed to the subprocess verbatim and the visible
+    /// `command_str` reflects the unredacted args. The operator
+    /// intentionally opted in to see "what bytes were passed".
+    #[tokio::test]
+    async fn sandbox_allow_injection_keeps_secrets() {
+        let cfg = SandboxConfig::new().with_allow_injection(true);
+        let sandbox = Sandbox::new(cfg).unwrap();
+        let secret = "sk-cp-fake_injection_keep_secret_xyz";
+        let result = sandbox.run("echo", &[secret]).await.unwrap();
+        assert_eq!(result.status, SandboxStatus::Pass);
+        assert!(
+            result.command.contains(secret),
+            "secret must pass through when allow_injection=true, got: {}",
+            result.command
+        );
     }
 }

@@ -87,6 +87,21 @@ pub struct Config {
     /// Overridable via `MOAGAN_STARTUP_RECONCILE=false`.
     #[serde(default = "default_startup_reconcile")]
     pub startup_reconcile: bool,
+    /// Track E (catalog §D.11.9): allow the sandbox subprocess to
+    /// reach the network. Default `false` (off-by-default) so the
+    /// default install never silently contacts the registry / an
+    /// arbitrary host. Operators opt in via
+    /// `MOAGAN_SANDBOX_ALLOW_NETWORK=true` or by setting this in
+    /// `~/.config/moagan/config.toml`. When `false`, the sandbox
+    /// injects `CARGO_NET_OFFLINE=true` in the subprocess env.
+    pub sandbox_allow_network: bool,
+    /// Track E (catalog §D.11.10): allow the sandbox to skip the
+    /// secret-stripping pass over argv. Default `false` (strip).
+    /// Operators opt in via `MOAGAN_SANDBOX_ALLOW_INJECTION=true` or
+    /// `moagan run --allow-injection`. When `false`, the sandbox
+    /// runs `strip_secrets` over argv before spawning; when `true`,
+    /// raw args are passed to the subprocess verbatim.
+    pub sandbox_allow_injection: bool,
 }
 
 fn default_startup_reconcile() -> bool {
@@ -289,6 +304,8 @@ impl Default for Config {
             retention: RetentionConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             startup_reconcile: default_startup_reconcile(),
+            sandbox_allow_network: false,
+            sandbox_allow_injection: false,
         }
     }
 }
@@ -623,6 +640,28 @@ impl Config {
             match normalised.as_str() {
                 "true" | "1" | "yes" | "on" => self.startup_reconcile = true,
                 "false" | "0" | "no" | "off" => self.startup_reconcile = false,
+                _ => {}
+            }
+        }
+        if let Ok(v) = std::env::var("MOAGAN_SANDBOX_ALLOW_NETWORK") {
+            // Catalog §D.11.9. Accept the canonical `true`/`false`
+            // and the bash-style `1`/`0` aliases. Stale / garbage
+            // exports are ignored so a stray env var does not
+            // silently flip the default.
+            let normalised = v.trim().to_ascii_lowercase();
+            match normalised.as_str() {
+                "true" | "1" | "yes" | "on" => self.sandbox_allow_network = true,
+                "false" | "0" | "no" | "off" => self.sandbox_allow_network = false,
+                _ => {}
+            }
+        }
+        if let Ok(v) = std::env::var("MOAGAN_SANDBOX_ALLOW_INJECTION") {
+            // Catalog §D.11.10. Same parsing as the network flag;
+            // missing / garbage values leave the existing knob alone.
+            let normalised = v.trim().to_ascii_lowercase();
+            match normalised.as_str() {
+                "true" | "1" | "yes" | "on" => self.sandbox_allow_injection = true,
+                "false" | "0" | "no" | "off" => self.sandbox_allow_injection = false,
                 _ => {}
             }
         }
@@ -980,6 +1019,114 @@ mod tests {
         assert!(
             cfg.startup_reconcile,
             "garbage env must not flip the default"
+        );
+    }
+
+    /// Catalog §D.11.9: the default value of `sandbox_allow_network`
+    /// is `false` (off-by-default). This is the privacy / hermetic-
+    /// sandbox contract — every operator install should run without
+    /// the sandbox reaching the network.
+    #[test]
+    fn config_sandbox_allow_network_default_is_false() {
+        let cfg = Config::default();
+        assert!(
+            !cfg.sandbox_allow_network,
+            "sandbox_allow_network must default to false (D.11.9 off-by-default)"
+        );
+    }
+
+    /// Catalog §D.11.9: `MOAGAN_SANDBOX_ALLOW_NETWORK=true` flips
+    /// the flag. Locked against the `_false` and `_garbage` tests
+    /// below because they all mutate the same env var.
+    #[test]
+    fn env_var_sandbox_allow_network_true_overrides_default() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_ALLOW_NETWORK", "true");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_ALLOW_NETWORK");
+        }
+        assert!(
+            cfg.sandbox_allow_network,
+            "MOAGAN_SANDBOX_ALLOW_NETWORK=true must opt in"
+        );
+    }
+
+    /// Catalog §D.11.9: `MOAGAN_SANDBOX_ALLOW_NETWORK=false` on a
+    /// custom-true config resets the flag (the env override is the
+    /// canonical mechanism to flip the default in either direction).
+    #[test]
+    fn env_var_sandbox_allow_network_false_overrides_true() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cfg = Config {
+            sandbox_allow_network: true,
+            ..Config::default()
+        };
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_ALLOW_NETWORK", "false");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_ALLOW_NETWORK");
+        }
+        assert!(
+            !cfg.sandbox_allow_network,
+            "MOAGAN_SANDBOX_ALLOW_NETWORK=false must opt out"
+        );
+    }
+
+    /// Catalog §D.11.9: garbage / whitespace env values are ignored
+    /// so a stray export does not silently flip the default.
+    #[test]
+    fn env_var_sandbox_allow_network_garbage_is_ignored() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_ALLOW_NETWORK", "   ");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_ALLOW_NETWORK");
+        }
+        assert!(
+            !cfg.sandbox_allow_network,
+            "garbage env must not flip the default"
+        );
+    }
+
+    /// Catalog §D.11.10: the default value of `sandbox_allow_injection`
+    /// is `false` (the secret-stripping pass always runs). Operators
+    /// opt in via `MOAGAN_SANDBOX_ALLOW_INJECTION=true` or
+    /// `moagan run --allow-injection`.
+    #[test]
+    fn config_sandbox_allow_injection_default_is_false() {
+        let cfg = Config::default();
+        assert!(
+            !cfg.sandbox_allow_injection,
+            "sandbox_allow_injection must default to false (D.11.10 strip-by-default)"
+        );
+    }
+
+    /// Catalog §D.11.10: `MOAGAN_SANDBOX_ALLOW_INJECTION=true` flips
+    /// the flag so the sandbox skips the argv-side secret-stripping
+    /// pass. Useful for debugging / repro cases.
+    #[test]
+    fn env_var_sandbox_allow_injection_true_overrides_default() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_ALLOW_INJECTION", "true");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_ALLOW_INJECTION");
+        }
+        assert!(
+            cfg.sandbox_allow_injection,
+            "MOAGAN_SANDBOX_ALLOW_INJECTION=true must opt in"
         );
     }
 }
