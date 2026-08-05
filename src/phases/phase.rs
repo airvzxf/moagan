@@ -255,13 +255,19 @@ impl RunContext {
     /// in the `calls` table. A miss falls through to the provider
     /// and the response is stored for the next run.
     pub async fn call(&self, role: Role, system: String, user: String) -> Result<Response> {
+        let profile_overrides: Option<&std::collections::HashMap<String, f32>> =
+            if self.config.profile_temperature_overrides.is_empty() {
+                None
+            } else {
+                Some(&self.config.profile_temperature_overrides)
+            };
         let req = Request {
             role,
             model: self.default_model.clone(),
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(temperature_for_role(role)),
+            temperature: Some(temperature_for_role(role, profile_overrides)),
             top_p: Some(0.95),
             response_schema: None,
         };
@@ -284,13 +290,19 @@ impl RunContext {
         user: String,
         started_unix: i64,
     ) -> Result<Response> {
+        let profile_overrides: Option<&std::collections::HashMap<String, f32>> =
+            if self.config.profile_temperature_overrides.is_empty() {
+                None
+            } else {
+                Some(&self.config.profile_temperature_overrides)
+            };
         let req = Request {
             role,
             model: self.default_model.clone(),
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(temperature_for_role(role)),
+            temperature: Some(temperature_for_role(role, profile_overrides)),
             top_p: Some(0.95),
             response_schema: None,
         };
@@ -902,7 +914,20 @@ fn max_tokens_for_role(role: Role) -> u32 {
 /// A future release will let providers override these defaults through
 /// the per-role `prompts/registry.rs` configuration block, but the
 /// values here are the contract.
-fn temperature_for_role(role: Role) -> f32 {
+fn temperature_for_role(
+    role: Role,
+    profile_overrides: Option<&std::collections::HashMap<String, f32>>,
+) -> f32 {
+    // Profile-defined overrides (spec D.6 / D.21.x) take precedence
+    // over the hard-coded defaults when the active domain profile
+    // maps the role name to a different sampling temperature.
+    // When the profile map is absent or lacks an entry for this
+    // role we fall through to the role-specific hard-coded value.
+    if let Some(map) = profile_overrides
+        && let Some(v) = map.get(role.as_str())
+    {
+        return *v;
+    }
     match role {
         Role::Intake => 0.4,
         Role::Clarify => 0.0,
@@ -1038,7 +1063,7 @@ mod tests {
     /// reduce the diversity that v0.2's `SketchPhase` relies on.
     #[test]
     fn temperature_sketch_is_one() {
-        assert_eq!(temperature_for_role(Role::Sketch), 1.0);
+        assert_eq!(temperature_for_role(Role::Sketch, None), 1.0);
     }
 
     /// Roles whose output is consumed by JSON parsers downstream
@@ -1047,10 +1072,10 @@ mod tests {
     /// the repair walker cannot recover from.
     #[test]
     fn temperature_deterministic_roles_are_zero() {
-        assert_eq!(temperature_for_role(Role::Clarify), 0.0);
-        assert_eq!(temperature_for_role(Role::Route), 0.0);
-        assert_eq!(temperature_for_role(Role::Gate), 0.0);
-        assert_eq!(temperature_for_role(Role::Rank), 0.0);
+        assert_eq!(temperature_for_role(Role::Clarify, None), 0.0);
+        assert_eq!(temperature_for_role(Role::Route, None), 0.0);
+        assert_eq!(temperature_for_role(Role::Gate, None), 0.0);
+        assert_eq!(temperature_for_role(Role::Rank, None), 0.0);
     }
 
     /// Every role must have a defined temperature so the helper is
@@ -1058,11 +1083,79 @@ mod tests {
     #[test]
     fn temperature_defined_for_every_role() {
         for r in Role::all() {
-            let t = temperature_for_role(*r);
+            let t = temperature_for_role(*r, None);
             assert!(
                 (0.0..=2.0).contains(&t),
                 "{r:?} temperature {t} outside [0, 2]"
             );
         }
+    }
+
+    /// Profile-supplied temperature overrides take precedence over
+    /// the hard-coded role default. Without an override the helper
+    /// returns 1.0 for `Sketch`; with an override it returns the
+    /// profile value. Pins the precedence contract from PR D6 so
+    /// future refactors cannot silently route around it.
+    #[test]
+    fn profile_temperature_override_takes_precedence_over_role_default() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("sketch".to_owned(), 0.25_f32);
+        let overridden = temperature_for_role(Role::Sketch, Some(&map));
+        assert_eq!(overridden, 0.25);
+        let baseline = temperature_for_role(Role::Sketch, None);
+        assert_eq!(baseline, 1.0);
+    }
+
+    /// When the profile map is absent OR does not contain an entry
+    /// for the role, the helper returns the hard-coded default.
+    /// Pins both the "no profile" branch and the "missing key"
+    /// branch because callers rely on the silent fall-through.
+    #[test]
+    fn profile_without_overrides_falls_back_to_hardcoded() {
+        let empty = std::collections::HashMap::<String, f32>::new();
+        // Empty map → fall-through.
+        assert_eq!(
+            temperature_for_role(Role::Sketch, Some(&empty)),
+            1.0,
+            "empty profile map must fall through to hard-coded default"
+        );
+        // Map present but role missing → fall-through.
+        let mut other_role = std::collections::HashMap::new();
+        other_role.insert("judge".to_owned(), 0.99_f32);
+        assert_eq!(
+            temperature_for_role(Role::Sketch, Some(&other_role)),
+            1.0,
+            "profile without an entry for the role must fall through"
+        );
+        // Same value as the override, but for a different role —
+        // sanity-check the lookup is keyed by `role.as_str()`.
+        assert_eq!(
+            temperature_for_role(Role::Judge, Some(&other_role)),
+            0.99,
+            "present entry must be returned when the role matches"
+        );
+    }
+
+    /// `temperature_for_role` looks up by `Role::as_str()`. Unknown
+    /// strings in the profile map are silently ignored (so an
+    /// operator's typo in `temperature_overrides.toml` does not
+    /// blow up every LLM call). This test pins the contract: the
+    /// helper only honours keys that match a known role.
+    #[test]
+    fn profile_overrides_validate_role_names() {
+        let mut map = std::collections::HashMap::new();
+        // Bogus role names that no real `Role` variant produces.
+        map.insert("not_a_role".to_owned(), 0.1_f32);
+        map.insert("SkEtCh".to_owned(), 0.5_f32); // case-sensitive too
+        assert_eq!(
+            temperature_for_role(Role::Sketch, Some(&map)),
+            1.0,
+            "case-mismatched key must not override"
+        );
+        assert_eq!(
+            temperature_for_role(Role::Clarify, Some(&map)),
+            0.0,
+            "unknown key must not influence unrelated roles"
+        );
     }
 }

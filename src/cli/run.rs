@@ -484,24 +484,89 @@ pub(crate) fn build_registry_for_with_api_key(
     registry_from_config(&spec_map, &cfg.circuit_breaker)
 }
 
-/// Build the canonical pipeline for a given mode. The cardinality
-/// table mirrors the v0.1 MVP in `docs/proposal-01-concept.md` §13.6
-/// and §5.3 of `docs/proposal-02-rust.md` for the v0.2 additions:
+/// Cardinality knobs for a single pipeline run. Returned by
+/// [`pipeline_shape`] so [`build_pipeline_for_mode`] can construct
+/// the phase vector with the right counts and so unit tests can
+/// verify the cardinality delegation without poking at the
+/// `Pipeline`'s private phase list.
 ///
-/// - `fast`: 3 proposals, 2 critics, 3 judges. No sketch phase.
+/// The fields match the contract documented on
+/// [`build_pipeline_for_mode`]: `proposals` and `sketches` come
+/// from `Cardinality::for_mode_default(mode).soft`, `judges` comes
+/// from `judge_quorum_for_mode(mode, cfg)`, and `critics` is a
+/// bounded derivative of `proposals` (no spec entry for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineShape {
+    /// `ProposePhase.count` (zero for `Mode::Explore`).
+    pub proposals: u32,
+    /// `JudgePhase.judges` (zero for `Mode::Explore`).
+    pub judges: u32,
+    /// `SketchPhase.count` (spec soft target for non-fast modes;
+    /// zero for `Mode::Fast` because the phase is skipped).
+    pub sketches: u32,
+    /// `CritiquePhase.critics_per_proposal` (zero for `Mode::Explore`).
+    pub critics: u32,
+}
+
+/// Resolve the per-mode cardinality knobs for a pipeline. Pulls
+/// `proposals` and `sketches` from the spec D.21.1 soft target via
+/// [`Cardinality::for_mode_default`], `judges` from spec D.21.7 via
+/// [`crate::phases::cardinality::judge_quorum_for_mode`] (which
+/// honours `profile_judge_quorum_overrides`), and derives `critics`
+/// from `proposals` (capped 2..=4) because the spec has no
+/// dedicated critics table.
+///
+/// `Mode::Explore` always gets `proposals = 0`, `judges = 0`,
+/// `critics = 0` because the pipeline returns at sketches for that
+/// mode. The sketches count is still the spec soft target so the
+/// `explore` fan-out keeps the spec's high-diversity shape.
+pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
+    use crate::phases::cardinality::{Cardinality, judge_quorum_for_mode};
+    let cardinality = Cardinality::for_mode_default(mode);
+    let soft = cardinality.soft as u32;
+    let judges = judge_quorum_for_mode(mode, cfg) as u32;
+    if mode == Mode::Explore {
+        PipelineShape {
+            proposals: 0,
+            judges: 0,
+            sketches: soft,
+            critics: 0,
+        }
+    } else {
+        PipelineShape {
+            proposals: soft,
+            judges,
+            sketches: soft,
+            critics: soft.div_ceil(4).clamp(2, 4),
+        }
+    }
+}
+
+/// Build the canonical pipeline for a given mode. The proposal
+/// and sketch fan-out counts come from [`Cardinality::for_mode_default`]
+/// (the spec D.21.1 soft target per mode), and the judge panel
+/// size comes from [`crate::phases::cardinality::judge_quorum_for_mode`]
+/// (spec D.21.7 with `profile_judge_quorum_overrides` honoured).
+/// This replaces the previous hand-rolled table, which drifted
+/// from the spec (`deep` shipped 5 proposals vs. the spec's 10-25
+/// range; `fast` shipped 3 judges vs. the spec's 1) and which
+/// ignored profile overrides entirely.
+///
+/// - `fast`: 4 proposals, 1 judge, no sketch phase.
 ///   Cluster/synthesize/adversary skipped to keep the loop short.
-/// - `standard`: 3 proposals, 3 critics, 5 judges, 4 sketches.
-///   Phase D enabled.
-/// - `deep`: 5 proposals, 4 critics, 7 judges, 6 sketches,
+/// - `standard`: 7 proposals, 3 judges, 7 sketches. Phase D enabled.
+/// - `deep`: 17 proposals, 5 judges, 17 sketches,
 ///   2 repair rounds, Phase D enabled (synthesis + adversary).
-/// - `explore`: 0 proposals, 0 critics, 0 judges, 12 sketches.
-///   Pipeline ends at sketches; the user inspects the sketch map
-///   manually.
-/// - `batch`: 3 proposals, 2 critics, 3 judges, 4 sketches.
-///   Mirrors fast cardinality plus sketches; differs in its
-///   JSON-stable output contract and lack of human pauses. Phase D
-///   enabled but the human checkpoints are auto-skipped (handled
-///   inside the phases via `CheckpointOpts::interactive`).
+/// - `explore`: 0 proposals, 0 judges, 27 sketches. Pipeline ends
+///   at sketches; the user inspects the sketch map manually.
+/// - `batch`: 11 proposals, 1 judge, 11 sketches. JSON-stable
+///   output contract, no human pauses, Phase D auto-suppressed.
+///
+/// Critics per proposal are derived from the proposals count
+/// (capped at 2-4) because the spec has no dedicated
+/// critics-cardinality table — this is the only knob that does
+/// not come from a spec helper. See [`pipeline_shape`] for the
+/// concrete derivation rule.
 ///
 /// Phase F (`replace_sources_enabled` flag): the synthesis-replacement
 /// predicate is wired into `RankPhase` for every mode that runs
@@ -513,13 +578,11 @@ pub fn build_pipeline_for_mode(
     cfg: &Config,
     replace_sources_enabled: bool,
 ) -> Pipeline {
-    let (proposals, critics, judges, sketches) = match mode {
-        Mode::Fast => (3u32, 2u32, 3u32, 0u32),
-        Mode::Standard => (3u32, 3u32, 5u32, 4u32),
-        Mode::Deep => (5u32, 4u32, 7u32, 6u32),
-        Mode::Explore => (0u32, 0u32, 0u32, 12u32),
-        Mode::Batch => (3u32, 2u32, 3u32, 4u32),
-    };
+    let shape = pipeline_shape(mode, cfg);
+    let proposals = shape.proposals;
+    let judges = shape.judges;
+    let sketches = shape.sketches;
+    let critics = shape.critics;
     let cfg_arc = std::sync::Arc::new(cfg.clone());
     let mut pipeline = Pipeline::new()
         .push(IntakePhase)
@@ -830,5 +893,99 @@ mod tests {
         let raw = "design a CLI for batch CSV processing";
         let redacted = redact::apply(&policy, Surface::Storage, raw).expect("redaction succeeds");
         assert_eq!(redacted, raw, "non-secret text should be unchanged");
+    }
+
+    /// PR D7: the pipeline fan-out (proposals + sketches) is sourced
+    /// from `Cardinality::for_mode_default`, not a hand-rolled table.
+    /// Pins the delegation so a future refactor cannot drift the
+    /// numbers back to the old `3/3/5/12/3` constants. Without the
+    /// helper the values would be 3 (fast) instead of 4 (the spec
+    /// soft target `(3 + 5) / 2`).
+    #[test]
+    fn pipeline_uses_cardinality_helper_instead_of_hardcoded() {
+        let cfg = crate::config::Config::default();
+        let shape = pipeline_shape(Mode::Fast, &cfg);
+        // `Cardinality::for_mode_default(Fast).soft == 4` per the
+        // spec D.21.1 range 3-5; the previous hard-coded value was 3.
+        assert_eq!(
+            shape.proposals, 4,
+            "proposals must come from Cardinality::for_mode_default, not a hand-rolled table"
+        );
+        assert_eq!(
+            shape.sketches, 4,
+            "sketches must come from Cardinality::for_mode_default for non-fast modes"
+        );
+        let deep = pipeline_shape(Mode::Deep, &cfg);
+        assert_eq!(
+            deep.proposals, 17,
+            "deep soft target is (10 + 25) / 2 == 17 per spec D.21.1"
+        );
+        let explore = pipeline_shape(Mode::Explore, &cfg);
+        assert_eq!(
+            explore.proposals, 0,
+            "explore never runs proposals regardless of cardinality"
+        );
+        assert_eq!(
+            explore.sketches, 27,
+            "explore sketches still come from the cardinality soft target (15-40 mid)"
+        );
+    }
+
+    /// PR D7: the judge panel size is sourced from
+    /// `judge_quorum_for_mode`, which honours spec D.21.7
+    /// (fast=1, standard=3, deep=5, batch=1). The previous
+    /// hard-coded table had `fast=3, standard=5, deep=7` which
+    /// contradicted the spec.
+    #[test]
+    fn pipeline_uses_judge_quorum_helper() {
+        let cfg = crate::config::Config::default();
+        let fast = pipeline_shape(Mode::Fast, &cfg);
+        assert_eq!(fast.judges, 1, "spec D.21.7: fast uses 1 judge");
+        let standard = pipeline_shape(Mode::Standard, &cfg);
+        assert_eq!(standard.judges, 3, "spec D.21.7: standard uses 3 judges");
+        let deep = pipeline_shape(Mode::Deep, &cfg);
+        assert_eq!(deep.judges, 5, "spec D.21.7: deep uses 5 judges");
+        let explore = pipeline_shape(Mode::Explore, &cfg);
+        assert_eq!(
+            explore.judges, 0,
+            "explore never runs judges regardless of quorum helper"
+        );
+        let batch = pipeline_shape(Mode::Batch, &cfg);
+        assert_eq!(batch.judges, 1, "spec D.21.7: batch uses 1 judge");
+    }
+
+    /// PR D7: profile-supplied `judge_quorum_overrides` propagate
+    /// through `build_pipeline_for_mode` so `--profile <name>`
+    /// actually changes the judge panel size (previously the
+    /// table ignored profiles entirely).
+    #[test]
+    fn profile_quorum_override_applies_to_pipeline() {
+        let mut cfg = crate::config::Config::default();
+        // Baseline: no profile, fast uses the spec 1 judge.
+        assert_eq!(pipeline_shape(Mode::Fast, &cfg).judges, 1);
+        // Profile: bump `fast` to 3 judges and `deep` to 9.
+        cfg.profile_judge_quorum_overrides
+            .insert("fast".to_owned(), 3);
+        cfg.profile_judge_quorum_overrides
+            .insert("deep".to_owned(), 9);
+        let fast = pipeline_shape(Mode::Fast, &cfg);
+        assert_eq!(
+            fast.judges, 3,
+            "profile_judge_quorum_overrides must win over the spec baseline"
+        );
+        let deep = pipeline_shape(Mode::Deep, &cfg);
+        assert_eq!(
+            deep.judges, 9,
+            "per-mode profile override must reach the pipeline shape"
+        );
+        // Untouched modes still use the spec baseline.
+        let standard = pipeline_shape(Mode::Standard, &cfg);
+        assert_eq!(standard.judges, 3, "unrelated modes keep the spec baseline");
+        // Cardinality-derived counts are unaffected by quorum overrides.
+        let fast_after = pipeline_shape(Mode::Fast, &cfg);
+        assert_eq!(
+            fast_after.proposals, 4,
+            "profile quorum override must not touch the cardinality-driven proposal count"
+        );
     }
 }

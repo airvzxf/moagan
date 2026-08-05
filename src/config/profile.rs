@@ -113,6 +113,22 @@ impl Profile {
             && self.judge_quorum_overrides.is_empty()
     }
 
+    /// Look up a per-role temperature override by role name (e.g.
+    /// `"sketch"` or `"judge"`). Returns `None` when the profile
+    /// does not override that role — callers should fall back to
+    /// the hard-coded role default in `phases::phase`.
+    pub fn temperature_for(&self, role: &str) -> Option<f32> {
+        self.temperature_overrides.get(role).copied()
+    }
+
+    /// Look up a per-mode judge quorum override by mode name (e.g.
+    /// `"fast"` or `"deep"`). Returns `None` when the profile does
+    /// not override that mode — callers should fall back to
+    /// [`crate::phases::cardinality::judge_quorum`].
+    pub fn judge_quorum_for(&self, mode: &str) -> Option<usize> {
+        self.judge_quorum_overrides.get(mode).copied()
+    }
+
     fn load_with_history(name: &str, chain: &mut Vec<String>) -> Result<Self> {
         if chain.iter().any(|ancestor| ancestor == name) {
             return Err(Error::InvalidArgs(format!(
