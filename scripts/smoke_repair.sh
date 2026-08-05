@@ -108,6 +108,12 @@ run_check 'cleanup-orphans dry-run exits 0' 0 \
   "${BIN}" repair --cleanup-orphans --dry-run
 run_check_grep 'cleanup-orphans dry-run prints "nothing to do"' 0 'nothing to do' "${TMP}/out"
 
+# 5. reindex-artifacts dry-run: against an empty home the
+#    plan is empty and the call exits 0.
+run_check 'reindex-artifacts dry-run exits 0' 0 \
+  env MOAGAN_HOME="${TMP}/repair-home" \
+  "${BIN}" repair --reindex-artifacts --dry-run
+
 printf '\nPhase D repair smoke: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [[ ${FAIL} -gt 0 ]]; then
   printf 'FAILED:\n'

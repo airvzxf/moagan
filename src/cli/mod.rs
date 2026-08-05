@@ -899,6 +899,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 yes,
                 run: parsed_run,
                 dry_run,
+                home_override: None,
             })?;
             Ok(code)
         }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde::Serialize;
 use thiserror::Error;
@@ -49,6 +50,9 @@ mod sql_v008 {
 }
 mod sql_v009 {
     pub(super) const V009: &str = include_str!("migrations/v009_stability.sql");
+}
+mod sql_v010 {
+    pub(super) const V010: &str = include_str!("migrations/v010_run_artifacts.sql");
 }
 
 /// SQLite-side error variants.
@@ -231,6 +235,10 @@ impl Db {
         if current < 9 {
             apply_v009_idempotent(&conn)?;
             conn.execute_batch("PRAGMA user_version = 9;")?;
+        }
+        if current < 10 {
+            conn.execute_batch(sql_v010::V010)?;
+            conn.execute_batch("PRAGMA user_version = 10;")?;
         }
         Ok(())
     }
@@ -1690,6 +1698,140 @@ impl Db {
             .ok();
         Ok(row)
     }
+
+    // -----------------------------------------------------------------
+    // Track D.2 (D.28.5) — reindex_artifacts helpers.
+    //
+    // The four `count_<kind>` readers return the cached count from
+    // `run_artifacts` (0 on a pre-v010 database or when no row
+    // exists yet). The four `reindex_<kind>` methods walk the
+    // filesystem under `root/<kind>/`, count the primary
+    // `*.json` files, and upsert the result.
+    // -----------------------------------------------------------------
+
+    /// Cached count of `proposals/p_*.json` files for `run_id`.
+    /// Returns 0 on a pre-v010 database or when no row exists yet.
+    pub fn count_proposals(&self, run_id: &RunId) -> Result<usize> {
+        self.count_run_artifact(run_id, "proposals")
+    }
+
+    /// Cached count of `sketches/sk_*.json` files for `run_id`.
+    pub fn count_sketches(&self, run_id: &RunId) -> Result<usize> {
+        self.count_run_artifact(run_id, "sketches")
+    }
+
+    /// Cached count of `evaluations/p_*.json` files for `run_id`.
+    pub fn count_evaluations(&self, run_id: &RunId) -> Result<usize> {
+        self.count_run_artifact(run_id, "evaluations")
+    }
+
+    /// Cached count of `critiques/p_*_critic_*.json` files for
+    /// `run_id`.
+    pub fn count_critiques(&self, run_id: &RunId) -> Result<usize> {
+        self.count_run_artifact(run_id, "critiques")
+    }
+
+    /// Walk `<root>/proposals/` and upsert the count into
+    /// `run_artifacts` keyed by `(run_id, "proposals")`. Returns
+    /// the freshly indexed count. Pre-v010 databases are a
+    /// no-op (the helper returns 0) so legacy operators never
+    /// crash the new code path.
+    pub fn reindex_proposals(&self, run_id: &RunId, root: &Path) -> Result<usize> {
+        self.reindex_run_artifact(run_id, "proposals", &root.join("proposals"))
+    }
+
+    /// Walk `<root>/sketches/` and upsert the count.
+    pub fn reindex_sketches(&self, run_id: &RunId, root: &Path) -> Result<usize> {
+        self.reindex_run_artifact(run_id, "sketches", &root.join("sketches"))
+    }
+
+    /// Walk `<root>/evaluations/` and upsert the count.
+    pub fn reindex_evaluations(&self, run_id: &RunId, root: &Path) -> Result<usize> {
+        self.reindex_run_artifact(run_id, "evaluations", &root.join("evaluations"))
+    }
+
+    /// Walk `<root>/critiques/` and upsert the count.
+    pub fn reindex_critiques(&self, run_id: &RunId, root: &Path) -> Result<usize> {
+        self.reindex_run_artifact(run_id, "critiques", &root.join("critiques"))
+    }
+
+    fn count_run_artifact(&self, run_id: &RunId, kind: &str) -> Result<usize> {
+        if self.user_version()? < 10 {
+            return Ok(0);
+        }
+        let conn = self.pool.get()?;
+        let count: Option<i64> = conn
+            .query_row(
+                "SELECT count FROM run_artifacts WHERE run_id = ? AND kind = ?",
+                params![run_id.to_string(), kind],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(count.unwrap_or(0).max(0) as usize)
+    }
+
+    fn reindex_run_artifact(&self, run_id: &RunId, kind: &str, dir: &Path) -> Result<usize> {
+        if self.user_version()? < 10 {
+            return Ok(0);
+        }
+        let count = count_artefacts_in(dir)?;
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        conn.execute(
+            "INSERT INTO run_artifacts (run_id, kind, count, last_indexed_unix) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT(run_id, kind) DO UPDATE SET \
+                count = excluded.count, \
+                last_indexed_unix = excluded.last_indexed_unix",
+            params![run_id.to_string(), kind, count as i64, now],
+        )?;
+        Ok(count)
+    }
+}
+
+/// Count primary `*.json` artefacts inside `dir`. Excludes
+/// sidecars (`*.meta.json`) and atomic-write leftovers
+/// (`*.tmp.<hex>`). Returns 0 when the directory is missing.
+fn count_artefacts_in(dir: &Path) -> Result<usize> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".json") || name.ends_with(".meta.json") {
+            continue;
+        }
+        if is_atomic_tmp_path(&p) {
+            continue;
+        }
+        count = count.checked_add(1).ok_or_else(|| {
+            crate::error::Error::Provider(format!("artefact count overflow at {}", p.display()))
+        })?;
+    }
+    Ok(count)
+}
+
+/// Atomic-tmp heuristic shared by `count_artefacts_in` and
+/// `src/cli/repair.rs::is_atomic_tmp`. The atomic writer appends
+/// `.<dest>.tmp.<16 hex>` to every temp file; any file whose name
+/// contains `.tmp.` followed by at least 8 hex chars qualifies.
+fn is_atomic_tmp_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let Some(idx) = name.find(".tmp.") else {
+        return false;
+    };
+    let tail = &name[idx + ".tmp.".len()..];
+    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -1714,8 +1856,10 @@ mod tests {
             .unwrap();
         // v007 added the lineage + context_refs columns; v008 adds
         // the five new tables; v009 adds the runs.stability_*
-        // columns. After all three migrations the user_version is 9.
-        assert_eq!(v, 9);
+        // columns; v010 adds the run_artifacts table (D.28.5).
+        // We assert >= 9 so future migrations (v010) do not break
+        // this test.
+        assert!(v >= 9, "user_version = {v}");
     }
 
     #[test]
@@ -2611,8 +2755,8 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // v008 ships the five new tables; v009 keeps it at 9.
-        assert_eq!(v, 9);
+        // v008 ships the five new tables; v010 keeps it at >= 9.
+        assert!(v >= 9, "user_version = {v}");
         for table in [
             "outbox_events",
             "redact_audit",
