@@ -134,6 +134,41 @@ fn apply_v009_idempotent(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Apply one migration step atomically. The schema change and the
+/// `PRAGMA user_version` bump must commit together — otherwise a
+/// crash between them leaves the DB with the new schema but the
+/// old version, which makes the next `open()` re-run the same
+/// migration (and break with "duplicate column name" once we
+/// reach v007/v009, where the ALTER TABLE statements are not
+/// natively idempotent at the SQL level).
+///
+/// `BEGIN IMMEDIATE` acquires a RESERVED lock for the duration
+/// of the transaction, which is enough to serialize two processes
+/// that race into `run_migrations` against the same DB file.
+/// On any failure inside `f` we `ROLLBACK` and propagate; the
+/// PRAGMA bump is therefore only visible if the schema change
+/// committed cleanly.
+fn apply_step<F>(conn: &rusqlite::Connection, version: i64, f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match f() {
+        Ok(()) => {
+            conn.execute_batch(&format!("PRAGMA user_version = {version};"))?;
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            // Best-effort ROLLBACK: if it fails the connection is
+            // already in an unusable state, but the next caller's
+            // error path will surface the original failure.
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 /// True when `column` exists on `table`. Probes via
 /// `PRAGMA table_info(<table>)` which is the canonical SQLite
 /// introspection idiom.
@@ -197,6 +232,23 @@ impl Db {
     /// applied idempotently: the runner probes `PRAGMA table_info`
     /// before each `ALTER TABLE` so a re-opened DB that was already
     /// at v007 stays at v007 without an "duplicate column" error.
+    /// v002…v010 run inside `apply_step`, which wraps the schema
+    /// change and the `PRAGMA user_version` bump in a single
+    /// `BEGIN IMMEDIATE` … `COMMIT` so a crash between the two
+    /// cannot leave the DB with the new schema and the old
+    /// version.
+    ///
+    /// v001 is the documented exception: it sets `PRAGMA synchronous
+    /// = NORMAL`, which SQLite refuses to apply inside a
+    /// transaction. The `with_init` hook on every connection
+    /// already sets `synchronous = NORMAL`, so the migration
+    /// statement is defensive and redundant in our code path. v001
+    /// is also fully idempotent — every `CREATE` is `IF NOT EXISTS`
+    /// — so a partial state on a v001 mid-flight crash recovers
+    /// cleanly on the next `open()`. The atomicity wrap is
+    /// therefore only applied from v002 onward, where the bug it
+    /// exists to prevent (a v007 / v009 `ALTER TABLE ADD COLUMN`
+    /// re-run on a partially-applied DB) is actually load-bearing.
     pub fn run_migrations(&self) -> Result<()> {
         let conn = self.pool.get()?;
         let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -205,40 +257,52 @@ impl Db {
             conn.execute_batch("PRAGMA user_version = 1;")?;
         }
         if current < 2 {
-            conn.execute_batch(sql_v002::V002)?;
-            conn.execute_batch("PRAGMA user_version = 2;")?;
+            apply_step(&conn, 2, || -> Result<()> {
+                conn.execute_batch(sql_v002::V002)?;
+                Ok(())
+            })?;
         }
         if current < 3 {
-            conn.execute_batch(sql_v003::V003)?;
-            conn.execute_batch("PRAGMA user_version = 3;")?;
+            apply_step(&conn, 3, || -> Result<()> {
+                conn.execute_batch(sql_v003::V003)?;
+                Ok(())
+            })?;
         }
         if current < 4 {
-            conn.execute_batch(sql_v004::V004)?;
-            conn.execute_batch("PRAGMA user_version = 4;")?;
+            apply_step(&conn, 4, || -> Result<()> {
+                conn.execute_batch(sql_v004::V004)?;
+                Ok(())
+            })?;
         }
         if current < 5 {
-            conn.execute_batch(sql_v005::V005)?;
-            conn.execute_batch("PRAGMA user_version = 5;")?;
+            apply_step(&conn, 5, || -> Result<()> {
+                conn.execute_batch(sql_v005::V005)?;
+                Ok(())
+            })?;
         }
         if current < 6 {
-            conn.execute_batch(sql_v006::V006)?;
-            conn.execute_batch("PRAGMA user_version = 6;")?;
+            apply_step(&conn, 6, || -> Result<()> {
+                conn.execute_batch(sql_v006::V006)?;
+                Ok(())
+            })?;
         }
         if current < 7 {
-            apply_v007_idempotent(&conn)?;
-            conn.execute_batch("PRAGMA user_version = 7;")?;
+            apply_step(&conn, 7, || apply_v007_idempotent(&conn))?;
         }
         if current < 8 {
-            conn.execute_batch(sql_v008::V008)?;
-            conn.execute_batch("PRAGMA user_version = 8;")?;
+            apply_step(&conn, 8, || -> Result<()> {
+                conn.execute_batch(sql_v008::V008)?;
+                Ok(())
+            })?;
         }
         if current < 9 {
-            apply_v009_idempotent(&conn)?;
-            conn.execute_batch("PRAGMA user_version = 9;")?;
+            apply_step(&conn, 9, || apply_v009_idempotent(&conn))?;
         }
         if current < 10 {
-            conn.execute_batch(sql_v010::V010)?;
-            conn.execute_batch("PRAGMA user_version = 10;")?;
+            apply_step(&conn, 10, || -> Result<()> {
+                conn.execute_batch(sql_v010::V010)?;
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -2934,5 +2998,101 @@ mod tests {
         assert_eq!(row.label.as_deref(), Some("stable"));
         let sigma = row.sigma.unwrap();
         assert!((sigma - 0.05).abs() < 0.001, "sigma={sigma}");
+    }
+
+    /// `apply_step` must roll the schema change back when the
+    /// closure fails. Without the transaction wrap the runner
+    /// would have applied the schema SQL but never bumped
+    /// `PRAGMA user_version`, leaving the DB in the inconsistent
+    /// "new schema + old version" state this fix exists to
+    /// prevent.
+    #[test]
+    fn migrations_run_atomically_schema_and_version_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("meta.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // A baseline table so we can confirm the connection is
+        // usable after the failed step.
+        conn.execute_batch("CREATE TABLE baseline (id INTEGER)")
+            .unwrap();
+
+        let result = apply_step(&conn, 42, || -> Result<()> {
+            conn.execute_batch("CREATE TABLE new_table (id INTEGER)")?;
+            // Simulate the crash: the schema SQL succeeded but
+            // the closure errors out before the PRAGMA bump.
+            Err(crate::Error::Provider("simulated crash".into()))
+        });
+        assert!(result.is_err(), "failing closure must surface");
+
+        // user_version must remain 0: PRAGMA bump never committed.
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 0, "user_version must not bump on rollback, got {v}");
+
+        // new_table must NOT exist: the schema change rolled back.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='new_table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "new_table must not survive a rolled-back apply_step"
+        );
+    }
+
+    /// Simulate the historical failure mode: process died between
+    /// the schema change and the `PRAGMA user_version` bump. The
+    /// DB is left with v006 schema but user_version = 5. The next
+    /// `Db::open` must re-run v006 idempotently (CREATE TABLE IF
+    /// NOT EXISTS / CREATE INDEX IF NOT EXISTS) and then apply
+    /// v007-v010, advancing the version to current. This is the
+    /// recovery path the atomicity fix makes safe — even if a
+    /// crash DID leave the DB in this state, the migrations are
+    /// idempotent enough to repair it.
+    #[test]
+    fn migrations_recovery_after_partial_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("meta.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(sql_v001::V001).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+            conn.execute_batch(sql_v002::V002).unwrap();
+            conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+            conn.execute_batch(sql_v003::V003).unwrap();
+            conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+            conn.execute_batch(sql_v004::V004).unwrap();
+            conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+            conn.execute_batch(sql_v005::V005).unwrap();
+            conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+            // Simulate the crash: v006 schema landed but the
+            // PRAGMA bump never committed.
+            conn.execute_batch(sql_v006::V006).unwrap();
+        }
+
+        // Confirm the test fixture is in the inconsistent state.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 5, "fixture must leave DB at user_version=5");
+        }
+
+        let _db = Db::open(&path).expect("Db::open must recover");
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            v >= 10,
+            "user_version must advance to current after recovery, got {v}"
+        );
     }
 }
