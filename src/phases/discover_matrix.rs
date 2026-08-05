@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 
 use crate::discovery::matrix::{ExplorationMatrix, MatrixCell};
+use crate::discovery::state::SketchLoopState;
 use crate::domain::Sketch;
 use crate::error::{Error, Result};
 use crate::llm::Role;
@@ -115,6 +116,23 @@ impl Phase for DiscoverMatrixPhase {
         let per_cell = self.matrix.sketches_per_cell.max(1);
         let cells: Vec<MatrixCell> = self.matrix.iter_cells().collect();
 
+        // Resilience (D.34.2): load any previously-persisted sketch
+        // loop state so a crashed mid-loop run can resume from the
+        // last completed sketch instead of starting over. A missing
+        // or version-mismatched file is normal on a fresh run.
+        let run_dir = ctx.run_dir().root().to_path_buf();
+        let mut state = match SketchLoopState::load(&run_dir)? {
+            Some(s) => {
+                tracing::info!(
+                    completed = s.completed_sketches.len(),
+                    failed = s.failed_attempts,
+                    "resuming discover_matrix from persisted state"
+                );
+                s
+            }
+            None => SketchLoopState::new("discover_matrix".to_owned()),
+        };
+
         // Build the future list (cell, index-in-cell, sketch_id).
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let brief_arc = Arc::new(brief_text);
@@ -160,6 +178,8 @@ impl Phase for DiscoverMatrixPhase {
                 Ok(s) => s,
                 Err(e) => {
                     failed_count += 1;
+                    state.record_failure();
+                    state.save(&run_dir)?;
                     let _ = ctx.telemetry.warn(
                         "phase.discover_matrix.skipped",
                         "warn",
@@ -175,11 +195,15 @@ impl Phase for DiscoverMatrixPhase {
                 }
             };
             if sketch.thesis.trim().len() < 30 {
+                state.record_failure();
+                state.save(&run_dir)?;
                 continue;
             }
             let id = sketch.id.clone();
             let path = sketches_dir.join(format!("{id}.json"));
             write_json(&path, &sketch)?;
+            state.record_completion(id);
+            state.save(&run_dir)?;
             paths.push(path);
         }
 
@@ -212,6 +236,13 @@ impl Phase for DiscoverMatrixPhase {
             "kept": paths.len(),
         });
         write_json(&summary_path, &summary)?;
+
+        // Successful loop: drop the persisted state so the next
+        // run starts fresh. Keeping the file around would only
+        // confuse the next invocation (different matrix, different
+        // sketch IDs).
+        SketchLoopState::delete(&run_dir)?;
+
         Ok(PhaseOutput::Sketches(paths))
     }
 }
