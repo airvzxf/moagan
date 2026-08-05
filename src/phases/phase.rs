@@ -859,6 +859,16 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // angle_picker is a routing decision with a one-line
         // rationale; the 1024-token ceiling matches role_settings.
         Role::AnglePicker => 1024,
+        // Track H batch-2: tiebreaker ceiling per D.7.1 (1536).
+        Role::FinalDisagreement => 1536,
+        // Track H batch-2 (commit 2): LLM re-call for malformed
+        // JSON. 1024 is enough to carry a repaired payload plus
+        // the audit fields.
+        Role::JsonRepairV2 => 1024,
+        // Track H batch-2 (commit 3): prompt-injection guard. The
+        // 512-token ceiling matches the role contract (verdict +
+        // reasons + recommended_action).
+        Role::HostilePromptDetector => 512,
     }
 }
 
@@ -942,6 +952,19 @@ fn temperature_for_role(role: Role) -> f32 {
         // obvious angles and surfaces the *next* one; the high
         // variance is intentional, not noise.
         Role::AnglePicker => 0.7,
+        // Track H batch-2: tiebreaker stays low (T=0.2) so re-runs
+        // of the same disagreement yield identical winner picks,
+        // which is what callers diff when they replay a cluster.
+        Role::FinalDisagreement => 0.2,
+        // Track H batch-2 (commit 2): JsonRepairV2 is fully
+        // deterministic (T=0.0) so re-runs against the same
+        // malformed text produce identical repairs.
+        Role::JsonRepairV2 => 0.0,
+        // Track H batch-2 (commit 3): HostilePromptDetector is
+        // fully deterministic (T=0.0) so two detectors on the
+        // same input agree — false negatives in the quarantine
+        // path are unacceptable.
+        Role::HostilePromptDetector => 0.0,
     }
 }
 
