@@ -1161,8 +1161,7 @@ impl Sandbox {
             // backstop cleanup for the parent.
             let _ = unsafe {
                 command.pre_exec(move || -> std::result::Result<(), std::io::Error> {
-                    seccomp::apply(kind)
-                        .map_err(|error| std::io::Error::other(error.to_string()))
+                    seccomp::apply(kind).map_err(|error| std::io::Error::other(error.to_string()))
                 })
             };
         }
