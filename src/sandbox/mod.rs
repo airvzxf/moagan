@@ -14,12 +14,14 @@
 //! [`allowlist`] for the command policy.
 
 pub mod allowlist;
+pub mod policy;
 pub mod process;
 
 pub use allowlist::{
     Allowlist, DEFAULT_ALLOWLIST, DEFAULT_DENYLIST, Denylist, contains_deny_token, is_allowed,
 };
+pub use policy::NetworkPolicy;
 pub use process::{
-    COMMAND_CONFIGS, Command, CommandConfig, Sandbox, SandboxConfig, SandboxError, SandboxOutput,
-    SandboxResult, SandboxStatus, config_for, strip_secrets, verify_binary_exists,
+    COMMAND_CONFIGS, Command, CommandConfig, MoaSandbox, Sandbox, SandboxConfig, SandboxError,
+    SandboxOutput, SandboxResult, SandboxStatus, config_for, strip_secrets, verify_binary_exists,
 };

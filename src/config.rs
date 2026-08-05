@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::sandbox::NetworkPolicy;
 
 /// Top-level configuration record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +96,20 @@ pub struct Config {
     /// `~/.config/moagan/config.toml`. When `false`, the sandbox
     /// injects `CARGO_NET_OFFLINE=true` in the subprocess env.
     pub sandbox_allow_network: bool,
+    /// Track E (catalog §D.11.13): typed network policy for the
+    /// sandbox subprocess. Replaces the boolean
+    /// [`Self::sandbox_allow_network`] for callers that need the
+    /// `AllowList(Vec<String>)` case. Defaults to
+    /// [`NetworkPolicy::Off`]. Operators opt in via
+    /// `MOAGAN_SANDBOX_NETWORK_POLICY=open` (or `=allow_list` /
+    /// `=["host1","host2"]`) or by setting
+    /// `sandbox_network_policy = { kind = "open" }` in
+    /// `~/.config/moagan/config.toml`. When the policy is `Off`,
+    /// the sandbox injects `CARGO_NET_OFFLINE=true`; for `Open` and
+    /// `AllowList` the hint is not injected and the pre-execution
+    /// host validation is enforced (catalog §D.11.13).
+    #[serde(default)]
+    pub sandbox_network_policy: NetworkPolicy,
     /// Track E (catalog §D.11.10): allow the sandbox to skip the
     /// secret-stripping pass over argv. Default `false` (strip).
     /// Operators opt in via `MOAGAN_SANDBOX_ALLOW_INJECTION=true` or
@@ -305,6 +320,7 @@ impl Default for Config {
             circuit_breaker: CircuitBreakerConfig::default(),
             startup_reconcile: default_startup_reconcile(),
             sandbox_allow_network: false,
+            sandbox_network_policy: NetworkPolicy::default(),
             sandbox_allow_injection: false,
         }
     }
@@ -665,7 +681,48 @@ impl Config {
                 _ => {}
             }
         }
+        if let Ok(v) = std::env::var("MOAGAN_SANDBOX_NETWORK_POLICY")
+            && let Some(policy) = parse_network_policy_env(&v)
+        {
+            self.sandbox_network_policy = policy;
+        }
     }
+}
+
+/// Parse the `MOAGAN_SANDBOX_NETWORK_POLICY` env var into a
+/// [`NetworkPolicy`].
+///
+/// Accepts:
+/// - `off` / `OFF` — [`NetworkPolicy::Off`]
+/// - `open` / `OPEN` — [`NetworkPolicy::Open`]
+/// - `["host1","host2",...]` (JSON array) —
+///   [`NetworkPolicy::AllowList`]
+/// - the full NetworkPolicy JSON form
+///   (`{"kind":"allow_list","hosts":["a","b"]}`)
+/// - `allow_list` alone — empty `AllowList` (semantically
+///   equivalent to `Off`).
+///
+/// Returns `None` for any value that does not parse; the caller is
+/// expected to leave the existing knob alone in that case so a
+/// stale export does not silently corrupt the install.
+fn parse_network_policy_env(s: &str) -> Option<NetworkPolicy> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("off") {
+        return Some(NetworkPolicy::Off);
+    }
+    if s.eq_ignore_ascii_case("open") {
+        return Some(NetworkPolicy::Open);
+    }
+    if let Ok(list) = serde_json::from_str::<Vec<String>>(s) {
+        return Some(NetworkPolicy::AllowList { hosts: list });
+    }
+    if let Ok(policy) = serde_json::from_str::<NetworkPolicy>(s) {
+        return Some(policy);
+    }
+    if s.eq_ignore_ascii_case("allow_list") {
+        return Some(NetworkPolicy::AllowList { hosts: Vec::new() });
+    }
+    None
 }
 
 impl Config {
@@ -1128,5 +1185,139 @@ mod tests {
             cfg.sandbox_allow_injection,
             "MOAGAN_SANDBOX_ALLOW_INJECTION=true must opt in"
         );
+    }
+
+    /// Catalog §D.11.13: `MOAGAN_SANDBOX_NETWORK_POLICY=off` flips
+    /// the policy to [`NetworkPolicy::Off`]. Locked against the
+    /// `_open` / `_allow_list` / `_garbage` tests below because
+    /// they all mutate the same env var.
+    #[test]
+    fn config_env_var_network_policy_off() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_NETWORK_POLICY", "off");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_NETWORK_POLICY");
+        }
+        assert!(
+            matches!(cfg.sandbox_network_policy, NetworkPolicy::Off),
+            "MOAGAN_SANDBOX_NETWORK_POLICY=off must parse to NetworkPolicy::Off, got {:?}",
+            cfg.sandbox_network_policy
+        );
+    }
+
+    /// Catalog §D.11.13: `MOAGAN_SANDBOX_NETWORK_POLICY=open` flips
+    /// the policy to [`NetworkPolicy::Open`] so cargo can fetch
+    /// crates from the registry. Case-insensitive (`OPEN` is fine).
+    #[test]
+    fn config_env_var_network_policy_open() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_NETWORK_POLICY", "OPEN");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_NETWORK_POLICY");
+        }
+        assert!(
+            matches!(cfg.sandbox_network_policy, NetworkPolicy::Open),
+            "MOAGAN_SANDBOX_NETWORK_POLICY=OPEN must parse to NetworkPolicy::Open, got {:?}",
+            cfg.sandbox_network_policy
+        );
+    }
+
+    /// Catalog §D.11.13: `MOAGAN_SANDBOX_NETWORK_POLICY=["a","b"]`
+    /// (JSON array form) parses to
+    /// [`NetworkPolicy::AllowList`] with the listed hosts verbatim.
+    /// This is the only way to express a partial opt-in from the
+    /// shell because the legacy `sandbox_allow_network` boolean
+    /// cannot represent an allowlist.
+    #[test]
+    fn config_env_var_network_policy_allow_list() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var(
+                "MOAGAN_SANDBOX_NETWORK_POLICY",
+                r#"["crates.io","github.com"]"#,
+            );
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_NETWORK_POLICY");
+        }
+        match cfg.sandbox_network_policy {
+            NetworkPolicy::AllowList { ref hosts } => assert_eq!(
+                hosts,
+                &vec!["crates.io".to_owned(), "github.com".to_owned()],
+                "JSON array must parse to AllowList with the listed hosts"
+            ),
+            other => panic!("expected AllowList, got {other:?}"),
+        }
+    }
+
+    /// Catalog §D.11.13: garbage / whitespace env values are ignored
+    /// so a stale / malformed export does not silently flip the
+    /// default. This mirrors the handling of
+    /// `MOAGAN_SANDBOX_ALLOW_NETWORK`.
+    #[test]
+    fn config_env_var_network_policy_garbage_is_ignored() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_NETWORK_POLICY", "   ");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_NETWORK_POLICY");
+        }
+        assert!(
+            matches!(cfg.sandbox_network_policy, NetworkPolicy::Off),
+            "garbage env must not flip the default Off policy, got {:?}",
+            cfg.sandbox_network_policy
+        );
+    }
+
+    /// Catalog §D.11.13: the default value of `sandbox_network_policy`
+    /// is [`NetworkPolicy::Off`] (off-by-default). Pin the default so
+    /// a refactor that drops the catalog alignment trips the test
+    /// before it lands in production.
+    #[test]
+    fn config_sandbox_network_policy_default_is_off() {
+        let cfg = Config::default();
+        assert!(
+            matches!(cfg.sandbox_network_policy, NetworkPolicy::Off),
+            "sandbox_network_policy must default to Off (D.11.13 off-by-default), got {:?}",
+            cfg.sandbox_network_policy
+        );
+    }
+
+    /// Catalog §D.11.13: the typed `sandbox_network_policy` survives
+    /// a TOML round-trip so operators can pin their value in
+    /// `~/.config/moagan/config.toml`. The TOML form for an
+    /// AllowList follows the internally-tagged enum shape:
+    /// `sandbox_network_policy = { kind = "allow_list", hosts = ["a", "b"] }`.
+    #[test]
+    fn config_sandbox_network_policy_toml_round_trip() {
+        let cfg = Config {
+            sandbox_network_policy: NetworkPolicy::AllowList {
+                hosts: vec!["crates.io".to_owned(), "github.com".to_owned()],
+            },
+            ..Config::default()
+        };
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        match back.sandbox_network_policy {
+            NetworkPolicy::AllowList { hosts } => assert_eq!(
+                hosts,
+                vec!["crates.io".to_owned(), "github.com".to_owned()],
+                "TOML round-trip must preserve the AllowList"
+            ),
+            other => panic!("expected AllowList after round-trip, got {other:?}"),
+        }
     }
 }

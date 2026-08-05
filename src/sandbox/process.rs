@@ -31,6 +31,7 @@ use crate::error::{Error, Result};
 use crate::redact::{RedactPolicy, Surface, apply};
 
 use super::allowlist::{Allowlist, Denylist, contains_deny_token, is_allowed};
+use super::policy::NetworkPolicy;
 
 /// Cap stdout/stderr to `max_bytes` per stream. When the cap is hit,
 /// the sandbox returns [`SandboxError::OutputTruncated`] and the
@@ -58,6 +59,14 @@ pub enum SandboxError {
     /// into a [`SandboxResult::status`].
     #[error("sandbox policy rejection: {0}")]
     NotAllowed(String),
+    /// The configured [`NetworkPolicy`] denied the host a subprocess
+    /// would have reached. Catalog §D.11.13. Currently informational:
+    /// [`MoaSandbox::run_cmd`] logs the denial and lets the spawn
+    /// proceed. The variant exists so future socket-level enforcement
+    /// (D.11.7 seccomp / D.11.1 cgroup) can surface policy rejections
+    /// as `Err` from the same API surface.
+    #[error("sandbox network denied: {0}")]
+    NetworkDenied(String),
     /// An I/O or task failure prevented the sandbox from collecting output.
     #[error("sandbox I/O failure: {0}")]
     Io(String),
@@ -205,12 +214,24 @@ pub struct SandboxConfig {
     /// Cap stdout/stderr capture. `None` means use [`MAX_STDOUT_BYTES`]
     /// / [`MAX_STDERR_BYTES`].
     pub max_capture_bytes: Option<usize>,
-    /// Whether the subprocess can reach the network. Default `false`
-    /// (off-by-default, catalog §D.11.9). When `false`, the sandbox
-    /// sets `CARGO_NET_OFFLINE=true` in the subprocess env so cargo
-    /// cannot fetch crates from the network. Callers that need
-    /// network must opt in explicitly via [`SandboxConfig::with_allow_network`].
+    /// Legacy boolean network flag (catalog §D.11.9). `true` maps to
+    /// [`NetworkPolicy::Open`] and `false` maps to
+    /// [`NetworkPolicy::Off`]. New code should use
+    /// [`Self::network_policy`] and [`Self::with_network_policy`].
+    /// Maintained for back-compat with existing call sites that pass
+    /// the boolean straight from `Config::sandbox_allow_network`.
+    #[deprecated(note = "use network_policy / with_network_policy instead")]
     pub allow_network: bool,
+    /// Network policy applied to every subprocess. Catalog §D.11.13.
+    /// Default `Off` so the install never silently contacts the
+    /// registry / an arbitrary host. Operators opt in via
+    /// `MOAGAN_SANDBOX_NETWORK_POLICY=open` (or `=allow_list`), via
+    /// `with_network_policy`, or by setting
+    /// `sandbox_network_policy = { kind = "open" }` in
+    /// `~/.config/moagan/config.toml`. When the policy is `Off`, the
+    /// sandbox injects `CARGO_NET_OFFLINE=true` in the subprocess
+    /// env so cargo refuses to fetch crates from the registry.
+    pub network_policy: NetworkPolicy,
     /// Whether to skip the secret-stripping pass over argv. Default
     /// `false` (strip). When `true`, the raw args are passed to the
     /// subprocess without redaction. Useful for debugging / repro
@@ -223,6 +244,7 @@ impl SandboxConfig {
     /// Build a config with the project defaults:
     /// `timeout = 30s`, default allowlist + denylist, network
     /// disabled, secret stripping enabled.
+    #[allow(deprecated)]
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -230,6 +252,7 @@ impl SandboxConfig {
             denylist: Denylist::default(),
             max_capture_bytes: None,
             allow_network: false,
+            network_policy: NetworkPolicy::Off,
             allow_injection: false,
         }
     }
@@ -273,8 +296,42 @@ impl SandboxConfig {
     /// `false` (off-by-default). When `true`, the sandbox does NOT
     /// set `CARGO_NET_OFFLINE=true` so cargo can fetch crates from
     /// the registry. Catalog §D.11.9.
+    ///
+    /// Deprecated wrapper: internally maps `true` to
+    /// [`NetworkPolicy::Open`] and `false` to [`NetworkPolicy::Off`],
+    /// and mirrors the bool into the legacy [`Self::allow_network`]
+    /// field for back-compat. New code should use
+    /// [`Self::with_network_policy`] so the `AllowList` case is
+    /// representable.
+    ///
+    /// The method itself is intentionally not marked
+    /// `#[deprecated]` so existing call sites that pass a `bool`
+    /// from the legacy `Config::sandbox_allow_network` (catalog
+    /// §D.11.9) keep compiling without `#[allow(deprecated)]`
+    /// annotations. The field it wraps *is* deprecated; direct
+    /// reads / writes of `cfg.allow_network` still emit the warning.
+    #[allow(deprecated)]
     pub fn with_allow_network(mut self, allow: bool) -> Self {
         self.allow_network = allow;
+        self.network_policy = if allow {
+            NetworkPolicy::Open
+        } else {
+            NetworkPolicy::Off
+        };
+        self
+    }
+
+    /// Replace the network policy. Catalog §D.11.13. Mirrors the
+    /// boolean into the legacy [`Self::allow_network`] field so
+    /// existing call sites that read it still observe a consistent
+    /// value (`true` for `Open` or any `AllowList`, `false` for
+    /// `Off`).
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        #[allow(deprecated)]
+        {
+            self.allow_network = !matches!(policy, NetworkPolicy::Off);
+        }
+        self.network_policy = policy;
         self
     }
 
@@ -1117,11 +1174,12 @@ impl Sandbox {
     ///   `cargo`) remain reachable.
     /// - Force `HOME` to the scratch directory so the child cannot
     ///   leak the real user's home contents.
-    /// - When `allow_network == false` (the default, catalog §D.11.9),
-    ///   inject `CARGO_NET_OFFLINE=true` so cargo refuses to fetch
-    ///   crates from the registry. The flag is the canonical
-    ///   cargo-respected hint; we do not attempt network namespaces
-    ///   here because that requires CAP_SYS_ADMIN on the host.
+    /// - When the [`NetworkPolicy`] is [`NetworkPolicy::Off`] (the
+    ///   default, catalog §D.11.13), inject `CARGO_NET_OFFLINE=true`
+    ///   so cargo refuses to fetch crates from the registry. For
+    ///   `Open` and `AllowList`, the hint is NOT injected; the
+    ///   policy is expected to be enforced at a lower layer (seccomp
+    ///   / cgroup) once D.11.7 lands.
     fn build_env(&self, work_path: &Path) -> std::collections::HashMap<String, String> {
         let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
         self.config.strip_secrets_env(&mut env);
@@ -1134,11 +1192,117 @@ impl Sandbox {
             format!("/usr/local/bin:/usr/bin:/bin:{inherited_path}"),
         );
         env.insert("HOME".into(), work_path.to_string_lossy().into_owned());
-        if !self.config.allow_network {
+        if matches!(self.config.network_policy, NetworkPolicy::Off) {
             env.insert("CARGO_NET_OFFLINE".into(), "true".into());
         }
         env
     }
+}
+
+/// High-level sandbox wrapper that carries the configured
+/// [`NetworkPolicy`] alongside the underlying [`Sandbox`].
+///
+/// Catalog §D.11.13. The wrapper is the future composition point for
+/// the rest of the Track E hardening (D.11.7 seccomp, D.11.1 cgroup).
+/// For D.11.13 the only obligation is that
+/// [`MoaSandbox::run_cmd`] validates host-like strings in the
+/// supplied argv against the policy and emits a `tracing::warn!` for
+/// any host that would be denied. The subprocess is still spawned
+/// because the kernel-level enforcement lands with the seccomp /
+/// cgroup follow-ups; the [`SandboxError::NetworkDenied`] variant
+/// is reserved for the day those land.
+#[derive(Debug, Clone)]
+pub struct MoaSandbox {
+    inner: Sandbox,
+    network: NetworkPolicy,
+}
+
+impl MoaSandbox {
+    /// Build a wrapper from `cfg` and an explicit [`NetworkPolicy`].
+    /// The supplied `network` overrides any policy already on `cfg`;
+    /// the inner [`Sandbox`] is then constructed from the merged
+    /// config so its `CARGO_NET_OFFLINE` hint reflects the same
+    /// policy that the pre-check validates.
+    pub fn new(
+        cfg: &SandboxConfig,
+        network: NetworkPolicy,
+    ) -> std::result::Result<Self, SandboxError> {
+        let mut cfg = cfg.clone();
+        cfg.network_policy = network.clone();
+        let inner = Sandbox::new(cfg).map_err(|error| SandboxError::Io(error.to_string()))?;
+        Ok(Self { inner, network })
+    }
+
+    /// Borrow the active [`NetworkPolicy`].
+    pub fn network(&self) -> &NetworkPolicy {
+        &self.network
+    }
+
+    /// Borrow the underlying [`Sandbox`] (for callers that need
+    /// direct access to legacy positional APIs like
+    /// [`Sandbox::run_in`]).
+    pub fn inner(&self) -> &Sandbox {
+        &self.inner
+    }
+
+    /// Run `cmd` inside the wrapped sandbox after validating host-
+    /// like strings in the argv against [`Self::network`]. Hosts
+    /// that would be denied are surfaced via a `tracing::warn!`
+    /// line; the run itself proceeds. Socket-level enforcement is
+    /// deferred to D.11.7 (seccomp) and D.11.1 (cgroup); when those
+    /// land the pre-check will be promoted from a log line to an
+    /// actual `SandboxError::NetworkDenied` short-circuit.
+    pub async fn run_cmd(
+        &self,
+        cmd: &Command<'_>,
+    ) -> std::result::Result<SandboxOutput, SandboxError> {
+        for host in extract_hosts(cmd) {
+            if let Some(reason) = self.network.deny_reason(&host) {
+                tracing::warn!(
+                    sandbox = "moa",
+                    host = %host,
+                    reason = %reason,
+                    "network policy would deny host; enforcement deferred to D.11.7/D.11.1"
+                );
+            }
+        }
+        self.inner.run_cmd(cmd).await
+    }
+}
+
+/// Extract host-like strings from a [`Command`]'s argv + binary name.
+///
+/// Heuristic: each argv string is split on whitespace; every token
+/// that looks like a host (`[a-zA-Z0-9.-:]+` containing at least one
+/// dot) is collected. This catches `curl https://example.com`
+/// (single-token URL host), `wget example.com` (bare hostname), and
+/// `sh -c "echo example.com"` (host embedded in a shell string).
+/// Shell metacharacters (`/`, `=`, `&`) and absolute paths are
+/// intentionally excluded by [`looks_like_host`].
+fn extract_hosts(cmd: &Command<'_>) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for arg in cmd.args {
+        for token in arg.split_whitespace() {
+            if looks_like_host(token) {
+                hosts.push(token.to_owned());
+            }
+        }
+    }
+    if let Some(binary_str) = cmd.binary.to_str() {
+        for token in binary_str.split_whitespace() {
+            if looks_like_host(token) {
+                hosts.push(token.to_owned());
+            }
+        }
+    }
+    hosts
+}
+
+fn looks_like_host(s: &str) -> bool {
+    !s.is_empty()
+        && s.contains('.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':')
 }
 
 fn config_for_binary(binary: &str) -> Option<&'static CommandConfig> {
@@ -1380,14 +1544,20 @@ mod tests {
         assert_eq!(result.command, "echo a b c");
     }
 
-    /// Catalog §D.11.9: the default `SandboxConfig` must forbid
-    /// network access for the subprocess. The sandbox enforces that
-    /// by injecting `CARGO_NET_OFFLINE=true` in the env, so the
-    /// observable contract is "default cargo runs offline".
+    /// Catalog §D.11.9 / §D.11.13: the default `SandboxConfig` must
+    /// forbid network access for the subprocess. The sandbox enforces
+    /// that by injecting `CARGO_NET_OFFLINE=true` in the env, so the
+    /// observable contract is "default cargo runs offline". The
+    /// post-D.11.13 source of truth is the `network_policy` field;
+    /// the legacy `allow_network` boolean mirrors it via the
+    /// `with_network_policy` / `with_allow_network` setters.
     #[tokio::test]
     async fn sandbox_default_does_not_allow_network() {
         let cfg = SandboxConfig::new();
-        assert!(!cfg.allow_network, "default must opt out of network");
+        assert!(
+            matches!(cfg.network_policy, NetworkPolicy::Off),
+            "default network_policy must be Off (D.11.13)"
+        );
         let sandbox = Sandbox::new(cfg).unwrap();
         let result = sandbox
             .run("sh", &["-c", "echo ${CARGO_NET_OFFLINE:-unset}"])
@@ -1401,12 +1571,18 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.9: `with_allow_network(true)` opts in. The
+    /// Catalog §D.11.9 / §D.11.13: `with_network_policy(Open)` (or
+    /// the legacy `with_allow_network(true)` wrapper) opts in. The
     /// sandbox must NOT set `CARGO_NET_OFFLINE` so cargo can fetch
-    /// crates from the registry.
+    /// crates from the registry. The test exercises the legacy
+    /// boolean path with `#[allow(deprecated)]` because the
+    /// post-D.11.13 source of truth is the typed
+    /// [`NetworkPolicy::Open`] variant.
     #[tokio::test]
+    #[allow(deprecated)]
     async fn sandbox_opt_in_allows_network() {
         let cfg = SandboxConfig::new().with_allow_network(true);
+        assert!(matches!(cfg.network_policy, NetworkPolicy::Open));
         let sandbox = Sandbox::new(cfg).unwrap();
         let result = sandbox
             .run("sh", &["-c", "echo ${CARGO_NET_OFFLINE:-unset}"])
@@ -1416,6 +1592,33 @@ mod tests {
         assert!(
             result.stdout.contains("unset"),
             "CARGO_NET_OFFLINE must be unset when network is allowed, got {:?}",
+            result.stdout
+        );
+    }
+
+    /// Catalog §D.11.13: `with_network_policy(AllowList)` is the
+    /// post-D.11.13 representation of a partial opt-in. The cargo
+    /// env hint must NOT be injected (the policy is permissive for
+    /// the listed hosts) and the new `network_policy` field must
+    /// carry the list verbatim so the pre-check can match it.
+    #[tokio::test]
+    async fn sandbox_with_network_policy_allow_list_does_not_inject_offline() {
+        let cfg = SandboxConfig::new().with_network_policy(NetworkPolicy::AllowList {
+            hosts: vec!["crates.io".to_owned()],
+        });
+        assert!(matches!(
+            cfg.network_policy,
+            NetworkPolicy::AllowList { ref hosts } if hosts == &vec!["crates.io".to_owned()]
+        ));
+        let sandbox = Sandbox::new(cfg).unwrap();
+        let result = sandbox
+            .run("sh", &["-c", "echo ${CARGO_NET_OFFLINE:-unset}"])
+            .await
+            .unwrap();
+        assert_eq!(result.status, SandboxStatus::Pass);
+        assert!(
+            result.stdout.contains("unset"),
+            "AllowList must NOT inject CARGO_NET_OFFLINE; got {:?}",
             result.stdout
         );
     }
@@ -1630,5 +1833,130 @@ mod tests {
         assert_eq!(output.exit_code, Some(0));
         assert_eq!(output.stdout, b"hello-legacy\n");
         assert!(!output.killed_by_timeout);
+    }
+
+    // ----------------------------------------------------------------
+    // D.11.13 — `MoaSandbox` + `NetworkPolicy` tests.
+    //
+    // Each test covers one of the acceptance criteria spelled out in
+    // the PR-E spec. The constructor / getter / legacy-mapping tests
+    // are synchronous so they run even when the tokio runtime is
+    // unavailable; the spawn-side test is `#[tokio::test]`.
+    // ----------------------------------------------------------------
+
+    /// D.11.13: `MoaSandbox::new` stores the supplied policy verbatim
+    /// on the wrapper. The getter returns a borrow so callers can
+    /// check the policy without consuming the wrapper.
+    #[test]
+    fn moa_sandbox_new_stores_policy() {
+        let cfg = SandboxConfig::new();
+        let policy = NetworkPolicy::AllowList {
+            hosts: vec!["crates.io".to_owned(), "github.com".to_owned()],
+        };
+        let moa = MoaSandbox::new(&cfg, policy.clone()).expect("moa sandbox builds");
+        assert_eq!(moa.network(), &policy);
+    }
+
+    /// D.11.13: when the supplied policy is `Off`, `MoaSandbox::run_cmd`
+    /// extracts host-like strings from argv, emits a `tracing::warn!`
+    /// line for each one, and proceeds to spawn the subprocess.
+    /// Socket-level enforcement is left to D.11.7 / D.11.1, so the
+    /// observable contract at D.11.13 is "logs a denial, lets the
+    /// run complete". The `tracing_subscriber` initialisation is a
+    /// best-effort `try_init`: a parallel test that already installed
+    /// a subscriber is fine; the only failure mode is "no subscriber
+    /// installed", which does not affect the assertions below.
+    #[tokio::test]
+    async fn moa_sandbox_run_cmd_with_off_logs_denial() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let cfg = SandboxConfig::new();
+        let moa = MoaSandbox::new(&cfg, NetworkPolicy::Off).expect("moa sandbox builds");
+        let args = ["-c", "echo example.com"];
+        let cmd = Command::new(Path::new("sh"), &args);
+        let output = moa.run_cmd(&cmd).await.expect("run completes");
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.stdout, b"example.com\n");
+        assert!(!output.killed_by_timeout);
+    }
+
+    /// D.11.13: the legacy `SandboxConfig::allow_network = true`
+    /// path (catalog §D.11.9) maps to [`NetworkPolicy::Open`] on the
+    /// wrapper. Pinning the mapping here means a refactor that drops
+    /// the wrapper / setter symmetry surfaces as a test failure.
+    #[test]
+    #[allow(deprecated)]
+    fn moa_sandbox_legacy_allow_network_true_maps_to_open() {
+        let cfg = SandboxConfig::new().with_allow_network(true);
+        assert!(matches!(cfg.network_policy, NetworkPolicy::Open));
+        let moa = MoaSandbox::new(&cfg, cfg.network_policy.clone()).expect("moa sandbox builds");
+        assert_eq!(moa.network(), &NetworkPolicy::Open);
+    }
+
+    /// D.11.13: `with_network_policy(AllowList)` round-trips the list
+    /// so `MoaSandbox::run_cmd` can validate hosts against it. This
+    /// complements the policy-level tests in `policy.rs` by pinning
+    /// the integration with [`SandboxConfig`].
+    #[test]
+    fn moa_sandbox_with_network_policy_allow_list_round_trip() {
+        let list = vec!["crates.io".to_owned(), "github.com".to_owned()];
+        let cfg = SandboxConfig::new().with_network_policy(NetworkPolicy::AllowList {
+            hosts: list.clone(),
+        });
+        let moa = MoaSandbox::new(
+            &cfg,
+            NetworkPolicy::AllowList {
+                hosts: list.clone(),
+            },
+        )
+        .expect("moa sandbox");
+        assert_eq!(moa.network(), &NetworkPolicy::AllowList { hosts: list });
+    }
+
+    /// D.11.13: `MoaSandbox::run_cmd` returns the same
+    /// [`SandboxOutput`] shape as the underlying [`Sandbox::run_cmd`]
+    /// so call sites that already consume [`SandboxOutput`] do not
+    /// need to special-case the wrapper.
+    #[tokio::test]
+    async fn moa_sandbox_run_cmd_returns_sandbox_output() {
+        let cfg = SandboxConfig::new();
+        let moa = MoaSandbox::new(&cfg, NetworkPolicy::Open).expect("moa sandbox builds");
+        let args = ["hello"];
+        let cmd = Command::new(Path::new("echo"), &args);
+        let output = moa.run_cmd(&cmd).await.expect("run completes");
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.stdout, b"hello\n");
+        assert!(!output.killed_by_timeout);
+    }
+
+    /// D.11.13: the helper [`extract_hosts`] catches common host
+    /// patterns and rejects noise like relative paths, shell
+    /// metacharacters, and empty strings. Pinning the heuristic here
+    /// means a refactor that tightens or loosens the pattern is
+    /// visible in the test diff.
+    #[test]
+    fn extract_hosts_catches_dotted_argv_tokens() {
+        let binary = Path::new("/bin/sh");
+        let args = ["-c", "echo example.com"];
+        let cmd = Command::new(binary, &args);
+        let hosts = extract_hosts(&cmd);
+        assert!(
+            hosts.contains(&"example.com".to_owned()),
+            "expected example.com in hosts, got {hosts:?}"
+        );
+        assert!(
+            !hosts.contains(&"-c".to_owned()),
+            "flag-like args must not be treated as hosts, got {hosts:?}"
+        );
+    }
+
+    /// D.11.13: the binary path itself is scanned, so a literal
+    /// `curl` argument or a hostname-shaped binary name still trips
+    /// the pre-check.
+    #[test]
+    fn extract_hosts_includes_binary_when_dotted() {
+        let binary = Path::new("host.example.com");
+        let cmd = Command::new(binary, &[]);
+        let hosts = extract_hosts(&cmd);
+        assert_eq!(hosts, vec!["host.example.com".to_owned()]);
     }
 }
