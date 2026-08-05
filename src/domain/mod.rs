@@ -905,6 +905,37 @@ pub struct JsonRepairV2Report {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the `Role::HostilePromptDetector` role (D.7.1 catalog).
+///
+/// Pre-processor that classifies incoming text as `safe`,
+/// `suspicious`, or `hostile` so the orchestrator can
+/// short-circuit or quarantine the request. Fully deterministic
+/// (T=0.0, top_p=0.1, max_tokens=512) because a flaky detector
+/// would cause false negatives in the quarantine path.
+/// `#[serde(default)]` keeps the validator accepting empty
+/// objects.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostilePromptReport {
+    /// Echo of the candidate text under inspection (kept for
+    /// audit; PII / secrets are redacted by the prompt rules).
+    pub input: String,
+    /// Detector verdict. Exactly one of `safe`, `suspicious`,
+    /// or `hostile`.
+    pub verdict: String,
+    /// Detector confidence on the 0..=1 scale. `0.0` means the
+    /// input was empty and the detector could not decide.
+    pub confidence: f32,
+    /// Ordered list of reasons supporting the verdict. The first
+    /// entry is the strongest signal the detector saw.
+    pub reasons: Vec<String>,
+    /// Recommended action for the orchestrator. MUST align with
+    /// the verdict (safe -> allow, suspicious -> sanitize,
+    /// hostile -> reject) except for the empty-input case.
+    pub recommended_action: String,
+    /// Schema version.
+    pub schema_version: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.

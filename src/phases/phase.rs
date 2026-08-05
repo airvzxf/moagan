@@ -865,6 +865,10 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // JSON. 1024 is enough to carry a repaired payload plus
         // the audit fields.
         Role::JsonRepairV2 => 1024,
+        // Track H batch-2 (commit 3): prompt-injection guard. The
+        // 512-token ceiling matches the role contract (verdict +
+        // reasons + recommended_action).
+        Role::HostilePromptDetector => 512,
     }
 }
 
@@ -956,6 +960,11 @@ fn temperature_for_role(role: Role) -> f32 {
         // deterministic (T=0.0) so re-runs against the same
         // malformed text produce identical repairs.
         Role::JsonRepairV2 => 0.0,
+        // Track H batch-2 (commit 3): HostilePromptDetector is
+        // fully deterministic (T=0.0) so two detectors on the
+        // same input agree — false negatives in the quarantine
+        // path are unacceptable.
+        Role::HostilePromptDetector => 0.0,
     }
 }
 
