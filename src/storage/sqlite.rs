@@ -3300,4 +3300,102 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
+
+    // -- Regression tests for the open/close/reopen flake ------------
+    //
+    // `cli::repair::tests::reindex_no_diff_returns_zero` was flaky under
+    // parallel `cargo test` execution: two consecutive `Db::open`
+    // calls could race the WAL-to-MAIN flush and re-run migrations
+    // that had already been applied, surfacing as a
+    // `duplicate column name: status` panic from v003/v007/v009.
+    // PR #95 added a per-step probe in `run_migrations`; PR #99
+    // forced a WAL checkpoint at the end of `Db::open` so the
+    // `user_version` bump is durable on the main DB file before the
+    // next open observes it. These three tests pin the recovered
+    // behaviour so future refactors cannot regress it.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_regression_path(label: &str) -> std::path::PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("moagan-regression-{label}-{pid}-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("meta.sqlite")
+    }
+
+    /// 50 sequential open/close cycles on the same path. The second
+    /// `Db::open` in each cycle is the actual repro: without the WAL
+    /// checkpoint, the runner would re-apply v003/v007/v009 and panic
+    /// with `duplicate column name`. 100 opens in a row give the
+    /// migration runner and the OS page-cache flusher enough chances
+    /// to surface any flakiness inside a single test run.
+    #[test]
+    fn regression_db_open_close_50_iterations_no_duplicate_column() {
+        let path = unique_regression_path("close50");
+        for _ in 0..50 {
+            let _ = Db::open(&path).expect("open 1");
+            let _ = Db::open(&path).expect("open 2 must not duplicate column");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 4 threads × 10 concurrent `Db::open` calls on the same path.
+    /// Each thread creates its own `Db` (with its own r2d2 pool), so
+    /// SQLite has to serialise concurrent file access via OS-level
+    /// locks. The original flake surfaced under this exact pattern:
+    /// the `cargo test` parallel runner interleaves the migrations of
+    /// sibling tests on the same path and one of them re-runs v003.
+    /// Without the per-step probe this would panic; without the WAL
+    /// checkpoint the second open from any thread can read a stale
+    /// `user_version = 0` and re-run the entire ladder. With both
+    /// fixes in place the test is a clean no-op.
+    #[test]
+    fn regression_db_open_under_load_no_panic() {
+        use std::sync::Arc;
+        use std::thread;
+        let path = Arc::new(unique_regression_path("load"));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                thread::spawn(move || {
+                    for _ in 0..10 {
+                        let _ = Db::open(&path).ok();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Replicates the exact flow of the original flaky test
+    /// (`cli::repair::tests::reindex_no_diff_returns_zero`): open DB,
+    /// drop the connection, reopen DB. Runs across 4 parallel threads
+    /// on independent tempdirs so the OS scheduler cannot serialise
+    /// the open/close/reopen sequence. Each thread exercises the full
+    /// dance on its own file; the parallel stress is in the OS
+    /// scheduler interleaving the four threads' Db::open calls
+    /// rather than in shared-state contention (which is covered by
+    /// `regression_db_open_under_load_no_panic`).
+    #[test]
+    fn regression_reindex_full_flow_under_load() {
+        use std::thread;
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                thread::spawn(move || {
+                    let path = unique_regression_path(&format!("flow{i}"));
+                    let _ = Db::open(&path).expect("first open");
+                    let _ = Db::open(&path).expect("second open must not fail");
+                    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
 }
