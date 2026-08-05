@@ -17,6 +17,7 @@ pub mod opencode_go_responses;
 pub mod prompts;
 pub mod provider;
 pub mod rate_limiter;
+pub mod response_format_opt_out;
 pub mod retry_budget;
 pub mod role;
 pub mod wire;
