@@ -141,6 +141,7 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         Error::InvalidArgs(_)
         | Error::InvalidApiKey(_)
         | Error::InvalidState(_)
+        | Error::NeedsInput(_)
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
     }

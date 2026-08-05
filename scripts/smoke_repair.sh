@@ -101,6 +101,13 @@ run_check 'no-flags exits 2' 2 \
   env MOAGAN_HOME="${TMP}/repair-home" "${BIN}" repair
 run_check_grep 'no-flags stderr mentions "at least one"' 0 'at least one' "${TMP}/err"
 
+# 4. cleanup-orphans dry-run: print the plan and exit 0 even
+#    when the runs dir does not exist (the plan is empty).
+run_check 'cleanup-orphans dry-run exits 0' 0 \
+  env MOAGAN_HOME="${TMP}/repair-home" \
+  "${BIN}" repair --cleanup-orphans --dry-run
+run_check_grep 'cleanup-orphans dry-run prints "nothing to do"' 0 'nothing to do' "${TMP}/out"
+
 printf '\nPhase D repair smoke: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [[ ${FAIL} -gt 0 ]]; then
   printf 'FAILED:\n'
