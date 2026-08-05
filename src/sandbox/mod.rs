@@ -20,6 +20,6 @@ pub use allowlist::{
     Allowlist, DEFAULT_ALLOWLIST, DEFAULT_DENYLIST, Denylist, contains_deny_token, is_allowed,
 };
 pub use process::{
-    COMMAND_CONFIGS, CommandConfig, Sandbox, SandboxConfig, SandboxError, SandboxResult,
-    SandboxStatus, config_for, strip_secrets, verify_binary_exists,
+    COMMAND_CONFIGS, Command, CommandConfig, Sandbox, SandboxConfig, SandboxError, SandboxOutput,
+    SandboxResult, SandboxStatus, config_for, strip_secrets, verify_binary_exists,
 };
