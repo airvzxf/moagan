@@ -518,6 +518,24 @@ pub enum AuditCmd {
     },
 }
 
+/// Whether the current subcommand opens the pipeline. The startup
+/// reconcile (Track F) only runs for these — read-only commands like
+/// `inspect` / `diff` / `validate` / `doctor` / `telemetry` skip the
+/// boot pass so their latency stays deterministic.
+fn should_reconcile_at_startup(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Run { .. }
+            | Cmd::Continue { .. }
+            | Cmd::Resume { .. }
+            | Cmd::Rerun { .. }
+            | Cmd::Import { .. }
+            | Cmd::Refine { .. }
+            | Cmd::Rerank { .. }
+            | Cmd::Discover { .. }
+    )
+}
+
 impl Cmd {
     /// The human description of what each subcommand does, used in
     /// `moagan --help` and in error messages.
@@ -560,6 +578,22 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         Some(path) => MoaganHome::at(path),
         None => MoaganHome::resolve()?,
     };
+    // Track F (D.28.3 + D.28.4): reconcile filesystem vs SQLite at
+    // the top of every pipeline-opening dispatch. Only commands that
+    // actually open the pipeline pay the cost; the read-only ones
+    // (`moagan inspect`, `moagan diff`, `moagan doctor`,
+    // `moagan telemetry`, `moagan validate`) skip the boot pass so
+    // their exit stays deterministic and latency-free. The
+    // `Config::startup_reconcile` flag (default `true`) and
+    // `MOAGAN_STARTUP_RECONCILE=false` env var gate the call.
+    if should_reconcile_at_startup(&cli.cmd) {
+        let cfg = Config::load()?;
+        if cfg.startup_reconcile {
+            let db = Db::open(&global_home.meta_db_path())?;
+            let report = crate::reconcile::startup_reconcile(&global_home, &db, &cfg)?;
+            tracing::info!(?report, "startup reconcile done");
+        }
+    }
     match cli.cmd {
         Cmd::Run {
             mode,

@@ -16,6 +16,12 @@
 //!   `status = 'running'` and `updated_unix < now - 7200s` as
 //!   `interrupted` and emits an outbox event per recovery.
 //!
+//! The two filesystem-facing operations (`--cleanup-orphans` and
+//! `--recover-zombies`) are thin wrappers around the public
+//! [`crate::reconcile`] module: that module is what runs at
+//! `moagan` startup (Track F), so the manual and the auto path
+//! can never drift.
+//!
 //! Common knobs:
 //! - `--run <id>`: scope every operation to a single run. Defaults
 //!   to all known runs (DB list, ordered by recency).
@@ -29,26 +35,12 @@
 //!   2 — `Error::InvalidArgs` (no flag passed, malformed run id).
 //!  10 — `Error::NeedsInput` (destructive plan, `--yes` missing).
 
-use std::path::{Path, PathBuf};
-
-use walkdir::WalkDir;
+use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
-use crate::storage::sqlite::{Db, OutboxEventRow};
-
-/// Stale-lock threshold for `--cleanup-orphans`. Anything older than
-/// 1h is considered abandoned (the process that took the lock has
-/// been dead long enough for the OS to have reaped the PID).
-const STALE_LOCK_SECS: i64 = 3600;
-
-/// Zombie heartbeat threshold for `--recover-zombies`. Two hours
-/// matches the existing `interrupted` semantics elsewhere in the
-/// pipeline: a phase that has not advanced in two hours is no
-/// longer "running" by any reasonable definition. Used by
-/// commit 4's `handle_recover_zombies` implementation.
-const ZOMBIE_HEARTBEAT_SECS: i64 = 7200;
+use crate::storage::sqlite::Db;
 
 /// CLI arguments for `moagan repair`. The dispatcher requires at
 /// least one of the operation flags; all other flags tweak the
@@ -128,12 +120,14 @@ pub fn run(args: RepairArgs) -> Result<i32> {
 
 /// D.28.3: walk the runs dir for `*.tmp.<uuid>` atomic-write
 /// leftovers and `*.lock` files with `mtime > STALE_LOCK_SECS`.
-/// The plan is a `Vec<PathBuf>`; we materialise it up front so the
-/// destructive branch can decide whether `--yes` is required.
+/// Delegates the actual walk-and-delete to
+/// [`crate::reconcile::cleanup_orphans`] so the manual
+/// `moagan repair --cleanup-orphans` path and the auto startup
+/// reconcile path share one implementation.
 fn handle_cleanup_orphans(home: &MoaganHome, dry_run: bool, yes: bool) -> Result<usize> {
-    let target_runs = resolve_target_runs_for_cleanup(home)?;
-    let plan = plan_cleanup(home, &target_runs)?;
-
+    // Mirror the reconcile module's plan so the operator sees the
+    // exact list of files the auto path would have removed.
+    let plan = crate::reconcile::plan_cleanup_for_report(home)?;
     if plan.is_empty() {
         println!("cleanup-orphans: nothing to do");
         return Ok(0);
@@ -153,133 +147,7 @@ fn handle_cleanup_orphans(home: &MoaganHome, dry_run: bool, yes: bool) -> Result
         )));
     }
 
-    let mut deleted = 0usize;
-    for p in &plan {
-        match std::fs::remove_file(p) {
-            Ok(()) => deleted += 1,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Race: another process or a concurrent repair pass
-                // already removed it. Treat as success.
-                deleted += 1;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(deleted)
-}
-
-/// For the cleanup-orphans path we walk the filesystem directly
-/// (orphan files may not have a corresponding DB row). The list
-/// of run directories is read from the filesystem, not the index,
-/// so the helper still works on a freshly-created MOAGAN_HOME
-/// whose SQLite index has not been bootstrapped yet.
-fn resolve_target_runs_for_cleanup(home: &MoaganHome) -> Result<Vec<RunId>> {
-    let runs_root = home.runs_dir();
-    if !runs_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut ids: Vec<RunId> = Vec::new();
-    for entry in std::fs::read_dir(&runs_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        // `.lock` files at the top of the runs dir are handled by
-        // `plan_cleanup` directly, not by the per-run walker.
-        if name.ends_with(".lock") {
-            continue;
-        }
-        if let Ok(id) = name.parse::<RunId>() {
-            ids.push(id);
-        }
-    }
-    Ok(ids)
-}
-
-/// Build the list of files the cleanup pass would delete. Two
-/// patterns:
-///
-/// 1. `<run_dir>/**/*.tmp.<hex>` — atomic-write leftovers from
-///    `AtomicWriter` (`src/atomic/writer.rs` writes `<dest>.tmp.<hex>`
-///    then renames on success).
-/// 2. `<runs_dir>/*.lock` with `mtime > STALE_LOCK_SECS` — abandoned
-///    per-run lock files at the top of the runs dir.
-fn plan_cleanup(home: &MoaganHome, target_runs: &[RunId]) -> Result<Vec<PathBuf>> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    let runs_root = home.runs_dir();
-    if !runs_root.exists() {
-        return Ok(out);
-    }
-
-    // 1. *.tmp.<hex> inside every target run dir.
-    for id in target_runs {
-        let run_dir = home.run_dir(*id);
-        for entry in WalkDir::new(run_dir.root())
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if is_atomic_tmp(path) {
-                out.push(path.to_path_buf());
-            }
-        }
-    }
-
-    // 2. Stale `*.lock` at the top of `home.runs_dir()`.
-    let now = crate::time::now_unix_secs();
-    for entry in std::fs::read_dir(&runs_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if !is_lock_file(&path) {
-            continue;
-        }
-        let modified = match entry.metadata() {
-            Ok(m) => m.modified().ok(),
-            Err(_) => None,
-        };
-        let Some(modified) = modified else { continue };
-        let modified_unix = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if now - modified_unix > STALE_LOCK_SECS {
-            out.push(path);
-        }
-    }
-    Ok(out)
-}
-
-/// `*.tmp.<hex>` heuristic. The atomic writer appends
-/// `.<dest>.tmp.<16 hex>` so any file whose name contains `.tmp.`
-/// followed by at least 8 hex chars qualifies.
-fn is_atomic_tmp(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    let Some(idx) = name.find(".tmp.") else {
-        return false;
-    };
-    let tail = &name[idx + ".tmp.".len()..];
-    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-/// `*.lock` heuristic. Conservative on purpose: the runs dir does
-/// not currently produce lock files on its own, so any `.lock`
-/// file at this depth is by definition orphan. We never delete
-/// sub-directory lock files.
-fn is_lock_file(path: &Path) -> bool {
-    path.extension().and_then(|s| s.to_str()) == Some("lock")
+    crate::reconcile::cleanup_orphans(home)
 }
 
 // -- D.28.5: --reindex-artifacts ----------------------------------
@@ -378,7 +246,7 @@ fn count_artefacts_in_dir(dir: &Path) -> Result<usize> {
         if !name.ends_with(".json") || name.ends_with(".meta.json") {
             continue;
         }
-        if is_atomic_tmp(&p) {
+        if crate::reconcile::is_atomic_tmp(&p) {
             continue;
         }
         count = count.checked_add(1).ok_or_else(|| {
@@ -406,28 +274,17 @@ fn reindex_kind(db: &Db, id: RunId, kind: &str, root: &Path) -> Result<usize> {
 // -- D.28.4: --recover-zombies ------------------------------------
 
 /// D.28.4: find runs whose `status = 'running'` and
-/// `updated_unix < now - ZOMBIE_HEARTBEAT_SECS`, mark them
+/// `updated_unix < now - 7200s`, mark them
 /// `interrupted`, and emit a `run.zombie_recovered` outbox
 /// event per recovery. In `--dry-run` mode the zombie list
 /// is printed and no row is touched.
+///
+/// The actual recovery is delegated to
+/// [`crate::reconcile::recover_zombies`] so the manual
+/// `moagan repair --recover-zombies` path and the auto startup
+/// reconcile path share one implementation.
 fn handle_recover_zombies(db: &Db, dry_run: bool) -> Result<usize> {
-    let now = crate::time::now_unix_secs();
-    let threshold = now - ZOMBIE_HEARTBEAT_SECS;
-    let rows = db.list_runs(u32::MAX)?;
-    let mut zombies: Vec<RunId> = Vec::new();
-    for row in rows {
-        let Ok(id) = row.run_id.parse::<RunId>() else {
-            continue;
-        };
-        if row.status != "running" {
-            continue;
-        }
-        if row.updated_unix >= threshold {
-            continue;
-        }
-        zombies.push(id);
-    }
-
+    let zombies = crate::reconcile::list_zombie_run_ids(db)?;
     if zombies.is_empty() {
         println!("recover-zombies: no zombie runs");
         return Ok(0);
@@ -441,24 +298,7 @@ fn handle_recover_zombies(db: &Db, dry_run: bool) -> Result<usize> {
         return Ok(zombies.len());
     }
 
-    let now = crate::time::now_unix_secs();
-    for z in &zombies {
-        db.update_run_status(*z, "interrupted")?;
-        let payload = serde_json::json!({
-            "kind": "zombie_recovered",
-            "previous_status": "running",
-            "new_status": "interrupted",
-            "recovered_at_unix": now,
-            "stale_threshold_secs": ZOMBIE_HEARTBEAT_SECS,
-        });
-        db.record_outbox_event(&OutboxEventRow {
-            run_id: z.to_string(),
-            event_type: "run.zombie_recovered".into(),
-            payload: payload.to_string(),
-            at_unix: now,
-        })?;
-    }
-    Ok(zombies.len())
+    crate::reconcile::recover_zombies(db)
 }
 
 // -- Tests --------------------------------------------------------
@@ -703,7 +543,7 @@ mod tests {
             .unwrap();
         db.register_run(alive, "fast", "running", "0.4.0", None, None, None)
             .unwrap();
-        let past = now - ZOMBIE_HEARTBEAT_SECS - 600;
+        let past = now - crate::reconcile::ZOMBIE_HEARTBEAT_SECS - 600;
         db._test_backdate_updated_unix(zombie, past)
             .expect("backdate");
 
@@ -741,7 +581,7 @@ mod tests {
         let now = crate::time::now_unix_secs();
         db.register_run(zombie, "fast", "running", "0.4.0", None, None, None)
             .unwrap();
-        let past = now - ZOMBIE_HEARTBEAT_SECS - 600;
+        let past = now - crate::reconcile::ZOMBIE_HEARTBEAT_SECS - 600;
         db._test_backdate_updated_unix(zombie, past)
             .expect("backdate");
 
@@ -762,6 +602,57 @@ mod tests {
             events.is_empty(),
             "dry-run must not emit any outbox events; got {events:?}"
         );
+        drop(db);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Track F refactor pin: the `moagan repair --cleanup-orphans`
+    /// and `--recover-zombies` paths now delegate to
+    /// `crate::reconcile`. The refactor must keep the
+    /// `dry-run → count without touching the DB` contract for
+    /// zombies so the regression coverage stays in place. We
+    /// piggy-back on the `recover_zombies_dry_run_does_not_update_db`
+    /// pattern above to also pin that the count is reported as 1
+    /// (the dispatcher prints `recover-zombies: found 1 zombie`).
+    #[test]
+    fn repair_refactor_still_passes() {
+        let tmp = unique_tmp("refactor-pin");
+        let home = crate::fs_layout::MoaganHome::at(tmp.clone());
+        let db = Db::open(&home.meta_db_path()).expect("open db");
+        let zombie = RunId::new();
+        let now = crate::time::now_unix_secs();
+        db.register_run(zombie, "fast", "running", "0.4.0", None, None, None)
+            .unwrap();
+        let past = now - crate::reconcile::ZOMBIE_HEARTBEAT_SECS - 600;
+        db._test_backdate_updated_unix(zombie, past)
+            .expect("backdate");
+
+        // The reconcile module's discovery helper must surface
+        // the same single zombie the dispatcher used to find
+        // inline. This is the contract that the refactor
+        // promises: `list_zombie_run_ids` is what `repair --dry-run`
+        // now prints, and `recover_zombies` is what
+        // `repair --yes` actually applies.
+        let zombies = crate::reconcile::list_zombie_run_ids(&db).expect("list");
+        assert_eq!(zombies.len(), 1);
+        assert_eq!(zombies[0], zombie);
+
+        // Apply the recovery directly (skipping the print/--yes
+        // UI) and confirm the row flips + the outbox event lands.
+        let recovered = crate::reconcile::recover_zombies(&db).expect("recover");
+        assert_eq!(recovered, 1);
+        let row = db.get_run(zombie).expect("get").unwrap();
+        assert_eq!(row.status, "interrupted");
+        let events = db
+            .list_outbox_events_for_run(&zombie.to_string())
+            .expect("events");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.event_type == "run.zombie_recovered"),
+            "recovery must emit the outbox event"
+        );
+
         drop(db);
         let _ = std::fs::remove_dir_all(&tmp);
     }
