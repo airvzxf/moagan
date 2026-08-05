@@ -20,3 +20,5 @@ pub mod integrator;
 pub mod matrix;
 pub mod state;
 pub mod tagger;
+
+pub use coordinator::{DiscoveryCoordinator, DiscoveryOutcome};
