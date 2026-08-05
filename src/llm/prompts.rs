@@ -60,6 +60,15 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: 1024,
             json_mode: true,
         }),
+        // Track H batch-2: tiebreaker for the 3 base judges. Low
+        // temperature keeps the call stable so snapshot diffs of
+        // cluster disagreements are meaningful.
+        Role::FinalDisagreement => Some(RoleSettings {
+            temperature: 0.2,
+            top_p: 0.85,
+            max_tokens: 1536,
+            json_mode: true,
+        }),
         _ => None,
     }
 }
@@ -89,6 +98,7 @@ const RATIONALE_EXTRACTOR_PROMPT: &str = include_str!("prompts/rationale_extract
 const TIEFIGHTER_CRITIC_PROMPT: &str = include_str!("prompts/tiefighter_critic.md");
 const PERSONA_PICKER_PROMPT: &str = include_str!("prompts/persona_picker.md");
 const ANGLE_PICKER_PROMPT: &str = include_str!("prompts/angle_picker.md");
+const FINAL_DISAGREEMENT_PROMPT: &str = include_str!("prompts/final_disagreement.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -123,6 +133,7 @@ pub fn prompt_set_hash() -> String {
                 TIEFIGHTER_CRITIC_PROMPT,
                 PERSONA_PICKER_PROMPT,
                 ANGLE_PICKER_PROMPT,
+                FINAL_DISAGREEMENT_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -157,6 +168,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::TiefighterCritic => TIEFIGHTER_CRITIC_PROMPT,
         Role::PersonaPicker => PERSONA_PICKER_PROMPT,
         Role::AnglePicker => ANGLE_PICKER_PROMPT,
+        Role::FinalDisagreement => FINAL_DISAGREEMENT_PROMPT,
     }
 }
 
@@ -205,6 +217,13 @@ mod tests {
         // Track H batch-1 (commit 3): exploration angle selector
         // carries its own placeholder prompt.
         assert!(!ANGLE_PICKER_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn final_disagreement_prompt_file_exists_and_is_non_empty() {
+        // Track H batch-2: the D.7.1 catalog entry for the judge
+        // tiebreaker ships with a real placeholder prompt.
+        assert!(!FINAL_DISAGREEMENT_PROMPT.trim().is_empty());
     }
 
     #[test]

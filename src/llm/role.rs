@@ -12,9 +12,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, AnglePickerReport, Brief, Critique, FinalReport, Intake, JudgeScore,
-    MergePlan, PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport, Repair, Route,
-    Sketch, SynthesizedProposal, TiefighterCriticReport,
+    AdversaryReport, AnglePickerReport, Brief, Critique, FinalDisagreementReport, FinalReport,
+    Intake, JudgeScore, MergePlan, PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport,
+    Repair, Route, Sketch, SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -105,6 +105,12 @@ pub enum Role {
     /// picker escapes the obvious angles and surfaces the *next*
     /// one. Opt-in.
     AnglePicker,
+    /// FinalDisagreement — D.7.1 catalog role. Tiebreaker for
+    /// when the 3 base judges disagree so strongly that the
+    /// normal weighted-aggregation cannot pick a winner. Low
+    /// temperature (`T=0.2, top_p=0.85, max_tokens=1536`) keeps
+    /// the call stable so snapshot diffs are meaningful. Opt-in.
+    FinalDisagreement,
 }
 
 impl Role {
@@ -135,6 +141,7 @@ impl Role {
             Self::TiefighterCritic => "tiefighter_critic",
             Self::PersonaPicker => "persona_picker",
             Self::AnglePicker => "angle_picker",
+            Self::FinalDisagreement => "final_disagreement",
         }
     }
 
@@ -199,6 +206,9 @@ impl Role {
             }
             Self::AnglePicker => {
                 "AnglePicker: {problem, existing_angles[]} (exploration angle selector; T=0.7, top_p=0.95, max_tokens=1024)"
+            }
+            Self::FinalDisagreement => {
+                "FinalDisagreement: {judge_scores[], candidates[], winner_id, margin, rationale} (judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1536)"
             }
         }
     }
@@ -273,6 +283,9 @@ impl Role {
             Self::AnglePicker => {
                 serde_json::from_value::<AnglePickerReport>(value.clone()).map(|_| ())
             }
+            Self::FinalDisagreement => {
+                serde_json::from_value::<FinalDisagreementReport>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -311,6 +324,7 @@ impl Role {
             Self::TiefighterCritic,
             Self::PersonaPicker,
             Self::AnglePicker,
+            Self::FinalDisagreement,
         ]
     }
 }
@@ -350,6 +364,7 @@ impl FromStr for Role {
             "tiefighter_critic" => Ok(Self::TiefighterCritic),
             "persona_picker" => Ok(Self::PersonaPicker),
             "angle_picker" => Ok(Self::AnglePicker),
+            "final_disagreement" => Ok(Self::FinalDisagreement),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -375,11 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_four() {
-        // Track H batch-1 closed: three catalog roles (D.7.1)
-        // wired — tiefighter_critic, persona_picker, angle_picker.
-        // Count jumps from 21 to 24.
-        assert_eq!(Role::all().len(), 24);
+    fn all_roles_are_count_twenty_five() {
+        // Track H batch-2: final_disagreement added (D.7.1 catalog,
+        // judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1536).
+        // Count moves from 24 to 25.
+        assert_eq!(Role::all().len(), 25);
     }
 
     #[test]
@@ -477,6 +492,44 @@ mod tests {
     }
 
     #[test]
+    fn final_disagreement_round_trip() {
+        // The catalog uses lowercase snake_case on the wire; the
+        // round-trip through `FromStr` must preserve the variant.
+        let s = Role::FinalDisagreement.as_str();
+        assert_eq!(s, "final_disagreement");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::FinalDisagreement, back);
+    }
+
+    #[test]
+    fn final_disagreement_validate_json_accepts_valid_payload() {
+        // D.7.1 catalog schema: a list of judge scores plus a
+        // candidate shortlist, plus the winner id the tiebreaker
+        // picks. `#[serde(default)]` on the domain type also makes
+        // {} acceptable (documented contract).
+        let raw = serde_json::json!({
+            "judge_scores": [
+                { "judge": "judge-a", "score": 7.5 },
+                { "judge": "judge-b", "score": 4.2 },
+                { "judge": "judge-c", "score": 8.1 }
+            ],
+            "candidates": [
+                { "id": "p-1", "summary": "Sharded ledger", "approach": "Tenant-keyed shards" },
+                { "id": "p-2", "summary": "Single-writer", "approach": "Centralized sequencer" }
+            ],
+            "winner_id": "p-1",
+            "margin": 0.6,
+            "rationale": "p-1 wins on evidence + completeness even though judge-b disagreed"
+        });
+        assert!(Role::FinalDisagreement.validate_json(&raw).is_ok());
+        assert!(
+            Role::FinalDisagreement
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn serde_round_trip() {
         let r = Role::Gate;
         let j = serde_json::to_string(&r).unwrap();
@@ -517,6 +570,7 @@ mod tests {
                     || desc.starts_with("TiefighterCritic:")
                     || desc.starts_with("PersonaPicker:")
                     || desc.starts_with("AnglePicker:")
+                    || desc.starts_with("FinalDisagreement:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -592,5 +646,9 @@ mod tests {
         // own domain type with `#[serde(default)]`, so {} parses
         // cleanly.
         assert!(Role::AnglePicker.validate_json(&empty).is_ok());
+        // Track H batch-2: final_disagreement carries its own
+        // domain type with `#[serde(default)]`, so {} parses
+        // cleanly.
+        assert!(Role::FinalDisagreement.validate_json(&empty).is_ok());
     }
 }

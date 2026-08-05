@@ -829,6 +829,55 @@ pub struct AnglePickerReport {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the `Role::FinalDisagreement` role (D.7.1 catalog).
+///
+/// Tiebreaker used when the 3 base judges disagree so strongly that
+/// the normal weighted-aggregation cannot pick a winner. The
+/// `judge_scores` echo the raw panel and `candidates` echo the
+/// shortlist the panel voted on so downstream phases can audit the
+/// decision. Sampling (T=0.2, top_p=0.85, max_tokens=1536) keeps the
+/// tiebreaker stable while leaving room for a small amount of
+/// variance when the disagreement is genuine.
+/// `#[serde(default)]` keeps the validator accepting empty objects.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FinalDisagreementReport {
+    /// Raw scores the 3 base judges assigned (echoed for audit).
+    pub judge_scores: Vec<JudgeScoreEntry>,
+    /// Candidate shortlist the panel voted on (echoed for audit).
+    pub candidates: Vec<CandidateEntry>,
+    /// Candidate id the tiebreaker picked (must be one of
+    /// `candidates`).
+    pub winner_id: String,
+    /// Absolute score gap on the 0..=10 scale between the chosen
+    /// candidate and the runner-up. Informational only.
+    pub margin: f32,
+    /// One-paragraph rationale referencing concrete properties of
+    /// the chosen candidate.
+    pub rationale: String,
+    /// Schema version.
+    pub schema_version: String,
+}
+/// Per-judge score entry carried by `FinalDisagreementReport`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JudgeScoreEntry {
+    /// Judge identifier (e.g. "judge-a").
+    pub judge: String,
+    /// Score the judge assigned on the 0..=10 scale.
+    pub score: f32,
+}
+/// Per-candidate entry carried by `FinalDisagreementReport`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CandidateEntry {
+    /// Candidate identifier the caller is voting on.
+    pub id: String,
+    /// One-line summary of the candidate.
+    pub summary: String,
+    /// Approach the candidate is taking (mirrors `Proposal::approach`).
+    pub approach: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.

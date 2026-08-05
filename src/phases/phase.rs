@@ -859,6 +859,8 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // angle_picker is a routing decision with a one-line
         // rationale; the 1024-token ceiling matches role_settings.
         Role::AnglePicker => 1024,
+        // Track H batch-2: tiebreaker ceiling per D.7.1 (1536).
+        Role::FinalDisagreement => 1536,
     }
 }
 
@@ -942,6 +944,10 @@ fn temperature_for_role(role: Role) -> f32 {
         // obvious angles and surfaces the *next* one; the high
         // variance is intentional, not noise.
         Role::AnglePicker => 0.7,
+        // Track H batch-2: tiebreaker stays low (T=0.2) so re-runs
+        // of the same disagreement yield identical winner picks,
+        // which is what callers diff when they replay a cluster.
+        Role::FinalDisagreement => 0.2,
     }
 }
 
