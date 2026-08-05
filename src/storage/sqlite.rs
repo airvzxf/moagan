@@ -289,6 +289,23 @@ impl Db {
         Ok(())
     }
 
+    /// Backdate `updated_unix` on a single run row. Test-only
+    /// helper used by `moagan repair --recover-zombies` tests
+    /// to plant a stale heartbeat without waiting two hours
+    /// for the real clock to advance. Production code never
+    /// reaches into this method: a real `updated_unix` is set
+    /// by every `register_run` / `update_run_status` /
+    /// `record_phase` write.
+    #[doc(hidden)]
+    pub fn _test_backdate_updated_unix(&self, run_id: RunId, unix: i64) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE runs SET updated_unix = ? WHERE run_id = ?",
+            params![unix, run_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// W2: persist the ranking-stability verdict on the `runs` row
     /// (v009 column add). Best-effort: a pre-v009 DB without the
     /// columns gets the migration via `run_migrations`, and a write

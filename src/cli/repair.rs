@@ -36,7 +36,7 @@ use walkdir::WalkDir;
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
-use crate::storage::sqlite::Db;
+use crate::storage::sqlite::{Db, OutboxEventRow};
 
 /// Stale-lock threshold for `--cleanup-orphans`. Anything older than
 /// 1h is considered abandoned (the process that took the lock has
@@ -48,7 +48,6 @@ const STALE_LOCK_SECS: i64 = 3600;
 /// pipeline: a phase that has not advanced in two hours is no
 /// longer "running" by any reasonable definition. Used by
 /// commit 4's `handle_recover_zombies` implementation.
-#[allow(dead_code)]
 const ZOMBIE_HEARTBEAT_SECS: i64 = 7200;
 
 /// CLI arguments for `moagan repair`. The dispatcher requires at
@@ -406,9 +405,60 @@ fn reindex_kind(db: &Db, id: RunId, kind: &str, root: &Path) -> Result<usize> {
 
 // -- D.28.4: --recover-zombies ------------------------------------
 
-/// D.28.4 stub. Real implementation lands in commit 4.
-fn handle_recover_zombies(_db: &Db, _dry_run: bool) -> Result<usize> {
-    Ok(0)
+/// D.28.4: find runs whose `status = 'running'` and
+/// `updated_unix < now - ZOMBIE_HEARTBEAT_SECS`, mark them
+/// `interrupted`, and emit a `run.zombie_recovered` outbox
+/// event per recovery. In `--dry-run` mode the zombie list
+/// is printed and no row is touched.
+fn handle_recover_zombies(db: &Db, dry_run: bool) -> Result<usize> {
+    let now = crate::time::now_unix_secs();
+    let threshold = now - ZOMBIE_HEARTBEAT_SECS;
+    let rows = db.list_runs(u32::MAX)?;
+    let mut zombies: Vec<RunId> = Vec::new();
+    for row in rows {
+        let Ok(id) = row.run_id.parse::<RunId>() else {
+            continue;
+        };
+        if row.status != "running" {
+            continue;
+        }
+        if row.updated_unix >= threshold {
+            continue;
+        }
+        zombies.push(id);
+    }
+
+    if zombies.is_empty() {
+        println!("recover-zombies: no zombie runs");
+        return Ok(0);
+    }
+    println!("recover-zombies: found {} zombie run(s)", zombies.len());
+    for z in &zombies {
+        println!("  - {z}");
+    }
+
+    if dry_run {
+        return Ok(zombies.len());
+    }
+
+    let now = crate::time::now_unix_secs();
+    for z in &zombies {
+        db.update_run_status(*z, "interrupted")?;
+        let payload = serde_json::json!({
+            "kind": "zombie_recovered",
+            "previous_status": "running",
+            "new_status": "interrupted",
+            "recovered_at_unix": now,
+            "stale_threshold_secs": ZOMBIE_HEARTBEAT_SECS,
+        });
+        db.record_outbox_event(&OutboxEventRow {
+            run_id: z.to_string(),
+            event_type: "run.zombie_recovered".into(),
+            payload: payload.to_string(),
+            at_unix: now,
+        })?;
+    }
+    Ok(zombies.len())
 }
 
 // -- Tests --------------------------------------------------------
@@ -602,23 +652,9 @@ mod tests {
 
     /// A proposal written to disk after the cached count was
     /// last seen triggers a reindex on the next call: the
-    /// dispatcher reports the drift, the DB catches up.
-    ///
-    /// The test makes TWO dispatcher calls — one to prime the
-    /// cache, one to detect the drift — both via
-    /// `home_override` so the global `MOAGAN_HOME` env var is
-    /// never touched. Two sequential opens of the same
-    /// `meta.sqlite` are race-prone against the non-atomic
-    /// migration runner (`ALTER TABLE` + `PRAGMA user_version`
-    /// are two separate transactions), so the second open can
-    /// see a stale `user_version` and re-apply v003's
-    /// `ALTER TABLE calls ADD COLUMN status`, which fails with
-    /// `duplicate column name: status` under parallel
-    /// `cargo test`. The `home_override` lets the dispatcher
-    /// resolve the same path deterministically; the underlying
-    /// race would still surface on the same file, so the
-    /// priming call commits the migrations synchronously
-    /// before the dry-run call observes them.
+    /// dispatcher reports the drift, the DB catches up. Same
+    /// single-dispatcher-call pattern as
+    /// `reindex_no_diff_returns_zero`.
     #[test]
     fn reindex_missing_in_db_catches_up() {
         let tmp = unique_tmp("reindex-drift");
@@ -637,14 +673,96 @@ mod tests {
         let _ = run(args).expect("prime reindex must not error");
         // Add a 4th file on disk; the cache still says 3.
         std::fs::write(proposals.join("p_extra.json"), b"{}").unwrap();
-        // Second call: dry-run, must detect the drift and
-        // exit 0. The migration runner short-circuits on
-        // user_version=10 because the first call already
-        // committed.
+        // Second call (dry): the dispatcher sees the drift
+        // and reports it; the cache stays at 3 because
+        // --dry-run skips the upsert.
         let mut args = args_with(&["reindex", "dry"]);
         args.home_override = Some(home);
         let rc = run(args).expect("dry reindex must not error");
         assert_eq!(rc, 0);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// D.28.4 — `--recover-zombies` flips a stale `running`
+    /// row to `interrupted` and emits a `run.zombie_recovered`
+    /// outbox event. The test seeds a row whose `updated_unix`
+    /// is older than the 2h threshold, runs the dispatcher,
+    /// and asserts the row is now `interrupted`.
+    #[test]
+    fn recovers_zombie_running_runs() {
+        let tmp = unique_tmp("zombies-recover");
+        let home = crate::fs_layout::MoaganHome::at(tmp.clone());
+        let db = Db::open(&home.meta_db_path()).expect("open db");
+        let zombie = RunId::new();
+        let alive = RunId::new();
+        let now = crate::time::now_unix_secs();
+        // `register_run` writes created_unix=updated_unix=now.
+        // Manually backdate the zombie's updated_unix via the
+        // pool so it lands well past the 2h threshold.
+        db.register_run(zombie, "fast", "running", "0.4.0", None, None, None)
+            .unwrap();
+        db.register_run(alive, "fast", "running", "0.4.0", None, None, None)
+            .unwrap();
+        let past = now - ZOMBIE_HEARTBEAT_SECS - 600;
+        db._test_backdate_updated_unix(zombie, past)
+            .expect("backdate");
+
+        let mut args = args_with(&["zombies"]);
+        args.home_override = Some(home.clone());
+        let recovered = run(args).expect("recover must not error");
+        assert_eq!(recovered, 0, "exit code is 0 (ok)");
+
+        let zombie_row = db.get_run(zombie).expect("get zombie").unwrap();
+        assert_eq!(zombie_row.status, "interrupted");
+        let alive_row = db.get_run(alive).expect("get alive").unwrap();
+        assert_eq!(alive_row.status, "running");
+
+        let events = db
+            .list_outbox_events_for_run(&zombie.to_string())
+            .expect("events");
+        let hit = events
+            .iter()
+            .find(|e| e.event_type == "run.zombie_recovered")
+            .expect("zombie_recovered event must exist");
+        assert!(hit.payload.contains("\"kind\":\"zombie_recovered\""));
+        drop(db);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `--recover-zombies --dry-run` must list the zombie but
+    /// leave the row untouched (status stays `running`) and
+    /// not emit any outbox event.
+    #[test]
+    fn recover_zombies_dry_run_does_not_update_db() {
+        let tmp = unique_tmp("zombies-dry-run");
+        let home = crate::fs_layout::MoaganHome::at(tmp.clone());
+        let db = Db::open(&home.meta_db_path()).expect("open db");
+        let zombie = RunId::new();
+        let now = crate::time::now_unix_secs();
+        db.register_run(zombie, "fast", "running", "0.4.0", None, None, None)
+            .unwrap();
+        let past = now - ZOMBIE_HEARTBEAT_SECS - 600;
+        db._test_backdate_updated_unix(zombie, past)
+            .expect("backdate");
+
+        let mut args = args_with(&["zombies", "dry"]);
+        args.home_override = Some(home.clone());
+        let recovered = run(args).expect("dry-run must not error");
+        assert_eq!(recovered, 0, "dry-run exit code is 0");
+
+        let row = db.get_run(zombie).expect("get").unwrap();
+        assert_eq!(
+            row.status, "running",
+            "dry-run must leave the row untouched"
+        );
+        let events = db
+            .list_outbox_events_for_run(&zombie.to_string())
+            .expect("events");
+        assert!(
+            events.is_empty(),
+            "dry-run must not emit any outbox events; got {events:?}"
+        );
+        drop(db);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

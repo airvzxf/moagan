@@ -114,6 +114,13 @@ run_check 'reindex-artifacts dry-run exits 0' 0 \
   env MOAGAN_HOME="${TMP}/repair-home" \
   "${BIN}" repair --reindex-artifacts --dry-run
 
+# 6. recover-zombies dry-run: against an empty home no
+#    zombie exists and the call exits 0.
+run_check 'recover-zombies dry-run exits 0' 0 \
+  env MOAGAN_HOME="${TMP}/repair-home" \
+  "${BIN}" repair --recover-zombies --dry-run
+run_check_grep 'recover-zombies dry-run prints "no zombie"' 0 'no zombie' "${TMP}/out"
+
 printf '\nPhase D repair smoke: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [[ ${FAIL} -gt 0 ]]; then
   printf 'FAILED:\n'
