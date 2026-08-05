@@ -18,6 +18,7 @@ use crate::secret::SecretString;
 
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
+use super::response_format_opt_out;
 use super::wire::{Request, Response, Usage};
 
 /// Generic OpenAI-compat provider.
@@ -65,6 +66,39 @@ impl OpenAiCompatProvider {
             format!("{base}/chat/completions")
         } else {
             format!("{base}/v1/chat/completions")
+        }
+    }
+
+    /// Build the chat-completions request body for a given provider
+    /// request, applying the role-based JSON output mode and the
+    /// per-model opt-out from `response_format_opt_out`. Extracted so
+    /// tests can assert on the wire shape without a live HTTP call.
+    fn build_chat_request(&self, req: &Request) -> ChatRequest<'_> {
+        ChatRequest {
+            model: &self.model,
+            messages: vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: req.system.clone(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: req.user.clone(),
+                },
+            ],
+            max_tokens: req.max_tokens,
+            temperature: req.temperature,
+            top_p: req.top_p,
+            stream: false,
+            response_format: if role_requires_json(req.role)
+                && !response_format_opt_out::model_skips_response_format(&self.model)
+            {
+                Some(ResponseFormat {
+                    kind: "json_object",
+                })
+            } else {
+                None
+            },
         }
     }
 }
@@ -174,30 +208,7 @@ impl Provider for OpenAiCompatProvider {
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
-            let body = ChatRequest {
-                model: &self.model,
-                messages: vec![
-                    ChatMessage {
-                        role: "system".into(),
-                        content: req.system.clone(),
-                    },
-                    ChatMessage {
-                        role: "user".into(),
-                        content: req.user.clone(),
-                    },
-                ],
-                max_tokens: req.max_tokens,
-                temperature: req.temperature,
-                top_p: req.top_p,
-                stream: false,
-                response_format: if role_requires_json(req.role) {
-                    Some(ResponseFormat {
-                        kind: "json_object",
-                    })
-                } else {
-                    None
-                },
-            };
+            let body = self.build_chat_request(req);
             // Apply per-provider max_tokens cap. Done AFTER the
             // body construction so the cap is visible regardless of
             // upstream choice. The default of 8192 covers DeepSeek
@@ -360,5 +371,133 @@ mod tests {
                 "stream": false
             })
         );
+    }
+
+    /// Build an `OpenAiCompatProvider` with a fully-specified config
+    /// so the per-test `model` overrides the default in `provider()`.
+    fn provider_with_model(kind: &str, endpoint: &str, model: &str) -> OpenAiCompatProvider {
+        OpenAiCompatProvider::new(
+            &ProviderConfig {
+                kind: kind.into(),
+                endpoint: endpoint.into(),
+                model: model.into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap()
+    }
+
+    fn json_request(role: crate::llm::Role, model: &str) -> Request {
+        Request {
+            role,
+            model: model.into(),
+            system: "system".into(),
+            user: "user".into(),
+            max_tokens: 128,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+        }
+    }
+
+    #[test]
+    fn openai_compat_request_includes_response_format_for_normal_models() {
+        let p = provider_with_model(
+            "deepseek",
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+        );
+        let body =
+            p.build_chat_request(&json_request(crate::llm::Role::Route, "deepseek-v4-flash"));
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(
+            value.get("response_format"),
+            Some(&serde_json::json!({"type": "json_object"}))
+        );
+    }
+
+    #[test]
+    fn openai_compat_request_omits_response_format_for_opted_out_models() {
+        // glm-5.1 routes through OpenCode Go's
+        // /v1/chat/completions endpoint, which is built on this
+        // OpenAiCompatProvider. Same code path as DeepSeek — the
+        // opt-out must trigger purely from the model name.
+        for model in [
+            "glm-5.1",
+            "glm-5.2",
+            "kimi-k2.6",
+            "kimi-k2.7-code",
+            "deepseek-v4-pro",
+            "kimi-k3",
+        ] {
+            let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", model);
+            let body = p.build_chat_request(&json_request(crate::llm::Role::Route, model));
+            let value = serde_json::to_value(&body).unwrap();
+            assert!(
+                value.get("response_format").is_none(),
+                "opted-out model {model} must omit response_format from the body, got: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_compat_request_omits_response_format_for_non_json_role() {
+        // Markdown / free-text roles must not get response_format
+        // either, regardless of model.
+        let p = provider_with_model(
+            "deepseek",
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+        );
+        let body = p.build_chat_request(&json_request(
+            crate::llm::Role::Propose,
+            "deepseek-v4-flash",
+        ));
+        let value = serde_json::to_value(&body).unwrap();
+        assert!(value.get("response_format").is_none());
+    }
+
+    #[test]
+    fn opencode_go_request_omits_response_format_for_opted_out_models() {
+        // Pin the OpenCode Go contract: even when role_requires_json
+        // is true (Route), the chat-completions body for an opted-out
+        // model must NOT carry the `response_format` field so the
+        // upstream doesn't return prose-prefixed content.
+        let p = provider_with_model(
+            "opencode_go",
+            "https://opencode.ai/zen/go/v1",
+            "kimi-k2.7-code",
+        );
+        let body = p.build_chat_request(&json_request(crate::llm::Role::Route, "kimi-k2.7-code"));
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["model"], serde_json::json!("kimi-k2.7-code"));
+        assert!(
+            value.get("response_format").is_none(),
+            "OpenCode Go request for opted-out model must omit response_format, got: {value}"
+        );
+        // Sanity: the role_requires_json path was actually exercised
+        // — without the opt-out check the field WOULD be present.
+        assert!(super::role_requires_json(crate::llm::Role::Route));
+    }
+
+    #[test]
+    fn opencode_go_request_keeps_response_format_for_non_opted_out_models() {
+        // The flip side of the previous test: an OpenCode Go model
+        // NOT on the opt-out list (mimo-v2.5, deepseek-v4-flash, hy3)
+        // still gets response_format = json_object for JSON roles.
+        for model in ["mimo-v2.5", "deepseek-v4-flash", "hy3"] {
+            let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", model);
+            let body = p.build_chat_request(&json_request(crate::llm::Role::Route, model));
+            let value = serde_json::to_value(&body).unwrap();
+            assert_eq!(
+                value.get("response_format"),
+                Some(&serde_json::json!({"type": "json_object"})),
+                "non-opted-out model {model} must keep response_format: json_object, got: {value}"
+            );
+        }
     }
 }
