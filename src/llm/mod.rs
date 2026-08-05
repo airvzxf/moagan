@@ -8,6 +8,7 @@ pub mod circuit_breaker;
 pub mod deepseek;
 pub mod embed;
 pub mod http;
+pub mod json_extractor;
 pub mod minimax;
 pub mod mock;
 pub mod openai_compat;
