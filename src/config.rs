@@ -968,9 +968,7 @@ mod tests {
     /// export does not silently flip the flag.
     #[test]
     fn env_var_startup_reconcile_garbage_is_ignored() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("MOAGAN_STARTUP_RECONCILE", "   ");
         }
