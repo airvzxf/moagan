@@ -12,9 +12,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, MergePlan, Proposal,
-    RationaleExtract, RecoveryReport, Repair, Route, Sketch, SynthesizedProposal,
-    TiefighterCriticReport,
+    AdversaryReport, Brief, Critique, FinalReport, Intake, JudgeScore, MergePlan,
+    PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport, Repair, Route, Sketch,
+    SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -94,6 +94,11 @@ pub enum Role {
     /// same input produce the same critique. Opt-in: no phase calls
     /// it automatically; callers wire it up explicitly.
     TiefighterCritic,
+    /// PersonaPicker — D.7.1 catalog role. Picks which persona
+    /// (system prompt variant) a downstream phase should adopt
+    /// for the current run. Sampling (T=0.3, top_p=0.9,
+    /// max_tokens=512). Opt-in.
+    PersonaPicker,
 }
 
 impl Role {
@@ -122,6 +127,7 @@ impl Role {
             Self::RecoveryExplainer => "recovery_explainer",
             Self::RationaleExtractor => "rationale_extractor",
             Self::TiefighterCritic => "tiefighter_critic",
+            Self::PersonaPicker => "persona_picker",
         }
     }
 
@@ -180,6 +186,9 @@ impl Role {
             }
             Self::TiefighterCritic => {
                 "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=2048)"
+            }
+            Self::PersonaPicker => {
+                "PersonaPicker: {candidates[]} (persona selector; T=0.3, top_p=0.9, max_tokens=512)"
             }
         }
     }
@@ -248,6 +257,9 @@ impl Role {
             Self::TiefighterCritic => {
                 serde_json::from_value::<TiefighterCriticReport>(value.clone()).map(|_| ())
             }
+            Self::PersonaPicker => {
+                serde_json::from_value::<PersonaPickerReport>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -284,6 +296,7 @@ impl Role {
             Self::RecoveryExplainer,
             Self::RationaleExtractor,
             Self::TiefighterCritic,
+            Self::PersonaPicker,
         ]
     }
 }
@@ -321,6 +334,7 @@ impl FromStr for Role {
             "recovery_explainer" => Ok(Self::RecoveryExplainer),
             "rationale_extractor" => Ok(Self::RationaleExtractor),
             "tiefighter_critic" => Ok(Self::TiefighterCritic),
+            "persona_picker" => Ok(Self::PersonaPicker),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -346,12 +360,12 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_two() {
-        // Track H batch-1: tiefighter_critic added (D.7.1 catalog,
-        // adversarial critic; T=0.0, top_p=0.1, max_tokens=2048).
-        // Two more catalog roles (persona_picker, angle_picker)
-        // land in subsequent commits of this batch.
-        assert_eq!(Role::all().len(), 22);
+    fn all_roles_are_count_twenty_three() {
+        // Track H batch-1 progress:
+        //   * commit 1: tiefighter_critic added
+        //   * commit 2: persona_picker added
+        //   * commit 3: angle_picker adds the third role
+        assert_eq!(Role::all().len(), 23);
     }
 
     #[test]
@@ -396,6 +410,32 @@ mod tests {
     }
 
     #[test]
+    fn persona_picker_round_trip() {
+        let s = Role::PersonaPicker.as_str();
+        assert_eq!(s, "persona_picker");
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::PersonaPicker, back);
+    }
+
+    #[test]
+    fn persona_picker_validate_json_accepts_valid_payload() {
+        // D.7.1 catalog schema: a list of persona candidates the
+        // picker will choose between. The empty-object case is
+        // also accepted (default-filled).
+        let raw = serde_json::json!({
+            "candidates": ["architect", "reviewer", "skeptic"],
+            "selected": "skeptic",
+            "rationale": "Brief asks for adversarial analysis"
+        });
+        assert!(Role::PersonaPicker.validate_json(&raw).is_ok());
+        assert!(
+            Role::PersonaPicker
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn serde_round_trip() {
         let r = Role::Gate;
         let j = serde_json::to_string(&r).unwrap();
@@ -434,6 +474,7 @@ mod tests {
                     || desc.starts_with("RecoveryExplainer:")
                     || desc.starts_with("RationaleExtractor:")
                     || desc.starts_with("TiefighterCritic:")
+                    || desc.starts_with("PersonaPicker:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -501,5 +542,9 @@ mod tests {
         // Track H batch-1: tiefighter_critic carries its own domain
         // type with `#[serde(default)]`, so {} parses cleanly.
         assert!(Role::TiefighterCritic.validate_json(&empty).is_ok());
+        // Track H batch-1 (commit 2): persona_picker carries its
+        // own domain type with `#[serde(default)]`, so {} parses
+        // cleanly.
+        assert!(Role::PersonaPicker.validate_json(&empty).is_ok());
     }
 }

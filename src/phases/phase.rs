@@ -853,6 +853,9 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // `src/llm/prompts.rs`); these are the runtime ceilings
         // used when the catalog role is invoked outside any phase.
         Role::TiefighterCritic => 2048,
+        // persona_picker is a short routing decision; the 512-token
+        // ceiling matches its role_settings (see prompts.rs).
+        Role::PersonaPicker => 512,
     }
 }
 
@@ -928,6 +931,10 @@ fn temperature_for_role(role: Role) -> f32 {
         // (T=0.0) per D.7.1 so re-runs against the same proposal
         // produce identical critiques (useful for snapshot diffs).
         Role::TiefighterCritic => 0.0,
+        // persona_picker needs a small amount of variance
+        // (T=0.3) to break ties between close candidates without
+        // flipping picks across runs of the same brief.
+        Role::PersonaPicker => 0.3,
     }
 }
 

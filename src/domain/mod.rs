@@ -781,6 +781,29 @@ pub struct TiefighterCriticReport {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the `Role::PersonaPicker` role (D.7.1 catalog).
+///
+/// Picks which persona (system prompt variant) a downstream phase
+/// should adopt for the current run. Sampling contract
+/// (T=0.3, top_p=0.9, max_tokens=512) balances determinism with
+/// enough variance to escape obvious ties; callers that want a
+/// hard lock can re-run with T=0.0 in `role_settings`.
+/// `#[serde(default)]` keeps the validator accepting empty
+/// objects.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersonaPickerReport {
+    /// Candidate persona ids supplied by the caller (echoed for
+    /// downstream phases that want to audit which pool the picker
+    /// saw).
+    pub candidates: Vec<String>,
+    /// Persona id the picker selected (must be one of `candidates`).
+    pub selected: String,
+    /// One-line rationale for the selection.
+    pub rationale: String,
+    /// Schema version.
+    pub schema_version: String,
+}
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.
