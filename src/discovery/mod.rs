@@ -18,6 +18,7 @@ pub mod facet;
 pub mod facet_cache;
 pub mod integrator;
 pub mod matrix;
+pub mod pause;
 pub mod state;
 pub mod tagger;
 
