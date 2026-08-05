@@ -33,6 +33,7 @@ use crate::redact::{RedactPolicy, Surface, apply};
 
 use super::allowlist::{Allowlist, Denylist, contains_deny_token, is_allowed};
 use super::policy::NetworkPolicy;
+use super::seccomp::{self, SeccompPolicyKind};
 
 /// Cap stdout/stderr to `max_bytes` per stream. When the cap is hit,
 /// the sandbox returns [`SandboxError::OutputTruncated`] and the
@@ -239,6 +240,14 @@ pub struct SandboxConfig {
     /// cases where the operator wants to see exactly what bytes were
     /// passed. Catalog §D.11.10.
     pub allow_injection: bool,
+    /// Opt-in seccomp syscall whitelist applied to the subprocess
+    /// in its `pre_exec` hook. Catalog §D.11.7. Default
+    /// [`SeccompPolicyKind::Permissive`] so the sandbox is
+    /// unchanged for existing runs. Operators opt in via
+    /// `MOAGAN_SANDBOX_SECCOMP=strict_rust_build` or by setting
+    /// `sandbox_seccomp = "strict_rust_build"` in
+    /// `~/.config/moagan/config.toml`.
+    pub seccomp: SeccompPolicyKind,
 }
 
 impl SandboxConfig {
@@ -255,6 +264,7 @@ impl SandboxConfig {
             allow_network: false,
             network_policy: NetworkPolicy::Off,
             allow_injection: false,
+            seccomp: SeccompPolicyKind::Permissive,
         }
     }
 
@@ -341,6 +351,17 @@ impl SandboxConfig {
     /// subprocess verbatim. Catalog §D.11.10.
     pub fn with_allow_injection(mut self, allow: bool) -> Self {
         self.allow_injection = allow;
+        self
+    }
+
+    /// Replace the seccomp syscall whitelist applied to the
+    /// subprocess. Catalog §D.11.7. Default
+    /// [`SeccompPolicyKind::Permissive`] (no-op). Setting
+    /// [`SeccompPolicyKind::StrictRustBuild`] makes the sandbox load
+    /// a BPF program that allow-lists the syscalls needed to compile
+    /// Rust from scratch.
+    pub fn with_seccomp(mut self, kind: SeccompPolicyKind) -> Self {
+        self.seccomp = kind;
         self
     }
 
@@ -1115,6 +1136,32 @@ impl Sandbox {
                     } else {
                         Ok(())
                     }
+                })
+            };
+        }
+
+        // Catalog §D.11.7: install the seccomp BPF filter in the
+        // child between fork and exec. `pre_exec` is a sync closure
+        // that runs in the child, so this is the canonical place to
+        // load a syscall whitelist that only affects the spawned
+        // subprocess (the parent keeps running unrestricted).
+        //
+        // Default [`SeccompPolicyKind::Permissive`] is a no-op so
+        // existing runs are unchanged; opting into
+        // [`SeccompPolicyKind::StrictRustBuild`] activates the
+        // ~30-syscall allow-list needed to compile Rust from
+        // scratch.
+        #[cfg(unix)]
+        if self.config.seccomp != SeccompPolicyKind::Permissive {
+            let kind = self.config.seccomp;
+            // SAFETY: `pre_exec` runs in the child between fork and
+            // exec. A non-zero return surfaces as `Err` and aborts
+            // the spawn, which is the documented failure mode for
+            // the seccomp loaders. `kill_on_drop` remains the
+            // backstop cleanup for the parent.
+            let _ = unsafe {
+                command.pre_exec(move || -> std::result::Result<(), std::io::Error> {
+                    seccomp::apply(kind).map_err(|error| std::io::Error::other(error.to_string()))
                 })
             };
         }

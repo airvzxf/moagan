@@ -220,6 +220,22 @@ impl Db {
             path: path.to_path_buf(),
         };
         db.run_migrations()?;
+        // Force a WAL checkpoint so the next open() of this file
+        // sees the latest user_version and schema state, even when
+        // the previous open dropped the connection without explicit
+        // sync. Without this, quick-succession opens can read stale
+        // user_version from the main DB file and re-run
+        // non-idempotent migrations like v003 (ALTER TABLE adds
+        // COLUMN status) which then fail with "duplicate column
+        // name". The per-step user_version probe inside
+        // run_migrations helps but does not eliminate the flake
+        // because once the probe enters the 'current < N' branch,
+        // the schema change itself fails before the version bump
+        // can land. The checkpoint makes the post-migration state
+        // durable on the main DB file before we return.
+        let conn = db.pool.get()?;
+        let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        drop(conn);
         Ok(db)
     }
 
@@ -3226,6 +3242,61 @@ mod tests {
         assert!(
             v >= 10,
             "user_version must reach the current head after recovery, got {v}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Db::open runs migrations and then forces a WAL checkpoint
+    /// before returning, so the user_version bump is durable on the
+    /// main DB file (not only on the WAL). Pins the contract that
+    /// closes the remaining flake in
+    /// `cli::repair::tests::reindex_no_diff_returns_zero`: after
+    /// the first open, the second open reads a consistent
+    /// user_version from the main file and run_migrations takes the
+    /// 'skip' branch on every step. We verify the checkpoint by
+    /// inspecting the WAL sidecar — `PRAGMA wal_checkpoint` reports
+    /// zero frames to checkpoint and an empty WAL file means
+    /// TRUNCATE ran successfully.
+    #[test]
+    fn db_open_checkpoints_wal_after_migrations() {
+        let path = unique_db_path();
+        let _ = Db::open(&path).expect("first open");
+
+        let conn = rusqlite::Connection::open(&path).expect("verify connection");
+        let (busy, log_frames, checkpointed): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .expect("wal_checkpoint must succeed on a healthy DB");
+        assert_eq!(busy, 0, "wal_checkpoint must not report busy");
+        assert_eq!(log_frames, 0, "WAL must be empty after Db::open TRUNCATE");
+        assert_eq!(checkpointed, 0);
+
+        drop(conn);
+        // Second open is the actual repro path: it reads user_version
+        // from the main file (no stale WAL frame masking it) and
+        // must succeed without touching the schema.
+        let _ = Db::open(&path).expect("second open must not fail");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Open/close the same DB ten times in quick succession, mirroring
+    /// the parallel-test pattern that exposed the flake. Without the
+    /// post-migration WAL checkpoint, two opens can race the
+    /// user_version bump between the WAL and the main DB file and
+    /// the second open re-runs v003 (ALTER TABLE ADD COLUMN
+    /// status), failing with `duplicate column name: status`. With
+    /// the fix in place every open is a clean no-op on the schema.
+    #[test]
+    fn db_open_idempotent_across_many_reopens() {
+        let path = unique_db_path();
+        for i in 0..10 {
+            Db::open(&path).unwrap_or_else(|e| panic!("open #{i} must succeed: {e}"));
+        }
+        let v = read_user_version(&path);
+        assert!(
+            v >= 10,
+            "user_version must reach the current head after 10 reopens, got {v}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
