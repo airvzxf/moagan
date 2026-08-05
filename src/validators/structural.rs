@@ -4,12 +4,24 @@
 //! The structural check is intentionally cheap: it never spawns a
 //! process and never calls an LLM. Anything that depends on a tool
 //! (cargo, python, tsc) belongs in a language-specific validator.
+//!
+//! D.11.14: every failure the structural validator emits carries a
+//! typed [`FailureKind`]. The legacy `failed_checks` strings are
+//! derived from the typed list and stay byte-identical so the
+//! existing pipeline tests keep passing.
 
 use crate::domain::Proposal;
 use crate::error::Result;
 use crate::sandbox::Sandbox;
 
-use super::{ValidationEvidence, ValidationStatus, Validator};
+use super::{FailureKind, ValidationEvidence, ValidationFailure, ValidationStatus, Validator};
+
+/// Tokens that, when found in the proposal summary or approach,
+/// trigger a [`FailureKind::ForbiddenTech`] failure. The list is
+/// deliberately small and conservative — only technologies that are
+/// universally out of scope for the moagan pipeline (cluster
+/// orchestrators the tool itself does not support).
+const FORBIDDEN_TECH_TOKENS: &[&str] = &["kubernetes", " k8s ", "docker swarm", "cassandra"];
 
 /// Structural validator. Stateless; reuse freely.
 #[derive(Debug, Default, Clone, Copy)]
@@ -33,28 +45,40 @@ impl StructuralValidator {
 
         if proposal.id.trim().is_empty() {
             evidence.status = ValidationStatus::Fail;
-            evidence.failed_checks.push("missing id".into());
+            evidence.record_failure(
+                ValidationFailure::new(FailureKind::MissingField, "missing id").with_field("id"),
+            );
         } else {
             evidence.checks_run.push("id".into());
         }
 
         if proposal.summary.trim().is_empty() {
             evidence.status = ValidationStatus::Fail;
-            evidence.failed_checks.push("missing summary".into());
+            evidence.record_failure(
+                ValidationFailure::new(FailureKind::MissingField, "missing summary")
+                    .with_field("summary"),
+            );
         } else if proposal.summary.len() < 20 {
             if evidence.status == ValidationStatus::Pass {
                 evidence.status = ValidationStatus::Warn;
             }
-            evidence
-                .failed_checks
-                .push("summary shorter than 20 chars".into());
+            evidence.record_failure(
+                ValidationFailure::new(
+                    FailureKind::LengthOutOfRange,
+                    "summary shorter than 20 chars",
+                )
+                .with_field("summary"),
+            );
         } else {
             evidence.checks_run.push("summary".into());
         }
 
         if proposal.approach.trim().is_empty() {
             evidence.status = ValidationStatus::Fail;
-            evidence.failed_checks.push("missing approach".into());
+            evidence.record_failure(
+                ValidationFailure::new(FailureKind::MissingField, "missing approach")
+                    .with_field("approach"),
+            );
         } else {
             evidence.checks_run.push("approach".into());
         }
@@ -63,7 +87,10 @@ impl StructuralValidator {
             if evidence.status == ValidationStatus::Pass {
                 evidence.status = ValidationStatus::Warn;
             }
-            evidence.failed_checks.push("no evidence provided".into());
+            evidence.record_failure(
+                ValidationFailure::new(FailureKind::SoftWarning, "no evidence provided")
+                    .with_field("evidence"),
+            );
         } else {
             evidence.checks_run.push("evidence".into());
         }
@@ -72,9 +99,41 @@ impl StructuralValidator {
             if evidence.status == ValidationStatus::Pass {
                 evidence.status = ValidationStatus::Warn;
             }
-            evidence.failed_checks.push("no tradeoffs listed".into());
+            evidence.record_failure(
+                ValidationFailure::new(FailureKind::SoftWarning, "no tradeoffs listed")
+                    .with_field("tradeoffs"),
+            );
         } else {
             evidence.checks_run.push("tradeoffs".into());
+        }
+
+        // Forbidden-tech scan over the proposal text. A hit turns
+        // the verdict into Fail and emits a typed
+        // `ForbiddenTech` failure pointing at the `approach`
+        // field (or `summary` if the hit only appears there).
+        let scan = format!(
+            " {} {} ",
+            proposal.summary.to_lowercase(),
+            proposal.approach.to_lowercase()
+        );
+        for token in FORBIDDEN_TECH_TOKENS {
+            let needle = token.to_lowercase();
+            if scan.contains(&needle) {
+                evidence.status = ValidationStatus::Fail;
+                let field = if proposal.approach.to_lowercase().contains(&needle) {
+                    "approach"
+                } else {
+                    "summary"
+                };
+                evidence.record_failure(
+                    ValidationFailure::new(
+                        FailureKind::ForbiddenTech,
+                        format!("proposal mentions forbidden technology '{token}'"),
+                    )
+                    .with_field(field)
+                    .with_hint("remove the technology mention or scope the proposal tighter"),
+                );
+            }
         }
 
         evidence

@@ -19,7 +19,10 @@ use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxResult, SandboxStatus};
 
 use super::rust_validator::tail;
-use super::{CodeArtifact, ValidationEvidence, ValidationStatus, Validator, capture_tool_version};
+use super::{
+    CodeArtifact, FailureKind, ValidationEvidence, ValidationFailure, ValidationStatus, Validator,
+    capture_tool_version,
+};
 
 /// Python validator. Stateless; reuse freely.
 #[derive(Debug, Default, Clone, Copy)]
@@ -120,9 +123,10 @@ fn evidence_from_result(result: SandboxResult) -> ValidationEvidence {
     };
     evidence.checks_run.push("python3 -m py_compile".into());
     if result.status == SandboxStatus::Fail {
-        evidence
-            .failed_checks
-            .push("py_compile returned non-zero exit".into());
+        evidence.record_failure(ValidationFailure::new(
+            FailureKind::PythonSyntaxError,
+            "py_compile returned non-zero exit",
+        ));
     }
     evidence
 }
