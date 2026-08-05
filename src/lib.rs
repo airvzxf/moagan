@@ -23,6 +23,7 @@ pub mod fs_layout;
 pub mod ids;
 pub mod llm;
 pub mod phases;
+pub mod preferences;
 pub mod ranking;
 pub mod reconcile;
 pub mod redact;
