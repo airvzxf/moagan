@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::sandbox::NetworkPolicy;
+use crate::sandbox::{NetworkPolicy, SeccompPolicyKind};
 
 /// Top-level configuration record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +117,16 @@ pub struct Config {
     /// runs `strip_secrets` over argv before spawning; when `true`,
     /// raw args are passed to the subprocess verbatim.
     pub sandbox_allow_injection: bool,
+    /// Track E (catalog §D.11.7): opt-in seccomp syscall whitelist
+    /// for the sandbox subprocess. Default
+    /// [`SeccompPolicyKind::Permissive`] (no-op). Operators opt in
+    /// via `MOAGAN_SANDBOX_SECCOMP=strict_rust_build` or by setting
+    /// `sandbox_seccomp = "strict_rust_build"` in
+    /// `~/.config/moagan/config.toml`. The sandbox installs the BPF
+    /// program in the child's `pre_exec` hook so only the spawned
+    /// subprocess is filtered.
+    #[serde(default)]
+    pub sandbox_seccomp: SeccompPolicyKind,
 }
 
 fn default_startup_reconcile() -> bool {
@@ -322,6 +332,7 @@ impl Default for Config {
             sandbox_allow_network: false,
             sandbox_network_policy: NetworkPolicy::default(),
             sandbox_allow_injection: false,
+            sandbox_seccomp: SeccompPolicyKind::default(),
         }
     }
 }
@@ -686,7 +697,38 @@ impl Config {
         {
             self.sandbox_network_policy = policy;
         }
+        if let Ok(v) = std::env::var("MOAGAN_SANDBOX_SECCOMP")
+            && let Some(kind) = parse_seccomp_policy_env(&v)
+        {
+            self.sandbox_seccomp = kind;
+        }
     }
+}
+
+/// Parse the `MOAGAN_SANDBOX_SECCOMP` env var into a
+/// [`SeccompPolicyKind`].
+///
+/// Accepts:
+/// - `permissive` / `PERMISSIVE` — [`SeccompPolicyKind::Permissive`]
+/// - `strict_rust_build` / `STRICT_RUST_BUILD` —
+///   [`SeccompPolicyKind::StrictRustBuild`]
+/// - the JSON string form (`"permissive"` / `"strict_rust_build"`)
+///
+/// Returns `None` for any value that does not parse; the caller is
+/// expected to leave the existing knob alone in that case so a
+/// stale / malformed export does not silently flip the install.
+fn parse_seccomp_policy_env(s: &str) -> Option<SeccompPolicyKind> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("permissive") {
+        return Some(SeccompPolicyKind::Permissive);
+    }
+    if s.eq_ignore_ascii_case("strict_rust_build") {
+        return Some(SeccompPolicyKind::StrictRustBuild);
+    }
+    if let Ok(kind) = serde_json::from_str::<SeccompPolicyKind>(s) {
+        return Some(kind);
+    }
+    None
 }
 
 /// Parse the `MOAGAN_SANDBOX_NETWORK_POLICY` env var into a
@@ -1319,5 +1361,107 @@ mod tests {
             ),
             other => panic!("expected AllowList after round-trip, got {other:?}"),
         }
+    }
+
+    /// Catalog §D.11.7: the default value of `sandbox_seccomp` is
+    /// [`SeccompPolicyKind::Permissive`] (no-op). Pin the default so
+    /// a refactor that flips it trips the test before it lands in
+    /// production.
+    #[test]
+    fn config_sandbox_seccomp_default_is_permissive() {
+        let cfg = Config::default();
+        assert!(
+            matches!(cfg.sandbox_seccomp, SeccompPolicyKind::Permissive),
+            "sandbox_seccomp must default to Permissive (D.11.7 off-by-default), got {:?}",
+            cfg.sandbox_seccomp
+        );
+    }
+
+    /// Catalog §D.11.7: `MOAGAN_SANDBOX_SECCOMP=strict_rust_build`
+    /// flips the knob to [`SeccompPolicyKind::StrictRustBuild`].
+    /// Locked against the `_permissive` / `_garbage` tests below
+    /// because they all mutate the same env var.
+    #[test]
+    fn config_env_var_seccomp_strict_rust_build_overrides_default() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_SECCOMP", "strict_rust_build");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_SECCOMP");
+        }
+        assert!(
+            matches!(cfg.sandbox_seccomp, SeccompPolicyKind::StrictRustBuild),
+            "MOAGAN_SANDBOX_SECCOMP=strict_rust_build must opt in, got {:?}",
+            cfg.sandbox_seccomp
+        );
+    }
+
+    /// Catalog §D.11.7: case-insensitive parsing — the env var
+    /// accepts `STRICT_RUST_BUILD`, `Permissive`, etc. Pin the
+    /// `PERMISSIVE` form on top of the default so a refactor that
+    /// tightens the parser surfaces as a test failure.
+    #[test]
+    fn config_env_var_seccomp_permissive_overrides_default() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cfg = Config {
+            sandbox_seccomp: SeccompPolicyKind::StrictRustBuild,
+            ..Config::default()
+        };
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_SECCOMP", "PERMISSIVE");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_SECCOMP");
+        }
+        assert!(
+            matches!(cfg.sandbox_seccomp, SeccompPolicyKind::Permissive),
+            "MOAGAN_SANDBOX_SECCOMP=PERMISSIVE must reset to Permissive, got {:?}",
+            cfg.sandbox_seccomp
+        );
+    }
+
+    /// Catalog §D.11.7: garbage / whitespace env values are ignored
+    /// so a stale / malformed export does not silently flip the
+    /// default. Mirrors the handling of
+    /// `MOAGAN_SANDBOX_NETWORK_POLICY`.
+    #[test]
+    fn config_env_var_seccomp_garbage_is_ignored() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_SANDBOX_SECCOMP", "   ");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_SANDBOX_SECCOMP");
+        }
+        assert!(
+            matches!(cfg.sandbox_seccomp, SeccompPolicyKind::Permissive),
+            "garbage env must not flip the default Permissive, got {:?}",
+            cfg.sandbox_seccomp
+        );
+    }
+
+    /// Catalog §D.11.7: the typed `sandbox_seccomp` survives a TOML
+    /// round-trip so operators can pin their value in
+    /// `~/.config/moagan/config.toml` with
+    /// `sandbox_seccomp = "strict_rust_build"`.
+    #[test]
+    fn config_sandbox_seccomp_toml_round_trip() {
+        let cfg = Config {
+            sandbox_seccomp: SeccompPolicyKind::StrictRustBuild,
+            ..Config::default()
+        };
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert!(
+            matches!(back.sandbox_seccomp, SeccompPolicyKind::StrictRustBuild),
+            "TOML round-trip must preserve StrictRustBuild, got {:?}",
+            back.sandbox_seccomp
+        );
     }
 }
