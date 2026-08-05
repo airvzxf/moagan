@@ -20,6 +20,7 @@ pub mod discover;
 pub mod doctor;
 pub mod forbidden;
 pub mod inspect;
+pub mod pause_cmd;
 pub mod repair;
 pub mod run;
 pub mod telemetry_cmd;
@@ -254,6 +255,13 @@ pub enum Cmd {
         /// Run id (defaults to the most recent run).
         #[arg(long)]
         run_id: Option<String>,
+        /// Track K.2b: resume from a `paused.json` instead of
+        /// querying SQLite for the last completed phase. When set,
+        /// the dispatcher reads `<run_dir>/paused.json` and (today)
+        /// prints the resume plan; the actual loop skip that uses
+        /// the file lands in PR C.5 (K.2 wires `continue_cmd.rs`).
+        #[arg(long, default_value_t = false)]
+        from_pause: bool,
         /// Phase J: switch the provider mid-run (e.g. `minimax` →
         /// `mock`). The change is recorded in `provider_changes`
         /// and on `manifest.json#provider`; the in-flight
@@ -494,6 +502,24 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: telemetry_cmd::TelemetryCmd,
     },
+    /// `moagan pause <run_id>` — serialise current run state to
+    /// `<run_dir>/paused.json` and stamp a `paused.lock` with TTL
+    /// 5 min. Track K.2b (catalog §D.22.5).
+    Pause {
+        /// Run id to pause (UUID v7).
+        #[arg(value_name = "RUN_ID")]
+        run_id: String,
+    },
+    /// `moagan list --paused` — enumerate every run directory under
+    /// `<home>/.runs/` that carries a `paused.json`. Track K.2b
+    /// (catalog §D.22.5).
+    List {
+        /// Filter to paused runs (the only kind the v0.4 pause
+        /// surface understands today; non-paused listing lives on
+        /// `moagan inspect`).
+        #[arg(long, default_value_t = false)]
+        paused: bool,
+    },
 }
 
 /// Subcommands of `moagan audit`.
@@ -579,6 +605,10 @@ impl Cmd {
             Self::Validate { .. } => "Validate a brief without running the pipeline",
             Self::Diff { .. } => "Compare two runs side-by-side (params, artefacts, scores)",
             Self::Repair { .. } => "Reconcile filesystem vs SQLite",
+            Self::Pause { .. } => {
+                "Serialise current run state to paused.json (cross-process hibernation)"
+            }
+            Self::List { .. } => "List runs (filter by --paused)",
         }
     }
 }
@@ -751,11 +781,28 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         }
         Cmd::Continue {
             run_id,
+            from_pause,
             switch_provider,
             switch_api_key,
             skip_checkpoint,
             non_interactive,
         } => {
+            // Track K.2b: `--from-pause` short-circuits to the
+            // pause-aware resume path. PR C.3 only logs the resume
+            // plan; the real loop skip that uses `paused.json` lands
+            // in PR C.5 (K.2 wires `continue_cmd.rs`). Until then,
+            // `--from-pause` is a no-op-ish probe that confirms the
+            // file is present and well-formed.
+            if from_pause {
+                let id = run_id.ok_or_else(|| {
+                    Error::InvalidArgs(
+                        "--run-id is required for `moagan continue --from-pause`".into(),
+                    )
+                })?;
+                let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
+                let code = pause_cmd::run_continue_from_pause(&global_home, parsed)?;
+                return Ok(code);
+            }
             let id = run_id.ok_or_else(|| {
                 Error::InvalidArgs("--run-id is required for `moagan continue`".into())
             })?;
@@ -982,6 +1029,22 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 dry_run,
                 home_override: None,
             })?;
+            Ok(code)
+        }
+        Cmd::Pause { run_id } => {
+            let parsed: crate::ids::RunId = run_id
+                .parse()
+                .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run_id}': {e}")))?;
+            let code = pause_cmd::run_pause(&global_home, pause_cmd::PauseArgs { run_id: parsed })?;
+            Ok(code)
+        }
+        Cmd::List { paused } => {
+            if !paused {
+                return Err(Error::InvalidArgs(
+                    "`moagan list` today only supports `--paused`; use `moagan inspect` for the full listing".into(),
+                ));
+            }
+            let code = pause_cmd::run_list(&global_home, pause_cmd::ListArgs {})?;
             Ok(code)
         }
     }
