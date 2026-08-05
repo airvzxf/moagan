@@ -30,6 +30,7 @@ pub mod sandbox;
 pub mod secret;
 pub mod storage;
 pub mod telemetry;
+pub mod test_support;
 pub mod time;
 pub mod validators;
 

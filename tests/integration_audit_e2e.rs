@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use moagan::audit::format::{AuditRecord, AuditWriter, count_invalid_crcs, sha256_hex};
 use moagan::ids::RunId;
+use moagan::test_support::with_moagan_home;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use wiremock::matchers::{method, path};
@@ -108,15 +109,29 @@ async fn direct_post(port: u16, body: &[u8]) -> Vec<u8> {
     response
 }
 
-#[tokio::test]
-async fn audit_verify_without_runs_returns_two() {
-    let home = tempfile::tempdir().unwrap();
-    let output = tokio::process::Command::new(binary())
-        .args(["audit", "verify", "--runs-dir"])
-        .arg(home.path())
-        .output()
-        .await
-        .expect("spawn audit verify without runs");
+#[test]
+fn audit_verify_without_runs_returns_two() {
+    // The helper gives every call a unique tempdir under /tmp; the
+    // binary receives it both as --runs-dir and as MOAGAN_HOME so
+    // it can locate the meta DB and run directory independently.
+    // A nested `with_moagan_home` cannot run inside the `#[tokio::test]`
+    // runtime (no nested `block_on`), so this one test is plain
+    // `#[test]` and drives tokio from inside the helper closure.
+    let output = with_moagan_home("audit_verify_without_runs", |home| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async {
+                tokio::process::Command::new(binary())
+                    .args(["audit", "verify", "--runs-dir"])
+                    .arg(home)
+                    .env("MOAGAN_HOME", home)
+                    .output()
+                    .await
+                    .expect("spawn audit verify without runs")
+            })
+    });
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stdout).contains("summary\tinvalid"));
 }
