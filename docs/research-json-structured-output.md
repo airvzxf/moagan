@@ -111,6 +111,12 @@ Cons:
   tight).
 - Adds latency.
 
+## Status as of v0.4+ (Sesiones A + B, 2026-08-05)
+
+- **Path A** ✅ Shipped in PR #117 (`feat(llm): per-model response_format opt-out`). 6 known-broken models skipped via static `MODEL_RESPONSE_FORMAT_OPT_OUT` list + runtime extension via `MOAGAN_RESPONSE_FORMAT_OPT_OUT` env var.
+- **Path B** ✅ Shipped in PR #119 (`feat(llm): tolerant JSON extractor`). Multi-pass extractor in `src/llm/json_extractor.rs`. Wire-up to the dispatcher is out of scope (separate follow-up PR that swaps `repair_m3_brackets` for the tolerant path).
+- **Path C** ⏳ Deferred — `Role::JsonRepairV2` is wired as enum + prompt placeholder (PR #81, Sesión 1) but the actual re-call loop is not enabled (budget flag is informative only).
+
 ## Recommendation
 
 Ship **Path A first** (1 PR, S) to unblock the 6 known-broken models.
