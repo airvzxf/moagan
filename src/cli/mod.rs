@@ -21,6 +21,7 @@ pub mod forbidden;
 pub mod inspect;
 pub mod run;
 pub mod telemetry_cmd;
+pub mod validate;
 
 /// Pipeline mode. v0.2 ships `fast`, `standard`, `deep`, `explore`,
 /// and `batch`. `discovery` is deferred to a later sub-phase: its
@@ -338,6 +339,20 @@ pub enum Cmd {
         #[arg(long)]
         run_id: String,
     },
+    /// Validate a pre-existing brief against hard constraints
+    /// without invoking the LLM. Exits 0 on pass, 1 on hard
+    /// failure, 2 on bad arguments (missing file / malformed
+    /// JSON), 8 on I/O errors. Useful as a CI pre-flight gate.
+    /// Spec D.14.4.
+    Validate {
+        /// Path to the brief JSON file.
+        #[arg(value_name = "BRIEF_PATH")]
+        brief_path: std::path::PathBuf,
+        /// Pipeline mode hint. Currently informational; the
+        /// structural check does not depend on it.
+        #[arg(long)]
+        mode: Option<Mode>,
+    },
     /// Check the local environment (API key, writability).
     Doctor,
     /// External, transparent HTTP recorder and verifier. The
@@ -461,6 +476,7 @@ impl Cmd {
             Self::Audit { .. } => "External, transparent audit trail",
             Self::Discover { .. } => "Discovery mode (knowledge base by category)",
             Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
+            Self::Validate { .. } => "Validate a brief without running the pipeline",
         }
     }
 }
@@ -786,5 +802,8 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Telemetry { sub } => telemetry_cmd::TelemetryCmd::dispatch(sub).await,
+        Cmd::Validate { brief_path, mode } => {
+            validate::run(validate::ValidateArgs { brief_path, mode })
+        }
     }
 }
