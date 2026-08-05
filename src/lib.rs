@@ -27,6 +27,7 @@ pub mod preferences;
 pub mod ranking;
 pub mod reconcile;
 pub mod redact;
+pub mod research;
 pub mod sandbox;
 pub mod secret;
 pub mod storage;
