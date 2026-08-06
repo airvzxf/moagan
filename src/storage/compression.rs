@@ -297,7 +297,7 @@ pub fn reader(path: &Path, c: Compression) -> io::Result<Box<dyn Read>> {
 /// (F5) to back the `ExportFormat::TarZst` archive pipeline with a
 /// deterministic per-frame output.
 pub struct ZstWriter {
-    inner: zstd::stream::write::Encoder<'static, File>,
+    encoder: zstd::stream::write::Encoder<'static, File>,
 }
 
 impl ZstWriter {
@@ -309,7 +309,7 @@ impl ZstWriter {
         let file = File::create(path)?;
         let encoder = zstd::stream::write::Encoder::new(file, 0)
             .map_err(|e| io::Error::other(format!("zstd encoder init: {e}")))?;
-        Ok(Self { inner: encoder })
+        Ok(Self { encoder })
     }
 
     /// Borrow the inner `File` so a caller (e.g. a tar builder
@@ -319,7 +319,7 @@ impl ZstWriter {
     /// callers that need compression should route through
     /// [`Self::as_write_mut`] or [`Self::write`].
     pub fn inner_mut(&mut self) -> &mut File {
-        self.inner.get_mut()
+        self.encoder.get_mut()
     }
 
     /// Borrow the encoder as a `dyn Write` so a caller (e.g.
@@ -328,14 +328,14 @@ impl ZstWriter {
     /// returned reference is bound to the encoder's lifetime,
     /// so it stays valid until `finish()` consumes `self`.
     pub fn as_write_mut(&mut self) -> &mut dyn Write {
-        &mut self.inner
+        &mut self.encoder
     }
 
     /// Stream `buf` into the underlying zstd frame. The bytes
     /// do not reach disk until `finish()` (or a `flush()`) is
     /// called.
     pub fn write(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.inner.write_all(buf)
+        self.encoder.write_all(buf)
     }
 
     /// Finish the current zstd frame and flush the file to
@@ -343,7 +343,19 @@ impl ZstWriter {
     /// keep writing (e.g. a tar builder that needs the
     /// underlying writer for `into_inner()`) can recover it.
     pub fn finish(self) -> io::Result<File> {
-        self.inner.finish()
+        let mut file = self.encoder.finish()?;
+        file.flush()?;
+        Ok(file)
+    }
+}
+
+impl Write for ZstWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.encoder.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.encoder.flush()
     }
 }
 
@@ -372,7 +384,7 @@ pub fn export_run_tar_zst(run_dir: &Path, out_path: &Path) -> Result<()> {
     }
     let mut zst = ZstWriter::new(out_path).map_err(|e| Error::Io(IoError::Raw(e)))?;
     {
-        let mut builder = tar::Builder::new(zst.as_write_mut());
+        let mut builder = tar::Builder::new(&mut zst);
         append_run_dir(&mut builder, run_dir, run_dir)?;
         builder
             .into_inner()
@@ -646,6 +658,23 @@ mod tests {
         let mut decoded = Vec::new();
         std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn zst_writer_compresses_streaming() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chunks.zst");
+        let chunks: [&[u8]; 4] = [b"alpha", b"-", b"beta", b"-gamma"];
+        let mut writer = ZstWriter::new(&path).unwrap();
+        for chunk in chunks {
+            writer.write(chunk).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let mut decoder = zstd::Decoder::new(File::open(&path).unwrap()).unwrap();
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, b"alpha-beta-gamma");
     }
 
     /// F5: `export_run_tar_zst` walks `run_dir`, archives each

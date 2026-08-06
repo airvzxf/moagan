@@ -6,7 +6,7 @@
 //! 3. `~/.config/moagan/config.toml` if present.
 //! 4. Built-in defaults.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -339,6 +339,8 @@ pub struct ResearchConfig {
     /// [`crate::research::ResearchFetcher::fetch_one`]). Default
     /// `None`.
     pub api_key: Option<String>,
+    #[allow(missing_docs)]
+    pub per_host_rate_limit: HashMap<String, RateLimitConfig>,
 }
 
 fn default_startup_reconcile() -> bool {
@@ -1144,6 +1146,18 @@ impl Config {
         {
             self.research.api_key = Some(v);
         }
+        for (key, value) in std::env::vars() {
+            let Some(suffix) = key.strip_prefix("MOAGAN_RESEARCH_RATE_LIMIT_") else {
+                continue;
+            };
+            let host = canonical_research_rate_limit_host(suffix);
+            if host.is_empty() {
+                continue;
+            }
+            if let Some(config) = parse_rate_limit_env(&value) {
+                self.research.per_host_rate_limit.insert(host, config);
+            }
+        }
         // Track E (catalog §D.19.6): per-provider rate-limit knobs.
         // `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>`
         // opts the named provider into the token bucket. Each entry
@@ -1174,6 +1188,14 @@ impl Config {
 /// expected to leave the existing knob alone in that case.
 fn parse_cgroup_limits_env(s: &str) -> Option<CgroupLimits> {
     serde_json::from_str::<CgroupLimits>(s).ok()
+}
+
+fn canonical_research_rate_limit_host(suffix: &str) -> String {
+    suffix
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .replace('_', ".")
 }
 
 /// Parse the `MOAGAN_RATE_LIMIT_<provider>` env var into a
@@ -2259,5 +2281,23 @@ mod tests {
             cfg.research.api_key.is_none(),
             "whitespace env var must NOT populate research.api_key"
         );
+    }
+
+    #[test]
+    fn config_per_host_rate_limit_from_env() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_RESEARCH_RATE_LIMIT_DOCS_RS", "3:7");
+        }
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_RESEARCH_RATE_LIMIT_DOCS_RS");
+        }
+
+        let rate_limit = config.research.per_host_rate_limit.get("docs.rs").unwrap();
+        assert_eq!(rate_limit.capacity, 3);
+        assert_eq!(rate_limit.refill_per_sec, 7);
+        assert_eq!(rate_limit.initial, None);
     }
 }

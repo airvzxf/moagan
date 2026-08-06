@@ -65,8 +65,34 @@ pub enum ExitCode {
     ContextError = 80,
     /// Export verification failed.
     ExportVerificationFailed = 90,
+    #[allow(missing_docs)]
+    Storage = 91,
+    #[allow(missing_docs)]
+    Llm = 92,
+    #[allow(missing_docs)]
+    Sandbox = 93,
+    #[allow(missing_docs)]
+    Research = 94,
+    #[allow(missing_docs)]
+    Resume = 95,
+    #[allow(missing_docs)]
+    Discovery = 96,
     /// Process interrupted by SIGINT.
     SigInt = 130,
+}
+
+impl From<ErrorCode> for ExitCode {
+    fn from(code: ErrorCode) -> Self {
+        match code {
+            ErrorCode::Storage => Self::Storage,
+            ErrorCode::Llm => Self::Llm,
+            ErrorCode::Sandbox => Self::Sandbox,
+            ErrorCode::Research => Self::Research,
+            ErrorCode::Resume => Self::Resume,
+            ErrorCode::Discovery => Self::Discovery,
+            _ => Self::GenericError,
+        }
+    }
 }
 
 /// Library error type. All public APIs return `Result<T, Error>`.
@@ -430,6 +456,35 @@ mod tests {
         assert_eq!(ExitCode::IoError as i32, 8);
         assert_eq!(ExitCode::ProviderError as i32, 40);
         assert_eq!(ExitCode::SigInt as i32, 130);
+    }
+
+    #[test]
+    fn error_code_extended_variants_count() {
+        let variants = [
+            ErrorCode::Storage,
+            ErrorCode::Llm,
+            ErrorCode::Sandbox,
+            ErrorCode::Research,
+            ErrorCode::Resume,
+            ErrorCode::Discovery,
+        ];
+        assert_eq!(variants.len(), 6);
+        assert_eq!(
+            variants.map(|code| ExitCode::from(code) as i32),
+            [91, 92, 93, 94, 95, 96]
+        );
+    }
+
+    #[test]
+    fn exit_code_storage_maps_to_91() {
+        assert_eq!(ExitCode::from(ErrorCode::Storage), ExitCode::Storage);
+        assert_eq!(ExitCode::Storage as i32, 91);
+    }
+
+    #[test]
+    fn exit_code_llm_maps_to_92() {
+        assert_eq!(ExitCode::from(ErrorCode::Llm), ExitCode::Llm);
+        assert_eq!(ExitCode::Llm as i32, 92);
     }
 
     #[test]

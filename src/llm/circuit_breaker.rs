@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -161,6 +161,12 @@ impl CircuitBreaker {
         g.last_failure = Some(now);
         if g.failures >= g.threshold {
             g.state = State::Open(now);
+        }
+    }
+
+    pub(crate) fn record_failure_if_circuit_opening(&self, err: &Error) {
+        if err.is_circuit_opening() {
+            self.record_failure();
         }
     }
 
