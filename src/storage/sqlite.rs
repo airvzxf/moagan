@@ -62,6 +62,10 @@ mod sql_v012 {
     pub(super) const V012: &str = include_str!("migrations/v012_versioned_manifest.sql");
 }
 
+mod sql_v013 {
+    pub(super) const V013: &str = include_str!("migrations/v013_closing_tables.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -396,6 +400,12 @@ impl Db {
         if current < 12 {
             apply_step(&conn, 12, || -> Result<()> {
                 conn.execute_batch(sql_v012::V012)?;
+                Ok(())
+            })?;
+        }
+        if current < 13 {
+            apply_step(&conn, 13, || -> Result<()> {
+                conn.execute_batch(sql_v013::V013)?;
                 Ok(())
             })?;
         }
@@ -3399,19 +3409,13 @@ mod tests {
             .unwrap();
         db.register_run(parent, "fast", "completed", "0.3.0", None, None, Some(root))
             .unwrap();
-        db.register_run(
-            child,
-            "fast",
-            "completed",
-            "0.3.0",
-            None,
-            None,
-            Some(parent),
-        )
-        .unwrap();
+        db.register_run(child, "fast", "completed", "0.3.0", None, None, Some(parent))
+            .unwrap();
         let pairs = db.list_lineage_pairs().unwrap();
-        let dict: std::collections::HashMap<Option<String>, Option<String>> =
-            pairs.into_iter().map(|(p, c)| (c, p)).collect();
+        let dict: std::collections::HashMap<Option<String>, Option<String>> = pairs
+            .into_iter()
+            .map(|(p, c)| (c, p))
+            .collect();
         assert_eq!(
             dict.get(&Some(root.to_string())).cloned().flatten(),
             None,
@@ -3425,6 +3429,67 @@ mod tests {
             dict.get(&Some(child.to_string())).cloned().flatten(),
             Some(parent.to_string())
         );
+    }
+
+    /// Catalog D.5.1 partial closure (v013): the three v013
+    /// tables (`run_state`, `discovery_dedup`, `plan_state`) exist
+    /// after `Db::open`. `user_version` reaches 13.
+    #[test]
+    fn v013_creates_closing_tables() {
+        let db = temp_db();
+        let conn = db.pool.get().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            v >= 13,
+            "user_version must reach v013 after Db::open, got {v}"
+        );
+        for table in ["run_state", "discovery_dedup", "plan_state"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                    params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing v013 table {table}");
+        }
+    }
+
+    /// Re-opening a DB that already has v013 applied stays at
+    /// v013 without error. The runner's `if current < N` gates
+    /// make this trivially true, but the test pins the contract:
+    /// `CREATE TABLE IF NOT EXISTS` is idempotent at the SQL
+    /// level so a third, fourth, ... open of the same DB also
+    /// succeeds.
+    #[test]
+    fn v013_migration_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("meta.sqlite");
+        let _db = Db::open(&path).expect("first open");
+        let _db = Db::open(&path).expect("second open must not fail");
+        let _db = Db::open(&path).expect("third open must not fail");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, 13,
+            "user_version must stay at 13 across consecutive reopens, got {v}"
+        );
+        // Each v013 table still has exactly one row in
+        // sqlite_master (no duplicate from re-execution).
+        for table in ["run_state", "discovery_dedup", "plan_state"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                    params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "v013 table {table} duplicated across reopens");
+        }
     }
 
     /// `apply_step` must roll the schema change back when the
