@@ -18,12 +18,14 @@
 //! stability check is a Phase H addition that the rank phase wires
 //! in as a step 5.6.
 
+pub mod adversary_patterns;
 pub mod cluster;
 pub mod diversity;
 pub mod pareto;
 pub mod rubric;
 pub mod stability;
 
+pub use adversary_patterns::{AdversaryPattern, PatternVerdict, run_all_patterns};
 pub use cluster::{cluster_by_simhash, jaccard_distance};
 pub use diversity::pick_with_crowding;
 pub use pareto::pareto_front;
