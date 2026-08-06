@@ -6,43 +6,68 @@
 
 use serde::Serialize;
 
+/// Hash algorithm selector for manifest digests.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub enum HashAlgo {
+    /// SHA-256.
     Sha256,
+    /// BLAKE3.
     Blake3,
 }
 
+/// One entry in the manifest's provider-history log.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManifestHistory {
+    /// Unix seconds when the transition happened.
     pub at_unix: i64,
+    /// Provider name being switched away from.
     pub from_provider: String,
+    /// Provider name being switched to.
     pub to_provider: String,
+    /// Free-text reason for the transition.
     pub reason: String,
 }
 
+/// One alert attached to the manifest export.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManifestAlert {
+    /// Unix seconds when the alert was raised.
     pub at_unix: i64,
+    /// Severity tag (e.g. `"warn"`, `"error"`).
     pub severity: String,
+    /// Human-readable alert body.
     pub message: String,
 }
 
+/// Snapshot of tool versions captured at manifest-export time.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolVersionsSummary {
+    /// `rustc --version` output, when available.
     pub rustc: Option<String>,
+    /// `cargo --version` output, when available.
     pub cargo: Option<String>,
+    /// `moagan` package version (always populated from
+    /// `CARGO_PKG_VERSION`).
     pub moagan: String,
 }
 
+/// Additive manifest extension; composed with the canonical
+/// manifest at export time without modifying its schema.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManifestExtension {
+    /// Hash algorithm used for the manifest digests.
     pub hash_algo: HashAlgo,
+    /// Provider-switch history, oldest first.
     pub history: Vec<ManifestHistory>,
+    /// Alerts emitted during the run.
     pub alerts: Vec<ManifestAlert>,
+    /// Tool versions used to produce the run.
     pub tool_versions: ToolVersionsSummary,
 }
 
 impl ManifestExtension {
+    /// Empty extension with SHA-256 default and `moagan`
+    /// version populated from `CARGO_PKG_VERSION`.
     pub fn empty() -> Self {
         Self {
             hash_algo: HashAlgo::Sha256,

@@ -8,16 +8,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
+/// Async semaphores keyed by provider name; each provider gets
+/// its own independent concurrency cap.
 pub struct PerProviderSemaphores {
     map: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
 
 impl PerProviderSemaphores {
+    /// Build an empty registry.
     pub fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
         }
     }
+    /// Acquire `permits` slots for `provider`, lazily creating
+    /// the semaphore on first use. Awaits until the slot is
+    /// available.
     pub async fn acquire(&self, provider: &str, permits: usize) -> OwnedSemaphorePermit {
         let sem = {
             let mut map = self.map.lock().await;
