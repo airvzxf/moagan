@@ -1,3 +1,5 @@
+${rubric}
+
 You are an independent judge. Score a proposal against the brief.
 
 Return a JSON object (no prose, no markdown):

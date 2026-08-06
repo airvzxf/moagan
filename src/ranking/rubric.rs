@@ -28,6 +28,49 @@ pub enum Criterion {
     Overall,
 }
 
+/// Six evaluation axes injected verbatim into the Judge and
+/// Critique system prompts. Each entry is `(key, question)`; the
+/// renderer emits them as a Markdown bullet list so the LLM can
+/// align its scoring rubric with the same six axes the rank phase
+/// aggregates. Centralizing this list here prevents `judge.md` and
+/// `critique.md` from drifting on what the score axes actually are.
+pub const RUBRIC_ANCHORS: &[(&str, &str)] = &[
+    ("correctness", "Does the proposal solve the stated problem?"),
+    (
+        "completeness",
+        "Does it cover all deliverables in the brief?",
+    ),
+    (
+        "feasibility",
+        "Is the approach implementable in Rust 1.97+?",
+    ),
+    (
+        "safety",
+        "Does it avoid forbidden tech and hard incompatibilities?",
+    ),
+    (
+        "cost",
+        "Is the token + wall-clock cost reasonable for the mode?",
+    ),
+    (
+        "clarity",
+        "Is the prose parseable by both humans and the parser?",
+    ),
+];
+
+/// Render the [`RUBRIC_ANCHORS`] list as a Markdown block suitable
+/// for substitution into the Judge and Critique prompts via
+/// `${rubric}`. The block is self-contained (heading + bullets)
+/// and stable across runs so the cross-run cache treats two
+/// equivalent rubric snapshots as the same key.
+pub fn render_rubric_block() -> String {
+    let mut s = String::from("# Rubric anchors\n\n");
+    for (k, v) in RUBRIC_ANCHORS {
+        s.push_str(&format!("- **{k}**: {v}\n"));
+    }
+    s
+}
+
 /// The 6-criterion rubric with anchored 1/3/5 phrases for each.
 /// Constructed via [`Rubric::default`] which seeds every (criterion,
 /// level) pair with a short, concrete phrase. The LLM-side judge
@@ -224,6 +267,28 @@ mod tests {
         assert_eq!(
             r.anchors.get(&(Criterion::Overall, 4)).map(String::as_str),
             None,
+        );
+    }
+
+    #[test]
+    fn rubric_anchors_count_is_six() {
+        assert_eq!(RUBRIC_ANCHORS.len(), 6);
+    }
+
+    #[test]
+    fn rubric_render_includes_all_keys() {
+        let block = render_rubric_block();
+        for (k, _) in RUBRIC_ANCHORS {
+            assert!(
+                block.contains(&format!("**{k}**")),
+                "rendered block missing key {k}: {block}"
+            );
+        }
+        assert!(block.starts_with("# Rubric anchors"));
+        assert_eq!(
+            block.matches('\n').count(),
+            RUBRIC_ANCHORS.len() + 2,
+            "expected one trailing newline per bullet plus two newlines around the heading separator"
         );
     }
 

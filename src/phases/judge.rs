@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{AdversaryReport, JudgeScore};
 use crate::error::Result;
 use crate::llm::Role;
-use crate::llm::prompts::system_prompt;
+use crate::llm::prompts::{inject_rubric, system_prompt};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::write_json;
 
@@ -112,7 +112,11 @@ impl Phase for JudgePhase {
         let adversaries_dir = ctx.run_dir().adversaries();
         std::fs::create_dir_all(&evaluations_dir)?;
         std::fs::create_dir_all(&adversaries_dir)?;
-        let system = system_prompt(Role::Judge).to_owned();
+        // Track E (E2): inject the six-axis rubric block before the
+        // Judge prompt reaches the LLM. The substitution is a no-op
+        // when the placeholder is absent (e.g. cached runs that
+        // already saw the injected text).
+        let system = inject_rubric(system_prompt(Role::Judge));
 
         // First pass: collect every (proposal_id, subject_json) pair.
         let mut subjects: Vec<(String, serde_json::Value)> = Vec::new();

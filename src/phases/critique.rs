@@ -9,7 +9,7 @@ use futures::future::join_all;
 use crate::domain::{Critique, Proposal};
 use crate::error::Result;
 use crate::llm::Role;
-use crate::llm::prompts::system_prompt;
+use crate::llm::prompts::{inject_rubric, system_prompt};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 
@@ -31,7 +31,10 @@ impl Phase for CritiquePhase {
         let proposals_dir = ctx.run_dir().proposals();
         let critiques_dir = ctx.run_dir().critiques();
         std::fs::create_dir_all(&critiques_dir)?;
-        let system = system_prompt(Role::Critique).to_owned();
+        // Track E (E2): inject the six-axis rubric block before the
+        // Critique prompt reaches the LLM. Same contract as the
+        // Judge phase so both panels score against the same axes.
+        let system = inject_rubric(system_prompt(Role::Critique));
 
         // Pre-load all proposals serially (disk I/O is cheap and
         // happens concurrently with the LLM calls below).
