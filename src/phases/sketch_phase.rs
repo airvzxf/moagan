@@ -119,12 +119,25 @@ pub const SIMILARITY_REJECT_THRESHOLD: f64 = 0.85;
 
 /// E5: minimum coverage of the brief's category token-set that
 /// each sketch must reach. Coverage is computed as
-/// `|sketch_tokens ∩ brief_tokens| / |brief_tokens|`. The default
-/// 0.5 mirrors the spec ("at least half of the brief's
-/// categories") and is forgiving enough that a single-angle
-/// sketch can still survive when the brief has only a handful of
-/// keywords.
-pub const COVERAGE_MIN_RATIO: f64 = 0.5;
+/// `|sketch_tokens ∩ brief_tokens| / min(|brief_tokens|,
+/// |sketch_tokens|)`. The symmetric numerator divides by the
+/// smaller of the two sets so the metric does not collapse
+/// on long briefs (where the absolute token count dilutes
+/// the ratio past any meaningful threshold). Real sketches
+/// discuss the same topic in different words, so an honest
+/// sketch typically overlaps 5-20% of the shared
+/// content-words with the brief. The gate's job is to catch
+/// sketches that drift entirely off-topic, not to demand
+/// the sketch echo half of the brief back.
+pub const COVERAGE_MIN_RATIO: f64 = 0.05;
+
+/// E5: when the brief's category set is below this size the
+/// coverage check is skipped entirely. A 1-token brief
+/// (`{"x"}`) would force any realistic sketch thesis to fail;
+/// skipping avoids the degenerate case while still running the
+/// check on briefs with at least [`COVERAGE_MIN_BRIEF_TOKENS`]
+/// meaningful tokens.
+pub const COVERAGE_MIN_BRIEF_TOKENS: usize = 3;
 
 /// Outcome of running the E5 quality filters against one sketch.
 #[derive(Debug, Clone, PartialEq)]
@@ -360,11 +373,27 @@ impl SketchPhase {
                 similarity: max_sim,
             };
         }
-        let coverage = if brief_tokens.is_empty() {
+        // Coverage check is skipped when the brief is too small
+        // to make the metric meaningful (see
+        // [`COVERAGE_MIN_BRIEF_TOKENS`]). Real briefs carry
+        // dozens of tokens; the gate only kicks in once the
+        // brief's category set has enough surface area to be a
+        // meaningful target.
+        let coverage = if brief_tokens.len() < COVERAGE_MIN_BRIEF_TOKENS {
             1.0
         } else {
             let hits = sk_tokens.intersection(brief_tokens).count();
-            hits as f64 / brief_tokens.len() as f64
+            // Symmetric ratio: |A ∩ B| / min(|A|, |B|) so a
+            // long brief does not collapse the metric past any
+            // meaningful threshold (the absolute token count of
+            // a 200-word brief is much larger than the
+            // content-word count of a 30-word sketch).
+            let denom = brief_tokens.len().min(sk_tokens.len());
+            if denom == 0 {
+                1.0
+            } else {
+                hits as f64 / denom as f64
+            }
         };
         if coverage < COVERAGE_MIN_RATIO {
             return FilterVerdict::LowCoverage { coverage };

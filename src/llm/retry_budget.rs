@@ -143,6 +143,7 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::InvalidState(_)
         | Error::NeedsInput(_)
         | Error::DiscoveryQualityTooLow { .. }
+        | Error::HostilePrompt(_)
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
     }

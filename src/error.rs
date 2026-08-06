@@ -135,6 +135,19 @@ pub enum Error {
         /// Threshold percentage that triggered the abort.
         threshold_pct: usize,
     },
+
+    /// E10 (catalog 10-integrada-v0 §D.20.7): the intake phase's
+    /// `Role::HostilePromptDetector` classified the user's raw
+    /// prompt as `hostile`, and the configured `HostilePolicy`
+    /// rejected the run outright. The inner string carries the
+    /// detector's `reasons[0]` (the strongest injection signal) so
+    /// the operator sees why the run was rejected without having
+    /// to cross-reference the telemetry stream. Maps to
+    /// [`ExitCode::ContextError`] because the run is in a
+    /// degraded state (the caller asked us to act on a hostile
+    /// input) and refusing to continue is the safe default.
+    #[error("hostile prompt: {0}")]
+    HostilePrompt(String),
 }
 
 impl Error {
@@ -159,6 +172,7 @@ impl Error {
             Self::Cancel(_) => ErrorCode::Cancelled,
             Self::NeedsInput(_) => ErrorCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ErrorCode::InvalidState,
+            Self::HostilePrompt(_) => ErrorCode::HostilePrompt,
         }
     }
 
@@ -176,6 +190,7 @@ impl Error {
             Self::Cache(_) | Self::InvalidState(_) => ExitCode::ContextError,
             Self::NeedsInput(_) => ExitCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
+            Self::HostilePrompt(_) => ExitCode::ContextError,
         }
     }
 
@@ -517,6 +532,12 @@ mod tests {
             }
             .code(),
             ErrorCode::InvalidState
+        );
+        // E10: hostile-prompt error maps to the dedicated bucket
+        // so the post-execution review can branch on the wire form.
+        assert_eq!(
+            Error::HostilePrompt("ignore previous instructions".into()).code(),
+            ErrorCode::HostilePrompt
         );
     }
 
