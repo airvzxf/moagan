@@ -94,6 +94,10 @@ pub enum Error {
     #[error("invalid state: {0}")]
     InvalidState(String),
 
+    /// Another holder owns the requested run lease.
+    #[error("lock held: {0}")]
+    LockHeld(String),
+
     /// Provider returned a non-recoverable error.
     #[error("provider error: {0}")]
     Provider(String),
@@ -166,6 +170,7 @@ impl Error {
             Self::Cancelled(_) => ErrorCode::Cancelled,
             Self::SchemaViolation(_) => ErrorCode::SchemaViolation,
             Self::InvalidState(_) => ErrorCode::InvalidState,
+            Self::LockHeld(_) => ErrorCode::InvalidState,
             Self::Provider(_) => ErrorCode::InvalidResponse,
             Self::MockExhausted => ErrorCode::NeedsInput,
             Self::Cache(_) => ErrorCode::Io,
@@ -187,7 +192,7 @@ impl Error {
             Self::SchemaViolation(_) => ExitCode::SchemaViolation,
             Self::Io(_) => ExitCode::IoError,
             Self::MockExhausted | Self::Provider(_) => ExitCode::ProviderError,
-            Self::Cache(_) | Self::InvalidState(_) => ExitCode::ContextError,
+            Self::Cache(_) | Self::InvalidState(_) | Self::LockHeld(_) => ExitCode::ContextError,
             Self::NeedsInput(_) => ExitCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
             Self::HostilePrompt(_) => ExitCode::ContextError,

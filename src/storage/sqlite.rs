@@ -1775,6 +1775,72 @@ impl Db {
         }
     }
 
+    /// Acquire or renew a run lease and return its monotonic fence.
+    pub fn renew_lease(
+        &self,
+        run_id: RunId,
+        holder: &str,
+        ttl: std::time::Duration,
+        expected_fence: Option<u64>,
+    ) -> Result<u64> {
+        if self.user_version()? < 8 {
+            return Ok(1);
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let expires = now
+            .checked_add(i64::try_from(ttl.as_secs()).map_err(|_| {
+                crate::error::Error::InvalidArgs("lease TTL exceeds SQLite timestamp range".into())
+            })?)
+            .ok_or_else(|| {
+                crate::error::Error::InvalidArgs("lease TTL overflows timestamp".into())
+            })?;
+        let prefix = format!("{run_id}|");
+        let current: Option<(String, i64, i64, String)> = conn
+            .query_row(
+                "SELECT holder, acquired_at_unix, expires_at_unix, fence \
+                 FROM process_locks WHERE holder LIKE ? ORDER BY acquired_at_unix DESC LIMIT 1",
+                params![format!("{prefix}%")],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
+        let Some((stored_key, _acquired, stored_expires, stored_fence)) = current else {
+            if expected_fence.is_some() {
+                return Err(crate::error::Error::LockHeld(run_id.to_string()));
+            }
+            conn.execute(
+                "INSERT INTO process_locks (holder, acquired_at_unix, expires_at_unix, fence) \
+                 VALUES (?, ?, ?, ?)",
+                params![format!("{prefix}{holder}"), now, expires, "1"],
+            )?;
+            return Ok(1);
+        };
+
+        let stored_holder = stored_key.strip_prefix(&prefix).unwrap_or_default();
+        let current_fence = stored_fence
+            .parse::<u64>()
+            .map_err(|_| crate::error::Error::Provider("sqlite: invalid lease fence".into()))?;
+        let active = stored_expires > now;
+        if let Some(expected) = expected_fence {
+            if stored_holder != holder || current_fence != expected || !active {
+                return Err(crate::error::Error::LockHeld(run_id.to_string()));
+            }
+        } else if active && stored_holder != holder {
+            return Err(crate::error::Error::LockHeld(run_id.to_string()));
+        }
+
+        let next_fence = current_fence
+            .checked_add(1)
+            .ok_or_else(|| crate::error::Error::Provider("sqlite: lease fence overflow".into()))?;
+        conn.execute(
+            "UPDATE process_locks SET holder = ?, acquired_at_unix = ?, expires_at_unix = ?, fence = ? \
+             WHERE holder = ?",
+            params![format!("{prefix}{holder}"), now, expires, next_fence.to_string(), stored_key],
+        )?;
+        Ok(next_fence)
+    }
+
     /// Release a process lock owned by `holder`.
     pub fn release_process_lock(&self, holder: &str) -> Result<bool> {
         if self.user_version()? < 8 {
@@ -1786,6 +1852,87 @@ impl Db {
             params![holder],
         )?;
         Ok(deleted > 0)
+    }
+
+    /// Release a run lease owned by `holder`.
+    pub fn release_run_lease(&self, run_id: RunId, holder: &str) -> Result<bool> {
+        if self.user_version()? < 8 {
+            return Ok(true);
+        }
+        let conn = self.pool.get()?;
+        let deleted = conn.execute(
+            "DELETE FROM process_locks WHERE holder = ?",
+            params![format!("{run_id}|{holder}")],
+        )?;
+        Ok(deleted > 0)
+    }
+
+    /// List run ids whose lease expired more than `threshold_secs`
+    /// ago. Reads from the `process_locks` table; ignores the
+    /// `runs` table so the caller can decide which side of the
+    /// (lease, run) pair to act on.
+    pub fn find_zombie_runs(&self, threshold_secs: u64) -> Result<Vec<RunId>> {
+        if self.user_version()? < 8 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let cutoff = now.saturating_sub(i64::try_from(threshold_secs).unwrap_or(i64::MAX));
+        let mut stmt =
+            conn.prepare("SELECT holder FROM process_locks WHERE expires_at_unix <= ?")?;
+        let mut rows = stmt.query(params![cutoff])?;
+        let mut out: Vec<RunId> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let holder: String = row.get(0)?;
+            let Some((run_id_str, _holder)) = holder.split_once('|') else {
+                continue;
+            };
+            if let Ok(run_id) = run_id_str.parse::<RunId>() {
+                out.push(run_id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Flip the run status to `interrupted` and record the reason
+    /// in `warnings` so an operator can see *why* the recovery
+    /// step promoted the run.
+    pub fn mark_run_interrupted(&self, run_id: RunId, reason: &str) -> Result<()> {
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let updated = conn.execute(
+            "UPDATE runs SET status = 'interrupted', updated_unix = ? WHERE run_id = ?",
+            params![now, run_id.to_string()],
+        )?;
+        if updated == 0 {
+            return Ok(());
+        }
+        let _ = self.record_warning(
+            run_id,
+            now.saturating_mul(1_000),
+            "run.interrupted",
+            "warn",
+            None,
+            None,
+            None,
+            None,
+            reason,
+            "{}",
+        );
+        Ok(())
+    }
+
+    /// Test-only helper to backdate the lease expiry for a
+    /// (run_id, holder) pair so the recovery tests can plant a
+    /// stale lease without waiting for the real clock to elapse.
+    #[doc(hidden)]
+    pub fn _test_backdate_run_lease(&self, run_id: RunId, holder: &str, unix: i64) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE process_locks SET expires_at_unix = ? WHERE holder = ?",
+            params![unix, format!("{run_id}|{holder}")],
+        )?;
+        Ok(())
     }
 
     /// Increment the cross-run rollup counters for a (provider, model) pair.
@@ -2988,18 +3135,23 @@ mod tests {
         .unwrap();
     }
 
-    /// `acquire_process_lock` returns true once and false while held.
+    /// A run lease can be released by its owning holder.
     #[test]
     fn process_lock_acquire_and_release() {
         let db = temp_db();
-        let first = db.acquire_process_lock("owner1", 60, "fence-a").unwrap();
-        assert!(first);
-        let second = db.acquire_process_lock("owner2", 60, "fence-b").unwrap();
-        assert!(!second);
-        let released = db.release_process_lock("owner1").unwrap();
+        let run_id = RunId::new();
+        let first = db
+            .renew_lease(run_id, "owner1", std::time::Duration::from_secs(60), None)
+            .unwrap();
+        assert_eq!(first, 1);
+        let second = db.renew_lease(run_id, "owner2", std::time::Duration::from_secs(60), None);
+        assert!(matches!(second, Err(crate::error::Error::LockHeld(_))));
+        let released = db.release_run_lease(run_id, "owner1").unwrap();
         assert!(released);
-        let third = db.acquire_process_lock("owner2", 60, "fence-c").unwrap();
-        assert!(third);
+        let third = db
+            .renew_lease(run_id, "owner2", std::time::Duration::from_secs(60), None)
+            .unwrap();
+        assert_eq!(third, 1);
     }
 
     /// `increment_provider_rollup` aggregates across calls.

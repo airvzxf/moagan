@@ -141,6 +141,7 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         Error::InvalidArgs(_)
         | Error::InvalidApiKey(_)
         | Error::InvalidState(_)
+        | Error::LockHeld(_)
         | Error::NeedsInput(_)
         | Error::DiscoveryQualityTooLow { .. }
         | Error::HostilePrompt(_)
