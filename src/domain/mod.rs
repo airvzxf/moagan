@@ -1051,6 +1051,20 @@ pub struct AdversaryReport {
     pub rationale: String,
     /// Schema version.
     pub schema_version: String,
+    /// Provenance drift score from the
+    /// [`AdversaryPattern::ProvenanceDrift`](crate::ranking::adversary_patterns::AdversaryPattern::ProvenanceDrift)
+    /// pass. Range 0.0..=1.0; higher means more cited sources
+    /// landed outside the brief context. Defaulted so legacy
+    /// sidecars continue to parse.
+    #[serde(default)]
+    pub provenance_drift_score: f64,
+    /// Audience match score from the
+    /// [`AdversaryPattern::AudienceMismatch`](crate::ranking::adversary_patterns::AdversaryPattern::AudienceMismatch)
+    /// pass. Range 0.0..=1.0; higher means the tone / scope
+    /// diverges further from the brief's audience cue. Defaulted
+    /// so legacy sidecars continue to parse.
+    #[serde(default)]
+    pub audience_match_score: f64,
 }
 
 /// Why a run entered a paused state.
@@ -1679,11 +1693,15 @@ mod tests {
             score_delta: -0.6,
             rationale: "edge case under load".into(),
             schema_version: "v1".into(),
+            provenance_drift_score: 0.25,
+            audience_match_score: 0.10,
         };
         let j = serde_json::to_string(&a).unwrap();
         let back: AdversaryReport = serde_json::from_str(&j).unwrap();
         assert_eq!(back.proposal_id, "p_001");
         assert!((back.score_delta + 0.6).abs() < 1e-6);
+        assert!((back.provenance_drift_score - 0.25).abs() < 1e-9);
+        assert!((back.audience_match_score - 0.10).abs() < 1e-9);
     }
 
     /// HumanCheckpoint captures the verbatim question + response so
