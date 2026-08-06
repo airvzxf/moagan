@@ -251,7 +251,8 @@ mod tests {
         let data = CodeArtifact::new("data.json", "json", BAD_DATA);
         let ev = SchemaValidator::check(&[schema, data], &sb()).unwrap();
         assert_eq!(ev.status, ValidationStatus::Fail);
-        assert!(ev.failed_checks[0].contains("data does not match schema"));
+        let legacy = ev.legacy_failed_checks();
+        assert!(legacy[0].contains("data does not match schema"));
     }
 
     #[test]
@@ -272,7 +273,8 @@ mod tests {
         let data = CodeArtifact::new("data.json", "json", GOOD_DATA);
         let ev = SchemaValidator::check(&[schema, data], &sb()).unwrap();
         assert_eq!(ev.status, ValidationStatus::Fail);
-        assert!(ev.failed_checks[0].contains("not a valid JSON Schema"));
+        let legacy = ev.legacy_failed_checks();
+        assert!(legacy[0].contains("not a valid JSON Schema"));
     }
 
     #[test]
@@ -292,7 +294,8 @@ mod tests {
         let data = CodeArtifact::new("data.json", "json", "{ this is not json");
         let ev = SchemaValidator::check(&[data], &sb()).unwrap();
         assert_eq!(ev.status, ValidationStatus::Fail);
-        assert!(ev.failed_checks[0].contains("not valid JSON"));
+        let legacy = ev.legacy_failed_checks();
+        assert!(legacy[0].contains("not valid JSON"));
     }
 
     #[test]
@@ -332,7 +335,8 @@ mod tests {
         );
         let ev = SchemaValidator::check(&[inline], &sb()).unwrap();
         assert_eq!(ev.status, ValidationStatus::Fail);
-        assert!(ev.failed_checks[0].contains("missing 'schema' field"));
+        let legacy = ev.legacy_failed_checks();
+        assert!(legacy[0].contains("missing 'schema' field"));
     }
 
     #[test]

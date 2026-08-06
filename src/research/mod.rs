@@ -66,7 +66,10 @@ mod tests {
         let s = render_known_apis_block(&[snippet]);
         assert!(s.contains("### Source: https://docs.rs/rust"));
         assert!(s.contains("fn main() {}"));
-        assert!(!s.contains("truncated"), "non-truncated snippet must not flag");
+        assert!(
+            !s.contains("truncated"),
+            "non-truncated snippet must not flag"
+        );
     }
 
     #[test]

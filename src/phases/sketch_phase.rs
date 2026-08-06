@@ -38,9 +38,7 @@ use futures::future::join_all;
 use crate::domain::{ProblemGraph, Sketch};
 use crate::error::{Error, Result};
 use crate::llm::Role;
-use crate::llm::prompts::{
-    KNOWN_APIS_PLACEHOLDER, inject_known_apis, system_prompt,
-};
+use crate::llm::prompts::{KNOWN_APIS_PLACEHOLDER, inject_known_apis, system_prompt};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::research::{ResearchSnippet, fetch_all};
@@ -168,10 +166,7 @@ impl SketchPhase {
             return Vec::new();
         }
         let results = fetch_all(&urls).await;
-        results
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect()
+        results.into_iter().filter_map(|r| r.ok()).collect()
     }
 }
 

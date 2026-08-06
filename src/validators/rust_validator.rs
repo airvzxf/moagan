@@ -680,11 +680,11 @@ mod tests {
             "test step must show as a real run when tests exist, got {labels:?}"
         );
         assert!(
-            ev.failed_checks
+            ev.legacy_failed_checks()
                 .iter()
                 .any(|c| c.contains("cargo test --offline")),
-            "failing test must appear in failed_checks, got {:?}",
-            ev.failed_checks
+            "failing test must appear in legacy_failed_checks, got {:?}",
+            ev.legacy_failed_checks()
         );
     }
 
@@ -750,7 +750,11 @@ mod tests {
         };
         record_step(&mut e, "cargo check", ValidationStatus::Fail, &r);
         assert_eq!(e.status, ValidationStatus::Fail);
-        assert!(e.failed_checks.iter().any(|c| c.contains("cargo check")));
+        assert!(
+            e.legacy_failed_checks()
+                .iter()
+                .any(|c| c.contains("cargo check"))
+        );
     }
 
     #[test]
@@ -767,6 +771,6 @@ mod tests {
         record_step(&mut e, "cargo fmt --check", ValidationStatus::Pass, &r);
         assert_eq!(e.status, ValidationStatus::Pass);
         assert!(e.checks_run.iter().any(|c| c == "cargo fmt --check"));
-        assert!(e.failed_checks.is_empty());
+        assert!(e.failures.is_empty());
     }
 }

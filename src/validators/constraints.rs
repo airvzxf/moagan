@@ -172,7 +172,8 @@ mod tests {
         let p = proposal_with("Single Rust binary with SQLite.");
         let e = ConstraintsValidator::check(&p, &["no serverless".into()]);
         assert_eq!(e.status, ValidationStatus::Warn);
-        assert!(e.failed_checks[0].contains("no serverless"));
+        let legacy = e.legacy_failed_checks();
+        assert!(legacy[0].contains("no serverless"));
     }
 
     #[test]
@@ -215,7 +216,8 @@ mod tests {
         };
         let e = ConstraintsValidator::check_with_brief(&p, &brief);
         assert_eq!(e.status, ValidationStatus::Warn);
-        assert!(e.failed_checks[0].contains("no serverless"));
+        let legacy = e.legacy_failed_checks();
+        assert!(legacy[0].contains("no serverless"));
     }
 
     #[test]

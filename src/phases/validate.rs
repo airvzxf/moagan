@@ -48,8 +48,14 @@ pub struct ValidationSidecar {
 }
 
 impl ValidationSidecar {
-    /// Current schema version.
-    pub const SCHEMA_VERSION: &'static str = "v1";
+    /// Current schema version. Bumped to v2 in D10 when the
+    /// `failed_checks: Vec<String>` free-form view was dropped
+    /// from [`ValidationEvidence`]. v1 sidecars remain readable
+    /// (the loader does not require the field to be present, so
+    /// older artifacts decode cleanly into the v2 schema with the
+    /// `failed_checks` field silently dropped). v2 writes always
+    /// use the typed `failures` view.
+    pub const SCHEMA_VERSION: &'static str = "v2";
 }
 
 /// Validate phase. Runs Structural, Constraints, Rust, Python, and
@@ -159,7 +165,10 @@ impl Phase for ValidatePhase {
                         Err(e) => ValidationEvidence {
                             validator: v.name().into(),
                             status: crate::validators::ValidationStatus::Error,
-                            failed_checks: vec![format!("validator error: {e}")],
+                            failures: vec![crate::validators::ValidationFailure::new(
+                                crate::validators::FailureKind::ReproducibilityMissing,
+                                format!("validator error: {e}"),
+                            )],
                             ..ValidationEvidence::default()
                         },
                     }
@@ -201,7 +210,10 @@ impl Phase for ValidatePhase {
                     Err(e) => evidences.push(ValidationEvidence {
                         validator: lang.into(),
                         status: crate::validators::ValidationStatus::Error,
-                        failed_checks: vec![format!("validator error: {e}")],
+                        failures: vec![crate::validators::ValidationFailure::new(
+                            crate::validators::FailureKind::ReproducibilityMissing,
+                            format!("validator error: {e}"),
+                        )],
                         ..ValidationEvidence::default()
                     }),
                 }
@@ -224,7 +236,10 @@ impl Phase for ValidatePhase {
                     Err(e) => evidences.push(ValidationEvidence {
                         validator: "schema".into(),
                         status: crate::validators::ValidationStatus::Error,
-                        failed_checks: vec![format!("validator error: {e}")],
+                        failures: vec![crate::validators::ValidationFailure::new(
+                            crate::validators::FailureKind::ReproducibilityMissing,
+                            format!("validator error: {e}"),
+                        )],
                         ..ValidationEvidence::default()
                     }),
                 }
