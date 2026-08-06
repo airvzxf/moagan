@@ -20,14 +20,17 @@
 //!    the constant list catches and the new kinds the catalog
 //!    adds: `TemporalImpossibility`, `NumericalOverflow`,
 //!    `MutuallyExclusive`, `UnsupportedPlatform`,
-//!    `VersionConflict`. The five unit variants added by
-//!    catalog I.6 §D.13.15 (`SyncRuntimeVsAsync`,
-//!    `BlockingCallInAsync`, `SqlDbWithColumnar`,
-//!    `GcLangWithManualMem`, `SingleTenantWithMultiTenant`)
-//!    capture the architectural-runtime clashes a proposal can
-//!    exhibit even when its tag vector is internally consistent.
-//!    [`HardIncompat::is_incompatible_with`] detects redundant or
-//!    overlapping records of those runtime clashes.
+//!    `VersionConflict`. The six unit variants added by
+//!    catalog I.6 §D.13.15 (the *exhaustive* set:
+//!    `MonolithVsMicroservices`, `SqlVsNosqlBackend`,
+//!    `GcRuntimeWithManualMem`, `SingleTenantInMultitenant`,
+//!    `StatefulInServerless`, `SyncApiWithAsyncCaller`) capture
+//!    the architectural clashes a proposal can exhibit even
+//!    when its tag vector is internally consistent.
+//!    [`HardIncompat::is_incompatible_with`] detects redundant
+//!    or overlapping records of those runtime clashes, and
+//!    [`HardIncompat::from_catalog`] enumerates the canonical
+//!    six-variant set for documentation and test fixtures.
 
 /// Pairs of tag values that are mutually exclusive. Order within each
 /// pair is irrelevant — `is_incompatible("a", "b")` and
@@ -160,32 +163,38 @@ pub enum HardIncompat {
         /// Version the host actually has (e.g. `"rust 1.70"`).
         found: String,
     },
-    /// Catalog I.6 §D.13.15: synchronous runtime code is mixed
-    /// with an async event loop (e.g. blocking `std::thread::*`
-    /// call sites interleaved with a `tokio` runtime). The two
-    /// execution models cannot share the same hot path.
-    SyncRuntimeVsAsync,
-    /// Catalog I.6 §D.13.15: a blocking call (`std::thread::sleep`,
-    /// `std::fs::*`, synchronous `std::net::TcpStream::*`) runs in
-    /// a `tokio` async context. The blocking call stalls the
-    /// runtime worker.
-    BlockingCallInAsync,
-    /// Catalog I.6 §D.13.15: an SQL-DB driver (e.g. `sqlx` with
-    /// the `postgres`/`mysql`/`sqlite` feature) is wired against a
-    /// columnar backend (e.g. ClickHouse, DuckDB, Apache Doris).
-    /// The driver speaks row-oriented SQL; the backend is
-    /// column-oriented and rejects the connection.
-    SqlDbWithColumnar,
-    /// Catalog I.6 §D.13.15: a garbage-collected runtime (Go,
-    /// Java, .NET, BEAM) is paired with manual RAII ownership
-    /// semantics. The collector owns the lifetime; manual `Drop`
-    /// implementations are unreachable or fight the GC.
-    GcLangWithManualMem,
-    /// Catalog I.6 §D.13.15: a single-tenant library is dropped
-    /// into a multi-tenant application (or vice versa). The
-    /// single-tenant library has no notion of tenant scoping;
-    /// the multi-tenant app leaks state across tenants.
-    SingleTenantWithMultiTenant,
+    /// Catalog I.6 §D.13.15 (exhaustive): a monolithic deployment
+    /// is paired with a microservice intent (or vice versa). The
+    /// single-process deployment cannot host the cross-service
+    /// discovery / circuit-breaker / per-service health surface
+    /// the microservice intent assumes.
+    MonolithVsMicroservices,
+    /// Catalog I.6 §D.13.15 (exhaustive): an SQL database is used
+    /// for a NoSQL workload (or vice versa). The relational schema
+    /// requires migrations; the NoSQL workload assumes schema-less
+    /// reads and finally-consistent indexing.
+    SqlVsNosqlBackend,
+    /// Catalog I.6 §D.13.15 (exhaustive): a garbage-collected
+    /// runtime (JVM, BEAM) is paired with manual memory
+    /// management expectations. The collector owns the lifetime;
+    /// manual `Drop` / `free` calls are unreachable or fight the GC.
+    GcRuntimeWithManualMem,
+    /// Catalog I.6 §D.13.15 (exhaustive): a single-tenant library
+    /// is deployed inside a multi-tenant application (or vice
+    /// versa). The single-tenant library has no notion of tenant
+    /// scoping; the multi-tenant app leaks state across tenants.
+    SingleTenantInMultitenant,
+    /// Catalog I.6 §D.13.15 (exhaustive): a stateful service runs
+    /// inside a serverless execution model. The serverless
+    /// runtime freezes / restarts the worker between invocations;
+    /// the in-process state evaporates.
+    StatefulInServerless,
+    /// Catalog I.6 §D.13.15 (exhaustive): a synchronous API caller
+    /// waits on an async upstream. The caller's thread blocks
+    /// while the upstream completes a multi-step async pipeline;
+    /// the latency budget is consumed by the upstream's scheduling,
+    /// not the caller's work.
+    SyncApiWithAsyncCaller,
 }
 
 impl HardIncompat {
@@ -224,37 +233,46 @@ impl HardIncompat {
             Self::VersionConflict { required, found } => {
                 format!("version conflict: requires '{required}' but the host has '{found}'")
             }
-            Self::SyncRuntimeVsAsync => {
-                "synchronous runtime code is mixed with an async event loop".to_string()
+            Self::MonolithVsMicroservices => {
+                "monolithic deployment is paired with microservice intent".to_string()
             }
-            Self::BlockingCallInAsync => {
-                "blocking call (sleep, fs, or sync I/O) runs inside an async runtime".to_string()
+            Self::SqlVsNosqlBackend => {
+                "SQL database is used for a NoSQL workload (or vice versa)".to_string()
             }
-            Self::SqlDbWithColumnar => {
-                "SQL row-oriented driver is wired against a columnar backend".to_string()
+            Self::GcRuntimeWithManualMem => {
+                "garbage-collected runtime (JVM, BEAM) is paired with manual memory management"
+                    .to_string()
             }
-            Self::GcLangWithManualMem => {
-                "garbage-collected runtime is paired with manual RAII ownership".to_string()
+            Self::SingleTenantInMultitenant => {
+                "single-tenant library is deployed inside a multi-tenant application".to_string()
             }
-            Self::SingleTenantWithMultiTenant => {
-                "single-tenant library is dropped into a multi-tenant application".to_string()
+            Self::StatefulInServerless => {
+                "stateful service runs inside a serverless execution model".to_string()
+            }
+            Self::SyncApiWithAsyncCaller => {
+                "synchronous API caller waits on an async upstream".to_string()
             }
         }
     }
 
-    /// Catalog I.6 §D.13.15: detect whether two `HardIncompat`
-    /// records describe redundant or overlapping incompatibilities.
-    /// Two records are "incompatible with each other" (in the
-    /// pair-detection sense) when reporting both is redundant:
+    /// Catalog I.6 §D.13.15 (exhaustive): detect whether two
+    /// `HardIncompat` records describe redundant or overlapping
+    /// incompatibilities. Two records are "incompatible with
+    /// each other" (in the pair-detection sense) when reporting
+    /// both is redundant:
     ///
     /// - Same unit variant → the proposal fails the same way twice;
     ///   a single record already covers it.
     /// - Two `MutuallyExclusive` records that share at least one
     ///   option → they describe the same structural clash.
-    /// - A `SingleTenantWithMultiTenant` clash vs. a
+    /// - A `SingleTenantInMultitenant` clash vs. a
     ///   `MutuallyExclusive { a: "single_tenant" | "multi_tenant",
     ///   .. }` → the tag-level pair already names the conflict;
     ///   the runtime-clash variant is redundant.
+    /// - A `SqlVsNosqlBackend` clash vs. a
+    ///   `MutuallyExclusive { a: "sql" | "nosql", .. }` → the
+    ///   tag-level pair already names the conflict; the
+    ///   runtime-clash variant is redundant.
     /// - All other pairs are independent: each describes a distinct
     ///   problem and the gatekeeper should report both.
     ///
@@ -263,12 +281,13 @@ impl HardIncompat {
     pub fn is_incompatible_with(&self, other: &HardIncompat) -> bool {
         use HardIncompat::*;
         match (self, other) {
-            // Same unit-variant redundancy.
-            (SyncRuntimeVsAsync, SyncRuntimeVsAsync) => true,
-            (BlockingCallInAsync, BlockingCallInAsync) => true,
-            (SqlDbWithColumnar, SqlDbWithColumnar) => true,
-            (GcLangWithManualMem, GcLangWithManualMem) => true,
-            (SingleTenantWithMultiTenant, SingleTenantWithMultiTenant) => true,
+            // Same unit-variant redundancy (6 exhaustive §D.13.15 cases).
+            (MonolithVsMicroservices, MonolithVsMicroservices) => true,
+            (SqlVsNosqlBackend, SqlVsNosqlBackend) => true,
+            (GcRuntimeWithManualMem, GcRuntimeWithManualMem) => true,
+            (SingleTenantInMultitenant, SingleTenantInMultitenant) => true,
+            (StatefulInServerless, StatefulInServerless) => true,
+            (SyncApiWithAsyncCaller, SyncApiWithAsyncCaller) => true,
             // Two MutuallyExclusive records overlap when they share
             // at least one option (regardless of order, so the
             // checker is symmetric without enumerating 4 permutations).
@@ -276,14 +295,35 @@ impl HardIncompat {
                 a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2
             }
             // Tag-level vs. runtime-clash redundancy.
-            (SingleTenantWithMultiTenant, MutuallyExclusive { a, b })
-            | (MutuallyExclusive { a, b }, SingleTenantWithMultiTenant) => {
+            (SingleTenantInMultitenant, MutuallyExclusive { a, b })
+            | (MutuallyExclusive { a, b }, SingleTenantInMultitenant) => {
                 matches!(a.as_str(), "single_tenant" | "multi_tenant")
                     || matches!(b.as_str(), "single_tenant" | "multi_tenant")
+            }
+            (SqlVsNosqlBackend, MutuallyExclusive { a, b })
+            | (MutuallyExclusive { a, b }, SqlVsNosqlBackend) => {
+                matches!(a.as_str(), "sql" | "nosql") || matches!(b.as_str(), "sql" | "nosql")
             }
             // Independent pairs.
             _ => false,
         }
+    }
+
+    /// Catalog I.6 §D.13.15 (exhaustive): return the canonical
+    /// six-variant set added by the exhaustive rewrite. The
+    /// returned vector is stable (insertion order matches the
+    /// enum declaration order); documentation and test fixtures
+    /// use it to pin the contract without depending on each
+    /// variant individually.
+    pub fn from_catalog() -> Vec<HardIncompat> {
+        vec![
+            HardIncompat::MonolithVsMicroservices,
+            HardIncompat::SqlVsNosqlBackend,
+            HardIncompat::GcRuntimeWithManualMem,
+            HardIncompat::SingleTenantInMultitenant,
+            HardIncompat::StatefulInServerless,
+            HardIncompat::SyncApiWithAsyncCaller,
+        ]
     }
 }
 
@@ -499,12 +539,15 @@ mod tests {
         }
     }
 
-    // -- Catalog I.6 §D.13.15: extended HardIncompat ------------------
+    // -- Catalog I.6 §D.13.15 (exhaustive): extended HardIncompat ----
 
     /// Pin the variant count of `HardIncompat` so a future catalog
     /// addition trips this test before it lands in production. The
-    /// catalog ships twelve variants: the seven from §I.6 plus the
-    /// five runtime-clash unit variants from §D.13.15.
+    /// catalog ships thirteen variants: the seven from §I.6 plus
+    /// the six exhaustive runtime-clash unit variants from §D.13.15
+    /// (MonolithVsMicroservices, SqlVsNosqlBackend,
+    /// GcRuntimeWithManualMem, SingleTenantInMultitenant,
+    /// StatefulInServerless, SyncApiWithAsyncCaller).
     #[test]
     fn hard_incompat_extended_variants_count() {
         let cases: Vec<HardIncompat> = vec![
@@ -535,16 +578,17 @@ mod tests {
                 required: "rust 1.80".into(),
                 found: "rust 1.70".into(),
             },
-            HardIncompat::SyncRuntimeVsAsync,
-            HardIncompat::BlockingCallInAsync,
-            HardIncompat::SqlDbWithColumnar,
-            HardIncompat::GcLangWithManualMem,
-            HardIncompat::SingleTenantWithMultiTenant,
+            HardIncompat::MonolithVsMicroservices,
+            HardIncompat::SqlVsNosqlBackend,
+            HardIncompat::GcRuntimeWithManualMem,
+            HardIncompat::SingleTenantInMultitenant,
+            HardIncompat::StatefulInServerless,
+            HardIncompat::SyncApiWithAsyncCaller,
         ];
         assert_eq!(
             cases.len(),
-            12,
-            "HardIncompat must have 12 variants (7 base + 5 §D.13.15)"
+            13,
+            "HardIncompat must have 13 variants (7 base + 6 §D.13.15 exhaustive)"
         );
         // Every variant serialises with the snake_case kind tag and
         // round-trips back to the same value: pins the wire format.
@@ -556,33 +600,35 @@ mod tests {
     }
 
     /// `is_incompatible_with` detects redundant pairs involving the
-    /// §D.13.15 runtime-clash variants. Two identical
-    /// `BlockingCallInAsync` records are redundant; the same
-    /// variant against `SyncRuntimeVsAsync` is independent; and
-    /// `SingleTenantWithMultiTenant` is redundant with the
+    /// §D.13.15 (exhaustive) runtime-clash variants. Two identical
+    /// `StatefulInServerless` records are redundant; the same
+    /// variant against `MonolithVsMicroservices` is independent;
+    /// and `SingleTenantInMultitenant` is redundant with the
     /// `MutuallyExclusive` tag-pair that names the same clash.
+    /// Similarly `SqlVsNosqlBackend` is redundant with the
+    /// `MutuallyExclusive { sql, nosql }` tag-pair.
     #[test]
-    fn hard_incompat_pair_blocking_in_async() {
+    fn hard_incompat_pair_stateful_serverless_detected() {
         // Same unit variant → redundant.
-        let a = HardIncompat::BlockingCallInAsync;
-        let b = HardIncompat::BlockingCallInAsync;
+        let a = HardIncompat::StatefulInServerless;
+        let b = HardIncompat::StatefulInServerless;
         assert!(a.is_incompatible_with(&b));
         assert!(b.is_incompatible_with(&a));
         // Different runtime-clash variants → independent.
-        let c = HardIncompat::SyncRuntimeVsAsync;
+        let c = HardIncompat::MonolithVsMicroservices;
         assert!(!a.is_incompatible_with(&c));
         assert!(!c.is_incompatible_with(&a));
-        // SqlDbWithColumnar is unrelated to BlockingCallInAsync.
-        let d = HardIncompat::SqlDbWithColumnar;
+        // SyncApiWithAsyncCaller is unrelated to StatefulInServerless.
+        let d = HardIncompat::SyncApiWithAsyncCaller;
         assert!(!a.is_incompatible_with(&d));
         assert!(!d.is_incompatible_with(&a));
         // MutuallyExclusive without the single/multi tenant tag
-        // does NOT collide with SingleTenantWithMultiTenant.
+        // does NOT collide with SingleTenantInMultitenant.
         let me = HardIncompat::MutuallyExclusive {
             a: "sql".into(),
             b: "nosql".into(),
         };
-        let stm = HardIncompat::SingleTenantWithMultiTenant;
+        let stm = HardIncompat::SingleTenantInMultitenant;
         assert!(!me.is_incompatible_with(&stm));
         // ... but the MutuallyExclusive tag-pair that names the
         // single/multi tenant clash DOES collide with the
@@ -593,6 +639,10 @@ mod tests {
         };
         assert!(stm.is_incompatible_with(&me_st));
         assert!(me_st.is_incompatible_with(&stm));
+        // SqlVsNosqlBackend collides with the sql/nosql tag-pair.
+        let svn = HardIncompat::SqlVsNosqlBackend;
+        assert!(svn.is_incompatible_with(&me));
+        assert!(me.is_incompatible_with(&svn));
     }
 
     /// Every variant round-trips through serde with the
@@ -654,13 +704,23 @@ mod tests {
                 },
                 "version_conflict",
             ),
-            (HardIncompat::SyncRuntimeVsAsync, "sync_runtime_vs_async"),
-            (HardIncompat::BlockingCallInAsync, "blocking_call_in_async"),
-            (HardIncompat::SqlDbWithColumnar, "sql_db_with_columnar"),
-            (HardIncompat::GcLangWithManualMem, "gc_lang_with_manual_mem"),
             (
-                HardIncompat::SingleTenantWithMultiTenant,
-                "single_tenant_with_multi_tenant",
+                HardIncompat::MonolithVsMicroservices,
+                "monolith_vs_microservices",
+            ),
+            (HardIncompat::SqlVsNosqlBackend, "sql_vs_nosql_backend"),
+            (
+                HardIncompat::GcRuntimeWithManualMem,
+                "gc_runtime_with_manual_mem",
+            ),
+            (
+                HardIncompat::SingleTenantInMultitenant,
+                "single_tenant_in_multitenant",
+            ),
+            (HardIncompat::StatefulInServerless, "stateful_in_serverless"),
+            (
+                HardIncompat::SyncApiWithAsyncCaller,
+                "sync_api_with_async_caller",
             ),
         ];
         for (variant, expected_kind) in cases {
@@ -671,5 +731,78 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing kind for {variant:?}"));
             assert_eq!(kind, expected_kind, "kind tag mismatch for {variant:?}");
         }
+    }
+
+    // -- Catalog I.6 §D.13.15 (exhaustive): new tests -----------------
+
+    /// Pin the variant count of `HardIncompat` to the canonical
+    /// 13 (7 base + 6 exhaustive §D.13.15). The 6 new variants are
+    /// architectural clashes widened from the partial initial set;
+    /// the catalog wraps them into a single test so a future
+    /// addition trips this test before it lands in production.
+    #[test]
+    fn hard_incompat_exhaustive_variants_count_is_13() {
+        let catalog = HardIncompat::from_catalog();
+        assert_eq!(
+            catalog.len(),
+            6,
+            "from_catalog must return the 6 exhaustive §D.13.15 variants"
+        );
+        // Build the full set: 7 base + 6 exhaustive = 13.
+        let mut all: Vec<HardIncompat> = vec![
+            HardIncompat::LanguageToolchainMismatch {
+                lang: "rust".into(),
+                toolchain: "1.70".into(),
+            },
+            HardIncompat::ForbiddenTech {
+                tech: "docker".into(),
+            },
+            HardIncompat::TemporalImpossibility {
+                earliest: "2026-12-01".into(),
+                latest: "2026-11-15".into(),
+            },
+            HardIncompat::NumericalOverflow {
+                declared: 100,
+                limit: 50,
+            },
+            HardIncompat::MutuallyExclusive {
+                a: "sql".into(),
+                b: "nosql".into(),
+            },
+            HardIncompat::UnsupportedPlatform {
+                required: "linux/arm64".into(),
+                available: vec!["linux/x86_64".into()],
+            },
+            HardIncompat::VersionConflict {
+                required: "rust 1.80".into(),
+                found: "rust 1.70".into(),
+            },
+        ];
+        all.extend(catalog);
+        assert_eq!(
+            all.len(),
+            13,
+            "HardIncompat must have 13 variants (7 base + 6 §D.13.15 exhaustive)"
+        );
+    }
+
+    /// `from_catalog` returns the canonical 6-variant list in
+    /// stable insertion order. Pin the contents so documentation
+    /// and test fixtures can rely on the order without enumerating
+    /// each variant by name.
+    #[test]
+    fn hard_incompat_from_catalog_returns_canonical_list() {
+        let catalog = HardIncompat::from_catalog();
+        assert_eq!(
+            catalog,
+            vec![
+                HardIncompat::MonolithVsMicroservices,
+                HardIncompat::SqlVsNosqlBackend,
+                HardIncompat::GcRuntimeWithManualMem,
+                HardIncompat::SingleTenantInMultitenant,
+                HardIncompat::StatefulInServerless,
+                HardIncompat::SyncApiWithAsyncCaller,
+            ]
+        );
     }
 }
