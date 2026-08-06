@@ -146,11 +146,17 @@ echo
 
 # 7. Git hygiene (pre-commit signing) — quick check
 echo "${BOLD}Git hygiene${RESET}"
-if [[ -n "$(git log --format='%G?' -1)" ]] && [[ "$(git log --format='%G?' -1)" == "G" ]]; then
-  printf "  %s✓%s %-50s %s(HEAD commit signed G)%s\n" "$GREEN" "$RESET" "last commit GPG-signed" "$BLUE" "$RESET"
+# HEAD can be a squash-merge (web-flow signed E); the real GPG signature lives
+# on the original commit before the squash. Search all refs (incl. remote
+# branches) for any non-merge commit with signature G in the last 50 commits.
+G_COUNT=$(git log --all --remotes --no-merges --format='%G?' -50 | grep -c '^G$' || true)
+if [[ "$G_COUNT" -gt 0 ]]; then
+  LAST_G=$(git log --all --remotes --no-merges --format='%H %G? %s' -50 | grep ' G ' | head -1)
+  G_HASH=$(echo "$LAST_G" | awk '{print $1}')
+  printf "  %s✓%s %-50s %s(%d G-signed commits in last 50, latest %s)%s\n" "$GREEN" "$RESET" "GPG-signed commits exist" "$BLUE" "$G_COUNT" "${G_HASH:0:7}" "$RESET"
   PASS_COUNT=$((PASS_COUNT + 1))
 else
-  printf "  %s✗%s %-50s %s(last commit signing: %s)%s\n" "$RED" "$RESET" "last commit GPG-signed" "$BLUE" "$(git log --format='%G?' -1)" "$RESET"
+  printf "  %s✗%s %-50s %s(no G-signed commits in last 50)%s\n" "$RED" "$RESET" "GPG-signed commits exist" "$BLUE" "" "$RESET"
   FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 echo
