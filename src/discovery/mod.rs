@@ -18,9 +18,15 @@ pub mod facet;
 pub mod facet_cache;
 pub mod integrator;
 pub mod matrix;
+pub mod matrix_seed;
 pub mod pause;
 pub mod resume;
+pub mod saturation;
+pub mod saturation_event;
+pub mod sketch_retry;
 pub mod state;
+pub mod tag_decision;
 pub mod tagger;
+pub mod tagger_threshold;
 
 pub use coordinator::{DiscoveryCoordinator, DiscoveryOutcome};
