@@ -1,8 +1,10 @@
 # Proposal 04 — Cuarta etapa
 
-> **Status**: prospective. Documents four items that survive V4 §13.6
-> as orphan roadmap candidates, with trade-offs before any
-> implementation. No code changes are proposed in this document.
+> **Status**: implemented partial. Four items that survived V4 §13.6
+> as orphan roadmap candidates have all shipped at narrower scope than
+> the original spec; this document records what was built, what was
+> deferred to v0.6+, and the trade-off matrix that informed each
+> implementation.
 
 ## Why a fourth stage
 
@@ -156,12 +158,19 @@ in v0.6+ if at all.
 3. **User preference learning** (medium cost, requires opt-in UX work).
 4. **External research** (heaviest; deferred to v0.6+).
 
-## Status (Sesión C, 2026-08-05)
+## Status (Sesión D, 2026-08-06)
 
 - **K.1 Per-domain profiles** ✅ implemented in PR #125.
-- **K.2 Cross-process hibernation** ✅ implemented in PRs #126 (schema) + #131 (CLI).
-- **K.3 User preference learning** ✅ implemented in PRs #133 (cache) + #135 (integration + moagan rate CLI).
-- **K.4 External research** ✅ implemented narrower in PR #137 (4-host allowlist, 3 URLs/call, 4 KB/response, 5s timeout). PDFs, JS rendering, auth, advanced rate-limiting deferred to v0.6+.
+- **K.2 Cross-process hibernation** ✅ implemented in PRs #126 (schema)
+  + #131 (CLI: pause / continue --from-pause / list --paused) +
+  #146 (actual resume from persisted phase state wire-up).
+- **K.3 User preference learning** ✅ implemented in PRs #133 (cache)
+  + #135 (Synthesize integration + `moagan rate` CLI).
+- **K.4 External research** ✅ implemented narrower in PRs
+  #137 (bounded fetcher: 4-host allowlist, 3 URLs/call, 4 KB/response,
+  5s timeout) + #150 (wire K.4 into Sketch + typed-only validators
+  refactor). PDFs, JS rendering, auth, advanced rate-limiting remain
+  deferred to v0.6+.
 
 ## Closing
 
