@@ -10,12 +10,6 @@ jobs:
   validate:
     runs-on: [self-hosted, Linux, X64, moagan]
     timeout-minutes: 30
-    container:
-      image: localhost/moagan-runner:latest
-      options: --userns=keep-id --network=host
-      volumes:
-        - /srv/runner/_work:/work/_work
-        - /srv/runner/cargo:/usr/local/cargo/registry
     steps:
       - uses: actions/checkout@v4
 
