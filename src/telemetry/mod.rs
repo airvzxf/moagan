@@ -20,6 +20,7 @@ use crate::error::Result;
 use crate::fs_layout::RunDir;
 use crate::ids::RunId;
 use crate::redact::{RedactPolicy, RedactWriter, Surface};
+use crate::storage::outbox_tx::{OutboxEvent, record_with};
 use crate::storage::sqlite::Db;
 use crate::time::{now_unix_millis, now_unix_secs};
 
@@ -472,49 +473,49 @@ impl Telemetry {
             w.write_all(b"\n")?;
         }
         drop(g);
-        if let Some(db) = &self.inner.db
-            && let Err(e) = db.record_call(
-                call_id,
-                self.inner.run_id,
-                phase,
-                role,
-                provider,
-                model,
-                cache_key,
-                body_sha256,
-                cache_hit,
-                http_status.map(i64::from),
-                input_tokens,
-                output_tokens,
-                cache_read,
-                cache_creation,
-                started_unix,
-                ended_unix,
-                error,
-            )
-        {
-            tracing::warn!(call_id, phase, error = %e, "SQLite call mirror failed");
+        if let Some(db) = &self.inner.db {
+            let record_call = || {
+                db.record_call(
+                    call_id,
+                    self.inner.run_id,
+                    phase,
+                    role,
+                    provider,
+                    model,
+                    cache_key,
+                    body_sha256,
+                    cache_hit,
+                    http_status.map(i64::from),
+                    input_tokens,
+                    output_tokens,
+                    cache_read,
+                    cache_creation,
+                    started_unix,
+                    ended_unix,
+                    error,
+                )
+            };
+            let call_result = if cache_hit {
+                record_call()
+            } else {
+                let events = [OutboxEvent {
+                    run_id: self.inner.run_id,
+                    event_type: "call.completed".into(),
+                    payload: format!(
+                        "{{\"call_id\":\"{call_id}\",\"phase\":\"{phase}\",\"role\":\"{role}\",\"input_tokens\":{input_tokens},\"output_tokens\":{output_tokens}}}"
+                    ),
+                }];
+                record_with(db, &events, record_call)
+            };
+            if let Err(e) = call_result {
+                tracing::warn!(call_id, phase, error = %e, "SQLite call/outbox mirror failed");
+            }
         }
         // U1: emit outbox_events + provider_rollups for every real
         // call (cache hits are skipped so the rollup counts reflect
         // actual LLM traffic). Both writes are best-effort: a SQLite
         // failure is logged and never aborts the call. Schema is
         // v008_add_ons.sql.
-        if let Some(db) = &self.inner.db
-            && !cache_hit
-            && let Err(e) = db.record_outbox_event(
-                &crate::storage::sqlite::OutboxEventRow {
-                    run_id: self.inner.run_id.to_string(),
-                    event_type: "call.completed".into(),
-                    payload: format!(
-                        "{{\"call_id\":\"{call_id}\",\"phase\":\"{phase}\",\"role\":\"{role}\",\"input_tokens\":{input_tokens},\"output_tokens\":{output_tokens}}}"
-                    ),
-                    at_unix: ended_unix,
-                },
-            )
-        {
-            tracing::warn!(call_id, error = %e, "outbox_events write failed");
-        }
         if let Some(db) = &self.inner.db
             && !cache_hit
             && let Err(e) = db.increment_provider_rollup(
