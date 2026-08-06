@@ -23,12 +23,20 @@ use crate::redact::{RedactPolicy, RedactWriter, Surface};
 use crate::storage::sqlite::Db;
 use crate::time::{now_unix_millis, now_unix_secs};
 
+pub mod csv_summary;
+pub mod daily_rotation;
 pub mod dashboard;
+pub mod dashboard_static;
+pub mod event;
 pub mod export;
 pub mod heartbeat;
+pub mod hub;
+pub mod level;
+pub mod phase_macro;
 pub mod recover;
 pub mod redact;
 pub mod retention;
+pub mod tracing_filter;
 pub mod verify;
 
 /// One phase event (start/end/error/cancel).
@@ -974,3 +982,31 @@ mod tests {
         assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
     }
 }
+
+#[cfg(test)]
+#[path = "event_tests.rs"]
+mod event_tests;
+
+#[cfg(test)]
+#[path = "hub_tests.rs"]
+mod hub_tests;
+
+#[cfg(test)]
+#[path = "level_tests.rs"]
+mod level_tests;
+
+#[cfg(test)]
+#[path = "csv_summary_tests.rs"]
+mod csv_summary_tests;
+
+#[cfg(test)]
+#[path = "dashboard_static_tests.rs"]
+mod dashboard_static_tests;
+
+#[cfg(test)]
+#[path = "tracing_filter_tests.rs"]
+mod tracing_filter_tests;
+
+#[cfg(test)]
+#[path = "daily_rotation_tests.rs"]
+mod daily_rotation_tests;
