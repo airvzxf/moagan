@@ -52,6 +52,18 @@ pub struct Config {
     pub ranking_weights: RankingWeights,
     #[allow(missing_docs)]
     pub rubric: RubricConfig,
+    /// Track E (E7 partial): knobs for the Critique phase. Today the
+    /// only knob is the opt-in switch for the `TiefighterCritic`
+    /// adversarial cross-check sidecar — the default is `false` so
+    /// existing runs are unaffected. Operators opt in via
+    /// `MOAGAN_CRITIQUE_TIEFIGHTER_ENABLED=true` or by setting
+    /// `[critique]\ntiefighter_enabled = true` in
+    /// `~/.config/moagan/config.toml`. The sidecar path is
+    /// `<run_dir>/critiques/<proposal_id>_tiefighter.json` and the
+    /// verdict is mirrored onto `Proposal::tiefighter_score` for
+    /// downstream phases that want to filter without re-reading the
+    /// sidecar.
+    pub critique: CritiqueConfig,
     /// Maximum number of repair rounds per failed proposal. Default 5.
     /// Spec T01-06 §16.10 allows 0..2; v0.1 default is 5 per operator
     /// preference (the cost is bounded by parallelism).
@@ -216,6 +228,25 @@ impl Default for RubricConfig {
             validate_responses: false,
         }
     }
+}
+
+/// Track E (E7 partial): knobs for the Critique phase. Currently
+/// only the `TiefighterCritic` adversarial cross-check switch —
+/// `false` keeps the canonical `CritiquePhase` flow unchanged (the
+/// N critics per proposal, no sidecar). Operators opting in flip
+/// `tiefighter_enabled = true` (or set
+/// `MOAGAN_CRITIQUE_TIEFIGHTER_ENABLED=true`) so the phase adds one
+/// adversarial call per proposal and writes the report to
+/// `<run_dir>/critiques/<proposal_id>_tiefighter.json`. Default
+/// `false` keeps existing runs bit-identical.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CritiqueConfig {
+    /// Whether the Critique phase should also call
+    /// `Role::TiefighterCritic` on every proposal after the base
+    /// critics loop and persist the resulting report as a sidecar.
+    /// Default `false` (opt-in).
+    pub tiefighter_enabled: bool,
 }
 
 /// Per-provider circuit breaker knobs (catalog §D.19.5).
@@ -440,6 +471,7 @@ impl Default for Config {
             no_color: false,
             ranking_weights: RankingWeights::default(),
             rubric: RubricConfig::default(),
+            critique: CritiqueConfig::default(),
             repair_max_rounds: 5,
             gate_forbidden_techs: Vec::new(),
             gate_min_length: 50,
@@ -907,6 +939,20 @@ impl Config {
             match normalised.as_str() {
                 "true" | "1" | "yes" | "on" => self.research_enabled = true,
                 "false" | "0" | "no" | "off" => self.research_enabled = false,
+                _ => {}
+            }
+        }
+        // Track E (E7 partial): opt-in switch for the
+        // `TiefighterCritic` adversarial cross-check sidecar.
+        // `MOAGAN_CRITIQUE_TIEFIGHTER_ENABLED=true` flips the flag;
+        // anything else (including garbage / blank) leaves the
+        // existing knob alone so a stale export does not silently
+        // re-enable the sidecar.
+        if let Ok(v) = std::env::var("MOAGAN_CRITIQUE_TIEFIGHTER_ENABLED") {
+            let normalised = v.trim().to_ascii_lowercase();
+            match normalised.as_str() {
+                "true" | "1" | "yes" | "on" => self.critique.tiefighter_enabled = true,
+                "false" | "0" | "no" | "off" => self.critique.tiefighter_enabled = false,
                 _ => {}
             }
         }
