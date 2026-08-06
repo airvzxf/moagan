@@ -7,6 +7,7 @@
 //! and judge, and an adversary branch inside `judge` (V4 §5.13).
 
 pub mod budget;
+pub mod budget_cascade;
 pub mod cardinality;
 pub mod clarify;
 pub mod cluster_proposals;
@@ -37,6 +38,7 @@ pub mod util;
 pub mod validate;
 
 pub use budget::{BudgetObserver, BudgetPolicy, PressureLevel};
+pub use budget_cascade::cascade_reduce;
 pub use clarify::ClarifyPhase;
 pub use cluster_proposals::ClusterProposalsPhase;
 pub use critique::CritiquePhase;
