@@ -5,6 +5,7 @@
 //! + `V4 §8.8`:
 //!
 //! - `GET /api/runs`
+//! - `GET /api/lineage` (J#5 closure — cross-run parent/child DAG).
 //! - `GET /api/runs/<run_id>`
 //! - `GET /api/runs/<run_id>/phases`
 //! - `GET /api/runs/<run_id>/calls`
@@ -48,6 +49,7 @@ use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 use crate::storage::sqlite::Db;
 use crate::telemetry::export::{self, ExportResult};
+use crate::telemetry::lineage_graph::LineageGraph;
 
 /// Maximum number of lines / bytes for a single HTTP request.
 /// GET requests should fit in a single URL + a couple of
@@ -238,6 +240,27 @@ async fn dispatch(
             &serde_json::to_vec(&rows).map_err(internal)?,
         ));
     }
+    // Cross-run lineage view (J#5 closure). Walks the `runs` table
+    // for `parent_run_id` <-> `run_id` pairs and projects them onto a
+    // [`LineageGraph`] adjacency list. Parents without a recorded
+    // `parent_run_id` become childless roots and still show up as
+    // nodes (no edges attached).
+    if path == "/api/lineage" {
+        let rows = db.list_lineage_pairs().map_err(internal)?;
+        let pairs: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|(parent, child)| {
+                let parent = parent.as_ref()?;
+                let child = child.as_ref()?;
+                Some((parent.clone(), child.clone()))
+            })
+            .collect();
+        let graph = LineageGraph::from_pairs(&pairs);
+        return Ok(json_response(
+            200,
+            &serde_json::to_vec(&graph).map_err(internal)?,
+        ));
+    }
     if let Some(rest) = path.strip_prefix("/api/runs/") {
         // /api/runs/<id>[/suffix]
         let (run_id_str, suffix) = match rest.split_once('/') {
@@ -424,6 +447,7 @@ moagan dashboard
 
 JSON endpoints:
   GET /api/runs
+  GET /api/lineage
   GET /api/runs/<id>
   GET /api/runs/<id>/phases
   GET /api/runs/<id>/calls
@@ -942,5 +966,90 @@ mod tests {
         // to keep the smoke surface small.
         let now = now_unix_secs();
         assert!(now > 1_700_000_000, "now must be after 2023-11-14");
+    }
+
+    /// J#5 closure: with no runs registered the `/api/lineage`
+    /// endpoint returns the JSON for an empty [`LineageGraph`]
+    /// (`{"nodes":[],"edges":[]}`), not a 404. Callers depend on
+    /// the empty graph as a stable first response for a fresh
+    /// install.
+    #[tokio::test]
+    async fn dashboard_lineage_returns_empty_for_no_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let resp = dispatch("/api/lineage", "", &cfg).await.unwrap();
+        assert_eq!(resp.status, 200);
+        let graph: LineageGraph =
+            serde_json::from_str(std::str::from_utf8(&resp.body).unwrap()).unwrap();
+        assert!(graph.nodes.is_empty(), "no runs => no nodes");
+        assert!(graph.edges.is_empty(), "no runs => no edges");
+    }
+
+    /// J#5 closure: seeded `parent_run_id` <-> `run_id` edges
+    /// surface on `/api/lineage`. Root nodes (no parent) only
+    /// show up when they appear in a recorded parent slot, so a
+    /// run with `parent_run_id = NULL` is invisible until at
+    /// least one child claims it. The test uses two generations
+    /// (parent -> child -> grandchild) to exercise the
+    /// deduplication path in [`LineageGraph::from_pairs`].
+    #[tokio::test]
+    async fn dashboard_lineage_returns_edges_for_parent_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let db = open_db(&cfg).unwrap();
+        let parent = RunId::new();
+        let child = RunId::new();
+        let grandchild = RunId::new();
+        db.register_run(parent, "fast", "completed", "0.3.0", None, None, None)
+            .unwrap();
+        db.register_run(
+            child,
+            "fast",
+            "completed",
+            "0.3.0",
+            None,
+            None,
+            Some(parent),
+        )
+        .unwrap();
+        db.register_run(
+            grandchild,
+            "fast",
+            "completed",
+            "0.3.0",
+            None,
+            None,
+            Some(child),
+        )
+        .unwrap();
+        let resp = dispatch("/api/lineage", "", &cfg).await.unwrap();
+        assert_eq!(resp.status, 200);
+        let graph: LineageGraph =
+            serde_json::from_str(std::str::from_utf8(&resp.body).unwrap()).unwrap();
+        // Three distinct nodes, two edges.
+        assert_eq!(graph.nodes.len(), 3, "expected 3 distinct nodes");
+        assert_eq!(graph.edges.len(), 2, "expected 2 edges");
+        // Order is created_unix DESC; multiple inserts in the same
+        // wall-clock second share an order with the underlying
+        // rowid, so we sort both sides before comparing.
+        let mut expected_edges: Vec<(String, String)> = vec![
+            (parent.to_string(), child.to_string()),
+            (child.to_string(), grandchild.to_string()),
+        ];
+        let mut actual_edges: Vec<(String, String)> = graph.edges.clone();
+        expected_edges.sort();
+        actual_edges.sort();
+        assert_eq!(actual_edges, expected_edges);
+        // The same dedup-via-HashMap contract is shared with the
+        // lineage_graph unit tests; pin the node set membership too.
+        let mut expected_nodes = vec![
+            parent.to_string(),
+            child.to_string(),
+            grandchild.to_string(),
+        ];
+        let mut actual_nodes = graph.nodes.clone();
+        expected_nodes.sort();
+        actual_nodes.sort();
+        assert_eq!(actual_nodes, expected_nodes);
     }
 }

@@ -1063,6 +1063,35 @@ impl Db {
         Ok(())
     }
 
+    /// J#5 closure (cross-run lineage view): list every recorded
+    /// `parent_run_id` <-> `run_id` pair. Children without a parent
+    /// (`parent_run_id IS NULL`) collapse to `(None, Some(child))`
+    /// so the dashboard projection can surface them as root nodes
+    /// while the per-edge graph builder ([`LineageGraph::from_pairs`])
+    /// drops the NULL parent edge.
+    ///
+    /// Returns `(parent, child)`. `parent` is `None` for
+    /// childless roots; `child` is always `Some` because the
+    /// column is `NOT NULL` (runs without a run_id are not
+    /// representable). Output order matches the underlying
+    /// `runs` row order (creation-time descending via
+    /// `created_unix DESC`) so a freshly appended lineage show
+    /// appears at the top.
+    pub fn list_lineage_pairs(&self) -> Result<Vec<(Option<String>, Option<String>)>> {
+        let conn = self.pool.get()?;
+        let mut stmt =
+            conn.prepare("SELECT parent_run_id, run_id FROM runs ORDER BY created_unix DESC")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Phase J: write `runs.shared_brief_hash` after the intake
     /// phase finishes computing it. The migration runner added the
     /// column in v007; the column is TEXT NULL so `None` is the
@@ -3354,6 +3383,48 @@ mod tests {
         assert_eq!(row.label.as_deref(), Some("stable"));
         let sigma = row.sigma.unwrap();
         assert!((sigma - 0.05).abs() < 0.001, "sigma={sigma}");
+    }
+
+    /// J#5 closure: `list_lineage_pairs` returns each registered
+    /// run paired with its parent (`None` for roots). Round-trip
+    /// sanity check so the dashboard `/api/lineage` projection
+    /// does not depend on filter+map internals.
+    #[test]
+    fn list_lineage_pairs_returns_parent_child_rows() {
+        let db = temp_db();
+        let parent = RunId::new();
+        let child = RunId::new();
+        let root = RunId::new();
+        db.register_run(root, "fast", "completed", "0.3.0", None, None, None)
+            .unwrap();
+        db.register_run(parent, "fast", "completed", "0.3.0", None, None, Some(root))
+            .unwrap();
+        db.register_run(
+            child,
+            "fast",
+            "completed",
+            "0.3.0",
+            None,
+            None,
+            Some(parent),
+        )
+        .unwrap();
+        let pairs = db.list_lineage_pairs().unwrap();
+        let dict: std::collections::HashMap<Option<String>, Option<String>> =
+            pairs.into_iter().map(|(p, c)| (c, p)).collect();
+        assert_eq!(
+            dict.get(&Some(root.to_string())).cloned().flatten(),
+            None,
+            "root run must have no parent"
+        );
+        assert_eq!(
+            dict.get(&Some(parent.to_string())).cloned().flatten(),
+            Some(root.to_string())
+        );
+        assert_eq!(
+            dict.get(&Some(child.to_string())).cloned().flatten(),
+            Some(parent.to_string())
+        );
     }
 
     /// `apply_step` must roll the schema change back when the
