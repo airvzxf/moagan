@@ -247,6 +247,15 @@ impl Db {
         &self.path
     }
 
+    /// Borrow the underlying r2d2 connection pool. Exposed so
+    /// that out-of-band helpers (e.g.
+    /// [`crate::storage::outbox_tx::record_with`]) can wrap a
+    /// series of `INSERT`s in a single SQLite transaction
+    /// without going through the per-statement methods on `Db`.
+    pub fn pool(&self) -> &Pool<SqliteConnectionManager> {
+        &self.pool
+    }
+
     /// Run pending migrations in order. v007 (Phase J lineage) is
     /// applied idempotently: the runner probes `PRAGMA table_info`
     /// before each `ALTER TABLE` so a re-opened DB that was already
