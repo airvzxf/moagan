@@ -207,6 +207,58 @@ pub struct Config {
     /// prompt cache does not drain the local bucket.
     #[serde(default)]
     pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
+    /// Track E (E8 partial): knobs for the two D.7.1 catalog
+    /// roles that the Discovery coordinator can invoke —
+    /// `Role::PersonaPicker` and `Role::AnglePicker`. Both are
+    /// opt-in; the helpers in `src/discovery/persona_angle.rs`
+    /// short-circuit to `Ok(None)` when the corresponding switch
+    /// is `false`. Operators opt in via
+    /// `MOAGAN_DISCOVERY_PERSONA_ENABLED=true` /
+    /// `MOAGAN_DISCOVERY_ANGLE_ENABLED=true` or by setting
+    /// `[discovery]\npersona_enabled = true` in
+    /// `~/.config/moagan/config.toml`. The defaults are `false`
+    /// so existing runs are bit-identical.
+    #[serde(default)]
+    pub discovery: DiscoveryWiringConfig,
+}
+
+/// Track E (E8 partial): knobs for the two D.7.1 catalog roles
+/// that the Discovery flow can opt-into invoke. The fields here
+/// gate the helpers in `src/discovery/persona_angle.rs`; neither
+/// role is auto-invoked today (the integration into
+/// `DiscoveryCoordinator::run` is a separate PR).
+///
+/// All fields default to "off / no-op" so existing runs are
+/// bit-identical when the section is absent from `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscoveryWiringConfig {
+    /// Whether `pick_persona` should call the LLM. When `false`
+    /// (the default) the helper returns `Ok(None)` immediately
+    /// and the model is never asked.
+    pub persona_enabled: bool,
+    /// Whether `pick_angle` should call the LLM. When `false`
+    /// (the default) the helper returns `Ok(None)` immediately
+    /// and the model is never asked.
+    pub angle_enabled: bool,
+    /// Minimum number of cluster labels the caller must supply
+    /// before `pick_angle` issues an LLM call. Below this
+    /// threshold the helper returns `Ok(None)` (the picker is
+    /// not useful with fewer clusters than the threshold). The
+    /// default `2` matches the catalog D.7.1 contract: the
+    /// picker expects at least one existing angle to anchor
+    /// against.
+    pub angle_clusters_min: usize,
+}
+
+impl Default for DiscoveryWiringConfig {
+    fn default() -> Self {
+        Self {
+            persona_enabled: false,
+            angle_enabled: false,
+            angle_clusters_min: 2,
+        }
+    }
 }
 
 fn default_startup_reconcile() -> bool {
@@ -492,6 +544,7 @@ impl Default for Config {
             research_enabled: false,
             research_urls: Vec::new(),
             rate_limit_per_provider: std::collections::HashMap::new(),
+            discovery: DiscoveryWiringConfig::default(),
         }
     }
 }

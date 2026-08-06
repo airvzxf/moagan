@@ -20,6 +20,7 @@ pub mod integrator;
 pub mod matrix;
 pub mod matrix_seed;
 pub mod pause;
+pub mod persona_angle;
 pub mod resume;
 pub mod saturation;
 pub mod saturation_event;
