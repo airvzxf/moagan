@@ -92,20 +92,15 @@ pub struct CallRecord {
 /// `crate::cli::flags_batch::HashAlgo` (the canonical CLI
 /// type) so the dispatcher can pass through the user's
 /// `--hash-algo` choice without an extra conversion layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheHashAlgo {
     /// SHA-256 (audit-friendly; human-readable with the usual
     /// CLI tooling).
     Sha256,
     /// BLAKE3 (the day-to-day internal hash; ~5–10x faster on
     /// hot paths than SHA-256).
+    #[default]
     Blake3,
-}
-
-impl Default for CacheHashAlgo {
-    fn default() -> Self {
-        Self::Blake3
-    }
 }
 
 impl From<crate::cli::flags_batch::HashAlgo> for CacheHashAlgo {

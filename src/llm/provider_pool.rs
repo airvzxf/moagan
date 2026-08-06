@@ -4,23 +4,33 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A single entry inside a [`ProviderPool`] that can report
+/// whether it is currently usable (e.g. circuit-closed, not
+/// paused).
 #[async_trait::async_trait]
 pub trait ProviderPoolEntry: Send + Sync {
+    /// Returns `true` when the entry is available to serve a
+    /// request.
     async fn is_available(&self) -> bool;
 }
 
+/// Pool of provider entries with atomic round-robin selection.
 pub struct ProviderPool {
     entries: Vec<Arc<dyn ProviderPoolEntry>>,
     counter: AtomicUsize,
 }
 
 impl ProviderPool {
+    /// Build a pool from the supplied entries; the counter
+    /// starts at zero.
     pub fn new(entries: Vec<Arc<dyn ProviderPoolEntry>>) -> Self {
         Self {
             entries,
             counter: AtomicUsize::new(0),
         }
     }
+    /// Pick the next entry index in round-robin order, or
+    /// `None` when the pool is empty.
     pub fn round_robin(&self) -> Option<usize> {
         if self.entries.is_empty() {
             return None;
@@ -41,9 +51,11 @@ impl ProviderPool {
         }
         None
     }
+    /// Number of entries in the pool.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+    /// True when the pool has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

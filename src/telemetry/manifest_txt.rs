@@ -3,6 +3,8 @@
 use crate::error::Result;
 use std::path::Path;
 
+/// Write `body` to `<run_dir>/telemetry/MANIFEST.txt`,
+/// creating the `telemetry/` directory if needed.
 pub fn write_manifest_txt(run_dir: &Path, body: &str) -> Result<()> {
     let dir = run_dir.join("telemetry");
     std::fs::create_dir_all(&dir)?;
