@@ -617,10 +617,12 @@ pub fn read_intake_with_context(path: &std::path::Path) -> Result<Intake> {
 fn write_config_hash_sidecar(ctx: &RunContext, hash: &str) -> Result<()> {
     let path = ctx.run_dir().final_dir().join(CONFIG_HASH_SIDECAR);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::Io(crate::error::IoError::Write {
-            path: parent.to_path_buf(),
-            source: e,
-        }))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::Io(crate::error::IoError::Write {
+                path: parent.to_path_buf(),
+                source: e,
+            })
+        })?;
     }
     let mut body = String::with_capacity(hash.len() + 1);
     body.push_str(hash);
@@ -992,7 +994,8 @@ mod tests {
         );
         // The digest is lowercase hex.
         assert!(
-            hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "digest must be lowercase hex, got {hash:?}"
         );
         // No-op contexts (the `noop_run_context` helper used

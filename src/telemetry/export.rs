@@ -199,6 +199,7 @@ pub fn export_run(
         ExportFormat::TarGz => write_tar_gz(&staging_dir, out)?,
         ExportFormat::Tar => write_tar(&staging_dir, out)?,
         ExportFormat::Zip => write_zip(&staging_dir, out)?,
+        ExportFormat::TarZst => write_tar_zst(&staging_dir, out)?,
     };
     let archive_sha256 = sha256_file(out)?;
 
@@ -343,6 +344,43 @@ fn write_zip(staging_dir: &Path, out: &Path) -> Result<u64> {
     append_zip_dir(&mut zip, staging_dir, staging_dir, options)?;
     zip.finish()
         .map_err(|e| Error::Io(IoError::Raw(zip_error_to_io(&e))))?;
+    Ok(std::fs::metadata(out).map(|m| m.len()).unwrap_or(0))
+}
+
+/// F5: write the staged tree as a `tar.zst` archive. The tar
+/// stream is uncompressed between entries; the entire stream
+/// is then compressed with a single zstd frame via
+/// [`crate::storage::compression::ZstWriter`]. The compression
+/// module owns the writer so the export module does not need to
+/// learn zstd directly.
+fn write_tar_zst(staging_dir: &Path, out: &Path) -> Result<u64> {
+    let mut zst = crate::storage::compression::ZstWriter::new(out).map_err(|e| {
+        Error::Io(IoError::CreateFile {
+            path: out.to_path_buf(),
+            source: e,
+        })
+    })?;
+    {
+        let mut builder = TarBuilder::new(zst.as_write_mut());
+        append_dir(&mut builder, staging_dir, staging_dir)?;
+        builder
+            .into_inner()
+            .map_err(|e| Error::Io(IoError::Raw(e)))?
+            .flush()
+            .map_err(|e| {
+                Error::Io(IoError::Write {
+                    path: out.to_path_buf(),
+                    source: e,
+                })
+            })?;
+    }
+    let mut f = zst.finish().map_err(|e| Error::Io(IoError::Raw(e)))?;
+    f.flush().map_err(|e| {
+        Error::Io(IoError::Write {
+            path: out.to_path_buf(),
+            source: e,
+        })
+    })?;
     Ok(std::fs::metadata(out).map(|m| m.len()).unwrap_or(0))
 }
 

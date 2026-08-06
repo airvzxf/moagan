@@ -788,7 +788,9 @@ fn read_telemetry_text(primary: &Path, legacy: &Path) -> String {
 /// (corrupted disk) so the manifest can stay at its v2 default
 /// without surfacing a confusing error to the operator.
 fn read_intake_config_hash(run_dir: &crate::fs_layout::RunDir<'_>) -> Option<String> {
-    let path = run_dir.final_dir().join(crate::phases::intake::CONFIG_HASH_SIDECAR);
+    let path = run_dir
+        .final_dir()
+        .join(crate::phases::intake::CONFIG_HASH_SIDECAR);
     let body = std::fs::read_to_string(&path).ok()?;
     let trimmed = body.trim();
     if trimmed.is_empty() {
