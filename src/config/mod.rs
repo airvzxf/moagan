@@ -162,6 +162,25 @@ pub struct Config {
     /// unavailable it falls back to per-process `libc::prlimit`.
     #[serde(default)]
     pub sandbox_cgroup: Option<CgroupLimits>,
+    /// Track K (D9): opt-in switch for the bounded external research
+    /// fetcher wired into the Sketch phase. When `false` (the
+    /// default) the fn never runs even if URLs are configured. When
+    /// `true`, the Sketch phase fetches up to
+    /// [`crate::research::MAX_URLS_PER_CALL`] URLs from
+    /// `research_urls` and injects the snippets via the
+    /// `${known_apis}` placeholder. Overridable via
+    /// `MOAGAN_RESEARCH_ENABLED=true`.
+    #[serde(default)]
+    pub research_enabled: bool,
+    /// Track K (D9): CSV list of URLs the research fetcher is
+    /// permitted to query when [`Self::research_enabled`] is true.
+    /// Hosts are filtered against the
+    /// [`crate::research::ALLOWED_HOSTS`] allowlist so a CSV
+    /// element does not silently smuggle an attacker-controlled host
+    /// into the prompt. Default `[]`. Overridable via
+    /// `MOAGAN_RESEARCH_URLS=docs.rs/foo,crates.io/bar`.
+    #[serde(default)]
+    pub research_urls: Vec<String>,
 }
 
 fn default_startup_reconcile() -> bool {
@@ -372,6 +391,8 @@ impl Default for Config {
             sandbox_namespaces: NamespaceFlags::default(),
             sandbox_seccomp: SeccompPolicyKind::default(),
             sandbox_cgroup: None,
+            research_enabled: false,
+            research_urls: Vec::new(),
         }
     }
 }
@@ -808,6 +829,34 @@ impl Config {
             } else if let Some(limits) = parse_cgroup_limits_env(normalised) {
                 self.sandbox_cgroup = Some(limits);
             }
+        }
+        // Track K (D9): bound the external research fetcher to an
+        // explicit opt-in. `MOAGAN_RESEARCH_ENABLED=true` flips the
+        // flag; everything else leaves the config alone so a stale
+        // `false` / blank export does not silently toggle the
+        // feature.
+        if let Ok(v) = std::env::var("MOAGAN_RESEARCH_ENABLED") {
+            let normalised = v.trim().to_ascii_lowercase();
+            match normalised.as_str() {
+                "true" | "1" | "yes" | "on" => self.research_enabled = true,
+                "false" | "0" | "no" | "off" => self.research_enabled = false,
+                _ => {}
+            }
+        }
+        // Track K (D9): CSV list of URLs the bounded fetcher is
+        // allowed to query. Empty / whitespace exports are ignored
+        // so a stale empty value cannot mask a user-supplied URL
+        // list. The host-allowlist filter is enforced at fetch
+        // time inside `research::fetch_all`, not here, so the
+        // env-var path stays a pure ownership-of-config.
+        if let Ok(v) = std::env::var("MOAGAN_RESEARCH_URLS")
+            && !v.trim().is_empty()
+        {
+            self.research_urls = v
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
     }
 }
