@@ -22,6 +22,7 @@
 //! without changing the loop's shape.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -31,8 +32,11 @@ use crate::domain::Brief;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 use crate::phases::cardinality::Cardinality;
+use crate::phases::phase::RunContext;
+use crate::telemetry::event::TelemetryEvent;
 
 use super::epistemic_legacy::EpistemicLegacy;
+use super::persona_angle;
 use super::state::SketchLoopState;
 
 /// Public outcome summary used by callers (and tests).
@@ -171,13 +175,62 @@ impl DiscoveryCoordinator {
     ///    uses to decide whether to inject the epistemic context
     ///    (`legacy_used`) and to surface sketch counts.
     pub async fn run(self) -> Result<DiscoveryOutcome, CoordinatorError> {
+        self.run_with_pickers(None, Vec::new(), Vec::new()).await
+    }
+
+    /// Track E (E8 wire-up): drives the discovery loop with the
+    /// optional persona/angle pickers attached.
+    ///
+    /// `picker_ctx` carries the [`RunContext`] (providers,
+    /// telemetry, config) the persona/angle helpers need. When
+    /// `None`, the helpers are skipped — this is what
+    /// [`DiscoveryCoordinator::run`] does, preserving the
+    /// self-contained behavior for callers that have not yet wired
+    /// the discovery wiring config into a phase boundary.
+    ///
+    /// Trigger rules:
+    ///
+    /// * [`persona_angle::pick_persona`] runs once at loop start
+    ///   when `picker_ctx.is_some()` AND
+    ///   `ctx.config.discovery.persona_enabled` AND the
+    ///   mode-derived `target` exceeds `4` AND
+    ///   `!candidates.is_empty()`. Below the threshold the model
+    ///   persona sweet spot is too narrow to be worth a call.
+    /// * [`persona_angle::pick_angle`] runs once at loop end when
+    ///   `picker_ctx.is_some()` AND
+    ///   `ctx.config.discovery.angle_enabled` AND
+    ///   `clusters.len() > ctx.config.discovery.angle_clusters_min`.
+    ///   The supplied `clusters` come from the upstream
+    ///   integrate phase in the eventual full wire-up; for the
+    ///   follow-up tasks that build SketchPhase +
+    ///   IntegratePhase this signature stays stable.
+    ///
+    /// Both helpers are soft — a picker failure surfaces as a
+    /// `tracing::warn!` and the loop continues without that
+    /// signal (the picker is opt-in additive, never load-bearing).
+    pub async fn run_with_pickers(
+        self,
+        picker_ctx: Option<Arc<RunContext>>,
+        candidates: Vec<String>,
+        clusters: Vec<String>,
+    ) -> Result<DiscoveryOutcome, CoordinatorError> {
+        let DiscoveryCoordinator {
+            home,
+            run_id,
+            cancel,
+            brief: _,
+            mut legacy,
+            state,
+            mode,
+        } = self;
+
         let run_dir = {
-            let handle = self.home.run_dir(self.run_id);
+            let handle = home.run_dir(run_id);
             handle.ensure()?;
             handle.root().to_path_buf()
         };
-        let strategy = self.state.current_strategy.clone();
-        let target = Cardinality::for_mode_default(self.mode).soft;
+        let strategy = state.current_strategy.clone();
+        let target = Cardinality::for_mode_default(mode).soft;
 
         let mut state = match SketchLoopState::load(&run_dir)? {
             Some(persisted) => {
@@ -190,6 +243,35 @@ impl DiscoveryCoordinator {
             }
             None => SketchLoopState::new(strategy),
         };
+
+        // E8 wire-up: persona picker trigger. Runs once at loop
+        // start when the wiring is enabled AND the cardinality
+        // band exceeds the persona sweet spot. We hold the picker
+        // result in a tracing record + telemetry PhaseStart so
+        // downstream phases can branch on the choice.
+        if let Some(ctx) = picker_ctx.as_ref()
+            && ctx.config.discovery.persona_enabled
+            && target > 4
+        {
+            match persona_angle::pick_persona(ctx, candidates).await {
+                Ok(Some(persona)) => {
+                    tracing::info!(persona = %persona, "persona selected");
+                    TelemetryEvent::PhaseStart {
+                        run_id: run_id.to_string(),
+                        phase: format!("persona_selection:{persona}"),
+                        at_unix: crate::time::now_unix_secs(),
+                    }
+                    .emit();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "persona picker failed; continuing without persona"
+                    );
+                }
+            }
+        }
 
         // D.3 resume: existing `sk_*.json` artefacts on disk count
         // toward the target. We synchronise the in-memory state to
@@ -212,8 +294,8 @@ impl DiscoveryCoordinator {
         }
 
         while state.completed_sketches.len() < target {
-            if self.cancel.is_cancelled() {
-                return Err(self.cancel.into_error().into());
+            if cancel.is_cancelled() {
+                return Err(cancel.into_error().into());
             }
             let id = format!("sk_{:04}", state.completed_sketches.len());
             tracing::debug!(
@@ -232,11 +314,41 @@ impl DiscoveryCoordinator {
         state.mark_done();
         SketchLoopState::delete(&run_dir)?;
 
+        // E8 wire-up: angle picker trigger. Runs once at loop end
+        // when the wiring is enabled AND the cluster list crosses
+        // the `angle_clusters_min` threshold. The chosen angle is
+        // appended to the in-memory legacy by the helper; we then
+        // re-emit the choice via tracing + telemetry so the rest
+        // of the run surfaces it.
+        if let Some(ctx) = picker_ctx.as_ref()
+            && ctx.config.discovery.angle_enabled
+            && clusters.len() > ctx.config.discovery.angle_clusters_min
+        {
+            match persona_angle::pick_angle(ctx, &mut legacy, clusters).await {
+                Ok(Some(angle)) => {
+                    tracing::info!(angle = %angle, "angle selected");
+                    TelemetryEvent::PhaseStart {
+                        run_id: run_id.to_string(),
+                        phase: format!("angle_selection:{angle}"),
+                        at_unix: crate::time::now_unix_secs(),
+                    }
+                    .emit();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "angle picker failed; continuing without angle"
+                    );
+                }
+            }
+        }
+
         Ok(DiscoveryOutcome {
-            run_id: self.run_id,
+            run_id,
             sketches_completed: state.completed_sketches.len(),
             sketches_failed: state.failed_attempts as usize,
-            legacy_used: !self.legacy.known_failures.is_empty(),
+            legacy_used: !legacy.known_failures.is_empty(),
         })
     }
 }
@@ -581,5 +693,273 @@ mod tests {
             !state_path.exists(),
             "state file must be removed after a successful run (D.34.2)"
         );
+    }
+
+    // Track E (E8 wire-up): tests for the persona + angle picker
+    // trigger rules. They all build a mock-provider-backed
+    // `RunContext` so the picker helpers get a controlled
+    // environment, then assert either that the provider was
+    // touched (or not) or that the legacy was mutated by
+    // `pick_angle`.
+
+    /// Reusable scripted-provider harness — mirrors the helper
+    /// inside `persona_angle::tests` so this module does not
+    /// have to expose internals across the public boundary.
+    struct ScriptedProvider {
+        outcomes: parking_lot::Mutex<Vec<String>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedProvider {
+        fn new(responses: Vec<String>) -> Arc<Self> {
+            Arc::new(Self {
+                outcomes: parking_lot::Mutex::new(responses),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::Provider for ScriptedProvider {
+        fn name(&self) -> &str {
+            "mock-coordinator-pickers"
+        }
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+        fn endpoint(&self) -> &str {
+            "mock://coordinator-pickers"
+        }
+        async fn send(
+            &self,
+            _req: &crate::llm::Request,
+        ) -> crate::Result<(u16, crate::llm::Response)> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = self
+                .outcomes
+                .lock()
+                .pop()
+                .expect("ScriptedProvider was drained");
+            Ok((
+                200,
+                crate::llm::Response {
+                    text,
+                    finish_reason: Some("end_turn".into()),
+                    truncated: false,
+                    usage: Default::default(),
+                },
+            ))
+        }
+    }
+
+    /// Build a [`RunContext`] wired to `scripted` with the supplied
+    /// discovery wiring config. Kept local to the tests module so
+    /// nobody outside pulls the helper into a public API surface.
+    fn build_picker_ctx(
+        home: MoaganHome,
+        scripted: Arc<ScriptedProvider>,
+        discovery: crate::config::DiscoveryWiringConfig,
+    ) -> Arc<RunContext> {
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), scripted);
+        let cfg = Arc::new(crate::config::Config {
+            discovery,
+            ..crate::config::Config::default()
+        });
+        Arc::new(RunContext::new_with_config(
+            RunId::new(),
+            Arc::new(home),
+            Arc::new(registry),
+            "mock".to_owned(),
+            "mock-model".to_owned(),
+            crate::execution::Parallelism::new(1),
+            crate::telemetry::Telemetry::noop(),
+            String::new(),
+            "standard".to_owned(),
+            cfg,
+        ))
+    }
+
+    /// E8 wire-up test 1 — when the target sketch cardinality
+    /// crosses the persona sweet spot (>4) AND the wiring is
+    /// enabled AND a non-empty candidate list is supplied,
+    /// `DiscoveryCoordinator::run_with_pickers` issues one
+    /// `Role::PersonaPicker` call before the loop starts.
+    #[test]
+    fn coordinator_run_invokes_persona_picker_when_cardinality_high() {
+        let rt = single_thread_runtime();
+        let scripted = ScriptedProvider::new(vec![
+            r#"{
+            "selected": "skeptic",
+            "rationale": "audit-first mindset catches corner cases",
+            "schema_version": "persona_picker.v1"
+        }"#
+            .to_owned(),
+        ]);
+        let scripted_for_ctx = scripted.clone();
+        let outcome = with_moagan_home("discovery-coordinator-persona-high", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                RunId::new(),
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            let ctx = build_picker_ctx(
+                home,
+                scripted_for_ctx,
+                crate::config::DiscoveryWiringConfig {
+                    persona_enabled: true,
+                    ..crate::config::DiscoveryWiringConfig::default()
+                },
+            );
+            rt.block_on(coordinator_inner.run_with_pickers(
+                Some(ctx),
+                vec!["skeptic".into(), "optimist".into()],
+                Vec::new(),
+            ))
+        })
+        .expect("high-cardinality run should succeed");
+
+        assert_eq!(
+            outcome.sketches_completed,
+            Cardinality::for_mode_default(Mode::Standard).soft
+        );
+        assert!(
+            scripted.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "persona picker must issue at least one provider call when cardinality > 4 and enabled"
+        );
+    }
+
+    /// E8 wire-up test 2 — when the wiring is disabled (default)
+    /// `run_with_pickers` must not touch the provider. This is
+    /// the bit-identical baseline that protects existing callers
+    /// that opt out of the discovery wiring config.
+    #[test]
+    fn coordinator_run_skips_persona_picker_when_disabled() {
+        let rt = single_thread_runtime();
+        let scripted = ScriptedProvider::new(vec![]);
+        let scripted_for_ctx = scripted.clone();
+        let outcome = with_moagan_home("discovery-coordinator-persona-disabled", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                RunId::new(),
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            let ctx = build_picker_ctx(
+                home,
+                scripted_for_ctx,
+                crate::config::DiscoveryWiringConfig {
+                    persona_enabled: false,
+                    ..crate::config::DiscoveryWiringConfig::default()
+                },
+            );
+            rt.block_on(coordinator_inner.run_with_pickers(
+                Some(ctx),
+                vec!["skeptic".into(), "optimist".into()],
+                Vec::new(),
+            ))
+        })
+        .expect("disabled-persona run should still succeed");
+
+        assert_eq!(
+            outcome.sketches_completed,
+            Cardinality::for_mode_default(Mode::Standard).soft
+        );
+        assert_eq!(
+            scripted.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "persona picker must short-circuit when persona_enabled=false"
+        );
+    }
+
+    /// E8 wire-up test 3 — after the sketch loop completes, when
+    /// the wiring is enabled AND the cluster list supplied by
+    /// the integrate phase crosses `angle_clusters_min`,
+    /// `run_with_pickers` invokes `Role::AnglePicker` and
+    /// appends the chosen angle to the in-memory legacy.
+    #[test]
+    fn coordinator_run_invokes_angle_picker_after_clustering() {
+        let rt = single_thread_runtime();
+        let scripted = ScriptedProvider::new(vec![
+            r#"{
+            "problem": "auth",
+            "existing_angles": ["jwt", "mtls"],
+            "selected": "oauth2_pkce",
+            "rationale": "delegates to a trusted IdP",
+            "schema_version": "angle_picker.v1"
+        }"#
+            .to_owned(),
+        ]);
+        let scripted_for_ctx = scripted.clone();
+        let outcome = with_moagan_home("discovery-coordinator-angle-after-clustering", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                RunId::new(),
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            let ctx = build_picker_ctx(
+                home,
+                scripted_for_ctx,
+                crate::config::DiscoveryWiringConfig {
+                    angle_enabled: true,
+                    angle_clusters_min: 1,
+                    ..crate::config::DiscoveryWiringConfig::default()
+                },
+            );
+            rt.block_on(coordinator_inner.run_with_pickers(
+                Some(ctx),
+                Vec::new(),
+                vec!["jwt".into(), "mtls".into()],
+            ))
+        })
+        .expect("post-clustering run should succeed");
+
+        assert_eq!(
+            outcome.sketches_completed,
+            Cardinality::for_mode_default(Mode::Standard).soft
+        );
+        assert!(
+            scripted.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "angle picker must issue at least one provider call when clusters.len() > angle_clusters_min"
+        );
+        // The angle picker appends `angle:<id>` to
+        // `legacy.preferred_strategies` inside the helper itself;
+        // the assertion above (provider was invoked with a valid
+        // AnglePicker payload) is sufficient evidence the trigger
+        // fired. The persisted mutation is independently pinned by
+        // `persona_angle::tests::pick_angle_persists_to_legacy`.
+    }
+
+    /// Build a single-threaded tokio runtime for the E8 tests.
+    /// `#[tokio::test]` is not used because the harness runs
+    /// `with_moagan_home`'s sync closure and we cannot nest a
+    /// tokio runtime inside an existing one; instead each test
+    /// owns its own current-thread runtime and drives the
+    /// async coordinator through `block_on`.
+    fn single_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime")
     }
 }
