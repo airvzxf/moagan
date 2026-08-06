@@ -10,6 +10,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::capabilities::ProviderCapabilities;
 use super::openai_compat::OpenAiCompatProvider;
 use super::provider::Provider;
 use super::wire::{Request, Response};
@@ -64,6 +65,13 @@ impl Provider for DeepSeekProvider {
 
     fn endpoint(&self) -> &str {
         self.0.endpoint()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        // Delegate to the wrapped OpenAI-compat. The inner impl
+        // reads `self.name == "deepseek"` and returns the deepseek
+        // variant; thin wrapper around it carries through.
+        self.0.capabilities()
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {

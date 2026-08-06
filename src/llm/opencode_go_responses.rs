@@ -24,6 +24,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::capabilities::ProviderCapabilities;
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
 use super::wire::{Request, Response, Usage};
@@ -169,6 +170,10 @@ impl Provider for OpenCodeGoResponsesProvider {
 
     fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::for_opencode_go_responses()
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {

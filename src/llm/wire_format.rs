@@ -66,8 +66,7 @@ pub trait WireFormat: Send + Sync {
     /// `serde_json::to_vec` step.
     fn encode_value(&self, req: &Request) -> Result<serde_json::Value> {
         let bytes = self.encode_body(req)?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Provider(format!("encode_value: {e}")))
+        serde_json::from_slice(&bytes).map_err(|e| Error::Provider(format!("encode_value: {e}")))
     }
 }
 
@@ -87,8 +86,8 @@ impl WireFormat for AnthropicWire {
     }
 
     fn decode(&self, status: u16, body: &[u8]) -> Result<WireResponse> {
-        let parsed: super::http::MessagesResponseBody = serde_json::from_slice(body)
-            .map_err(|e| Error::Provider(format!("decode: {e}")))?;
+        let parsed: super::http::MessagesResponseBody =
+            serde_json::from_slice(body).map_err(|e| Error::Provider(format!("decode: {e}")))?;
         let response = parsed
             .into_response()
             .map_err(|e| Error::Provider(e.to_string()))?;
@@ -118,8 +117,8 @@ impl WireFormat for OpenAiWire {
     }
 
     fn decode(&self, status: u16, body: &[u8]) -> Result<WireResponse> {
-        let parsed: OpenAiChatResponse = serde_json::from_slice(body)
-            .map_err(|e| Error::Provider(format!("decode: {e}")))?;
+        let parsed: OpenAiChatResponse =
+            serde_json::from_slice(body).map_err(|e| Error::Provider(format!("decode: {e}")))?;
         let choice = parsed
             .choices
             .into_iter()
@@ -175,8 +174,8 @@ impl WireFormat for ResponsesWire {
     }
 
     fn decode(&self, status: u16, body: &[u8]) -> Result<WireResponse> {
-        let parsed: ResponsesBody = serde_json::from_slice(body)
-            .map_err(|e| Error::Provider(format!("decode: {e}")))?;
+        let parsed: ResponsesBody =
+            serde_json::from_slice(body).map_err(|e| Error::Provider(format!("decode: {e}")))?;
         let mut text = String::new();
         for out in parsed.output {
             for c in out.content {
@@ -408,12 +407,21 @@ mod tests {
         assert_eq!(json["messages"][1]["role"], "user");
         assert_eq!(json["messages"][1]["content"], "user");
         let temp = json["temperature"].as_f64().unwrap();
-        assert!((temp - 0.6).abs() < 1e-6, "temperature must be 0.6, got {temp}");
+        assert!(
+            (temp - 0.6).abs() < 1e-6,
+            "temperature must be 0.6, got {temp}"
+        );
         let top_p = json["top_p"].as_f64().unwrap();
-        assert!((top_p - 0.95).abs() < 1e-6, "top_p must be 0.95, got {top_p}");
+        assert!(
+            (top_p - 0.95).abs() < 1e-6,
+            "top_p must be 0.95, got {top_p}"
+        );
         // Intake is a JSON role, but "deepseek-v4-flash" is not on
         // the opt-out list — the field is sent.
-        assert_eq!(json["response_format"], serde_json::json!({"type": "json_object"}));
+        assert_eq!(
+            json["response_format"],
+            serde_json::json!({"type": "json_object"})
+        );
     }
 
     /// OpenAI-compat body contract for markdown roles (Propose):
@@ -494,7 +502,9 @@ mod tests {
                 }
             ]
         });
-        let decoded = wire.decode(200, &serde_json::to_vec(&raw).unwrap()).unwrap();
+        let decoded = wire
+            .decode(200, &serde_json::to_vec(&raw).unwrap())
+            .unwrap();
         assert_eq!(decoded.body.text, "partial");
         assert!(decoded.body.truncated);
     }
@@ -590,7 +600,10 @@ mod tests {
         let req = sample_request();
         let bytes = wire.encode_body(&req).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json, serde_json::json!({"custom": true, "shape": "arbitrary"}));
+        assert_eq!(
+            json,
+            serde_json::json!({"custom": true, "shape": "arbitrary"})
+        );
         assert_eq!(wire.name(), "ngc");
         let err = wire
             .decode(200, b"{}")

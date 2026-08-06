@@ -26,6 +26,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::capabilities::ProviderCapabilities;
 use super::http::{body_from_request, build_client, build_headers, classify_status, retry_after};
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
@@ -123,6 +124,10 @@ impl Provider for OpenCodeGoAnthropicProvider {
 
     fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::for_opencode_go_anthropic()
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {

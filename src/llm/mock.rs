@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 
+use super::capabilities::ProviderCapabilities;
 use super::provider::Provider;
 use super::wire::{CallRecord, Request, Response, Usage};
 
@@ -183,6 +184,10 @@ impl Provider for MockProvider {
 
     fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::for_mock()
     }
 
     async fn send(&self, _req: &Request) -> Result<(u16, Response)> {

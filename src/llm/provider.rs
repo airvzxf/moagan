@@ -33,6 +33,7 @@ use async_trait::async_trait;
 use crate::config::{CircuitBreakerConfig, ProviderConfig};
 use crate::error::{Error, Result};
 
+use super::capabilities::ProviderCapabilities;
 use super::circuit_breaker::CircuitBreaker;
 use super::rate_limiter::RateLimiter;
 use super::wire::{Request, Response};
@@ -51,6 +52,22 @@ pub trait Provider: Send + Sync {
     /// HTTP endpoint. Providers that do not talk to HTTP may return
     /// any stable string (e.g. `"mock://local"`).
     fn endpoint(&self) -> &str;
+
+    /// Static capability matrix — see
+    /// [`ProviderCapabilities`](super::capabilities::ProviderCapabilities).
+    /// The default returns the OpenAI-compat baseline so providers
+    /// built before the capability layer (or third-party impls that
+    /// don't care about wire-format routing) keep working unchanged.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+
+    /// Stable wire-format identifier derived from `capabilities()`.
+    /// The wrapper layer exposes this for telemetry; production
+    /// providers should NOT override it.
+    fn wire_format_id(&self) -> &'static str {
+        self.capabilities().wire_format_id()
+    }
 
     /// Send a request and return the HTTP status alongside the
     /// response. The status is recorded in the call-level telemetry
@@ -286,6 +303,15 @@ impl Provider for BreakeredProvider {
         self.inner.endpoint()
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        // Delegate so telemetry sees the inner provider's exact
+        // preference rather than the OpenAI-compat default. The
+        // wrapper is transparent: the wire-format choice was made
+        // when the inner provider was built, and that decision
+        // propagates through the wrapper untouched.
+        self.inner.capabilities()
+    }
+
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         if self.breaker.is_open() {
             return Err(Error::Provider(format!(
@@ -299,6 +325,20 @@ impl Provider for BreakeredProvider {
                 None => rl.acquire().await?,
             };
         }
+        // Wire-format dispatch decision: log the inner provider's
+        // preferred wire so dashboards can pin each call to its
+        // protocol without re-parsing the request body. The
+        // dispatch is metadata here — the inner provider does its
+        // own encoding (with model-specific hooks like the
+        // response_format opt-out and thinking-block fallback).
+        let wire = self.inner.wire_format_id();
+        tracing::debug!(
+            provider = self.inner.name(),
+            model = self.inner.model(),
+            wire,
+            stage = "wire.dispatch",
+            "BreakeredProvider dispatched via {wire} wire"
+        );
         match self.inner.send(req).await {
             Ok(pair) => {
                 let cache_hit = pair.1.usage.cache_read > 0;
@@ -617,5 +657,272 @@ mod tests {
             !breaker.is_open(),
             "local overflow must not open the breaker"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Capability + wire-format dispatch tests (PR F4).
+    //
+    // The dispatcher pattern: each concrete provider reports its
+    // wire-format preference via `capabilities()`; `BreakeredProvider`
+    // forwards the preference through unchanged so callers can
+    // log / branch on it. Each provider below has its own
+    // expected wire id so the test pins the routing table.
+    // ----------------------------------------------------------------
+
+    use crate::llm::deepseek::DeepSeekProvider;
+    use crate::llm::minimax::MinimaxProvider;
+    use crate::llm::openai_compat::OpenAiCompatProvider;
+    use crate::llm::opencode_go::OpenCodeGoProvider;
+    use crate::llm::opencode_go_anthropic::OpenCodeGoAnthropicProvider;
+    use crate::llm::opencode_go_responses::OpenCodeGoResponsesProvider;
+
+    /// Per-provider capability pin. Every concrete provider must
+    /// declare its wire-format preference; the table here mirrors
+    /// the constructor matrix in `capabilities.rs`.
+    #[test]
+    fn provider_capabilities_for_each_provider() {
+        let cfg = crate::config::ProviderConfig {
+            kind: "minimax".into(),
+            endpoint: "https://api.minimax.io/anthropic/v1".into(),
+            model: "MiniMax-M3".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            hard_incompatibilities: vec![],
+        };
+        let minimax =
+            MinimaxProvider::new(&cfg, crate::secret::SecretString::new("dummy".into())).unwrap();
+        let cap = minimax.capabilities();
+        assert!(cap.prefers_anthropic_wire, "minimax must prefer anthropic");
+        assert_eq!(cap.wire_format_id(), "anthropic");
+        assert!(!cap.supports_response_format);
+
+        let cfg_d = crate::config::ProviderConfig {
+            kind: "deepseek".into(),
+            endpoint: "https://api.deepseek.com/v1".into(),
+            model: "deepseek-v4-flash".into(),
+            max_tokens: Some(8192),
+            temperature: None,
+            top_p: None,
+            hard_incompatibilities: vec![],
+        };
+        let deepseek =
+            DeepSeekProvider::new(&cfg_d, crate::secret::SecretString::new("dummy".into()))
+                .unwrap();
+        let cap = deepseek.capabilities();
+        assert!(cap.prefers_openai_wire, "deepseek must prefer openai");
+        assert_eq!(cap.wire_format_id(), "openai");
+        assert!(cap.supports_response_format);
+
+        let cfg_oc = crate::config::ProviderConfig {
+            kind: "opencode_go".into(),
+            endpoint: "https://opencode.ai/zen/go/v1".into(),
+            model: "qwen3.7-max".into(), // Anthropic-compat path
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            hard_incompatibilities: vec![],
+        };
+        let oc_a = OpenCodeGoAnthropicProvider::new(
+            &cfg_oc,
+            crate::secret::SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(oc_a.capabilities().wire_format_id(), "anthropic");
+
+        let cfg_ocr = crate::config::ProviderConfig {
+            model: "gpt-5.6-luna".into(),
+            ..cfg_oc.clone()
+        };
+        let oc_r = OpenCodeGoResponsesProvider::new(
+            &cfg_ocr,
+            crate::secret::SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(oc_r.capabilities().wire_format_id(), "responses");
+
+        let cfg_occ = crate::config::ProviderConfig {
+            model: "kimi-k2.7-code".into(),
+            ..cfg_oc.clone()
+        };
+        let oc =
+            OpenCodeGoProvider::new(&cfg_occ, crate::secret::SecretString::new("dummy".into()))
+                .unwrap();
+        // Dispatcher delegates to the inner provider; for the
+        // chat-completions path the inner is OpenAiCompatProvider
+        // and reports `"openai"`.
+        assert_eq!(oc.capabilities().wire_format_id(), "openai");
+
+        let cfg_dispatcher = crate::config::ProviderConfig {
+            model: "qwen3.7-max".into(),
+            ..cfg_oc.clone()
+        };
+        let oc_d_anthropic = OpenCodeGoProvider::new(
+            &cfg_dispatcher,
+            crate::secret::SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        // Anthropic-routed dispatcher reports `anthropic`.
+        assert_eq!(oc_d_anthropic.capabilities().wire_format_id(), "anthropic");
+
+        let cfg_dispatcher_r = crate::config::ProviderConfig {
+            model: "gpt-5.6-luna".into(),
+            ..cfg_oc.clone()
+        };
+        let oc_d_responses = OpenCodeGoProvider::new(
+            &cfg_dispatcher_r,
+            crate::secret::SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        // Responses-routed dispatcher reports `responses`.
+        assert_eq!(oc_d_responses.capabilities().wire_format_id(), "responses");
+
+        let mock_cap = MockProvider::empty().capabilities();
+        assert_eq!(mock_cap.wire_format_id(), "openai");
+        assert!(mock_cap.supports_streaming);
+        assert!(mock_cap.supports_tools);
+    }
+
+    /// `BreakeredProvider::capabilities` and
+    /// `BreakeredProvider::wire_format_id` delegate to the inner
+    /// provider so the dispatcher layer sees the same wire id
+    /// the inner provider chose at construction.
+    #[test]
+    fn breakered_provider_dispatches_via_correct_wire() {
+        // OpenAI-compat inner: dispatcher picks the OpenAI wire.
+        let inner_oai: Arc<dyn Provider> = Arc::new(
+            OpenAiCompatProvider::new(
+                &crate::config::ProviderConfig {
+                    kind: "deepseek".into(),
+                    endpoint: "https://api.deepseek.com/v1".into(),
+                    model: "deepseek-v4-flash".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                crate::secret::SecretString::new("dummy".into()),
+            )
+            .unwrap(),
+        );
+        let wrapped = BreakeredProvider::new(inner_oai, Arc::new(CircuitBreaker::default()));
+        assert_eq!(wrapped.capabilities().wire_format_id(), "openai");
+        assert_eq!(wrapped.wire_format_id(), "openai");
+        assert!(wrapped.capabilities().supports_response_format);
+
+        // Anthropic inner: dispatcher flips to the Anthropic wire.
+        let inner_anth: Arc<dyn Provider> = Arc::new(
+            MinimaxProvider::new(
+                &crate::config::ProviderConfig {
+                    kind: "minimax".into(),
+                    endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                    model: "MiniMax-M3".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                crate::secret::SecretString::new("dummy".into()),
+            )
+            .unwrap(),
+        );
+        let wrapped = BreakeredProvider::new(inner_anth, Arc::new(CircuitBreaker::default()));
+        assert_eq!(wrapped.capabilities().wire_format_id(), "anthropic");
+        assert_eq!(wrapped.wire_format_id(), "anthropic");
+        assert!(!wrapped.capabilities().supports_response_format);
+
+        // Responses inner: dispatcher flips to the Responses wire.
+        let inner_resp: Arc<dyn Provider> = Arc::new(
+            OpenCodeGoResponsesProvider::new(
+                &crate::config::ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: "https://opencode.ai/zen/go/v1".into(),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                crate::secret::SecretString::new("dummy".into()),
+            )
+            .unwrap(),
+        );
+        let wrapped = BreakeredProvider::new(inner_resp, Arc::new(CircuitBreaker::default()));
+        assert_eq!(wrapped.capabilities().wire_format_id(), "responses");
+        assert_eq!(wrapped.wire_format_id(), "responses");
+    }
+
+    /// AnthropicWire is the round-trip pair used by the
+    /// `BreakeredProvider` path: encode + decode produce the same
+    /// parsed shape.
+    #[test]
+    fn anthropic_wire_format_round_trip() {
+        use crate::llm::role::Role;
+        use crate::llm::wire_format::{AnthropicWire, WireFormat};
+
+        let req = Request {
+            role: Role::Intake,
+            model: "qwen3.7-max".into(),
+            system: "sys".into(),
+            user: "u".into(),
+            max_tokens: 64,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+        };
+        let wire = AnthropicWire;
+        let body = wire.encode_body(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["model"], "qwen3.7-max");
+        assert_eq!(parsed["system"], "sys");
+        assert_eq!(parsed["messages"][0]["content"], "u");
+
+        // Round-trip the response decoder too.
+        let raw = r#"{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":2}}"#;
+        let decoded = wire.decode(200, raw.as_bytes()).unwrap();
+        assert_eq!(decoded.status, 200);
+        assert_eq!(decoded.body.text, "hi");
+        assert_eq!(decoded.body.usage.input_tokens, 11);
+    }
+
+    /// ResponsesWire round-trip: encode produces a body with
+    /// `instructions` + `input`; decode threads the
+    /// `output_text` blocks into a flat string. Pinned so future
+    /// refactors of the OpenAI Responses provider see the same
+    /// shape as the dispatcher table.
+    #[test]
+    fn responses_wire_format_round_trip() {
+        use crate::llm::role::Role;
+        use crate::llm::wire_format::{ResponsesWire, WireFormat};
+
+        let req = Request {
+            role: Role::Intake,
+            model: "gpt-5.6-luna".into(),
+            system: "instructions".into(),
+            user: "the user prompt".into(),
+            max_tokens: 32,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+        };
+        let wire = ResponsesWire;
+        let body = wire.encode_body(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["model"], "gpt-5.6-luna");
+        assert_eq!(parsed["instructions"], "instructions");
+        assert_eq!(parsed["input"], "the user prompt");
+        assert_eq!(parsed["max_tokens"], 32);
+
+        let raw = serde_json::json!({
+            "output": [
+                {"content": [{"type": "output_text", "text": "hello"}]}
+            ],
+            "usage": {"input_tokens": 5, "output_tokens": 1}
+        });
+        let decoded = wire
+            .decode(200, &serde_json::to_vec(&raw).unwrap())
+            .unwrap();
+        assert_eq!(decoded.body.text, "hello");
+        assert_eq!(decoded.body.usage.input_tokens, 5);
     }
 }
