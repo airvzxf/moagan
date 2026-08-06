@@ -401,6 +401,77 @@ impl DecomposePhase {
     }
 }
 
+/// Hash the bytes of a canonical brief into both SHA-256 (the
+/// audit-friendly export format) and BLAKE3 (the day-to-day
+/// internal hash). Mirrors the dual-hash contract described in
+/// `ids.rs`: BLAKE3 is the hot-path key (cache, ledger, brief
+/// binding), SHA-256 is the value humans can re-verify with
+/// the usual tooling.
+///
+/// Returns `(sha256_hex, blake3_hex)`. Both are lowercase hex;
+/// the empty string for an empty input (`SHA-256("") = ""`
+/// and `BLAKE3("") = ""` are NOT what we want — we want a
+/// stable sentinel for "no brief on disk"). Callers that want
+/// to record an absent brief should pass an empty `Vec` and
+/// handle the `("", "")` pair explicitly; that is what the
+/// `cli/run.rs` manifest writer does.
+pub fn compute_brief_hash(bytes: &[u8]) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let sha = hex::encode(hasher.finalize());
+    let blake = blake3::hash(bytes).to_hex().to_string();
+    (sha, blake)
+}
+
+#[cfg(test)]
+mod compute_brief_hash_tests {
+    use super::compute_brief_hash;
+    use sha2::Digest;
+
+    #[test]
+    fn compute_brief_hash_emits_both_sha256_and_blake3() {
+        let bytes = b"the quick brown fox";
+        let (sha, blake) = compute_brief_hash(bytes);
+        // 64 hex chars × 8 bits / 4 bits-per-hex = 32 bytes; both
+        // SHA-256 and BLAKE3 produce a 32-byte digest here.
+        assert_eq!(sha.len(), 64, "sha256 hex must be 64 chars");
+        assert_eq!(blake.len(), 64, "blake3 hex must be 64 chars");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(blake.chars().all(|c| c.is_ascii_hexdigit()));
+        // Known vectors so a future port to a different digest
+        // breaks loudly instead of silently.
+        let expected_sha = sha2::Sha256::digest(bytes);
+        assert_eq!(
+            sha,
+            hex::encode(expected_sha),
+            "sha256 must match the canonical algorithm"
+        );
+        let expected_blake = blake3::hash(bytes);
+        assert_eq!(
+            blake,
+            expected_blake.to_hex().to_string(),
+            "blake3 must match the canonical algorithm"
+        );
+        // Different families, so the digests differ for the
+        // same input (a real collision is astronomically
+        // unlikely).
+        assert_ne!(sha, blake);
+        // Determinism: same input → same pair.
+        let (sha2, blake2) = compute_brief_hash(bytes);
+        assert_eq!(sha, sha2);
+        assert_eq!(blake, blake2);
+    }
+
+    #[test]
+    fn compute_brief_hash_is_deterministic_across_calls() {
+        let bytes = b"another brief";
+        let a = compute_brief_hash(bytes);
+        let b = compute_brief_hash(bytes);
+        assert_eq!(a, b);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

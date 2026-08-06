@@ -687,15 +687,11 @@ pub(crate) fn build_manifest(
     let now = Utc::now();
 
     // 1. Compute the brief hashes from the on-disk canonical brief.
+    // The dual-hash helper lives in `phases::decompose::compute_brief_hash`
+    // (extracted so tests can pin the contract without touching the
+    // filesystem).
     let (brief_sha256, brief_blake3) = match std::fs::read(run_dir.brief()) {
-        Ok(bytes) => {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            let sha = hex::encode(hasher.finalize());
-            let blake = blake3::hash(&bytes).to_hex().to_string();
-            (sha, blake)
-        }
+        Ok(bytes) => crate::phases::decompose::compute_brief_hash(&bytes),
         Err(_) => (String::new(), String::new()),
     };
 

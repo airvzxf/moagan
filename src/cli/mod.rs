@@ -251,6 +251,18 @@ pub enum Cmd {
         /// `--runs-dir`.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Hash algorithm threaded through the export-side
+        /// checksums. `blake3` matches the canonical internal
+        /// hash (cache keys, ledger, brief binding); `sha256`
+        /// is the audit-friendly alternative that auditors can
+        /// re-verify with the usual CLI tooling. The choice is
+        /// mirrored onto `Config::export.hash_algo`; the
+        /// `--hash-algo` flag wins on conflict with the
+        /// `MOAGAN_HASH_ALGO` env var. Empty / whitespace
+        /// values are ignored so an accidental trailing space
+        /// does not silently flip the algorithm.
+        #[arg(long, value_name = "ALGO")]
+        hash_algo: Option<String>,
     },
     /// Continue a paused or failed run.
     Continue {
@@ -695,6 +707,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             model,
             allow_injection,
             profile,
+            hash_algo,
         } => {
             // Phase J: validate the `--context-{summary,full}` flags
             // are only useful with `--context`. Setting them without
@@ -721,6 +734,24 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // for. The validate phase reads the cfg knob and wires
             // it into the Sandbox via `with_allow_injection`.
             cfg.sandbox_allow_injection |= allow_injection;
+            // `--hash-algo <blake3|sha256>` overrides
+            // `Config::export.hash_algo`. The CLI flag wins on
+            // conflict with the env var (`MOAGAN_HASH_ALGO`) so
+            // the operator gets the explicit choice they typed.
+            // Empty / whitespace values are ignored so a stray
+            // `--hash-algo ""` does not silently corrupt the
+            // config.
+            if let Some(raw) = hash_algo.as_deref()
+                && !raw.trim().is_empty()
+            {
+                if let Ok(parsed) = raw.trim().parse::<crate::cli::flags_batch::HashAlgo>() {
+                    cfg.export.hash_algo = parsed;
+                } else {
+                    return Err(Error::InvalidArgs(format!(
+                        "--hash-algo: invalid value '{raw}' (expected blake3 or sha256)"
+                    )));
+                }
+            }
             // Track K (catalog §D.21): `--profile <name>` loads a
             // domain-specific profile from
             // `$MOAGAN_HOME/profiles/<name>.toml` (with the

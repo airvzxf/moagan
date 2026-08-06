@@ -7,8 +7,10 @@
 
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// Hash algorithm supported by `--hash-algo` (D.14.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum HashAlgo {
     /// SHA-256 (default).
     #[default]

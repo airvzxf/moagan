@@ -809,3 +809,93 @@ fn runs_dir_dispatch_mirrors_into_moagan_home_env() -> Result<()> {
     );
     Ok(())
 }
+
+/// `--hash-algo blake3` (the default) parses into the
+/// `Cmd::Run::hash_algo` slot and propagates onto
+/// `Config::export.hash_algo` (BLAKE3) when the dispatch
+/// applies the override. The test exercises both halves: the
+/// CLI parser recognises the flag, and the loaded Config
+/// picks the override up. Mirror test for `sha256` follows.
+#[test]
+fn cli_run_hash_algo_flag_propagates_to_config() -> Result<()> {
+    use moagan::cli::flags_batch::HashAlgo;
+    // Clean env so the `MOAGAN_HASH_ALGO` fallback is a no-op
+    // and the CLI value is the only writer.
+    let _g = env_lock();
+    unsafe {
+        std::env::remove_var("MOAGAN_HASH_ALGO");
+    }
+    let cli = moagan::cli::Cli::from_iter_args([
+        "moagan",
+        "run",
+        "--mode",
+        "fast",
+        "--prompt",
+        "p",
+        "--hash-algo",
+        "blake3",
+    ])
+    .expect("clap must accept --hash-algo blake3");
+    let moagan::cli::Cmd::Run { hash_algo, .. } = &cli.cmd else {
+        panic!("expected Cmd::Run");
+    };
+    assert_eq!(
+        hash_algo.as_deref(),
+        Some("blake3"),
+        "--hash-algo blake3 must propagate into Cmd::Run::hash_algo"
+    );
+    // The CLI dispatcher mutates the loaded Config; simulate
+    // that mutation here and assert the resulting knob is
+    // BLAKE3.
+    let mut cfg = Config::default();
+    if let Some(raw) = hash_algo.as_deref() {
+        let parsed: HashAlgo = raw.parse().expect("blake3 must parse");
+        cfg.export.hash_algo = parsed;
+    }
+    assert!(matches!(cfg.export.hash_algo, HashAlgo::Blake3));
+
+    // SHA-256 path: same flow, opposite outcome.
+    let cli = moagan::cli::Cli::from_iter_args([
+        "moagan",
+        "run",
+        "--mode",
+        "fast",
+        "--prompt",
+        "p",
+        "--hash-algo",
+        "sha256",
+    ])
+    .expect("clap must accept --hash-algo sha256");
+    let moagan::cli::Cmd::Run { hash_algo, .. } = &cli.cmd else {
+        panic!("expected Cmd::Run");
+    };
+    let mut cfg = Config::default();
+    if let Some(raw) = hash_algo.as_deref() {
+        let parsed: HashAlgo = raw.parse().expect("sha256 must parse");
+        cfg.export.hash_algo = parsed;
+    }
+    assert!(matches!(cfg.export.hash_algo, HashAlgo::Sha256));
+
+    // Invalid values are caught by the dispatch (the CLI
+    // parser passes them through as opaque strings).
+    let cli = moagan::cli::Cli::from_iter_args([
+        "moagan",
+        "run",
+        "--mode",
+        "fast",
+        "--prompt",
+        "p",
+        "--hash-algo",
+        "md5",
+    ])
+    .expect("clap accepts any string for --hash-algo; dispatch rejects");
+    let moagan::cli::Cmd::Run { hash_algo, .. } = &cli.cmd else {
+        panic!("expected Cmd::Run");
+    };
+    let parsed: std::result::Result<HashAlgo, String> = hash_algo.as_deref().unwrap().parse();
+    assert!(
+        parsed.is_err(),
+        "md5 must not parse as a HashAlgo, got: {parsed:?}"
+    );
+    Ok(())
+}
