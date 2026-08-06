@@ -16,11 +16,18 @@
 //!    uses to *report* an incompatibility: a `SynthesizePhase`
 //!    gatekeeper can describe *why* two proposals cannot coexist,
 //!    with a human-readable [`HardIncompat::explain`] message.
-//!    The seven variants cover both the tag-based conflicts the
-//!    constant list catches and the new kinds the catalog adds:
-//!    `TemporalImpossibility`, `NumericalOverflow`,
+//!    The seven base variants cover both the tag-based conflicts
+//!    the constant list catches and the new kinds the catalog
+//!    adds: `TemporalImpossibility`, `NumericalOverflow`,
 //!    `MutuallyExclusive`, `UnsupportedPlatform`,
-//!    `VersionConflict`.
+//!    `VersionConflict`. The five unit variants added by
+//!    catalog I.6 §D.13.15 (`SyncRuntimeVsAsync`,
+//!    `BlockingCallInAsync`, `SqlDbWithColumnar`,
+//!    `GcLangWithManualMem`, `SingleTenantWithMultiTenant`)
+//!    capture the architectural-runtime clashes a proposal can
+//!    exhibit even when its tag vector is internally consistent.
+//!    [`HardIncompat::is_incompatible_with`] detects redundant or
+//!    overlapping records of those runtime clashes.
 
 /// Pairs of tag values that are mutually exclusive. Order within each
 /// pair is irrelevant — `is_incompatible("a", "b")` and
@@ -153,6 +160,32 @@ pub enum HardIncompat {
         /// Version the host actually has (e.g. `"rust 1.70"`).
         found: String,
     },
+    /// Catalog I.6 §D.13.15: synchronous runtime code is mixed
+    /// with an async event loop (e.g. blocking `std::thread::*`
+    /// call sites interleaved with a `tokio` runtime). The two
+    /// execution models cannot share the same hot path.
+    SyncRuntimeVsAsync,
+    /// Catalog I.6 §D.13.15: a blocking call (`std::thread::sleep`,
+    /// `std::fs::*`, synchronous `std::net::TcpStream::*`) runs in
+    /// a `tokio` async context. The blocking call stalls the
+    /// runtime worker.
+    BlockingCallInAsync,
+    /// Catalog I.6 §D.13.15: an SQL-DB driver (e.g. `sqlx` with
+    /// the `postgres`/`mysql`/`sqlite` feature) is wired against a
+    /// columnar backend (e.g. ClickHouse, DuckDB, Apache Doris).
+    /// The driver speaks row-oriented SQL; the backend is
+    /// column-oriented and rejects the connection.
+    SqlDbWithColumnar,
+    /// Catalog I.6 §D.13.15: a garbage-collected runtime (Go,
+    /// Java, .NET, BEAM) is paired with manual RAII ownership
+    /// semantics. The collector owns the lifetime; manual `Drop`
+    /// implementations are unreachable or fight the GC.
+    GcLangWithManualMem,
+    /// Catalog I.6 §D.13.15: a single-tenant library is dropped
+    /// into a multi-tenant application (or vice versa). The
+    /// single-tenant library has no notion of tenant scoping;
+    /// the multi-tenant app leaks state across tenants.
+    SingleTenantWithMultiTenant,
 }
 
 impl HardIncompat {
@@ -191,6 +224,65 @@ impl HardIncompat {
             Self::VersionConflict { required, found } => {
                 format!("version conflict: requires '{required}' but the host has '{found}'")
             }
+            Self::SyncRuntimeVsAsync => {
+                "synchronous runtime code is mixed with an async event loop".to_string()
+            }
+            Self::BlockingCallInAsync => {
+                "blocking call (sleep, fs, or sync I/O) runs inside an async runtime".to_string()
+            }
+            Self::SqlDbWithColumnar => {
+                "SQL row-oriented driver is wired against a columnar backend".to_string()
+            }
+            Self::GcLangWithManualMem => {
+                "garbage-collected runtime is paired with manual RAII ownership".to_string()
+            }
+            Self::SingleTenantWithMultiTenant => {
+                "single-tenant library is dropped into a multi-tenant application".to_string()
+            }
+        }
+    }
+
+    /// Catalog I.6 §D.13.15: detect whether two `HardIncompat`
+    /// records describe redundant or overlapping incompatibilities.
+    /// Two records are "incompatible with each other" (in the
+    /// pair-detection sense) when reporting both is redundant:
+    ///
+    /// - Same unit variant → the proposal fails the same way twice;
+    ///   a single record already covers it.
+    /// - Two `MutuallyExclusive` records that share at least one
+    ///   option → they describe the same structural clash.
+    /// - A `SingleTenantWithMultiTenant` clash vs. a
+    ///   `MutuallyExclusive { a: "single_tenant" | "multi_tenant",
+    ///   .. }` → the tag-level pair already names the conflict;
+    ///   the runtime-clash variant is redundant.
+    /// - All other pairs are independent: each describes a distinct
+    ///   problem and the gatekeeper should report both.
+    ///
+    /// The function is symmetric:
+    /// `a.is_incompatible_with(b) == b.is_incompatible_with(a)`.
+    pub fn is_incompatible_with(&self, other: &HardIncompat) -> bool {
+        use HardIncompat::*;
+        match (self, other) {
+            // Same unit-variant redundancy.
+            (SyncRuntimeVsAsync, SyncRuntimeVsAsync) => true,
+            (BlockingCallInAsync, BlockingCallInAsync) => true,
+            (SqlDbWithColumnar, SqlDbWithColumnar) => true,
+            (GcLangWithManualMem, GcLangWithManualMem) => true,
+            (SingleTenantWithMultiTenant, SingleTenantWithMultiTenant) => true,
+            // Two MutuallyExclusive records overlap when they share
+            // at least one option (regardless of order, so the
+            // checker is symmetric without enumerating 4 permutations).
+            (MutuallyExclusive { a: a1, b: b1 }, MutuallyExclusive { a: a2, b: b2 }) => {
+                a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2
+            }
+            // Tag-level vs. runtime-clash redundancy.
+            (SingleTenantWithMultiTenant, MutuallyExclusive { a, b })
+            | (MutuallyExclusive { a, b }, SingleTenantWithMultiTenant) => {
+                matches!(a.as_str(), "single_tenant" | "multi_tenant")
+                    || matches!(b.as_str(), "single_tenant" | "multi_tenant")
+            }
+            // Independent pairs.
+            _ => false,
         }
     }
 }
@@ -404,6 +496,180 @@ mod tests {
                 h.explain(),
                 "Display must match explain() for {h:?}"
             );
+        }
+    }
+
+    // -- Catalog I.6 §D.13.15: extended HardIncompat ------------------
+
+    /// Pin the variant count of `HardIncompat` so a future catalog
+    /// addition trips this test before it lands in production. The
+    /// catalog ships twelve variants: the seven from §I.6 plus the
+    /// five runtime-clash unit variants from §D.13.15.
+    #[test]
+    fn hard_incompat_extended_variants_count() {
+        let cases: Vec<HardIncompat> = vec![
+            HardIncompat::LanguageToolchainMismatch {
+                lang: "rust".into(),
+                toolchain: "1.70".into(),
+            },
+            HardIncompat::ForbiddenTech {
+                tech: "docker".into(),
+            },
+            HardIncompat::TemporalImpossibility {
+                earliest: "2026-12-01".into(),
+                latest: "2026-11-15".into(),
+            },
+            HardIncompat::NumericalOverflow {
+                declared: 100,
+                limit: 50,
+            },
+            HardIncompat::MutuallyExclusive {
+                a: "sql".into(),
+                b: "nosql".into(),
+            },
+            HardIncompat::UnsupportedPlatform {
+                required: "linux/arm64".into(),
+                available: vec!["linux/x86_64".into()],
+            },
+            HardIncompat::VersionConflict {
+                required: "rust 1.80".into(),
+                found: "rust 1.70".into(),
+            },
+            HardIncompat::SyncRuntimeVsAsync,
+            HardIncompat::BlockingCallInAsync,
+            HardIncompat::SqlDbWithColumnar,
+            HardIncompat::GcLangWithManualMem,
+            HardIncompat::SingleTenantWithMultiTenant,
+        ];
+        assert_eq!(
+            cases.len(),
+            12,
+            "HardIncompat must have 12 variants (7 base + 5 §D.13.15)"
+        );
+        // Every variant serialises with the snake_case kind tag and
+        // round-trips back to the same value: pins the wire format.
+        for v in &cases {
+            let json = serde_json::to_string(v).expect("serialize");
+            let back: HardIncompat = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(&back, v, "round-trip must preserve {v:?}");
+        }
+    }
+
+    /// `is_incompatible_with` detects redundant pairs involving the
+    /// §D.13.15 runtime-clash variants. Two identical
+    /// `BlockingCallInAsync` records are redundant; the same
+    /// variant against `SyncRuntimeVsAsync` is independent; and
+    /// `SingleTenantWithMultiTenant` is redundant with the
+    /// `MutuallyExclusive` tag-pair that names the same clash.
+    #[test]
+    fn hard_incompat_pair_blocking_in_async() {
+        // Same unit variant → redundant.
+        let a = HardIncompat::BlockingCallInAsync;
+        let b = HardIncompat::BlockingCallInAsync;
+        assert!(a.is_incompatible_with(&b));
+        assert!(b.is_incompatible_with(&a));
+        // Different runtime-clash variants → independent.
+        let c = HardIncompat::SyncRuntimeVsAsync;
+        assert!(!a.is_incompatible_with(&c));
+        assert!(!c.is_incompatible_with(&a));
+        // SqlDbWithColumnar is unrelated to BlockingCallInAsync.
+        let d = HardIncompat::SqlDbWithColumnar;
+        assert!(!a.is_incompatible_with(&d));
+        assert!(!d.is_incompatible_with(&a));
+        // MutuallyExclusive without the single/multi tenant tag
+        // does NOT collide with SingleTenantWithMultiTenant.
+        let me = HardIncompat::MutuallyExclusive {
+            a: "sql".into(),
+            b: "nosql".into(),
+        };
+        let stm = HardIncompat::SingleTenantWithMultiTenant;
+        assert!(!me.is_incompatible_with(&stm));
+        // ... but the MutuallyExclusive tag-pair that names the
+        // single/multi tenant clash DOES collide with the
+        // runtime-clash variant (same conflict, different lens).
+        let me_st = HardIncompat::MutuallyExclusive {
+            a: "single_tenant".into(),
+            b: "multi_tenant".into(),
+        };
+        assert!(stm.is_incompatible_with(&me_st));
+        assert!(me_st.is_incompatible_with(&stm));
+    }
+
+    /// Every variant round-trips through serde with the
+    /// `snake_case` `kind` discriminator. The wire format is part
+    /// of the public contract — sidecar JSON consumers depend on
+    /// it — so this test pins the discriminator and the payload
+    /// shape per variant.
+    #[test]
+    fn hard_incompat_serialize_each_variant() {
+        // Each entry is (variant, expected_kind_tag). The kind tag
+        // is the `#[serde(rename_all = "snake_case")]` form of the
+        // variant name.
+        let cases: Vec<(HardIncompat, &str)> = vec![
+            (
+                HardIncompat::LanguageToolchainMismatch {
+                    lang: "rust".into(),
+                    toolchain: "stable".into(),
+                },
+                "language_toolchain_mismatch",
+            ),
+            (
+                HardIncompat::ForbiddenTech {
+                    tech: "docker".into(),
+                },
+                "forbidden_tech",
+            ),
+            (
+                HardIncompat::TemporalImpossibility {
+                    earliest: "a".into(),
+                    latest: "b".into(),
+                },
+                "temporal_impossibility",
+            ),
+            (
+                HardIncompat::NumericalOverflow {
+                    declared: 1,
+                    limit: 0,
+                },
+                "numerical_overflow",
+            ),
+            (
+                HardIncompat::MutuallyExclusive {
+                    a: "x".into(),
+                    b: "y".into(),
+                },
+                "mutually_exclusive",
+            ),
+            (
+                HardIncompat::UnsupportedPlatform {
+                    required: "linux/arm64".into(),
+                    available: vec![],
+                },
+                "unsupported_platform",
+            ),
+            (
+                HardIncompat::VersionConflict {
+                    required: "1.0".into(),
+                    found: "0.9".into(),
+                },
+                "version_conflict",
+            ),
+            (HardIncompat::SyncRuntimeVsAsync, "sync_runtime_vs_async"),
+            (HardIncompat::BlockingCallInAsync, "blocking_call_in_async"),
+            (HardIncompat::SqlDbWithColumnar, "sql_db_with_columnar"),
+            (HardIncompat::GcLangWithManualMem, "gc_lang_with_manual_mem"),
+            (
+                HardIncompat::SingleTenantWithMultiTenant,
+                "single_tenant_with_multi_tenant",
+            ),
+        ];
+        for (variant, expected_kind) in cases {
+            let json = serde_json::to_value(&variant).expect("serialize");
+            let kind = json
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("missing kind for {variant:?}"));
+            assert_eq!(kind, expected_kind, "kind tag mismatch for {variant:?}");
         }
     }
 }
