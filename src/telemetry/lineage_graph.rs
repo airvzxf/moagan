@@ -1,7 +1,7 @@
 //! J#5: lineage graph view. Renders the parent/child run DAG
 //! as a simple JSON adjacency list for the dashboard.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Stable identifier for a single run, used as a node label in
@@ -11,7 +11,7 @@ pub type RunId = String;
 /// Adjacency-list view of the parent/child run DAG for the
 /// dashboard. `nodes` lists each run id exactly once;
 /// `edges` lists `(parent, child)` pairs in input order.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LineageGraph {
     /// Distinct run ids referenced by the graph.
     pub nodes: Vec<RunId>,
@@ -46,11 +46,16 @@ impl LineageGraph {
         }
         Self { nodes, edges }
     }
-    /// Serialize the graph to JSON. Returns an empty string on
-    /// serialization failure rather than propagating the error.
+    /// Serialize to JSON.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
+    /// Total node count.
+    pub fn node_count(&self) -> usize { self.nodes.len() }
+    /// Total edge count.
+    pub fn edge_count(&self) -> usize { self.edges.len() }
+    /// True if the graph has no nodes.
+    pub fn is_empty(&self) -> bool { self.nodes.is_empty() }
 }
 
 #[cfg(test)]
@@ -81,5 +86,18 @@ mod tests {
         let g = LineageGraph::empty();
         assert!(g.nodes.is_empty());
         assert!(g.edges.is_empty());
+        assert!(g.is_empty());
+        assert_eq!(g.node_count(), 0);
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn lineage_graph_node_and_edge_count() {
+        let g = LineageGraph::from_pairs(&[
+            ("p1".into(), "c1".into()),
+            ("p1".into(), "c2".into()),
+        ]);
+        assert_eq!(g.node_count(), 3);
+        assert_eq!(g.edge_count(), 2);
     }
 }

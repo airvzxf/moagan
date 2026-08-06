@@ -15,7 +15,17 @@ pub mod allowlist;
 pub mod fetcher;
 
 pub use allowlist::ALLOWED_HOSTS;
-pub use fetcher::{FetchError, MAX_BYTES_PER_URL, MAX_URLS_PER_CALL, ResearchSnippet, fetch_all};
+pub use fetcher::{
+    FetchError, MAX_BYTES_PER_URL, MAX_URLS_PER_CALL, ResearchFetcher, ResearchSnippet,
+};
+
+/// Backwards-compat free function that fetches with an empty API
+/// key (no Authorization header on any host). K.4 follow-up work
+/// should construct a [`ResearchFetcher`] explicitly so the
+/// bearer opt-in hosts see the key when configured.
+pub async fn fetch_all(urls: &[String]) -> Vec<std::result::Result<ResearchSnippet, FetchError>> {
+    ResearchFetcher::new(None).fetch_all(urls).await
+}
 
 /// Render a list of research snippets into the Markdown block that
 /// stands in for the `${known_apis}` placeholder. Each snippet is
