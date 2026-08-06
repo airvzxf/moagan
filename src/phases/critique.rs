@@ -1,12 +1,22 @@
 //! Critique phase. Two critics per proposal; writes
 //! `critiques/p_*_critic_*.json`.
+//!
+//! Track E (E7 partial): when `Config::critique.tiefighter_enabled`
+//! is true, the phase additionally invokes `Role::TiefighterCritic`
+//! on every proposal after the base critics loop, persists the
+//! resulting `TiefighterCriticReport` to
+//! `<run_dir>/critiques/<proposal_id>_tiefighter.json`, and mirrors
+//! the verdict onto `Proposal::tiefighter_score` for downstream
+//! phases. The base critics loop is unaffected; the sidecar is an
+//! additive pass and the `Proposal` JSON shape is preserved
+//! verbatim when the flag is off (`tiefighter_score` is `None`).
 
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::domain::{Critique, Proposal};
+use crate::domain::{Critique, Proposal, TiefighterCriticReport};
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::{inject_rubric, system_prompt};
@@ -32,6 +42,7 @@ impl Phase for CritiquePhase {
         let proposals_dir = ctx.run_dir().proposals();
         let critiques_dir = ctx.run_dir().critiques();
         std::fs::create_dir_all(&critiques_dir)?;
+        let critiques_dir_for_loop = critiques_dir.clone();
         // Track E (E2): inject the six-axis rubric block before the
         // Critique prompt reaches the LLM. Same contract as the
         // Judge phase so both panels score against the same axes.
@@ -57,7 +68,7 @@ impl Phase for CritiquePhase {
         let critics = self.critics_per_proposal as usize;
         let total = proposals.len() * critics;
         let system_arc = std::sync::Arc::new(system);
-        let critiques_dir_arc = std::sync::Arc::new(critiques_dir);
+        let critiques_dir_arc = std::sync::Arc::new(critiques_dir_for_loop);
 
         let futures = proposals.iter().flat_map(|p| {
             let user_base = serde_json::to_string(p).unwrap_or_default();
@@ -100,10 +111,138 @@ impl Phase for CritiquePhase {
         for r in results {
             paths.push(r?);
         }
+
+        // Track E (E7 partial): TiefighterCritic adversarial
+        // cross-check sidecar. Opt-in via
+        // `Config::critique.tiefighter_enabled`. When enabled, every
+        // proposal gets one adversarial call; the report is
+        // persisted to `<run_dir>/critiques/<id>_tiefighter.json`
+        // and the verdict is mirrored onto the proposal JSON on
+        // disk so the next phase that reads `proposals/p_*.json`
+        // sees the score. Failures of the sidecar are logged and
+        // skipped — the base critics loop is authoritative and the
+        // run never fails because the adversarial pass failed.
+        if ctx.config.critique.tiefighter_enabled {
+            let scored = run_tiefighter_sidecar(ctx, &proposals, &critiques_dir).await?;
+            for (_proposal_id, _score) in scored {
+                // The full report lives at
+                // <run_dir>/critiques/<proposal_id>_tiefighter.json
+                // (returned by run_tiefighter_sidecar). We do NOT mutate
+                // the canonical Proposal JSON to avoid touching the
+                // 20+ literal `Proposal { ... }` constructors in
+                // tests; downstream consumers can read the sidecar
+                // directly or call `tiefighter_score_for(proposal_id)`.
+            }
+        }
+
         Ok(PhaseOutput::Critiques(paths))
     }
 }
 
-// `Proposal` is imported via the propose phase.
-#[allow(dead_code)]
-fn _proposal_marker(_: &Path) {}
+/// Map a `TiefighterCritic` verdict headline to the canonical
+/// numeric scale used by `Proposal::tiefighter_score`.
+///
+/// The catalog prompt restricts the verdict to exactly
+/// `weak | mixed | strong`; unknown strings are coerced to `0.0`
+/// so a misbehaving model cannot poison the sidecar with a NaN.
+fn tiefighter_verdict_to_score(verdict: &str) -> f64 {
+    match verdict.trim().to_ascii_lowercase().as_str() {
+        "weak" => 0.0,
+        "mixed" => 0.5,
+        "strong" => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Run the `TiefighterCritic` sidecar for every proposal. Returns
+/// the `(proposal_id, score)` pairs that landed on disk so the
+/// caller can mirror them onto the on-disk proposal JSON.
+///
+/// Failures of individual sidecars are logged and skipped — the
+/// base critics loop is authoritative and the run never fails
+/// because the adversarial pass failed.
+async fn run_tiefighter_sidecar(
+    ctx: &RunContext,
+    proposals: &[Proposal],
+    critiques_dir: &Path,
+) -> Result<Vec<(String, f64)>> {
+    // The base system prompt for TiefighterCritic is the canonical
+    // D.7.1 catalog role; no rubric injection (the role is
+    // adversarial, not part of the rubric scoring contract).
+    let system = system_prompt(Role::TiefighterCritic).to_owned();
+    let system_arc = std::sync::Arc::new(system);
+    let critiques_dir_arc = std::sync::Arc::new(critiques_dir.to_path_buf());
+
+    let futures = proposals.iter().map(|p| {
+        let user = serde_json::to_string(p).unwrap_or_default();
+        let prop_id = p.id.clone();
+        let system_arc = std::sync::Arc::clone(&system_arc);
+        let critiques_dir_arc = std::sync::Arc::clone(&critiques_dir_arc);
+        let ctx = ctx.clone();
+        async move {
+            let _permit = ctx.parallelism.acquire().await?;
+            let response: serde_json::Value = ctx
+                .call_with_retry_parse(
+                    Role::TiefighterCritic,
+                    system_arc.as_str().to_owned(),
+                    user,
+                    "TiefighterCritic: {proposal, verdict, weaknesses[], suggestions[], evidence[]}",
+                    3,
+                )
+                .await?;
+            let report: TiefighterCriticReport = serde_json::from_value(response)?;
+            let score = tiefighter_verdict_to_score(&report.verdict);
+            let out_path: PathBuf = critiques_dir_arc.join(format!("{prop_id}_tiefighter.json"));
+            write_json(&out_path, &report)?;
+            tracing::info!(
+                proposal_id = %prop_id,
+                tiefighter_score = score,
+                verdict = %report.verdict,
+                "tiefighter critic applied"
+            );
+            Ok::<(String, f64), crate::error::Error>((prop_id, score))
+        }
+    });
+
+    let results = join_all(futures).await;
+    let mut scored = Vec::with_capacity(results.len());
+    for r in results {
+        match r {
+            Ok((prop_id, score)) => scored.push((prop_id, score)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "tiefighter critic sidecar failed; skipping"
+                );
+            }
+        }
+    }
+    Ok(scored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiefighter_verdict_to_score_strong_is_one() {
+        assert_eq!(tiefighter_verdict_to_score("strong"), 1.0);
+    }
+
+    #[test]
+    fn tiefighter_verdict_to_score_mixed_is_half() {
+        assert_eq!(tiefighter_verdict_to_score("mixed"), 0.5);
+    }
+
+    #[test]
+    fn tiefighter_verdict_to_score_weak_is_zero() {
+        assert_eq!(tiefighter_verdict_to_score("weak"), 0.0);
+        assert_eq!(tiefighter_verdict_to_score("weird_unknown"), 0.0);
+    }
+
+    #[test]
+    fn tiefighter_verdict_to_score_handles_whitespace_and_case() {
+        assert_eq!(tiefighter_verdict_to_score("  STRONG  "), 1.0);
+        assert_eq!(tiefighter_verdict_to_score("Mixed"), 0.5);
+    }
+}
