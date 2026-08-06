@@ -223,6 +223,39 @@ pub struct Config {
     /// so existing runs are bit-identical.
     #[serde(default)]
     pub discovery: DiscoveryWiringConfig,
+    /// Export-side knobs. The hash algorithm threads through
+    /// the cache key builder
+    /// (`crate::llm::wire::build_cache_key`) and the brief
+    /// dual-hash helper
+    /// (`crate::phases::decompose::compute_brief_hash`).
+    /// `HashAlgo::Blake3` matches the canonical internal hash;
+    /// `HashAlgo::Sha256` is the audit-friendly variant. The
+    /// field is independent of the wire-level cache key so an
+    /// operator can keep BLAKE3 on the hot path while still
+    /// asking for SHA-256 in the export sidecar.
+    #[serde(default)]
+    pub export: ExportConfig,
+}
+
+/// Export-side knobs. Mirrors `crate::cli::flags_batch::HashAlgo`
+/// (the canonical CLI type) so the `--hash-algo` flag can
+/// propagate without an extra conversion layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportConfig {
+    /// Hash algorithm used for the export-side checksums.
+    /// Default BLAKE3 — matches the internal hot-path key. The
+    /// `--hash-algo blake3|sha256` flag on `moagan run` overrides
+    /// this on the CLI.
+    pub hash_algo: crate::cli::flags_batch::HashAlgo,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            hash_algo: crate::cli::flags_batch::HashAlgo::Blake3,
+        }
+    }
 }
 
 /// Track E (E8 partial): knobs for the two D.7.1 catalog roles
@@ -556,6 +589,7 @@ impl Default for Config {
             research_urls: Vec::new(),
             rate_limit_per_provider: std::collections::HashMap::new(),
             discovery: DiscoveryWiringConfig::default(),
+            export: ExportConfig::default(),
         }
     }
 }
@@ -2094,5 +2128,33 @@ mod tests {
             .expect("minimax entry must survive TOML round-trip");
         assert_eq!(entry.capacity, 20);
         assert_eq!(entry.refill_per_sec, 2);
+    }
+
+    #[test]
+    fn export_config_default_is_blake3() {
+        // The default matches `CacheHashAlgo::default()` (in
+        // `llm::wire`) and the canonical cache-key
+        // implementation: BLAKE3 is the day-to-day internal
+        // hash. SHA-256 stays available via
+        // `--hash-algo sha256` for operators who want to
+        // re-verify the sidecar with the usual CLI tooling.
+        let cfg = Config::default();
+        assert!(matches!(
+            cfg.export.hash_algo,
+            crate::cli::flags_batch::HashAlgo::Blake3
+        ));
+    }
+
+    #[test]
+    fn export_config_round_trips_through_toml() {
+        use crate::cli::flags_batch::HashAlgo;
+        let mut cfg = Config::default();
+        cfg.export.hash_algo = HashAlgo::Sha256;
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert!(matches!(
+            back.export.hash_algo,
+            crate::cli::flags_batch::HashAlgo::Sha256
+        ));
     }
 }
