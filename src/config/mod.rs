@@ -181,6 +181,18 @@ pub struct Config {
     /// `MOAGAN_RESEARCH_URLS=docs.rs/foo,crates.io/bar`.
     #[serde(default)]
     pub research_urls: Vec<String>,
+    /// Track E (catalog §D.19.6): per-provider token-bucket knobs.
+    /// Empty by default; opt in via
+    /// `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>` or by
+    /// setting `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`.
+    /// Each entry is consumed by `BreakeredProvider::send` so calls
+    /// beyond `capacity` either wait for the next refill or fail with
+    /// an `Error::Provider` (carrying a budget-exhausted message)
+    /// when a max-wait is configured. Provider responses whose
+    /// `Usage::cache_read > 0` refund the token so the upstream
+    /// prompt cache does not drain the local bucket.
+    #[serde(default)]
+    pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
 }
 
 fn default_startup_reconcile() -> bool {
@@ -217,6 +229,40 @@ impl Default for CircuitBreakerConfig {
             threshold: 5,
             window_secs: 60,
             cooldown_secs: 30,
+        }
+    }
+}
+
+/// Per-provider token-bucket knobs (catalog §D.19.6).
+///
+/// Each entry maps a provider name to its bucket capacity and refill
+/// rate. The runtime [`crate::llm::rate_limiter::RateLimiter`] reads
+/// these knobs at construction; the bucket itself lives in
+/// `src/llm/rate_limiter.rs`. Defaults (60 capacity, 4 tokens/sec)
+/// are a conservative profile for chatty workloads — operators
+/// wanting a tighter ceiling lower `capacity` and/or raise
+/// `refill_per_sec`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// Maximum tokens stored. Must be `>= 1`; `0` would disable the
+    /// bucket entirely (every call would fail). Default 60.
+    pub capacity: u32,
+    /// Tokens added per second. Must be `>= 1`; `0` would never refill
+    /// once the bucket is empty. Default 4.
+    pub refill_per_sec: u32,
+    /// Initial token count. `None` means start at full capacity
+    /// (`capacity`); set lower to throttle the very first burst after
+    /// boot.
+    pub initial: Option<u32>,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            capacity: 60,
+            refill_per_sec: 4,
+            initial: None,
         }
     }
 }
@@ -393,6 +439,7 @@ impl Default for Config {
             sandbox_cgroup: None,
             research_enabled: false,
             research_urls: Vec::new(),
+            rate_limit_per_provider: std::collections::HashMap::new(),
         }
     }
 }
@@ -858,6 +905,27 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect();
         }
+        // Track E (catalog §D.19.6): per-provider rate-limit knobs.
+        // `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>`
+        // opts the named provider into the token bucket. Each entry
+        // overwrites any previous value for the same provider so the
+        // env var is the canonical last-write-wins surface. Garbage
+        // values (missing colon, non-numeric tokens) are silently
+        // ignored so a stale export does not corrupt an existing
+        // TOML-loaded entry. The provider name is lowercased to
+        // match the canonical `[providers]` table keys.
+        for (key, value) in std::env::vars() {
+            let Some(suffix) = key.strip_prefix("MOAGAN_RATE_LIMIT_") else {
+                continue;
+            };
+            if suffix.is_empty() {
+                continue;
+            }
+            let provider = suffix.to_ascii_lowercase();
+            if let Some(cfg) = parse_rate_limit_env(&value) {
+                self.rate_limit_per_provider.insert(provider, cfg);
+            }
+        }
     }
 }
 
@@ -867,6 +935,23 @@ impl Config {
 /// expected to leave the existing knob alone in that case.
 fn parse_cgroup_limits_env(s: &str) -> Option<CgroupLimits> {
     serde_json::from_str::<CgroupLimits>(s).ok()
+}
+
+/// Parse the `MOAGAN_RATE_LIMIT_<provider>` env var into a
+/// [`RateLimitConfig`]. Accepts `<capacity>:<refill_per_sec>` (both
+/// non-negative integers). Returns `None` for any value that does
+/// not parse so a stale / malformed export leaves the existing knob
+/// alone.
+fn parse_rate_limit_env(s: &str) -> Option<RateLimitConfig> {
+    let s = s.trim();
+    let (cap_str, refill_str) = s.split_once(':')?;
+    let capacity: u32 = cap_str.trim().parse().ok()?;
+    let refill_per_sec: u32 = refill_str.trim().parse().ok()?;
+    Some(RateLimitConfig {
+        capacity,
+        refill_per_sec,
+        initial: None,
+    })
 }
 
 /// Parse the `MOAGAN_SANDBOX_SECCOMP` env var into a
@@ -1785,5 +1870,91 @@ mod tests {
             back.sandbox_cgroup, cfg.sandbox_cgroup,
             "TOML round-trip must preserve sandbox_cgroup"
         );
+    }
+
+    /// Track E (catalog §D.19.6): `rate_limit_per_provider` defaults
+    /// to an empty map so the default install is unaffected by the
+    /// token-bucket wiring. Operators opt in by setting entries in
+    /// `~/.config/moagan/config.toml` or by exporting
+    /// `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>`.
+    #[test]
+    fn config_rate_limit_per_provider_default_is_empty() {
+        let cfg = Config::default();
+        assert!(
+            cfg.rate_limit_per_provider.is_empty(),
+            "rate_limit_per_provider must default to empty (D.19.6 off-by-default), got {:?}",
+            cfg.rate_limit_per_provider
+        );
+    }
+
+    /// `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>` opts
+    /// the named provider into a token bucket. The provider name in
+    /// the env var is uppercased by convention; the config stores it
+    /// lowercased to match the `[providers]` table keys.
+    #[test]
+    fn config_env_var_rate_limit_per_provider_populates_map() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_RATE_LIMIT_MINIMAX", "30:5");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_RATE_LIMIT_MINIMAX");
+        }
+        let entry = cfg
+            .rate_limit_per_provider
+            .get("minimax")
+            .expect("minimax rate-limit entry must be populated");
+        assert_eq!(entry.capacity, 30);
+        assert_eq!(entry.refill_per_sec, 5);
+    }
+
+    /// Garbage env values are ignored so a stale / malformed export
+    /// does not corrupt the install.
+    #[test]
+    fn config_env_var_rate_limit_garbage_is_ignored() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_RATE_LIMIT_MOCK", "no-colon-here");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_RATE_LIMIT_MOCK");
+        }
+        assert!(
+            cfg.rate_limit_per_provider.is_empty(),
+            "garbage rate-limit env must not populate the map, got {:?}",
+            cfg.rate_limit_per_provider
+        );
+    }
+
+    /// TOML round-trip preserves the per-provider rate-limit knobs
+    /// so operators can pin their choice in
+    /// `~/.config/moagan/config.toml`.
+    #[test]
+    fn config_rate_limit_per_provider_toml_round_trip() {
+        let mut rate_limit_per_provider = std::collections::HashMap::new();
+        rate_limit_per_provider.insert(
+            "minimax".into(),
+            RateLimitConfig {
+                capacity: 20,
+                refill_per_sec: 2,
+                initial: None,
+            },
+        );
+        let cfg = Config {
+            rate_limit_per_provider,
+            ..Config::default()
+        };
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        let entry = back
+            .rate_limit_per_provider
+            .get("minimax")
+            .expect("minimax entry must survive TOML round-trip");
+        assert_eq!(entry.capacity, 20);
+        assert_eq!(entry.refill_per_sec, 2);
     }
 }

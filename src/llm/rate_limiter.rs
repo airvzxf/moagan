@@ -1,35 +1,18 @@
 //! Token-bucket rate limiter. Per-provider, in-memory.
 //!
 //! Compliance: 10-integrada-v0 §D.19.6 (rate_limiter). Replaces the
-//! `governor` crate (rejected in catalog §C).
+//! `governor` crate (rejected in catalog §C). The knobs themselves
+//! live in [`crate::config::RateLimitConfig`] so the config layer
+//! owns the wire-format / env-override surface; this module owns the
+//! runtime state machine.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::error::Result;
-
-/// Configuration for a token bucket.
-#[derive(Debug, Clone)]
-pub struct RateLimitConfig {
-    /// Maximum tokens stored.
-    pub capacity: u32,
-    /// Tokens added per second.
-    pub refill_per_sec: u32,
-    /// Initial token count (defaults to `capacity`).
-    pub initial: Option<u32>,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            capacity: 60,
-            refill_per_sec: 4,
-            initial: None,
-        }
-    }
-}
+use crate::config::RateLimitConfig;
+use crate::error::{Error, Result};
 
 /// Token-bucket rate limiter. Thread-safe via internal mutex.
 #[derive(Debug, Clone)]
@@ -76,6 +59,69 @@ impl RateLimiter {
         Ok(wait)
     }
 
+    /// Block until one token is available, but fail fast with
+    /// `Error::Provider` (carrying a budget-exhausted message) when
+    /// the wait would exceed `max`. Refunds the consumed token when
+    /// the wait is in range so the caller can sleep it without losing
+    /// the slot. Use this when the caller wants a bounded
+    /// backpressure (CI loops, batch runners) instead of an
+    /// unbounded wait.
+    pub async fn acquire_with_max(&self, max: Duration) -> Result<Duration> {
+        let wait = {
+            let mut g = self.inner.lock();
+            g.refill();
+            if g.tokens >= 1.0 {
+                g.tokens -= 1.0;
+                g.last_wait = Duration::ZERO;
+                Duration::ZERO
+            } else {
+                let deficit = 1.0 - g.tokens;
+                let secs = deficit / g.refill_per_sec.max(1) as f64;
+                let wait = Duration::from_secs_f64(secs);
+                if wait > max {
+                    g.last_wait = wait;
+                    return Err(Error::Provider(format!(
+                        "rate limiter budget exhausted: would wait {wait:?} > max {max:?}"
+                    )));
+                }
+                g.last_wait = wait;
+                g.tokens += wait.as_secs_f64() * g.refill_per_sec as f64;
+                g.tokens = g.tokens.min(g.capacity as f64);
+                g.tokens -= 1.0;
+                wait
+            }
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        Ok(wait)
+    }
+
+    /// Try to consume one token without waiting. Returns `true` when
+    /// the bucket had a token available, `false` otherwise. Callers
+    /// that pair this with a fallback path (e.g. queue-and-retry)
+    /// avoid the cost of `acquire` when the bucket is empty.
+    pub fn try_acquire(&self) -> bool {
+        let mut g = self.inner.lock();
+        g.refill();
+        if g.tokens >= 1.0 {
+            g.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return a previously-consumed token to the bucket. Used when
+    /// the call was served from a cache and the upstream should not
+    /// be charged against the local rate limit. Capped at `capacity`
+    /// so a runaway refund loop cannot inflate the bucket beyond its
+    /// configured ceiling.
+    pub fn refund(&self) {
+        let mut g = self.inner.lock();
+        g.tokens = (g.tokens + 1.0).min(g.capacity as f64);
+    }
+
     /// Latest recorded wait time. Useful for telemetry.
     pub fn last_wait(&self) -> Duration {
         self.inner.lock().last_wait
@@ -83,14 +129,21 @@ impl RateLimiter {
 }
 
 impl Inner {
-    /// Refill tokens based on elapsed time and consume one, returning
-    /// the wait time needed (zero if a token was already available).
-    fn token_after_one(&mut self) -> Duration {
+    /// Advance the bucket's token count by the elapsed wall-clock time
+    /// since the last refill. Clamps at `capacity` so the bucket
+    /// never over-fills.
+    fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
         self.tokens =
             (self.tokens + elapsed * self.refill_per_sec as f64).min(self.capacity as f64);
         self.last_refill = now;
+    }
+
+    /// Refill tokens based on elapsed time and consume one, returning
+    /// the wait time needed (zero if a token was already available).
+    fn token_after_one(&mut self) -> Duration {
+        self.refill();
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
             self.last_wait = Duration::ZERO;

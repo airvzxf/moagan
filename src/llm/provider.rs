@@ -12,9 +12,21 @@
 //! fails fast when the breaker is open. The wrapper does not call
 //! the inner provider at all while the breaker is open, which is
 //! what makes the fail-fast behaviour observable from outside.
+//!
+//! Per-provider token-bucket rate limiters (catalog §D.19.6) live
+//! on the same wrapper via the optional
+//! [`super::rate_limiter::RateLimiter`]. When configured, every
+//! `send` consumes a token before the inner call; responses whose
+//! `Usage::cache_read > 0` (the upstream served from its own prompt
+//! cache) refund the token so cached responses do not drain the
+//! local bucket. Cache hits at the cross-run layer never reach
+//! `provider.send` (they short-circuit at
+//! `phases::phase::PhaseContext::call`), so the wrapper only
+//! observes provider-level cache hits via the response payload.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -22,6 +34,7 @@ use crate::config::{CircuitBreakerConfig, ProviderConfig};
 use crate::error::{Error, Result};
 
 use super::circuit_breaker::CircuitBreaker;
+use super::rate_limiter::RateLimiter;
 use super::wire::{Request, Response};
 
 /// A provider can take a `Request` and produce a `Response`. Providers
@@ -158,19 +171,29 @@ impl ProviderRegistry {
 /// 1. If the breaker is open, return
 ///    `Error::Provider("circuit open: ...")` immediately. The
 ///    inner provider is not called.
-/// 2. Otherwise, call `inner.send(req)`. On `Ok`, call
-///    `breaker.record_success()` (resets the failure counter).
-/// 3. On `Err`, consult [`Error::is_circuit_opening`]: if the
+/// 2. If a [`RateLimiter`] is configured, consume a token before
+///    the inner call. The default `acquire` awaits forever when
+///    the bucket is empty; `acquire_with_max` (enabled via
+///    [`Self::with_rate_limit_max_wait`]) fails fast with an
+///    `Error::Provider` carrying a budget-exhausted message when
+///    the wait would exceed the configured cap.
+/// 3. Otherwise, call `inner.send(req)`. On `Ok`, call
+///    `breaker.record_success()` (resets the failure counter) and
+///    refund the rate-limit token when `Usage::cache_read > 0`
+///    (the upstream served the call from its own prompt cache).
+/// 4. On `Err`, consult [`Error::is_circuit_opening`]: if the
 ///    error should count, call `breaker.record_failure()`; if it
 ///    should not (schema, operator, cancel), leave the breaker
 ///    state untouched.
 ///
 /// `count_tokens` is delegated straight to the inner provider —
 /// token estimation is a local heuristic and is never responsible
-/// for opening the breaker.
+/// for opening the breaker or consuming a rate-limit token.
 pub struct BreakeredProvider {
     inner: Arc<dyn Provider>,
     breaker: Arc<CircuitBreaker>,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    rate_limit_max_wait: Option<Duration>,
 }
 
 impl std::fmt::Debug for BreakeredProvider {
@@ -180,14 +203,55 @@ impl std::fmt::Debug for BreakeredProvider {
             .field("model", &self.inner.model())
             .field("endpoint", &self.inner.endpoint())
             .field("breaker_state", &self.breaker.state())
+            .field(
+                "rate_limiter",
+                &self.rate_limiter.as_ref().map(|_| "configured"),
+            )
+            .field("rate_limit_max_wait", &self.rate_limit_max_wait)
             .finish()
     }
 }
 
 impl BreakeredProvider {
-    /// Build a wrapper around `inner` with the supplied breaker.
+    /// Build a wrapper around `inner` with the supplied breaker and
+    /// no rate limiter. Equivalent to the pre-rate-limit
+    /// constructor — callers that want token-bucket backpressure
+    /// chain [`Self::with_rate_limiter`] (and optionally
+    /// [`Self::with_rate_limit_max_wait`]) on top of this.
     pub fn new(inner: Arc<dyn Provider>, breaker: Arc<CircuitBreaker>) -> Self {
-        Self { inner, breaker }
+        Self {
+            inner,
+            breaker,
+            rate_limiter: None,
+            rate_limit_max_wait: None,
+        }
+    }
+
+    /// Build a wrapper around `inner` with the supplied breaker and
+    /// rate limiter. Every `send` call consumes a token from the
+    /// bucket; calls when the bucket is empty await the next refill
+    /// (use [`Self::with_rate_limit_max_wait`] for fail-fast
+    /// semantics).
+    pub fn with_rate_limiter(
+        inner: Arc<dyn Provider>,
+        breaker: Arc<CircuitBreaker>,
+        rate_limiter: Arc<RateLimiter>,
+    ) -> Self {
+        Self {
+            inner,
+            breaker,
+            rate_limiter: Some(rate_limiter),
+            rate_limit_max_wait: None,
+        }
+    }
+
+    /// Cap the rate-limit wait. When set, calls that would wait
+    /// longer than `max` for the next refill fail with
+    /// `Error::Provider` (carrying a budget-exhausted message)
+    /// instead of sleeping. Default (`None`) is unbounded wait.
+    pub fn with_rate_limit_max_wait(mut self, max: Duration) -> Self {
+        self.rate_limit_max_wait = Some(max);
+        self
     }
 
     /// Borrow the inner provider (for tests that need to inspect
@@ -199,6 +263,12 @@ impl BreakeredProvider {
     /// Clone the breaker handle for telemetry / introspection.
     pub fn breaker(&self) -> Arc<CircuitBreaker> {
         self.breaker.clone()
+    }
+
+    /// Clone the rate-limiter handle (when configured) for
+    /// telemetry / introspection.
+    pub fn rate_limiter(&self) -> Option<Arc<RateLimiter>> {
+        self.rate_limiter.clone()
     }
 }
 
@@ -223,8 +293,18 @@ impl Provider for BreakeredProvider {
                 self.inner.name()
             )));
         }
+        if let Some(rl) = &self.rate_limiter {
+            let _wait = match self.rate_limit_max_wait {
+                Some(max) => rl.acquire_with_max(max).await?,
+                None => rl.acquire().await?,
+            };
+        }
         match self.inner.send(req).await {
             Ok(pair) => {
+                let cache_hit = pair.1.usage.cache_read > 0;
+                if cache_hit && let Some(rl) = &self.rate_limiter {
+                    rl.refund();
+                }
                 self.breaker.record_success();
                 Ok(pair)
             }
@@ -338,5 +418,204 @@ mod tests {
             }
             other => panic!("expected InvalidArgs, got {other:?}"),
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Rate-limiter wiring tests (PR E1).
+    //
+    // Each test wraps a `MockProvider` in a `BreakeredProvider` with a
+    // token bucket, exercises a `send` call, and asserts on the
+    // bucket's observed state. The mock provider returns canned
+    // responses so the inner call is deterministic; the breaker stays
+    // closed because no errors are produced.
+    // ----------------------------------------------------------------
+
+    use crate::config::RateLimitConfig;
+    use crate::llm::mock::{MockProvider, MockResponse};
+    use crate::llm::role::Role;
+    use crate::llm::wire::{Request, Usage};
+
+    fn sample_request() -> Request {
+        Request {
+            role: Role::Intake,
+            model: "mock-model".into(),
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: 16,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+        }
+    }
+
+    /// Each successful `send` consumes one token from the bucket.
+    /// Mock provider returns a fresh response every call so the
+    /// wrapper has no cache_hit refund path to consider.
+    #[tokio::test]
+    async fn provider_send_consumes_rate_limit_token() {
+        let rl = Arc::new(RateLimiter::new(RateLimitConfig {
+            capacity: 3,
+            refill_per_sec: 100,
+            initial: Some(3),
+        }));
+        let mock = Arc::new(MockProvider::new(vec![
+            MockResponse::plain("a"),
+            MockResponse::plain("b"),
+            MockResponse::plain("c"),
+        ]));
+        let breaker = Arc::new(CircuitBreaker::default());
+        let provider = BreakeredProvider::with_rate_limiter(mock, breaker, rl.clone());
+
+        // Three calls drain the bucket exactly.
+        for expected in ["a", "b", "c"] {
+            let (_, resp) = provider.send(&sample_request()).await.unwrap();
+            assert_eq!(resp.text, expected);
+        }
+        // Bucket is at 0; the next `try_acquire` (mirroring the
+        // wrapper's pre-call probe) must report the bucket empty.
+        assert!(
+            !rl.try_acquire(),
+            "bucket should be empty after three calls against capacity=3"
+        );
+    }
+
+    /// Responses whose `Usage::cache_read > 0` refund the token so
+    /// the upstream prompt cache does not drain the local bucket.
+    /// Three calls with full cache hits leave the bucket at 3.
+    #[tokio::test]
+    async fn provider_send_skips_rate_limit_on_cache_hit() {
+        let rl = Arc::new(RateLimiter::new(RateLimitConfig {
+            capacity: 3,
+            refill_per_sec: 100,
+            initial: Some(3),
+        }));
+        let mut mock = MockProvider::new(vec![
+            MockResponse {
+                text: "cached-a".into(),
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cache_read: 100,
+                    cache_creation: 0,
+                },
+                finish_reason: Some("end_turn".into()),
+            },
+            MockResponse {
+                text: "cached-b".into(),
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cache_read: 100,
+                    cache_creation: 0,
+                },
+                finish_reason: Some("end_turn".into()),
+            },
+            MockResponse {
+                text: "cached-c".into(),
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cache_read: 100,
+                    cache_creation: 0,
+                },
+                finish_reason: Some("end_turn".into()),
+            },
+        ]);
+        // Disable cycle so an over-call returns an error instead of
+        // wrapping and confusing the assertion.
+        mock.set_cycle(false);
+        let breaker = Arc::new(CircuitBreaker::default());
+        let provider = BreakeredProvider::with_rate_limiter(Arc::new(mock), breaker, rl.clone());
+
+        for expected in ["cached-a", "cached-b", "cached-c"] {
+            let (_, resp) = provider.send(&sample_request()).await.unwrap();
+            assert_eq!(resp.text, expected);
+        }
+        // All three tokens were refunded because every response was
+        // a cache hit. The next non-blocking probe must succeed.
+        assert!(
+            rl.try_acquire(),
+            "cache hits must not drain the bucket; expected at least one token"
+        );
+    }
+
+    /// When the bucket is empty and no max-wait is configured, the
+    /// wrapper awaits the next refill instead of failing. With
+    /// `refill_per_sec=100` the wait is ~10 ms — measurable but
+    /// short enough for the test budget.
+    #[tokio::test]
+    async fn provider_send_waits_when_bucket_empty() {
+        let rl = Arc::new(RateLimiter::new(RateLimitConfig {
+            capacity: 1,
+            refill_per_sec: 100,
+            initial: Some(1),
+        }));
+        let mock = Arc::new(MockProvider::new(vec![
+            MockResponse::plain("first"),
+            MockResponse::plain("second"),
+        ]));
+        let breaker = Arc::new(CircuitBreaker::default());
+        let provider = BreakeredProvider::with_rate_limiter(mock, breaker, rl.clone());
+
+        // First call drains the bucket (initial = 1).
+        let (_, r1) = provider.send(&sample_request()).await.unwrap();
+        assert_eq!(r1.text, "first");
+        // Second call must wait for the refill and still succeed.
+        let started = std::time::Instant::now();
+        let (_, r2) = provider.send(&sample_request()).await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(r2.text, "second");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(5),
+            "expected >=5 ms wait when bucket is empty at refill_per_sec=100, got {elapsed:?}"
+        );
+    }
+
+    /// When the bucket is empty AND a max-wait is configured AND
+    /// the would-be wait exceeds that cap, the wrapper returns an
+    /// `Error::Provider` carrying a budget-exhausted message
+    /// instead of sleeping. The inner provider is not called.
+    #[tokio::test]
+    async fn provider_send_returns_budget_exhausted_on_overflow() {
+        let rl = Arc::new(RateLimiter::new(RateLimitConfig {
+            capacity: 1,
+            refill_per_sec: 1,
+            initial: Some(1),
+        }));
+        let mock = Arc::new(MockProvider::new(vec![
+            MockResponse::plain("first"),
+            MockResponse::plain("second"),
+        ]));
+        let breaker = Arc::new(CircuitBreaker::default());
+        // Cap the wait at 1 ms; with refill_per_sec=1 and an empty
+        // bucket the wait is ~1 s, so the call must fail fast.
+        let provider = BreakeredProvider::with_rate_limiter(mock, breaker.clone(), rl)
+            .with_rate_limit_max_wait(std::time::Duration::from_millis(1));
+
+        // First call drains the bucket.
+        let (_, r1) = provider.send(&sample_request()).await.unwrap();
+        assert_eq!(r1.text, "first");
+
+        // Second call exceeds the max-wait; the wrapper must fail
+        // fast without touching the inner provider.
+        let err = provider
+            .send(&sample_request())
+            .await
+            .expect_err("overflow must return an error");
+        match err {
+            Error::Provider(msg) => {
+                assert!(
+                    msg.contains("budget exhausted"),
+                    "overflow error must mention budget exhausted, got: {msg}"
+                );
+            }
+            other => panic!("expected Error::Provider, got {other:?}"),
+        }
+        // Breaker was not opened by the local overflow (the error
+        // is not a circuit-opening error class).
+        assert!(
+            !breaker.is_open(),
+            "local overflow must not open the breaker"
+        );
     }
 }
