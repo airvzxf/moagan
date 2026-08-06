@@ -8,27 +8,23 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, moagan]
     timeout-minutes: 30
+    container:
+      image: localhost/moagan-runner:latest
+      options: --userns=keep-id --network=host
+      volumes:
+        - /srv/runner/_work:/work/_work
+        - /srv/runner/cargo:/usr/local/cargo/registry
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.1
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - name: Show toolchain
+        run: |
+          cargo --version
+          rustc --version
+          clippy-driver --version
+          mold --version
 
       - name: Guard against forbidden crates
         run: make guard-deps
