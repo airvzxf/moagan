@@ -474,6 +474,113 @@ mod tests {
     use crate::llm::mock::{MockProvider, MockResponse};
     use crate::llm::role::Role;
     use crate::llm::wire::{Request, Usage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ErrorProvider {
+        calls: AtomicUsize,
+        error: fn() -> Error,
+    }
+
+    #[async_trait]
+    impl Provider for ErrorProvider {
+        fn name(&self) -> &str {
+            "error-provider"
+        }
+
+        fn model(&self) -> &str {
+            "error-model"
+        }
+
+        fn endpoint(&self) -> &str {
+            "mock://error"
+        }
+
+        async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err((self.error)())
+        }
+    }
+
+    fn opening_error() -> Error {
+        Error::Provider("upstream 503".into())
+    }
+
+    fn breaker_request() -> Request {
+        Request {
+            role: Role::Intake,
+            model: "error-model".into(),
+            system: String::new(),
+            user: String::new(),
+            max_tokens: 16,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+        }
+    }
+
+    fn threshold_one_breaker() -> Arc<CircuitBreaker> {
+        Arc::new(CircuitBreaker::new(
+            1,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ))
+    }
+
+    #[tokio::test]
+    async fn breakered_provider_records_circuit_opening_failure() {
+        let inner = Arc::new(ErrorProvider {
+            calls: AtomicUsize::new(0),
+            error: opening_error,
+        });
+        let breaker = threshold_one_breaker();
+        let provider = BreakeredProvider::new(inner.clone(), breaker.clone());
+
+        let result = provider.send(&breaker_request()).await;
+        assert!(matches!(result, Err(Error::Provider(_))));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(breaker.failure_count(), 1);
+        assert!(breaker.is_open());
+    }
+
+    #[tokio::test]
+    async fn breakered_provider_skips_calls_when_open() {
+        let inner = Arc::new(ErrorProvider {
+            calls: AtomicUsize::new(0),
+            error: opening_error,
+        });
+        let breaker = threshold_one_breaker();
+        let provider = BreakeredProvider::new(inner.clone(), breaker.clone());
+
+        let _ = provider.send(&breaker_request()).await;
+        let result = provider.send(&breaker_request()).await;
+        assert!(
+            matches!(result, Err(Error::Provider(message)) if message.starts_with("circuit open"))
+        );
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn minimax_provider_records_circuit_opening() {
+        let spec = ProviderConfig {
+            kind: "minimax".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            model: "MiniMax-M3".into(),
+            max_tokens: Some(16),
+            temperature: None,
+            top_p: None,
+            hard_incompatibilities: vec![],
+        };
+        let minimax = MinimaxProvider::new(&spec, crate::secret::SecretString::new("dummy".into()))
+            .unwrap()
+            .with_max_retries(1);
+        let breaker = threshold_one_breaker();
+        let provider = BreakeredProvider::new(Arc::new(minimax), breaker.clone());
+
+        let result = provider.send(&breaker_request()).await;
+        assert!(result.is_err());
+        assert!(breaker.is_open());
+        assert_eq!(breaker.failure_count(), 1);
+    }
 
     fn sample_request() -> Request {
         Request {
