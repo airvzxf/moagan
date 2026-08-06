@@ -20,6 +20,7 @@ pub mod policy;
 pub mod process;
 pub mod seccomp;
 pub mod seccomp_allowlist;
+pub mod tool_versions;
 
 pub use allowlist::{
     Allowlist, DEFAULT_ALLOWLIST, DEFAULT_DENYLIST, Denylist, contains_deny_token, is_allowed,
@@ -31,3 +32,4 @@ pub use process::{
     SandboxOutput, SandboxResult, SandboxStatus, config_for, strip_secrets, verify_binary_exists,
 };
 pub use seccomp::{SeccompPolicyKind, apply as apply_seccomp};
+pub use tool_versions::ToolVersions;
