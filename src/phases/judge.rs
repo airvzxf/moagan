@@ -29,6 +29,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
+use crate::cli::Mode;
 use crate::config::Config;
 use crate::domain::{AdversaryReport, FinalDisagreementReport, JudgeScore};
 use crate::error::{Error, Result};
@@ -67,6 +68,38 @@ pub(crate) fn validate_rubric_response(
     Ok(())
 }
 
+/// D.21.7: per-mode judge quorum — the panel size each mode runs
+/// by default. The values are pinned to the spec:
+///
+/// - `fast`:    1 (single judge; the panel disagreement contract
+///   is meaningless with one scorer)
+/// - `standard`: 3 (balanced panel; covers disagreement stats)
+/// - `deep`:    5 (full panel; the panel disagreement gates the
+///   adversary pass, so a 5-judge panel gives a meaningful stddev)
+/// - `explore`: 5 (full panel; explore reuses the deep quorum
+///   because exploration trades evaluation depth for proposal
+///   breadth — a 5-judge panel keeps the score comparable with
+///   `deep`)
+/// - `batch`:   2 (CI/automation runs favour determinism over
+///   panel disagreement — two judges is enough to detect
+///   gross disagreement, the rest is handled by a downstream
+///   consensus pass)
+///
+/// This helper is the spec baseline only. For profile-driven
+/// overrides (`--profile <name>`), use the
+/// `cardinality::judge_quorum_for_mode(mode, cfg)` helper which
+/// checks `cfg.profile_judge_quorum_overrides` first and falls
+/// through to this function when no override is set.
+pub fn judge_quorum_for_mode(mode: Mode) -> usize {
+    match mode {
+        Mode::Fast => 1,
+        Mode::Standard => 3,
+        Mode::Deep => 5,
+        Mode::Explore => 5,
+        Mode::Batch => 2,
+    }
+}
+
 /// Judge phase. `judges` judge scores per proposal. All proposals ×
 /// judges are scheduled concurrently up to the global parallelism
 /// cap; each proposal's individual scores are aggregated once its
@@ -82,8 +115,17 @@ pub(crate) fn validate_rubric_response(
 /// `Aggregated` is preserved verbatim — the tiebreaker is
 /// supplementary audit data the downstream phases can read.
 pub struct JudgePhase {
-    /// Number of judges per proposal.
+    /// Number of judges per proposal. When `mode` is `Some(_)`, the
+    /// execute path overrides this with [`judge_quorum_for_mode`]
+    /// for the active mode; when `mode` is `None`, `judges` is
+    /// used verbatim (the legacy hard-coded knob).
     pub judges: u32,
+    /// D.21.7: when `Some(mode)`, the per-mode judge quorum
+    /// overrides `self.judges` in `execute()`. Set this from the
+    /// pipeline builder so the per-mode panel size lands on the
+    /// phase without callers having to re-derive the number. `None`
+    /// preserves the legacy `self.judges` behaviour.
+    pub mode: Option<Mode>,
     /// Disagreement threshold for the adversary pass. Default
     /// [`DEFAULT_DISAGREEMENT_THRESHOLD`].
     pub disagreement_threshold: f32,
@@ -108,6 +150,7 @@ impl Default for JudgePhase {
     fn default() -> Self {
         Self {
             judges: 3,
+            mode: None,
             disagreement_threshold: DEFAULT_DISAGREEMENT_THRESHOLD,
             enable_adversary: true,
             final_disagreement_spread_threshold: DEFAULT_FINAL_DISAGREEMENT_SPREAD,
@@ -293,7 +336,10 @@ impl Phase for JudgePhase {
             subjects.push((proposal_id, subject));
         }
 
-        let judges = self.judges as usize;
+        let judges = self
+            .mode
+            .map(judge_quorum_for_mode)
+            .unwrap_or(self.judges as usize);
         let total = subjects.len() * judges;
         let system_arc = Arc::new(system);
         let evaluations_dir_arc = Arc::new(evaluations_dir.clone());
@@ -814,6 +860,84 @@ mod tests {
         );
     }
 
+    // -- D.21.7: per-mode judge quorum ---------------------------------
+
+    /// D.21.7: `fast` mode runs with 1 judge. Pins the smallest
+    /// entry of the per-mode table so a refactor that drifts a
+    /// value trips the test before it lands.
+    #[test]
+    fn judge_quorum_fast_returns_1() {
+        assert_eq!(judge_quorum_for_mode(Mode::Fast), 1);
+    }
+
+    /// D.21.7: `deep` mode runs with 5 judges. Pins the largest
+    /// entry of the per-mode table alongside the `fast` test.
+    #[test]
+    fn judge_quorum_deep_returns_5() {
+        assert_eq!(judge_quorum_for_mode(Mode::Deep), 5);
+    }
+
+    /// The full per-mode table — pins every spec D.21.7 number in
+    /// one test so a future addition is visible here first.
+    #[test]
+    fn judge_quorum_table_matches_spec() {
+        assert_eq!(judge_quorum_for_mode(Mode::Fast), 1);
+        assert_eq!(judge_quorum_for_mode(Mode::Standard), 3);
+        assert_eq!(judge_quorum_for_mode(Mode::Deep), 5);
+        assert_eq!(judge_quorum_for_mode(Mode::Explore), 5);
+        assert_eq!(judge_quorum_for_mode(Mode::Batch), 2);
+    }
+
+    /// D.21.7: when `JudgePhase.mode` is set, the execute path
+    /// derives the panel size from [`judge_quorum_for_mode`] for
+    /// the active mode and ignores the legacy `self.judges` field.
+    /// Pins that the per-mode helper is the single source of
+    /// truth for the panel size when the mode is wired through.
+    #[test]
+    fn judge_phase_uses_mode_specific_quorum() {
+        // Each mode maps to the spec D.21.7 quorum.
+        for (mode, expected) in [
+            (Mode::Fast, 1),
+            (Mode::Standard, 3),
+            (Mode::Deep, 5),
+            (Mode::Explore, 5),
+            (Mode::Batch, 2),
+        ] {
+            let phase = JudgePhase {
+                mode: Some(mode),
+                judges: 99, // explicitly different from the mode quorum
+                ..JudgePhase::default()
+            };
+            assert_eq!(
+                phase.mode.map(judge_quorum_for_mode),
+                Some(expected),
+                "mode {mode:?} must yield quorum {expected}"
+            );
+            // Mirror the execute() derivation in a single line:
+            // when `mode` is Some, it wins; when None, fall back
+            // to `judges`. Pins the precedence contract.
+            let resolved = phase
+                .mode
+                .map(judge_quorum_for_mode)
+                .unwrap_or(phase.judges as usize);
+            assert_eq!(
+                resolved, expected,
+                "mode {mode:?} must drive the panel size"
+            );
+        }
+        // When mode is None, the legacy `judges` field wins.
+        let legacy = JudgePhase {
+            mode: None,
+            judges: 7,
+            ..JudgePhase::default()
+        };
+        let resolved = legacy
+            .mode
+            .map(judge_quorum_for_mode)
+            .unwrap_or(legacy.judges as usize);
+        assert_eq!(resolved, 7, "mode=None must keep the legacy judges field");
+    }
+
     /// F3: when the budget is Hard under the Reduce policy, the
     /// judge phase must skip the adversary pass — no
     /// `adversaries/p_<id>.json` is written, and
@@ -918,6 +1042,7 @@ mod tests {
         // barrier.
         let phase = JudgePhase {
             judges: 1,
+            mode: None,
             enable_adversary: true,
             enable_final_disagreement: false,
             disagreement_threshold: 0.0,

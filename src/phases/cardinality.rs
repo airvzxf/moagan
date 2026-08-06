@@ -3,8 +3,13 @@
 //! Cardinality tuning and selection-plan helpers for the linear and
 //! discovery pipelines. Three orthogonal surfaces:
 //!
-//! - [`Cardinality::for_mode`] returns the soft `Range<usize>` for
-//!   the mode (spec D.21.2 / D.21.1).
+//! - [`Cardinality::for_mode`] returns the `(soft, hard)`
+//!   [`Cardinality`] for the mode (spec D.21.2). Preferred for
+//!   callers that want the Cardinality struct directly.
+//! - [`Cardinality::range_for_mode`] returns the soft `Range<usize>`
+//!   for the mode (spec D.21.1). Used by
+//!   [`Cardinality::for_mode_default`] to derive the midpoint
+//!   (the soft target) and the upper bound (the hard ceiling).
 //! - [`Cardinality::for_mode_default`] returns the
 //!   (soft, hard) limits for budget enforcement (spec D.21.8).
 //! - [`SelectionPlan`] describes the post-rank selection strategy
@@ -15,7 +20,7 @@
 //! The mode-to-cardinality mapping is the single source of truth for
 //! both the linear pipeline (`Mode::Fast`/`Standard`/`Deep`/`Explore`/
 //! `Batch`) and the discovery sub-fase. Numbers are pinned to spec
-//! §D.21.1; tests fail loudly when a refactor drifts a value.
+//! §D.21.1 / §D.21.2; tests fail loudly when a refactor drifts a value.
 //!
 //! ## Selection strategies
 //!
@@ -52,10 +57,16 @@
 //! use moagan::cli::Mode;
 //! use moagan::phases::cardinality::{Cardinality, SelectionPlan, judge_quorum};
 //!
-//! // Cardinality table for the current mode.
-//! let c = Cardinality::for_mode_default(Mode::Deep);
-//! assert_eq!(c.soft, 17);
+//! // Cardinality table for the current mode (D.21.2 — soft/hard
+//! // Cardinality struct).
+//! let c = Cardinality::for_mode(Mode::Deep);
+//! assert_eq!(c.soft, 10);
 //! assert_eq!(c.hard, 25);
+//!
+//! // Default Cardinality (D.21.8 — midpoint of the range).
+//! let d = Cardinality::for_mode_default(Mode::Deep);
+//! assert_eq!(d.soft, 17);
+//! assert_eq!(d.hard, 25);
 //!
 //! // Quorum of judges required for the mode.
 //! assert_eq!(judge_quorum(Mode::Deep), 5);
@@ -106,7 +117,11 @@ impl Cardinality {
     }
 
     /// The soft `Range<usize>` for the mode. Pin to spec D.21.1.
-    pub fn for_mode(mode: Mode) -> Range<usize> {
+    /// Used by [`Self::for_mode_default`] to derive the midpoint
+    /// (the soft target) and the upper bound (the hard ceiling).
+    /// Callers that want the Cardinality struct directly should
+    /// prefer [`Self::for_mode`].
+    pub fn range_for_mode(mode: Mode) -> Range<usize> {
         match mode {
             Mode::Fast => 3..5,
             Mode::Standard => 5..10,
@@ -116,11 +131,28 @@ impl Cardinality {
         }
     }
 
+    /// The `(soft, hard)` cardinality for the mode. Spec D.21.2:
+    /// `soft` is the spec's soft target and `hard` is the spec's
+    /// upper bound; both are pinned so a refactor that drifts a
+    /// value trips a test before it lands. The numbers match the
+    /// endpoints of [`Self::range_for_mode`] for the same mode, so
+    /// `for_mode(mode).soft == range_for_mode(mode).start` and
+    /// `for_mode(mode).hard == range_for_mode(mode).end`.
+    pub fn for_mode(mode: Mode) -> Cardinality {
+        match mode {
+            Mode::Fast => Cardinality { soft: 3, hard: 5 },
+            Mode::Standard => Cardinality { soft: 5, hard: 10 },
+            Mode::Deep => Cardinality { soft: 10, hard: 25 },
+            Mode::Explore => Cardinality { soft: 15, hard: 40 },
+            Mode::Batch => Cardinality { soft: 8, hard: 15 },
+        }
+    }
+
     /// The default (soft, hard) cardinality for the mode. Pin to
-    /// spec D.21.1 (the midpoint of `for_mode` becomes the soft
-    /// target; the upper bound becomes the hard ceiling).
+    /// spec D.21.1 (the midpoint of `range_for_mode` becomes the
+    /// soft target; the upper bound becomes the hard ceiling).
     pub fn for_mode_default(mode: Mode) -> Self {
-        let range = Self::for_mode(mode);
+        let range = Self::range_for_mode(mode);
         let soft = (range.start + range.end) / 2;
         let hard = range.end;
         Self::new(soft, hard)
@@ -437,40 +469,40 @@ mod tests {
 
     /// Spec D.21.1: `fast` cardinality range is 3-5.
     #[test]
-    fn cardinality_for_mode_fast_returns_three_to_five() {
-        let r = Cardinality::for_mode(Mode::Fast);
+    fn cardinality_range_for_mode_fast_returns_three_to_five() {
+        let r = Cardinality::range_for_mode(Mode::Fast);
         assert_eq!(r.start, 3);
         assert_eq!(r.end, 5);
     }
 
     /// Spec D.21.1: `standard` cardinality range is 5-10.
     #[test]
-    fn cardinality_for_mode_standard_returns_five_to_ten() {
-        let r = Cardinality::for_mode(Mode::Standard);
+    fn cardinality_range_for_mode_standard_returns_five_to_ten() {
+        let r = Cardinality::range_for_mode(Mode::Standard);
         assert_eq!(r.start, 5);
         assert_eq!(r.end, 10);
     }
 
     /// Spec D.21.1: `deep` cardinality range is 10-25.
     #[test]
-    fn cardinality_for_mode_deep_returns_ten_to_twenty_five() {
-        let r = Cardinality::for_mode(Mode::Deep);
+    fn cardinality_range_for_mode_deep_returns_ten_to_twenty_five() {
+        let r = Cardinality::range_for_mode(Mode::Deep);
         assert_eq!(r.start, 10);
         assert_eq!(r.end, 25);
     }
 
     /// Spec D.21.1: `explore` cardinality range is 15-40.
     #[test]
-    fn cardinality_for_mode_explore_returns_fifteen_to_forty() {
-        let r = Cardinality::for_mode(Mode::Explore);
+    fn cardinality_range_for_mode_explore_returns_fifteen_to_forty() {
+        let r = Cardinality::range_for_mode(Mode::Explore);
         assert_eq!(r.start, 15);
         assert_eq!(r.end, 40);
     }
 
     /// Spec D.21.1: `batch` cardinality range is 8-15.
     #[test]
-    fn cardinality_for_mode_batch_returns_eight_to_fifteen() {
-        let r = Cardinality::for_mode(Mode::Batch);
+    fn cardinality_range_for_mode_batch_returns_eight_to_fifteen() {
+        let r = Cardinality::range_for_mode(Mode::Batch);
         assert_eq!(r.start, 8);
         assert_eq!(r.end, 15);
     }
@@ -534,6 +566,37 @@ mod tests {
             msg.contains("6") && msg.contains("5"),
             "error must name the actual and the ceiling; got {msg}"
         );
+    }
+
+    // -- Spec D.21.2: Cardinality::for_mode(mode) -> Cardinality -------
+
+    /// Spec D.21.2: `fast` cardinality is `(soft: 3, hard: 5)`.
+    /// Pinned to the spec; a refactor that drifts a number trips
+    /// this test before it lands.
+    #[test]
+    fn cardinality_for_mode_fast_returns_3_5() {
+        let c = Cardinality::for_mode(Mode::Fast);
+        assert_eq!(c.soft, 3, "spec D.21.2: fast soft target");
+        assert_eq!(c.hard, 5, "spec D.21.2: fast hard ceiling");
+    }
+
+    /// Spec D.21.2: `deep` cardinality is `(soft: 10, hard: 25)`.
+    /// Pins the deepest spec entry; a drift here would balloon the
+    /// deep pipeline's LLM cost.
+    #[test]
+    fn cardinality_for_mode_deep_returns_10_25() {
+        let c = Cardinality::for_mode(Mode::Deep);
+        assert_eq!(c.soft, 10, "spec D.21.2: deep soft target");
+        assert_eq!(c.hard, 25, "spec D.21.2: deep hard ceiling");
+    }
+
+    /// Spec D.21.2: `explore` cardinality is `(soft: 15, hard: 40)`.
+    /// Pins the explore spec entry; explore fans out the widest.
+    #[test]
+    fn cardinality_for_mode_explore_returns_15_40() {
+        let c = Cardinality::for_mode(Mode::Explore);
+        assert_eq!(c.soft, 15, "spec D.21.2: explore soft target");
+        assert_eq!(c.hard, 40, "spec D.21.2: explore hard ceiling");
     }
 
     /// `keep_top` returns the top-N ids by score, descending.
