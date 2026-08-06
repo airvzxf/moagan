@@ -26,6 +26,7 @@ pub mod rate_limiter;
 pub mod response_format_opt_out;
 pub mod retry_budget;
 pub mod role;
+pub mod sse_parser;
 pub mod streaming;
 pub mod wire;
 pub mod wire_format;
