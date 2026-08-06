@@ -29,6 +29,7 @@ pub mod phase;
 pub mod pipe;
 pub mod propose;
 pub mod rank;
+pub mod refine;
 pub mod repair;
 pub mod replace;
 pub mod route;
@@ -59,6 +60,10 @@ pub use phase::{Phase, PhaseOutput, RunContext};
 pub use pipe::Pipeline;
 pub use propose::ProposePhase;
 pub use rank::RankPhase;
+pub use refine::{
+    DROPPED_SENTINEL, NOOP_REASON_MERGE, NOOP_REASON_SPLIT, RefineContext, RefineDispatchPlan,
+    dispatch_refine_action,
+};
 pub use repair::RepairPhase;
 pub use route::RoutePhase;
 pub use sketch_phase::SketchPhase;

@@ -1,4 +1,4 @@
-//! D.22.1: five adversary patterns extending the single-pattern
+//! D.22.1: seven adversary patterns extending the single-pattern
 //! dispatch in the judge phase. Each pattern maps a metric to a
 //! boolean verdict and a free-form detail string. The judge phase
 //! runs [`run_all_patterns`] over a (re-)scored proposal and
@@ -7,23 +7,24 @@
 //!
 //! Spec contract:
 //!
-//! - [`AdversaryPattern::all_five`] returns the canonical five
+//! - [`AdversaryPattern::all_seven`] returns the canonical seven
 //!   patterns in stable order so callers can iterate deterministically.
 //! - [`run_all_patterns`] is a pure function: no I/O, no LLM, no DB.
 //!   It takes the per-judge scores, the evidence count, and a
 //!   concatenated provenance/justification string and returns a
 //!   `Vec<PatternVerdict>` with one entry per pattern. Patterns
-//!   that need richer context (`ProvenanceMismatch`) are emitted
-//!   with `fired = false` and a `detail` payload the caller can
-//!   inspect; the caller is responsible for the actual provenance
-//!   comparison.
+//!   that need richer context (`ProvenanceMismatch`,
+//!   `ProvenanceDrift`, `AudienceMismatch`) are emitted with
+//!   `fired = false` and a `detail` payload the caller can inspect;
+//!   the caller is responsible for the actual comparison against
+//!   the brief context.
 //!
 //! Thresholds (spread > 1.0, stddev > 0.5, evidence < 2) are
 //! intentional defaults chosen so a single mock judge never trips
 //! any of them and a five-judge panel with strong disagreement
 //! trips at least one. Tests pin these defaults.
 
-/// One of the five adversary patterns the judge phase evaluates
+/// One of the seven adversary patterns the judge phase evaluates
 /// per proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AdversaryPattern {
@@ -48,19 +49,33 @@ pub enum AdversaryPattern {
     /// provenance string. Catches refusals and self-references
     /// smuggled into a justification.
     HallucinationSignature,
+    /// Provenance drift: the proposal claims sources / citations
+    /// that are not present in the brief context. The dispatcher
+    /// records the candidate drift span; the caller compares the
+    /// span against the brief's source list and sets `fired`.
+    ProvenanceDrift,
+    /// Audience mismatch: the proposal's tone, scope, or
+    /// vocabulary does not fit the audience cue the brief
+    /// establishes (e.g. a beginner audience receiving a
+    /// kernel-internals deep-dive). The dispatcher records the
+    /// detected tone token; the caller classifies against the
+    /// brief's audience cue and sets `fired`.
+    AudienceMismatch,
 }
 
 impl AdversaryPattern {
-    /// Canonical five-pattern array. Returned in stable order so
+    /// Canonical seven-pattern array. Returned in stable order so
     /// callers can iterate deterministically and the unit tests
     /// can pin the count.
-    pub fn all_five() -> [Self; 5] {
+    pub fn all_seven() -> [Self; 7] {
         [
             Self::ScoreSpread,
             Self::StdDeviation,
             Self::InsufficientEvidence,
             Self::ProvenanceMismatch,
             Self::HallucinationSignature,
+            Self::ProvenanceDrift,
+            Self::AudienceMismatch,
         ]
     }
 }
@@ -80,7 +95,7 @@ pub struct PatternVerdict {
     pub detail: String,
 }
 
-/// Run every pattern in [`AdversaryPattern::all_five`] against the
+/// Run every pattern in [`AdversaryPattern::all_seven`] against the
 /// supplied inputs. Pure function: no I/O, no LLM, no DB.
 ///
 /// - `scores` is the per-judge overall score slice; the function
@@ -92,18 +107,19 @@ pub struct PatternVerdict {
 /// - `provenance` is a free-form string the caller concatenates
 ///   from the per-judge justification blocks; the
 ///   `HallucinationSignature` pattern scans it for known
-///   LLM-meta phrases, and the `ProvenanceMismatch` pattern
-///   records the payload verbatim so the caller can compare
-///   hashes against `fired = false` (the per-judge hash
-///   comparison is the caller's responsibility because the
-///   function is single-string-only by design).
+///   LLM-meta phrases, and the `ProvenanceMismatch`,
+///   `ProvenanceDrift`, and `AudienceMismatch` patterns record
+///   the payload verbatim so the caller can compare against the
+///   brief context (the per-judge comparison is the caller's
+///   responsibility because the function is single-string-only by
+///   design).
 pub fn run_all_patterns(
     scores: &[f64],
     evidence_count: usize,
     provenance: &str,
 ) -> Vec<PatternVerdict> {
     if scores.is_empty() {
-        return AdversaryPattern::all_five()
+        return AdversaryPattern::all_seven()
             .into_iter()
             .map(|pattern| PatternVerdict {
                 pattern,
@@ -157,20 +173,45 @@ pub fn run_all_patterns(
             fired: hallucination_match.is_some(),
             detail: format!("matched={}", hallucination_match.unwrap_or("none")),
         },
+        PatternVerdict {
+            pattern: AdversaryPattern::ProvenanceDrift,
+            // The brief-context comparison is the caller's job;
+            // the function records the candidate drift span so
+            // the caller can decide. Marker token "<claim:">
+            // surfaces the unverified references the LLM
+            // inserted without sourcing them; absence means no
+            // drift signal in the payload.
+            fired: provenance_lc.contains("<claim:") && !provenance_lc.contains("brief:source:"),
+            detail: format!("drift_span={}", provenance),
+        },
+        PatternVerdict {
+            pattern: AdversaryPattern::AudienceMismatch,
+            // The brief-context comparison is the caller's job;
+            // the function detects a coarse tone signal
+            // (technical jargon paired with no beginner cue)
+            // and lets the caller confirm against the brief's
+            // audience cue.
+            fired: AUDIENCE_JARGON.iter().any(|t| provenance_lc.contains(t))
+                && !provenance_lc.contains("for beginners")
+                && !provenance_lc.contains("introductory"),
+            detail: format!("tone_signal={}", provenance),
+        },
     ]
 }
+
+const AUDIENCE_JARGON: &[&str] = &["page tables", "tlb shootdown", "ring -1", "vfs layer"];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `all_five` returns exactly the five canonical variants in a
-    /// stable order. Pins the count so a future refactor that adds
-    /// a sixth pattern trips the test before it lands.
+    /// `all_seven` returns exactly the seven canonical variants in
+    /// a stable order. Pins the count so a future refactor that
+    /// adds an eighth pattern trips the test before it lands.
     #[test]
-    fn adversary_patterns_all_five_returns_five() {
-        let patterns = AdversaryPattern::all_five();
-        assert_eq!(patterns.len(), 5);
+    fn adversary_patterns_all_seven_returns_seven() {
+        let patterns = AdversaryPattern::all_seven();
+        assert_eq!(patterns.len(), 7);
         assert_eq!(
             patterns,
             [
@@ -179,6 +220,8 @@ mod tests {
                 AdversaryPattern::InsufficientEvidence,
                 AdversaryPattern::ProvenanceMismatch,
                 AdversaryPattern::HallucinationSignature,
+                AdversaryPattern::ProvenanceDrift,
+                AdversaryPattern::AudienceMismatch,
             ]
         );
     }
@@ -243,13 +286,89 @@ mod tests {
         assert!(prov.detail.contains("reviewer-a"));
     }
 
+    /// `ProvenanceDrift` fires when the provenance string contains
+    /// a `<claim:>` marker (an unsourced reference the LLM
+    /// inserted) and no `brief:source:` anchor (a citation the
+    /// brief actually supplies). The marker-based heuristic lets
+    /// the helper surface drift without needing access to the
+    /// brief itself; the caller still confirms against the brief
+    /// context.
+    #[test]
+    fn run_all_seven_patterns_fires_provenance_drift() {
+        let verdicts = run_all_patterns(
+            &[0.5, 0.6],
+            3,
+            "The proposal cites <claim:kernel-2003> without grounding it.",
+        );
+        let drift = verdicts
+            .iter()
+            .find(|v| v.pattern == AdversaryPattern::ProvenanceDrift)
+            .expect("ProvenanceDrift verdict must be present");
+        assert!(
+            drift.fired,
+            "drift should fire on <claim:> without brief:source: anchor, detail={}",
+            drift.detail
+        );
+
+        // Anchored claims (brief:source: token present) do not
+        // fire — the caller is still in charge of the real check,
+        // but the helper stays conservative on anchored payloads.
+        let verdicts_anchored = run_all_patterns(
+            &[0.5, 0.6],
+            3,
+            "brief:source:kernel-2003 <claim:kernel-2003>",
+        );
+        let drift_anchored = verdicts_anchored
+            .iter()
+            .find(|v| v.pattern == AdversaryPattern::ProvenanceDrift)
+            .expect("ProvenanceDrift verdict must be present");
+        assert!(!drift_anchored.fired);
+    }
+
+    /// `AudienceMismatch` fires when the provenance string is
+    /// dense in jargon and contains no beginner cue. Pins the
+    /// "kernel-internals prose + no `for beginners` / `introductory`
+    /// marker" heuristic the helper uses as a coarse tone
+    /// signal.
+    #[test]
+    fn run_all_seven_patterns_fires_audience_mismatch() {
+        let verdicts = run_all_patterns(
+            &[0.5, 0.6],
+            3,
+            "Walks through page tables and TLB shootdown mechanics in detail.",
+        );
+        let aud = verdicts
+            .iter()
+            .find(|v| v.pattern == AdversaryPattern::AudienceMismatch)
+            .expect("AudienceMismatch verdict must be present");
+        assert!(
+            aud.fired,
+            "audience mismatch should fire on jargon without a beginner cue, detail={}",
+            aud.detail
+        );
+
+        // Same jargon with a beginner cue does NOT fire — the
+        // caller still confirms, but the helper stays conservative
+        // on beginner-tagged payloads.
+        let verdicts_beginner = run_all_patterns(
+            &[0.5, 0.6],
+            3,
+            "Introductory walk-through of page tables and TLB shootdown for beginners.",
+        );
+        let aud_b = verdicts_beginner
+            .iter()
+            .find(|v| v.pattern == AdversaryPattern::AudienceMismatch)
+            .expect("AudienceMismatch verdict must be present");
+        assert!(!aud_b.fired);
+    }
+
     /// Empty scores slice is a no-op: every pattern returns
     /// `fired = false` and `detail = "no_scores"`. Pins the
-    /// zero-input contract.
+    /// zero-input contract for all seven patterns.
     #[test]
     fn run_all_patterns_empty_scores_returns_no_fire() {
         let verdicts = run_all_patterns(&[], 0, "");
-        assert_eq!(verdicts.len(), 5);
+        assert_eq!(verdicts.len(), 7);
         for v in &verdicts {
             assert!(!v.fired, "{:?} should not fire on empty input", v.pattern);
         }
