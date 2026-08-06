@@ -352,9 +352,33 @@ impl Phase for JudgePhase {
         // because the disagreement score depends on the aggregated
         // scores. Skipped entirely in `fast` mode (`enable_adversary
         // = false`) and when the threshold is non-positive.
+        //
+        // F3: budget gate. The adversary is the most expensive
+        // pass in the judge phase — one LLM call per proposal
+        // that exceeded the disagreement threshold. When the
+        // budget observer reports Hard pressure + Reduce
+        // policy, skip the pass entirely so the remaining
+        // budget is reserved for the core pipeline.
+        let budget_skip_adversary = ctx
+            .telemetry
+            .db()
+            .map(|db| {
+                crate::phases::budget::BudgetObserver::new(db.clone(), ctx.run_id)
+                    .should_skip_optional()
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if budget_skip_adversary {
+            tracing::info!(
+                run_id = %ctx.run_id,
+                stage = "judge.adversary.skipped",
+                reason = "budget_hard",
+                "adversary pass skipped: budget under Hard pressure"
+            );
+        }
         let mut adversary_paths: Vec<PathBuf> = Vec::new();
         let mut deltas: BTreeMap<String, f32> = BTreeMap::new();
-        if self.enable_adversary && self.disagreement_threshold > 0.0 {
+        if self.enable_adversary && self.disagreement_threshold > 0.0 && !budget_skip_adversary {
             let adv_system = system_prompt(Role::Adversary).to_owned();
             let adv_system_arc = Arc::new(adv_system);
             let adversaries_dir_arc = Arc::new(adversaries_dir.clone());
@@ -759,5 +783,145 @@ mod tests {
             (phase.final_disagreement_stddev_threshold - DEFAULT_FINAL_DISAGREEMENT_STDDEV).abs()
                 < 1e-6
         );
+    }
+
+    /// F3: when the budget is Hard under the Reduce policy, the
+    /// judge phase must skip the adversary pass — no
+    /// `adversaries/p_<id>.json` is written, and
+    /// `Aggregated.adversary_delta` stays at 0.0.
+    ///
+    /// The mock provider returns the same `AdversaryReport`
+    /// regardless of input, so any adversary call would normally
+    /// succeed and write a sidecar. The gate is the only thing
+    /// that can stop that. We stage a single proposal with a
+    /// unanimous panel (disagreement = 0) so the adversary
+    /// short-circuit on `disagreement_score < threshold` would
+    /// *also* prevent the call — to pin the F3 gate, we lower
+    /// the threshold to 0.0 so the disagreement check passes
+    /// and the gate is the only thing that can stop the call.
+    #[test]
+    fn adversary_phase_skipped_under_hard_budget() -> Result<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve()?);
+        home.ensure()?;
+        let run_id = crate::ids::RunId::new();
+
+        // Real Db + hard budget.
+        let db = crate::storage::sqlite::Db::open(&home.meta_db_path())?;
+        db.register_run(run_id, "fast", "running", "0.4.0", None, None, None)?;
+        db.set_budget(run_id, 1000)?;
+        db.budget_record(run_id, "seed", 950)?;
+
+        // One proposal so the panel can run. The proposal text
+        // is irrelevant — the mock provider always returns a
+        // valid JudgeScore.
+        let proposal_path = home.run_dir(run_id).proposals().join("p_a.json");
+        std::fs::create_dir_all(proposal_path.parent().unwrap())?;
+        crate::phases::util::write_json(
+            &proposal_path,
+            &crate::domain::Proposal {
+                id: "p_a".into(),
+                summary: "alpha".into(),
+                approach: "approach body".into(),
+                ..Default::default()
+            },
+        )?;
+
+        // Register the mock provider in the registry so the
+        // judge phase's `call_with_retry_parse` resolves it.
+        // We push exactly one JudgeScore response — the
+        // panel call consumes it, and the budget gate must
+        // fire before the adversary call, so the mock's queue
+        // is never drained twice. Without the gate, the
+        // adversary call would land in `adversaries/p_a.json`
+        // and the test would fail the assertion below.
+        let mut mock = crate::llm::mock::MockProvider::empty();
+        let judge_response = crate::llm::mock::MockResponse::plain(
+            serde_json::json!({
+                "score": 7.5_f32,
+                "criteria": {
+                    "correctness": 7.5,
+                    "completeness": 7.5,
+                    "fit": 7.5,
+                    "evidence": 7.5,
+                    "clarity": 7.5
+                },
+                "comments": "panel ok"
+            })
+            .to_string(),
+        );
+        mock.push(judge_response);
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), std::sync::Arc::new(mock));
+
+        let run_dir = home.run_dir(run_id);
+        let telemetry = crate::telemetry::Telemetry::open(
+            run_id,
+            &run_dir,
+            crate::redact::RedactPolicy::default(),
+            Some(db.clone()),
+        )?;
+
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            std::sync::Arc::new(registry),
+            "mock".into(),
+            "mock-model".into(),
+            crate::execution::Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".into(),
+        )
+        .with_interactive(false);
+
+        // disagreement_threshold = 0.0 so the disagreement
+        // short-circuit never fires; the gate is the only
+        // barrier.
+        let phase = JudgePhase {
+            judges: 1,
+            enable_adversary: true,
+            enable_final_disagreement: false,
+            disagreement_threshold: 0.0,
+            final_disagreement_spread_threshold: 0.0,
+            final_disagreement_stddev_threshold: 0.0,
+        };
+        pollster::block_on(phase.execute(&ctx))?;
+
+        // The adversary dir must be empty: the gate fired
+        // before the per-proposal adversary call.
+        let adv_dir = home.run_dir(run_id).adversaries();
+        let written: Vec<_> = std::fs::read_dir(&adv_dir)?
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let adv_files: Vec<_> = written
+            .iter()
+            .filter(|n| n.starts_with("p_") && n.ends_with(".json") && !n.ends_with(".meta.json"))
+            .collect();
+        assert!(
+            adv_files.is_empty(),
+            "no adversary sidecar must be written under hard budget; got {adv_files:?}"
+        );
+
+        // And the evaluation must carry adversary_delta = 0.0
+        // because the pass was skipped.
+        let eval_path = home.run_dir(run_id).evaluations().join("p_a.json");
+        let agg: crate::phases::judge::Aggregated =
+            serde_json::from_slice(&std::fs::read(&eval_path)?)?;
+        assert_eq!(
+            agg.adversary_delta, 0.0,
+            "adversary_delta must stay 0.0 when the gate skipped the pass; got {agg:?}"
+        );
+        Ok(())
     }
 }

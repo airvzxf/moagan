@@ -265,87 +265,111 @@ impl Phase for RankPhase {
         //   mirrored Config::stability.enabled into this flag).
         // - fewer than 2 evaluations (trivially stable, score = 1.0).
         // - Config::stability.n_perturbations == 0.
-        let (stability_score_map, stability_label, stability_sigma) =
-            if !self.stability_enabled || self.config.stability.n_perturbations == 0 {
-                // No-op: write nothing useful. The fields stay None
-                // on the sidecar so legacy parsers see no change.
-                (None, None, None)
-            } else {
-                let snapshots: Vec<(String, EvalSnapshot)> = items
-                    .iter()
-                    .map(|(id, agg, _)| {
-                        (
-                            id.clone(),
-                            EvalSnapshot {
-                                correctness: agg.correctness,
-                                completeness: agg.completeness,
-                                fit: agg.fit,
-                                evidence: agg.evidence,
-                                clarity: agg.clarity,
-                                overall: agg.score,
-                            },
-                        )
-                    })
-                    .collect();
-                if snapshots.len() < 2 {
-                    // Single proposal: trivially stable.
-                    let mut m = std::collections::HashMap::new();
-                    m.insert(snapshots[0].0.clone(), 1.0_f32);
+        // - BudgetObserver reports Hard pressure under the Reduce
+        //   policy (F3). The check is no-op when the run is
+        //   configured without a budget (`planned = 0`) so legacy
+        //   fast-mode users do not silently lose the stability
+        //   verdict.
+        let budget_skip_stability = ctx
+            .telemetry
+            .db()
+            .map(|db| {
+                crate::phases::budget::BudgetObserver::new(db.clone(), ctx.run_id)
+                    .should_skip_optional()
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if budget_skip_stability {
+            tracing::info!(
+                run_id = %ctx.run_id,
+                stage = "rank.stability.skipped",
+                reason = "budget_hard",
+                "rank stability skipped: budget under Hard pressure"
+            );
+        }
+        let (stability_score_map, stability_label, stability_sigma) = if !self.stability_enabled
+            || self.config.stability.n_perturbations == 0
+            || budget_skip_stability
+        {
+            // No-op: write nothing useful. The fields stay None
+            // on the sidecar so legacy parsers see no change.
+            (None, None, None)
+        } else {
+            let snapshots: Vec<(String, EvalSnapshot)> = items
+                .iter()
+                .map(|(id, agg, _)| {
                     (
-                        Some(m),
-                        Some(StabilityLabel::Stable),
-                        Some(self.config.stability.sigma_default),
+                        id.clone(),
+                        EvalSnapshot {
+                            correctness: agg.correctness,
+                            completeness: agg.completeness,
+                            fit: agg.fit,
+                            evidence: agg.evidence,
+                            clarity: agg.clarity,
+                            overall: agg.score,
+                        },
                     )
+                })
+                .collect();
+            if snapshots.len() < 2 {
+                // Single proposal: trivially stable.
+                let mut m = std::collections::HashMap::new();
+                m.insert(snapshots[0].0.clone(), 1.0_f32);
+                (
+                    Some(m),
+                    Some(StabilityLabel::Stable),
+                    Some(self.config.stability.sigma_default),
+                )
+            } else {
+                let sigma = if ctx.interactive {
+                    self.config.stability.sigma_interactive
                 } else {
-                    let sigma = if ctx.interactive {
-                        self.config.stability.sigma_interactive
-                    } else {
-                        self.config.stability.sigma_default
+                    self.config.stability.sigma_default
+                };
+                let (score, label, _sigma_used) = stability_check(
+                    &self.config.ranking_weights,
+                    &snapshots,
+                    self.config.stability.n_perturbations,
+                    sigma,
+                    self.config.stability.seed,
+                    self.config.stability.sensitive_threshold,
+                );
+                let sigma_used = if ctx.interactive {
+                    self.config.stability.sigma_interactive
+                } else {
+                    self.config.stability.sigma_default
+                };
+                // W2: mirror the verdict into SQLite via the
+                // `runs` row (v009). Best-effort: a pre-v009
+                // DB returns Ok(()) silently and the sidecar
+                // path stays as the canonical source.
+                if let Some(db) = ctx.telemetry.db() {
+                    let label_str = match label {
+                        crate::domain::StabilityLabel::Stable => "stable",
+                        crate::domain::StabilityLabel::Sensitive => "sensitive",
                     };
-                    let (score, label, _sigma_used) = stability_check(
-                        &self.config.ranking_weights,
-                        &snapshots,
-                        self.config.stability.n_perturbations,
-                        sigma,
-                        self.config.stability.seed,
-                        self.config.stability.sensitive_threshold,
-                    );
-                    let sigma_used = if ctx.interactive {
-                        self.config.stability.sigma_interactive
-                    } else {
-                        self.config.stability.sigma_default
-                    };
-                    // W2: mirror the verdict into SQLite via the
-                    // `runs` row (v009). Best-effort: a pre-v009
-                    // DB returns Ok(()) silently and the sidecar
-                    // path stays as the canonical source.
-                    if let Some(db) = ctx.telemetry.db() {
-                        let label_str = match label {
-                            crate::domain::StabilityLabel::Stable => "stable",
-                            crate::domain::StabilityLabel::Sensitive => "sensitive",
-                        };
-                        // `score` is the per-proposal stability HashMap.
-                        // Persist the top-1 score (the winner's) so the
-                        // dashboard's "stability per run" view shows
-                        // the same number the operator sees in the
-                        // sensitive-checkpoint question.
-                        let top_score = score.values().copied().reduce(f32::max).unwrap_or(0.0);
-                        if let Err(e) =
-                            db.record_run_stability(ctx.run_id, top_score, label_str, sigma_used)
-                        {
-                            tracing::warn!(error = %e, "stability mirror to runs failed");
-                        }
+                    // `score` is the per-proposal stability HashMap.
+                    // Persist the top-1 score (the winner's) so the
+                    // dashboard's "stability per run" view shows
+                    // the same number the operator sees in the
+                    // sensitive-checkpoint question.
+                    let top_score = score.values().copied().reduce(f32::max).unwrap_or(0.0);
+                    if let Err(e) =
+                        db.record_run_stability(ctx.run_id, top_score, label_str, sigma_used)
+                    {
+                        tracing::warn!(error = %e, "stability mirror to runs failed");
                     }
-                    tracing::info!(
-                        run_id = %ctx.run_id,
-                        sigma = sigma_used,
-                        n = self.config.stability.n_perturbations,
-                        label = ?label,
-                        "rank stability computed"
-                    );
-                    (Some(score), Some(label), Some(sigma_used))
                 }
-            };
+                tracing::info!(
+                    run_id = %ctx.run_id,
+                    sigma = sigma_used,
+                    n = self.config.stability.n_perturbations,
+                    label = ?label,
+                    "rank stability computed"
+                );
+                (Some(score), Some(label), Some(sigma_used))
+            }
+        };
 
         let ranking = Ranking {
             ranked,
@@ -590,6 +614,8 @@ mod tests {
     use crate::phases::phase::{Phase, RunContext};
     use crate::phases::rank::RankPhase;
     use crate::phases::util::write_json;
+    use crate::redact::RedactPolicy;
+    use crate::storage::sqlite::Db;
     use crate::telemetry::Telemetry;
 
     #[test]
@@ -910,6 +936,267 @@ mod tests {
         assert!(
             prepended.ends_with("rank-phase-base-prompt"),
             "base prompt must remain at the tail; got:\n{prepended}"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // F3: budget gate. The rank phase consults the
+    // `BudgetObserver` before running the stability check; under
+    // Hard pressure + Reduce policy the check is skipped, the
+    // ranking sidecar keeps `stability_label = None`, and the
+    // operator never sees a sensitive-checkpoint prompt that the
+    // budget does not have room to honour.
+    //
+    // The tests below open a real Db-backed `Telemetry` (the
+    // budget observer only fires when `ctx.telemetry.db()` is
+    // `Some`); the noop path is covered by the existing
+    // `rank_phase_uses_selection_plan_to_filter` test which
+    // proves the no-Db path is a clean no-op.
+    // -----------------------------------------------------------------
+
+    /// F3: when the run is staged with `planned = 1000` and
+    /// `used = 950`, the rank phase's stability check is
+    /// skipped — the resulting `ranking.json` has
+    /// `stability_label = None` and the dashboard's
+    /// "stability per run" view stays empty.
+    #[test]
+    fn rank_phase_skips_stability_under_hard_budget() -> Result<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = Arc::new(MoaganHome::resolve().unwrap());
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+
+        // Open a real Db and stage the budget. The v011
+        // migration is applied on the first open; the
+        // budget_state row is keyed on the run.
+        let db = Db::open(&home.meta_db_path())?;
+        db.register_run(run_id, "fast", "running", "0.4.0", None, None, None)?;
+        db.set_budget(run_id, 1000)?;
+        // 95% usage -> Hard pressure with the default 90%
+        // threshold. `seed` is the audit phase tag; the
+        // observer does not read it.
+        db.budget_record(run_id, "seed", 950)?;
+
+        // Two proposals so the stability check would normally
+        // run (the single-proposal short-circuit is also fine,
+        // but a multi-proposal run exercises the
+        // `snapshots.len() < 2` branch is not the gate we're
+        // testing here).
+        for (id, score) in [("p_a", 8.0_f32), ("p_b", 7.0_f32)] {
+            let proposal_path = home.run_dir(run_id).proposals().join(format!("{id}.json"));
+            std::fs::create_dir_all(proposal_path.parent().unwrap()).unwrap();
+            write_json(
+                &proposal_path,
+                &Proposal {
+                    id: id.into(),
+                    summary: id.into(),
+                    ..Proposal::default()
+                },
+            )
+            .unwrap();
+            let agg_path = home
+                .run_dir(run_id)
+                .evaluations()
+                .join(format!("{id}.json"));
+            std::fs::create_dir_all(agg_path.parent().unwrap()).unwrap();
+            write_json(
+                &agg_path,
+                &Aggregated {
+                    score,
+                    correctness: score,
+                    completeness: score,
+                    fit: score,
+                    evidence: score,
+                    clarity: score,
+                    judges: 3,
+                    adversary_delta: 0.0,
+                },
+            )
+            .unwrap();
+        }
+
+        // Open a Db-backed Telemetry so `ctx.telemetry.db()` is
+        // `Some` and the budget gate activates. The on-disk
+        // jsonl files go under `<MOAGAN_HOME>/.runs/<id>/telemetry/`.
+        let run_dir = home.run_dir(run_id);
+        let telemetry =
+            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))?;
+
+        // Stability enabled and a non-zero n_perturbations so
+        // the gate is the only thing that can stop the check.
+        let cfg = Arc::new(Config {
+            ranking_weights: RankingWeights::default(),
+            stability: StabilityConfig {
+                enabled: true,
+                n_perturbations: 4,
+                ..StabilityConfig::default()
+            },
+            ..Config::default()
+        });
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            Arc::new(ProviderRegistry::default()),
+            "mock".into(),
+            "mock-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".into(),
+        )
+        .with_interactive(false);
+
+        let phase = RankPhase {
+            config: cfg,
+            replace_sources_enabled: false,
+            stability_enabled: true,
+        };
+        pollster::block_on(phase.execute(&ctx))?;
+
+        // Read the ranking sidecar and assert the stability
+        // fields stayed None — the gate worked, the
+        // perturbation loop never ran.
+        let path = home.run_dir(run_id).rankings().join("ranking.json");
+        let raw = std::fs::read(&path).unwrap();
+        let ranking: Ranking = serde_json::from_slice(&raw).unwrap();
+        assert!(
+            ranking.stability_label.is_none(),
+            "stability_label must be None when budget is Hard; got {:?}",
+            ranking.stability_label
+        );
+        assert!(
+            ranking.stability_score.is_none(),
+            "stability_score must be None when budget is Hard; got {:?}",
+            ranking.stability_score
+        );
+        // The run-level mirror must NOT have been written
+        // either: the gate happens before the SQLite mirror.
+        // The row exists (it was created by `register_run`),
+        // but every stability column must stay NULL.
+        let row = db.get_run_stability(run_id)?;
+        let row = row.expect("runs row must exist (register_run was called)");
+        assert!(
+            row.score.is_none() && row.label.is_none() && row.sigma.is_none(),
+            "runs.stability_* columns must all stay NULL when the gate skipped the check; got {row:?}"
+        );
+        Ok(())
+    }
+
+    /// F3: when the run is staged with `planned = 1000` and
+    /// `used = 100` (Ok pressure), the stability check runs
+    /// normally and the sidecar carries a real verdict. This
+    /// pins the negative case: the gate must not fire when the
+    /// budget is comfortable.
+    #[test]
+    fn rank_phase_does_not_skip_under_ok_budget() -> Result<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = Arc::new(MoaganHome::resolve().unwrap());
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+
+        let db = Db::open(&home.meta_db_path())?;
+        db.register_run(run_id, "fast", "running", "0.4.0", None, None, None)?;
+        db.set_budget(run_id, 1000)?;
+        // 10% usage -> Ok pressure with the default 50% soft
+        // threshold. The stability check must run.
+        db.budget_record(run_id, "seed", 100)?;
+
+        for (id, score) in [("p_a", 8.0_f32), ("p_b", 7.0_f32)] {
+            let proposal_path = home.run_dir(run_id).proposals().join(format!("{id}.json"));
+            std::fs::create_dir_all(proposal_path.parent().unwrap()).unwrap();
+            write_json(
+                &proposal_path,
+                &Proposal {
+                    id: id.into(),
+                    summary: id.into(),
+                    ..Proposal::default()
+                },
+            )
+            .unwrap();
+            let agg_path = home
+                .run_dir(run_id)
+                .evaluations()
+                .join(format!("{id}.json"));
+            std::fs::create_dir_all(agg_path.parent().unwrap()).unwrap();
+            write_json(
+                &agg_path,
+                &Aggregated {
+                    score,
+                    correctness: score,
+                    completeness: score,
+                    fit: score,
+                    evidence: score,
+                    clarity: score,
+                    judges: 3,
+                    adversary_delta: 0.0,
+                },
+            )
+            .unwrap();
+        }
+
+        let run_dir = home.run_dir(run_id);
+        let telemetry =
+            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))?;
+
+        let cfg = Arc::new(Config {
+            ranking_weights: RankingWeights::default(),
+            stability: StabilityConfig {
+                enabled: true,
+                n_perturbations: 4,
+                ..StabilityConfig::default()
+            },
+            ..Config::default()
+        });
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            Arc::new(ProviderRegistry::default()),
+            "mock".into(),
+            "mock-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".into(),
+        )
+        .with_interactive(false);
+
+        let phase = RankPhase {
+            config: cfg,
+            replace_sources_enabled: false,
+            stability_enabled: true,
+        };
+        pollster::block_on(phase.execute(&ctx))?;
+
+        let path = home.run_dir(run_id).rankings().join("ranking.json");
+        let raw = std::fs::read(&path).unwrap();
+        let ranking: Ranking = serde_json::from_slice(&raw).unwrap();
+        // Stability ran: the label must be Some (the
+        // perturbation loop deterministically labels two
+        // proposals either Stable or Sensitive depending on
+        // the seed; either is fine here — the negative case
+        // pins "the gate did not fire").
+        assert!(
+            ranking.stability_label.is_some(),
+            "stability_label must be populated when budget is Ok; got None"
         );
         Ok(())
     }

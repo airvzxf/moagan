@@ -349,6 +349,34 @@ impl Phase for SynthesizePhase {
         std::fs::create_dir_all(&dir)?;
         let dir = std::sync::Arc::new(dir);
 
+        // F3: budget gate. The synthesis merge is an LLM call
+        // per cluster — the most expensive optional work in the
+        // pipeline. When the budget observer reports Hard
+        // pressure + Reduce policy, skip the merge entirely so
+        // the remaining budget is reserved for the core
+        // pipeline. The empty-eligible fast-path below already
+        // covers runs that have nothing to merge; this gate
+        // covers runs that *do* have clusters but cannot afford
+        // to synthesise them.
+        let budget_skip_synthesis = ctx
+            .telemetry
+            .db()
+            .map(|db| {
+                crate::phases::budget::BudgetObserver::new(db.clone(), ctx.run_id)
+                    .should_skip_optional()
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if budget_skip_synthesis {
+            tracing::info!(
+                run_id = %ctx.run_id,
+                stage = "synthesize.skipped",
+                reason = "budget_hard",
+                "synthesize phase skipped: budget under Hard pressure"
+            );
+            return Ok(PhaseOutput::Synthesized(Vec::new()));
+        }
+
         let clusters = Self::load_clusters(ctx)?;
         let eligible: Vec<&ProposalCluster> = clusters
             .iter()
@@ -518,6 +546,7 @@ fn portfolio_proposal_ids(proposals_dir: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::RunId;
 
     #[test]
     fn default_min_cluster_size_is_two() {
@@ -763,6 +792,115 @@ mod tests {
             ids,
             vec!["s_01".to_string(), "s_02".to_string(), "s_03".to_string()]
         );
+    }
+
+    /// F3: when the budget is Hard under the Reduce policy, the
+    /// synthesize phase must skip the merge entirely — no
+    /// `synthesized/s_<NN>.json` is written, and the phase
+    /// returns an empty `Synthesized(paths)`. The clusters
+    /// input is staged as two proposals that *would* trigger
+    /// synthesis, so the test pins that the gate fires before
+    /// the per-cluster work loop.
+    #[test]
+    fn synthesize_phase_skips_rationale_under_hard_budget() -> Result<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve()?);
+        home.ensure()?;
+        let run_id = RunId::new();
+
+        // Real Db + hard budget.
+        let db = crate::storage::sqlite::Db::open(&home.meta_db_path())?;
+        db.register_run(run_id, "fast", "running", "0.4.0", None, None, None)?;
+        db.set_budget(run_id, 1000)?;
+        db.budget_record(run_id, "seed", 950)?;
+
+        // Stage a two-proposal cluster that would otherwise
+        // trigger synthesis (min_cluster_size default is 2).
+        let cluster_dir = home.run_dir(run_id).cluster_proposals_dir();
+        std::fs::create_dir_all(&cluster_dir)?;
+        let cluster = ProposalCluster {
+            schema_version: "v1".into(),
+            id: "cp_00".into(),
+            member_proposals: vec!["p_a".into(), "p_b".into()],
+            cluster_text_sample: String::new(),
+            created_unix: 0,
+        };
+        crate::phases::util::write_json(&cluster_dir.join("cp_00.json"), &cluster)?;
+
+        // Stage the two source proposals so the merge would
+        // have data to consume (not strictly required for the
+        // gate, but documents the full happy path the gate
+        // bypasses).
+        for id in ["p_a", "p_b"] {
+            let path = home.run_dir(run_id).proposals().join(format!("{id}.json"));
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            crate::phases::util::write_json(
+                &path,
+                &Proposal {
+                    id: id.into(),
+                    summary: format!("{id} summary"),
+                    ..Proposal::default()
+                },
+            )?;
+        }
+
+        // Db-backed Telemetry so the gate fires.
+        let run_dir = home.run_dir(run_id);
+        let telemetry = crate::telemetry::Telemetry::open(
+            run_id,
+            &run_dir,
+            crate::redact::RedactPolicy::default(),
+            Some(db.clone()),
+        )?;
+
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            std::sync::Arc::new(crate::llm::ProviderRegistry::default()),
+            "mock".into(),
+            "mock-model".into(),
+            crate::execution::Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".into(),
+        )
+        .with_interactive(false);
+
+        let phase = SynthesizePhase::default();
+        let out = pollster::block_on(phase.execute(&ctx))?;
+        match out {
+            PhaseOutput::Synthesized(paths) => assert!(
+                paths.is_empty(),
+                "synthesize must produce zero paths under hard budget; got {paths:?}"
+            ),
+            other => panic!("synthesize must return Synthesized; got {other:?}"),
+        }
+        // The synthesized dir must not have any `s_*.json`
+        // sidecar (the gate returned early before the merge
+        // loop).
+        let synth_dir = home.run_dir(run_id).synthesized();
+        let written: Vec<_> = std::fs::read_dir(&synth_dir)?
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let synth_files: Vec<_> = written
+            .iter()
+            .filter(|n| n.starts_with("s_") && n.ends_with(".json") && !n.ends_with(".meta.json"))
+            .collect();
+        assert!(
+            synth_files.is_empty(),
+            "no s_<NN>.json must be written under hard budget; got {synth_files:?}"
+        );
+        Ok(())
     }
 
     /// Local helper: build a unique tempdir under
