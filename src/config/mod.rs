@@ -52,6 +52,9 @@ pub struct Config {
     pub ranking_weights: RankingWeights,
     #[allow(missing_docs)]
     pub rubric: RubricConfig,
+    #[allow(missing_docs)]
+    #[serde(default)]
+    pub llm: LlmConfig,
     /// Track E (E7 partial): knobs for the Critique phase. Today the
     /// only knob is the opt-in switch for the `TiefighterCritic`
     /// adversarial cross-check sidecar — the default is `false` so
@@ -280,6 +283,13 @@ impl Default for RubricConfig {
             validate_responses: false,
         }
     }
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LlmConfig {
+    pub json_repair_v2_enabled: bool,
 }
 
 /// Track E (E7 partial): knobs for the Critique phase. Currently
@@ -523,6 +533,7 @@ impl Default for Config {
             no_color: false,
             ranking_weights: RankingWeights::default(),
             rubric: RubricConfig::default(),
+            llm: LlmConfig::default(),
             critique: CritiqueConfig::default(),
             repair_max_rounds: 5,
             gate_forbidden_techs: Vec::new(),
@@ -902,6 +913,14 @@ impl Config {
                 if spec.kind == "minimax" {
                     spec.model = v.clone();
                 }
+            }
+        }
+        if let Ok(v) = std::env::var("MOAGAN_JSON_REPAIR_V2_ENABLED") {
+            let normalised = v.trim().to_ascii_lowercase();
+            match normalised.as_str() {
+                "true" | "1" | "yes" | "on" => self.llm.json_repair_v2_enabled = true,
+                "false" | "0" | "no" | "off" => self.llm.json_repair_v2_enabled = false,
+                _ => {}
             }
         }
         if let Ok(v) = std::env::var("MOAGAN_REPAIR_MAX_ROUNDS")

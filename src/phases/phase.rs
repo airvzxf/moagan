@@ -16,7 +16,7 @@ use crate::cancel::Cancel;
 use crate::cli::Mode;
 use crate::config::Config;
 use crate::context::ContextRefRecord;
-use crate::domain::LineagePaths;
+use crate::domain::{JsonRepairV2Report, LineagePaths};
 use crate::error::{Error, Result};
 use crate::error_code::ErrorCode;
 use crate::execution::Parallelism;
@@ -595,6 +595,36 @@ impl RunContext {
         }
     }
 
+    async fn call_json_repair_v2<T>(&self, role: Role, raw: &str, schema_hint: &str) -> Option<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let user = serde_json::json!({
+            "malformed": raw,
+            "target_role": role.as_str(),
+            "target_schema": schema_hint,
+        })
+        .to_string();
+        let response = self
+            .call_uncached(
+                Role::JsonRepairV2,
+                crate::llm::prompts::system_prompt(Role::JsonRepairV2).to_owned(),
+                user,
+                crate::time::now_unix_secs(),
+            )
+            .await
+            .ok()?;
+        let report = serde_json::from_str::<JsonRepairV2Report>(&response.text).ok();
+        let repaired = report
+            .as_ref()
+            .map(|value| value.repaired.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| (!response.text.trim().is_empty()).then_some(response.text.as_str()))?;
+        let value = serde_json::from_str::<serde_json::Value>(repaired).ok()?;
+        role.validate_json(&value).ok()?;
+        serde_json::from_value(value).ok()
+    }
+
     /// Call the model and parse the response, retrying the call up to
     /// `max_retries` additional times if the parse fails. Each attempt
     /// goes through the normal pipeline (provider send + telemetry +
@@ -709,6 +739,14 @@ impl RunContext {
                         budget = Some(b);
                         let max_attempts = b.max_attempts.min(ceiling + 1);
                         if attempt + 1 >= max_attempts {
+                            if b.use_json_repair
+                                && self.config.llm.json_repair_v2_enabled
+                                && let Some(value) = self
+                                    .call_json_repair_v2::<T>(role, &resp.text, schema_hint)
+                                    .await
+                            {
+                                return Ok(value);
+                            }
                             return Err(e);
                         }
                         let _ = self.telemetry.warn(
@@ -1170,6 +1208,78 @@ mod tests {
             .unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(script.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn json_repair_v2_succeeds_after_m3_fails() {
+        let (_temp, mut ctx, script) = retry_context(vec![
+            Ok((200, response(r#"{"broken":"unterminated}"#))),
+            Ok((
+                200,
+                response(
+                    r#"{"malformed":"broken","target_schema":"intake","repaired":"{\"ok\":true}","notes":"fixed","schema_version":"json_repair_v2.v1"}"#,
+                ),
+            )),
+        ]);
+        Arc::get_mut(&mut ctx.config)
+            .unwrap()
+            .llm
+            .json_repair_v2_enabled = true;
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Intake: {problem, objectives[]}",
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(script.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn json_repair_v2_falls_back_to_original_on_no_response() {
+        let (_temp, mut ctx, script) = retry_context(vec![
+            Ok((200, response(r#"{"broken":"unterminated}"#))),
+            Ok((200, response(""))),
+        ]);
+        Arc::get_mut(&mut ctx.config)
+            .unwrap()
+            .llm
+            .json_repair_v2_enabled = true;
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Intake: {problem, objectives[]}",
+                5,
+            )
+            .await;
+        assert!(matches!(result, Err(Error::SchemaViolation(_))));
+        assert_eq!(script.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn json_repair_v2_disabled_by_default() {
+        let (_temp, ctx, script) = retry_context(vec![
+            Ok((200, response(r#"{"broken":"unterminated}"#))),
+            Ok((200, response(r#"{"ok":true}"#))),
+        ]);
+        assert!(!ctx.config.llm.json_repair_v2_enabled);
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Intake: {problem, objectives[]}",
+                5,
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(script.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
