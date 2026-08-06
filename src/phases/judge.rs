@@ -29,12 +29,14 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
 use crate::domain::{AdversaryReport, FinalDisagreementReport, JudgeScore};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::llm::Role;
 use crate::llm::prompts::{inject_rubric, system_prompt};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::write_json;
+use crate::ranking::Rubric;
 
 /// Default threshold (stddev on a 0..=10 scale) above which the
 /// adversary pass is triggered. Tunable via [`JudgePhase::with_threshold`].
@@ -52,6 +54,18 @@ pub const DEFAULT_FINAL_DISAGREEMENT_SPREAD: f32 = 1.0;
 /// (max-min) and "the panel scatters broadly" (stddev). Either
 /// condition alone is enough.
 pub const DEFAULT_FINAL_DISAGREEMENT_STDDEV: f32 = 0.5;
+
+pub(crate) fn validate_rubric_response(
+    config: &Config,
+    response: &serde_json::Value,
+) -> Result<()> {
+    if config.rubric.enabled && config.rubric.validate_responses {
+        Rubric::default().validate(response).map_err(|error| {
+            Error::SchemaViolation(format!("rubric validation failed: {error}"))
+        })?;
+    }
+    Ok(())
+}
 
 /// Judge phase. `judges` judge scores per proposal. All proposals ×
 /// judges are scheduled concurrently up to the global parallelism
@@ -250,7 +264,11 @@ impl Phase for JudgePhase {
         // Judge prompt reaches the LLM. The substitution is a no-op
         // when the placeholder is absent (e.g. cached runs that
         // already saw the injected text).
-        let system = inject_rubric(system_prompt(Role::Judge));
+        let system = if ctx.config.rubric.enabled {
+            inject_rubric(system_prompt(Role::Judge))
+        } else {
+            system_prompt(Role::Judge).to_owned()
+        };
 
         // First pass: collect every (proposal_id, subject_json) pair.
         let mut subjects: Vec<(String, serde_json::Value)> = Vec::new();
@@ -303,15 +321,17 @@ impl Phase for JudgePhase {
                         stage = "judge.future.started",
                         "Judge stage"
                     );
-                    let score: JudgeScore = ctx
+                    let response: serde_json::Value = ctx
                         .call_with_retry_parse(
                             Role::Judge,
                             system_arc.as_str().to_owned(),
                             user,
-                            "JudgeScore: {score, criteria{correctness,completeness,fit,evidence,clarity}, comments}",
+                            "JudgeScore: {score, criteria{correctness,completeness,feasibility,safety,cost,clarity}, comments}",
                             5,
                         )
                         .await?;
+                    validate_rubric_response(&ctx.config, &response)?;
+                    let score: JudgeScore = serde_json::from_value(response)?;
                     tracing::debug!(
                         proposal_id = %proposal_id,
                         judge_index = j,
@@ -615,6 +635,15 @@ mod tests {
             criteria: JudgeCriteria::default(),
             comments: String::new(),
         }
+    }
+
+    #[test]
+    fn judge_phase_skips_validation_when_disabled() {
+        let response = serde_json::json!({"verdict": "ok"});
+        let config = Config::default();
+        assert!(config.rubric.enabled);
+        assert!(!config.rubric.validate_responses);
+        assert!(validate_rubric_response(&config, &response).is_ok());
     }
 
     #[test]

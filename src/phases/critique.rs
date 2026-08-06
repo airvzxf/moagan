@@ -10,6 +10,7 @@ use crate::domain::{Critique, Proposal};
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::{inject_rubric, system_prompt};
+use crate::phases::judge::validate_rubric_response;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 
@@ -34,7 +35,11 @@ impl Phase for CritiquePhase {
         // Track E (E2): inject the six-axis rubric block before the
         // Critique prompt reaches the LLM. Same contract as the
         // Judge phase so both panels score against the same axes.
-        let system = inject_rubric(system_prompt(Role::Critique));
+        let system = if ctx.config.rubric.enabled {
+            inject_rubric(system_prompt(Role::Critique))
+        } else {
+            system_prompt(Role::Critique).to_owned()
+        };
 
         // Pre-load all proposals serially (disk I/O is cheap and
         // happens concurrently with the LLM calls below).
@@ -72,15 +77,17 @@ impl Phase for CritiquePhase {
                 let id_clone = id.clone();
                 async move {
                     let _permit = ctx.parallelism.acquire().await?;
-                    let critique: Critique = ctx
+                    let response: serde_json::Value = ctx
                         .call_with_retry_parse(
                             Role::Critique,
                             system_arc.as_str().to_owned(),
                             user,
-                            "Critique: {verdict, issues[], suggestions[]}",
+                            "Critique: {verdict, issues[], suggestions[], criteria{correctness,completeness,feasibility,safety,cost,clarity}}",
                             5,
                         )
                         .await?;
+                    validate_rubric_response(&ctx.config, &response)?;
+                    let critique: Critique = serde_json::from_value(response)?;
                     let out_path: PathBuf = critiques_dir.join(format!("{id_clone}.json"));
                     write_json(&out_path, &critique)?;
                     Ok::<PathBuf, crate::error::Error>(out_path)
