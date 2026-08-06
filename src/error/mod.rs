@@ -4,6 +4,16 @@
 //! Exit codes follow T01-06 §12.3:
 //! 0 ok, 1 generic, 2 invalid args, 3 invalid api key, 4 plan exhausted,
 //! 5 timeout, 6 cancelled, 7 schema violation, 8 io error.
+//!
+//! Companion modules (catalog gap closures). These are additive
+//! types that callers can attach to existing error paths without
+//! touching the public `Error` enum.
+
+pub mod chain;
+pub mod json_output;
+pub mod llm_error;
+pub mod redact_display;
+pub mod storage_error;
 
 use std::io;
 use std::path::PathBuf;
@@ -672,5 +682,148 @@ mod tests {
             Error::InvalidApiKey("http 401: bad".into()).is_circuit_opening(),
             "Error::InvalidApiKey must trip the breaker (covers Auth)"
         );
+    }
+    // --- catalog gap closures: companion modules ---------------
+    // D.12.10, D.12.11, D.16.2, D.26.5, D.29.9. Each new module
+    // gets at least one test that pins its public contract so
+    // future refactors cannot silently regress the wire form.
+
+    /// D.12.11: `RetryAdvice` default must be the optimistic
+    /// `Retry` so a freshly-constructed `LlmError` does not
+    /// pessimistically suppress retries.
+    #[test]
+    fn retry_advice_default_is_retry() {
+        use crate::error::llm_error::RetryAdvice;
+        assert_eq!(RetryAdvice::default(), RetryAdvice::Retry);
+        let explicit = RetryAdvice::SwitchProvider;
+        assert_ne!(explicit, RetryAdvice::default());
+    }
+
+    /// D.12.10: `StorageError::from(IoError)` must aggregate
+    /// the original I/O error so callers can recover the
+    /// path / source without losing information.
+    #[test]
+    fn storage_error_from_io_error_converts() {
+        use crate::error::storage_error::StorageError;
+        let io = IoError::Read {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("boom"),
+        };
+        let storage: StorageError = io.into();
+        match storage {
+            StorageError::Io(IoError::Read { path, .. }) => {
+                assert_eq!(path, PathBuf::from("/tmp/x"));
+            }
+            other => panic!("expected Io(Read), got {other:?}"),
+        }
+    }
+
+    /// D.16.2: `RedactedDisplay` must strip known secret
+    /// patterns (here a MiniMax sk-cp key) from the inner
+    /// value's `Display` output before the formatter sees it.
+    #[test]
+    fn redacted_display_removes_known_secrets() {
+        use crate::error::redact_display::redacted_display;
+        let leaky = String::from("auth header: sk-cp-abcdef0123456789ABCDEF");
+        let rendered = format!("{}", redacted_display(&leaky));
+        assert!(
+            !rendered.contains("sk-cp-abc"),
+            "secret must be scrubbed, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED:minimax_sk_cp]"),
+            "expected the marker, got: {rendered}"
+        );
+    }
+
+    /// D.26.5: `JsonError` must serialize the canonical four
+    /// fields with the right names and types so downstream
+    /// scripts can parse the line without guessing.
+    #[test]
+    fn json_error_serializes_to_correct_format() {
+        use crate::error::json_output::JsonError;
+        let err = JsonError::from_error_code(
+            "INVALID_ARGS",
+            "missing --prompt",
+            2,
+            Some("stdin: line 1"),
+        );
+        let json = err.to_json();
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(value["code"], "INVALID_ARGS");
+        assert_eq!(value["message"], "missing --prompt");
+        assert_eq!(value["exit_code"], 2);
+        assert_eq!(value["source"], "stdin: line 1");
+    }
+
+    /// D.29.9: `ErrorChain` must keep the input and the
+    /// source chain as separate fields and walk
+    /// `error.source()` to the root.
+    #[test]
+    fn error_chain_captures_input_and_source() {
+        use crate::error::chain::ErrorChain;
+        use std::io;
+
+        let outer = io::Error::other("open failed");
+        // Build a two-level chain so the test does not
+        // depend on a specific catalog error type.
+        #[derive(Debug)]
+        struct Nested {
+            msg: String,
+            inner: Option<Box<dyn std::error::Error + Send + Sync>>,
+        }
+        impl std::fmt::Display for Nested {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.msg)
+            }
+        }
+        impl std::error::Error for Nested {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.inner
+                    .as_deref()
+                    .map(|e| e as &(dyn std::error::Error + 'static))
+            }
+        }
+        let inner: Box<dyn std::error::Error + Send + Sync> = Box::new(outer);
+        let nested = Nested {
+            msg: "open failed".into(),
+            inner: Some(inner),
+        };
+        let chain = ErrorChain::from_error("user prompt: build X", &nested);
+        assert_eq!(chain.input, "user prompt: build X");
+        assert!(!chain.source_chain.is_empty());
+        assert_eq!(chain.source_chain[0], "open failed");
+        assert!(chain.source_chain.len() >= 2);
+    }
+
+    /// D.12.10: `StorageError::Display` must render every
+    /// variant with its discriminator prefix so log lines
+    /// can be filtered by category.
+    #[test]
+    fn storage_error_display_format() {
+        use crate::error::storage_error::StorageError;
+        let cases = [
+            (
+                StorageError::Sqlite {
+                    message: "no such table".into(),
+                },
+                "sqlite: no such table",
+            ),
+            (
+                StorageError::Compression {
+                    message: "gzip header".into(),
+                },
+                "compression: gzip header",
+            ),
+            (
+                StorageError::Schema {
+                    message: "version 3 vs 4".into(),
+                },
+                "schema: version 3 vs 4",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(format!("{err}"), expected);
+        }
     }
 }
