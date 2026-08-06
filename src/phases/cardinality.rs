@@ -35,10 +35,10 @@
 //! Maximise the spread. The first pick is the highest-scoring
 //! entry; subsequent picks maximise the minimum Jaccard distance
 //! to the already-chosen set. Jaccard distance runs on token
-//! features derived from each id's `Debug` representation — cheap,
-//! deterministic, and good enough for the operator-facing
-//! diversification. Useful when the operator wants the spread,
-//! not the average.
+//! features derived from each `Proposal`'s `summary + approach +
+//! tradeoffs + evidence` text — cheap, deterministic, and good
+//! enough for the operator-facing diversification. Useful when
+//! the operator wants the spread, not the average.
 //!
 //! ### `keep_outlier(n)` — largest distance from centroid
 //!
@@ -60,17 +60,21 @@
 //! // Quorum of judges required for the mode.
 //! assert_eq!(judge_quorum(Mode::Deep), 5);
 //!
-//! // Selection plan: keep the top 3 by score.
+//! // Selection plan: keep the top 3 by score. The input slice
+//! // carries (proposal_id, weighted_score, &Proposal) tuples so
+//! // `keep_diverse` / `keep_outlier` can compute Jaccard distance
+//! // over the proposal text.
 //! let plan = SelectionPlan::keep_top(3);
-//! let scored = vec![("p1", 0.7), ("p2", 0.9), ("p3", 0.5), ("p4", 0.8)];
+//! let scored: Vec<(String, f64, moagan::domain::Proposal)> = vec![];
 //! let chosen = plan.apply(&scored);
-//! assert_eq!(chosen, vec!["p2", "p4", "p1"]);
+//! assert!(chosen.is_empty());
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::cli::Mode;
+use crate::domain::Proposal;
 use crate::error::{Error, Result};
 
 /// Soft cardinality for a given mode. Spec D.21.1 ranges:
@@ -191,115 +195,166 @@ impl SelectionPlan {
         }
     }
 
-    /// Apply the plan to a `(Id, score)` slice and return the
-    /// chosen ids. `count == 0` is a no-op (returns empty). When
-    /// `count >= scored.len()` every id is returned in the order
-    /// the plan dictates.
+    /// Apply the plan to a `(proposal_id, weighted_score, &Proposal)`
+    /// slice and return the chosen proposal ids. The slice carries
+    /// the proposal text so `keep_diverse` / `keep_outlier` can
+    /// compute Jaccard distance over the proposal's actual
+    /// `summary + approach + tradeoffs + evidence`. `count == 0`
+    /// is a no-op (returns empty). When `count >= scored.len()`
+    /// every id is returned in the order the plan dictates.
     ///
     /// Strategies:
     /// - `TopN`     → score-descending sort, take first N. Stable.
     /// - `DiverseN` → greedy farthest-first traversal over Jaccard
-    ///   distance on token features. The first pick is the highest
-    ///   scorer; subsequent picks maximise the minimum distance to
-    ///   the already-chosen set.
+    ///   distance on token features extracted from `Proposal` text.
+    ///   The first pick is the highest scorer; subsequent picks
+    ///   maximise the minimum distance to the already-chosen set.
     /// - `OutlierN` → distance from the score-weighted centroid in
     ///   Jaccard space; keep the N with the largest distance.
-    pub fn apply<Id: Clone + Eq + std::fmt::Debug + std::hash::Hash>(
-        &self,
-        scored: &[(Id, f64)],
-    ) -> Vec<Id> {
+    ///
+    /// The three strategies are also exposed directly as
+    /// [`Self::apply_top`] / [`Self::apply_diverse`] /
+    /// [`Self::apply_outlier`] so a future caller can pick a
+    /// specific strategy without paying for the `match` on
+    /// [`SelectionKind`].
+    pub fn apply(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
+        match self.kind {
+            SelectionKind::TopN => self.apply_top(scored),
+            SelectionKind::DiverseN => self.apply_diverse(scored),
+            SelectionKind::OutlierN => self.apply_outlier(scored),
+        }
+    }
+
+    /// Apply `keep_top(n)`: sort the input by weighted score
+    /// descending and take the first `n` proposal ids. Stable so
+    /// ties preserve insertion order. `count == 0` or empty input
+    /// returns an empty vector; `count >= scored.len()` returns
+    /// every id in score-descending order.
+    pub fn apply_top(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
         if self.count == 0 || scored.is_empty() {
             return Vec::new();
         }
-        match self.kind {
-            SelectionKind::TopN => {
-                let mut sorted: Vec<(Id, f64)> = scored.to_vec();
-                sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                sorted
-                    .into_iter()
-                    .take(self.count)
-                    .map(|(id, _)| id)
-                    .collect()
-            }
-            SelectionKind::DiverseN => {
-                // Greedy farthest-first traversal. The first pick
-                // is the highest-scoring entry; each subsequent
-                // pick maximises the minimum Jaccard distance to
-                // the already-chosen set. Ties on min-distance
-                // break by score descending so the highest scorer
-                // wins.
-                let mut sorted: Vec<(Id, f64)> = scored.to_vec();
-                sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let n = self.count.min(sorted.len());
-                let mut chosen: Vec<Id> = Vec::with_capacity(n);
-                let mut chosen_features: Vec<HashSet<String>> = Vec::with_capacity(n);
-                let mut remaining: Vec<(Id, f64)> = sorted;
-                for _ in 0..n {
-                    let mut best_idx = 0usize;
-                    let mut best_min_dist = f64::NEG_INFINITY;
-                    let mut best_score = f64::NEG_INFINITY;
-                    for (idx, (id, score)) in remaining.iter().enumerate() {
-                        let feats = token_features_for(id);
-                        let min_dist = if chosen.is_empty() {
-                            // First pick: any min_dist is a tie;
-                            // break by score descending.
-                            0.0
-                        } else {
-                            chosen_features
-                                .iter()
-                                .map(|c| jaccard_distance(&feats, c))
-                                .fold(f64::INFINITY, f64::min)
-                        };
-                        if min_dist > best_min_dist
-                            || (min_dist == best_min_dist && *score > best_score)
-                        {
-                            best_idx = idx;
-                            best_min_dist = min_dist;
-                            best_score = *score;
-                        }
-                        let _ = feats;
-                    }
-                    let (id, _) = remaining.remove(best_idx);
-                    chosen_features.push(token_features_for(&id));
-                    chosen.push(id);
+        let mut sorted: Vec<(String, f64, Proposal)> = scored.to_vec();
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        sorted
+            .into_iter()
+            .take(self.count)
+            .map(|(id, _, _)| id)
+            .collect()
+    }
+
+    /// Apply `keep_diverse(n)`: greedy farthest-first traversal
+    /// over Jaccard distance on token features extracted from
+    /// each `Proposal`'s `summary + approach + tradeoffs +
+    /// evidence`. The first pick is the highest-scoring entry;
+    /// each subsequent pick maximises the minimum distance to
+    /// the already-chosen set. Ties on min-distance break by
+    /// score descending so the highest scorer wins.
+    pub fn apply_diverse(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
+        if self.count == 0 || scored.is_empty() {
+            return Vec::new();
+        }
+        let mut sorted: Vec<(String, f64, Proposal)> = scored.to_vec();
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let n = self.count.min(sorted.len());
+        let mut chosen: Vec<String> = Vec::with_capacity(n);
+        let mut chosen_features: Vec<HashSet<String>> = Vec::with_capacity(n);
+        let mut remaining: Vec<(String, f64, Proposal)> = sorted;
+        for _ in 0..n {
+            let mut best_idx = 0usize;
+            let mut best_min_dist = f64::NEG_INFINITY;
+            let mut best_score = f64::NEG_INFINITY;
+            for (idx, (_id, score, proposal)) in remaining.iter().enumerate() {
+                let feats = token_features_for_proposal(proposal);
+                let min_dist = if chosen.is_empty() {
+                    // First pick: any min_dist is a tie; break by
+                    // score descending.
+                    0.0
+                } else {
+                    chosen_features
+                        .iter()
+                        .map(|c| jaccard_distance(&feats, c))
+                        .fold(f64::INFINITY, f64::min)
+                };
+                if min_dist > best_min_dist || (min_dist == best_min_dist && *score > best_score) {
+                    best_idx = idx;
+                    best_min_dist = min_dist;
+                    best_score = *score;
                 }
-                chosen
             }
-            SelectionKind::OutlierN => {
-                // Distance from the score-weighted centroid in
-                // Jaccard space; keep the N with the largest
-                // distance. The centroid weights each token by
-                // the sum of its proposals' normalised scores.
-                let total: f64 = scored.iter().map(|(_, s)| *s).sum();
-                let mut weights: std::collections::HashMap<String, f64> =
-                    std::collections::HashMap::new();
-                for (id, score) in scored {
-                    let w = if total > 0.0 {
-                        score / total
-                    } else {
-                        1.0 / scored.len() as f64
-                    };
-                    for tok in token_features_for(id) {
-                        *weights.entry(tok).or_insert(0.0) += w;
-                    }
+            let (id, _, proposal) = remaining.remove(best_idx);
+            chosen_features.push(token_features_for_proposal(&proposal));
+            chosen.push(id);
+        }
+        chosen
+    }
+
+    /// Apply `keep_outlier(n)`: keep the N proposals whose token
+    /// set is most distant from the score-weighted token bag of
+    /// the OTHER proposals. The intuition is "outlier": a proposal
+    /// whose vocabulary is rare or absent from the rest of the
+    /// field is the contrarian pick. A naive "centroid of all
+    /// proposals" would include each proposal's own tokens in the
+    /// centroid, collapsing every distance toward 0.5; the
+    /// leave-one-out formulation recovers the intended contrast.
+    ///
+    /// `count == 0` or empty input returns an empty vector. When
+    /// `count >= scored.len()` every id is returned in
+    /// outlier-distance descending order.
+    pub fn apply_outlier(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
+        if self.count == 0 || scored.is_empty() {
+            return Vec::new();
+        }
+        let total: f64 = scored.iter().map(|(_, s, _)| *s).sum();
+        let mut distances: Vec<(String, f64)> = Vec::with_capacity(scored.len());
+        for (i, (id, _, proposal)) in scored.iter().enumerate() {
+            let mut weights: HashMap<String, f64> = HashMap::new();
+            for (j, (_, other_score, other_proposal)) in scored.iter().enumerate() {
+                if i == j {
+                    continue;
                 }
-                let centroid: HashSet<String> = weights.keys().cloned().collect();
-                let mut distances: Vec<(Id, f64)> = scored
-                    .iter()
-                    .map(|(id, _)| {
-                        let feats = token_features_for(id);
-                        let d = jaccard_distance(&feats, &centroid);
-                        (id.clone(), d)
-                    })
-                    .collect();
-                distances
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                distances
-                    .into_iter()
-                    .take(self.count)
-                    .map(|(id, _)| id)
-                    .collect()
+                let w = if total > 0.0 {
+                    other_score / total
+                } else {
+                    1.0 / (scored.len().saturating_sub(1)) as f64
+                };
+                for tok in token_features_for_proposal(other_proposal) {
+                    *weights.entry(tok).or_insert(0.0) += w;
+                }
             }
+            let others: HashSet<String> = weights.keys().cloned().collect();
+            let feats = token_features_for_proposal(proposal);
+            let d = jaccard_distance(&feats, &others);
+            distances.push((id.clone(), d));
+        }
+        distances.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        distances
+            .into_iter()
+            .take(self.count)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Default SelectionPlan for a given mode string. Spec D.21.3:
+    /// the per-mode baseline lives here so the rank phase can pick
+    /// a strategy without inspecting the Config (the config field
+    /// is opt-in and lands in a later commit).
+    ///
+    /// - `fast`     → `keep_top(3)`
+    /// - `standard` → `keep_top(5)`
+    /// - `deep`     → `keep_top(10)`
+    /// - `explore`  → `keep_diverse(15)` — explore-mode spreads
+    ///   ideas, top-scoring by score would lose the spread.
+    /// - `batch`    → `keep_top(8)`
+    /// - other      → `keep_top(5)` (safe fallback for unknown modes)
+    pub fn default_for_mode(mode: &str) -> Self {
+        match mode {
+            "fast" => Self::keep_top(3),
+            "standard" => Self::keep_top(5),
+            "deep" => Self::keep_top(10),
+            "explore" => Self::keep_diverse(15),
+            "batch" => Self::keep_top(8),
+            _ => Self::keep_top(5),
         }
     }
 }
@@ -338,13 +393,22 @@ pub fn judge_quorum_for_mode(mode: Mode, cfg: &crate::config::Config) -> usize {
     judge_quorum(mode)
 }
 
-/// Heuristic: derive a token-feature set from an id's
-/// `Debug` representation. Cheap, deterministic, and good enough
-/// for Jaccard-based distance. The caller can layer richer
-/// features later (e.g. proposal text) without changing the
-/// [`SelectionPlan::apply`] contract.
-fn token_features_for<Id: std::fmt::Debug>(id: &Id) -> HashSet<String> {
-    let raw = format!("{id:?}");
+/// Heuristic: derive a token-feature set from a `Proposal`'s
+/// textual fields (`summary + approach + tradeoffs + evidence`).
+/// Cheap, deterministic, case-insensitive, and good enough for
+/// Jaccard-based distance. The previous implementation tokenised
+/// the id's `Debug` representation; switching to the actual
+/// proposal text gives the distance metrics a meaningful signal
+/// (two proposals with the same id but different content now
+/// diverge on text, not on a useless prefix).
+fn token_features_for_proposal(p: &Proposal) -> HashSet<String> {
+    let raw = format!(
+        "{} {} {} {}",
+        p.summary,
+        p.approach,
+        p.tradeoffs.join(" "),
+        p.evidence.join(" ")
+    );
     raw.split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase())
@@ -475,7 +539,12 @@ mod tests {
     /// `keep_top` returns the top-N ids by score, descending.
     #[test]
     fn selection_plan_keep_top_returns_top_n() {
-        let scored = vec![("a", 0.3_f64), ("b", 0.9), ("c", 0.5), ("d", 0.8)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("a".into(), 0.3, Proposal::default()),
+            ("b".into(), 0.9, Proposal::default()),
+            ("c".into(), 0.5, Proposal::default()),
+            ("d".into(), 0.8, Proposal::default()),
+        ];
         let plan = SelectionPlan::keep_top(2);
         let chosen = plan.apply(&scored);
         assert_eq!(chosen, vec!["b", "d"]);
@@ -484,7 +553,10 @@ mod tests {
     /// `keep_top` with `count >= scored.len()` returns every id.
     #[test]
     fn selection_plan_keep_top_saturates() {
-        let scored = vec![("a", 0.3_f64), ("b", 0.9)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("a".into(), 0.3, Proposal::default()),
+            ("b".into(), 0.9, Proposal::default()),
+        ];
         let plan = SelectionPlan::keep_top(10);
         let chosen = plan.apply(&scored);
         assert_eq!(chosen, vec!["b", "a"]);
@@ -493,7 +565,10 @@ mod tests {
     /// `keep_top` with `count == 0` is a no-op.
     #[test]
     fn selection_plan_keep_top_zero_returns_empty() {
-        let scored = vec![("a", 0.3_f64), ("b", 0.9)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("a".into(), 0.3, Proposal::default()),
+            ("b".into(), 0.9, Proposal::default()),
+        ];
         let plan = SelectionPlan::keep_top(0);
         assert!(plan.apply(&scored).is_empty());
     }
@@ -501,7 +576,7 @@ mod tests {
     /// `keep_top` on an empty slice is a no-op.
     #[test]
     fn selection_plan_keep_top_empty_input() {
-        let scored: Vec<(&str, f64)> = Vec::new();
+        let scored: Vec<(String, f64, Proposal)> = Vec::new();
         let plan = SelectionPlan::keep_top(3);
         assert!(plan.apply(&scored).is_empty());
     }
@@ -519,13 +594,17 @@ mod tests {
         // pick count at `min(count, scored.len())` = 3 so every
         // id ends up chosen. First pick is the highest scorer;
         // subsequent picks break ties by score descending.
-        let scored = vec![("a", 0.3_f64), ("b", 0.9), ("c", 0.5)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("a".into(), 0.3, Proposal::default()),
+            ("b".into(), 0.9, Proposal::default()),
+            ("c".into(), 0.5, Proposal::default()),
+        ];
         let chosen = plan.apply(&scored);
         assert_eq!(chosen.len(), 3);
         // First pick is the highest scorer (`b`).
         assert_eq!(chosen[0], "b");
         // Every id ends up in the chosen set.
-        let set: std::collections::HashSet<&str> = chosen.iter().copied().collect();
+        let set: std::collections::HashSet<&str> = chosen.iter().map(String::as_str).collect();
         assert_eq!(set, ["a", "b", "c"].iter().copied().collect());
     }
 
@@ -539,7 +618,11 @@ mod tests {
         // {"b"} (single char — splits on alphanumeric, so just
         // "b"). The other two share no token with `b`, so either
         // is a valid second pick.
-        let scored = vec![("a", 0.3_f64), ("b", 0.9), ("c", 0.5)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("a".into(), 0.3, Proposal::default()),
+            ("b".into(), 0.9, Proposal::default()),
+            ("c".into(), 0.5, Proposal::default()),
+        ];
         let chosen = plan.apply(&scored);
         assert_eq!(chosen.len(), 2);
         assert_eq!(chosen[0], "b");
@@ -556,12 +639,16 @@ mod tests {
         assert_eq!(plan.count, 3);
         // Apply on a 3-entry slice with N=3 returns every id
         // sorted by centroid-distance descending.
-        let scored = vec![("a", 0.3_f64), ("b", 0.9), ("c", 0.5)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("a".into(), 0.3, Proposal::default()),
+            ("b".into(), 0.9, Proposal::default()),
+            ("c".into(), 0.5, Proposal::default()),
+        ];
         let chosen = plan.apply(&scored);
         assert_eq!(chosen.len(), 3);
         // All three ids present (order may vary but set equality
         // is well-defined for this slice).
-        let set: std::collections::HashSet<&str> = chosen.iter().copied().collect();
+        let set: std::collections::HashSet<&str> = chosen.iter().map(String::as_str).collect();
         assert_eq!(set, ["a", "b", "c"].iter().copied().collect());
     }
 
@@ -570,7 +657,11 @@ mod tests {
     #[test]
     fn selection_plan_keep_outlier_n_one() {
         let plan = SelectionPlan::keep_outlier(1);
-        let scored = vec![("alpha", 0.5), ("beta", 0.5), ("alpha-dup", 0.5)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("alpha".into(), 0.5, Proposal::default()),
+            ("beta".into(), 0.5, Proposal::default()),
+            ("alpha-dup".into(), 0.5, Proposal::default()),
+        ];
         let chosen = plan.apply(&scored);
         assert_eq!(chosen.len(), 1);
     }
@@ -579,7 +670,11 @@ mod tests {
     #[test]
     fn selection_plan_keep_diverse_n_one_picks_top() {
         let plan = SelectionPlan::keep_diverse(1);
-        let scored = vec![("a", 0.3_f64), ("b", 0.9), ("c", 0.5)];
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("a".into(), 0.3, Proposal::default()),
+            ("b".into(), 0.9, Proposal::default()),
+            ("c".into(), 0.5, Proposal::default()),
+        ];
         let chosen = plan.apply(&scored);
         assert_eq!(chosen, vec!["b"]);
     }
@@ -652,13 +747,195 @@ mod tests {
         assert!((jaccard_distance(&a, &c) - 1.0).abs() < 1e-9);
     }
 
-    /// `token_features_for` is deterministic and case-insensitive:
-    /// two ids with the same alphanumeric content hash to the
-    /// same set.
+    /// `token_features_for_proposal` is deterministic and
+    /// case-insensitive: two `Proposal`s whose textual fields
+    /// differ only in casing tokenise to the same set.
     #[test]
-    fn token_features_is_case_insensitive() {
-        let a: HashSet<String> = token_features_for(&"FooBarBaz");
-        let b: HashSet<String> = token_features_for(&"foobarbaz");
-        assert_eq!(a, b);
+    fn token_features_for_proposal_is_case_insensitive() {
+        let a = Proposal {
+            id: String::new(),
+            summary: "FooBarBaz".into(),
+            approach: String::new(),
+            tradeoffs: Vec::new(),
+            evidence: Vec::new(),
+            ..Proposal::default()
+        };
+        let b = Proposal {
+            id: String::new(),
+            summary: "foobarbaz".into(),
+            approach: String::new(),
+            tradeoffs: Vec::new(),
+            evidence: Vec::new(),
+            ..Proposal::default()
+        };
+        let fa: HashSet<String> = token_features_for_proposal(&a);
+        let fb: HashSet<String> = token_features_for_proposal(&b);
+        assert_eq!(fa, fb);
+    }
+
+    /// E3 (Track E): `apply_top` operates on `(id, score, Proposal)`
+    /// triples and returns the top-N by score. Pins the new
+    /// signature so a future refactor that drops the score (or
+    /// drops Proposal access) trips the test before it lands.
+    #[test]
+    fn selection_plan_apply_top_returns_top_n() {
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            (
+                "p1".into(),
+                0.3,
+                Proposal {
+                    summary: "first".into(),
+                    ..Proposal::default()
+                },
+            ),
+            (
+                "p2".into(),
+                0.9,
+                Proposal {
+                    summary: "second".into(),
+                    ..Proposal::default()
+                },
+            ),
+            (
+                "p3".into(),
+                0.5,
+                Proposal {
+                    summary: "third".into(),
+                    ..Proposal::default()
+                },
+            ),
+            (
+                "p4".into(),
+                0.8,
+                Proposal {
+                    summary: "fourth".into(),
+                    ..Proposal::default()
+                },
+            ),
+        ];
+        let plan = SelectionPlan::keep_top(2);
+        let chosen = plan.apply_top(&scored);
+        assert_eq!(chosen, vec!["p2", "p4"]);
+    }
+
+    /// E3: `apply_diverse` uses Jaccard distance over the
+    /// `Proposal`'s textual fields. Two proposals that share no
+    /// tokens have Jaccard distance 1.0 and the farthest-first
+    /// traversal picks them. The test pins that the distance
+    /// metric operates on Proposal text, not on the proposal id.
+    #[test]
+    fn selection_plan_apply_diverse_uses_jaccard_distance() {
+        // p1 and p3 share zero tokens with p2 ("alpha"/"beta").
+        // p2 is the highest scorer; the second pick is whichever
+        // of p1/p3 is most distant from p2 — both are valid
+        // because they share no tokens. The test pins that the
+        // distance metric actually inspects the proposal text.
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            (
+                "p1".into(),
+                0.3,
+                Proposal {
+                    summary: "alpha alpha alpha".into(),
+                    approach: "alpha".into(),
+                    ..Proposal::default()
+                },
+            ),
+            (
+                "p2".into(),
+                0.9,
+                Proposal {
+                    summary: "beta beta".into(),
+                    approach: "beta beta beta".into(),
+                    ..Proposal::default()
+                },
+            ),
+            (
+                "p3".into(),
+                0.5,
+                Proposal {
+                    summary: "gamma gamma gamma gamma".into(),
+                    approach: "gamma".into(),
+                    ..Proposal::default()
+                },
+            ),
+        ];
+        let plan = SelectionPlan::keep_diverse(2);
+        let chosen = plan.apply_diverse(&scored);
+        assert_eq!(chosen.len(), 2);
+        // First pick is always the highest scorer.
+        assert_eq!(chosen[0], "p2");
+        // Second pick is whichever of p1/p3 has the larger
+        // min-distance to p2. Both are at distance 1.0 (no
+        // shared tokens with p2), so the tiebreaker is score
+        // descending → p3 wins (0.5 > 0.3). This pins that
+        // distance actually inspects the proposal text.
+        assert_eq!(
+            chosen[1], "p3",
+            "Jaccard distance must use Proposal text, not id"
+        );
+    }
+
+    /// E3: `apply_outlier` returns the proposal with the largest
+    /// distance from the score-weighted centroid. Construct three
+    /// proposals: two share a vocabulary (`alpha beta gamma`) and
+    /// one is the outlier (`delta epsilon zeta`). The outlier wins.
+    #[test]
+    fn selection_plan_apply_outlier_returns_max_distance_from_centroid() {
+        let outlier = Proposal {
+            summary: "delta epsilon zeta".into(),
+            approach: "delta epsilon".into(),
+            ..Proposal::default()
+        };
+        let common_a = Proposal {
+            summary: "alpha beta gamma".into(),
+            approach: "alpha beta".into(),
+            ..Proposal::default()
+        };
+        let common_b = Proposal {
+            summary: "alpha gamma beta".into(),
+            approach: "beta alpha gamma".into(),
+            ..Proposal::default()
+        };
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("common_a".into(), 0.5, common_a),
+            ("outlier".into(), 0.5, outlier),
+            ("common_b".into(), 0.5, common_b),
+        ];
+        let plan = SelectionPlan::keep_outlier(1);
+        let chosen = plan.apply_outlier(&scored);
+        assert_eq!(chosen, vec!["outlier"]);
+    }
+
+    /// E3: `SelectionPlan::default_for_mode` returns the
+    /// spec-baseline plan for each mode and a safe fallback for
+    /// unknown mode strings. Pins the defaults so a future
+    /// refactor that drifts a number trips the test.
+    #[test]
+    fn selection_plan_default_for_mode_returns_mode_baseline() {
+        assert_eq!(
+            SelectionPlan::default_for_mode("fast"),
+            SelectionPlan::keep_top(3)
+        );
+        assert_eq!(
+            SelectionPlan::default_for_mode("standard"),
+            SelectionPlan::keep_top(5)
+        );
+        assert_eq!(
+            SelectionPlan::default_for_mode("deep"),
+            SelectionPlan::keep_top(10)
+        );
+        assert_eq!(
+            SelectionPlan::default_for_mode("explore"),
+            SelectionPlan::keep_diverse(15)
+        );
+        assert_eq!(
+            SelectionPlan::default_for_mode("batch"),
+            SelectionPlan::keep_top(8)
+        );
+        // Unknown mode falls back to keep_top(5).
+        assert_eq!(
+            SelectionPlan::default_for_mode("unknown"),
+            SelectionPlan::keep_top(5)
+        );
     }
 }
