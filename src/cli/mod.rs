@@ -628,6 +628,27 @@ fn should_reconcile_at_startup(cmd: &Cmd) -> bool {
     )
 }
 
+/// Track F (D.28.3 + D.28.4): the actual startup reconcile call.
+/// Extracted from [`dispatch_inner`] so unit tests can exercise
+/// the disabled / enabled / sweep paths without re-entering the
+/// CLI parser. Returns `Some(report)` when the reconcile ran and
+/// `None` when [`Config::startup_reconcile`] is `false`. Errors
+/// from the underlying helpers bubble up via `?` so a missing
+/// meta.sqlite or a poisoned `MOAGAN_HOME` still surfaces to the
+/// dispatcher.
+fn run_startup_reconcile(
+    home: &MoaganHome,
+    cfg: &Config,
+) -> Result<Option<crate::reconcile::StartupReconcileReport>> {
+    if !cfg.startup_reconcile {
+        return Ok(None);
+    }
+    let db = Db::open(&home.meta_db_path())?;
+    let report = crate::reconcile::startup_reconcile(home, &db, cfg)?;
+    tracing::info!(?report, "startup reconcile done");
+    Ok(Some(report))
+}
+
 impl Cmd {
     /// The human description of what each subcommand does, used in
     /// `moagan --help` and in error messages.
@@ -683,13 +704,14 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     // their exit stays deterministic and latency-free. The
     // `Config::startup_reconcile` flag (default `true`) and
     // `MOAGAN_STARTUP_RECONCILE=false` env var gate the call.
+    //
+    // The actual reconcile call lives in
+    // [`run_startup_reconcile`] so unit tests can drive the
+    // disabled / enabled / sweep paths without going through the
+    // full `Config::load()` + `Cli::parse` plumbing.
     if should_reconcile_at_startup(&cli.cmd) {
         let cfg = Config::load()?;
-        if cfg.startup_reconcile {
-            let db = Db::open(&global_home.meta_db_path())?;
-            let report = crate::reconcile::startup_reconcile(&global_home, &db, &cfg)?;
-            tracing::info!(?report, "startup reconcile done");
-        }
+        run_startup_reconcile(&global_home, &cfg)?;
     }
     match cli.cmd {
         Cmd::Run {
@@ -1129,5 +1151,174 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             })?;
             Ok(code)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TEST_MOAGAN_HOME_LOCK;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counter so every test under this module gets a unique tmp
+    /// directory. Without it two tests could pick the same label
+    /// and step on each other when they share the process-wide
+    /// `MOAGAN_HOME` lock (the `lock_env` helper below).
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_tmp(label: &str) -> std::path::PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("moagan-cli-{pid}-{n}-{label}"));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        dir
+    }
+
+    fn lock_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
+        let guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp);
+        }
+        guard
+    }
+
+    fn unlock_env(guard: std::sync::MutexGuard<'static, ()>) {
+        unsafe {
+            std::env::remove_var("MOAGAN_HOME");
+        }
+        drop(guard);
+    }
+
+    /// `should_reconcile_at_startup` is the gate that scopes the
+    /// reconcile sweep to pipeline-opening commands. Read-only
+    /// commands like `Doctor` must NOT trigger the reconcile so
+    /// `moagan doctor` keeps its deterministic exit code.
+    #[test]
+    fn should_reconcile_at_startup_skips_read_only_commands() {
+        assert!(!should_reconcile_at_startup(&Cmd::Doctor));
+    }
+
+    /// D.28.3 + D.28.4 wire: when
+    /// `Config::startup_reconcile == true` (the default), the
+    /// pre-dispatch reconcile actually runs and returns a report.
+    /// The test sets up a clean `MOAGAN_HOME` (no orphans, no
+    /// zombies) and asserts the report is `Some` with both
+    /// counters at zero, the canonical "ran, nothing to do"
+    /// outcome.
+    #[test]
+    fn cli_run_invokes_startup_reconcile_when_enabled() {
+        let tmp = unique_tmp("reconcile-enabled");
+        let guard = lock_env(&tmp);
+        let home = MoaganHome::at(tmp.clone());
+
+        let cfg = Config::default();
+        assert!(
+            cfg.startup_reconcile,
+            "default Config::startup_reconcile must be true"
+        );
+
+        let report =
+            run_startup_reconcile(&home, &cfg).expect("reconcile must succeed on a fresh home");
+        let report = report.expect("Some(report) when startup_reconcile is enabled");
+        assert_eq!(report.orphans_removed, 0);
+        assert_eq!(report.zombies_recovered, 0);
+
+        unlock_env(guard);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// D.28.3 + D.28.4 wire: when
+    /// `Config::startup_reconcile == false`, the pre-dispatch
+    /// reconcile short-circuits and returns `Ok(None)`. No DB
+    /// open, no `meta.sqlite` migration, no filesystem walk —
+    /// the operator who opted out pays nothing.
+    #[test]
+    fn cli_run_skips_startup_reconcile_when_disabled() {
+        let tmp = unique_tmp("reconcile-disabled");
+        let guard = lock_env(&tmp);
+        let home = MoaganHome::at(tmp.clone());
+
+        let cfg = Config {
+            startup_reconcile: false,
+            ..Config::default()
+        };
+
+        let report = run_startup_reconcile(&home, &cfg)
+            .expect("disabled path must not error on a fresh home");
+        assert!(
+            report.is_none(),
+            "startup_reconcile=false must short-circuit to Ok(None); got {report:?}"
+        );
+
+        unlock_env(guard);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// D.28.3 + D.28.4 wire end-to-end: the pre-dispatch
+    /// reconcile actually cleans up `*.tmp.<hex>` orphans and
+    /// flips stale `running` rows to `interrupted`. The test
+    /// seeds both shapes and asserts the returned report
+    /// reports the right counts and the side effects land on
+    /// disk + SQLite.
+    #[test]
+    fn cli_run_reconcile_sweeps_zombies_and_orphans() {
+        let tmp = unique_tmp("reconcile-sweep");
+        let guard = lock_env(&tmp);
+        let home = MoaganHome::at(tmp.clone());
+
+        // Open the DB once so the migration runner applies
+        // before we seed a zombie row (otherwise `register_run`
+        // would race the migration).
+        let db = crate::storage::sqlite::Db::open(&home.meta_db_path()).expect("open db");
+
+        // Seed a zombie: stale `running` row whose
+        // `updated_unix` is past the 2h threshold.
+        let zombie = crate::ids::RunId::new();
+        db.register_run(zombie, "fast", "running", "0.4.0", None, None, None)
+            .expect("register zombie");
+        let now = crate::time::now_unix_secs();
+        let past = now - crate::reconcile::ZOMBIE_HEARTBEAT_SECS - 600;
+        db._test_backdate_updated_unix(zombie, past)
+            .expect("backdate");
+
+        // Seed an orphan: a `*.tmp.<hex>` file inside a real
+        // run directory. `cleanup_orphans` walks every run
+        // directory it can find on disk; creating a real run
+        // dir makes the walker hit the fixture.
+        let run_with_orphan = crate::ids::RunId::new();
+        let proposals_dir = home
+            .runs_dir()
+            .join(run_with_orphan.to_string())
+            .join("proposals");
+        std::fs::create_dir_all(&proposals_dir).expect("mkdir");
+        let orphan = proposals_dir.join("p_001.json.tmp.deadbeef01234567");
+        std::fs::write(&orphan, b"orphan").expect("write orphan");
+        drop(db);
+
+        let cfg = Config::default();
+        assert!(cfg.startup_reconcile);
+        let report = run_startup_reconcile(&home, &cfg)
+            .expect("sweep must succeed")
+            .expect("Some(report) when enabled");
+
+        assert_eq!(report.orphans_removed, 1, "exactly one orphan removed");
+        assert_eq!(report.zombies_recovered, 1, "exactly one zombie recovered");
+
+        // Side effects must land on disk + SQLite.
+        assert!(!orphan.exists(), "orphan file must be gone");
+        let db_after = crate::storage::sqlite::Db::open(&home.meta_db_path()).expect("reopen db");
+        let row = db_after
+            .get_run(zombie)
+            .expect("get_run")
+            .expect("zombie row must still exist (flipped to interrupted)");
+        assert_eq!(
+            row.status, "interrupted",
+            "zombie must be flipped to `interrupted`"
+        );
+
+        unlock_env(guard);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

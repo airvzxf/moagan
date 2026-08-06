@@ -84,6 +84,8 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 use crate::cli::Mode;
 use crate::domain::Proposal;
 use crate::error::{Error, Result};
@@ -175,7 +177,7 @@ impl Cardinality {
 }
 
 /// Selection strategy (D.21.3 / D.12.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionKind {
     /// Keep the top-N by score (descending). Stable sort.
     TopN,
@@ -191,7 +193,12 @@ pub enum SelectionKind {
 /// Plan describing how to pick a subset of scored proposals
 /// after the rank phase. Constructed via [`SelectionPlan::keep_top`],
 /// [`SelectionPlan::keep_diverse`], or [`SelectionPlan::keep_outlier`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Copy` so it lives directly inside `Config` (Catalog D.21.3
+/// config wiring); `Serialize`/`Deserialize` so the operator can
+/// pin the strategy in `~/.config/moagan/config.toml` or via the
+/// `MOAGAN_SELECTION_PLAN` env var.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionPlan {
     /// Which selection strategy to apply.
     pub kind: SelectionKind,
@@ -999,6 +1006,176 @@ mod tests {
         assert_eq!(
             SelectionPlan::default_for_mode("unknown"),
             SelectionPlan::keep_top(5)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // D.21.3 wire (PR J2): the three builder constructors and the
+    // distinct distance semantics each `SelectionKind` invokes. The
+    // constructors themselves were already covered above
+    // (`selection_plan_keep_top_returns_top_n`,
+    // `selection_plan_keep_diverse_constructs`,
+    // `selection_plan_keep_outlier_constructs`); the tests below
+    // pin the actual filter semantics — i.e. that
+    // `keep_diverse` picks via Jaccard distance on Proposal text
+    // (not on id) and that `keep_outlier` surfaces the entry whose
+    // vocabulary sits farthest from the score-weighted centroid.
+    // -----------------------------------------------------------------
+
+    /// D.21.3 wire: `SelectionPlan::keep_diverse(N)` filters the
+    /// scored list by Jaccard distance over the proposal text.
+    /// First pick is the highest scorer; every subsequent pick
+    /// maximises the minimum Jaccard distance to the already-
+    /// chosen set. The fixture gives p1 / p3 a vocabulary that
+    /// is maximally distant from p2's, so the test pins the
+    /// distance semantics (an implementation that tokenised the
+    /// id alone would surface the wrong second pick).
+    #[test]
+    fn selection_plan_keep_diverse_filters_by_jaccard() {
+        let p1 = Proposal {
+            id: "p1".into(),
+            summary: "alpha alpha alpha alpha alpha".into(),
+            approach: "alpha alpha".into(),
+            ..Proposal::default()
+        };
+        let p2 = Proposal {
+            id: "p2".into(),
+            summary: "beta beta beta".into(),
+            approach: "beta".into(),
+            ..Proposal::default()
+        };
+        let p3 = Proposal {
+            id: "p3".into(),
+            summary: "gamma gamma gamma gamma gamma gamma".into(),
+            approach: "gamma gamma".into(),
+            ..Proposal::default()
+        };
+        let p4 = Proposal {
+            id: "p4".into(),
+            summary: "delta delta".into(),
+            approach: "delta delta delta".into(),
+            ..Proposal::default()
+        };
+        // p2 is the highest scorer → first pick. p1 / p3 / p4
+        // share zero tokens with p2, so each is at Jaccard
+        // distance 1.0 from p2. Tiebreak by score descending:
+        // p4 (0.6) > p3 (0.5) > p1 (0.3). With N = 3 the chosen
+        // set is {p2, p4, p3}.
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("p1".into(), 0.3, p1),
+            ("p2".into(), 0.9, p2),
+            ("p3".into(), 0.5, p3),
+            ("p4".into(), 0.6, p4),
+        ];
+        let plan = SelectionPlan::keep_diverse(3);
+        let chosen = plan.apply(&scored);
+        assert_eq!(chosen.len(), 3);
+        // Highest scorer is always first.
+        assert_eq!(chosen[0], "p2");
+        // Remaining picks are at Jaccard distance 1.0 from p2
+        // (no shared tokens). With score descending as
+        // tiebreaker the order is p4 (0.6) then p3 (0.5); p1
+        // (0.3) is dropped.
+        let set: std::collections::BTreeSet<&str> = chosen.iter().map(String::as_str).collect();
+        assert_eq!(
+            set,
+            ["p2", "p3", "p4"].iter().copied().collect(),
+            "Jaccard distance must use Proposal text"
+        );
+        assert!(!chosen.contains(&"p1".to_owned()));
+    }
+
+    /// D.21.3 wire: `SelectionPlan::keep_outlier(N)` returns the
+    /// N entries with the largest distance from the
+    /// score-weighted centroid. The fixture has two proposals
+    /// sharing a common vocabulary (`cluster_a`, `cluster_b`)
+    /// and one outlier (`contrarian`). The outlier must surface
+    /// regardless of score, because the centroid is dominated
+    /// by the cluster tokens and the outlier's tokens never
+    /// appear in any other proposal.
+    #[test]
+    fn selection_plan_keep_outlier_returns_max_distance() {
+        let cluster_a = Proposal {
+            id: "ca".into(),
+            summary: "alpha beta gamma".into(),
+            approach: "alpha beta".into(),
+            ..Proposal::default()
+        };
+        let cluster_b = Proposal {
+            id: "cb".into(),
+            summary: "alpha gamma beta".into(),
+            approach: "beta alpha gamma".into(),
+            ..Proposal::default()
+        };
+        let contrarian = Proposal {
+            id: "ctr".into(),
+            summary: "zeta eta theta".into(),
+            approach: "zeta eta".into(),
+            ..Proposal::default()
+        };
+        // Identical scores so the centroid is a uniform average
+        // over cluster_a and cluster_b; the contrarian has
+        // zero overlap with that vocabulary and therefore the
+        // largest centroid distance.
+        let scored: Vec<(String, f64, Proposal)> = vec![
+            ("ca".into(), 0.5, cluster_a),
+            ("cb".into(), 0.5, cluster_b),
+            ("ctr".into(), 0.5, contrarian),
+        ];
+        let plan = SelectionPlan::keep_outlier(1);
+        let chosen = plan.apply(&scored);
+        assert_eq!(
+            chosen,
+            vec!["ctr".to_owned()],
+            "keep_outlier must surface the maximum-distance entry"
+        );
+
+        // With N = 3 every id is returned (in outlier-distance
+        // descending order), but the contrarian is still first
+        // because its centroid distance dwarfs the cluster ids'.
+        let plan_all = SelectionPlan::keep_outlier(3);
+        let chosen_all = plan_all.apply(&scored);
+        assert_eq!(chosen_all.len(), 3);
+        assert_eq!(
+            chosen_all[0], "ctr",
+            "outlier must rank first even when every id is kept"
+        );
+    }
+
+    /// D.21.3 wire: `SelectionPlan` is `Copy + Eq + Serialize +
+    /// Deserialize` so it can live directly inside `Config`
+    /// (catalog D.21.3 wiring) and travel through TOML. The
+    /// round-trip pins both the encoding shape (`{kind, count}`)
+    /// and the equality so a future refactor that drops the
+    /// derives trips the test before `Config` stops compiling.
+    #[test]
+    fn selection_plan_round_trips_through_toml() {
+        let plans = [
+            SelectionPlan::keep_top(3),
+            SelectionPlan::keep_diverse(15),
+            SelectionPlan::keep_outlier(7),
+        ];
+        for plan in plans {
+            let encoded = toml::to_string(&plan).expect("serialize");
+            let decoded: SelectionPlan = toml::from_str(&encoded).expect("deserialize");
+            assert_eq!(decoded, plan, "round-trip must preserve identity");
+        }
+        // The TOML shape must surface both `kind` and `count`
+        // as named fields so an operator can write
+        // `[selection_plan]\nkind = "diverse"\ncount = 15`.
+        let plan = SelectionPlan::keep_diverse(15);
+        let encoded = toml::to_string(&plan).unwrap();
+        assert!(
+            encoded.contains("kind"),
+            "TOML must surface `kind`; got {encoded}"
+        );
+        assert!(
+            encoded.contains("count"),
+            "TOML must surface `count`; got {encoded}"
+        );
+        assert!(
+            encoded.contains("DiverseN") || encoded.contains("\"DiverseN\""),
+            "TOML must serialise the variant as `DiverseN`; got {encoded}"
         );
     }
 }
