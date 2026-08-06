@@ -27,4 +27,4 @@ pub mod stability;
 pub use cluster::{cluster_by_simhash, jaccard_distance};
 pub use diversity::pick_with_crowding;
 pub use pareto::pareto_front;
-pub use rubric::{Criterion, Rubric};
+pub use rubric::{Criterion, RUBRIC_ANCHORS, Rubric, render_rubric_block};

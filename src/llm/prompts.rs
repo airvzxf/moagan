@@ -250,6 +250,26 @@ pub fn inject_epistemic_preferences(prompt: &str, user: &str) -> String {
 /// opinions in current docs.
 pub const KNOWN_APIS_PLACEHOLDER: &str = "${known_apis}";
 
+/// Placeholder token that prompts embed when they want the canonical
+/// six-axis rubric rendered inline. Substitute via
+/// [`inject_rubric`]. Track E (E2): the Judge and Critique prompts
+/// share a single rubric so the LLM-side scoring contract cannot
+/// drift between the two phases.
+pub const RUBRIC_PLACEHOLDER: &str = "${rubric}";
+
+/// Substitute [`RUBRIC_PLACEHOLDER`] in `prompt` with the rendered
+/// Markdown view of [`crate::ranking::RUBRIC_ANCHORS`] (the
+/// six-criterion rubric: correctness, completeness, feasibility,
+/// safety, cost, clarity). When the placeholder is absent, `prompt`
+/// is returned unchanged.
+pub fn inject_rubric(prompt: &str) -> String {
+    if !prompt.contains(RUBRIC_PLACEHOLDER) {
+        return prompt.to_owned();
+    }
+    let block = crate::ranking::render_rubric_block();
+    prompt.replace(RUBRIC_PLACEHOLDER, &block)
+}
+
 /// Substitute [`KNOWN_APIS_PLACEHOLDER`] in `prompt` with the rendered
 /// Markdown of the supplied research snippets. When the placeholder
 /// is absent, `prompt` is returned unchanged. When `snippets` is
@@ -405,5 +425,45 @@ mod tests {
         let injected = inject_known_apis(template, &[]);
         assert!(!injected.contains(KNOWN_APIS_PLACEHOLDER));
         assert!(injected.contains("no research available"));
+    }
+
+    /// Track E (E2): when the Judge prompt embeds `${rubric}` the
+    /// injector must replace it with the rendered six-axis Markdown
+    /// block. The block must list every key from `RUBRIC_ANCHORS`
+    /// and the placeholder must be gone after the call so the LLM
+    /// never sees the literal token.
+    #[test]
+    fn judge_prompt_substitutes_rubric_placeholder() {
+        let template = "# judge\n${rubric}\nrest";
+        let injected = inject_rubric(template);
+        assert!(!injected.contains(RUBRIC_PLACEHOLDER));
+        for (k, _) in crate::ranking::RUBRIC_ANCHORS {
+            assert!(
+                injected.contains(&format!("**{k}**")),
+                "injected judge prompt missing key {k}"
+            );
+        }
+        assert!(injected.starts_with("# judge\n"));
+        assert!(injected.ends_with("\nrest"));
+    }
+
+    /// Track E (E2): the Critique prompt substitutes `${rubric}`
+    /// identically to the Judge prompt. Both prompts must share the
+    /// same six-axis rubric so the LLM-side scoring contract is
+    /// stable across phases.
+    #[test]
+    fn critique_prompt_substitutes_rubric_placeholder() {
+        let template = "# critique\n${rubric}\ntail";
+        let injected = inject_rubric(template);
+        assert!(!injected.contains(RUBRIC_PLACEHOLDER));
+        assert!(injected.contains("# Rubric anchors"));
+        for (k, _) in crate::ranking::RUBRIC_ANCHORS {
+            assert!(
+                injected.contains(&format!("**{k}**")),
+                "injected critique prompt missing key {k}"
+            );
+        }
+        assert!(injected.starts_with("# critique\n"));
+        assert!(injected.ends_with("\ntail"));
     }
 }
