@@ -22,7 +22,6 @@ use crate::checkpoint::modify_note;
 use crate::config::Config;
 use crate::domain::{Proposal, RankEntry, Ranking, StabilityLabel};
 use crate::error::Result;
-use crate::phases::cardinality::SelectionPlan;
 use crate::phases::judge::Aggregated;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
@@ -214,23 +213,28 @@ impl Phase for RankPhase {
             .or_else(|| ranked.first().map(|r| r.id.clone()))
             .unwrap_or_default();
 
-        // Step 5.7 (Track E, E3): apply the mode-specific
-        // SelectionPlan to filter the final portfolio. The plan
-        // picks a subset of `(id, score, Proposal)` triples — top-N
-        // for `fast` / `standard` / `deep` / `batch`, diverse-N for
-        // `explore` (spec D.21.3). Both `ranked` and
-        // `representatives` are filtered so the deliver surface
-        // only sees the chosen ids. The score is the same
-        // weighted score computed in step 5; the Proposal is the
-        // structured object read in step 1 (used by
-        // `keep_diverse` / `keep_outlier` for Jaccard distance over
-        // the proposal text).
+        // Step 5.7 (Track E, E3): apply the SelectionPlan pinned
+        // in `Config::selection_plan` to filter the final
+        // portfolio. The plan picks a subset of
+        // `(id, score, Proposal)` triples — top-N (the default
+        // `keep_top(10)`), diverse-N, or outlier-N (spec D.21.3 /
+        // §D.12.4). Both `ranked` and `representatives` are
+        // filtered so the deliver surface only sees the chosen
+        // ids. The score is the same weighted score computed in
+        // step 5; the Proposal is the structured object read in
+        // step 1 (used by `keep_diverse` / `keep_outlier` for
+        // Jaccard distance over the proposal text).
         //
-        // The plan's defaults live in
-        // [`SelectionPlan::default_for_mode`] — a future commit
-        // can override per-profile via a Config field without
-        // touching this call site.
-        let plan = SelectionPlan::default_for_mode(&ctx.mode);
+        // Catalog D.21.3 wiring: the per-mode baselines still
+        // live in [`SelectionPlan::default_for_mode`] for
+        // back-compat (and for callers that want a one-shot
+        // baseline without instantiating `Config`). The rank
+        // phase reads from `self.config.selection_plan` so an
+        // operator who pins `MOAGAN_SELECTION_PLAN=...` or sets
+        // `[selection_plan]\nkind = "diverse"\ncount = 15` in
+        // `~/.config/moagan/config.toml` actually sees their
+        // choice reflected in `ranking.json`.
+        let plan = self.config.selection_plan;
         let id_to_score: std::collections::HashMap<&str, f64> = ranked
             .iter()
             .map(|r| (r.id.as_str(), r.score as f64))
@@ -775,13 +779,18 @@ mod tests {
 
         // Disable stability so the test does not block on the
         // sensitive-checkpoint trigger and so the deterministic
-        // ranking flows through to the assertions.
+        // ranking flows through to the assertions. Pin
+        // `selection_plan = keep_top(3)` so the assertion below
+        // (3 ids kept) is independent of `Config::default()` —
+        // the catalog baseline `keep_top(10)` would otherwise
+        // keep every proposal in the fixture.
         let cfg = Arc::new(Config {
             ranking_weights: RankingWeights::default(),
             stability: StabilityConfig {
                 enabled: false,
                 ..StabilityConfig::default()
             },
+            selection_plan: crate::phases::cardinality::SelectionPlan::keep_top(3),
             ..Config::default()
         });
         let ctx = RunContext::new(
@@ -809,7 +818,7 @@ mod tests {
         let raw = std::fs::read(&path).unwrap();
         let ranking: Ranking = serde_json::from_slice(&raw).unwrap();
 
-        // `mode = "fast"` ⇒ `keep_top(3)` ⇒ the three highest
+        // `selection_plan = keep_top(3)` ⇒ the three highest
         // scorers land on `ranked`. The two lowest scorers
         // (`p_four`, `p_five`) must be filtered out by
         // SelectionPlan::apply.

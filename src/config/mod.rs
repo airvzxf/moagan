@@ -223,6 +223,22 @@ pub struct Config {
     /// so existing runs are bit-identical.
     #[serde(default)]
     pub discovery: DiscoveryWiringConfig,
+    /// Track J (D.21.3): selection strategy the rank phase
+    /// applies after the weighted sort to choose which
+    /// `(proposal_id, score, Proposal)` triples make it into the
+    /// final `ranking.json`. Spec D.21.3 / §D.12.4. Three
+    /// constructors — `SelectionPlan::keep_top`,
+    /// `SelectionPlan::keep_diverse`,
+    /// `SelectionPlan::keep_outlier` — produce the three
+    /// flavours the catalog describes. Default
+    /// `SelectionPlan::keep_top(10)` matches the spec baseline
+    /// for `Mode::Deep`. Operators wanting the spread (D.7.1
+    /// `explore` semantics) set
+    /// `MOAGAN_SELECTION_PLAN={kind="diverse", count=15}` in
+    /// `~/.config/moagan/config.toml`; the env-var override is
+    /// applied in [`Self::apply_env_overrides`].
+    #[serde(default = "default_selection_plan")]
+    pub selection_plan: crate::phases::cardinality::SelectionPlan,
     /// Export-side knobs. The hash algorithm threads through
     /// the cache key builder
     /// (`crate::llm::wire::build_cache_key`) and the brief
@@ -299,6 +315,14 @@ impl Default for DiscoveryWiringConfig {
 
 fn default_startup_reconcile() -> bool {
     true
+}
+
+/// Default `SelectionPlan` for `Config::selection_plan`.
+/// Spec D.21.3 baseline: `keep_top(10)`. Matches the
+/// `Mode::Deep` cardinality baseline (see
+/// [`crate::phases::cardinality::SelectionPlan::default_for_mode`]).
+fn default_selection_plan() -> crate::phases::cardinality::SelectionPlan {
+    crate::phases::cardinality::SelectionPlan::keep_top(10)
 }
 
 #[allow(missing_docs)]
@@ -590,6 +614,7 @@ impl Default for Config {
             rate_limit_per_provider: std::collections::HashMap::new(),
             discovery: DiscoveryWiringConfig::default(),
             export: ExportConfig::default(),
+            selection_plan: default_selection_plan(),
         }
     }
 }
