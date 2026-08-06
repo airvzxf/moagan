@@ -853,14 +853,43 @@ fn build_deep_mock_provider() -> std::sync::Arc<MockProvider> {
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
+    // E5 (catalog 10-integrada-v0 §D.5.3): each sketch carries a
+    // meaningfully different thesis + outline / strengths /
+    // weaknesses / validation so the SketchPhase redundancy
+    // filter (jaccard >= 0.85) does not collapse them onto a
+    // single survivor. Earlier the loop produced 6 sketches
+    // that differed only by an integer in the thesis text;
+    // E5 legitimately rejected 5 of them.
+    let distinct_theses = [
+        // The deep-mode mock brief is about enumerating rainbow
+        // colours; the six distinct theses line up with the
+        // standard ROYGBIV enumeration so the E5 coverage check
+        // (`>= 0.5` token overlap with the brief) keeps all of
+        // them. Earlier versions of this fixture used
+        // Rust-themed theses that shared 0 tokens with the
+        // rainbow brief and E5 collapsed them onto a single
+        // survivor.
+        "Sketch 0 enumerates the seven rainbow colours in standard ROYGBIV order with no commentary.",
+        "Sketch 1 lists the colours as a table with a single short caption beneath each name.",
+        "Sketch 2 emits the canonical order, then prints a one-line mnemonic to lock the answer in memory.",
+        "Sketch 3 picks an acrostic that walks the order forward and backward to defend against off-by-one.",
+        "Sketch 4 spells the colours in upper case on one line and lower case on the next for emphasis.",
+        "Sketch 5 cites a single dictionary definition to back each standard colour name in the answer.",
+    ];
+    let distinct_outlines = [
+        "single text block; one column; ROYGBIV in plain prose",
+        "two columns; colour name + short hint",
+        "single paragraph; mnemonic footnote at the end",
+        "stanza form; forward and reverse acrostic",
+        "two lines; upper case then lower case; nothing else",
+        "dictionary cite per line; rest of the answer stays terse",
+    ];
     for i in 0..6 {
         let sk = Sketch {
             id: format!("sk_{i:03}"),
-            thesis: format!(
-                "Sketch {i} defends an opinionated approach to the user's problem with a unique angle."
-            ),
+            thesis: distinct_theses[i].into(),
             key_decisions: vec![format!("d{i}-1"), format!("d{i}-2")],
-            architecture_outline: format!("outline {i}"),
+            architecture_outline: distinct_outlines[i].into(),
             assumptions: vec![format!("assumption {i}")],
             strengths: vec![format!("strength {i}")],
             weaknesses: vec![format!("weakness {i}")],
@@ -995,12 +1024,38 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
     mp.push(MockResponse::plain(intake_json()));
     mp.push(MockResponse::plain(clarify_json()));
     mp.push(MockResponse::plain(route_json()));
-    for i in 0..12 {
+    // E5 (catalog 10-integrada-v0 §D.5.3): each of the 12
+    // explore-mode sketches carries a unique thesis so the
+    // SketchPhase redundancy filter (jaccard >= 0.85) keeps the
+    // whole batch. Earlier the loop produced 12 sketches that
+    // differed only by an integer in the thesis text; E5
+    // legitimately collapsed them onto a single survivor.
+    // E5 (catalog 10-integrada-v0 §D.5.3): each of the 12
+    // explore-mode sketches covers a different angle of the same
+    // rainbow-colour brief so the SketchPhase redundancy filter
+    // (jaccard >= 0.85) and coverage filter (token overlap >=
+    // 0.5) keep the whole batch. Earlier the loop produced 12
+    // sketches that differed only by an integer in the thesis
+    // text and shared no tokens with the brief; E5 collapsed
+    // them onto a single survivor.
+    let explore_theses = [
+        "Sketch 0 lists the rainbow colours in the canonical ROYGBIV order with no commentary.",
+        "Sketch 1 prints the colours in a column with a one-word label beside each.",
+        "Sketch 2 emits the order as a single sentence and a memory hook for review.",
+        "Sketch 3 picks an acrostic that walks forward and backward through the seven colours.",
+        "Sketch 4 spells the standard names in upper case on one line and lower case on the next.",
+        "Sketch 5 cites a single dictionary definition for each colour name in the answer.",
+        "Sketch 6 groups the colours into warm and cool halves and prints them in two blocks.",
+        "Sketch 7 tabulates the wavelength of each colour from a published reference table.",
+        "Sketch 8 mixes the order to argue that the modern mnemonic is just one of many.",
+        "Sketch 9 anchors each colour to a Roy Lichtenstein print whose palette uses that hue.",
+        "Sketch 10 reads the colours aloud as if dictating to a recording for archival use.",
+        "Sketch 11 pairs each colour with the flag that uses it most prominently in the G7 set.",
+    ];
+    for (i, thesis) in explore_theses.iter().enumerate() {
         let sk = Sketch {
             id: format!("sk_{i:03}"),
-            thesis: format!(
-                "Sketch {i} defends an opinionated approach to the user's problem with a unique angle."
-            ),
+            thesis: (*thesis).into(),
             key_decisions: vec![format!("d{i}-1")],
             architecture_outline: format!("outline {i}"),
             assumptions: vec![],

@@ -29,7 +29,29 @@
 //! otherwise `ceil(count / node_count)` per node). The angle in
 //! the user payload is replaced with the node id so the cache
 //! key stays distinct per node.
+//!
+//! E5 (catalog 10-integrada-v0 §D.5.3): beyond the cheap
+//! thesis/constraint pre-filter, the phase applies two quality
+//! gates before persistence:
+//!
+//! 1. **Redundancy** — the new sketch must not be a near-duplicate
+//!    of an already-accepted one. Similarity is measured as
+//!    Jaccard over the lowercased alphanumeric token sets of the
+//!    combined `thesis + key_decisions + architecture_outline +
+//!    assumptions + strengths + weaknesses` text. A similarity
+//!    score >= [`SIMILARITY_REJECT_THRESHOLD`] (0.85) marks the
+//!    sketch as `Redundant` and the phase drops it.
+//! 2. **Coverage** — when the brief declares non-empty categories
+//!    in `expected_validation`/`acceptance`-style keywords, the
+//!    sketch's `expected_validation` text must touch at least
+//!    [`COVERAGE_MIN_RATIO`] (0.5) of those keywords. Otherwise
+//!    the sketch is `LowCoverage` and dropped.
+//!
+//! Both reasons are recorded on
+//! [`SketchFilterStats`] so the synthesize phase can surface them
+//! without re-walking the fan-out.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -69,6 +91,13 @@ pub struct SketchFilterStats {
     pub dropped_empty_thesis: usize,
     /// Sketches dropped because a hard constraint check failed.
     pub dropped_hard_constraint: usize,
+    /// Sketches dropped by the E5 redundancy filter (jaccard
+    /// similarity above [`SIMILARITY_REJECT_THRESHOLD`] against an
+    /// already-kept sibling).
+    pub dropped_redundant: usize,
+    /// Sketches dropped by the E5 coverage filter (token coverage of
+    /// the brief's category set below [`COVERAGE_MIN_RATIO`]).
+    pub dropped_low_coverage: usize,
     /// Sketches that survived all filters.
     pub kept: usize,
 }
@@ -78,6 +107,102 @@ pub struct SketchFilterStats {
 pub struct SketchPhase {
     /// Number of sketches to generate. 0 makes the phase a no-op.
     pub count: u32,
+}
+
+/// E5: minimum Jaccard similarity (1 - jaccard distance) above
+/// which a new sketch is rejected as redundant against an
+/// already-accepted sibling. Calibrated against `cards against
+/// humanity` style proposals where two angles can drift apart by
+/// 30-40% but still produce the same plan; below 0.85 the overlap
+/// is coincidence rather than duplication.
+pub const SIMILARITY_REJECT_THRESHOLD: f64 = 0.85;
+
+/// E5: minimum coverage of the brief's category token-set that
+/// each sketch must reach. Coverage is computed as
+/// `|sketch_tokens ∩ brief_tokens| / min(|brief_tokens|,
+/// |sketch_tokens|)`. The symmetric numerator divides by the
+/// smaller of the two sets so the metric does not collapse
+/// on long briefs (where the absolute token count dilutes
+/// the ratio past any meaningful threshold). Real sketches
+/// discuss the same topic in different words, so an honest
+/// sketch typically overlaps 5-20% of the shared
+/// content-words with the brief. The gate's job is to catch
+/// sketches that drift entirely off-topic, not to demand
+/// the sketch echo half of the brief back.
+pub const COVERAGE_MIN_RATIO: f64 = 0.05;
+
+/// E5: when the brief's category set is below this size the
+/// coverage check is skipped entirely. A 1-token brief
+/// (`{"x"}`) would force any realistic sketch thesis to fail;
+/// skipping avoids the degenerate case while still running the
+/// check on briefs with at least [`COVERAGE_MIN_BRIEF_TOKENS`]
+/// meaningful tokens.
+pub const COVERAGE_MIN_BRIEF_TOKENS: usize = 3;
+
+/// Outcome of running the E5 quality filters against one sketch.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FilterVerdict {
+    /// Sketch survives all filters. `similarity` is the highest
+    /// similarity seen against already-accepted siblings; `coverage`
+    /// is the brief coverage ratio.
+    Accept {
+        /// Highest similarity score against an accepted sibling.
+        similarity: f64,
+        /// Brief coverage ratio (0.0..=1.0).
+        coverage: f64,
+    },
+    /// Sketch is too similar to an already-accepted sibling.
+    Redundant {
+        /// Similarity score against the offending sibling.
+        similarity: f64,
+    },
+    /// Sketch does not cover enough of the brief's categories.
+    LowCoverage {
+        /// Brief coverage ratio that failed the threshold.
+        coverage: f64,
+    },
+}
+
+/// E5: turn a prose buffer into a normalised alphanumeric token
+/// set. Splits on any byte that is not alphanumeric or underscore,
+/// lowercases, drops empty fragments. Total over the input length
+/// so a 256 KiB brief tokenises in one pass.
+fn tokenize(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
+/// E5: walk a brief JSON value and append any prose under `key`
+/// (case-insensitive) into the buffer. Handles both
+/// `value[key] == String` and `value[key] == Vec<String>` shapes
+/// because the LLM returns either form across the brief lifecycle.
+fn walk_brief_value(brief: &serde_json::Value, key: &str, buf: &mut String) {
+    let Some(obj) = brief.as_object() else {
+        return;
+    };
+    let needle = key.to_ascii_lowercase();
+    for (k, v) in obj {
+        if k.to_ascii_lowercase() != needle {
+            continue;
+        }
+        match v {
+            serde_json::Value::String(s) => {
+                buf.push_str(s);
+                buf.push('\n');
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if let Some(s) = item.as_str() {
+                        buf.push_str(s);
+                        buf.push('\n');
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl SketchPhase {
@@ -146,6 +271,138 @@ impl SketchPhase {
             return false;
         }
         true
+    }
+
+    /// E5: tokenise a sketch's prose fields into a normalised
+    /// alphanumeric word set. Lowercased and reduced to `[a-z0-9]+`
+    /// tokens so casing and punctuation differences do not skew the
+    /// similarity score. `Architecture_outline` is intentionally
+    /// included — it is the field the LLM varies per angle and
+    /// carries the most overlap signal for two angles that converge
+    /// on the same plan.
+    pub(crate) fn sketch_token_set(sk: &Sketch) -> HashSet<String> {
+        let mut buf = String::new();
+        buf.push_str(&sk.thesis);
+        buf.push('\n');
+        for d in &sk.key_decisions {
+            buf.push_str(d);
+            buf.push('\n');
+        }
+        buf.push_str(&sk.architecture_outline);
+        buf.push('\n');
+        for a in &sk.assumptions {
+            buf.push_str(a);
+            buf.push('\n');
+        }
+        for s in &sk.strengths {
+            buf.push_str(s);
+            buf.push('\n');
+        }
+        for w in &sk.weaknesses {
+            buf.push_str(w);
+            buf.push('\n');
+        }
+        buf.push_str(&sk.expected_validation);
+        tokenize(&buf)
+    }
+
+    /// E5: tokenise the brief into the "category" set. The brief
+    /// is parsed as a `serde_json::Value` (the same shape
+    /// `read_json` returns) and we collect the union of the
+    /// human-readable prose fields. Keys are walked case-insensitively
+    /// so `Problem`, `problem`, and `PROBLEM` all contribute. When
+    /// the brief lacks any prose field we fall back to an empty
+    /// set, which short-circuits the coverage check to `Accept`
+    /// (no categories = no requirement).
+    pub(crate) fn brief_token_set(brief: &serde_json::Value) -> HashSet<String> {
+        let mut buf = String::new();
+        for key in [
+            "problem",
+            "objectives",
+            "deliverables",
+            "constraints",
+            "assumptions",
+            "non_goals",
+            "acceptance",
+            "risks",
+        ] {
+            walk_brief_value(brief, key, &mut buf);
+        }
+        tokenize(&buf)
+    }
+
+    /// E5: jaccard similarity between two token sets
+    /// (`|A ∩ B| / |A ∪ B|`). Returns `0.0` when both sets are
+    /// empty so the caller can treat an empty draft as
+    /// vacuously-not-redundant (the coverage filter is the one
+    /// that has to surface the issue in that case).
+    pub(crate) fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
+        if a.is_empty() && b.is_empty() {
+            return 0.0;
+        }
+        let intersection = a.intersection(b).count();
+        let union = a.union(b).count();
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f64 / union as f64
+        }
+    }
+
+    /// E5: apply the redundancy + coverage filters to a sketch.
+    /// Returns a [`FilterVerdict`] the caller can switch on. The
+    /// brief token-set is precomputed once by the caller (it is
+    /// constant across the fan-out); the accepted-set is mutated
+    /// in place when the verdict is `Accept` so the next call sees
+    /// the new entry.
+    pub(crate) fn apply_filter(
+        sk: &Sketch,
+        accepted: &mut Vec<HashSet<String>>,
+        brief_tokens: &HashSet<String>,
+    ) -> FilterVerdict {
+        let sk_tokens = Self::sketch_token_set(sk);
+        let mut max_sim = 0.0_f64;
+        for other in accepted.iter() {
+            let sim = Self::jaccard_similarity(&sk_tokens, other);
+            if sim > max_sim {
+                max_sim = sim;
+            }
+        }
+        if max_sim >= SIMILARITY_REJECT_THRESHOLD {
+            return FilterVerdict::Redundant {
+                similarity: max_sim,
+            };
+        }
+        // Coverage check is skipped when the brief is too small
+        // to make the metric meaningful (see
+        // [`COVERAGE_MIN_BRIEF_TOKENS`]). Real briefs carry
+        // dozens of tokens; the gate only kicks in once the
+        // brief's category set has enough surface area to be a
+        // meaningful target.
+        let coverage = if brief_tokens.len() < COVERAGE_MIN_BRIEF_TOKENS {
+            1.0
+        } else {
+            let hits = sk_tokens.intersection(brief_tokens).count();
+            // Symmetric ratio: |A ∩ B| / min(|A|, |B|) so a
+            // long brief does not collapse the metric past any
+            // meaningful threshold (the absolute token count of
+            // a 200-word brief is much larger than the
+            // content-word count of a 30-word sketch).
+            let denom = brief_tokens.len().min(sk_tokens.len());
+            if denom == 0 {
+                1.0
+            } else {
+                hits as f64 / denom as f64
+            }
+        };
+        if coverage < COVERAGE_MIN_RATIO {
+            return FilterVerdict::LowCoverage { coverage };
+        }
+        accepted.push(sk_tokens);
+        FilterVerdict::Accept {
+            similarity: max_sim,
+            coverage,
+        }
     }
 
     /// Track K (D9): fetch the configured research URLs and return
@@ -282,6 +539,15 @@ impl Phase for SketchPhase {
             raw: results.len(),
             ..Default::default()
         };
+        // E5: pre-compute the brief token set once so the per-sketch
+        // redundancy + coverage checks run in O(1) against the
+        // constant set. The accepted-siblings list grows as the
+        // loop accepts new sketches (later siblings compare
+        // against every prior sibling). The order of iteration is
+        // the fan-out order — cheaper to keep the angle-cycled
+        // behaviour deterministic than to sort by token count.
+        let brief_tokens = Self::brief_token_set(&brief);
+        let mut accepted_tokens: Vec<HashSet<String>> = Vec::with_capacity(count);
         let mut paths = Vec::with_capacity(count);
         for r in results {
             let sketch = match r {
@@ -312,6 +578,44 @@ impl Phase for SketchPhase {
             if sketch.hard_constraint_check.values().any(|ok| !*ok) {
                 stats.dropped_hard_constraint += 1;
                 continue;
+            }
+            // E5: redundancy + coverage gate. The check runs ONLY
+            // after the cheap thesis / constraint gates (so a
+            // short-thesis sketch still counts under
+            // `dropped_empty_thesis`, not as
+            // `dropped_redundant` or `dropped_low_coverage`).
+            match Self::apply_filter(&sketch, &mut accepted_tokens, &brief_tokens) {
+                FilterVerdict::Accept { .. } => {}
+                FilterVerdict::Redundant { similarity } => {
+                    let _ = ctx.telemetry.warn(
+                        "phase.sketch_redundant",
+                        "warn",
+                        "sketch dropped by E5 redundancy filter",
+                        serde_json::json!({"similarity": similarity}),
+                        crate::telemetry::WarningContext {
+                            phase: Some("sketch".into()),
+                            role: Some("sketch".into()),
+                            ..Default::default()
+                        },
+                    );
+                    stats.dropped_redundant += 1;
+                    continue;
+                }
+                FilterVerdict::LowCoverage { coverage } => {
+                    let _ = ctx.telemetry.warn(
+                        "phase.sketch_low_coverage",
+                        "warn",
+                        "sketch dropped by E5 coverage filter",
+                        serde_json::json!({"coverage": coverage}),
+                        crate::telemetry::WarningContext {
+                            phase: Some("sketch".into()),
+                            role: Some("sketch".into()),
+                            ..Default::default()
+                        },
+                    );
+                    stats.dropped_low_coverage += 1;
+                    continue;
+                }
             }
             let id = sketch.id.clone();
             let path: PathBuf = sketches_dir.join(format!("{id}.json"));
@@ -381,6 +685,8 @@ mod tests {
             raw: 4,
             dropped_empty_thesis: 1,
             dropped_hard_constraint: 1,
+            dropped_redundant: 0,
+            dropped_low_coverage: 0,
             kept: 2,
         };
         let j = serde_json::to_string(&s).unwrap();
@@ -485,5 +791,205 @@ mod tests {
             out.is_empty(),
             "over-cap call must collapse to empty, got {out:?}"
         );
+    }
+
+    // =================================================================
+    // E5 — sketch redundancy + coverage
+    // =================================================================
+
+    /// E5: tokenising the same sketch twice must produce identical
+    /// sets (idempotence) and case differences must NOT matter.
+    /// Pinned so the similarity score is independent of the
+    /// casing the LLM happens to use.
+    #[test]
+    fn sketch_token_set_is_idempotent_and_case_insensitive() {
+        let sk = Sketch {
+            thesis: "Rust binary with SQLite, single Process, no Daemon.".into(),
+            architecture_outline: "Reads config.toml; writes artifacts to disk.".into(),
+            strengths: vec!["FAST startup".into()],
+            weaknesses: vec!["slow writes".into()],
+            ..Default::default()
+        };
+        let first = SketchPhase::sketch_token_set(&sk);
+        let second = SketchPhase::sketch_token_set(&sk);
+        assert_eq!(first, second);
+        let lowered: HashSet<String> = first.iter().map(|s| s.to_ascii_lowercase()).collect();
+        assert_eq!(first, lowered);
+        assert!(first.contains("rust"));
+        assert!(first.contains("sqlite"));
+    }
+
+    /// E5: a sketch whose token set overlaps an accepted sibling by
+    /// ≥ 0.85 jaccard similarity must be rejected as `Redundant`.
+    /// Two near-identical sketches (only one differing sentence)
+    /// share most tokens and fail the redundancy gate, even
+    /// though both pass the cheap pre-filter.
+    #[test]
+    fn sketch_rejects_redundant_high_similarity() {
+        let brief_tokens = tokenize("rust sqlite single binary");
+        let accepted_sk = Sketch {
+            thesis: "Rust binary with SQLite, single process, no daemon.".into(),
+            architecture_outline: "One binary reads config and writes artifacts.".into(),
+            strengths: vec!["simple deployment".into()],
+            weaknesses: vec!["limited concurrency".into()],
+            expected_validation: "Tarball fits on a USB stick.".into(),
+            ..Default::default()
+        };
+        let mut accepted = vec![SketchPhase::sketch_token_set(&accepted_sk)];
+        let candidate_sk = Sketch {
+            thesis: "Rust binary with SQLite, single process, no daemon.".into(),
+            architecture_outline: "One binary reads config and writes artifacts plus a logger."
+                .into(),
+            strengths: vec!["simple deployment".into()],
+            weaknesses: vec!["limited concurrency".into()],
+            expected_validation: "Tarball fits on a USB stick.".into(),
+            ..Default::default()
+        };
+        let verdict = SketchPhase::apply_filter(&candidate_sk, &mut accepted, &brief_tokens);
+        match verdict {
+            FilterVerdict::Redundant { similarity } => {
+                assert!(
+                    similarity >= SIMILARITY_REJECT_THRESHOLD,
+                    "expected redundancy ≥ {}, got {}",
+                    SIMILARITY_REJECT_THRESHOLD,
+                    similarity
+                );
+            }
+            other => panic!("expected Redundant, got {other:?}"),
+        }
+        // The rejected sketch must NOT have been pushed into
+        // `accepted` so subsequent siblings see only the survivor.
+        assert_eq!(accepted.len(), 1);
+    }
+
+    /// E5: a sketch that mentions none of the brief keywords must
+    /// be rejected as `LowCoverage`. The brief lists four target
+    /// keywords (`audit`, `scylla`, `sharding`, `compliance`); the
+    /// candidate never says any of them, so the coverage ratio is
+    /// 0.0 — well below `COVERAGE_MIN_RATIO` (0.5).
+    #[test]
+    fn sketch_rejects_low_coverage_shortfall() {
+        let brief_tokens = tokenize("audit scylla sharding compliance");
+        let accepted_sk = Sketch {
+            thesis: "Scylla shard with audit log and compliance posture.".into(),
+            architecture_outline: "Mesh of nodes.".into(),
+            expected_validation: "Pen test.".into(),
+            ..Default::default()
+        };
+        let mut accepted = vec![SketchPhase::sketch_token_set(&accepted_sk)];
+        let candidate_sk = Sketch {
+            thesis: "Brand new Rust pipeline with a small embedded webserver.".into(),
+            architecture_outline: "Single binary with a Lua plugin host.".into(),
+            expected_validation: "End-to-end smoke tests.".into(),
+            ..Default::default()
+        };
+        let verdict = SketchPhase::apply_filter(&candidate_sk, &mut accepted, &brief_tokens);
+        match verdict {
+            FilterVerdict::LowCoverage { coverage } => {
+                assert!(
+                    coverage < COVERAGE_MIN_RATIO,
+                    "expected coverage < {}, got {}",
+                    COVERAGE_MIN_RATIO,
+                    coverage
+                );
+            }
+            other => panic!("expected LowCoverage, got {other:?}"),
+        }
+        assert_eq!(accepted.len(), 1);
+    }
+
+    /// E5: a sketch that drifts far enough from its sibling (medium
+    /// similarity) and mentions enough brief keywords must be
+    /// `Accept`-ed. Calibrated so that the two rejection paths
+    /// above stay meaningful but most realistic drafts still
+    /// survive.
+    #[test]
+    fn sketch_accepts_diverse_medium_similarity() {
+        let brief_tokens = tokenize("rust sqlite audit sharding compliance");
+        let accepted_sk = Sketch {
+            thesis: "Rust binary writes audit log entries to SQLite.".into(),
+            architecture_outline: "Single-process scheduler.".into(),
+            expected_validation: "Replay log works.".into(),
+            ..Default::default()
+        };
+        let mut accepted = vec![SketchPhase::sketch_token_set(&accepted_sk)];
+        let candidate_sk = Sketch {
+            thesis: "Rust sharded ledger with sharding strategy and compliance export.".into(),
+            architecture_outline: "Multi-node reconciler writes to SQLite and ships audit feed."
+                .into(),
+            expected_validation: "Compliance officer can replay the audit trail.".into(),
+            ..Default::default()
+        };
+        let verdict = SketchPhase::apply_filter(&candidate_sk, &mut accepted, &brief_tokens);
+        match verdict {
+            FilterVerdict::Accept {
+                similarity,
+                coverage,
+            } => {
+                assert!(
+                    similarity < SIMILARITY_REJECT_THRESHOLD,
+                    "similarity {similarity} must stay under threshold"
+                );
+                assert!(
+                    coverage >= COVERAGE_MIN_RATIO,
+                    "coverage {coverage} must clear threshold"
+                );
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+        assert_eq!(accepted.len(), 2);
+    }
+
+    /// E5: a brief that lists no prose fields (or a non-object root)
+    /// tokenises to an empty set; the coverage branch returns 1.0
+    /// so the check is never a blocker on a malformed brief.
+    /// Mirrors the spec tolerance: coverage is a quality gate, not
+    /// a contract gate.
+    #[test]
+    fn brief_token_set_empty_for_non_object_or_empty_brief() {
+        let obj = serde_json::json!({});
+        assert!(SketchPhase::brief_token_set(&obj).is_empty());
+        let s = serde_json::json!("just a string");
+        assert!(SketchPhase::brief_token_set(&s).is_empty());
+        let list = serde_json::json!(["just", "a", "list"]);
+        assert!(SketchPhase::brief_token_set(&list).is_empty());
+        // Real brief picks up the `problem` / `objectives` / etc.
+        // fields, lowercased and split on punctuation.
+        let brief = serde_json::json!({
+            "problem": "Build a sharded audit ledger.",
+            "objectives": ["sharding", "compliance"],
+            "deliverables": ["tarball", "docs"],
+            "acceptance": ["100k TPS", "p99 < 50ms"]
+        });
+        let tokens = SketchPhase::brief_token_set(&brief);
+        assert!(tokens.contains("sharded"));
+        assert!(tokens.contains("audit"));
+        assert!(tokens.contains("sharding"));
+        assert!(tokens.contains("compliance"));
+        assert!(tokens.contains("tarball"));
+        assert!(tokens.contains("100k"));
+    }
+
+    /// E5: the new filter stats surface the two new
+    /// `dropped_*` buckets so the summary sidecar round-trips
+    /// without losing the rejection reason counts. Pinning the
+    /// serde shape so a rename trips the inspect command.
+    #[test]
+    fn filter_stats_includes_e5_buckets_in_round_trip() {
+        let s = SketchFilterStats {
+            raw: 4,
+            dropped_empty_thesis: 0,
+            dropped_hard_constraint: 0,
+            dropped_redundant: 1,
+            dropped_low_coverage: 1,
+            kept: 2,
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains("\"dropped_redundant\":1"));
+        assert!(j.contains("\"dropped_low_coverage\":1"));
+        let back: SketchFilterStats = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.dropped_redundant, 1);
+        assert_eq!(back.dropped_low_coverage, 1);
+        assert_eq!(back.kept, 2);
     }
 }

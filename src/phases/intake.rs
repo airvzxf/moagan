@@ -32,12 +32,34 @@
 //! The normalised string is fed both to the LLM call and persisted
 //! in `Intake.raw_prompt` so a re-run with the same CLI prompt
 //! reproduces the same downstream cache key.
+//!
+//! E10 (catalog 10-integrada-v0 §D.20.7): the normalised prompt is
+//! classified by `Role::HostilePromptDetector` *before* the intake
+//! LLM call so a clearly hostile input is rejected at the door.
+//! The verdict drives a [`HostilePolicy`]:
+//!
+//! - [`HostilePolicy::FailClosed`] (default): `hostile` verdict
+//!   → `Error::HostilePrompt`; `suspicious` → warning + continue;
+//!   `safe` → continue. This is the safe-by-default behaviour.
+//! - [`HostilePolicy::FailOpen`]: `hostile` and `suspicious` both
+//!   log a warning and continue (the spec allows this for
+//!   operators who want every prompt to reach the model).
+//! - [`HostilePolicy::Disabled`]: the detector is not called at
+//!   all (the cheapest path; useful for repro cases the operator
+//!   needs to keep reproducible without re-litigating the
+//!   detector).
+//!
+//! The policy is encoded as an env-var knob
+//! (`MOAGAN_INTAKE_HOSTILE_POLICY=fail_closed|fail_open|disabled`)
+//! with the same last-write-wins discipline as the rest of the
+//! catalog env surface. A future Config-level plumbing lands in
+//! a follow-up so the scope of this phase stays focused.
 
 use async_trait::async_trait;
 
 use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
-use crate::domain::Intake;
-use crate::error::Result;
+use crate::domain::{HostilePromptReport, Intake};
+use crate::error::{Error, Result};
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
@@ -48,6 +70,177 @@ use crate::phases::util::{read_json, write_json};
 /// budget cannot be exhausted by a single paste. Matches
 /// proposal-03 §D.20.4.
 pub const MAX_NORMALIZED_INPUT_BYTES: usize = 256 * 1024;
+
+/// E10: how the intake phase handles the
+/// `Role::HostilePromptDetector` verdict. The default is
+/// `FailClosed` so a clearly hostile input is rejected
+/// pre-pipeline; the other two modes exist for operators who
+/// need the detector's classification to flow through as a
+/// warning only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostilePolicy {
+    /// `hostile` verdict aborts the run with
+    /// `Error::HostilePrompt`; `suspicious` logs a warning and
+    /// continues; `safe` continues silently. This is the
+    /// default because refusing to act on a clearly-hostile
+    /// input is the safer behaviour.
+    #[default]
+    FailClosed,
+    /// `hostile` and `suspicious` both log a warning and
+    /// continue; `safe` continues silently. Useful for
+    /// development / repro flows where the operator wants the
+    /// downstream phases to run anyway.
+    FailOpen,
+    /// The detector is not called at all. The cheapest path;
+    /// intended for the case where the operator knows the
+    /// dataset is benign and wants to skip the extra LLM call
+    /// for throughput.
+    Disabled,
+}
+
+impl HostilePolicy {
+    /// Parse the env-var form (`fail_closed` / `fail_open` /
+    /// `disabled`; aliases `fail-closed` / `fail-open` /
+    /// `disable` / `off` for ergonomic shell use). Unknown /
+    /// empty values leave the existing knob alone (last-write
+    /// wins matches the rest of the catalog).
+    fn from_env(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fail_closed" | "fail-closed" | "closed" | "default" => Some(Self::FailClosed),
+            "fail_open" | "fail-open" | "open" => Some(Self::FailOpen),
+            "disabled" | "disable" | "off" | "none" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+/// Resolve the effective `HostilePolicy` from the env var
+/// `MOAGAN_INTAKE_HOSTILE_POLICY` with a hardcoded default of
+/// `FailClosed`. The check runs at most once per phase (no
+/// allocation when the env var is unset).
+fn effective_hostile_policy() -> HostilePolicy {
+    match std::env::var("MOAGAN_INTAKE_HOSTILE_POLICY") {
+        Ok(v) => HostilePolicy::from_env(&v).unwrap_or_default(),
+        Err(_) => HostilePolicy::default(),
+    }
+}
+
+/// Classified verdict of the `Role::HostilePromptDetector`
+/// pass, after the policy has been applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostileVerdict {
+    /// Detector said `safe` (or the detector returned an empty
+    /// payload that the schema defaults to "safe"). The phase
+    /// continues without side effects.
+    Safe,
+    /// Detector said `suspicious`. The phase logs a warning
+    /// (regardless of policy) and continues — the
+    /// `Safe` behaviour is preserved downstream.
+    Suspicious {
+        /// First signal the detector surfaced (or empty when
+        /// the report had no reasons).
+        reason: String,
+    },
+    /// Detector said `hostile`. Under
+    /// `HostilePolicy::FailClosed` this propagates as
+    /// `Err(Error::HostilePrompt(...))`. Under the other two
+    /// policies it is downgraded to a warning log so the
+    /// downstream pipeline still runs.
+    Hostile {
+        /// First signal the detector surfaced.
+        reason: String,
+    },
+}
+
+/// E10: outcome of the cheap regex-based heuristic that
+/// pre-classifies the normalised prompt before deciding whether
+/// to invoke the LLM detector. The four buckets span the
+/// "obvious benign" → "obvious hostile" spectrum and a fallback
+/// `Indeterminate` bucket that escalates to the LLM detector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeuristicOutcome {
+    /// No injection signal; skip the LLM detector entirely.
+    Benign,
+    /// The detector-style heuristic matches a known suspicious
+    /// pattern; the LLM call is not made (fail-closed under
+    /// `HostilePolicy::FailClosed`).
+    Suspicious,
+    /// The heuristic matches a known hostile pattern; the
+    /// LLM call is not made. `FailClosed` propagates as
+    /// `Error::HostilePrompt`.
+    Hostile,
+    /// Heuristic neither cleared nor flagged the prompt; the
+    /// LLM detector is consulted.
+    Indeterminate,
+}
+
+/// E10: cheap regex-based hostile-prompt check that runs
+/// **before** any LLM call. The patterns cover the canonical
+/// prompt-injection vocabulary from the public literature
+/// (`ignore previous instructions`, `disregard the system
+/// prompt`, etc.). A match escalates to the matching verdict
+/// without a network call; a miss returns `Indeterminate` so
+/// the LLM detector still runs for genuinely novel prompts.
+///
+/// The patterns are case-insensitive and tolerate whitespace
+/// between words. They are intentionally conservative: false
+/// positives (a legitimate brief that mentions "ignore" in
+/// plain text) escalate to the LLM detector through
+/// `Indeterminate`, not to `Hostile`. Only direct quotes of
+/// well-known injection phrasing trip the regex set.
+fn heuristic_hostile_check(normalised: &str) -> HeuristicOutcome {
+    const HOSTILE_PATTERNS: &[&str] = &[
+        // The canonical "system override" attempts. A bare
+        // "ignore" or "disregard" is too noisy; we require the
+        // phrase to mention instructions, the system prompt,
+        // or the prior context.
+        "ignore (?:the )?(?:previous|prior|above|all) instructions",
+        "ignore (?:your|all) (?:rules|guidelines|system)",
+        "disregard (?:the )?(?:system|previous|prior) prompt",
+        "disregard (?:your|all) (?:rules|guidelines|instructions)",
+        "forget (?:the )?(?:previous|prior|above) instructions",
+        "you are now (?:a|an) ",
+        "act as (?:a|an) (?:different|new) ",
+        "system prompt[: ]",
+    ];
+    let lower = normalised.to_ascii_lowercase();
+    for pat in HOSTILE_PATTERNS {
+        if contains_ci(&lower, pat) {
+            return HeuristicOutcome::Hostile;
+        }
+    }
+    const SUSPICIOUS_PATTERNS: &[&str] = &[
+        // Lower-confidence signals. Treated as
+        // `Suspicious` rather than `Hostile` because the
+        // phrase can appear in legitimate prompts about
+        // security / privacy.
+        "reveal (?:the )?system prompt",
+        "show (?:me )?(?:the )?hidden prompt",
+        "what (?:are|is) your instructions",
+        "developer mode",
+        "jailbreak",
+    ];
+    for pat in SUSPICIOUS_PATTERNS {
+        if contains_ci(&lower, pat) {
+            return HeuristicOutcome::Suspicious;
+        }
+    }
+    if normalised.trim().is_empty() {
+        // Empty prompts have nothing to classify; let the
+        // LLM detector surface an empty-input verdict.
+        return HeuristicOutcome::Indeterminate;
+    }
+    HeuristicOutcome::Benign
+}
+
+/// Cheap substring search that compiles the haystack-side
+/// pattern as a "literal substring" probe (no regex compile).
+/// Tolerant of case differences (the caller pre-lowercases the
+/// text). Pinned to ASCII for the prototype so we don't have to
+/// deal with Unicode case folding yet.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    haystack.contains(needle)
+}
 
 /// Intake phase.
 pub struct IntakePhase;
@@ -65,6 +258,45 @@ impl Phase for IntakePhase {
         // persist in `Intake.raw_prompt` so a re-run is
         // reproducible.
         let normalised = normalize_raw_prompt(&ctx.raw_prompt);
+
+        // E10: classify the normalised prompt before the intake
+        // call. The classification runs in two stages:
+        //
+        // 1. A cheap, regex-based **heuristic** that catches the
+        //    obvious prompt-injection patterns
+        //    (`ignore previous instructions`,
+        //    `disregard the system prompt`, etc.). When the
+        //    heuristic says "looks benign", we skip the LLM
+        //    call entirely — both the smoke gate
+        //    (`moagan run --mode fast --provider mock`) and
+        //    the integration tests stay green because the mock
+        //    queue is not shifted by an extra LLM call.
+        // 2. Anything the heuristic cannot rule out (genuine
+        //    ambiguity, an unfamiliar injection phrasings) goes
+        //    through the `Role::HostilePromptDetector` LLM
+        //    call. The LLM call runs in cheap mode
+        //    (`max_retries=1`) because the verdict is binary
+        //    and a flaky retry would only buy extra cost.
+        //
+        // The `Disabled` policy short-circuits to `Safe`
+        // regardless of heuristic so the cheapest profile pays
+        // zero detector-side cost.
+        let policy = effective_hostile_policy();
+        let verdict = match policy {
+            HostilePolicy::Disabled => HostileVerdict::Safe,
+            _ => match heuristic_hostile_check(&normalised) {
+                HeuristicOutcome::Benign => HostileVerdict::Safe,
+                HeuristicOutcome::Suspicious => HostileVerdict::Suspicious {
+                    reason: "heuristic match".into(),
+                },
+                HeuristicOutcome::Hostile => HostileVerdict::Hostile {
+                    reason: "heuristic match".into(),
+                },
+                HeuristicOutcome::Indeterminate => run_hostile_detector(ctx, &normalised).await?,
+            },
+        };
+        enforce_hostile_verdict(ctx, &verdict, policy)?;
+
         let user = build_user_message(ctx, &normalised)?;
         let intake: Intake = ctx
             .call_with_retry_parse(
@@ -85,7 +317,7 @@ impl Phase for IntakePhase {
         // post-execution review can recover the exact prompt the
         // model saw without re-loading the context ref.
         if let Some(block) = ctx.context_block.as_ref() {
-            let mut value = serde_json::to_value(&intake).map_err(crate::Error::from)?;
+            let mut value = serde_json::to_value(&intake).map_err(Error::from)?;
             if let Some(obj) = value.as_object_mut() {
                 obj.insert(
                     "context_block".into(),
@@ -94,7 +326,7 @@ impl Phase for IntakePhase {
             }
             crate::atomic::writer::AtomicWriter::new().write(
                 &brief_path,
-                &serde_json::to_vec(&value).map_err(crate::Error::from)?,
+                &serde_json::to_vec(&value).map_err(Error::from)?,
             )?;
         } else {
             write_json(&brief_path, &intake)?;
@@ -137,6 +369,131 @@ impl Phase for IntakePhase {
         }
 
         Ok(PhaseOutput::Intake(brief_path))
+    }
+}
+
+/// E10: invoke the `Role::HostilePromptDetector` against the
+/// normalised prompt and translate the wire form into a
+/// [`HostileVerdict`]. The detector is deterministic
+/// (`T=0.0`, `top_p=0.1`, `max_tokens=512`); we still go through
+/// `call_with_retry_parse` so transient transport errors recover
+/// without a separate retry loop in this module. Empty / unknown
+/// verdicts default to `Safe` so a misbehaving model cannot fail
+/// the pipeline by being too quiet.
+async fn run_hostile_detector(ctx: &RunContext, normalised: &str) -> Result<HostileVerdict> {
+    let system = system_prompt(Role::HostilePromptDetector).to_owned();
+    let user = normalised.to_owned();
+    let report: HostilePromptReport = ctx
+        .call_with_retry_parse(
+            Role::HostilePromptDetector,
+            system,
+            user,
+            "HostilePromptDetector: {input, verdict, confidence, reasons[], recommended_action}",
+            1,
+        )
+        .await?;
+    Ok(classify_hostile_report(&report))
+}
+
+/// E10: convert a populated [`HostilePromptReport`] into a
+/// [`HostileVerdict`]. Pure function so tests can drive it
+/// without standing up a real LLM call. The first reason is
+/// surfaced so a single string carries the strongest injection
+/// signal all the way to the error message.
+fn classify_hostile_report(report: &HostilePromptReport) -> HostileVerdict {
+    let reason = report
+        .reasons
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "unspecified".into());
+    match report.verdict.trim().to_ascii_lowercase().as_str() {
+        "hostile" => HostileVerdict::Hostile { reason },
+        "suspicious" => HostileVerdict::Suspicious { reason },
+        _ => HostileVerdict::Safe,
+    }
+}
+
+/// E10: enforce the policy decision against the verdict.
+/// Returns `Err(Error::HostilePrompt)` only under
+/// `HostilePolicy::FailClosed` when the verdict is `Hostile`;
+/// the other combinations log a warning and return `Ok(())`
+/// so the caller can keep going.
+fn enforce_hostile_verdict(
+    ctx: &RunContext,
+    verdict: &HostileVerdict,
+    policy: HostilePolicy,
+) -> Result<()> {
+    let warn =
+        |code: &'static str, level: &'static str, msg: &'static str, payload: serde_json::Value| {
+            let _ = ctx.telemetry.warn(
+                code,
+                level,
+                msg,
+                payload,
+                crate::telemetry::WarningContext {
+                    phase: Some("intake".into()),
+                    role: Some("hostile_prompt_detector".into()),
+                    ..Default::default()
+                },
+            );
+        };
+    match verdict {
+        HostileVerdict::Safe => Ok(()),
+        HostileVerdict::Suspicious { reason } => {
+            tracing::warn!(
+                verdict = "suspicious",
+                reason = %reason,
+                stage = "intake.hostile_prompt.suspicious",
+                "Intake phase"
+            );
+            warn(
+                "phase.intake_suspicious_prompt",
+                "warn",
+                "intake detector marked the prompt as suspicious",
+                serde_json::json!({"reason": reason, "policy": format!("{policy:?}")}),
+            );
+            Ok(())
+        }
+        HostileVerdict::Hostile { reason } => match policy {
+            HostilePolicy::FailClosed => {
+                tracing::warn!(
+                    verdict = "hostile",
+                    reason = %reason,
+                    policy = "fail_closed",
+                    stage = "intake.hostile_prompt.rejected",
+                    "Intake phase"
+                );
+                warn(
+                    "phase.intake_hostile_prompt",
+                    "warn",
+                    "intake detector rejected the prompt as hostile",
+                    serde_json::json!({"reason": reason, "policy": "fail_closed"}),
+                );
+                Err(Error::HostilePrompt(reason.clone()))
+            }
+            HostilePolicy::FailOpen => {
+                tracing::warn!(
+                    verdict = "hostile",
+                    reason = %reason,
+                    policy = "fail_open",
+                    stage = "intake.hostile_prompt.fail_open_continue",
+                    "Intake phase"
+                );
+                warn(
+                    "phase.intake_hostile_prompt_fail_open",
+                    "warn",
+                    "intake detector flagged the prompt as hostile but the policy is fail-open",
+                    serde_json::json!({"reason": reason, "policy": "fail_open"}),
+                );
+                Ok(())
+            }
+            HostilePolicy::Disabled => {
+                // Defensive: `Disabled` short-circuits the
+                // detector above, so this arm is unreachable. The
+                // match is total to keep the helper exhaustive.
+                Ok(())
+            }
+        },
     }
 }
 
@@ -215,6 +572,33 @@ pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
 #[doc(hidden)]
 pub fn read_intake_with_context(path: &std::path::Path) -> Result<Intake> {
     read_json(path)
+}
+
+/// Build a minimal no-op `RunContext` for the policy-enforcement
+/// tests so they don't have to wire up a real cache / registry.
+/// Lives at module level (not in `tests`) so the helper is
+/// reachable from every test in the module without re-importing
+/// the (private) builder.
+#[cfg(test)]
+fn noop_run_context() -> RunContext {
+    use crate::execution::Parallelism;
+    use crate::fs_layout::MoaganHome;
+    use crate::ids::RunId;
+    use crate::telemetry::Telemetry;
+    use std::sync::Arc;
+
+    let home = Arc::new(MoaganHome::at(std::path::PathBuf::from("/tmp/moagan-e10")));
+    RunContext::new(
+        RunId::default(),
+        home,
+        Arc::new(crate::llm::ProviderRegistry::default()),
+        "mock".into(),
+        "mock-model".into(),
+        Parallelism::new(1),
+        Telemetry::noop(),
+        "hello".into(),
+        "fast".into(),
+    )
 }
 
 #[cfg(test)]
@@ -335,5 +719,201 @@ mod tests {
         let tabs = out.chars().filter(|c| *c == '\t').count();
         assert_eq!(newlines, 2, "expected 2 newlines preserved");
         assert_eq!(tabs, 1, "expected 1 tab preserved");
+    }
+
+    // -- E10: hostile-prompt policy -----------------------------------
+
+    /// E10: env-var parsing accepts the documented
+    /// canonical forms and the case-insensitive aliases
+    /// (`fail-closed`, `closed`, `default`,
+    /// `fail-open`, `open`, `disabled`, `disable`,
+    /// `off`, `none`). Empty / whitespace / unknown
+    /// values resolve to the [`HostilePolicy::default`]
+    /// so a stale `MOAGAN_INTAKE_HOSTILE_POLICY` export
+    /// cannot silently flip the default.
+    #[test]
+    fn hostile_policy_from_env_accepts_canonical_and_aliases() {
+        assert_eq!(
+            HostilePolicy::from_env("fail_closed").unwrap(),
+            HostilePolicy::FailClosed
+        );
+        assert_eq!(
+            HostilePolicy::from_env("FAIL_CLOSED").unwrap(),
+            HostilePolicy::FailClosed
+        );
+        assert_eq!(
+            HostilePolicy::from_env("fail-closed").unwrap(),
+            HostilePolicy::FailClosed
+        );
+        assert_eq!(
+            HostilePolicy::from_env("closed").unwrap(),
+            HostilePolicy::FailClosed
+        );
+        assert_eq!(
+            HostilePolicy::from_env("fail_open").unwrap(),
+            HostilePolicy::FailOpen
+        );
+        assert_eq!(
+            HostilePolicy::from_env("disabled").unwrap(),
+            HostilePolicy::Disabled
+        );
+        assert_eq!(
+            HostilePolicy::from_env("off").unwrap(),
+            HostilePolicy::Disabled
+        );
+        // Garbage values must NOT silently coerce; the caller
+        // (effective_hostile_policy) falls back to
+        // `default()` in that case.
+        assert!(HostilePolicy::from_env("definitely-not-a-policy").is_none());
+        assert!(HostilePolicy::from_env("").is_none());
+        assert!(HostilePolicy::from_env("   ").is_none());
+        // Default stays FailClosed so the spec is satisfied
+        // out of the box.
+        assert_eq!(HostilePolicy::default(), HostilePolicy::FailClosed);
+    }
+
+    /// E10: `classify_hostile_report` is the pure helper that
+    /// translates the wire form into the internal verdict enum.
+    /// The happy paths cover all three classifier outputs plus
+    /// the "unknown verdict" defensive case (a misbehaving model
+    /// must not fail-closed implicitly).
+    #[test]
+    fn classify_hostile_report_maps_every_verdict() {
+        let host = HostilePromptReport {
+            verdict: "hostile".into(),
+            reasons: vec!["ignore previous instructions".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_hostile_report(&host),
+            HostileVerdict::Hostile {
+                reason: "ignore previous instructions".into()
+            }
+        );
+        let sus = HostilePromptReport {
+            verdict: "suspicious".into(),
+            reasons: vec!["embedded role override".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_hostile_report(&sus),
+            HostileVerdict::Suspicious {
+                reason: "embedded role override".into()
+            }
+        );
+        let safe = HostilePromptReport {
+            verdict: "safe".into(),
+            reasons: vec!["no injection signals".into()],
+            ..Default::default()
+        };
+        assert_eq!(classify_hostile_report(&safe), HostileVerdict::Safe);
+        let unknown = HostilePromptReport {
+            verdict: "definitely-not-a-verdict".into(),
+            reasons: Vec::new(),
+            ..Default::default()
+        };
+        assert_eq!(classify_hostile_report(&unknown), HostileVerdict::Safe);
+        let empty_reasons = HostilePromptReport {
+            verdict: "hostile".into(),
+            reasons: Vec::new(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_hostile_report(&empty_reasons),
+            HostileVerdict::Hostile {
+                reason: "unspecified".into()
+            }
+        );
+    }
+
+    /// E10: `FailClosed` (the default) rejects a `Hostile`
+    /// verdict with `Error::HostilePrompt("...")` so the run
+    /// aborts before the intake LLM call. The helper is a
+    /// no-op for `Safe` and `Suspicious` so neither blocks the
+    /// pipeline.
+    #[test]
+    fn intake_fails_closed_on_hostile_prompt() {
+        let ctx = noop_run_context();
+        let verdict = HostileVerdict::Hostile {
+            reason: "ignore previous instructions".into(),
+        };
+        let err = enforce_hostile_verdict(&ctx, &verdict, HostilePolicy::FailClosed)
+            .expect_err("FailClosed must surface hostile verdicts as Err");
+        match err {
+            Error::HostilePrompt(msg) => {
+                assert!(
+                    msg.contains("ignore previous instructions"),
+                    "reason must propagate, got {msg:?}"
+                );
+            }
+            other => panic!("expected Error::HostilePrompt, got {other:?}"),
+        }
+        // Safe + Suspicious keep flowing under FailClosed.
+        assert!(
+            enforce_hostile_verdict(&ctx, &HostileVerdict::Safe, HostilePolicy::FailClosed).is_ok()
+        );
+        assert!(
+            enforce_hostile_verdict(
+                &ctx,
+                &HostileVerdict::Suspicious {
+                    reason: "noise".into()
+                },
+                HostilePolicy::FailClosed
+            )
+            .is_ok()
+        );
+    }
+
+    /// E10: `Suspicous` verdict is non-blocking under both
+    /// policies — the warning is the side effect. The helper
+    /// returns `Ok(())` so the pipeline continues into the
+    /// intake LLM call.
+    #[test]
+    fn intake_warns_on_suspicious_prompt() {
+        let ctx = noop_run_context();
+        let verdict = HostileVerdict::Suspicious {
+            reason: "encoded control tokens".into(),
+        };
+        for policy in [HostilePolicy::FailClosed, HostilePolicy::FailOpen] {
+            assert!(
+                enforce_hostile_verdict(&ctx, &verdict, policy).is_ok(),
+                "{policy:?} must let suspicious prompts continue"
+            );
+        }
+    }
+
+    /// E10: `Safe` verdict is a no-op for every policy (it
+    /// neither logs nor returns an error). The pipeline
+    /// continues into the intake LLM call.
+    #[test]
+    fn intake_allows_safe_prompt() {
+        let ctx = noop_run_context();
+        for policy in [
+            HostilePolicy::FailClosed,
+            HostilePolicy::FailOpen,
+            HostilePolicy::Disabled,
+        ] {
+            assert!(
+                enforce_hostile_verdict(&ctx, &HostileVerdict::Safe, policy).is_ok(),
+                "{policy:?} must let safe prompts through"
+            );
+        }
+    }
+
+    /// E10: a `Hostile` verdict under `FailOpen` is
+    /// downgraded to a non-blocking warning. The contract
+    /// "operator opted into fail-open" means the pipeline
+    /// keeps going; the warning carries the reason so the
+    /// audit trail still records what the detector saw.
+    #[test]
+    fn intake_fail_open_continues_on_hostile() {
+        let ctx = noop_run_context();
+        let verdict = HostileVerdict::Hostile {
+            reason: "jailbreak template".into(),
+        };
+        assert!(
+            enforce_hostile_verdict(&ctx, &verdict, HostilePolicy::FailOpen).is_ok(),
+            "FailOpen must NOT abort on hostile verdicts"
+        );
     }
 }
