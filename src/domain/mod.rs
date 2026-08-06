@@ -4,6 +4,8 @@
 //! are present.
 
 pub mod constraint;
+pub mod graph;
+pub mod synthesis_request;
 
 use std::collections::BTreeMap;
 
@@ -1282,6 +1284,20 @@ impl ProblemGraph {
             return Err(format!("graph has a cycle; stuck at: {stuck:?}"));
         }
         Ok(layers)
+    }
+
+    pub fn adjacency(&self) -> std::collections::HashMap<String, Vec<String>> {
+        let mut adjacency = std::collections::HashMap::new();
+        for node in &self.nodes {
+            adjacency.entry(node.id.clone()).or_insert_with(Vec::new);
+            for dependency in &node.dependencies {
+                adjacency
+                    .entry(dependency.clone())
+                    .or_insert_with(Vec::new)
+                    .push(node.id.clone());
+            }
+        }
+        adjacency
     }
 
     /// Detect cycles. Returns `Ok(())` when the DAG is acyclic and
