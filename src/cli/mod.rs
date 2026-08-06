@@ -18,6 +18,7 @@ pub mod continue_cmd;
 pub mod diff;
 pub mod discover;
 pub mod doctor;
+pub mod flags_batch;
 pub mod forbidden;
 pub mod inspect;
 pub mod pause_cmd;
