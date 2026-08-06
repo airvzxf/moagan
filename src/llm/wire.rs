@@ -26,6 +26,11 @@ pub struct Request {
     /// support native JSON mode honour it; others only get a textual
     /// hint in the prompt.
     pub response_schema: Option<serde_json::Value>,
+    /// Whether the provider should stream tokens as they arrive.
+    /// Defaults to `false`. Only providers whose capability matrix
+    /// advertises streaming honour this flag.
+    #[serde(default)]
+    pub stream: bool,
 }
 
 /// Provider-agnostic response.
@@ -197,11 +202,13 @@ mod tests {
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
+            stream: false,
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Request = serde_json::from_str(&j).unwrap();
         assert_eq!(back.role, Role::Intake);
         assert_eq!(back.max_tokens, 1024);
+        assert!(!back.stream, "default stream flag roundtrips as false");
     }
 
     #[test]
@@ -220,6 +227,7 @@ mod tests {
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
+            stream: false,
         };
         let blake = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Blake3);
         let sha = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Sha256);

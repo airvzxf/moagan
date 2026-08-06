@@ -237,6 +237,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         };
         let (status1, r1) = p.send(&req()).await.unwrap();
         let (status2, r2) = p.send(&req()).await.unwrap();
@@ -259,6 +260,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         };
         let _r1 = p.send(&req()).await.unwrap();
         assert!(p.send(&req()).await.is_err());

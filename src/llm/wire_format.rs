@@ -367,6 +367,7 @@ mod tests {
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
+            stream: false,
         }
     }
 
@@ -381,6 +382,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         };
         let wire = AnthropicWire;
         let body = wire.encode_body(&req).unwrap();
@@ -562,6 +564,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         };
         let body = wire.encode_body(&req).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();

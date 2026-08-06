@@ -109,6 +109,7 @@ fn dummy_request() -> Request {
         temperature: None,
         top_p: None,
         response_schema: None,
+        stream: false,
     }
 }
 
