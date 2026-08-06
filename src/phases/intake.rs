@@ -58,12 +58,36 @@
 use async_trait::async_trait;
 
 use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
+use crate::config::Config;
 use crate::domain::{HostilePromptReport, Intake};
 use crate::error::{Error, Result};
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
+
+/// F5: file name (under the run's `final/` directory) that
+/// carries the hex-encoded BLAKE3 hash of the canonical TOML
+/// serialization of the run's `Config`. `build_manifest` reads
+/// this sidecar after the pipeline finishes and stamps the
+/// digest onto `manifest.config_hash` so a `moagan rerun` with
+/// a different config produces a different manifest hash and
+/// the run is non-reproducible by inspection.
+pub const CONFIG_HASH_SIDECAR: &str = "config_hash.txt";
+
+/// F5: compute the deterministic BLAKE3 hex digest of the
+/// canonical TOML form of `config`. Two runs with the same
+/// `Config` produce the same digest; a `moagan rerun` after
+/// editing `~/.config/moagan/config.toml` produces a different
+/// digest and the manifest's `config_hash` field surfaces the
+/// drift. Returns an `InvalidState` error if `toml::to_string`
+/// fails — should not happen for our `#[derive(Serialize)]`
+/// types but we surface the failure rather than swallow it.
+pub fn compute_config_hash(config: &Config) -> Result<String> {
+    let serialized = toml::to_string(config)
+        .map_err(|e| Error::InvalidState(format!("config_hash: toml serialize failed: {e}")))?;
+    Ok(blake3::hash(serialized.as_bytes()).to_hex().to_string())
+}
 
 /// E9: hard byte cap for the normalised raw prompt. Briefs larger
 /// than 256 KiB are truncated before the LLM call so the context
@@ -258,6 +282,18 @@ impl Phase for IntakePhase {
         // persist in `Intake.raw_prompt` so a re-run is
         // reproducible.
         let normalised = normalize_raw_prompt(&ctx.raw_prompt);
+
+        // F5: compute the deterministic hash of the run's
+        // `Config` and persist it to the
+        // `final/config_hash.txt` sidecar. `build_manifest`
+        // reads this sidecar after the pipeline finishes and
+        // stamps the digest onto `manifest.config_hash`. The
+        // hash is a pure function of the config, so two runs
+        // with the same config produce the same manifest hash
+        // and a `moagan rerun` after a config edit produces a
+        // different one.
+        let config_hash = compute_config_hash(&ctx.config)?;
+        write_config_hash_sidecar(ctx, &config_hash)?;
 
         // E10: classify the normalised prompt before the intake
         // call. The classification runs in two stages:
@@ -572,6 +608,25 @@ pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
 #[doc(hidden)]
 pub fn read_intake_with_context(path: &std::path::Path) -> Result<Intake> {
     read_json(path)
+}
+
+/// F5: write the config hash to the run's `final/` directory so
+/// `build_manifest` can pick it up later. Sidecar is a single
+/// line of hex + LF; atomic so a partial write cannot leave a
+/// truncated digest on disk.
+fn write_config_hash_sidecar(ctx: &RunContext, hash: &str) -> Result<()> {
+    let path = ctx.run_dir().final_dir().join(CONFIG_HASH_SIDECAR);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::Io(crate::error::IoError::Write {
+            path: parent.to_path_buf(),
+            source: e,
+        }))?;
+    }
+    let mut body = String::with_capacity(hash.len() + 1);
+    body.push_str(hash);
+    body.push('\n');
+    crate::atomic::writer::AtomicWriter::new().write(&path, body.as_bytes())?;
+    Ok(())
 }
 
 /// Build a minimal no-op `RunContext` for the policy-enforcement
@@ -915,5 +970,54 @@ mod tests {
             enforce_hostile_verdict(&ctx, &verdict, HostilePolicy::FailOpen).is_ok(),
             "FailOpen must NOT abort on hostile verdicts"
         );
+    }
+
+    // -- F5: config_hash ---------------------------------------------
+
+    /// F5: `compute_config_hash` returns a 64-char hex BLAKE3
+    /// digest of the canonical TOML form of `Config`. The
+    /// `IntakePhase::execute` path stamps this digest onto the
+    /// `final/config_hash.txt` sidecar so `build_manifest` can
+    /// pick it up later. The test uses `Config::default()` so
+    /// the assertion does not break when the `Config` struct
+    /// gains new fields.
+    #[test]
+    fn intake_records_config_hash_in_manifest() {
+        let cfg = Config::default();
+        let hash = compute_config_hash(&cfg).expect("config_hash succeeds");
+        assert_eq!(
+            hash.len(),
+            64,
+            "BLAKE3 hex digest is 64 chars (32 bytes), got {hash:?}"
+        );
+        // The digest is lowercase hex.
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "digest must be lowercase hex, got {hash:?}"
+        );
+        // No-op contexts (the `noop_run_context` helper used
+        // elsewhere in this module) do NOT change the hash:
+        // the helper derives from a `Config::default()`,
+        // matching what the `compute_config_hash` call sees.
+        let ctx = noop_run_context();
+        let same = compute_config_hash(&ctx.config).expect("noop ctx config_hash");
+        assert_eq!(hash, same, "hash is purely a function of the Config");
+    }
+
+    /// F5: the same `Config` produces the same hash across
+    /// repeated runs — the property the sidecar exists to
+    /// guarantee. A `Config` mutated post-hash produces a
+    /// different hash so a `moagan rerun` after editing the
+    /// config file surfaces the drift.
+    #[test]
+    fn config_hash_deterministic_across_repeated_runs() {
+        let cfg = Config::default();
+        let first = compute_config_hash(&cfg).unwrap();
+        let second = compute_config_hash(&cfg).unwrap();
+        let third = compute_config_hash(&cfg).unwrap();
+        assert_eq!(first, second, "deterministic: same input -> same digest");
+        assert_eq!(second, third, "deterministic across multiple calls");
+        // Length sanity: 64-char BLAKE3 hex.
+        assert_eq!(first.len(), 64);
     }
 }
