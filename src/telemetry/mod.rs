@@ -25,6 +25,7 @@ use crate::time::{now_unix_millis, now_unix_secs};
 
 pub mod dashboard;
 pub mod export;
+pub mod heartbeat;
 pub mod redact;
 pub mod retention;
 pub mod verify;
