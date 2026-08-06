@@ -10,6 +10,24 @@ use thiserror::Error;
 use crate::atomic::writer::AtomicWriter;
 use crate::error::Result;
 use crate::llm::json_extractor;
+use crate::redact::detect_stale;
+
+const DEFAULT_STALE_TTL_SECS: u64 = 86_400;
+
+fn stale_ttl_secs() -> u64 {
+    std::env::var("MOAGAN_STALE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_STALE_TTL_SECS)
+}
+
+fn emit_stale_artifact_if_needed(path: &Path) -> Option<crate::redact::StaleArtifact> {
+    let artifact = detect_stale(path, stale_ttl_secs());
+    if let Some(artifact) = &artifact {
+        artifact.emit();
+    }
+    artifact
+}
 
 /// Which repair pass actually changed the model output. Surfaced
 /// through `parse_model_json_traced` so the warnings stream can
@@ -46,6 +64,7 @@ pub type RepairEvent = RepairTrace;
 
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    emit_stale_artifact_if_needed(path);
     let bytes = std::fs::read(path)?;
     serde_json::from_slice(&bytes).map_err(crate::Error::from)
 }
@@ -826,6 +845,58 @@ mod tests {
     struct Sample {
         a: u32,
         b: String,
+    }
+
+    static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn stale_artifact_emits_when_artifact_old() {
+        let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("old.json");
+        std::fs::write(&path, b"{}").unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let artifact = emit_stale_artifact_if_needed(&path);
+        unsafe {
+            std::env::remove_var("MOAGAN_STALE_TTL_SECS");
+        }
+        assert!(artifact.is_some());
+    }
+
+    #[test]
+    fn stale_artifact_silent_when_fresh() {
+        let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fresh.json");
+        std::fs::write(&path, b"{}").unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_STALE_TTL_SECS", u64::MAX.to_string());
+        }
+        let artifact = emit_stale_artifact_if_needed(&path);
+        unsafe {
+            std::env::remove_var("MOAGAN_STALE_TTL_SECS");
+        }
+        assert!(artifact.is_none());
+    }
+
+    #[test]
+    fn stale_artifact_respects_env_ttl() {
+        let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("configured.json");
+        std::fs::write(&path, b"{}").unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let artifact = emit_stale_artifact_if_needed(&path);
+        unsafe {
+            std::env::remove_var("MOAGAN_STALE_TTL_SECS");
+        }
+        assert_eq!(artifact.map(|value| value.ttl_secs), Some(0));
     }
 
     #[test]
