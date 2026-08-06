@@ -58,6 +58,10 @@ mod sql_v011 {
     pub(super) const V011: &str = include_str!("migrations/v011_budget.sql");
 }
 
+mod sql_v012 {
+    pub(super) const V012: &str = include_str!("migrations/v012_versioned_manifest.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -188,6 +192,9 @@ fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> Resu
     Ok(false)
 }
 
+/// Pooled SQLite connection returned by [`Db::connection`].
+pub type Connection = r2d2::PooledConnection<SqliteConnectionManager>;
+
 /// Handle to the meta-database. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Db {
@@ -254,6 +261,11 @@ impl Db {
     /// without going through the per-statement methods on `Db`.
     pub fn pool(&self) -> &Pool<SqliteConnectionManager> {
         &self.pool
+    }
+
+    /// Get a pooled SQLite connection for direct queries.
+    pub fn connection(&self) -> Result<Connection> {
+        Ok(self.pool.get()?)
     }
 
     /// Run pending migrations in order. v007 (Phase J lineage) is
@@ -378,6 +390,12 @@ impl Db {
         if current < 11 {
             apply_step(&conn, 11, || -> Result<()> {
                 conn.execute_batch(sql_v011::V011)?;
+                Ok(())
+            })?;
+        }
+        if current < 12 {
+            apply_step(&conn, 12, || -> Result<()> {
+                conn.execute_batch(sql_v012::V012)?;
                 Ok(())
             })?;
         }

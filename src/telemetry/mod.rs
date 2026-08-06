@@ -36,6 +36,7 @@ pub mod level;
 pub mod lineage_graph;
 pub mod manifest_ext;
 pub mod manifest_txt;
+pub mod manifest_version;
 pub mod phase_macro;
 pub mod recover;
 pub mod redact;

@@ -7,6 +7,7 @@
 use crate::domain::graph::ProblemGraph;
 use std::collections::HashSet;
 
+/// Return the root and every node reachable through downstream edges.
 pub fn invalidate_downstream(graph: &ProblemGraph, root_node_id: &str) -> HashSet<String> {
     let mut invalidated = HashSet::new();
     invalidated.insert(root_node_id.to_string());

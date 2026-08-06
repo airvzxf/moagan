@@ -5,15 +5,19 @@
 
 use serde::Serialize;
 
+/// Request constraints passed to synthesis.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SynthesisRequest {
+    /// Decisions the synthesizer must avoid.
     pub prohibited_decisions: Vec<String>,
 }
 
 impl SynthesisRequest {
+    /// Construct an unconstrained synthesis request.
     pub fn new() -> Self {
         Self::default()
     }
+    /// Add a prohibited decision.
     pub fn forbid(mut self, decision: &str) -> Self {
         self.prohibited_decisions.push(decision.to_string());
         self
