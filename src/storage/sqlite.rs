@@ -54,6 +54,9 @@ mod sql_v009 {
 mod sql_v010 {
     pub(super) const V010: &str = include_str!("migrations/v010_run_artifacts.sql");
 }
+mod sql_v011 {
+    pub(super) const V011: &str = include_str!("migrations/v011_budget.sql");
+}
 
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
@@ -362,6 +365,12 @@ impl Db {
             // would be a dead store and `-D unused_assignments`
             // would reject it. The per-step probe invariant still
             // holds for v001…v009.
+        }
+        if current < 11 {
+            apply_step(&conn, 11, || -> Result<()> {
+                conn.execute_batch(sql_v011::V011)?;
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -2089,6 +2098,99 @@ impl Db {
             params![run_id.to_string(), kind, count as i64, now],
         )?;
         Ok(count)
+    }
+
+    // -----------------------------------------------------------------
+    // Track F (F3) — budget enforcement helpers.
+    //
+    // The BudgetObserver (`src/phases/budget.rs`) consumes these
+    // two methods to compute the pressure tier (Ok / Soft / Hard)
+    // and to record per-phase usage. The contract is intentionally
+    // minimal: a pre-v011 DB short-circuits to `(0, 0)` so legacy
+    // runs are never artificially throttled by a fresh binary.
+    // -----------------------------------------------------------------
+
+    /// Read the `(planned, used)` budget for `run_id`. Returns
+    /// `(0, 0)` on a pre-v011 database or when no row exists yet
+    /// (the Ok pressure tier — the observer treats 0/0 as "no
+    /// budget configured" and never throttles optional work).
+    pub fn budget_read(&self, run_id: RunId) -> Result<(u64, u64)> {
+        if self.user_version()? < 11 {
+            return Ok((0, 0));
+        }
+        let conn = self.pool.get()?;
+        let row: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT planned_tokens, used_tokens FROM budget_state WHERE run_id = ?",
+                params![run_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (planned, used) = row.unwrap_or((0, 0));
+        Ok((planned.max(0) as u64, used.max(0) as u64))
+    }
+
+    /// Record `tokens` consumed by `phase` for `run_id`. Inserts
+    /// the budget row on first call, increments `used_tokens` on
+    /// every call, and appends a row to `budget_events` so
+    /// operators can later answer "which phase burned the
+    /// budget?" without re-aggregating the `calls` table.
+    ///
+    /// `phase` is part of the contract (forward-compatible with
+    /// future per-phase caps); the parameter is recorded
+    /// verbatim in `budget_events.phase` even when the aggregate
+    /// is the only thing the observer reads.
+    ///
+    /// Pre-v011 databases are a no-op so legacy operators
+    /// upgrading the binary mid-run do not see a synthetic write.
+    pub fn budget_record(&self, run_id: RunId, phase: &str, tokens: u64) -> Result<()> {
+        if self.user_version()? < 11 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        // Upsert the aggregate. `planned_tokens` is preserved on
+        // the ON CONFLICT branch (we only ever set it via
+        // `set_budget`); `used_tokens` is the running total.
+        conn.execute(
+            "INSERT INTO budget_state (run_id, planned_tokens, used_tokens) \
+             VALUES (?, 0, ?) \
+             ON CONFLICT(run_id) DO UPDATE SET \
+                used_tokens = used_tokens + excluded.used_tokens",
+            params![run_id.to_string(), tokens as i64],
+        )?;
+        // Append the per-phase event. The `id` column is
+        // AUTOINCREMENT so a `NULL` placeholder is the canonical
+        // SQLite idiom for "let SQLite assign the rowid".
+        conn.execute(
+            "INSERT INTO budget_events (id, run_id, phase, tokens, at_unix) \
+             VALUES (NULL, ?, ?, ?, ?)",
+            params![run_id.to_string(), phase, tokens as i64, now],
+        )?;
+        Ok(())
+    }
+
+    /// Set the planned token budget for `run_id`. Idempotent:
+    /// called once at run start (or zero times, leaving the
+    /// default `planned_tokens = 0` which the observer treats as
+    /// "unlimited"). The helper exists so the
+    /// `moagan run --token-budget` CLI flag (or a future Config
+    /// field) has a single, well-typed entry point. Pre-v011
+    /// databases are a no-op.
+    #[allow(dead_code)]
+    pub fn set_budget(&self, run_id: RunId, planned_tokens: u64) -> Result<()> {
+        if self.user_version()? < 11 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO budget_state (run_id, planned_tokens, used_tokens) \
+             VALUES (?, ?, 0) \
+             ON CONFLICT(run_id) DO UPDATE SET \
+                planned_tokens = excluded.planned_tokens",
+            params![run_id.to_string(), planned_tokens as i64],
+        )?;
+        Ok(())
     }
 }
 
