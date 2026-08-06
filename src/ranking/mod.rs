@@ -22,6 +22,7 @@ pub mod adversary_patterns;
 pub mod cluster;
 pub mod diversity;
 pub mod pareto;
+pub mod refine_action;
 pub mod rubric;
 pub mod stability;
 
@@ -29,4 +30,5 @@ pub use adversary_patterns::{AdversaryPattern, PatternVerdict, run_all_patterns}
 pub use cluster::{cluster_by_simhash, jaccard_distance};
 pub use diversity::pick_with_crowding;
 pub use pareto::pareto_front;
+pub use refine_action::RefineAction;
 pub use rubric::{Criterion, RUBRIC_ANCHORS, Rubric, render_rubric_block};
