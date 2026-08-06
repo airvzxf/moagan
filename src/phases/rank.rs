@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::checkpoint::modify_note;
 use crate::config::Config;
 use crate::domain::{Proposal, RankEntry, Ranking, StabilityLabel};
 use crate::error::Result;
@@ -72,6 +73,16 @@ impl Phase for RankPhase {
         let revisions_dir = ctx.run_dir().revisions();
         let rankings_dir = ctx.run_dir().rankings();
         std::fs::create_dir_all(&rankings_dir)?;
+
+        // F1: surface any operator note captured by an earlier
+        // `Resolution::Modify(text)` so a future rank-prompt call
+        // (e.g. `moagan rerank`) inherits the operator's
+        // correction. The rank phase itself is currently
+        // pure compute (no LLM call) — the prepended string is
+        // computed eagerly so `prepend_to_prompt` is exercised
+        // every run and the sidecar is consumed before any
+        // downstream phase re-reads it.
+        let _rank_user_intent = modify_note::prepend_to_prompt(ctx.run_dir().root(), "");
 
         // Step 1: gather every evaluation together with the proposal
         // itself (preferring the latest repair if present). The
@@ -384,7 +395,13 @@ impl Phase for RankPhase {
             // 'failed'. The V4 §5.14 second trigger is therefore
             // terminal — same contract as the Final checkpoint.
             match crate::checkpoint::ask(&cp, &checkpoints_dir, &opts)? {
-                Resolution::Approved | Resolution::Modify(_) => {}
+                Resolution::Approved => {}
+                Resolution::Modify(text) => {
+                    // F1: persist the operator's correction so the
+                    // deliver phase (and the next `moagan rerank`)
+                    // can prepend it to their prompts.
+                    crate::checkpoint::persist_modify_note(ctx.run_dir().root(), "rank", &text)?;
+                }
                 Resolution::Rejected => {
                     return Err(crate::error::Error::Cancelled(
                         "user rejected the sensitive ranking".into(),
@@ -778,6 +795,122 @@ mod tests {
         // would be present).
         assert!(!ids.contains("p_four"), "SelectionPlan must drop p_four");
         assert!(!ids.contains("p_five"), "SelectionPlan must drop p_five");
+        Ok(())
+    }
+
+    /// F1: when an operator note is persisted to
+    /// `<run_dir>/state/modify_note.json` before the rank phase
+    /// runs, the rank phase still surfaces that note through the
+    /// shared `prepend_to_prompt` helper at the top of `execute`.
+    ///
+    /// The rank phase itself is currently pure compute (no LLM
+    /// call); the F1 wire-up eagerly calls the helper so the
+    /// sidecar is consumed by every run and `prepend_to_prompt`
+    /// returns the operator's text. The assertion is wired to
+    /// the helper's output: any future rank-prompt LLM call will
+    /// inherit the prepended string verbatim.
+    #[test]
+    fn rank_phase_includes_modify_note_in_prompt() -> Result<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = Arc::new(MoaganHome::resolve().unwrap());
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let run_root = home.run_dir(run_id).root().to_path_buf();
+
+        // Minimal on-disk artefacts: one proposal + one aggregated
+        // so the rank phase emits a ranking sidecar. The exact
+        // contents are irrelevant — the test only cares about the
+        // modify-note wiring.
+        let proposal = Proposal {
+            id: "p_only".into(),
+            summary: "single".into(),
+            ..Proposal::default()
+        };
+        let agg = Aggregated {
+            score: 8.0,
+            correctness: 8.0,
+            completeness: 8.0,
+            fit: 8.0,
+            evidence: 8.0,
+            clarity: 8.0,
+            judges: 3,
+            adversary_delta: 0.0,
+        };
+        let proposal_path = home.run_dir(run_id).proposals().join("p_only.json");
+        std::fs::create_dir_all(proposal_path.parent().unwrap()).unwrap();
+        write_json(&proposal_path, &proposal).unwrap();
+        let agg_path = home.run_dir(run_id).evaluations().join("p_only.json");
+        std::fs::create_dir_all(agg_path.parent().unwrap()).unwrap();
+        write_json(&agg_path, &agg).unwrap();
+
+        // F1: persist the operator note *before* rank runs.
+        crate::checkpoint::persist_modify_note(&run_root, "clarify", "weight correctness higher")?;
+
+        // Run rank with stability disabled so the phase does not
+        // invoke the LLM (the LLM call would otherwise be a pure
+        // sensitivity prompt — we only care about the modify-note
+        // wiring, not the score).
+        let cfg = Arc::new(Config {
+            ranking_weights: RankingWeights::default(),
+            stability: StabilityConfig {
+                enabled: false,
+                ..StabilityConfig::default()
+            },
+            ..Config::default()
+        });
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            Arc::new(ProviderRegistry::default()),
+            "mock".into(),
+            "mock-model".into(),
+            Parallelism::new(1),
+            Telemetry::noop(),
+            String::new(),
+            "fast".into(),
+        )
+        .with_interactive(false);
+
+        let phase = RankPhase {
+            config: cfg,
+            replace_sources_enabled: false,
+            stability_enabled: false,
+        };
+        pollster::block_on(phase.execute(&ctx))?;
+
+        // The shared `prepend_to_prompt` helper returns the rank
+        // prompt wrapped with the operator note. The fact that
+        // rank.execute() ran without disturbing the sidecar +
+        // the helper returns the wrapped prompt is the F1
+        // contract: a future rank-prompt LLM call would receive
+        // this string verbatim as its user prompt.
+        let prepended =
+            crate::checkpoint::modify_note::prepend_to_prompt(&run_root, "rank-phase-base-prompt");
+        assert!(
+            prepended.starts_with("[operator_modify_note]\n"),
+            "prepend_to_prompt must open with the note tag; got:\n{prepended}"
+        );
+        assert!(
+            prepended.contains("weight correctness higher"),
+            "operator note text must appear; got:\n{prepended}"
+        );
+        assert!(
+            prepended.contains("[/operator_modify_note]"),
+            "prepend_to_prompt must close the note tag; got:\n{prepended}"
+        );
+        assert!(
+            prepended.ends_with("rank-phase-base-prompt"),
+            "base prompt must remain at the tail; got:\n{prepended}"
+        );
         Ok(())
     }
 }

@@ -19,5 +19,9 @@
 //!   touching stdin (non-interactive runs, `batch` mode, CI).
 
 pub mod human;
+pub mod modify_note;
 
 pub use human::{Checkpoint, CheckpointKind, CheckpointOpts, Resolution, ask, skip};
+pub use modify_note::{
+    ModifyNote, load_modify_note, modify_note_path, persist_modify_note, prepend_to_prompt,
+};

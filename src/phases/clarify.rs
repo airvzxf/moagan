@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 
-use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
+use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts, persist_modify_note};
 use crate::domain::Brief;
 use crate::error::Result;
 use crate::llm::Role;
@@ -63,6 +63,12 @@ impl Phase for ClarifyPhase {
             match resolution {
                 crate::checkpoint::Resolution::Approved => {}
                 crate::checkpoint::Resolution::Modify(text) => {
+                    // F1: persist the operator's text to the
+                    // `<run_dir>/state/modify_note.json` sidecar via
+                    // the shared helper so the rank and deliver
+                    // phases can prepend the correction to their
+                    // prompts on the next run / cycle.
+                    persist_modify_note(ctx.run_dir().root(), "clarify", &text)?;
                     // The user added an extra constraint. Persist it as
                     // a brief-level assumption so downstream phases can
                     // read it via `brief.json#assumptions`. Cheap hack:
