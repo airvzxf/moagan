@@ -16,6 +16,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::capabilities::ProviderCapabilities;
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
 use super::response_format_opt_out;
@@ -201,6 +202,18 @@ impl Provider for OpenAiCompatProvider {
 
     fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        // Dispatcher lookup by `kind`: direct DeepSeek config
+        // gets the deepseek variant; everything else (the
+        // OpenCode Go chat-completions path) stays on the
+        // generic baseline.
+        if self.name == "deepseek" {
+            ProviderCapabilities::for_deepseek()
+        } else {
+            ProviderCapabilities::for_openai_compat()
+        }
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {

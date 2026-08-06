@@ -33,6 +33,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::capabilities::ProviderCapabilities;
 use super::openai_compat::OpenAiCompatProvider;
 use super::opencode_go_anthropic::OpenCodeGoAnthropicProvider;
 use super::opencode_go_responses::OpenCodeGoResponsesProvider;
@@ -196,6 +197,14 @@ impl Provider for OpenCodeGoProvider {
 
     fn endpoint(&self) -> &str {
         self.inner.endpoint()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        // Delegate to the routed provider so the dispatcher's
+        // capability view matches the wire-format path actually
+        // exercised on the wire (Anthropic for messages models,
+        // Responses for gpt-5.6-luna, OpenAI-compat for the rest).
+        self.inner.capabilities()
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {

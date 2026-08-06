@@ -10,6 +10,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
+use super::capabilities::ProviderCapabilities;
 use super::http::{
     MessagesResponseBody, body_from_request, build_client, build_headers, classify_status,
     retry_after,
@@ -113,6 +114,10 @@ impl Provider for MinimaxProvider {
 
     fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::for_minimax()
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
