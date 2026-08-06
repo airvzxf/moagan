@@ -72,16 +72,18 @@ mod tests {
     /// change lands in production.
     #[test]
     fn refine_action_as_str_returns_snake_case() {
-        assert_eq!(RefineAction::TightenConstraint.as_str(), "tighten_constraint");
-        assert_eq!(RefineAction::AddEvidence.as_str(), "add_evidence");
-        assert_eq!(RefineAction::SplitProposal.as_str(), "split_proposal");
-        assert_eq!(RefineAction::MergeProposal.as_str(), "merge_proposal");
-        assert_eq!(RefineAction::RerunCritique.as_str(), "rerun_critique");
-        assert_eq!(RefineAction::DropProposal.as_str(), "drop_proposal");
-        assert_eq!(
-            RefineAction::RequestHumanInput.as_str(),
-            "request_human_input"
-        );
+        let cases = [
+            (RefineAction::TightenConstraint, "tighten_constraint"),
+            (RefineAction::AddEvidence, "add_evidence"),
+            (RefineAction::SplitProposal, "split_proposal"),
+            (RefineAction::MergeProposal, "merge_proposal"),
+            (RefineAction::RerunCritique, "rerun_critique"),
+            (RefineAction::DropProposal, "drop_proposal"),
+            (RefineAction::RequestHumanInput, "request_human_input"),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(action.as_str(), expected);
+        }
     }
 
     /// The enum has exactly seven variants. A future refactor
