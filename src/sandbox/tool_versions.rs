@@ -35,7 +35,11 @@ impl ToolVersions {
         let rustc = run_capture("rustc", &["--version"]);
         let cargo = run_capture("cargo", &["--version"]);
         let moagan = env!("CARGO_PKG_VERSION").to_string();
-        Self { rustc, cargo, moagan }
+        Self {
+            rustc,
+            cargo,
+            moagan,
+        }
     }
 }
 

@@ -1,4 +1,5 @@
-//! `src/reconcile.rs` — startup reconcile (Track F, specs D.28.3 + D.28.4).
+//! `src/reconcile/mod.rs` — startup reconcile (Track F, specs D.28.3 + D.28.4)
+//! plus per-run reconcile (D.28.1).
 //!
 //! Reconciles the canonical filesystem (`home.runs_dir()`) against the
 //! SQLite index at the top of every `moagan run` / `moagan continue` /
@@ -38,6 +39,8 @@ use crate::error::Result;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 use crate::storage::sqlite::{Db, OutboxEventRow};
+
+pub mod per_run;
 
 /// Stale-lock threshold for `cleanup_orphans`. Anything older than
 /// 1 h is considered abandoned (the process that took the lock has
