@@ -43,6 +43,7 @@ use crate::llm::prompts::system_prompt;
 use crate::phases::cluster_proposals::ProposalCluster;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
+use crate::preferences::integration as prefs_integration;
 use crate::time::now_unix_secs;
 
 /// Cheap whole-word substring check used by `extract_tags`. Returns
@@ -177,6 +178,31 @@ impl SynthesizePhase {
              {proposals_json}\n\n\
              Return the JSON object described in the system prompt.",
         )
+    }
+
+    /// Apply the opt-in preference injection to `system`. When
+    /// `MOAGAN_LEARNING=true` AND `MOAGAN_USER` is set, any
+    /// `${epistemic_preferences}` placeholder embedded in
+    /// `system` is replaced with the user's top-3 ratings. In
+    /// every other case (disabled loop, missing user, empty
+    /// cache, missing placeholder) `system` is returned
+    /// unchanged so anonymous / opted-out runs see no
+    /// substitution. PR D.8.
+    pub fn prepare_system_prompt(system: String) -> String {
+        prefs_integration::inject_preferences_into_prompt(&system)
+    }
+
+    /// Extract the synthesised proposal ids from the file paths
+    /// the phase writes. Each path looks like
+    /// `<run_dir>/synthesized/s_<NN>.json`; the file stem (the
+    /// part before `.json`) is the proposal id we feed into
+    /// [`prefs_integration::auto_record_run`] at phase completion.
+    /// PR D.8.
+    pub fn proposal_ids_from_paths(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
+            .collect()
     }
 
     /// Extract candidate architectural tags from a proposal's textual
@@ -330,6 +356,16 @@ impl Phase for SynthesizePhase {
             .collect();
 
         if eligible.is_empty() {
+            // PR D.8: even on the empty-eligible fast-path, fire
+            // the auto-record so a run that synthesised zero
+            // proposals still gets a neutral entry per portfolio
+            // proposal. The caller supplies `run_id`; we extract
+            // portfolio ids from the proposals dir so the learning
+            // loop keeps observing every shipped proposal.
+            let portfolio_ids = portfolio_proposal_ids(&ctx.run_dir().proposals());
+            if !portfolio_ids.is_empty() {
+                Self::record_phase_outcome(ctx.run_id, &portfolio_ids);
+            }
             return Ok(PhaseOutput::Synthesized(Vec::new()));
         }
 
@@ -379,7 +415,14 @@ impl Phase for SynthesizePhase {
                 // source); the phase converts it to the
                 // `SynthesizedProposal` shape the downstream
                 // pipeline already consumes.
-                let system = system_prompt(Role::MergeSynthesizer).to_owned();
+                //
+                // PR D.8: pass the system prompt through the
+                // preference injector so the `${epistemic_preferences}`
+                // placeholder in `merge_synthesizer.md` is replaced
+                // with the user's top-3 ratings when the loop is
+                // enabled.
+                let raw_system = system_prompt(Role::MergeSynthesizer).to_owned();
+                let system = SynthesizePhase::prepare_system_prompt(raw_system);
                 let plan: MergePlan = ctx
                     .call_with_retry_parse(
                         Role::MergeSynthesizer,
@@ -416,8 +459,60 @@ impl Phase for SynthesizePhase {
                 paths.push(p);
             }
         }
+
+        // PR D.8: on phase completion, fire the auto-record for
+        // the synthesised proposals. Every synthesised `s_<NN>`
+        // (already mirrored to `proposals/` above) becomes a
+        // neutral `score = 0.5` rating when the learning loop is
+        // opted in; an opted-out or missing-user run is a no-op
+        // (the helper returns silently).
+        let proposal_ids = Self::proposal_ids_from_paths(&paths);
+        Self::record_phase_outcome(ctx.run_id, &proposal_ids);
+
         Ok(PhaseOutput::Synthesized(paths))
     }
+}
+
+impl SynthesizePhase {
+    /// PR D.8 — fire the auto-record once the phase completes.
+    /// Reads `MOAGAN_USER`; no-op when unset or when the
+    /// learning loop is opted out (the integration helper
+    /// short-circuits internally).
+    fn record_phase_outcome(run_id: crate::ids::RunId, proposal_ids: &[String]) {
+        if proposal_ids.is_empty() {
+            return;
+        }
+        let Ok(user) = std::env::var("MOAGAN_USER") else {
+            return;
+        };
+        if user.is_empty() {
+            return;
+        }
+        prefs_integration::auto_record_run(&user, run_id, proposal_ids);
+    }
+}
+
+/// Collect the proposal ids present in `<run_dir>/proposals/` at
+/// the moment the synthesize phase finishes. Used by the
+/// no-eligible-clusters fast-path so the learning loop still
+/// observes a neutral rating for every shipped proposal. PR D.8.
+fn portfolio_proposal_ids(proposals_dir: &std::path::Path) -> Vec<String> {
+    let entries = match std::fs::read_dir(proposals_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !name.ends_with(".json") || name.ends_with(".meta.json") {
+                return None;
+            }
+            name.strip_suffix(".json").map(str::to_owned)
+        })
+        .collect();
+    ids.sort();
+    ids
 }
 
 #[cfg(test)]
@@ -521,5 +616,170 @@ mod tests {
             "evidence should carry hard_constraints line, got {:?}",
             s.evidence
         );
+    }
+
+    /// PR D.8: `proposal_ids_from_paths` strips the `.json`
+    /// extension off each synthesised path so the result feeds
+    /// cleanly into `auto_record_run`. The list must be in input
+    /// order so the rating log preserves the synthesis index.
+    #[test]
+    fn synthesize_proposal_ids_from_paths_strips_extension() {
+        let paths = vec![
+            PathBuf::from("/tmp/run/synthesized/s_00.json"),
+            PathBuf::from("/tmp/run/synthesized/s_01.json"),
+            PathBuf::from("/tmp/run/synthesized/s_02.json"),
+        ];
+        let ids = SynthesizePhase::proposal_ids_from_paths(&paths);
+        assert_eq!(
+            ids,
+            vec!["s_00".to_string(), "s_01".to_string(), "s_02".to_string()]
+        );
+    }
+
+    /// PR D.8: an empty path list (no eligible clusters) must
+    /// produce an empty id list so the auto-record call is a
+    /// no-op and never persists a phantom rating.
+    #[test]
+    fn synthesize_proposal_ids_from_empty_paths_is_empty() {
+        let ids = SynthesizePhase::proposal_ids_from_paths(&[]);
+        assert!(ids.is_empty());
+    }
+
+    /// PR D.8: `merge_synthesizer.md` must embed the
+    /// `${epistemic_preferences}` placeholder so the
+    /// preference injector has something to substitute. The
+    /// placeholder is intentionally placed at the top of the
+    /// prompt (right under the role header) so the
+    /// synthesised LLM sees the user's prior ratings before
+    /// any cluster proposal.
+    #[test]
+    fn synthesize_prompt_substitutes_preferences_placeholder() {
+        // Use the same path the binary embeds via
+        // `include_str!`; assert it carries the placeholder.
+        const MERGE_SYNTHESIZER_PROMPT: &str = include_str!("../llm/prompts/merge_synthesizer.md");
+        assert!(
+            MERGE_SYNTHESIZER_PROMPT
+                .contains(crate::llm::prompts::EPISTEMIC_PREFERENCES_PLACEHOLDER),
+            "merge_synthesizer.md must embed the placeholder, got: {MERGE_SYNTHESIZER_PROMPT:?}"
+        );
+
+        // And the phase-level wrapper must substitute it once
+        // `MOAGAN_LEARNING=true` and `MOAGAN_USER` are set and
+        // the cache has at least one rating.
+        let _g = crate::TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
+        let prev_home = std::env::var("MOAGAN_HOME").ok();
+        let prev_user = std::env::var("MOAGAN_USER").ok();
+        let tmp = unique_tmp_dir("synth_placeholder");
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", &tmp);
+            std::env::set_var("MOAGAN_LEARNING", "true");
+            std::env::set_var("MOAGAN_USER", "alice");
+        }
+        let mut cache = crate::preferences::PreferenceCache::load("alice");
+        cache.add(crate::preferences::cache::Rating {
+            proposal_id: "p_alpha".into(),
+            score: 0.8,
+            rated_unix: crate::preferences::cache::unix_now(),
+            run_id: crate::ids::RunId::new(),
+        });
+        cache.save().unwrap();
+
+        let prepared = SynthesizePhase::prepare_system_prompt(MERGE_SYNTHESIZER_PROMPT.to_owned());
+        assert!(
+            !prepared.contains(crate::llm::prompts::EPISTEMIC_PREFERENCES_PLACEHOLDER),
+            "placeholder must be replaced, got: {prepared:?}"
+        );
+        assert!(
+            prepared.contains("p_alpha"),
+            "rendered block must include the prior rating id, got: {prepared:?}"
+        );
+
+        unsafe {
+            std::env::set_var("MOAGAN_LEARNING", prev_learning.unwrap_or_default());
+            std::env::set_var("MOAGAN_HOME", prev_home.unwrap_or_default());
+            std::env::set_var("MOAGAN_USER", prev_user.unwrap_or_default());
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// PR D.8: when the learning loop is opted out, the prompt
+    /// is returned unchanged — no header, no placeholder
+    /// leakage, no synthetic content.
+    #[test]
+    fn synthesize_prompt_returns_unchanged_when_disabled() {
+        let _g = crate::TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
+        let prev_home = std::env::var("MOAGAN_HOME").ok();
+        let prev_user = std::env::var("MOAGAN_USER").ok();
+        let tmp = unique_tmp_dir("synth_disabled");
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", &tmp);
+            std::env::set_var("MOAGAN_LEARNING", "false");
+            std::env::set_var("MOAGAN_USER", "alice");
+        }
+
+        let prompt = "Hello\n${epistemic_preferences}\nWorld";
+        let out = SynthesizePhase::prepare_system_prompt(prompt.to_owned());
+        assert_eq!(out, prompt, "disabled loop must yield unchanged prompt");
+
+        unsafe {
+            std::env::set_var("MOAGAN_LEARNING", prev_learning.unwrap_or_default());
+            std::env::set_var("MOAGAN_HOME", prev_home.unwrap_or_default());
+            std::env::set_var("MOAGAN_USER", prev_user.unwrap_or_default());
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// PR D.8: `portfolio_proposal_ids` reads every
+    /// `<run_dir>/proposals/<id>.json` and returns the ids
+    /// sorted so the auto-record call observes a stable
+    /// ordering regardless of the on-disk layout.
+    #[test]
+    fn synthesize_portfolio_ids_are_sorted_and_skip_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("proposals")).unwrap();
+        for id in ["s_03", "s_01", "s_02"] {
+            std::fs::write(
+                dir.path().join("proposals").join(format!("{id}.json")),
+                b"{}",
+            )
+            .unwrap();
+        }
+        // Meta sidecars are produced by AtomicWriter and must
+        // be ignored.
+        std::fs::write(
+            dir.path().join("proposals").join("s_01.json.meta.json"),
+            b"{}",
+        )
+        .unwrap();
+
+        let ids = portfolio_proposal_ids(&dir.path().join("proposals"));
+        assert_eq!(
+            ids,
+            vec!["s_01".to_string(), "s_02".to_string(), "s_03".to_string()]
+        );
+    }
+
+    /// Local helper: build a unique tempdir under
+    /// [`std::env::temp_dir`] for a test that needs to mutate
+    /// `MOAGAN_HOME` without acquiring the global lock used by
+    /// `with_moagan_home`.
+    fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "moagan-synth-test-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 }
