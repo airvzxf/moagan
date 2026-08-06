@@ -152,6 +152,18 @@ pub enum ErrorCode {
     InvalidArgs,
     /// Illegal state-machine transition.
     InvalidState,
+    #[allow(missing_docs)]
+    Storage,
+    #[allow(missing_docs)]
+    Llm,
+    #[allow(missing_docs)]
+    Sandbox,
+    #[allow(missing_docs)]
+    Research,
+    #[allow(missing_docs)]
+    Resume,
+    #[allow(missing_docs)]
+    Discovery,
 }
 
 impl ErrorCode {
@@ -224,6 +236,12 @@ impl ErrorCode {
             Self::Custom => "CUSTOM",
             Self::InvalidArgs => "INVALID_ARGS",
             Self::InvalidState => "INVALID_STATE",
+            Self::Storage => "STORAGE",
+            Self::Llm => "LLM",
+            Self::Sandbox => "SANDBOX",
+            Self::Research => "RESEARCH",
+            Self::Resume => "RESUME",
+            Self::Discovery => "DISCOVERY",
         }
     }
 
