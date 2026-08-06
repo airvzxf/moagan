@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use thiserror::Error;
+
 /// The 6 criteria the rank phase uses. Each one is rated on a 1/3/5
 /// scale; the LLM-side critic / judge interpolates a continuous
 /// score by interpolating between the rubric anchors.
@@ -71,6 +73,15 @@ pub fn render_rubric_block() -> String {
     s
 }
 
+#[allow(missing_docs)]
+#[derive(Debug, Error, PartialEq)]
+pub enum RubricViolation {
+    #[error("missing rubric criterion: {criterion}")]
+    MissingCriterion { criterion: String },
+    #[error("invalid score for rubric criterion {criterion}: {value}")]
+    InvalidScore { criterion: String, value: String },
+}
+
 /// The 6-criterion rubric with anchored 1/3/5 phrases for each.
 /// Constructed via [`Rubric::default`] which seeds every (criterion,
 /// level) pair with a short, concrete phrase. The LLM-side judge
@@ -95,6 +106,39 @@ impl Rubric {
     /// Low-tier anchor for `c` ("what a 1 looks like").
     pub fn anchored_1(&self, c: Criterion) -> &str {
         self.anchors.get(&(c, 1)).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    #[allow(missing_docs)]
+    pub fn validate(
+        &self,
+        response: &serde_json::Value,
+    ) -> std::result::Result<(), RubricViolation> {
+        let scores = response
+            .get("criteria")
+            .or_else(|| response.get("scores"))
+            .and_then(serde_json::Value::as_object)
+            .or_else(|| response.as_object())
+            .ok_or_else(|| RubricViolation::MissingCriterion {
+                criterion: RUBRIC_ANCHORS[0].0.to_owned(),
+            })?;
+        for (criterion, _) in RUBRIC_ANCHORS {
+            let value =
+                scores
+                    .get(*criterion)
+                    .ok_or_else(|| RubricViolation::MissingCriterion {
+                        criterion: (*criterion).to_owned(),
+                    })?;
+            let valid = value
+                .as_f64()
+                .is_some_and(|score| score.is_finite() && (0.0..=5.0).contains(&score));
+            if !valid {
+                return Err(RubricViolation::InvalidScore {
+                    criterion: (*criterion).to_owned(),
+                    value: value.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +212,56 @@ impl Default for Rubric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rubric_validate_accepts_complete_response() {
+        let response = serde_json::json!({
+            "criteria": {
+                "correctness": 5.0,
+                "completeness": 4.0,
+                "feasibility": 3.0,
+                "safety": 2.0,
+                "cost": 1.0,
+                "clarity": 0.0
+            }
+        });
+        assert!(Rubric::default().validate(&response).is_ok());
+    }
+
+    #[test]
+    fn rubric_validate_rejects_missing_criterion() {
+        let response = serde_json::json!({
+            "criteria": {
+                "correctness": 5.0,
+                "completeness": 4.0,
+                "feasibility": 3.0,
+                "safety": 2.0,
+                "cost": 1.0
+            }
+        });
+        let result = Rubric::default().validate(&response);
+        assert!(matches!(
+            result,
+            Err(RubricViolation::MissingCriterion { criterion }) if criterion == "clarity"
+        ));
+    }
+
+    #[test]
+    fn rubric_validate_rejects_score_outside_range() {
+        let response = serde_json::json!({
+            "correctness": 5.0,
+            "completeness": 4.0,
+            "feasibility": 3.0,
+            "safety": 2.0,
+            "cost": 1.0,
+            "clarity": 5.1
+        });
+        let result = Rubric::default().validate(&response);
+        assert!(matches!(
+            result,
+            Err(RubricViolation::InvalidScore { criterion, .. }) if criterion == "clarity"
+        ));
+    }
 
     #[test]
     fn default_rubric_has_anchor_for_every_criterion() {

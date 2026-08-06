@@ -50,6 +50,8 @@ pub struct Config {
     pub no_color: bool,
     /// Per-criterion weights for the ranked score. Equal weights by default.
     pub ranking_weights: RankingWeights,
+    #[allow(missing_docs)]
+    pub rubric: RubricConfig,
     /// Maximum number of repair rounds per failed proposal. Default 5.
     /// Spec T01-06 §16.10 allows 0..2; v0.1 default is 5 per operator
     /// preference (the cost is bounded by parallelism).
@@ -197,6 +199,23 @@ pub struct Config {
 
 fn default_startup_reconcile() -> bool {
     true
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RubricConfig {
+    pub enabled: bool,
+    pub validate_responses: bool,
+}
+
+impl Default for RubricConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            validate_responses: false,
+        }
+    }
 }
 
 /// Per-provider circuit breaker knobs (catalog §D.19.5).
@@ -420,6 +439,7 @@ impl Default for Config {
             emit_summary: false,
             no_color: false,
             ranking_weights: RankingWeights::default(),
+            rubric: RubricConfig::default(),
             repair_max_rounds: 5,
             gate_forbidden_techs: Vec::new(),
             gate_min_length: 50,
