@@ -27,6 +27,7 @@ use crate::secret::SecretString;
 use super::capabilities::ProviderCapabilities;
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
+use super::sse_parser::{SseError, SseParser};
 use super::wire::{Request, Response, Usage};
 
 /// OpenCode Go provider routed through the OpenAI Responses API.
@@ -178,6 +179,9 @@ impl Provider for OpenCodeGoResponsesProvider {
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let url = self.responses_url();
+        if req.stream {
+            return self.send_streaming(req, &url).await;
+        }
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -281,6 +285,123 @@ impl Provider for OpenCodeGoResponsesProvider {
     }
 }
 
+/// Build the wire-level request body used by `send`.
+fn build_responses_body<'a>(
+    req: &'a Request,
+    model: &'a str,
+    stream: bool,
+) -> ResponsesRequest<'a> {
+    ResponsesRequest {
+        model,
+        instructions: Some(&req.system),
+        input: &req.user,
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        stream,
+    }
+}
+
+/// Consume an OpenAI Responses SSE wire body and return the
+/// accumulated text plus the most-recent usage block.
+///
+/// Each `data:` payload is expected to carry a partial Responses
+/// shape (`{"output": [{"content": [{"type": "output_text",
+/// "text": "..."}]}]}`) plus an optional `usage` block that
+/// may arrive on the terminal event. The function walks every
+/// payload, concatenates `output_text` blocks in arrival order,
+/// and replaces the cached usage with the most recent observation
+/// (the terminal event typically carries the authoritative
+/// counts).
+///
+/// Visible to tests so they can exercise the SSE consumer
+/// without having to spin up a wiremock server.
+fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
+    let mut parser = SseParser::new(body);
+    let mut text = String::new();
+    let mut usage = ResponsesUsage::default();
+    loop {
+        match parser.next_data::<ResponsesBody>() {
+            Ok(Some(delta)) => {
+                for out in delta.output {
+                    for c in out.content {
+                        if c.kind == "output_text"
+                            && let Some(t) = c.text
+                        {
+                            text.push_str(&t);
+                        }
+                    }
+                }
+                if let Some(u) = delta.usage {
+                    usage = u;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(match e {
+                    SseError::Io(err) => Error::Provider(format!("sse io: {err}")),
+                    SseError::Parse(err) => Error::Provider(format!("sse parse: {err}")),
+                });
+            }
+        }
+    }
+    Ok((text, usage))
+}
+
+impl OpenCodeGoResponsesProvider {
+    /// Streaming variant of [`Provider::send`]: sets
+    /// `stream=true` on the wire body, reads the entire SSE
+    /// response, and returns a single aggregated `Response` with
+    /// the joined text and the terminal usage block.
+    async fn send_streaming(&self, req: &Request, url: &str) -> Result<(u16, Response)> {
+        let body = build_responses_body(req, &self.model, true);
+        let request_started = std::time::Instant::now();
+        let resp = self
+            .client
+            .post(url)
+            .bearer_auth(self.api_key.expose())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("network: {e}")))?;
+        let status = resp.status();
+        let status_code = status.as_u16();
+        if !status.is_success() {
+            let raw = resp.text().await.unwrap_or_default();
+            let err = match status_code {
+                401 | 403 => Error::InvalidApiKey(format!("http {status_code}: {raw}")),
+                429 => Error::PlanExhausted(format!("http {status_code}: {raw}")),
+                408 | 504 | 524 => Error::Timeout(format!("http {status_code}: {raw}")),
+                _ => Error::Provider(format!("http {status_code}: {raw}")),
+            };
+            return Err(err);
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::Provider(format!("stream body read: {e}")))?;
+        tracing::debug!(
+            provider = self.name,
+            status = status_code,
+            elapsed_ms = request_started.elapsed().as_millis(),
+            "Provider HTTP stage (sse)"
+        );
+        let (text, usage) = accumulate_sse_responses(&bytes)?;
+        let response = Response {
+            text,
+            finish_reason: None,
+            truncated: false,
+            usage: Usage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read: 0,
+                cache_creation: 0,
+            },
+        };
+        Ok((status_code, response))
+    }
+}
+
 impl OpenCodeGoDispatch for OpenCodeGoResponsesProvider {
     fn url(&self) -> String {
         self.responses_url()
@@ -342,5 +463,182 @@ mod tests {
             hard_incompatibilities: vec![],
         });
         assert!(matches!(result, Err(Error::InvalidApiKey(_))));
+    }
+
+    #[test]
+    fn opencode_go_responses_streaming_consumes_sse_data_lines() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            let body = "\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"Hello \"}]}]}\n\n\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"world\"}]}]}\n\n\
+data: {\"output\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":34}}\n\n\
+data: [DONE]\n\n";
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(body),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 256,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: true,
+            };
+            let (status, response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            assert_eq!(response.text, "Hello world");
+            assert_eq!(response.usage.input_tokens, 12);
+            assert_eq!(response.usage.output_tokens, 34);
+            assert!(!response.truncated);
+            assert!(response.finish_reason.is_none());
+        });
+    }
+
+    #[test]
+    fn opencode_go_responses_streaming_returns_error_on_mid_stream_failure() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            // First delta is well-formed; the second is intentionally
+            // malformed so the SseParser surfaces a parse error.
+            let body = "\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}\n\n\
+data: {not json}\n\n";
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(body),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 64,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: true,
+            };
+            let err = p.send(&req).await.unwrap_err();
+            match err {
+                Error::Provider(msg) => assert!(
+                    msg.contains("sse parse"),
+                    "expected sse parse error, got {msg:?}"
+                ),
+                other => panic!("expected Error::Provider, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn opencode_go_responses_non_streaming_still_works() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "plain"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 7, "output_tokens": 11}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 64,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+            };
+            let (status, response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            assert_eq!(response.text, "plain");
+            assert_eq!(response.usage.input_tokens, 7);
+            assert_eq!(response.usage.output_tokens, 11);
+        });
+    }
+
+    #[test]
+    fn accumulate_sse_responses_joins_text_and_picks_last_usage() {
+        let body = b"\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"Hello \"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"world\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}\n\n\
+data: [DONE]\n\n";
+        let (text, usage) = accumulate_sse_responses(body).unwrap();
+        assert_eq!(text, "Hello world");
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 4);
     }
 }

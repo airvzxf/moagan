@@ -575,6 +575,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         }
     }
 
@@ -652,6 +653,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         }
     }
 
@@ -1036,6 +1038,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         };
         let wire = AnthropicWire;
         let body = wire.encode_body(&req).unwrap();
@@ -1071,6 +1074,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         };
         let wire = ResponsesWire;
         let body = wire.encode_body(&req).unwrap();

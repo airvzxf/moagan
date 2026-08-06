@@ -17,6 +17,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -66,6 +68,30 @@ pub struct FacetCache {
     root: PathBuf,
     /// TTL applied to every new entry. `None` disables expiry.
     ttl_secs: Option<u64>,
+    /// Cumulative counter of cache hits (lookups that returned a
+    /// fresh `FacetList`). Wrapped in `Arc` so clones share the
+    /// counter across tasks.
+    hits: Arc<AtomicU64>,
+    /// Cumulative counter of cache misses (lookups that returned
+    /// `None` because the entry was missing, stale, malformed, or
+    /// schema-mismatched).
+    misses: Arc<AtomicU64>,
+}
+
+/// Read-only snapshot of cache effectiveness counters.
+///
+/// Returned by [`FacetCache::stats`]. The `entries` count is
+/// recomputed on demand from disk; `hits` and `misses` are
+/// monotonically increasing counters held inside the cache
+/// handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FacetCacheStats {
+    /// Number of lookups that returned a fresh cached `FacetList`.
+    pub hits: u64,
+    /// Number of lookups that did not return a fresh entry.
+    pub misses: u64,
+    /// Number of cache entries currently persisted on disk.
+    pub entries: usize,
 }
 
 impl FacetCache {
@@ -75,6 +101,8 @@ impl FacetCache {
         Self {
             root: root.into(),
             ttl_secs,
+            hits: Arc::new(AtomicU64::new(0)),
+            misses: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -102,6 +130,7 @@ impl FacetCache {
     ) -> Result<Option<FacetList>> {
         let path = root.join(format!("{cache_key}.json"));
         if !path.exists() {
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
         let raw = match fs::read_to_string(&path) {
@@ -112,6 +141,7 @@ impl FacetCache {
                     error = %e,
                     "facet cache read failed; treating as miss"
                 );
+                self.misses.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
         };
@@ -123,6 +153,7 @@ impl FacetCache {
                     error = %e,
                     "facet cache entry malformed; treating as miss"
                 );
+                self.misses.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
         };
@@ -132,12 +163,15 @@ impl FacetCache {
                 schema = entry.schema_version,
                 "facet cache schema mismatch; treating as miss"
             );
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
         if !entry.is_fresh(now_unix) {
             tracing::debug!(cache_key, "facet cache entry stale");
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
+        self.hits.fetch_add(1, Ordering::Relaxed);
         Ok(Some(entry.facet_list))
     }
 
@@ -187,6 +221,20 @@ impl FacetCache {
             }
         }
         Ok(n)
+    }
+
+    /// Snapshot the cache effectiveness counters and the on-disk
+    /// entry count.
+    ///
+    /// `hits` and `misses` are cumulative since the cache handle
+    /// was constructed (clones share the same counters). `entries`
+    /// is recomputed on demand via [`FacetCache::count`].
+    pub fn stats(&self) -> FacetCacheStats {
+        FacetCacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            entries: self.count().unwrap_or(0),
+        }
     }
 }
 
@@ -401,5 +449,51 @@ mod tests {
         };
         assert!(!entry.is_fresh(200));
         assert!(entry.is_fresh(50));
+    }
+
+    #[test]
+    fn facet_cache_stats_initial_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = FacetCache::new(tmp.path(), Some(60));
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.entries, 0);
+    }
+
+    #[test]
+    fn facet_cache_stats_records_hits_and_misses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = FacetCache::new(tmp.path(), Some(60));
+        let list = mk_list("brief", "cat_01");
+        cache.store(&list).unwrap();
+
+        let miss_stats = cache.stats();
+        assert_eq!(miss_stats.hits, 0);
+        assert_eq!(miss_stats.misses, 0, "stores don't touch counters");
+        assert_eq!(miss_stats.entries, 1);
+
+        assert!(cache.lookup(&list.cache_key).unwrap().is_some());
+        assert!(cache.lookup(&list.cache_key).unwrap().is_some());
+        assert!(cache.lookup("never-stored").unwrap().is_none());
+
+        let populated = cache.stats();
+        assert_eq!(populated.hits, 2);
+        assert_eq!(populated.misses, 1);
+        assert_eq!(populated.entries, 1);
+    }
+
+    #[test]
+    fn facet_cache_stats_counts_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = FacetCache::new(tmp.path(), Some(60));
+        cache.store(&mk_list("brief-a", "cat_01")).unwrap();
+        cache.store(&mk_list("brief-a", "cat_02")).unwrap();
+        cache.store(&mk_list("brief-b", "cat_01")).unwrap();
+
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 3);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
     }
 }

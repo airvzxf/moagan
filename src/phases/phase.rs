@@ -271,6 +271,7 @@ impl RunContext {
             temperature: Some(temperature_for_role(role, profile_overrides)),
             top_p: Some(0.95),
             response_schema: None,
+            stream: false,
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
@@ -306,6 +307,7 @@ impl RunContext {
             temperature: Some(temperature_for_role(role, profile_overrides)),
             top_p: Some(0.95),
             response_schema: None,
+            stream: false,
         };
         self.dispatch_to_provider(req, None, started_unix).await
     }

@@ -367,6 +367,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_schema: None,
+            stream: false,
         }
     }
 

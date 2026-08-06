@@ -259,6 +259,7 @@ mod tests {
             temperature: Some(0.7),
             top_p: Some(0.95),
             response_schema: None,
+            stream: false,
         }
     }
 
