@@ -1,7 +1,7 @@
 //! D.33.4: MANIFEST.txt human-readable writer.
 
-use std::path::Path;
 use crate::error::Result;
+use std::path::Path;
 
 pub fn write_manifest_txt(run_dir: &Path, body: &str) -> Result<()> {
     let dir = run_dir.join("telemetry");
