@@ -184,7 +184,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
     let stub = Manifest {
-        schema_version: "v1".into(),
+        schema_version: Manifest::schema_version_string(),
         run_id,
         mode: opts.mode.as_str().into(),
         status: "running".into(),
@@ -203,6 +203,10 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         context_refs: context_refs.clone(),
         lineage_paths: lineage_paths.clone(),
         cli_prompt: Some(opts.prompt.clone()),
+        config_hash: None,
+        created_at_iso: chrono::Utc::now().to_rfc3339(),
+        last_resumed_at_iso: None,
+        resume_count: 0,
     };
 
     let final_manifest = run_full_pipeline(
@@ -707,7 +711,7 @@ pub(crate) fn build_manifest(
     let usage = aggregate_usage(&calls_path, &legacy_calls_path);
 
     let mut manifest = Manifest {
-        schema_version: "v1".into(),
+        schema_version: Manifest::schema_version_string(),
         run_id: *run_id,
         mode: mode.into(),
         status: status.into(),
@@ -728,6 +732,10 @@ pub(crate) fn build_manifest(
             home, *run_id,
         ))),
         cli_prompt: None,
+        config_hash: None,
+        created_at_iso: now.to_rfc3339(),
+        last_resumed_at_iso: None,
+        resume_count: 0,
     };
 
     // 4. Compute the self-hash over the canonical JSON with
