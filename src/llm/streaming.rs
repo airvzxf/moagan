@@ -20,7 +20,11 @@ pub struct StreamRecorder {
 
 impl StreamRecorder {
     pub fn new() -> Self {
-        Self { started_at: None, first_token_at: None, tokens: 0 }
+        Self {
+            started_at: None,
+            first_token_at: None,
+            tokens: 0,
+        }
     }
     pub fn start(&mut self) {
         if self.started_at.is_none() {
@@ -44,7 +48,9 @@ impl StreamRecorder {
 }
 
 impl Default for StreamRecorder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,10 @@ pub struct LineageGraph {
 
 impl LineageGraph {
     pub fn empty() -> Self {
-        Self { nodes: Vec::new(), edges: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
     }
     pub fn from_pairs(pairs: &[(String, String)]) -> Self {
         let mut nodes: Vec<RunId> = Vec::new();

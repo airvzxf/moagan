@@ -16,10 +16,15 @@ pub struct ProviderPool {
 
 impl ProviderPool {
     pub fn new(entries: Vec<Arc<dyn ProviderPoolEntry>>) -> Self {
-        Self { entries, counter: AtomicUsize::new(0) }
+        Self {
+            entries,
+            counter: AtomicUsize::new(0),
+        }
     }
     pub fn round_robin(&self) -> Option<usize> {
-        if self.entries.is_empty() { return None; }
+        if self.entries.is_empty() {
+            return None;
+        }
         let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.entries.len();
         Some(idx)
     }
@@ -36,8 +41,12 @@ impl ProviderPool {
         }
         None
     }
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -45,10 +54,14 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    struct MockEntry { available: AtomicBool }
+    struct MockEntry {
+        available: AtomicBool,
+    }
     #[async_trait::async_trait]
     impl ProviderPoolEntry for MockEntry {
-        async fn is_available(&self) -> bool { self.available.load(Ordering::Relaxed) }
+        async fn is_available(&self) -> bool {
+            self.available.load(Ordering::Relaxed)
+        }
     }
 
     #[test]
@@ -61,9 +74,15 @@ mod tests {
     #[test]
     fn provider_pool_round_robin_distributes() {
         let pool = ProviderPool::new(vec![
-            Arc::new(MockEntry { available: AtomicBool::new(true) }),
-            Arc::new(MockEntry { available: AtomicBool::new(true) }),
-            Arc::new(MockEntry { available: AtomicBool::new(true) }),
+            Arc::new(MockEntry {
+                available: AtomicBool::new(true),
+            }),
+            Arc::new(MockEntry {
+                available: AtomicBool::new(true),
+            }),
+            Arc::new(MockEntry {
+                available: AtomicBool::new(true),
+            }),
         ]);
         assert_eq!(pool.round_robin(), Some(0));
         assert_eq!(pool.round_robin(), Some(1));
@@ -77,9 +96,15 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let pool = ProviderPool::new(vec![
-                Arc::new(MockEntry { available: AtomicBool::new(false) }),
-                Arc::new(MockEntry { available: AtomicBool::new(true) }),
-                Arc::new(MockEntry { available: AtomicBool::new(false) }),
+                Arc::new(MockEntry {
+                    available: AtomicBool::new(false),
+                }),
+                Arc::new(MockEntry {
+                    available: AtomicBool::new(true),
+                }),
+                Arc::new(MockEntry {
+                    available: AtomicBool::new(false),
+                }),
             ]);
             // round_robin starts at 0; pick with allow_paused=false
             // skips 0 and 2 (paused), returns 1.
@@ -92,8 +117,12 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let pool = ProviderPool::new(vec![
-                Arc::new(MockEntry { available: AtomicBool::new(false) }),
-                Arc::new(MockEntry { available: AtomicBool::new(false) }),
+                Arc::new(MockEntry {
+                    available: AtomicBool::new(false),
+                }),
+                Arc::new(MockEntry {
+                    available: AtomicBool::new(false),
+                }),
             ]);
             assert!(pool.pick(false).await.is_none());
         });
@@ -104,8 +133,12 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let pool = ProviderPool::new(vec![
-                Arc::new(MockEntry { available: AtomicBool::new(false) }),
-                Arc::new(MockEntry { available: AtomicBool::new(false) }),
+                Arc::new(MockEntry {
+                    available: AtomicBool::new(false),
+                }),
+                Arc::new(MockEntry {
+                    available: AtomicBool::new(false),
+                }),
             ]);
             assert_eq!(pool.pick(true).await, Some(0)); // accepts even paused
         });
