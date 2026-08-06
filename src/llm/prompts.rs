@@ -242,6 +242,28 @@ pub fn inject_epistemic_preferences(prompt: &str, user: &str) -> String {
     prompt.replace(EPISTEMIC_PREFERENCES_PLACEHOLDER, &block)
 }
 
+/// Placeholder token that prompts embed when they want a fetched
+/// research snippet block rendered inline. Substitute via
+/// [`inject_known_apis`]. Track K (D9): the bounded external research
+/// fetcher (proposal-04 §4) returns redacted snippets that the
+/// Sketch phase appends to the prompt so the model can ground
+/// opinions in current docs.
+pub const KNOWN_APIS_PLACEHOLDER: &str = "${known_apis}";
+
+/// Substitute [`KNOWN_APIS_PLACEHOLDER`] in `prompt` with the rendered
+/// Markdown of the supplied research snippets. When the placeholder
+/// is absent, `prompt` is returned unchanged. When `snippets` is
+/// empty, the placeholder is replaced with a marker line that
+/// explicitly states "no research available" so the model is not
+/// misled into believing the block was forgotten.
+pub fn inject_known_apis(prompt: &str, snippets: &[crate::research::ResearchSnippet]) -> String {
+    if !prompt.contains(KNOWN_APIS_PLACEHOLDER) {
+        return prompt.to_owned();
+    }
+    let block = crate::research::render_known_apis_block(snippets);
+    prompt.replace(KNOWN_APIS_PLACEHOLDER, &block)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +358,52 @@ mod tests {
         let template = "no placeholder here, only prose";
         let injected = inject_epistemic_legacy(template);
         assert_eq!(injected, template);
+    }
+
+    /// Track K (D9): the `${known_apis}` placeholder is substituted
+    /// with the rendered Markdown block when the prompt embeds it.
+    /// The block must include the source URL so the model can cite
+    /// it, and the placeholder must be gone after the call.
+    #[test]
+    fn inject_known_apis_substitutes_placeholder_with_snippets() {
+        let snippet = crate::research::ResearchSnippet {
+            url: "https://docs.rs/serde".into(),
+            content: "fn main() {}".into(),
+            truncated: false,
+        };
+        let template = "before\n${known_apis}\nafter";
+        let injected = inject_known_apis(template, std::slice::from_ref(&snippet));
+        assert!(!injected.contains(KNOWN_APIS_PLACEHOLDER));
+        assert!(injected.contains("https://docs.rs/serde"));
+        assert!(injected.contains("fn main() {}"));
+        assert!(injected.starts_with("before\n"));
+        assert!(injected.ends_with("\nafter"));
+    }
+
+    /// Track K (D9): a prompt without the placeholder is returned
+    /// verbatim. This is the cached-response path — the injector
+    /// must never mutate a prompt that does not ask for research.
+    #[test]
+    fn inject_known_apis_returns_unchanged_when_no_placeholder() {
+        let template = "plain prompt, no slot";
+        let snippet = crate::research::ResearchSnippet {
+            url: "https://docs.rs/x".into(),
+            content: "x".into(),
+            truncated: false,
+        };
+        let injected = inject_known_apis(template, std::slice::from_ref(&snippet));
+        assert_eq!(injected, template);
+    }
+
+    /// Track K (D9): an empty snippet list collapses to a marker
+    /// line so the prompt never contains the literal placeholder.
+    /// The marker text is the contract the deliver phase reads to
+    /// tell the user "research was requested but the fetch failed".
+    #[test]
+    fn inject_known_apis_empty_list_substitutes_no_research_marker() {
+        let template = "before\n${known_apis}\nafter";
+        let injected = inject_known_apis(template, &[]);
+        assert!(!injected.contains(KNOWN_APIS_PLACEHOLDER));
+        assert!(injected.contains("no research available"));
     }
 }

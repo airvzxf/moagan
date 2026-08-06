@@ -38,9 +38,10 @@ use futures::future::join_all;
 use crate::domain::{ProblemGraph, Sketch};
 use crate::error::{Error, Result};
 use crate::llm::Role;
-use crate::llm::prompts::system_prompt;
+use crate::llm::prompts::{KNOWN_APIS_PLACEHOLDER, inject_known_apis, system_prompt};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
+use crate::research::{ResearchSnippet, fetch_all};
 
 /// Default angles cycled across the fan-out. The list is the
 /// `spec §5.5` recommended set; when `count > angles.len()` the cycle
@@ -146,6 +147,27 @@ impl SketchPhase {
         }
         true
     }
+
+    /// Track K (D9): fetch the configured research URLs and return
+    /// the snippets that should land in the prompt via the
+    /// `${known_apis}` placeholder. The helper is opt-in:
+    /// `enabled == false` or `urls.is_empty()` short-circuits to
+    /// `Ok(vec![])` without touching the network. Any
+    /// per-URL fetch failure is dropped silently (the
+    /// allowlist / network / host errors are recorded as empty
+    /// entries in the result vec by `fetch_all`); the
+    /// surviving snippets still surface so a partial failure is
+    /// not a fatal error.
+    pub(crate) async fn collect_research_snippets(
+        enabled: bool,
+        urls: Vec<String>,
+    ) -> Vec<ResearchSnippet> {
+        if !enabled || urls.is_empty() {
+            return Vec::new();
+        }
+        let results = fetch_all(&urls).await;
+        results.into_iter().filter_map(|r| r.ok()).collect()
+    }
 }
 
 #[async_trait]
@@ -170,6 +192,36 @@ impl Phase for SketchPhase {
         let brief: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let user = serde_json::to_string(&brief).map_err(Error::from)?;
         let system = system_prompt(Role::Sketch).to_owned();
+
+        // Track K (D9): when the research fetcher is enabled the
+        // Sketch phase pulls snippets from the configured allowlist
+        // URLs and injects them into the system prompt via the
+        // `${known_apis}` placeholder. The fetcher is opt-in:
+        // `research_enabled = false` keeps the prompt untouched
+        // (zero overhead, no network), and a fetch failure collapses
+        // to an empty snippet list so the LLM still receives a
+        // well-formed prompt. To avoid changing the bundled
+        // `sketch.md` template (and invalidating the prompt-set
+        // hash cache), the placeholder is appended at runtime only
+        // when the feature is enabled.
+        let research_urls = ctx.config.research_urls.clone();
+        let research_enabled = ctx.config.research_enabled;
+        let snippets = Self::collect_research_snippets(research_enabled, research_urls).await;
+        let system = if snippets.is_empty() {
+            system
+        } else {
+            // Stamp the placeholder into a copy of the system prompt
+            // so `inject_known_apis` can substitute it. The
+            // template is left untouched on disk so the
+            // `prompt_set_hash` cache key stays stable for runs that
+            // never opt in.
+            let augmented = if system.contains(KNOWN_APIS_PLACEHOLDER) {
+                system
+            } else {
+                format!("{system}\n\n{KNOWN_APIS_PLACEHOLDER}")
+            };
+            inject_known_apis(&augmented, &snippets)
+        };
 
         let sketches_dir = ctx.run_dir().sketches();
         std::fs::create_dir_all(&sketches_dir)?;
@@ -377,5 +429,61 @@ mod tests {
             assert!(label.is_empty());
             assert_eq!(*idx, i);
         }
+    }
+
+    // =================================================================
+    // D9 — research fetcher wire-up
+    // =================================================================
+
+    /// Track K (D9): the disabled path is a no-op. No fetch, no
+    /// network, returns an empty vec even when a URL list is
+    /// supplied. The contract is "opt-in means opt-in".
+    #[tokio::test]
+    async fn sketch_phase_skips_research_when_disabled() {
+        let urls = vec!["https://docs.rs/serde".into()];
+        let out = SketchPhase::collect_research_snippets(false, urls).await;
+        assert!(out.is_empty(), "disabled flag must short-circuit");
+    }
+
+    /// Track K (D9): empty URL list is a no-op even when the
+    /// flag is on. The optimiser pins the assert so a refactor
+    /// that always fetches an empty list cannot accidentally
+    /// issue a noop HTTP call.
+    #[tokio::test]
+    async fn collect_research_snippets_returns_empty_when_urls_empty() {
+        let out = SketchPhase::collect_research_snippets(true, vec![]).await;
+        assert!(out.is_empty(), "empty URL list must short-circuit");
+    }
+
+    /// Track K (D9): a host outside the allowlist is dropped
+    /// silently by `fetch_all` (it returns `Err(DisallowedHost)`
+    /// for that URL). The helper must filter the failure out and
+    /// return an empty vec — never panic, never bubble the error
+    /// up to the Sketch phase. Mirrors the "fetch fails gracefully"
+    /// contract: the phase continues with the original prompt.
+    #[tokio::test]
+    async fn sketch_phase_continues_when_fetch_fails_gracefully() {
+        let urls = vec!["https://evil.example.com/secret".into()];
+        let out = SketchPhase::collect_research_snippets(true, urls).await;
+        assert!(
+            out.is_empty(),
+            "disallowed host must be filtered out, got {out:?}"
+        );
+    }
+
+    /// Track K (D9): over-cap URL list (> MAX_URLS_PER_CALL) is
+    /// collapsed to a single `TooManyUrls` error by `fetch_all`,
+    /// which the helper filters out — the Sketch phase must
+    /// degrade gracefully instead of refusing to run.
+    #[tokio::test]
+    async fn collect_research_snippets_over_cap_collapses_to_empty() {
+        let urls: Vec<String> = (0..crate::research::MAX_URLS_PER_CALL + 1)
+            .map(|i| format!("https://docs.rs/page-{i}"))
+            .collect();
+        let out = SketchPhase::collect_research_snippets(true, urls).await;
+        assert!(
+            out.is_empty(),
+            "over-cap call must collapse to empty, got {out:?}"
+        );
     }
 }

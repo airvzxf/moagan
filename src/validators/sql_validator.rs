@@ -1543,7 +1543,7 @@ mod tests {
             .unwrap();
         let ev = rt.block_on(SqlValidator::check(&artifact, &sb())).unwrap();
         assert_eq!(ev.status, ValidationStatus::Fail);
-        assert!(!ev.failed_checks.is_empty());
+        assert!(!ev.legacy_failed_checks().is_empty());
     }
 
     #[test]

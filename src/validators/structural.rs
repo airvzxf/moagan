@@ -176,7 +176,7 @@ mod tests {
     fn full_proposal_passes() {
         let e = StructuralValidator::check(&proposal());
         assert_eq!(e.status, ValidationStatus::Pass);
-        assert!(e.failed_checks.is_empty());
+        assert!(e.failures.is_empty());
         assert_eq!(e.checks_run.len(), 5);
     }
 
@@ -186,7 +186,8 @@ mod tests {
         p.id.clear();
         let e = StructuralValidator::check(&p);
         assert_eq!(e.status, ValidationStatus::Fail);
-        assert!(e.failed_checks.iter().any(|f| f.contains("id")));
+        let legacy = e.legacy_failed_checks();
+        assert!(legacy.iter().any(|f| f.contains("id")));
     }
 
     #[test]
@@ -195,7 +196,8 @@ mod tests {
         p.summary = "short".into();
         let e = StructuralValidator::check(&p);
         assert_eq!(e.status, ValidationStatus::Warn);
-        assert!(e.failed_checks.iter().any(|f| f.contains("summary")));
+        let legacy = e.legacy_failed_checks();
+        assert!(legacy.iter().any(|f| f.contains("summary")));
     }
 
     #[test]
@@ -204,7 +206,8 @@ mod tests {
         p.evidence.clear();
         let e = StructuralValidator::check(&p);
         assert_eq!(e.status, ValidationStatus::Warn);
-        assert!(e.failed_checks.iter().any(|f| f.contains("evidence")));
+        let legacy = e.legacy_failed_checks();
+        assert!(legacy.iter().any(|f| f.contains("evidence")));
     }
 
     #[test]
@@ -213,7 +216,8 @@ mod tests {
         p.approach.clear();
         let e = StructuralValidator::check(&p);
         assert_eq!(e.status, ValidationStatus::Fail);
-        assert!(e.failed_checks.iter().any(|f| f.contains("approach")));
+        let legacy = e.legacy_failed_checks();
+        assert!(legacy.iter().any(|f| f.contains("approach")));
     }
 
     #[test]

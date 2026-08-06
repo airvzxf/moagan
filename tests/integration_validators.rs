@@ -429,17 +429,21 @@ fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Res
             "matched constraint must appear in checks_run, got {checks_run:?}"
         );
         let failed: Vec<String> = constraints_entry
-            .get("failed_checks")
+            .get("failures")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_owned()))
+                    .filter_map(|x| {
+                        x.get("message")
+                            .and_then(|m| m.as_str())
+                            .map(|s| s.to_owned())
+                    })
                     .collect()
             })
             .unwrap_or_default();
         assert!(
             failed.iter().any(|c| c.contains("deploy via systemd")),
-            "missing constraint must appear in failed_checks, got {failed:?}"
+            "missing constraint must appear in typed failures, got {failed:?}"
         );
         assert!(
             !checks_run.iter().any(|c| c == "no_constraints_in_brief"),

@@ -112,14 +112,14 @@ pub struct ValidationEvidence {
     pub checks_run: Vec<String>,
     /// Names of checks that were skipped and the reason.
     pub skipped_checks: Vec<String>,
-    /// Failures with one-line explanations.
-    pub failed_checks: Vec<String>,
-    /// D.11.14: typed view of every failure emitted by the validator.
-    /// `failed_checks` is the legacy string projection of this list
-    /// (one entry per failure, message only); `failures` carries the
-    /// full [`ValidationFailure`] record (kind, field, line, column,
-    /// hint). New code should read `failures`; legacy callers that
-    /// only know about `failed_checks` continue to work unchanged.
+    /// D.11.14 / D10: typed view of every failure emitted by the
+    /// validator. Each entry carries the full [`ValidationFailure`]
+    /// record (kind, field, line, column, hint, message). The
+    /// legacy free-form `failed_checks` view was dropped in D10
+    /// so there is exactly one source of truth for failure data;
+    /// log sites that only need the message can call
+    /// [`Self::legacy_failed_checks`] to recover a `Vec<String>`
+    /// projection derived from the typed list.
     #[serde(default)]
     pub failures: Vec<ValidationFailure>,
     /// The command that produced the evidence (language validators
@@ -146,12 +146,20 @@ impl ValidationEvidence {
         }
     }
 
-    /// Build a `Fail` evidence with a failure message.
+    /// Build a `Fail` evidence with a single failure message. The
+    /// message is wrapped in a [`ValidationFailure`] with kind
+    /// [`FailureKind::SoftWarning`] so the legacy "just a string"
+    /// call sites still compile. New code should prefer
+    /// constructing a typed [`ValidationFailure`] and calling
+    /// [`Self::record_failure`] so the kind is meaningful.
     pub fn fail(validator: impl Into<String>, failure: impl Into<String>) -> Self {
         Self {
             validator: validator.into(),
             status: ValidationStatus::Fail,
-            failed_checks: vec![failure.into()],
+            failures: vec![ValidationFailure::new(
+                FailureKind::SoftWarning,
+                failure.into(),
+            )],
             ..Self::default()
         }
     }
@@ -166,12 +174,25 @@ impl ValidationEvidence {
         }
     }
 
-    /// Record a typed failure. Pushes to `failures` (typed view) and
-    /// `failed_checks` (legacy string view). The message becomes the
-    /// legacy string; the typed record carries the structured data.
+    /// Record a typed failure. Pushes the full
+    /// [`ValidationFailure`] onto `failures`; the legacy free-form
+    /// view is gone (D10) so callers that need a string projection
+    /// must call [`Self::legacy_failed_checks`].
     pub fn record_failure(&mut self, failure: ValidationFailure) {
-        self.failed_checks.push(failure.message.clone());
         self.failures.push(failure);
+    }
+
+    /// Legacy free-form view of the typed failure list. Returns
+    /// one entry per [`ValidationFailure`] formatted as
+    /// `"<kind>: <message>"` so log sites that want a single
+    /// string per failure keep their previous shape. The order
+    /// matches the order of `failures` so the projection is
+    /// deterministic across re-renders.
+    pub fn legacy_failed_checks(&self) -> Vec<String> {
+        self.failures
+            .iter()
+            .map(|f| format!("{}: {}", f.kind, f.message))
+            .collect()
     }
 
     /// Project the typed view into a [`ValidationOutcome`]. A `Fail`
@@ -493,7 +514,8 @@ pub trait Validator: Send + Sync {
 /// T01-06 §5.7 rules: any `Fail` collapses to `Fail`, otherwise any
 /// `Warn` becomes `Warn`, otherwise `Pass`. `Skipped` and `Error`
 /// votes are recorded but do not dominate a `Pass` / `Warn` (the
-/// caller inspects `skipped_checks` / `failed_checks` for detail).
+/// caller inspects `skipped_checks` / `failures` for detail — D10
+/// dropped the free-form `failed_checks` view).
 pub struct CompositeValidator {
     validators: Vec<Box<dyn Validator>>,
 }
@@ -535,9 +557,6 @@ impl CompositeValidator {
         let mut aggregate = ValidationEvidence {
             validator: "composite".into(),
             status: ValidationStatus::Pass,
-            checks_run: Vec::new(),
-            skipped_checks: Vec::new(),
-            failed_checks: Vec::new(),
             ..ValidationEvidence::default()
         };
         for ev in evidences {
@@ -547,9 +566,7 @@ impl CompositeValidator {
             aggregate
                 .skipped_checks
                 .extend(ev.skipped_checks.iter().cloned());
-            aggregate
-                .failed_checks
-                .extend(ev.failed_checks.iter().cloned());
+            aggregate.failures.extend(ev.failures.iter().cloned());
             aggregate.status = match (aggregate.status, ev.status) {
                 (_, ValidationStatus::Fail) | (ValidationStatus::Fail, _) => ValidationStatus::Fail,
                 (ValidationStatus::Pass, ValidationStatus::Warn)
@@ -599,14 +616,15 @@ mod tests {
         let e = ValidationEvidence::pass("x", "y");
         assert_eq!(e.status, ValidationStatus::Pass);
         assert_eq!(e.checks_run, vec!["y"]);
-        assert!(e.failed_checks.is_empty());
+        assert!(e.failures.is_empty());
     }
 
     #[test]
     fn evidence_fail_records_failure() {
         let e = ValidationEvidence::fail("x", "boom");
         assert_eq!(e.status, ValidationStatus::Fail);
-        assert_eq!(e.failed_checks, vec!["boom"]);
+        let legacy = e.legacy_failed_checks();
+        assert_eq!(legacy, vec!["soft_warning: boom"]);
     }
 
     #[test]
@@ -637,7 +655,7 @@ mod tests {
             fn validate(&self, _: &Proposal, _: Option<&Sandbox>) -> Result<ValidationEvidence> {
                 let mut e = ValidationEvidence::pass("warn", "ok");
                 e.status = ValidationStatus::Warn;
-                e.failed_checks.push("soft".into());
+                e.record_failure(ValidationFailure::new(FailureKind::SoftWarning, "soft"));
                 Ok(e)
             }
         }
@@ -658,14 +676,14 @@ mod tests {
             fn validate(&self, _: &Proposal, _: Option<&Sandbox>) -> Result<ValidationEvidence> {
                 let mut e = ValidationEvidence::pass("warn", "ok");
                 e.status = ValidationStatus::Warn;
-                e.failed_checks.push("soft".into());
+                e.record_failure(ValidationFailure::new(FailureKind::SoftWarning, "soft"));
                 Ok(e)
             }
         }
         let c = CompositeValidator::new().with(Warn);
         let agg = c.aggregate(&p_with_summary("x"), None).unwrap();
         assert_eq!(agg.status, ValidationStatus::Warn);
-        assert_eq!(agg.failed_checks, vec!["soft"]);
+        assert_eq!(agg.legacy_failed_checks(), vec!["soft_warning: soft"]);
     }
 
     #[test]
@@ -961,9 +979,13 @@ mod tests {
             kinds.contains(&FailureKind::SqlSyntaxError),
             "expected SqlSyntaxError in {kinds:?}"
         );
-        // The legacy string view must also be populated so the
-        // deliver phase keeps working.
-        assert_eq!(e.failed_checks, vec!["line 1:7: unexpected character '@'"]);
+        // The legacy string view (derived via the accessor) must
+        // carry the kind-serialised message so the few log sites
+        // that still want a per-failure string line keep working.
+        assert_eq!(
+            e.legacy_failed_checks(),
+            vec!["sql_syntax_error: line 1:7: unexpected character '@'"]
+        );
     }
 
     /// `FailureKind::from_str` must accept every known snake_case
@@ -1050,9 +1072,11 @@ mod tests {
         assert_eq!(s, "soft_warning");
     }
 
-    /// `ValidationEvidence::record_failure` must populate both the
-    /// typed view and the legacy string view in lock-step so the
-    /// deliver phase never sees them diverge.
+    /// `ValidationEvidence::record_failure` pushes the typed record
+    /// onto `failures`. The legacy string view is no longer a
+    /// primary field; the projection is computed on demand via
+    /// `legacy_failed_checks()`. The test pins the lock-step so
+    /// the deliver phase sees consistent ordering.
     #[test]
     fn record_failure_populates_typed_and_legacy_views() {
         let mut e = ValidationEvidence::default();
@@ -1063,10 +1087,11 @@ mod tests {
             ValidationFailure::new(FailureKind::LengthOutOfRange, "summary too short")
                 .with_field("summary"),
         );
-        assert_eq!(e.failed_checks.len(), 2);
         assert_eq!(e.failures.len(), 2);
-        assert_eq!(e.failed_checks[0], "missing id");
-        assert_eq!(e.failed_checks[1], "summary too short");
+        let legacy = e.legacy_failed_checks();
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(legacy[0], "missing_field: missing id");
+        assert_eq!(legacy[1], "length_out_of_range: summary too short");
         assert_eq!(e.failures[0].kind, FailureKind::MissingField);
         assert_eq!(e.failures[1].field.as_deref(), Some("summary"));
     }
@@ -1134,5 +1159,168 @@ mod tests {
         assert!(outcome.is_ok());
         let outcome = ValidationOutcome::fail(vec![]);
         assert!(outcome.failures().is_empty());
+    }
+
+    // =================================================================
+    // D10 — drop the legacy free-form failed_checks field
+    // =================================================================
+
+    /// D10: the free-form `failed_checks: Vec<String>` field is
+    /// gone. The `ValidationEvidence` struct must not serialise
+    /// into a JSON document that carries the legacy key, otherwise
+    /// the deliver phase would still try to read it. The test
+    /// pins the contract by serialising a fresh, populated
+    /// evidence and asserting the legacy key is absent.
+    #[test]
+    fn validation_evidence_dropped_failed_checks_field() {
+        let mut e = ValidationEvidence::pass("rust", "cargo check");
+        e.record_failure(ValidationFailure::new(
+            FailureKind::RustCompileError,
+            "boom",
+        ));
+        let j = serde_json::to_string(&e).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert!(
+            v.get("failed_checks").is_none(),
+            "serialised evidence must not carry failed_checks, got {v:?}"
+        );
+        // The typed view still serialises correctly so the legacy
+        // viewer that maps to `failures` keeps working.
+        assert!(v.get("failures").is_some(), "failures must be present");
+        assert_eq!(v["failures"].as_array().unwrap().len(), 1);
+        assert_eq!(v["failures"][0]["kind"], "rust_compile_error");
+    }
+
+    /// D10: the legacy accessor returns one entry per typed
+    /// failure, formatted as `"<kind>: <message>"`. The
+    /// snake_case wire form for the kind matches
+    /// `FailureKind::as_str` so log sites that build messages
+    /// from the projection see the same value JSON consumers get.
+    #[test]
+    fn validation_evidence_legacy_accessor_returns_kind_serialized_strings() {
+        let mut e = ValidationEvidence::default();
+        e.record_failure(
+            ValidationFailure::new(FailureKind::MissingField, "missing id").with_field("id"),
+        );
+        e.record_failure(ValidationFailure::new(
+            FailureKind::RustCompileError,
+            "error[E0425]: cannot find value",
+        ));
+        let legacy = e.legacy_failed_checks();
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(legacy[0], "missing_field: missing id");
+        assert_eq!(
+            legacy[1],
+            "rust_compile_error: error[E0425]: cannot find value"
+        );
+    }
+
+    /// D10: the sidecar (ValidationSidecar) carries `schema_version:
+    /// "v2"` so a downstream reader can tell the new shape from
+    /// the legacy v1 format. The JSON still serialises and
+    /// deserialises cleanly through the v2 schema; readers that
+    /// decode v1 sidecars (which may carry `failed_checks`) get
+    /// the field silently dropped because the v2 struct no
+    /// longer declares it.
+    #[test]
+    fn validation_evidence_v2_sidecar_round_trips() {
+        use crate::phases::validate::ValidationSidecar;
+        let mut evidence = ValidationEvidence::pass("structural", "id");
+        evidence.record_failure(ValidationFailure::new(
+            FailureKind::ForbiddenTech,
+            "kubernetes in approach",
+        ));
+        let sidecar = ValidationSidecar {
+            schema_version: ValidationSidecar::SCHEMA_VERSION.into(),
+            proposal_id: "p_001".into(),
+            status: "fail".into(),
+            validators: vec![evidence],
+        };
+        assert_eq!(sidecar.schema_version, "v2");
+
+        // Round-trip the v2 shape.
+        let j = serde_json::to_string(&sidecar).unwrap();
+        let back: ValidationSidecar = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.schema_version, "v2");
+        assert_eq!(back.proposal_id, "p_001");
+        assert_eq!(back.validators.len(), 1);
+        assert_eq!(back.validators[0].failures.len(), 1);
+        assert_eq!(
+            back.validators[0].failures[0].kind,
+            FailureKind::ForbiddenTech
+        );
+
+        // A v1 sidecar (carrying the legacy `failed_checks` field)
+        // must decode cleanly into the v2 schema — the field is
+        // silently dropped so older artifacts keep working.
+        let v1_json = r#"{
+            "schema_version": "v1",
+            "proposal_id": "p_legacy",
+            "status": "fail",
+            "validators": [
+                {
+                    "validator": "structural",
+                    "status": "Fail",
+                    "checks_run": [],
+                    "skipped_checks": [],
+                    "failed_checks": ["legacy boom"],
+                    "failures": [],
+                    "command": null,
+                    "exit_code": null,
+                    "stdout_summary": "",
+                    "stderr_summary": "",
+                    "reproducibility": []
+                }
+            ]
+        }"#;
+        let back_v1: ValidationSidecar = serde_json::from_str(v1_json).unwrap();
+        assert_eq!(back_v1.schema_version, "v1");
+        assert_eq!(back_v1.proposal_id, "p_legacy");
+        assert!(
+            back_v1.validators[0].failures.is_empty(),
+            "legacy failed_checks must NOT be imported into the typed view"
+        );
+    }
+
+    /// D10: the `CompositeValidator::aggregate` method no longer
+    /// touches a `failed_checks` field. The Fail verdict path
+    /// extends the typed `failures` list from every child
+    /// validator instead, and the final aggregate carries the
+    /// merged record so the deliver phase can render the full
+    /// failure list.
+    #[test]
+    fn composite_validator_drops_failed_checks_in_fail_method() {
+        struct FailA;
+        impl Validator for FailA {
+            fn name(&self) -> &'static str {
+                "fail_a"
+            }
+            fn validate(&self, _: &Proposal, _: Option<&Sandbox>) -> Result<ValidationEvidence> {
+                Ok(ValidationEvidence::fail("fail_a", "boom_a"))
+            }
+        }
+        struct FailB;
+        impl Validator for FailB {
+            fn name(&self) -> &'static str {
+                "fail_b"
+            }
+            fn validate(&self, _: &Proposal, _: Option<&Sandbox>) -> Result<ValidationEvidence> {
+                Ok(ValidationEvidence::fail("fail_b", "boom_b"))
+            }
+        }
+        let c = CompositeValidator::new().with(FailA).with(FailB);
+        let agg = c.aggregate(&p_with_summary("x"), None).unwrap();
+        assert_eq!(agg.status, ValidationStatus::Fail);
+        // The aggregate carries the union of the two child
+        // failures in `failures`, not the deprecated
+        // `failed_checks` field.
+        assert_eq!(agg.failures.len(), 2);
+        let messages: Vec<&str> = agg.failures.iter().map(|f| f.message.as_str()).collect();
+        assert!(messages.contains(&"boom_a"));
+        assert!(messages.contains(&"boom_b"));
+        // Sanity check: the legacy accessor mirrors the typed
+        // list so the deliver phase logs the same content.
+        let legacy = agg.legacy_failed_checks();
+        assert_eq!(legacy.len(), 2);
     }
 }
