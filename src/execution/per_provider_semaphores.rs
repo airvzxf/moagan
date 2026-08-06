@@ -14,7 +14,9 @@ pub struct PerProviderSemaphores {
 
 impl PerProviderSemaphores {
     pub fn new() -> Self {
-        Self { map: Mutex::new(HashMap::new()) }
+        Self {
+            map: Mutex::new(HashMap::new()),
+        }
     }
     pub async fn acquire(&self, provider: &str, permits: usize) -> OwnedSemaphorePermit {
         let sem = {
@@ -25,10 +27,19 @@ impl PerProviderSemaphores {
         };
         sem.acquire_owned().await.unwrap()
     }
+
+    /// Remaining permits for `provider`, or `None` when no slot
+    /// has been created yet (no `acquire` has run for that key).
+    pub async fn available_permits(&self, provider: &str) -> Option<usize> {
+        let map = self.map.lock().await;
+        map.get(provider).map(|s| s.available_permits())
+    }
 }
 
 impl Default for PerProviderSemaphores {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

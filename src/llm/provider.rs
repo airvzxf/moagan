@@ -23,6 +23,18 @@
 //! `provider.send` (they short-circuit at
 //! `phases::phase::PhaseContext::call`), so the wrapper only
 //! observes provider-level cache hits via the response payload.
+//!
+//! Per-provider semaphores (catalog §D.9.6) live on the same
+//! wrapper via the optional
+//! [`crate::execution::PerProviderSemaphores`]. When configured,
+//! every `send` acquires one permit keyed by `inner.name()` before
+//! the call; the permit is held for the duration of the call and
+//! released on drop (RAII). Concurrent calls to the same provider
+//! therefore stay within the configured capacity; calls to other
+//! providers are not blocked because the semaphore map is keyed
+//! per provider name. This is independent of the global
+//! [`crate::execution::Parallelism`] cap, which still bounds total
+//! in-flight LLM calls across every provider.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +44,7 @@ use async_trait::async_trait;
 
 use crate::config::{CircuitBreakerConfig, ProviderConfig};
 use crate::error::{Error, Result};
+use crate::execution::PerProviderSemaphores;
 
 use super::capabilities::ProviderCapabilities;
 use super::circuit_breaker::CircuitBreaker;
@@ -211,6 +224,15 @@ pub struct BreakeredProvider {
     breaker: Arc<CircuitBreaker>,
     rate_limiter: Option<Arc<RateLimiter>>,
     rate_limit_max_wait: Option<Duration>,
+    /// Optional per-provider capacity gate (catalog §D.9.6). When
+    /// set, `send` acquires one permit from the inner provider's
+    /// slot before calling `inner.send(req)` so concurrent calls
+    /// to the same provider cannot exceed the configured capacity.
+    /// The permit is held for the duration of the inner call and
+    /// released on drop (RAII). When `None`, no per-provider
+    /// throttling is applied — only the breaker, the (optional)
+    /// rate limiter, and the global parallelism pool gate calls.
+    provider_semaphores: Option<Arc<PerProviderSemaphores>>,
 }
 
 impl std::fmt::Debug for BreakeredProvider {
@@ -225,6 +247,10 @@ impl std::fmt::Debug for BreakeredProvider {
                 &self.rate_limiter.as_ref().map(|_| "configured"),
             )
             .field("rate_limit_max_wait", &self.rate_limit_max_wait)
+            .field(
+                "provider_semaphores",
+                &self.provider_semaphores.as_ref().map(|_| "configured"),
+            )
             .finish()
     }
 }
@@ -241,6 +267,7 @@ impl BreakeredProvider {
             breaker,
             rate_limiter: None,
             rate_limit_max_wait: None,
+            provider_semaphores: None,
         }
     }
 
@@ -259,6 +286,7 @@ impl BreakeredProvider {
             breaker,
             rate_limiter: Some(rate_limiter),
             rate_limit_max_wait: None,
+            provider_semaphores: None,
         }
     }
 
@@ -268,6 +296,20 @@ impl BreakeredProvider {
     /// instead of sleeping. Default (`None`) is unbounded wait.
     pub fn with_rate_limit_max_wait(mut self, max: Duration) -> Self {
         self.rate_limit_max_wait = Some(max);
+        self
+    }
+
+    /// Attach a per-provider semaphore pool (catalog §D.9.6).
+    /// Every `send` call acquires one permit keyed by
+    /// `inner.name()` before the inner call; the permit is held for
+    /// the call's lifetime and released on drop. Concurrent calls
+    /// to the same provider therefore cannot exceed the configured
+    /// capacity. Calls to other providers are not blocked because
+    /// the semaphore map is keyed per provider name. The global
+    /// [`crate::execution::Parallelism`] cap still applies on top
+    /// of this.
+    pub fn with_per_provider_semaphores(mut self, semaphores: Arc<PerProviderSemaphores>) -> Self {
+        self.provider_semaphores = Some(semaphores);
         self
     }
 
@@ -286,6 +328,12 @@ impl BreakeredProvider {
     /// telemetry / introspection.
     pub fn rate_limiter(&self) -> Option<Arc<RateLimiter>> {
         self.rate_limiter.clone()
+    }
+
+    /// Clone the per-provider semaphore handle (when configured)
+    /// for telemetry / introspection.
+    pub fn provider_semaphores(&self) -> Option<Arc<PerProviderSemaphores>> {
+        self.provider_semaphores.clone()
     }
 }
 
@@ -325,6 +373,18 @@ impl Provider for BreakeredProvider {
                 None => rl.acquire().await?,
             };
         }
+        // Per-provider capacity gate (catalog §D.9.6): acquire one
+        // permit from the inner provider's slot before the call and
+        // hold it across `inner.send(req)`. The permit is released
+        // by RAII when `_permit` drops at the end of this function.
+        // When no semaphores are configured, the global parallelism
+        // pool still bounds in-flight calls; this gate is purely
+        // additive.
+        let _permit = if let Some(sem) = &self.provider_semaphores {
+            Some(sem.acquire(self.inner.name(), 1).await)
+        } else {
+            None
+        };
         // Wire-format dispatch decision: log the inner provider's
         // preferred wire so dashboards can pin each call to its
         // protocol without re-parsing the request body. The
@@ -1031,5 +1091,128 @@ mod tests {
             .unwrap();
         assert_eq!(decoded.body.text, "hello");
         assert_eq!(decoded.body.usage.input_tokens, 5);
+    }
+
+    // ----------------------------------------------------------------
+    // Per-provider semaphores wiring tests (PR G6, D.9.6 wire).
+    //
+    // `BreakeredProvider` accepts an `Arc<PerProviderSemaphores>` and
+    // acquires one permit keyed by `inner.name()` before each `send`.
+    // The permit is held for the duration of the inner call and
+    // released on drop (RAII). Tests below pin three behaviours:
+    //
+    // 1. The semaphore map records the inner provider's name the
+    //    first time `send` is called, and the permit is released at
+    //    end of `send` (RAII).
+    // 2. With `permits=1` and the only permit held externally, a
+    //    second concurrent `send` blocks inside the wrapper until
+    //    the permit is dropped. The inner provider is not invoked
+    //    while the call is blocked at the gate.
+    // 3. The pre-wire-up legacy path (no semaphores configured)
+    //    stays unchanged: `send` returns immediately and there is
+    //    no per-provider capacity gate.
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn breakered_provider_acquires_per_provider_semaphore() {
+        use crate::execution::PerProviderSemaphores;
+        let sem = Arc::new(PerProviderSemaphores::new());
+        let mock = Arc::new(MockProvider::new(vec![MockResponse::plain("ok")]));
+        let breaker = Arc::new(CircuitBreaker::default());
+        let provider =
+            BreakeredProvider::new(mock.clone(), breaker).with_per_provider_semaphores(sem.clone());
+
+        let (_, resp) = provider.send(&sample_request()).await.expect("ok");
+        assert_eq!(resp.text, "ok");
+        assert_eq!(mock.calls().len(), 1, "inner provider must be called");
+
+        // The wrapper acquires one permit keyed by `inner.name()`.
+        // The RAII permit is released at the end of `send`, so the
+        // slot is back at its initial capacity after the call.
+        let permits_after = sem
+            .available_permits("mock")
+            .await
+            .expect("per-provider semaphore slot must exist for the wrapped provider");
+        assert_eq!(
+            permits_after, 1,
+            "permit must be released after send (RAII)"
+        );
+    }
+
+    #[tokio::test]
+    async fn breakered_provider_blocks_when_provider_semaphore_saturated() {
+        use crate::execution::PerProviderSemaphores;
+        let sem = Arc::new(PerProviderSemaphores::new());
+        let mock = Arc::new(MockProvider::new(vec![MockResponse::plain("ok")]));
+        let provider: Arc<dyn Provider> = Arc::new(
+            BreakeredProvider::new(mock.clone(), Arc::new(CircuitBreaker::default()))
+                .with_per_provider_semaphores(sem.clone()),
+        );
+
+        // Pre-acquire the only available permit on the `mock`
+        // provider's slot. Capacity is 1 (permits=1 -> one permit),
+        // so any subsequent `send` on this provider must block at
+        // the gate until we drop ours.
+        let held_permit = sem.acquire("mock", 1).await;
+
+        // Spawn a second `send` against the same provider. It must
+        // sit at the semaphore acquire until we release ours; the
+        // inner provider must NOT see it during that window.
+        let p = provider.clone();
+        let task = tokio::spawn(async move { p.send(&sample_request()).await });
+
+        // Give the spawned task enough wall-clock time to either
+        // complete or be observably stuck on the acquire.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "spawned send must block while a permit is held externally"
+        );
+        assert_eq!(
+            mock.calls().len(),
+            0,
+            "inner provider must NOT be called while the second send is blocked at the gate"
+        );
+
+        // Release the permit. The spawned task unblocks, runs the
+        // inner call, and returns Ok.
+        drop(held_permit);
+        let result = task.await.expect("task panicked").expect("send ok");
+        assert_eq!(result.1.text, "ok");
+        assert_eq!(
+            mock.calls().len(),
+            1,
+            "inner provider must be called exactly once after the permit is released"
+        );
+    }
+
+    #[tokio::test]
+    async fn breakered_provider_no_semaphore_does_not_block() {
+        let mock = Arc::new(MockProvider::new(vec![
+            MockResponse::plain("first"),
+            MockResponse::plain("second"),
+            MockResponse::plain("third"),
+        ]));
+        let breaker = Arc::new(CircuitBreaker::default());
+        // No `.with_per_provider_semaphores(...)` call: the wrapper
+        // must keep the legacy path where `send` returns as soon as
+        // the inner call finishes, with no extra capacity gate on
+        // the per-provider slot.
+        let provider = BreakeredProvider::new(mock.clone(), breaker);
+
+        // Three back-to-back calls must each return immediately --
+        // the only guard between them is the inner provider (a
+        // mock that returns in well under one millisecond).
+        let started = std::time::Instant::now();
+        for expected in ["first", "second", "third"] {
+            let (_, resp) = provider.send(&sample_request()).await.expect("ok");
+            assert_eq!(resp.text, expected);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "no-semaphore path must not introduce extra waits, got {elapsed:?}"
+        );
+        assert_eq!(mock.calls().len(), 3);
     }
 }
