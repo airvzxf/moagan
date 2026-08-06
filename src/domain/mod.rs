@@ -4,6 +4,9 @@
 //! are present.
 
 pub mod constraint;
+/// Reexports for problem graph domain types.
+pub mod graph;
+pub mod synthesis_request;
 
 use std::collections::BTreeMap;
 
@@ -437,6 +440,8 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// schema-versioned artefacts (`ArtifactMeta::SCHEMA_VERSION`,
 /// `Checkpoint::SCHEMA_VERSION`, `ValidationSidecar::SCHEMA_VERSION`).
 pub const MANIFEST_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
+/// Numeric manifest version for v2 sidecars.
+pub const MANIFEST_VERSION_V2: u32 = 2;
 
 /// Lineage path block. Stored as two parallel maps so the JSON
 /// sidecar remains human-readable while the in-memory
@@ -1282,6 +1287,21 @@ impl ProblemGraph {
             return Err(format!("graph has a cycle; stuck at: {stuck:?}"));
         }
         Ok(layers)
+    }
+
+    /// Return a parent-to-children adjacency map for DAG traversal.
+    pub fn adjacency(&self) -> std::collections::HashMap<String, Vec<String>> {
+        let mut adjacency = std::collections::HashMap::new();
+        for node in &self.nodes {
+            adjacency.entry(node.id.clone()).or_insert_with(Vec::new);
+            for dependency in &node.dependencies {
+                adjacency
+                    .entry(dependency.clone())
+                    .or_insert_with(Vec::new)
+                    .push(node.id.clone());
+            }
+        }
+        adjacency
     }
 
     /// Detect cycles. Returns `Ok(())` when the DAG is acyclic and

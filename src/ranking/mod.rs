@@ -21,6 +21,7 @@
 pub mod adversary_patterns;
 pub mod cluster;
 pub mod diversity;
+pub mod invalidate_downstream;
 pub mod pareto;
 pub mod refine_action;
 pub mod rubric;
