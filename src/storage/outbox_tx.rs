@@ -78,43 +78,50 @@ mod tests {
     }
 
     #[test]
-    fn outbox_tx_records_all_events_in_transaction() {
+    fn outbox_tx_records_calls_event_with_sidecar_committed() {
         let db = temp_db();
         let run = RunId::new();
         register(&db, run);
-        let events = vec![
-            OutboxEvent {
-                run_id: run,
-                event_type: "sidecar_written".into(),
-                payload: r#"{"path":"a.json"}"#.into(),
-            },
-            OutboxEvent {
-                run_id: run,
-                event_type: "sidecar_written".into(),
-                payload: r#"{"path":"b.json"}"#.into(),
-            },
-            OutboxEvent {
-                run_id: run,
-                event_type: "phase_end".into(),
-                payload: r#"{"phase":"intake"}"#.into(),
-            },
-        ];
-        let sidecar_value: String = record_with(&db, &events, || Ok("sidecar-ok".into())).unwrap();
+        let events = vec![OutboxEvent {
+            run_id: run,
+            event_type: "call.completed".into(),
+            payload: r#"{"call_id":"call-1"}"#.into(),
+        }];
+        let sidecar_value: String = record_with(&db, &events, || {
+            db.record_call(
+                "call-1",
+                run,
+                "intake",
+                "intake",
+                "mock",
+                "mock-model",
+                "cache-key",
+                None,
+                false,
+                Some(200),
+                10,
+                5,
+                0,
+                0,
+                1,
+                2,
+                None,
+            )?;
+            Ok("sidecar-ok".into())
+        })
+        .unwrap();
         assert_eq!(sidecar_value, "sidecar-ok");
 
+        let aggregate = db.run_aggregate(run).unwrap();
+        assert_eq!(aggregate.calls, 1, "sidecar call must be committed");
         let rows = db.list_outbox_events_for_run(&run.to_string()).unwrap();
-        assert_eq!(rows.len(), 3, "all events must be recorded");
-        assert_eq!(rows[0].event_type, "sidecar_written");
-        assert_eq!(rows[1].event_type, "sidecar_written");
-        assert_eq!(rows[2].event_type, "phase_end");
-        assert!(
-            rows.iter().all(|r| r.payload.contains('{')),
-            "payload preserved"
-        );
+        assert_eq!(rows.len(), 1, "call event must be recorded");
+        assert_eq!(rows[0].event_type, "call.completed");
+        assert_eq!(rows[0].payload, r#"{"call_id":"call-1"}"#);
     }
 
     #[test]
-    fn outbox_tx_propagates_sidecar_failure_without_inserting() {
+    fn outbox_tx_skips_outbox_when_sidecar_fails() {
         let db = temp_db();
         let run = RunId::new();
         register(&db, run);
@@ -132,7 +139,30 @@ mod tests {
     }
 
     #[test]
-    fn outbox_tx_empty_events_still_returns_sidecar_value() {
+    fn outbox_tx_rolls_back_outbox_when_outbox_insert_fails() {
+        let db = temp_db();
+        let run = RunId::new();
+        register(&db, run);
+        let events = vec![
+            OutboxEvent {
+                run_id: run,
+                event_type: "call.completed".into(),
+                payload: "{}".into(),
+            },
+            OutboxEvent {
+                run_id: RunId::new(),
+                event_type: "invalid.run".into(),
+                payload: "{}".into(),
+            },
+        ];
+        let result: Result<()> = record_with(&db, &events, || Ok(()));
+        assert!(result.is_err(), "invalid outbox row must fail");
+        let rows = db.list_outbox_events_for_run(&run.to_string()).unwrap();
+        assert!(rows.is_empty(), "the first outbox row must be rolled back");
+    }
+
+    #[test]
+    fn outbox_tx_with_empty_events_still_returns_sidecar() {
         let db = temp_db();
         let run = RunId::new();
         register(&db, run);

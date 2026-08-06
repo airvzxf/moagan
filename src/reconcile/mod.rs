@@ -38,7 +38,8 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
-use crate::storage::sqlite::{Db, OutboxEventRow};
+use crate::storage::outbox_tx::{OutboxEvent, record_with};
+use crate::storage::sqlite::Db;
 
 pub mod per_run;
 
@@ -258,7 +259,6 @@ pub fn recover_zombies(db: &Db) -> Result<usize> {
     }
     let now = crate::time::now_unix_secs();
     for z in &zombies {
-        db.update_run_status(*z, "interrupted")?;
         let payload = serde_json::json!({
             "kind": "zombie_recovered",
             "previous_status": "running",
@@ -266,12 +266,12 @@ pub fn recover_zombies(db: &Db) -> Result<usize> {
             "recovered_at_unix": now,
             "stale_threshold_secs": ZOMBIE_HEARTBEAT_SECS,
         });
-        db.record_outbox_event(&OutboxEventRow {
-            run_id: z.to_string(),
+        let events = [OutboxEvent {
+            run_id: *z,
             event_type: "run.zombie_recovered".into(),
             payload: payload.to_string(),
-            at_unix: now,
-        })?;
+        }];
+        record_with(db, &events, || db.update_run_status(*z, "interrupted"))?;
     }
     Ok(zombies.len())
 }
