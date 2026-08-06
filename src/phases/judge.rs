@@ -9,6 +9,18 @@
 //! adversary writes `adversaries/p_<id>.json` and the report's
 //! `score_delta` is folded into the aggregated evaluation under
 //! `Aggregated.adversary_delta`.
+//!
+//! Track H (E6): when the 3 base judges disagree so strongly that
+//! the aggregated mean is unreliable (max-min spread >
+//! [`DEFAULT_FINAL_DISAGREEMENT_SPREAD`] **OR** stddev >
+//! [`DEFAULT_FINAL_DISAGREEMENT_STDDEV`]), the phase fires the
+//! `FinalDisagreement` role as a per-proposal tiebreaker. The
+//! tiebreaker's verdict is written to
+//! `adversaries/p_<id>_tiebreak.json` (next to the regular
+//! adversary report when the panel was adversarial, or alone when
+//! the panel agreed). The base panel's `Aggregated` is preserved
+//! verbatim — the FinalDisagreement verdict is supplementary audit
+//! data the downstream phases can opt in to.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +29,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{AdversaryReport, JudgeScore};
+use crate::domain::{AdversaryReport, FinalDisagreementReport, JudgeScore};
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::{inject_rubric, system_prompt};
@@ -28,12 +40,33 @@ use crate::phases::util::write_json;
 /// adversary pass is triggered. Tunable via [`JudgePhase::with_threshold`].
 pub const DEFAULT_DISAGREEMENT_THRESHOLD: f32 = 0.5;
 
+/// Default max-min spread (on the 0..=10 scale) above which the
+/// `FinalDisagreement` tiebreaker is invoked. E6: a single judge
+/// disagreeing by 2+ points relative to another is a strong signal
+/// that the simple arithmetic mean is misleading.
+pub const DEFAULT_FINAL_DISAGREEMENT_SPREAD: f32 = 1.0;
+
+/// Default stddev threshold (on the 0..=10 scale) that also
+/// triggers the `FinalDisagreement` tiebreaker. E6: paired with the
+/// spread check, it covers both "one judge disagrees by a lot"
+/// (max-min) and "the panel scatters broadly" (stddev). Either
+/// condition alone is enough.
+pub const DEFAULT_FINAL_DISAGREEMENT_STDDEV: f32 = 0.5;
+
 /// Judge phase. `judges` judge scores per proposal. All proposals ×
 /// judges are scheduled concurrently up to the global parallelism
 /// cap; each proposal's individual scores are aggregated once its
 /// `judges` calls complete. After the panel runs, an optional
 /// adversary pass fires per proposal when `disagreement_score`
 /// exceeds the configured threshold.
+///
+/// E6: when the base panel's spread is wide enough (max-min >
+/// `final_disagreement_spread_threshold` OR stddev >
+/// `final_disagreement_stddev_threshold`), the phase fires the
+/// `FinalDisagreement` tiebreaker per proposal and writes the
+/// verdict to `adversaries/p_<id>_tiebreak.json`. The base panel's
+/// `Aggregated` is preserved verbatim — the tiebreaker is
+/// supplementary audit data the downstream phases can read.
 pub struct JudgePhase {
     /// Number of judges per proposal.
     pub judges: u32,
@@ -43,6 +76,18 @@ pub struct JudgePhase {
     /// When `false`, skip the adversary pass entirely (Phase D
     /// opt-out for `fast` mode and `--no-adversary`).
     pub enable_adversary: bool,
+    /// E6: max-min spread (0..=10 scale) above which the
+    /// `FinalDisagreement` tiebreaker is invoked. Default
+    /// [`DEFAULT_FINAL_DISAGREEMENT_SPREAD`].
+    pub final_disagreement_spread_threshold: f32,
+    /// E6: stddev (0..=10 scale) above which the
+    /// `FinalDisagreement` tiebreaker is invoked. Default
+    /// [`DEFAULT_FINAL_DISAGREEMENT_STDDEV`].
+    pub final_disagreement_stddev_threshold: f32,
+    /// E6: when `false`, skip the `FinalDisagreement` tiebreaker
+    /// entirely. Opt-out for `fast` mode where the tiebreaker cost
+    /// is not amortised across a large enough panel.
+    pub enable_final_disagreement: bool,
 }
 
 impl Default for JudgePhase {
@@ -51,6 +96,9 @@ impl Default for JudgePhase {
             judges: 3,
             disagreement_threshold: DEFAULT_DISAGREEMENT_THRESHOLD,
             enable_adversary: true,
+            final_disagreement_spread_threshold: DEFAULT_FINAL_DISAGREEMENT_SPREAD,
+            final_disagreement_stddev_threshold: DEFAULT_FINAL_DISAGREEMENT_STDDEV,
+            enable_final_disagreement: true,
         }
     }
 }
@@ -73,6 +121,92 @@ impl JudgePhase {
         let mean: f32 = scores.iter().map(|s| s.score).sum::<f32>() / n;
         let variance: f32 = scores.iter().map(|s| (s.score - mean).powi(2)).sum::<f32>() / n;
         Some(variance.sqrt())
+    }
+
+    /// Max-min spread of the judges' overall scores on the 0..=10
+    /// scale. `None` for fewer than two scores (the spread is
+    /// undefined).
+    pub fn score_spread(scores: &[JudgeScore]) -> Option<f32> {
+        if scores.len() < 2 {
+            return None;
+        }
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for s in scores {
+            if s.score < min {
+                min = s.score;
+            }
+            if s.score > max {
+                max = s.score;
+            }
+        }
+        Some(max - min)
+    }
+
+    /// E6: should the `FinalDisagreement` tiebreaker fire for this
+    /// proposal's panel? Returns `true` when EITHER the max-min
+    /// spread exceeds `spread_threshold` OR the stddev exceeds
+    /// `stddev_threshold`. Either condition alone is sufficient —
+    /// the spread check catches "one judge disagrees by a lot", the
+    /// stddev check catches "the panel scatters broadly". Returns
+    /// `false` for fewer than two scores (the tiebreaker is
+    /// meaningless without a panel).
+    pub fn should_invoke_final_disagreement(
+        scores: &[JudgeScore],
+        spread_threshold: f32,
+        stddev_threshold: f32,
+    ) -> bool {
+        if scores.len() < 2 {
+            return false;
+        }
+        if let Some(spread) = Self::score_spread(scores)
+            && spread > spread_threshold
+        {
+            return true;
+        }
+        if let Some(stddev) = Self::disagreement_score(scores)
+            && stddev > stddev_threshold
+        {
+            return true;
+        }
+        false
+    }
+
+    /// E6: render the JSON user payload that the `FinalDisagreement`
+    /// LLM call receives. The payload carries the raw 3 judge
+    /// scores, a single-element candidate shortlist (the proposal
+    /// under judgment), and the disagreement stats the tiebreaker
+    /// needs to know about. The rendered payload is fed verbatim
+    /// to `ctx.call_with_retry_parse` so the LLM-side schema and
+    /// cache keys stay stable.
+    pub fn build_final_disagreement_payload(
+        proposal_id: &str,
+        scores: &[JudgeScore],
+        summary: &str,
+        approach: &str,
+    ) -> serde_json::Value {
+        let judge_entries: Vec<serde_json::Value> = scores
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                serde_json::json!({
+                    "judge": format!("judge-{}", (b'a' + i as u8) as char),
+                    "score": s.score,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "proposal_id": proposal_id,
+            "judge_scores": judge_entries,
+            "candidates": [{
+                "id": proposal_id,
+                "summary": summary,
+                "approach": approach,
+            }],
+            "spread": Self::score_spread(scores),
+            "disagreement_score": Self::disagreement_score(scores),
+            "schema_version": "final_disagreement.v1",
+        })
     }
 }
 
@@ -219,6 +353,7 @@ impl Phase for JudgePhase {
         // scores. Skipped entirely in `fast` mode (`enable_adversary
         // = false`) and when the threshold is non-positive.
         let mut adversary_paths: Vec<PathBuf> = Vec::new();
+        let mut deltas: BTreeMap<String, f32> = BTreeMap::new();
         if self.enable_adversary && self.disagreement_threshold > 0.0 {
             let adv_system = system_prompt(Role::Adversary).to_owned();
             let adv_system_arc = Arc::new(adv_system);
@@ -258,10 +393,6 @@ impl Phase for JudgePhase {
                 })
             });
             let adv_results = join_all(adv_futures).await;
-            // Aggregate the adversary deltas into the per-proposal map
-            // so we can apply them in the next loop. We use a parallel
-            // BTreeMap keyed by proposal_id.
-            let mut deltas: BTreeMap<String, f32> = BTreeMap::new();
             for (proposal_id, disagreement, delta, path) in adv_results.into_iter().flatten() {
                 tracing::debug!(
                     proposal_id = %proposal_id,
@@ -273,56 +404,118 @@ impl Phase for JudgePhase {
                 deltas.insert(proposal_id, delta);
                 adversary_paths.push(path);
             }
-
-            let mut paths = Vec::with_capacity(order.len());
-            for proposal_id in order {
-                let scores = by_proposal.remove(&proposal_id).unwrap_or_default();
-                let mut agg = aggregate(&scores);
-                if let Some(delta) = deltas.remove(&proposal_id) {
-                    // Clamp the final score so adversary fires can't
-                    // push an evaluation below 0 or above 10.
-                    let combined = (agg.score + delta).clamp(0.0, 10.0);
-                    agg.adversary_delta = combined - agg.score;
-                    agg.score = combined;
-                }
-                let out_path: PathBuf =
-                    evaluations_dir.join(format!("{proposal_id}.json"));
-                write_json(&out_path, &agg)?;
-                paths.push(out_path);
-            }
-            Ok(PhaseOutput::Evaluations(paths))
-        } else {
-            let mut paths = Vec::with_capacity(order.len());
-            for proposal_id in order {
-                let scores = by_proposal.remove(&proposal_id).unwrap_or_default();
-                let agg = aggregate(&scores);
-                let out_path: PathBuf =
-                    evaluations_dir.join(format!("{proposal_id}.json"));
-                write_json(&out_path, &agg)?;
-                paths.push(out_path);
-            }
-            Ok(PhaseOutput::Evaluations(paths))
         }
-        .map(|out| match out {
-            PhaseOutput::Evaluations(paths) => {
-                if adversary_paths.is_empty() {
-                    PhaseOutput::Evaluations(paths)
-                } else {
-                    // Surface adversary paths in a parallel field by
-                    // logging + returning the Evaluations. We do NOT
-                    // add a new PhaseOutput variant per call to avoid
-                    // touching the `pipe::run` match; the adversaries
-                    // are still written to disk and indexed.
-                    tracing::info!(
-                        adversary_paths = adversary_paths.len(),
-                        stage = "judge.adversary.summary",
-                        "Judge stage"
-                    );
-                    PhaseOutput::Evaluations(paths)
-                }
+
+        // Aggregate per proposal. Walk `order` (preserved insertion
+        // order from the panel stage) so evaluation files land on
+        // disk in the same order they were judged. Apply the
+        // adversary delta when present; clamp into [0.0, 10.0] so a
+        // runaway delta cannot push the score out of range.
+        let mut paths: Vec<PathBuf> = Vec::with_capacity(order.len());
+        for proposal_id in &order {
+            let scores = by_proposal.get(proposal_id).cloned().unwrap_or_default();
+            let mut agg = aggregate(&scores);
+            if let Some(delta) = deltas.remove(proposal_id) {
+                let combined = (agg.score + delta).clamp(0.0, 10.0);
+                agg.adversary_delta = combined - agg.score;
+                agg.score = combined;
             }
-            other => other,
-        })
+            let out_path: PathBuf = evaluations_dir.join(format!("{proposal_id}.json"));
+            write_json(&out_path, &agg)?;
+            paths.push(out_path);
+        }
+        if !adversary_paths.is_empty() {
+            tracing::info!(
+                adversary_paths = adversary_paths.len(),
+                stage = "judge.adversary.summary",
+                "Judge stage"
+            );
+        }
+
+        // Track H (E6): FinalDisagreement tiebreaker. After the
+        // adversary pass (which only fires when disagreement_score
+        // exceeds `disagreement_threshold`), run an opt-in second
+        // check that combines max-min spread AND stddev. Either
+        // criterion triggers the tiebreaker; either condition alone
+        // is enough to suggest the panel is unreliable. The verdict
+        // is written to `adversaries/p_<id>_tiebreak.json` next to
+        // the regular adversary report (or alone when the panel
+        // agreed). The base panel's `Aggregated` is preserved
+        // verbatim — the tiebreaker is supplementary audit data the
+        // downstream phases can read. Skipped entirely when
+        // `enable_final_disagreement == false` (fast mode opt-out)
+        // or when both thresholds are non-positive.
+        if self.enable_final_disagreement
+            && (self.final_disagreement_spread_threshold > 0.0
+                || self.final_disagreement_stddev_threshold > 0.0)
+        {
+            let fd_system = system_prompt(Role::FinalDisagreement).to_owned();
+            let fd_system_arc = Arc::new(fd_system);
+            let adversaries_dir_arc = Arc::new(adversaries_dir.clone());
+            let fd_futures = order.iter().filter_map(|proposal_id| {
+                let scores = by_proposal.get(proposal_id)?.clone();
+                if !Self::should_invoke_final_disagreement(
+                    &scores,
+                    self.final_disagreement_spread_threshold,
+                    self.final_disagreement_stddev_threshold,
+                ) {
+                    return None;
+                }
+                let proposal_id = proposal_id.clone();
+                let fd_system_arc = Arc::clone(&fd_system_arc);
+                let adversaries_dir_arc = Arc::clone(&adversaries_dir_arc);
+                // The proposal text is needed by the tiebreaker so
+                // it can audit the summary + approach alongside the
+                // score table. The reviewer may use the text to
+                // explain the disagreement in `rationale`.
+                let summary = read_proposal_summary(&proposals_dir, &proposal_id);
+                let approach = read_proposal_approach(&proposals_dir, &proposal_id);
+                Some(async move {
+                    let ctx_for_fd = ctx.clone();
+                    let payload = JudgePhase::build_final_disagreement_payload(
+                        &proposal_id,
+                        &scores,
+                        &summary,
+                        &approach,
+                    );
+                    let user = serde_json::to_string(&payload).unwrap_or_default();
+                    let _permit = ctx_for_fd.parallelism.acquire().await.ok()?;
+                    let report: FinalDisagreementReport = ctx_for_fd
+                        .call_with_retry_parse(
+                            Role::FinalDisagreement,
+                            fd_system_arc.as_str().to_owned(),
+                            user,
+                            "FinalDisagreement: {judge_scores[], candidates[], winner_id, margin, rationale}",
+                            2,
+                        )
+                        .await
+                        .ok()?;
+                    let path = adversaries_dir_arc
+                        .join(format!("{proposal_id}_tiebreak.json"));
+                    write_json(&path, &report).ok()?;
+                    Some((proposal_id, report.winner_id, report.margin, path))
+                })
+            });
+            let fd_results = join_all(fd_futures).await;
+            for (proposal_id, winner_id, margin, path) in fd_results.into_iter().flatten() {
+                tracing::debug!(
+                    proposal_id = %proposal_id,
+                    winner_id = %winner_id,
+                    margin,
+                    stage = "judge.final_disagreement.fired",
+                    "Judge stage"
+                );
+                adversary_paths.push(path);
+            }
+            if adversary_paths.len() > deltas.len() {
+                tracing::info!(
+                    final_disagreement_paths = adversary_paths.len(),
+                    stage = "judge.final_disagreement.summary",
+                    "Judge stage"
+                );
+            }
+        }
+        Ok(PhaseOutput::Evaluations(paths))
     }
 }
 
@@ -345,6 +538,46 @@ fn aggregate_no_delta(scores: &[JudgeScore]) -> Aggregated {
     let mut a = aggregate(scores);
     a.adversary_delta = 0.0;
     a
+}
+
+/// Read the `summary` field of a proposal sidecar. Used by the
+/// `FinalDisagreement` pass to inject the proposal text into the
+/// tiebreaker's payload. Returns an empty string when the sidecar
+/// is missing or the field is absent — the tiebreaker treats an
+/// empty summary the same as "no additional context".
+fn read_proposal_summary(proposals_dir: &std::path::Path, proposal_id: &str) -> String {
+    let path = proposals_dir.join(format!("{proposal_id}.json"));
+    let Ok(bytes) = std::fs::read(&path) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return String::new();
+    };
+    value
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// Read the `approach` field of a proposal sidecar. Used by the
+/// `FinalDisagreement` pass to inject the proposal text into the
+/// tiebreaker's payload. Returns an empty string when the sidecar
+/// is missing or the field is absent — the tiebreaker treats an
+/// empty approach the same as "no additional context".
+fn read_proposal_approach(proposals_dir: &std::path::Path, proposal_id: &str) -> String {
+    let path = proposals_dir.join(format!("{proposal_id}.json"));
+    let Ok(bytes) = std::fs::read(&path) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return String::new();
+    };
+    value
+        .get("approach")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -394,5 +627,137 @@ mod tests {
         let phase = JudgePhase::default();
         assert!(phase.enable_adversary);
         assert!((phase.disagreement_threshold - DEFAULT_DISAGREEMENT_THRESHOLD).abs() < 1e-6);
+    }
+
+    // -- E6: FinalDisagreement tiebreaker -------------------------------
+
+    /// When the three judges agree on the same score, neither the
+    /// max-min spread nor the stddev crosses the default
+    /// thresholds, so the tiebreaker is NOT invoked. Pins the
+    /// contract that a unanimous panel stays unanimous.
+    #[test]
+    fn judge_skips_final_disagreement_when_unanimous() {
+        let s = vec![js(7.0), js(7.0), js(7.0)];
+        let fire = JudgePhase::should_invoke_final_disagreement(
+            &s,
+            DEFAULT_FINAL_DISAGREEMENT_SPREAD,
+            DEFAULT_FINAL_DISAGREEMENT_STDDEV,
+        );
+        assert!(!fire, "unanimous panel must skip the tiebreaker");
+    }
+
+    /// A wide max-min spread (judges at 4.0, 5.0, 9.0 → spread 5.0)
+    /// triggers the tiebreaker regardless of stddev. Pins the
+    /// "either condition alone is enough" half of the E6 contract.
+    #[test]
+    fn judge_invokes_final_disagreement_when_spread_high() {
+        // Spread = 9.0 - 4.0 = 5.0, well above the 1.0 threshold.
+        let s = vec![js(4.0), js(5.0), js(9.0)];
+        let fire = JudgePhase::should_invoke_final_disagreement(
+            &s,
+            DEFAULT_FINAL_DISAGREEMENT_SPREAD,
+            DEFAULT_FINAL_DISAGREEMENT_STDDEV,
+        );
+        assert!(fire, "wide max-min spread must fire the tiebreaker");
+    }
+
+    /// When the max-min spread is small but the stddev is high
+    /// (clustered around the mean with one outlier), the stddev
+    /// half of the E6 condition must still fire. The default
+    /// stddev threshold is 0.5; [7.0, 7.0, 8.0] has spread 1.0
+    /// (right at the boundary) and stddev ≈ 0.471, which is BELOW
+    /// the threshold — so we use a stricter case to exercise the
+    /// stddev-only branch: [5.0, 8.0, 8.0] has spread 3.0 (fires
+    /// the spread branch too). For a pure stddev-only case we need
+    /// a spread at-or-below 1.0 with stddev > 0.5; [6.0, 7.0, 8.0]
+    /// has spread 2.0 so it still fires on spread. To exercise the
+    /// stddev branch exclusively, set `spread_threshold = 100.0`
+    /// (impossible to exceed) and verify a high-stddev panel still
+    /// fires on stddev alone.
+    #[test]
+    fn final_disagreement_fires_on_stddev_when_spread_threshold_disabled() {
+        let s = vec![js(5.0), js(7.0), js(9.0)];
+        let fire = JudgePhase::should_invoke_final_disagreement(
+            &s,
+            f32::INFINITY,
+            DEFAULT_FINAL_DISAGREEMENT_STDDEV,
+        );
+        assert!(fire, "stddev > 0.5 must fire even when spread is disabled");
+        // Same panel with both thresholds default: fires on spread.
+        let fire_both = JudgePhase::should_invoke_final_disagreement(
+            &s,
+            DEFAULT_FINAL_DISAGREEMENT_SPREAD,
+            DEFAULT_FINAL_DISAGREEMENT_STDDEV,
+        );
+        assert!(fire_both, "default thresholds must fire on the wide spread");
+    }
+
+    /// The rendered FinalDisagreement user payload must carry the
+    /// raw judge scores as a structured table (so the LLM can
+    /// reason about the disagreement) plus a single-element
+    /// candidate shortlist with the proposal under judgment. Pins
+    /// the schema contract for the catalog role.
+    #[test]
+    fn final_disagreement_prompt_renders_with_score_table() {
+        let scores = vec![js(4.0), js(7.0), js(9.0)];
+        let payload = JudgePhase::build_final_disagreement_payload(
+            "p_001",
+            &scores,
+            "Sharded ledger keyed by tenant id.",
+            "Route each tenant to its own shard; cross-shard reads go through a sequencer.",
+        );
+        let j = payload.to_string();
+        assert!(j.contains("\"judge_scores\""), "missing judge_scores: {j}");
+        assert!(j.contains("\"score\":4"), "missing judge score 4: {j}");
+        assert!(j.contains("\"score\":7"), "missing judge score 7: {j}");
+        assert!(j.contains("\"score\":9"), "missing judge score 9: {j}");
+        assert!(j.contains("\"candidates\""), "missing candidates: {j}");
+        assert!(j.contains("\"id\":\"p_001\""), "missing proposal id: {j}");
+        assert!(
+            j.contains("Sharded ledger keyed by tenant id."),
+            "missing summary: {j}"
+        );
+        assert!(
+            j.contains("Route each tenant to its own shard"),
+            "missing approach: {j}"
+        );
+        assert!(
+            j.contains("\"spread\""),
+            "missing spread key (telemetry): {j}"
+        );
+        assert!(
+            j.contains("\"disagreement_score\""),
+            "missing disagreement_score key: {j}"
+        );
+    }
+
+    /// Score-spread helper: a single sample has no spread; a pair
+    /// has `max - min`; three unanimous judges have spread zero.
+    #[test]
+    fn score_spread_helper_behaves() {
+        let one = vec![js(7.0)];
+        assert_eq!(JudgePhase::score_spread(&one), None);
+        let pair = vec![js(5.0), js(9.0)];
+        assert!((JudgePhase::score_spread(&pair).unwrap() - 4.0).abs() < 1e-6);
+        let three = vec![js(7.0), js(7.0), js(7.0)];
+        assert!((JudgePhase::score_spread(&three).unwrap() - 0.0).abs() < 1e-6);
+    }
+
+    /// The default `JudgePhase` exposes the new FinalDisagreement
+    /// fields with the documented defaults. Pins the wire-level
+    /// contract for any downstream caller that introspects the
+    /// phase configuration (CLI flags, profile overrides, etc.).
+    #[test]
+    fn default_judge_phase_has_final_disagreement_enabled() {
+        let phase = JudgePhase::default();
+        assert!(phase.enable_final_disagreement);
+        assert!(
+            (phase.final_disagreement_spread_threshold - DEFAULT_FINAL_DISAGREEMENT_SPREAD).abs()
+                < 1e-6
+        );
+        assert!(
+            (phase.final_disagreement_stddev_threshold - DEFAULT_FINAL_DISAGREEMENT_STDDEV).abs()
+                < 1e-6
+        );
     }
 }
