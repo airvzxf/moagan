@@ -51,11 +51,17 @@ impl LineageGraph {
         serde_json::to_string(self).unwrap_or_default()
     }
     /// Total node count.
-    pub fn node_count(&self) -> usize { self.nodes.len() }
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
     /// Total edge count.
-    pub fn edge_count(&self) -> usize { self.edges.len() }
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
     /// True if the graph has no nodes.
-    pub fn is_empty(&self) -> bool { self.nodes.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -93,10 +99,7 @@ mod tests {
 
     #[test]
     fn lineage_graph_node_and_edge_count() {
-        let g = LineageGraph::from_pairs(&[
-            ("p1".into(), "c1".into()),
-            ("p1".into(), "c2".into()),
-        ]);
+        let g = LineageGraph::from_pairs(&[("p1".into(), "c1".into()), ("p1".into(), "c2".into())]);
         assert_eq!(g.node_count(), 3);
         assert_eq!(g.edge_count(), 2);
     }

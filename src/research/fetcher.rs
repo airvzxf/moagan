@@ -177,12 +177,11 @@ impl ResearchFetcher {
         // obviously-bad value.
         if let Some(policy_entry) = allowlist::find_policy(host)
             && policy_entry.auth_bearer
+            && let Some(key) = self.api_key.as_ref()
         {
-            if let Some(key) = self.api_key.as_ref() {
-                let trimmed = key.trim();
-                if !trimmed.is_empty() {
-                    request = request.header("Authorization", format!("Bearer {trimmed}"));
-                }
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                request = request.header("Authorization", format!("Bearer {trimmed}"));
             }
         }
         let resp = request
