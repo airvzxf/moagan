@@ -198,6 +198,18 @@ pub struct Config {
     /// `MOAGAN_RESEARCH_URLS=docs.rs/foo,crates.io/bar`.
     #[serde(default)]
     pub research_urls: Vec<String>,
+    /// Track K (D9): research sub-knobs grouped under `research`.
+    /// Holds the optional bearer token applied to hosts whose
+    /// [`crate::research::allowlist::HostPolicy::auth_bearer`] flag
+    /// is `true` (currently `api.github.com`). Operators opt in
+    /// via `MOAGAN_RESEARCH_API_KEY=<token>` or by setting
+    /// `[research]\napi_key = "..."` in
+    /// `~/.config/moagan/config.toml`. The key never appears in
+    /// the serialized output or any CLI flag dump — it stays
+    /// inside the `Config` and feeds straight into the
+    /// `Authorization: Bearer ...` header at fetch time.
+    #[serde(default)]
+    pub research: ResearchConfig,
     /// Track E (catalog §D.19.6): per-provider token-bucket knobs.
     /// Empty by default; opt in via
     /// `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>` or by
@@ -311,6 +323,22 @@ impl Default for DiscoveryWiringConfig {
             angle_clusters_min: 2,
         }
     }
+}
+
+/// Track K (D9): knobs for the research fetcher grouped under
+/// `research`. Currently only the bearer token; future per-host
+/// rate limits or timeout overrides can land here without
+/// re-shuffling the top-level `Config` layout.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResearchConfig {
+    /// Optional bearer token for `auth_bearer`-flagged hosts. Set
+    /// via `MOAGAN_RESEARCH_API_KEY=<token>` or `[research] api_key
+    /// = "<token>"` in `~/.config/moagan/config.toml`. Empty /
+    /// whitespace values are ignored at fetch time (see
+    /// [`crate::research::ResearchFetcher::fetch_one`]). Default
+    /// `None`.
+    pub api_key: Option<String>,
 }
 
 fn default_startup_reconcile() -> bool {
@@ -611,6 +639,7 @@ impl Default for Config {
             sandbox_cgroup: None,
             research_enabled: false,
             research_urls: Vec::new(),
+            research: ResearchConfig::default(),
             rate_limit_per_provider: std::collections::HashMap::new(),
             discovery: DiscoveryWiringConfig::default(),
             export: ExportConfig::default(),
@@ -1101,6 +1130,19 @@ impl Config {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect();
+        }
+        // Track K (D9): bearer-token wiring for `auth_bearer`-flagged
+        // hosts (`api.github.com` in the canonical allowlist). Empty
+        // / whitespace exports are kept-as-`None` so a stale shell
+        // export cannot forge an Authorization header with an empty
+        // value. Mirrors the `MOAGAN_RESEARCH_URLS` handling: the
+        // env var only owns the config surface, the actual wiring
+        // happens at fetch time inside
+        // `ResearchFetcher::fetch_one`.
+        if let Ok(v) = std::env::var("MOAGAN_RESEARCH_API_KEY")
+            && !v.trim().is_empty()
+        {
+            self.research.api_key = Some(v);
         }
         // Track E (catalog §D.19.6): per-provider rate-limit knobs.
         // `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>`
@@ -2181,5 +2223,41 @@ mod tests {
             back.export.hash_algo,
             crate::cli::flags_batch::HashAlgo::Sha256
         ));
+    }
+
+    /// K.4: `MOAGAN_RESEARCH_API_KEY` populates
+    /// `Config::research.api_key`. Empty / whitespace exports are
+    /// ignored so a stale shell value cannot forge an empty
+    /// Authorization header at fetch time.
+    #[test]
+    fn config_research_api_key_from_env() {
+        let mut cfg = Config::default();
+        assert!(cfg.research.api_key.is_none(), "default must be None");
+
+        unsafe {
+            std::env::set_var("MOAGAN_RESEARCH_API_KEY", "ghp_token_123");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_RESEARCH_API_KEY");
+        }
+        assert_eq!(
+            cfg.research.api_key.as_deref(),
+            Some("ghp_token_123"),
+            "non-empty env var must populate research.api_key"
+        );
+
+        let mut cfg = Config::default();
+        unsafe {
+            std::env::set_var("MOAGAN_RESEARCH_API_KEY", "   ");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_RESEARCH_API_KEY");
+        }
+        assert!(
+            cfg.research.api_key.is_none(),
+            "whitespace env var must NOT populate research.api_key"
+        );
     }
 }
