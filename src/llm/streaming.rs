@@ -6,12 +6,19 @@
 
 use std::time::Instant;
 
+/// Time-to-first-token measurement for a streaming response.
 #[derive(Debug, Clone, Copy)]
 pub struct TtftMeasurement {
+    /// Milliseconds elapsed from the recorder's `start` to the
+    /// first emitted token.
     pub first_token_at_ms: u128,
+    /// Total tokens observed during the stream.
     pub total_tokens: u32,
 }
 
+/// Recorder that tracks the wall-clock latency between the
+/// first call and the first token emitted by a streaming
+/// response, plus the running token count.
 pub struct StreamRecorder {
     started_at: Option<Instant>,
     first_token_at: Option<Instant>,
@@ -19,6 +26,7 @@ pub struct StreamRecorder {
 }
 
 impl StreamRecorder {
+    /// Build a fresh recorder with no clock started.
     pub fn new() -> Self {
         Self {
             started_at: None,
@@ -26,17 +34,25 @@ impl StreamRecorder {
             tokens: 0,
         }
     }
+    /// Mark the moment the stream was issued. Idempotent: the
+    /// first call wins.
     pub fn start(&mut self) {
         if self.started_at.is_none() {
             self.started_at = Some(Instant::now());
         }
     }
+    /// Mark a token emission. The first call also records the
+    /// first-token instant; subsequent calls only bump the
+    /// counter (saturating at `u32::MAX`).
     pub fn record_token(&mut self) {
         if self.first_token_at.is_none() {
             self.first_token_at = Some(Instant::now());
         }
         self.tokens = self.tokens.saturating_add(1);
     }
+    /// Produce a [`TtftMeasurement`] if both `start` and at
+    /// least one `record_token` were observed; otherwise
+    /// `None`.
     pub fn finish(&self) -> Option<TtftMeasurement> {
         let start = self.started_at?;
         let first = self.first_token_at?;

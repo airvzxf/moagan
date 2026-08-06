@@ -4,21 +4,31 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
+/// Stable identifier for a single run, used as a node label in
+/// the lineage graph.
 pub type RunId = String;
 
+/// Adjacency-list view of the parent/child run DAG for the
+/// dashboard. `nodes` lists each run id exactly once;
+/// `edges` lists `(parent, child)` pairs in input order.
 #[derive(Debug, Clone, Serialize)]
 pub struct LineageGraph {
+    /// Distinct run ids referenced by the graph.
     pub nodes: Vec<RunId>,
+    /// `(parent, child)` edges in the order they were observed.
     pub edges: Vec<(RunId, RunId)>,
 }
 
 impl LineageGraph {
+    /// Empty graph with no nodes and no edges.
     pub fn empty() -> Self {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
         }
     }
+    /// Build the graph from a flat list of `(parent, child)`
+    /// pairs. Nodes are deduplicated in first-seen order.
     pub fn from_pairs(pairs: &[(String, String)]) -> Self {
         let mut nodes: Vec<RunId> = Vec::new();
         let mut edges: Vec<(RunId, RunId)> = Vec::new();
@@ -36,6 +46,8 @@ impl LineageGraph {
         }
         Self { nodes, edges }
     }
+    /// Serialize the graph to JSON. Returns an empty string on
+    /// serialization failure rather than propagating the error.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
