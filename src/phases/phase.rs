@@ -17,7 +17,8 @@ use crate::cli::Mode;
 use crate::config::Config;
 use crate::context::ContextRefRecord;
 use crate::domain::LineagePaths;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::error_code::ErrorCode;
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
@@ -726,6 +727,10 @@ impl RunContext {
                     }
                 },
                 Err(e) => {
+                    if !should_retry_error(&e) {
+                        tracing::debug!(error = ?e, code = ?e.code(), "non-retriable error, bailing out");
+                        return Err(e);
+                    }
                     let reason = retry_budget::reason_from_error(&e);
                     let b = budget.unwrap_or_else(|| retry_budget::budget_for(mode, reason));
                     budget = Some(b);
@@ -754,6 +759,15 @@ impl RunContext {
             }
         }
     }
+}
+
+fn error_code_is_retriable(code: Option<ErrorCode>) -> bool {
+    code.map(|c| c.is_retriable()).unwrap_or(true)
+}
+
+fn should_retry_error(err: &Error) -> bool {
+    error_code_is_retriable(Some(err.code()))
+        || matches!(err, Error::Provider(_) | Error::PlanExhausted(_))
 }
 
 /// Internal loop-control flag for `call_with_retry_parse`. The
@@ -1048,6 +1062,120 @@ pub trait Phase: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RetryScript {
+        outcomes: parking_lot::Mutex<VecDeque<Result<(u16, Response)>>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::Provider for RetryScript {
+        fn name(&self) -> &str {
+            "retry-script"
+        }
+
+        fn model(&self) -> &str {
+            "retry-model"
+        }
+
+        fn endpoint(&self) -> &str {
+            "mock://retry"
+        }
+
+        async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.outcomes
+                .lock()
+                .pop_front()
+                .unwrap_or(Err(Error::MockExhausted))
+        }
+    }
+
+    fn retry_context(
+        outcomes: Vec<Result<(u16, Response)>>,
+    ) -> (tempfile::TempDir, RunContext, Arc<RetryScript>) {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::open(
+            run_id,
+            &home.run_dir(run_id),
+            crate::redact::RedactPolicy::default(),
+            None,
+        )
+        .unwrap();
+        let script = Arc::new(RetryScript {
+            outcomes: parking_lot::Mutex::new(outcomes.into()),
+            calls: AtomicUsize::new(0),
+        });
+        let mut registry = ProviderRegistry::default();
+        registry.insert("retry".into(), script.clone());
+        let ctx = RunContext::new(
+            run_id,
+            home,
+            Arc::new(registry),
+            "retry".into(),
+            "retry-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "standard".into(),
+        );
+        (temp, ctx, script)
+    }
+
+    fn response(text: &str) -> Response {
+        Response {
+            text: text.into(),
+            finish_reason: Some("end_turn".into()),
+            truncated: false,
+            usage: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_parse_bails_on_non_retriable_error() {
+        let (_temp, ctx, script) = retry_context(vec![Err(Error::InvalidApiKey("bad".into()))]);
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Value",
+                5,
+            )
+            .await;
+        assert!(matches!(result, Err(Error::InvalidApiKey(_))));
+        assert_eq!(script.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn call_with_retry_parse_retries_on_retriable_error() {
+        let (_temp, ctx, script) = retry_context(vec![
+            Err(Error::Provider("temporary outage".into())),
+            Ok((200, response(r#"{"ok":true}"#))),
+        ]);
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Value",
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(script.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn call_with_retry_parse_handles_error_without_code_as_retriable() {
+        assert!(error_code_is_retriable(None));
+    }
 
     #[test]
     fn phase_output_serializes_tagged() {
