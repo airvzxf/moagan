@@ -13,8 +13,14 @@
 //! research snippets are destined for context injection in the
 //! Sketch phase, not direct telemetry emission.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::config::RateLimitConfig;
 use crate::redact::{RedactPolicy, Surface, apply};
 use crate::research::allowlist;
 
@@ -81,6 +87,69 @@ impl std::fmt::Display for FetchError {
 
 impl std::error::Error for FetchError {}
 
+#[derive(Debug)]
+struct HostRateLimiter {
+    permits: Arc<Semaphore>,
+    bucket: Mutex<HostRateBucket>,
+}
+
+#[derive(Debug)]
+struct HostRateBucket {
+    capacity: f64,
+    refill_per_sec: f64,
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl HostRateLimiter {
+    fn new(config: RateLimitConfig) -> Self {
+        let capacity = config.capacity.max(1);
+        let initial = config.initial.unwrap_or(capacity).min(capacity);
+        Self {
+            permits: Arc::new(Semaphore::new(capacity as usize)),
+            bucket: Mutex::new(HostRateBucket {
+                capacity: capacity as f64,
+                refill_per_sec: config.refill_per_sec.max(1) as f64,
+                tokens: initial as f64,
+                last_refill: Instant::now(),
+            }),
+        }
+    }
+
+    async fn acquire(&self) -> std::result::Result<OwnedSemaphorePermit, FetchError> {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| FetchError::NetworkError(format!("rate limit permit: {e}")))?;
+        let wait = {
+            let mut bucket = self.bucket.lock();
+            let now = Instant::now();
+            let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+            bucket.tokens = (bucket.tokens + elapsed * bucket.refill_per_sec).min(bucket.capacity);
+            bucket.last_refill = now;
+            bucket.tokens -= 1.0;
+            if bucket.tokens < 0.0 {
+                Duration::from_secs_f64(-bucket.tokens / bucket.refill_per_sec)
+            } else {
+                Duration::ZERO
+            }
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        Ok(permit)
+    }
+}
+
+fn canonical_host(host: &str) -> String {
+    host.trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .replace('_', ".")
+}
+
 /// Bounded external research fetcher (K.4 / proposal-04 §4).
 ///
 /// Allowlist-only; max [`MAX_URLS_PER_CALL`] URLs per call; max
@@ -108,6 +177,7 @@ pub struct ResearchFetcher {
     /// `None` (or `Some("")`) suppresses the Authorization header
     /// so an unset config still produces clean anonymous requests.
     pub api_key: Option<String>,
+    per_host_rate_limit: HashMap<String, Arc<HostRateLimiter>>,
 }
 
 impl ResearchFetcher {
@@ -116,7 +186,32 @@ impl ResearchFetcher {
     /// the canonical case when the operator has not configured
     /// `MOAGAN_RESEARCH_API_KEY`.
     pub fn new(api_key: Option<String>) -> Self {
-        Self { api_key }
+        Self {
+            api_key,
+            per_host_rate_limit: HashMap::new(),
+        }
+    }
+
+    #[allow(missing_docs)]
+    pub fn with_per_host_rate_limit(mut self, map: HashMap<String, RateLimitConfig>) -> Self {
+        self.per_host_rate_limit = map
+            .into_iter()
+            .filter_map(|(host, config)| {
+                let host = canonical_host(&host);
+                (!host.is_empty()).then(|| (host, Arc::new(HostRateLimiter::new(config))))
+            })
+            .collect();
+        self
+    }
+
+    async fn acquire_host_rate_limit(
+        &self,
+        host: &str,
+    ) -> std::result::Result<Option<OwnedSemaphorePermit>, FetchError> {
+        let Some(limiter) = self.per_host_rate_limit.get(&canonical_host(host)) else {
+            return Ok(None);
+        };
+        limiter.acquire().await.map(Some)
     }
 
     /// Fetch up to [`MAX_URLS_PER_CALL`] URLs, capped at
@@ -168,6 +263,7 @@ impl ResearchFetcher {
         if !allowlist::is_allowed(host) {
             return Err(FetchError::DisallowedHost(host.to_string()));
         }
+        let _rate_limit_permit = self.acquire_host_rate_limit(host).await?;
         let mut request = client.get(url);
         // K.4: bearer-token wire-up. Attach the header only when the
         // allowlist entry opts in via `auth_bearer = true` AND the
@@ -406,5 +502,35 @@ mod tests {
                 built.headers().get("Authorization")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn fetcher_per_host_rate_limit_throttles_per_host() {
+        let mut limits = HashMap::new();
+        for host in ["docs.rs", "github.com"] {
+            limits.insert(
+                host.to_owned(),
+                RateLimitConfig {
+                    capacity: 1,
+                    refill_per_sec: 10,
+                    initial: Some(1),
+                },
+            );
+        }
+        let fetcher = ResearchFetcher::new(None).with_per_host_rate_limit(limits);
+
+        drop(fetcher.acquire_host_rate_limit("docs.rs").await.unwrap());
+        drop(fetcher.acquire_host_rate_limit("github.com").await.unwrap());
+
+        let same_host_started = Instant::now();
+        drop(fetcher.acquire_host_rate_limit("docs.rs").await.unwrap());
+        assert!(same_host_started.elapsed() >= Duration::from_millis(80));
+    }
+
+    #[tokio::test]
+    async fn fetcher_no_rate_limit_when_unconfigured() {
+        let fetcher = ResearchFetcher::new(None);
+        let permit = fetcher.acquire_host_rate_limit("docs.rs").await.unwrap();
+        assert!(permit.is_none());
     }
 }

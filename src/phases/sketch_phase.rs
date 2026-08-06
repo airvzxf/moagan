@@ -51,12 +51,13 @@
 //! [`SketchFilterStats`] so the synthesize phase can surface them
 //! without re-walking the fan-out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures::future::join_all;
 
+use crate::config::RateLimitConfig;
 use crate::domain::{ProblemGraph, Sketch};
 use crate::error::{Error, Result};
 use crate::llm::Role;
@@ -419,11 +420,12 @@ impl SketchPhase {
         enabled: bool,
         urls: Vec<String>,
         api_key: Option<String>,
+        per_host_rate_limit: HashMap<String, RateLimitConfig>,
     ) -> Vec<ResearchSnippet> {
         if !enabled || urls.is_empty() {
             return Vec::new();
         }
-        let fetcher = ResearchFetcher::new(api_key);
+        let fetcher = ResearchFetcher::new(api_key).with_per_host_rate_limit(per_host_rate_limit);
         let results = fetcher.fetch_all(&urls).await;
         results.into_iter().filter_map(|r| r.ok()).collect()
     }
@@ -466,9 +468,14 @@ impl Phase for SketchPhase {
         let research_urls = ctx.config.research_urls.clone();
         let research_enabled = ctx.config.research_enabled;
         let research_api_key = ctx.config.research.api_key.clone();
-        let snippets =
-            Self::collect_research_snippets(research_enabled, research_urls, research_api_key)
-                .await;
+        let research_rate_limits = ctx.config.research.per_host_rate_limit.clone();
+        let snippets = Self::collect_research_snippets(
+            research_enabled,
+            research_urls,
+            research_api_key,
+            research_rate_limits,
+        )
+        .await;
         let system = if snippets.is_empty() {
             system
         } else {
@@ -752,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn sketch_phase_skips_research_when_disabled() {
         let urls = vec!["https://docs.rs/serde".into()];
-        let out = SketchPhase::collect_research_snippets(false, urls, None).await;
+        let out = SketchPhase::collect_research_snippets(false, urls, None, HashMap::new()).await;
         assert!(out.is_empty(), "disabled flag must short-circuit");
     }
 
@@ -762,7 +769,7 @@ mod tests {
     /// issue a noop HTTP call.
     #[tokio::test]
     async fn collect_research_snippets_returns_empty_when_urls_empty() {
-        let out = SketchPhase::collect_research_snippets(true, vec![], None).await;
+        let out = SketchPhase::collect_research_snippets(true, vec![], None, HashMap::new()).await;
         assert!(out.is_empty(), "empty URL list must short-circuit");
     }
 
@@ -775,7 +782,7 @@ mod tests {
     #[tokio::test]
     async fn sketch_phase_continues_when_fetch_fails_gracefully() {
         let urls = vec!["https://evil.example.com/secret".into()];
-        let out = SketchPhase::collect_research_snippets(true, urls, None).await;
+        let out = SketchPhase::collect_research_snippets(true, urls, None, HashMap::new()).await;
         assert!(
             out.is_empty(),
             "disallowed host must be filtered out, got {out:?}"
@@ -791,7 +798,7 @@ mod tests {
         let urls: Vec<String> = (0..crate::research::MAX_URLS_PER_CALL + 1)
             .map(|i| format!("https://docs.rs/page-{i}"))
             .collect();
-        let out = SketchPhase::collect_research_snippets(true, urls, None).await;
+        let out = SketchPhase::collect_research_snippets(true, urls, None, HashMap::new()).await;
         assert!(
             out.is_empty(),
             "over-cap call must collapse to empty, got {out:?}"
