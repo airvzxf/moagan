@@ -8,52 +8,90 @@
 
 ## 1. TL;DR
 
-HEAD `921474a feat(provider+streaming): D.9.6 + D.19.13 + D.19.19 +
-D.19.20 + D.19.7 (#195)`. Local in sync con `origin/main`. Test
-suite verde: `cargo test --lib` reporta `1406 passed; 0 failed;
-2 ignored` (2026-08-06). **63 commits** / **65 PRs** squash-mergeados
-desde el último handoff (`dbbaeac feat(llm): wire circuit breaker
-per-provider in registry (#71)`). Tracks **E** (sandbox hardening
-D.11.x), **I** (discovery resilience D.13.x + D.34.x + D.1.13),
-**G** (JSON output paths A + B), y **K** (cuarta etapa K.1-K.4)
-**cerrados**. Tracks **E1-E10** (LLM wiring), **F1-F5** (storage +
-checkpoint + manifest), **M** (Tier A correctness), **J#5** (dashboard
-graph) **cerrados** en esta misma ventana. Crate version
-`0.4.0` (Cargo.toml). 27 roles LLM wirados. 19 sub-comandos CLI
-top-level. 11 migraciones SQLite (`v001`-`v011`). 199 archivos
-`.rs` (~73 600 LoC).
+HEAD `693d746 feat(discovery+llm): FacetCache stats + OpenCodeGoResponses
+streaming SSE wire (#215)`. Local in sync con `origin/main`. Test
+suite verde: `cargo test --lib` reporta `1492 passed; 0 failed;
+2 ignored` (2026-08-06). `cargo test --all-targets` reporta
+`1492 + 1 + 14 + 3 + 3 = 1513 passed; 0 failed` across all targets.
+**63 commits** / **~70 PRs** squash-mergeados desde el último handoff
+(`dbbaeac feat(llm): wire circuit breaker per-provider in registry (#71)`).
+Tracks **E** (sandbox hardening D.11.x), **I** (discovery resilience
+D.13.x + D.34.x + D.1.13), **G** (JSON output paths A + B + C), y
+**K** (cuarta etapa K.1-K.4) **cerrados**. Tracks **E1-E10** (LLM
+wiring), **F1-F5** (storage + checkpoint + manifest), **M** (Tier A
+correctness), **J#5** (dashboard graph), **T1-T7** (telemetry + CLI +
+error) **cerrados** en la misma ventana. PRs **H1+H2+H3**
+(AnthropicCompat + invalidate ledger + BLAKE3 default, #204), **J1**
+(Cardinality::for_mode + judge quorum, #205), **J3** (dashboard
+/api/lineage + K.4 auth, #212), y el **D.13.15 exhaustivo** (HardIncompat
+13 variantes, +this commit) **cerrados**. Crate version `0.4.0`
+(Cargo.toml). 27 roles LLM wirados. 19 sub-comandos CLI top-level.
+13 migraciones SQLite (`v001`-`v013`). 202 archivos `.rs` (~75 200 LoC).
 
-## 2. Tabla de los últimos 20 PRs mergeados
+## 2. Tabla de los últimos 30 PRs mergeados (Sesiones D-J)
 
 (Orden cronológico inverso. Cada PR cierra uno o más items del
 catálogo D.x o del roadmap prospectivo K.x.)
 
+### Sesión D — E1-E10 (LLM wiring hardening)
+
 | #   | PR  | Track | D.x / spec | Capacidad |
 |---:|----:|---|---|---|
-|  1 | #195 | T7   | D.9.6 / D.19.13 / D.19.19 / D.19.20 / D.19.7 | provider + streaming |
-|  2 | #193 | T6   | D.35.3-.5 / D.6.4 / D.1.4 | api-key + cache + outbox |
-|  3 | #191 | T5   | D.14.6-.21 / D.15.2-.6 | CLI flags batch |
-|  4 | #189 | T4   | D.12.10 / D.12.11 / D.16.2 / D.26.5 / D.29.9 | error enrichments |
-|  5 | #188 | J#5  | D.33.1-4 / D.33.7 | dashboard graph + manifest extensions |
-|  6 | #186 | T3   | D.17.1-4 / D.17.7-10 | exhaustive telemetry |
-|  7 | #184 | T2   | D.28.1 | `reconcile(run_id)` per-run |
-|  8 | #182 | T2   | D.11.12 / D.28.1 | `tool_versions` + reconcile per-run |
-|  9 | #180 | T1   | — | Adversary 5 patterns + `RefineAction` + `StaleArtifact` + `BudgetCascade` |
-| 10 | #178 | E8   | — | `PersonaPicker` + `AnglePicker` helpers opt-in |
-| 11 | #176 | I+   | D.34.1 / D.13.2 / D.13.7 / D.13.10 / D.13.9 / D.13.19 | discovery resilience bundle |
-| 12 | #174 | E7   | — | `TiefighterCritic` sidecar opt-in |
+|  1 | #152 | E1   | — | `RateLimiter` wire-up en `BreakeredProvider::send` |
+|  2 | #154 | E2   | — | rubric anchors inyectados en Judge + Critique prompts |
+|  3 | #156 | E3   | — | `SelectionPlan::apply` opera sobre Proposal text |
+|  4 | #158 | E4/E6/E9 | — | DAG layers + `FinalDisagreement` + Intake normalize |
+|  5 | #160 | E5/E10 | — | sketch quality scoring + hostile-prompt policy |
+|  6 | #174 | E7   | — | `TiefighterCritic` sidecar opt-in (T=0.0, top_p=0.1) |
+|  7 | #178 | E8   | — | `PersonaPicker` + `AnglePicker` helpers opt-in |
+
+### Sesión E — F1-F5 (storage + checkpoint + manifest)
+
+| #   | PR  | Track | D.x / spec | Capacidad |
+|---:|----:|---|---|---|
+|  8 | #162 | F1   | — | `Modify(text)` del checkpoint al rerank feedback |
+|  9 | #164 | F2   | — | run leases + heartbeat + zombie recovery |
+| 10 | #166 | F3   | — | `BudgetObserver` + optional-phase gating |
+| 11 | #168 | F5   | — | manifest v2 + `config_hash` + `tar.zst` export |
+| 12 | #170 | F4   | — | provider capabilities + wire formats unification |
+
+### Sesión F — M + J#5 + T1-T7 (telemetry + reconcile + cli + error)
+
+| #   | PR  | Track | D.x / spec | Capacidad |
+|---:|----:|---|---|---|
 | 13 | #172 | M    | M#1 / M#2 | Tier A correctness + rubric validation |
-| 14 | #170 | F4   | — | provider capabilities + wire formats unification |
-| 15 | #168 | F5   | — | manifest v2 + `config_hash` + `tar.zst` export |
-| 16 | #166 | F3   | — | `BudgetObserver` + optional-phase gating |
-| 17 | #164 | F2   | — | run leases + heartbeat + zombie recovery |
-| 18 | #162 | F1   | — | `Modify(text)` del checkpoint al rerank feedback |
-| 19 | #160 | E5/E10 | — | sketch quality + hostile-prompt policy |
-| 20 | #158 | E4/E6/E9 | — | `FinalDisagreement` + DAG layers + Intake normalize |
+| 14 | #188 | J#5 + D.33.x | D.33.1-4 + D.33.7 | dashboard graph + manifest extensions |
+| 15 | #180 | T1   | — | Adversary 5 patterns + `RefineAction` + `StaleArtifact` + `BudgetCascade` |
+| 16 | #182 | T2   | D.11.12 / D.28.1 | `tool_versions` + reconcile per-run |
+| 17 | #184 | T2   | D.28.1 | `reconcile(run_id)` standalone command |
+| 18 | #186 | T3   | D.17.1-4 + D.17.7-10 | exhaustive telemetry |
+| 19 | #189 | T4   | D.12.10 / D.12.11 / D.16.2 / D.26.5 / D.29.9 | error enrichments |
+| 20 | #191 | T5   | D.14.6-.21 + D.15.2-.6 | CLI flags batch |
+| 21 | #193 | T6   | D.35.3-.5 + D.6.4 + D.1.4 | api-key + cache + outbox |
+| 22 | #195 | T7   | D.9.6 + D.19.13 + D.19.19 + D.19.20 + D.19.7 | provider + streaming |
+
+### Sesión G + H + J — Catalog wiring completion (12 PRs)
+
+| #   | PR  | Track | D.x / spec | Capacidad |
+|---:|----:|---|---|---|
+| 23 | #198 | outbox wire | D.1.4 wire | `record_with` wired into call sites |
+| 24 | #199 | streaming | D.19.7 closure | SSE streaming parser real |
+| 25 | #200 | provider | D.9.6 | wire per-provider semaphores |
+| 26 | #201 | refine + llm | D.22.5 + Path C | `StaleArtifact` + `JsonRepairV2` re-call |
+| 27 | #202 | discovery | E8 wire | auto-invoke `PersonaPicker` + `AnglePicker` |
+| 28 | #203 | ranking + storage | — | `invalidate_downstream` + `SynthesisRequest` + v012 |
+| 29 | #204 | llm + storage | H1 + H2 + H3 | `AnthropicCompat.send` + invalidate ledger + BLAKE3 |
+| 30 | #205 | domain + phases | J1 | `HardIncompat` extended + `Cardinality::for_mode` + quorum |
+| 31 | #210 | phases + cli | D.21.3 + D.28.3+4 | `SelectionPlan::keep_top/diverse/outlier` + startup reconcile sweep |
+| 32 | #212 | telemetry + storage + research | J3 | dashboard `/api/lineage` + v013 + K.4 auth |
+| 33 | #214 | ranking + refine | — | Adversary 5→7 patterns + `RefineAction` dispatcher |
+| 34 | #215 | discovery + llm | — | FacetCache stats + OpenCodeGoResponses streaming SSE |
+| 35 | #216 | domain | D.13.15 | `HardIncompat` exhaustivo (13 variants) — this commit |
 
 ## 3. Deferred items restantes (no atacados)
 
-Ordenados por valor/costo descendente.
+Ordenados por valor/costo descendente. El estado refleja HEAD
+`693d746` (2026-08-06).
 
 ### 3.1 K.4 ampliado (D.43, propuesta cuarta etapa)
 
@@ -61,52 +99,55 @@ Ordenados por valor/costo descendente.
 - Acotado hoy a 4-host allowlist (`docs.rs`, `crates.io/api`,
   `github.com/api` + 1 configurable), 3 URLs/call, 4 KB/response,
   5s timeout.
+- PR #212 añadió auth básico para los 4 hosts; lo que queda es
+  extender a PDFs / JS rendering.
 - Trade-off en `docs/proposal-04-cuarta-etapa.md` §4.
 
-### 3.2 DiscoveryCardinality (D.21.3 / J.2)
+### 3.2 Cross-platform sandbox fallback (macOS / WSL)
 
-- `SelectionPlan::keep_top / keep_diverse / keep_outlier` queda como
-  opt-in del catálogo. Hoy `SelectionPlan::apply` opera sobre
-  Proposal text (PR #156) pero los helpers de diversity/outlier no
-  están wirados.
+- Sandbox hardening (Tracks E + D.11.x) es Linux-only. Las primitivas
+  `unshare(CLONE_NEW*)` + cgroup v2 + seccomp BPF no tienen
+  equivalente en macOS / WSL.
+- Trade-off importante: spec §11.4 asume Linux; v0.6+ queda
+  pendiente.
 
-### 3.3 Cardinality::for_mode (D.21.2 / J.1)
+### 3.3 `process_locks` lease module (D.1.5)
 
-- `Mode -> Range<usize>` con soft/hard ceilings. No wired.
+- Schema `process_locks` está creada (v008). Las funciones
+  `acquire_process_lock` / `release_process_lock` son scaffolding
+  hasta que exista un `src/storage/lease.rs` module con fence
+  monótono (`holder` keyed con FencingToken).
+- Diferido por falta de demanda concreta.
 
-### 3.4 Quorum de judges por modo (D.21.7 / J.4)
+### 3.4 Track C path B wire-up to dispatcher
 
-- Tier A (PR #172) cubre pesos + validación, no el quorum matrix.
-
-### 3.5 Dashboard `/api/lineage` dedicado (J#5 partial)
-
-- PR #188 extendió `manifest.json` con `lineage_paths` y grafo en
-  `/api/runs/<id>/graph`; un endpoint `/api/lineage` cross-run queda
-  para una sub-fase posterior.
-
-### 3.6 `cleanup_orphans` + `recover_zombies` startup (D.28.3 / D.28.4)
-
-- `reconcile(run_id)` per-run (#184) cubre el caso de uso inmediato.
-  El sweep startup queda para una sub-fase posterior.
-
-### 3.7 `HardIncompat` extensión (D.13.15)
-
-- PR #91 extendió `FailureKind` + `HardIncompat` parcialmente. El
-  catálogo completo de pares incompatibles (D.13.15 list exhaustive)
-  queda para una sub-fase posterior.
-
-### 3.8 Path C — `Role::JsonRepairV2` re-call loop
-
-- Track G paths A (#117) + B (#119) shippeados. Path C (LLM re-call
-  con schema completo) documentado en
+- Track C (#202, E8 wire) shippeado. La path B (LLM-side re-call
+  con schema completo) documentada en
   `docs/research-json-structured-output.md` y queda deferred por
   decisión del usuario (no arreglar JSON output forzado, sólo
-  hacerlo tolerante).
+  hacerlo tolerante — path A + B + C shipped en #117, #119, #201).
 
-### 3.9 `seccomp`/`cgroup` Linux-only features on macOS / WSL
+### 3.5 Dashboard cross-run analytics
 
-- Sandbox hardening (Tracks E) es Linux-only. Cross-platform fallback
-  queda para v0.6+.
+- PR #212 cerró `J3` (`/api/lineage` cross-run endpoint). Quedan
+  otras vistas cross-run (e.g. `/api/compare-runs`,
+  `/api/aggregates`) como opt-in del catálogo.
+
+### 3.6 `seccomp`/`cgroup` Linux-only features on macOS / WSL
+
+- Idéntico a §3.2. Documentado por separado para tracking.
+
+### 3.7 Catalog items J4 follow-ups
+
+- `Judge quorum per-mode` matrix (J.1 / D.21.7) ✅ cerrado en #205.
+- `judge_consensus` threshold tuning queda como opt-in del catálogo.
+
+### 3.8 HardIncompat extensions beyond catalog I.6
+
+- PR #216 (this commit) cerró la lista exhaustiva de 6 variantes
+  del catálogo D.13.15. Variantes adicionales (e.g. `ClusterLocalInGlobal`,
+  `PullInPushOnly`, `StatelessInStateful`) quedan como opt-in para
+  una sub-fase futura si surge demanda.
 
 ## 4. Convenciones
 
@@ -145,7 +186,7 @@ Ordenados por valor/costo descendente.
 ```bash
 cargo fmt --all -- --check                          # formatter diff = empty
 cargo clippy --all-targets -- -D warnings           # 0 warnings
-cargo test --all-targets                            # 0 failed (1406 lib + integration)
+cargo test --all-targets                            # 0 failed (1492 lib + 21 integration)
 cargo build                                         # exit 0
 ```
 
@@ -206,40 +247,47 @@ de GitHub (`C` en `git log --pretty="%G?"`). Es esperado.
 
 ## 6. Plan para la siguiente sesión (delegar al subagent planning)
 
-Tres tracks abiertos al cierre. Recomiendo atacar en este orden
-(priorizado por valor/costo):
+Status al cierre de HEAD `693d746` (2026-08-06):
 
-### 6.1 `HardIncompat` catálogo completo (D.13.15)
+- ✅ **HardIncompat catálogo completo (D.13.15)** — cerrado en
+  PR #216 (this commit). 6 variantes exhaustivas reemplazan la
+  lista parcial de 5.
+- ✅ **Dashboard `/api/lineage` cross-run endpoint (J#5 follow-up)** —
+  cerrado en PR #212 (J3).
+- ✅ **DiscoveryCardinality wiring (D.21.3 / J.2)** — cerrado en
+  PR #210. `SelectionPlan::keep_top/diverse/outlier` ya wired.
+- ✅ **Cardinality::for_mode (J.1)** — cerrado en PR #205.
+- ✅ **Judge quorum per-mode (J.4)** — cerrado en PR #205.
+- ✅ **Path C JSON output (`Role::JsonRepairV2` re-call)** — cerrado
+  en PR #201 (research-json Path C).
+- ✅ **HardIncompat exhaustivo (D.13.15)** — cerrado en PR #216
+  (this commit).
 
-- M-sized (1 PR). Trade-off ya documentado en proposal-03 §D.13.15.
-- Wiring: extender `src/domain/constraint.rs` con la lista exhaustiva
-  (monolith ↔ microservices, sql ↔ nosql, blocking ↔ async runtime,
-  etc.).
-- Test: integration test que cubre cada par nuevo.
+Tracks abiertos al cierre (ordenados por valor/costo):
 
-### 6.2 Dashboard `/api/lineage` cross-run endpoint (J#5 follow-up)
+### 6.1 K.4 ampliado (PDFs, JS rendering)
 
-- M-sized (1 PR). PR #188 ya graficó per-run; falta el endpoint
-  cross-run.
-- Wiring: nuevo handler en `src/telemetry/view.rs`, query SQLite
-  cross-run con `parent_run_id` joins.
-- Test: integration test con 3 runs encadenados
-  (`run_disc → run_deep → run_variant`).
+- L-sized (1 PR). PR #212 añadió auth básico; falta extender a
+  PDFs / JS rendering.
+- Wiring: `src/research/fetcher.rs` con nuevos content-type handlers.
+- Test: integration test que cubre PDF parsing + JS-rendered HTML.
 
-### 6.3 DiscoveryCardinality wiring (D.21.3 / J.2)
+### 6.2 Cross-platform sandbox fallback (macOS / WSL)
 
-- L-sized (1 PR, depende de #156 `SelectionPlan::apply`).
-- Wiring: implementar `keep_top`, `keep_diverse`, `keep_outlier` en
-  `SelectionPlan`; conectar desde `RankPhase`.
-- Test: integration test con cardinalities 20/50/100 sobre el mismo
-  set de proposals.
+- XL-sized (1+ PR). Las primitivas `unshare(CLONE_NEW*)` + cgroup v2
+  + seccomp BPF son Linux-only.
+- Trade-off: spec §11.4 asume Linux; v0.6+ queda pendiente.
+
+### 6.3 `process_locks` lease module (D.1.5)
+
+- M-sized (1 PR). Schema `process_locks` (v008) ya existe; queda
+  implementar `src/storage/lease.rs` con FencingToken + heartbeats.
+- Wiring: completar `acquire_process_lock` / `release_process_lock`
+  para que dejen de ser scaffolding.
 
 ### 6.4 Deferred a v0.6+
 
-- K.4 ampliado (PDFs, auth, JS rendering) — necesita decisión de
-  producto.
-- Path C JSON output (`Role::JsonRepairV2` re-call) — usuario
-  explícito "no arreglar".
+- K.4 ampliado (PDFs, JS rendering) — necesita decisión de producto.
 - Cross-platform sandbox fallback (macOS / WSL) — trade-off
   importante.
 
