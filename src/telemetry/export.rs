@@ -361,7 +361,7 @@ fn write_tar_zst(staging_dir: &Path, out: &Path) -> Result<u64> {
         })
     })?;
     {
-        let mut builder = TarBuilder::new(zst.as_write_mut());
+        let mut builder = TarBuilder::new(&mut zst);
         append_dir(&mut builder, staging_dir, staging_dir)?;
         builder
             .into_inner()
@@ -591,5 +591,69 @@ mod tests {
         let full = collect_files(&run_dir, ExportLevel::Full).unwrap();
         let full_paths: Vec<&str> = full.iter().map(|(_, p)| p.as_str()).collect();
         assert!(full_paths.contains(&"telemetry/calls.jsonl.gz"));
+    }
+
+    #[test]
+    fn tar_zst_roundtrip_preserves_all_files() {
+        use std::collections::BTreeMap;
+
+        let staging = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(staging.path().join("nested/deep")).unwrap();
+        std::fs::write(staging.path().join("manifest.json"), b"{\"run\":1}").unwrap();
+        std::fs::write(staging.path().join("nested/data.bin"), [0, 1, 2, 3]).unwrap();
+        std::fs::write(staging.path().join("nested/deep/empty.txt"), []).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive_path = output.path().join("bundle.tar.zst");
+
+        assert!(write_tar_zst(staging.path(), &archive_path).unwrap() > 0);
+
+        let decoder = zstd::Decoder::new(File::open(&archive_path).unwrap()).unwrap();
+        let mut archive = tar::Archive::new(decoder);
+        let mut files = BTreeMap::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type().is_file() {
+                let path = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                files.insert(path, bytes);
+            }
+        }
+
+        assert_eq!(files.len(), 3);
+        assert_eq!(files["manifest.json"], b"{\"run\":1}");
+        assert_eq!(files["nested/data.bin"], [0, 1, 2, 3]);
+        assert!(files["nested/deep/empty.txt"].is_empty());
+    }
+
+    #[test]
+    fn tar_zst_writer_handles_large_files() {
+        let staging = tempfile::tempdir().unwrap();
+        let large_path = staging.path().join("large.bin");
+        let mut source = BufWriter::new(File::create(&large_path).unwrap());
+        let mut chunk = vec![0x5a; 64 * 1024];
+        for index in 0..128 {
+            chunk[0] = index as u8;
+            source.write_all(&chunk).unwrap();
+        }
+        source.flush().unwrap();
+        drop(source);
+        let expected_len = 128 * 64 * 1024;
+        let expected_sha = sha256_file(&large_path).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive_path = output.path().join("large.tar.zst");
+
+        write_tar_zst(staging.path(), &archive_path).unwrap();
+
+        let decoder = zstd::Decoder::new(File::open(&archive_path).unwrap()).unwrap();
+        let mut archive = tar::Archive::new(decoder);
+        let extracted = tempfile::tempdir().unwrap();
+        archive.unpack(extracted.path()).unwrap();
+        let extracted_path = extracted.path().join("large.bin");
+        assert_eq!(
+            std::fs::metadata(&extracted_path).unwrap().len(),
+            expected_len
+        );
+        assert_eq!(sha256_file(&extracted_path).unwrap(), expected_sha);
     }
 }
