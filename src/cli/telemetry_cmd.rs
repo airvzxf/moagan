@@ -154,6 +154,8 @@ pub enum ExportFormat {
     Tar,
     /// zip archive (uses `deflate`).
     Zip,
+    /// F5: tar archive compressed with zstd (`.tar.zst`).
+    TarZst,
 }
 
 impl std::str::FromStr for ExportLevel {
@@ -176,8 +178,9 @@ impl std::str::FromStr for ExportFormat {
             "tar.gz" | "targz" | "tgz" => Ok(Self::TarGz),
             "tar" => Ok(Self::Tar),
             "zip" => Ok(Self::Zip),
+            "tar.zst" | "tarzst" | "tzst" => Ok(Self::TarZst),
             other => Err(Error::InvalidArgs(format!(
-                "invalid export format '{other}' (expected 'tar.gz', 'tar', or 'zip')"
+                "invalid export format '{other}' (expected 'tar.gz', 'tar', 'zip', or 'tar.zst')"
             ))),
         }
     }
@@ -198,6 +201,7 @@ impl std::fmt::Display for ExportFormat {
             Self::TarGz => "tar.gz",
             Self::Tar => "tar",
             Self::Zip => "zip",
+            Self::TarZst => "tar.zst",
         })
     }
 }
@@ -855,6 +859,7 @@ mod export {
             super::ExportFormat::TarGz => "tar.gz",
             super::ExportFormat::Tar => "tar",
             super::ExportFormat::Zip => "zip",
+            super::ExportFormat::TarZst => "tar.zst",
         }
     }
 }
@@ -1068,6 +1073,14 @@ mod tests {
         }
         assert_eq!("tar".parse::<ExportFormat>().unwrap(), ExportFormat::Tar);
         assert_eq!("zip".parse::<ExportFormat>().unwrap(), ExportFormat::Zip);
+        assert_eq!(
+            "tar.zst".parse::<ExportFormat>().unwrap(),
+            ExportFormat::TarZst
+        );
+        assert_eq!(
+            "tarZST".parse::<ExportFormat>().unwrap(),
+            ExportFormat::TarZst
+        );
         assert!("rar".parse::<ExportFormat>().is_err());
     }
 

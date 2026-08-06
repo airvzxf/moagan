@@ -184,7 +184,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
     let stub = Manifest {
-        schema_version: "v1".into(),
+        schema_version: Manifest::schema_version_string(),
         run_id,
         mode: opts.mode.as_str().into(),
         status: "running".into(),
@@ -203,6 +203,10 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         context_refs: context_refs.clone(),
         lineage_paths: lineage_paths.clone(),
         cli_prompt: Some(opts.prompt.clone()),
+        config_hash: None,
+        created_at_iso: chrono::Utc::now().to_rfc3339(),
+        last_resumed_at_iso: None,
+        resume_count: 0,
     };
 
     let final_manifest = run_full_pipeline(
@@ -372,6 +376,12 @@ pub async fn run_full_pipeline(
         manifest.lineage_paths = stub.lineage_paths.clone();
     }
     manifest.cli_prompt = stub.cli_prompt.clone();
+    // F5: read the `final/config_hash.txt` sidecar that the
+    // intake phase wrote and stamp the digest onto the manifest.
+    // Missing sidecar (legacy runs, mocked-out intake) leaves
+    // `config_hash` at its v2 default of `None` so the field
+    // round-trips cleanly.
+    manifest.config_hash = read_intake_config_hash(&run_dir);
     // Redact the verbatim CLI prompt before it lands on disk. The
     // default policy redacts on Storage; the pattern catalog covers
     // API keys (sk-cp-, sk-, ghp_, …), JWTs, Bearer headers, and
@@ -707,7 +717,7 @@ pub(crate) fn build_manifest(
     let usage = aggregate_usage(&calls_path, &legacy_calls_path);
 
     let mut manifest = Manifest {
-        schema_version: "v1".into(),
+        schema_version: Manifest::schema_version_string(),
         run_id: *run_id,
         mode: mode.into(),
         status: status.into(),
@@ -728,6 +738,10 @@ pub(crate) fn build_manifest(
             home, *run_id,
         ))),
         cli_prompt: None,
+        config_hash: None,
+        created_at_iso: now.to_rfc3339(),
+        last_resumed_at_iso: None,
+        resume_count: 0,
     };
 
     // 4. Compute the self-hash over the canonical JSON with
@@ -765,6 +779,24 @@ fn read_telemetry_text(primary: &Path, legacy: &Path) -> String {
     match crate::storage::compression::read_to_string(primary) {
         Ok(s) => s,
         Err(_) => crate::storage::compression::read_to_string(legacy).unwrap_or_default(),
+    }
+}
+
+/// F5: read the `final/config_hash.txt` sidecar that the intake
+/// phase wrote and return the trimmed hex digest. Returns `None`
+/// when the sidecar is missing (legacy runs) or malformed
+/// (corrupted disk) so the manifest can stay at its v2 default
+/// without surfacing a confusing error to the operator.
+fn read_intake_config_hash(run_dir: &crate::fs_layout::RunDir<'_>) -> Option<String> {
+    let path = run_dir
+        .final_dir()
+        .join(crate::phases::intake::CONFIG_HASH_SIDECAR);
+    let body = std::fs::read_to_string(&path).ok()?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
     }
 }
 

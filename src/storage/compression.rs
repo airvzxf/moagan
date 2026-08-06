@@ -280,6 +280,165 @@ pub fn reader(path: &Path, c: Compression) -> io::Result<Box<dyn Read>> {
     })
 }
 
+// =====================================================================
+// F5 — Streaming zstd writer + run-bundle export
+// =====================================================================
+//
+// The export surface gained a `tar.zst` archive format (F5) so
+// operators can ship a run as a single compressed file. The
+// `ZstWriter` wraps `zstd::stream::write::Encoder` over a `File`
+// and exposes a `finish()` call that flushes the trailing frame
+// to disk — without it the encoder holds bytes in its internal
+// buffer and the on-disk file ends in a truncated frame that
+// `zstd::Decoder` cannot open.
+
+/// Stream-friendly zstd writer that wraps `File` and finishes a
+/// complete zstd frame on `finish()`. Used by `export_run_tar_zst`
+/// (F5) to back the `ExportFormat::TarZst` archive pipeline with a
+/// deterministic per-frame output.
+pub struct ZstWriter {
+    inner: zstd::stream::write::Encoder<'static, File>,
+}
+
+impl ZstWriter {
+    /// Open `path` for writing and wrap it in a fresh
+    /// `zstd::Encoder` at compression level 0 (the fastest
+    /// level; F5 does not pin a level so callers can change it
+    /// later without breaking existing archives).
+    pub fn new(path: &Path) -> io::Result<Self> {
+        let file = File::create(path)?;
+        let encoder = zstd::stream::write::Encoder::new(file, 0)
+            .map_err(|e| io::Error::other(format!("zstd encoder init: {e}")))?;
+        Ok(Self { inner: encoder })
+    }
+
+    /// Borrow the inner `File` so a caller (e.g. a tar builder
+    /// that wants to flush the file before `finish()`) can
+    /// reach the underlying writer. Bytes written through the
+    /// returned reference are NOT compressed by the encoder —
+    /// callers that need compression should route through
+    /// [`Self::as_write_mut`] or [`Self::write`].
+    pub fn inner_mut(&mut self) -> &mut File {
+        self.inner.get_mut()
+    }
+
+    /// Borrow the encoder as a `dyn Write` so a caller (e.g.
+    /// `tar::Builder`) can stream data through it and have
+    /// every byte compressed by the active zstd frame. The
+    /// returned reference is bound to the encoder's lifetime,
+    /// so it stays valid until `finish()` consumes `self`.
+    pub fn as_write_mut(&mut self) -> &mut dyn Write {
+        &mut self.inner
+    }
+
+    /// Stream `buf` into the underlying zstd frame. The bytes
+    /// do not reach disk until `finish()` (or a `flush()`) is
+    /// called.
+    pub fn write(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.inner.write_all(buf)
+    }
+
+    /// Finish the current zstd frame and flush the file to
+    /// disk. Returns the inner `File` so callers that want to
+    /// keep writing (e.g. a tar builder that needs the
+    /// underlying writer for `into_inner()`) can recover it.
+    pub fn finish(self) -> io::Result<File> {
+        self.inner.finish()
+    }
+}
+
+/// Build a single `run_<id>.tar.zst` archive containing every
+/// file under `run_dir`. The on-disk layout mirrors `tar`/`zstd`
+/// defaults: an uncompressed tar stream (no compression between
+/// entries) compressed by a single zstd frame around the whole
+/// archive. Used by F5's `ExportFormat::TarZst` and by the
+/// ad-hoc `moagan telemetry export --format tar.zst` CLI path.
+pub fn export_run_tar_zst(run_dir: &Path, out_path: &Path) -> Result<()> {
+    if !run_dir.exists() {
+        return Err(Error::InvalidState(format!(
+            "run dir not found at {}",
+            run_dir.display()
+        )));
+    }
+    if let Some(parent) = out_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::Io(IoError::CreateDir {
+                path: parent.to_path_buf(),
+                source: e,
+            })
+        })?;
+    }
+    let mut zst = ZstWriter::new(out_path).map_err(|e| Error::Io(IoError::Raw(e)))?;
+    {
+        let mut builder = tar::Builder::new(zst.as_write_mut());
+        append_run_dir(&mut builder, run_dir, run_dir)?;
+        builder
+            .into_inner()
+            .map_err(|e| Error::Io(IoError::Raw(e)))?
+            .flush()
+            .map_err(|e| {
+                Error::Io(IoError::Write {
+                    path: out_path.to_path_buf(),
+                    source: e,
+                })
+            })?;
+    }
+    let mut file = zst.finish().map_err(|e| Error::Io(IoError::Raw(e)))?;
+    file.flush().map_err(|e| {
+        Error::Io(IoError::Write {
+            path: out_path.to_path_buf(),
+            source: e,
+        })
+    })?;
+    Ok(())
+}
+
+/// Recursively walk `dir` and append every file to the tar
+/// builder with a path relative to `root`. Mirrors the helper in
+/// `telemetry::export::append_dir` but is kept local so the
+/// compression module does not need to depend on the export
+/// module (and vice-versa).
+fn append_run_dir<W: Write>(builder: &mut tar::Builder<W>, root: &Path, dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(dir).map_err(|e| {
+        Error::Io(IoError::Read {
+            path: dir.to_path_buf(),
+            source: e,
+        })
+    })? {
+        let entry = entry.map_err(|e| Error::Io(IoError::Raw(e)))?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| path.clone());
+        let meta = std::fs::metadata(&path).map_err(|e| {
+            Error::Io(IoError::Read {
+                path: path.clone(),
+                source: e,
+            })
+        })?;
+        if meta.is_dir() {
+            builder
+                .append_dir(rel.to_string_lossy().replace('\\', "/"), &path)
+                .map_err(|e| Error::Io(IoError::Raw(e)))?;
+            append_run_dir(builder, root, &path)?;
+        } else if meta.is_file() {
+            let mut f = File::open(&path).map_err(|e| {
+                Error::Io(IoError::Read {
+                    path: path.clone(),
+                    source: e,
+                })
+            })?;
+            builder
+                .append_file(rel.to_string_lossy().replace('\\', "/"), &mut f)
+                .map_err(|e| Error::Io(IoError::Raw(e)))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +616,114 @@ mod tests {
         let mut buf = String::new();
         r.read_to_string(&mut buf).unwrap();
         assert!(buf.contains("\"phase\":\"gzip\""));
+    }
+
+    // -- F5: ZstWriter + tar.zst export ------------------------------
+
+    /// F5: `ZstWriter` produces a single zstd frame that
+    /// `zstd::Decoder` can read back. The output bytes start
+    /// with the canonical zstd magic (`28 b5 2f fd`) and the
+    /// round-trip recovers the original bytes byte-for-byte.
+    #[test]
+    fn zst_writer_compresses_stream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("frame.zst");
+        let payload = b"the quick brown fox jumps over the lazy dog";
+        {
+            let mut w = ZstWriter::new(&path).unwrap();
+            w.write(payload).unwrap();
+            w.finish().unwrap();
+        }
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            raw.len() >= 4,
+            "encoded frame must contain at least the magic header, got {} bytes",
+            raw.len()
+        );
+        assert_eq!(&raw[..4], &[0x28, 0xb5, 0x2f, 0xfd], "zstd frame magic");
+        // Round-trip: the decoder produces the input verbatim.
+        let mut decoder = zstd::Decoder::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    /// F5: `export_run_tar_zst` walks `run_dir`, archives each
+    /// file via `tar::Builder`, compresses the resulting tar
+    /// stream with zstd, and writes the bundle to `out_path`.
+    /// Decompressing the bundle and extracting the tar returns
+    /// the original files with byte-for-byte fidelity.
+    #[test]
+    fn tar_zst_roundtrip_extracts_files() {
+        let src = tempfile::tempdir().unwrap();
+        let src_dir = src.path().to_path_buf();
+        std::fs::write(src_dir.join("manifest.json"), b"{\"run\":1}").unwrap();
+        std::fs::create_dir_all(src_dir.join("final").join("rankings")).unwrap();
+        std::fs::write(src_dir.join("final").join("portfolio.md"), b"# portfolio").unwrap();
+        std::fs::write(
+            src_dir.join("final").join("rankings").join("ranking.json"),
+            b"[]",
+        )
+        .unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let out_path = bundle.path().join("run.tar.zst");
+        export_run_tar_zst(&src_dir, &out_path).expect("tar.zst export succeeds");
+
+        // Decode the zstd frame and stream the tar.
+        let f = std::fs::File::open(&out_path).unwrap();
+        let zst = zstd::Decoder::new(f).unwrap();
+        let mut tar = tar::Archive::new(zst);
+        let extract = tempfile::tempdir().unwrap();
+        tar.unpack(extract.path()).expect("tar unpacks");
+
+        assert_eq!(
+            std::fs::read(extract.path().join("manifest.json")).unwrap(),
+            b"{\"run\":1}"
+        );
+        assert_eq!(
+            std::fs::read(extract.path().join("final").join("portfolio.md"),).unwrap(),
+            b"# portfolio"
+        );
+        assert_eq!(
+            std::fs::read(
+                extract
+                    .path()
+                    .join("final")
+                    .join("rankings")
+                    .join("ranking.json"),
+            )
+            .unwrap(),
+            b"[]"
+        );
+    }
+
+    /// F5: the bundled tar includes the run's `manifest.json`
+    /// sidecar. This is the operator-facing guarantee: opening
+    /// the archive without re-running the pipeline surfaces the
+    /// canonical run metadata. The test seeds a known manifest
+    /// payload and confirms it survives the round-trip
+    /// verbatim.
+    #[test]
+    fn tar_zst_export_emits_manifest() {
+        let src = tempfile::tempdir().unwrap();
+        let src_dir = src.path().to_path_buf();
+        let manifest_body =
+            b"{\"schema_version\":\"v2\",\"run_id\":\"019f0000-0000-7000-8000-000000000001\"}";
+        std::fs::write(src_dir.join("manifest.json"), manifest_body).unwrap();
+        std::fs::write(src_dir.join("brief.json"), b"{}").unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let out_path = bundle.path().join("run.tar.zst");
+        export_run_tar_zst(&src_dir, &out_path).expect("export succeeds");
+
+        let f = std::fs::File::open(&out_path).unwrap();
+        let zst = zstd::Decoder::new(f).unwrap();
+        let mut tar = tar::Archive::new(zst);
+        let extract = tempfile::tempdir().unwrap();
+        tar.unpack(extract.path()).unwrap();
+
+        let archived = std::fs::read(extract.path().join("manifest.json")).unwrap();
+        assert_eq!(archived, manifest_body, "manifest.json preserved verbatim");
     }
 }

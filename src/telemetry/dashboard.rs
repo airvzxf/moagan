@@ -330,6 +330,7 @@ async fn dispatch(
                     ExportFormat::TarGz => "application/gzip",
                     ExportFormat::Tar => "application/x-tar",
                     ExportFormat::Zip => "application/zip",
+                    ExportFormat::TarZst => "application/zstd",
                 };
                 return Ok(binary_response(200, content_type, body));
             }

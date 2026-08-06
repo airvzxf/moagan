@@ -398,7 +398,45 @@ pub struct Manifest {
     /// value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_prompt: Option<String>,
+    /// F5: BLAKE3 hash of the canonical TOML serialization of the
+    /// run's `Config` (see `intake.rs::compute_config_hash`).
+    /// Pinned at run start so two runs with the same config
+    /// produce the same `config_hash` and a `moagan rerun` with
+    /// a different config can be detected by comparing the hash.
+    /// `None` for runs that pre-date the field (legacy readers
+    /// parse it as `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
+    /// F5: ISO-8601 UTC timestamp string for when the run was
+    /// first created. Mirrors `created_at` (a `DateTime<Utc>`)
+    /// but kept as an explicit string so external consumers can
+    /// diff it against telemetry / SQLite without re-parsing
+    /// RFC3339. Empty for runs that pre-date the field.
+    pub created_at_iso: String,
+    /// F5: ISO-8601 UTC timestamp of the most recent `moagan
+    /// continue` invocation. `None` until the first resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resumed_at_iso: Option<String>,
+    /// F5: number of times the run has been resumed via `moagan
+    /// continue`. Default 0; saturates on overflow so a long-lived
+    /// run cannot panic.
+    pub resume_count: u32,
 }
+
+/// Numeric manifest schema version. Bumped to `2` by F5 to add
+/// the lifecycle / reproducibility block (`config_hash`,
+/// `created_at_iso`, `last_resumed_at_iso`, `resume_count`). The
+/// JSON sidecar still uses the string form (`"v2"`) for
+/// human-readability; the typed constant is the single source of
+/// truth for downstream consumers that want a numeric comparison.
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Back-compat alias for `SCHEMA_VERSION`. The F5 task brief
+/// names the constant `MANIFEST_SCHEMA_VERSION`; the existing
+/// `SCHEMA_VERSION` name matches the convention used by the other
+/// schema-versioned artefacts (`ArtifactMeta::SCHEMA_VERSION`,
+/// `Checkpoint::SCHEMA_VERSION`, `ValidationSidecar::SCHEMA_VERSION`).
+pub const MANIFEST_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// Lineage path block. Stored as two parallel maps so the JSON
 /// sidecar remains human-readable while the in-memory
@@ -440,6 +478,55 @@ impl LineagePaths {
         let relative = rp.relative.clone().into_iter().collect();
         let absolute = rp.absolute.clone().into_iter().collect();
         Self { relative, absolute }
+    }
+}
+
+impl Manifest {
+    /// F5: numeric schema version. Matches the top-level constant
+    /// `SCHEMA_VERSION` and is exposed here so downstream consumers
+    /// that already carry a `Manifest` value can branch on the
+    /// version without importing the constant.
+    pub const SCHEMA_VERSION: u32 = SCHEMA_VERSION;
+
+    /// F5: build the canonical `"vN"` string used in the JSON
+    /// sidecar. Pinning the formatter on the type keeps the
+    /// `"v1" -> "v2"` migration a single `const` change.
+    pub fn schema_version_string() -> String {
+        format!("v{}", Self::SCHEMA_VERSION)
+    }
+
+    /// F5: stable accessor for the config hash. Returns the hex
+    /// digest or `None` for runs that pre-date the field (legacy
+    /// v1 sidecars parse it as `None`).
+    pub fn config_hash(&self) -> Option<&str> {
+        self.config_hash.as_deref()
+    }
+
+    /// F5: returns `true` when the manifest has been resumed at
+    /// least once. Equivalent to `resume_count > 0` but reads
+    /// more naturally in `moagan inspect` / dashboard code.
+    pub fn has_been_resumed(&self) -> bool {
+        self.resume_count > 0
+    }
+
+    /// F5: record a `moagan continue` invocation. Saturates the
+    /// counter on overflow so a long-lived run cannot panic and
+    /// bumps `updated_at` so the manifest sidecar's
+    /// `manifest_blake3` is recomputed by the next writer.
+    pub fn mark_resumed(&mut self, iso: &str) {
+        self.resume_count = self.resume_count.saturating_add(1);
+        self.last_resumed_at_iso = Some(iso.to_owned());
+        self.updated_at = chrono::Utc::now();
+    }
+
+    /// F5: stamp the ISO-8601 creation timestamp. Idempotent on
+    /// the JSON sidecar (the same string is written every call)
+    /// and exposed so `build_manifest` can populate the field
+    /// without reaching for `chrono::Utc` directly.
+    pub fn stamp_created_at(&mut self) {
+        if self.created_at_iso.is_empty() {
+            self.created_at_iso = self.created_at.to_rfc3339();
+        }
     }
 }
 
@@ -1977,6 +2064,10 @@ mod tests {
             context_refs: Vec::new(),
             lineage_paths: Some(lineage.clone()),
             cli_prompt: None,
+            config_hash: None,
+            created_at_iso: "2026-01-01T00:00:00+00:00".into(),
+            last_resumed_at_iso: None,
+            resume_count: 0,
         };
         let j = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&j).unwrap();
@@ -1985,5 +2076,104 @@ mod tests {
         // Spot-check the keys.
         assert!(lp.relative.contains_key("brief"));
         assert!(lp.absolute.contains_key("final"));
+    }
+
+    // -- F5: schema v2 + lifecycle metadata ---------------------------
+
+    /// F5: bumping `SCHEMA_VERSION` to `2` propagates through the
+    /// canonical string form (`"v2"`) and the typed constant. The
+    /// four new fields (`config_hash`, `created_at_iso`,
+    /// `last_resumed_at_iso`, `resume_count`) are present on a
+    /// fresh Manifest with their documented defaults.
+    #[test]
+    fn manifest_schema_v2_includes_lifecycle_metadata() {
+        assert_eq!(SCHEMA_VERSION, 2);
+        assert_eq!(Manifest::SCHEMA_VERSION, 2);
+        assert_eq!(MANIFEST_SCHEMA_VERSION, 2);
+        assert_eq!(Manifest::schema_version_string(), "v2");
+
+        let m = Manifest::default();
+        assert_eq!(m.schema_version, "");
+        assert!(m.config_hash().is_none());
+        assert!(!m.has_been_resumed());
+        assert_eq!(m.resume_count, 0);
+        assert!(m.last_resumed_at_iso.is_none());
+        assert_eq!(m.created_at_iso, "");
+    }
+
+    /// F5: `mark_resumed` is the canonical accessor for the
+    /// lifecycle block. Each call increments the counter,
+    /// overwrites `last_resumed_at_iso`, and refreshes
+    /// `updated_at`. After three calls the counter saturates
+    /// correctly when pushed past `u32::MAX` so the panic stays
+    /// out of the operator's hot path.
+    #[test]
+    fn manifest_lifecycle_increments_resume_count() {
+        let mut m = Manifest::default();
+        assert!(!m.has_been_resumed());
+
+        m.mark_resumed("2026-01-01T00:00:01+00:00");
+        assert_eq!(m.resume_count, 1);
+        assert_eq!(
+            m.last_resumed_at_iso.as_deref(),
+            Some("2026-01-01T00:00:01+00:00")
+        );
+        assert!(m.has_been_resumed());
+
+        m.mark_resumed("2026-01-01T00:00:02+00:00");
+        m.mark_resumed("2026-01-01T00:00:03+00:00");
+        assert_eq!(m.resume_count, 3);
+        assert_eq!(
+            m.last_resumed_at_iso.as_deref(),
+            Some("2026-01-01T00:00:03+00:00")
+        );
+
+        // Saturating add: pushing past u32::MAX must not panic.
+        m.resume_count = u32::MAX;
+        m.mark_resumed("2026-01-01T00:00:04+00:00");
+        assert_eq!(m.resume_count, u32::MAX);
+    }
+
+    /// F5: a v1 legacy sidecar (no `config_hash`, no
+    /// `created_at_iso`, no `last_resumed_at_iso`, no
+    /// `resume_count`) parses into a v2 Manifest with the new
+    /// fields populated from their documented defaults. The
+    /// `#[serde(default, ...)]` annotations are what make this
+    /// backwards-compatible load possible; this test pins the
+    /// contract for downstream consumers that read mixed-version
+    /// archives.
+    #[test]
+    fn manifest_v1_loads_v2_with_defaults() {
+        let legacy = serde_json::json!({
+            "schema_version": "v1",
+            "run_id": "019f0000-0000-7000-8000-000000000001",
+            "mode": "fast",
+            "status": "completed",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "client_version": "0.3.0",
+            "brief_sha256": "",
+            "brief_blake3": "",
+            "provider": "minimax",
+            "model": "MiniMax-M3",
+            "phases": [],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read": 0,
+                "cache_creation": 0,
+            },
+            "manifest_blake3": "",
+        });
+        let m: Manifest = serde_json::from_value(legacy).unwrap();
+        // v2 lifecycle fields default to empty / zero / None so
+        // legacy sidecars continue to load.
+        assert!(m.config_hash.is_none());
+        assert_eq!(m.created_at_iso, "");
+        assert!(m.last_resumed_at_iso.is_none());
+        assert_eq!(m.resume_count, 0);
+        // The schema_version field stays at the legacy value so a
+        // round-trip preserves the originating schema marker.
+        assert_eq!(m.schema_version, "v1");
     }
 }
