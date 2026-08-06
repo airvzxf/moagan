@@ -103,6 +103,12 @@ pub enum Resolution {
     Rejected,
     /// User typed a free-form text answer (e.g. a constraint or an
     /// edit). The text is captured verbatim.
+    ///
+    /// Call sites that match this variant should call
+    /// [`crate::checkpoint::persist_modify_note`] to persist the
+    /// text to `<run_dir>/state/modify_note.json` (F1 wire-up) so
+    /// the rank and deliver phases can prepend the operator's
+    /// correction to their LLM prompts on the next cycle.
     Modify(String),
 }
 

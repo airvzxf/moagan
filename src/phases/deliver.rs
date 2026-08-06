@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
+use crate::checkpoint::modify_note;
 use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
 use crate::domain::{FinalReport, Proposal, Ranking};
 use crate::error::Result;
@@ -57,6 +58,11 @@ impl Phase for DeliverPhase {
             "representatives": ranking.representatives,
         }))
         .map_err(crate::Error::from)?;
+        // F1: prepend the operator note (if any) to the user
+        // prompt. The note is wrapped in a tagged block so the
+        // deliver model can distinguish the correction from the
+        // underlying ranking payload.
+        let user = modify_note::prepend_to_prompt(ctx.run_dir().root(), &user);
         let system = system_prompt(Role::Deliver).to_owned();
         let report: FinalReport = ctx
             .call_with_retry_parse(
@@ -104,8 +110,14 @@ impl Phase for DeliverPhase {
             // gets a non-zero exit and the manifest status flips to
             // 'failed'.
             match crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)? {
-                crate::checkpoint::Resolution::Approved
-                | crate::checkpoint::Resolution::Modify(_) => {}
+                crate::checkpoint::Resolution::Approved => {}
+                crate::checkpoint::Resolution::Modify(text) => {
+                    // F1: persist the operator's correction. The
+                    // current deliver call already shipped, so the
+                    // note informs the next rank/deliver cycle
+                    // (e.g. `moagan rerank`) rather than this run.
+                    crate::checkpoint::persist_modify_note(ctx.run_dir().root(), "deliver", &text)?;
+                }
                 crate::checkpoint::Resolution::Rejected => {
                     return Err(crate::error::Error::Cancelled(
                         "user rejected the final portfolio".into(),
@@ -453,5 +465,202 @@ mod tests {
         assert!(md.contains("cluster_proposals/cp_*.json"));
         assert!(md.contains("proposals/s_*.json"));
         assert!(md.contains("adversaries/p_*.json"));
+    }
+
+    /// Test-only provider that records every `Request` it receives
+    /// and replies with a canned `FinalReport` JSON. Used by the
+    /// F1 prompt-injection test below to capture what the
+    /// deliver-phase LLM call actually saw as its `user` prompt.
+    struct RecordingDeliverProvider {
+        name: String,
+        model: String,
+        recorded: parking_lot::Mutex<Vec<crate::llm::wire::Request>>,
+        canned: crate::llm::wire::Response,
+    }
+
+    impl RecordingDeliverProvider {
+        fn new() -> Self {
+            Self {
+                name: "recording".into(),
+                model: "recording-model".into(),
+                recorded: parking_lot::Mutex::new(Vec::new()),
+                canned: crate::llm::wire::Response {
+                    text:
+                        r#"{"title":"T","summary":"S","recommendation":"R","alternatives":[],"next_steps":[]}"#
+                            .to_owned(),
+                    finish_reason: Some("end_turn".into()),
+                    truncated: false,
+                    usage: crate::llm::wire::Usage::default(),
+                },
+            }
+        }
+
+        fn recorded(&self) -> Vec<crate::llm::wire::Request> {
+            self.recorded.lock().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::Provider for RecordingDeliverProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn model(&self) -> &str {
+            &self.model
+        }
+        fn endpoint(&self) -> &str {
+            "record://local"
+        }
+        async fn send(
+            &self,
+            req: &crate::llm::wire::Request,
+        ) -> crate::error::Result<(u16, crate::llm::wire::Response)> {
+            self.recorded.lock().push(req.clone());
+            Ok((200, self.canned.clone()))
+        }
+    }
+
+    /// F1: when an operator note is persisted to
+    /// `<run_dir>/state/modify_note.json` before the deliver phase
+    /// runs, the `user` prompt that the LLM receives must be
+    /// wrapped with the operator note in a `[operator_modify_note]`
+    /// tagged block. The contract is end-to-end: the test builds a
+    /// real `RunContext`, wires a `RecordingDeliverProvider`, runs
+    /// `DeliverPhase::execute`, and asserts on the recorded
+    /// request.
+    #[test]
+    fn deliver_phase_includes_modify_note_in_prompt() -> crate::error::Result<()> {
+        use std::sync::Arc;
+
+        use crate::execution::Parallelism;
+        use crate::fs_layout::MoaganHome;
+        use crate::ids::RunId;
+        use crate::llm::ProviderRegistry;
+        use crate::phases::phase::{Phase, RunContext};
+        use crate::phases::util::write_json;
+        use crate::telemetry::Telemetry;
+
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = Arc::new(MoaganHome::resolve().unwrap());
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+
+        // Minimal winning proposal (the deliver phase reads
+        // `proposals/p_000.json` first; revisions are tried next).
+        let proposal = Proposal {
+            id: "p_000".into(),
+            summary: "winning summary".into(),
+            ..Proposal::default()
+        };
+        let proposal_path = run_dir.proposals().join("p_000.json");
+        std::fs::create_dir_all(proposal_path.parent().unwrap()).unwrap();
+        write_json(&proposal_path, &proposal)?;
+
+        // Minimal ranking sidecar.
+        let ranking = Ranking {
+            ranked: vec![RankEntry {
+                id: "p_000".into(),
+                score: 9.0,
+                reason: "test winner".into(),
+            }],
+            representatives: vec![],
+            winner: "p_000".into(),
+            stability_score: None,
+            stability_label: None,
+            stability_sigma: None,
+        };
+        let ranking_path = run_dir.rankings().join("ranking.json");
+        std::fs::create_dir_all(ranking_path.parent().unwrap()).unwrap();
+        write_json(&ranking_path, &ranking)?;
+
+        // F1: persist the operator note *before* deliver runs.
+        let run_root = run_dir.root().to_path_buf();
+        crate::checkpoint::persist_modify_note(
+            &run_root,
+            "rank",
+            "drop weak evidence in the recommendation",
+        )?;
+
+        // Wire the recording provider into the registry. The
+        // deliver phase resolves its provider through
+        // `RunContext::provider()` which looks up by
+        // `default_provider == "mock"` here — we register under
+        // "mock" so the lookup path stays identical to the
+        // production wire-up.
+        let recorder = Arc::new(RecordingDeliverProvider::new());
+        let mut registry = ProviderRegistry::default();
+        registry.insert(
+            "mock".into(),
+            recorder.clone() as Arc<dyn crate::llm::Provider>,
+        );
+
+        // Non-interactive so the deliver phase skips the final
+        // checkpoint prompt (we only care about the LLM call's
+        // user prompt, not the operator interaction).
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            Arc::new(registry),
+            "mock".into(),
+            "recording-model".into(),
+            Parallelism::new(1),
+            Telemetry::noop(),
+            String::new(),
+            "fast".into(),
+        )
+        .with_interactive(false);
+
+        let phase = DeliverPhase;
+        pollster::block_on(phase.execute(&ctx))?;
+
+        // The recording provider must have at least one entry —
+        // the deliver phase makes at least one LLM call (the
+        // `FinalReport` synthesis). The very last attempt's
+        // `user` field is the prompt that would be re-sent on a
+        // parse retry; what we care about is that the operator
+        // note is present on every recorded prompt.
+        let calls = recorder.recorded();
+        assert!(
+            !calls.is_empty(),
+            "deliver phase must invoke the LLM at least once"
+        );
+        for call in &calls {
+            assert!(
+                call.user.contains("[operator_modify_note]"),
+                "user prompt must open the note tag; got:\n{}",
+                call.user
+            );
+            assert!(
+                call.user
+                    .contains("drop weak evidence in the recommendation"),
+                "operator note text must appear; got:\n{}",
+                call.user
+            );
+            assert!(
+                call.user.contains("[/operator_modify_note]"),
+                "user prompt must close the note tag; got:\n{}",
+                call.user
+            );
+            // The underlying ranking payload must still be
+            // present below the note block — prepending is
+            // additive.
+            assert!(
+                call.user.contains("p_000"),
+                "underlying ranking payload must remain; got:\n{}",
+                call.user
+            );
+        }
+        Ok(())
     }
 }
