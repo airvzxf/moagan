@@ -467,7 +467,8 @@ impl Phase for SketchPhase {
         let research_enabled = ctx.config.research_enabled;
         let research_api_key = ctx.config.research.api_key.clone();
         let snippets =
-            Self::collect_research_snippets(research_enabled, research_urls, research_api_key).await;
+            Self::collect_research_snippets(research_enabled, research_urls, research_api_key)
+                .await;
         let system = if snippets.is_empty() {
             system
         } else {

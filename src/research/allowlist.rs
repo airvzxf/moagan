@@ -65,9 +65,7 @@ pub fn is_allowed(host: &str) -> bool {
 /// allowlist; the caller is expected to enforce the allowlist
 /// separately via [`is_allowed`] before looking up policy details.
 pub fn find_policy(host: &str) -> Option<&'static HostPolicy> {
-    HOSTS
-        .iter()
-        .find(|p| p.host.eq_ignore_ascii_case(host))
+    HOSTS.iter().find(|p| p.host.eq_ignore_ascii_case(host))
 }
 
 #[cfg(test)]

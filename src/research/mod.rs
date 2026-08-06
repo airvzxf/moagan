@@ -23,9 +23,7 @@ pub use fetcher::{
 /// key (no Authorization header on any host). K.4 follow-up work
 /// should construct a [`ResearchFetcher`] explicitly so the
 /// bearer opt-in hosts see the key when configured.
-pub async fn fetch_all(
-    urls: &[String],
-) -> Vec<std::result::Result<ResearchSnippet, FetchError>> {
+pub async fn fetch_all(urls: &[String]) -> Vec<std::result::Result<ResearchSnippet, FetchError>> {
     ResearchFetcher::new(None).fetch_all(urls).await
 }
 

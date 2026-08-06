@@ -160,8 +160,8 @@ impl ResearchFetcher {
         policy: &RedactPolicy,
         url: &str,
     ) -> std::result::Result<ResearchSnippet, FetchError> {
-        let parsed =
-            reqwest::Url::parse(url).map_err(|e| FetchError::NetworkError(format!("parse: {e}")))?;
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| FetchError::NetworkError(format!("parse: {e}")))?;
         let host = parsed
             .host_str()
             .ok_or_else(|| FetchError::NetworkError("url has no host".into()))?;

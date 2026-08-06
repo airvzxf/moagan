@@ -3409,13 +3409,19 @@ mod tests {
             .unwrap();
         db.register_run(parent, "fast", "completed", "0.3.0", None, None, Some(root))
             .unwrap();
-        db.register_run(child, "fast", "completed", "0.3.0", None, None, Some(parent))
-            .unwrap();
+        db.register_run(
+            child,
+            "fast",
+            "completed",
+            "0.3.0",
+            None,
+            None,
+            Some(parent),
+        )
+        .unwrap();
         let pairs = db.list_lineage_pairs().unwrap();
-        let dict: std::collections::HashMap<Option<String>, Option<String>> = pairs
-            .into_iter()
-            .map(|(p, c)| (c, p))
-            .collect();
+        let dict: std::collections::HashMap<Option<String>, Option<String>> =
+            pairs.into_iter().map(|(p, c)| (c, p)).collect();
         assert_eq!(
             dict.get(&Some(root.to_string())).cloned().flatten(),
             None,
