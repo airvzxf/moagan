@@ -2,6 +2,7 @@
 //! implementations, cache, rate limiter, circuit breaker, and the
 //! versioned prompt registry.
 
+pub mod api_keys_file;
 pub mod budget;
 pub mod cache;
 pub mod capabilities;
@@ -16,6 +17,7 @@ pub mod openai_compat;
 pub mod opencode_go;
 pub mod opencode_go_anthropic;
 pub mod opencode_go_responses;
+pub mod prompt_cache;
 pub mod prompts;
 pub mod provider;
 pub mod rate_limiter;
