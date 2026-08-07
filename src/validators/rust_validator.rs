@@ -372,19 +372,19 @@ mod tests {
     /// Cargo respects `CARGO_HOME` over `HOME`; the sandbox
     /// inherits `CARGO_HOME` because `build_env` does
     /// `env = std::env::vars().collect()` and only overrides `HOME`
-    /// and `PATH` explicitly. So we:
+    /// and `PATH` explicitly. Two cases:
     ///
-    /// 1. Allocate a fresh [`tempfile::TempDir`] under `TMPDIR`.
-    /// 2. Run `cargo fetch` against a throwaway stdlib-only dummy
-    ///    crate from the *test* process, which has the network the
-    ///    sandbox refuses. This populates the tempdir's
-    ///    `registry/index/` and `registry/cache/`.
-    /// 3. `set_var("CARGO_HOME", <tempdir>)` so every subsequent
-    ///    `Sandbox::build_env` call copies the populated path into
-    ///    the child's env. The sandboxed `cargo --offline` then
-    ///    resolves against the populated registry.
-    /// 4. Keep the `TempDir` inside the `OnceLock` so the on-disk
-    ///    registry survives the lifetime of the test binary.
+    /// 1. **`CARGO_HOME` already set in the test process** (CI with
+    ///    Swatinem, developer with a global registry, etc.): leave
+    ///    it alone. The sandbox will inherit the already-populated
+    ///    registry and `cargo --offline` works.
+    /// 2. **`CARGO_HOME` unset** (local cold cache, a fresh test
+    ///    runner with no global registry): allocate a fresh
+    ///    [`tempfile::TempDir`] under `TMPDIR`, run `cargo fetch`
+    ///    from the *test* process against a throwaway stdlib-only
+    ///    dummy crate to materialise the registry index there, and
+    ///    `set_var("CARGO_HOME", <tempdir>)` so the sandbox
+    ///    inherits the populated path.
     ///
     /// `OnceLock` guarantees the fetch + set_var runs exactly once
     /// per test binary regardless of how many of the five tests
@@ -393,14 +393,24 @@ mod tests {
     /// the initialisation race; subsequent callers just observe
     /// the already-set value via `std::env::var_os`.
     ///
-    /// Scope of the env leak: `CARGO_HOME` stays set for the
-    /// remainder of the test binary's lifetime. The test binary is
-    /// about to exit when the tests complete, and a parallel
-    /// `cargo test` invocation is a separate process with its own
-    /// env, so the leak is harmless.
+    /// Scope of the env leak: when we do set `CARGO_HOME`, it
+    /// stays set for the remainder of the test binary's lifetime.
+    /// The test binary is about to exit when the tests complete,
+    /// and a parallel `cargo test` invocation is a separate process
+    /// with its own env, so the leak is harmless.
     static CARGO_HOME_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
 
     fn prewarm_cargo_registry() {
+        // If the caller (CI workflow, dev shell) already exported a
+        // CARGO_HOME, trust it. Swatinem pre-populates
+        // /home/runner/.cargo on GitHub-hosted runners; locally a
+        // developer may have a global registry. Overwriting that
+        // with a tempdir would either (a) drop a populated cache
+        // for no benefit, or (b) leave the tempdir empty if the
+        // subsequent `cargo fetch` cannot reach the network.
+        if std::env::var_os("CARGO_HOME").is_some() {
+            return;
+        }
         CARGO_HOME_DIR.get_or_init(|| {
             let dir = tempfile::Builder::new()
                 .prefix("moagan-validator-cargo-home-")
