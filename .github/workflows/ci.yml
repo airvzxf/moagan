@@ -33,6 +33,19 @@ concurrency:
 #   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e) ~3 min
 # Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
 #
+# Note on artifact sharing:
+#   We tried to share the built binary between `build` and the
+#   consumers (smoke, e2e) via actions/upload-artifact + download-artifact.
+#   The v4 actions preserve the file's relative path inside the zip
+#   (the zip contains `target/debug/moagan`), and download-artifact
+#   extracts the zip with that internal structure preserved. Two
+#   attempts to fix the path (`path: target/debug` and `path: workspace`)
+#   placed the file at the wrong location and the consumers' hard-coded
+#   `${ROOT}/target/debug/moagan` did not find it. Removed artifact
+#   sharing; consumers run `cargo build` themselves. Swatinem/rust-cache
+#   shares `target/` across all jobs in the same workflow, so the
+#   consumer rebuild is incremental (just relink) and costs ~5-15 s.
+#
 # Required check names (must match the ruleset `protect-main` rule
 # `required_status_checks.required_status_checks[].context`):
 #   - fmt-check
@@ -80,7 +93,7 @@ jobs:
       - run: make lint
 
   build:
-    name: 'T1 · build (uploads moagan-debug artifact)'
+    name: 'T1 · build (populates cargo cache)'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -88,13 +101,6 @@ jobs:
       - uses: ./.github/actions/rust-setup
       - name: cargo build (debug)
         run: cargo build
-      - name: Upload debug binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: moagan-debug
-          path: target/debug/moagan
-          if-no-files-found: error
-          retention-days: 1
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'
@@ -155,11 +161,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
-      - name: Download moagan-debug binary
-        uses: actions/download-artifact@v4
-        with:
-          name: moagan-debug
-          path: ${{ github.workspace }}
+      - name: cargo build (debug, for smoke + e2e binaries)
+        run: cargo build
       - name: make smoke
         run: make smoke
 
@@ -171,10 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
-      - name: Download moagan-debug binary
-        uses: actions/download-artifact@v4
-        with:
-          name: moagan-debug
-          path: ${{ github.workspace }}
+      - name: cargo build (debug, for smoke + e2e binaries)
+        run: cargo build
       - name: make e2e
         run: make e2e
