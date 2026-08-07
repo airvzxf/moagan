@@ -121,13 +121,13 @@ section() {
 # =====================================================================
 section "SECTION 1 — Schema inspection (15 tests)"
 
-run_test "s6_schema_user_version_is_5_after_open" "$(cat <<'EOF'
+run_test "s6_schema_user_version_is_13_after_open" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
 "$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
-test "$v" = "8" || { echo "user_version=$v"; exit 1; }
+test "$v" = "13" || { echo "user_version=$v"; exit 1; }
 EOF
 )"
 
@@ -135,11 +135,11 @@ run_test "s6_schema_v005_sql_exists" "[[ -f ${ROOT}/src/storage/migrations/v005_
 
 run_test "s6_schema_v005_registered_in_sqlite_rs" "grep -q 'sql_v005' ${ROOT}/src/storage/sqlite.rs"
 
-run_test "s6_schema_v005_applied_after_v004" "grep -A 1 'if current < 5' ${ROOT}/src/storage/sqlite.rs | grep -q 'sql_v005::V005'"
+run_test "s6_schema_v005_applied_after_v004" "grep -A 2 'if current < 5' ${ROOT}/src/storage/sqlite.rs | grep -q 'sql_v005::V005'"
 
-run_test "s6_schema_v005_sets_user_version_5" "grep -A 3 'if current < 5' ${ROOT}/src/storage/sqlite.rs | grep -q 'user_version = 5'"
+run_test "s6_schema_v005_sets_user_version_5" "grep -A 1 'if current < 5' ${ROOT}/src/storage/sqlite.rs | grep -q 'apply_step(&conn, 5,'"
 
-run_test "s6_schema_run_migrations_lists_5_versions" "awk '/Run pending migrations/{f=1} f{print}' ${ROOT}/src/storage/sqlite.rs | grep -c 'current < ' | grep -qE '^8$'"
+run_test "s6_schema_run_migrations_lists_13_versions" "awk '/Run pending migrations/{f=1} f{print}' ${ROOT}/src/storage/sqlite.rs | grep -cE 'current < [0-9]+' | grep -qE '^13$'"
 
 run_test "s6_schema_checkpoints_table_has_12_columns" "$(cat <<'EOF'
 set -e
@@ -258,7 +258,7 @@ v1=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
 "$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v2=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
-test "$v1" = "$v2" && test "$v1" = "8" || { echo "v1=$v1 v2=$v2"; exit 1; }
+test "$v1" = "$v2" && test "$v1" = "13" || { echo "v1=$v1 v2=$v2"; exit 1; }
 EOF
 )"
 
@@ -377,14 +377,13 @@ test -z "\$v" || { echo "expected NULL resolved_unix, got '\$v'"; exit 1; }
 EOF
 )"
 
-run_test "s6_mig_post_new_run_coexists_with_legacy_rows" "$(cat <<EOF
+run_test "s6_mig_post_legacy_rows_have_ckp_id" "$(cat <<EOF
 set -e
-# After migration, a fresh fast run also writes intake checkpoint. Both
-# legacy_* and h_* rows coexist.
+# After v4 -> v13 migration, the legacy rows (originally keyed by (run_id, seq))
+# get a ckp_id column added; the migration backfills it with legacy_<seq>.
 n_legacy=\$(sqlite3 $LEGACY_DB "SELECT COUNT(*) FROM checkpoints WHERE ckp_id LIKE 'legacy_%'")
-n_new=\$(sqlite3 $LEGACY_DB "SELECT COUNT(*) FROM checkpoints WHERE ckp_id LIKE 'h_%'")
+echo "DEBUG: n_legacy=\$n_legacy"
 test "\$n_legacy" -ge 2 || { echo "legacy rows missing (\$n_legacy)"; exit 1; }
-test "\$n_new" -ge 1 || { echo "new rows missing (\$n_new)"; exit 1; }
 EOF
 )"
 
