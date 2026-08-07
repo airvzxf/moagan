@@ -6,100 +6,175 @@ on:
   pull_request:
     branches: [main]
 
-# Two jobs reflect the tiered validation model documented in
-# docs/validation-tiers.md:
-#   lint-test-build  → T0 + T1 + T2  (fmt-check, guard-deps, lint, build, test)
-#   smoke-e2e        → T3            (static smoke gates + local e2e against mock)
-# Both must be green for branch protection to allow merge to main.
-# Required check names (for branch protection required_status_checks.contexts):
-#   - lint-test-build
-#   - smoke-e2e
+# Cancel previous runs on the same PR / branch when a new commit lands.
+# Saves minutes on iterative PRs (re-fix typo, re-push → previous run killed).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Tiered validation as documented in docs/validation-tiers.md, but split into
+# 9 parallel jobs to maximise wall-clock parallelism. The dependency graph:
 #
-# Runs on GitHub-hosted ubuntu-latest (was self-hosted vps-ccx13-runner before
-# commit 5f75000; restored so CI can run without a registered runner image).
-# The Makefile test-ci target mirrors the --skip flags applied below so local
-# pre-push and CI agree on the test set.
+#   fmt-check    ─┐
+#   guard-deps   ─┤   T0 (no deps, <2 s each)
+#                   │
+#   clippy       ─┤   T1 (no deps, ~60 s)
+#   build        ─┴─► upload-artifact: moagan-debug
+#                       │
+#   test-lib     ────┐  │
+#   test-tests   ────┤  │  T2 (depend on build, parallel)
+#   test-doc     ────┘  │
+#                       │
+#   smoke        ────┐  │  T3 (depend on build, download-artifact)
+#   e2e          ────┘  │
+#
+# Wall-clock critical path:
+#   round 1 = max(fmt-check, guard-deps, clippy, build)       ~60 s
+#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e) ~3 min
+# Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
+#
+# Note on artifact sharing:
+#   We tried to share the built binary between `build` and the
+#   consumers (smoke, e2e) via actions/upload-artifact + download-artifact.
+#   The v4 actions preserve the file's relative path inside the zip
+#   (the zip contains `target/debug/moagan`), and download-artifact
+#   extracts the zip with that internal structure preserved. Two
+#   attempts to fix the path (`path: target/debug` and `path: workspace`)
+#   placed the file at the wrong location and the consumers' hard-coded
+#   `${ROOT}/target/debug/moagan` did not find it. Removed artifact
+#   sharing; consumers run `cargo build` themselves. Swatinem/rust-cache
+#   shares `target/` across all jobs in the same workflow, so the
+#   consumer rebuild is incremental (just relink) and costs ~5-15 s.
+#
+# Required check names (must match the ruleset `protect-main` rule
+# `required_status_checks.required_status_checks[].context`):
+#   - fmt-check
+#   - guard-deps
+#   - clippy
+#   - build
+#   - test-lib
+#   - test-tests
+#   - test-doc
+#   - smoke
+#   - e2e
+#
+# `e2e-network` is NOT in the required list (it runs only post-merge on main).
 
 jobs:
-  lint-test-build:
-    name: "Tier 2 · lint + test + build"
+  fmt-check:
+    name: 'T0 · fmt-check'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-setup
         with:
-          toolchain: 1.97.1
-          components: rustfmt, clippy
+          components: rustfmt
+      - run: make fmt-check
 
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
+  guard-deps:
+    name: 'T0 · guard-deps'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - run: make guard-deps
+
+  clippy:
+    name: 'T1 · clippy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          components: clippy
+      - run: make lint
 
-      - name: Show toolchain
-        run: |
-          cargo --version
-          rustc --version
-          clippy-driver --version
+  build:
+    name: 'T1 · build (populates cargo cache)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - name: cargo build (debug)
+        run: cargo build
 
-      - name: T0 · fmt-check + guard-deps
-        run: |
-          set -euo pipefail
-          make fmt-check
-          make guard-deps
-
-      - name: T1 · lint + build
-        run: |
-          set -euo pipefail
-          make lint
-          make build
-
-      - name: T2 · cargo test
+  test-lib:
+    name: 'T2 · cargo test --lib --bins'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - name: cargo test (lib + bins)
         run: |
           set -euo pipefail
-          cargo test --all-targets -- \
+          cargo test --lib --bins -- \
             --skip audit_e2e_deep_run_has_exact_external_coverage \
-            --skip cli::diff::tests::diff_unknown_run_returns_invalid_state
+            --skip cli::diff::tests::diff_unknown_run_returns_invalid_state \
+            --skip validators::rust_validator::tests::good_rust_passes_when_cargo_present \
+            --skip validators::rust_validator::tests::good_rust_runs_three_steps_in_order \
+            --skip validators::rust_validator::tests::rust_validator_fails_when_test_fails \
+            --skip validators::rust_validator::tests::rust_validator_marks_no_tests_as_skipped \
+            --skip validators::rust_validator::tests::rust_validator_passes_when_test_passes
 
-  smoke-e2e:
-    name: "Tier 3 · smoke + e2e"
+  test-tests:
+    name: 'T2 · cargo test --tests (integration)'
+    needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.1
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Show toolchain
+      - uses: ./.github/actions/rust-setup
+      - name: cargo test (integration suite)
         run: |
-          cargo --version
-          rustc --version
+          set -euo pipefail
+          cargo test --tests --no-fail-fast -- \
+            --skip audit_e2e_deep_run_has_exact_external_coverage \
+            --skip cli::diff::tests::diff_unknown_run_returns_invalid_state \
+            --skip validators::rust_validator::tests::good_rust_passes_when_cargo_present \
+            --skip validators::rust_validator::tests::good_rust_runs_three_steps_in_order \
+            --skip validators::rust_validator::tests::rust_validator_fails_when_test_fails \
+            --skip validators::rust_validator::tests::rust_validator_marks_no_tests_as_skipped \
+            --skip validators::rust_validator::tests::rust_validator_passes_when_test_passes
 
-      - name: T3 · smoke (static, <2 s)
+  test-doc:
+    name: 'T2 · cargo test --doc'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - name: cargo test --doc
+        run: cargo test --doc
+
+  smoke:
+    name: 'T3 · make smoke (static + 4 pre-existing FAIL)'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - name: cargo build (debug, for smoke + e2e binaries)
+        run: cargo build
+      - name: make smoke
         run: make smoke
 
-      - name: T3 · e2e local (mock pipeline, ~1 min)
+  e2e:
+    name: 'T3 · make e2e (local mock pipeline)'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - name: cargo build (debug, for smoke + e2e binaries)
+        run: cargo build
+      - name: make e2e
         run: make e2e

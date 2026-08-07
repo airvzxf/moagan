@@ -1,0 +1,26 @@
+name: 'rust-setup'
+description: 'Install pinned Rust toolchain + restore cargo cache (Swatinem/rust-cache@v2). The calling workflow MUST `actions/checkout@v4` first — local composite actions live in the repo and are not resolvable before checkout.'
+
+inputs:
+  components:
+    description: 'Extra rustup components to install (e.g. "rustfmt,clippy")'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: 1.97.1
+        components: ${{ inputs.components }}
+
+    - name: Cache cargo registry, git index, and target/
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        # Single-crate project, so default workspace detection is fine.
+        # cache-on-failure: true keeps the cache around even if a job failed
+        # mid-build, so the next push doesn't have to re-download the
+        # registry from scratch.
