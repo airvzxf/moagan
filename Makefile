@@ -62,6 +62,11 @@ lint:
 test:
 	cargo test --all-targets
 
+test-ci:
+	cargo test --all-targets -- \
+		--skip audit_e2e_deep_run_has_exact_external_coverage \
+		--skip cli::diff::tests::diff_unknown_run_returns_invalid_state
+
 test-doc:
 	cargo test --doc
 

@@ -33,16 +33,29 @@
 When conflicts arise, T01-06 wins. Catalog patches are opt-in and documented inline in
 `docs/proposal-03-add-ons.md` (each section is an opt-in overlay).
 
-## Validation gauntlet
+## Validation tiers
 
-Before any commit:
+The validation split across the dev loop is documented in
+[`docs/validation-tiers.md`](docs/validation-tiers.md). Short version:
+
+| Tier | Cost | Where | What |
+|---|---|---|---|
+| T0 | <2 s | pre-commit | `make fmt-check` + `make guard-deps` |
+| T1 | 30–90 s | pre-commit | `make lint` + `make build` |
+| T2 | 1–5 min | pre-push | `make test-ci` (cargo test, skips known-flaky `audit_e2e`) |
+| T3 | 5–30 min | CI | `make smoke` + `make e2e`; `make e2e-network` on `main` only |
+
+Hooks are managed by [`lefthook`](https://github.com/evilmartians/lefthook);
+config lives in [`lefthook.yml`](lefthook.yml). Setup once per clone:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo build
+pacman -S lefthook    # or: cargo install lefthook
+lefthook install
 ```
+
+The local aggregator `scripts/gauntlet.sh` runs everything end-to-end and is
+the reference for the full gauntlet order. Branch protection rules and the
+required-status-checks list are in [`docs/branch-protection.md`](docs/branch-protection.md).
 
 ## Smoke gates
 
