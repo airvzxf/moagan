@@ -113,11 +113,7 @@ jobs:
         with:
           components: rustfmt,clippy
       - name: cargo test (lib + bins)
-        run: |
-          set -euo pipefail
-          cargo test --lib --bins -- \
-            --skip audit_e2e_deep_run_has_exact_external_coverage \
-            --skip llm::response_format_opt_out::tests::env_var_extends_opt_out
+        run: cargo test --lib --bins
 
   test-tests:
     name: 'T2 · cargo test --tests (integration)'
@@ -130,11 +126,7 @@ jobs:
         with:
           components: rustfmt,clippy
       - name: cargo test (integration suite)
-        run: |
-          set -euo pipefail
-          cargo test --tests --no-fail-fast -- \
-            --skip audit_e2e_deep_run_has_exact_external_coverage \
-            --skip llm::response_format_opt_out::tests::env_var_extends_opt_out
+        run: cargo test --tests --no-fail-fast
 
   test-doc:
     name: 'T2 · cargo test --doc'
