@@ -539,6 +539,15 @@ mod tests {
         let ev = rt
             .block_on(RustValidator::check(&good_rust(), &sandbox()))
             .unwrap();
+        if ev.status != ValidationStatus::Pass {
+            eprintln!("DIAG: cargo HOME = {:?}", std::env::var_os("CARGO_HOME"));
+            eprintln!(
+                "DIAG: status={:?} exit={:?} cmd={:?}",
+                ev.status, ev.exit_code, ev.command
+            );
+            eprintln!("DIAG: stderr_summary=\n{}", ev.stderr_summary);
+            eprintln!("DIAG: skipped_checks={:?}", ev.skipped_checks);
+        }
         assert_eq!(ev.status, ValidationStatus::Pass);
         assert!(ev.command.is_some());
         assert_eq!(ev.exit_code, Some(0));
