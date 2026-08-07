@@ -9,7 +9,7 @@ each check lives at the moment it does. Read it once, then trust it.
 |---|---|---|---|---|
 | **T0** | <2 s | pre-commit (parallel) | `make fmt-check`, `make guard-deps` | Cheap checks that catch 80 % of "obviously wrong" commits. Fail = don't waste anyone's time. |
 | **T1** | 30–90 s | pre-commit (parallel) | `make lint` (`cargo clippy -D warnings`), `make build` | Real lint + the binary actually compiles. Run in parallel since they share no state. |
-| **T2** | 1–5 min | pre-push | `make test-ci` (`cargo test --all-targets`, skips known-flaky `audit_e2e`) | The 21 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
+| **T2** | 1–5 min | pre-push | `make test-ci` (`cargo test --all-targets`, skips known-flaky `audit_e2e` + `cli::diff::*`) | The 21 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
 | **T3** | 5–30 min | CI on PR + post-merge | `make smoke` + `make e2e` (PR); `make e2e-network` (post-merge) | Full gauntlet: static smokes, local e2e against the mock pipeline, and the long real-LLM e2e (only on `main`, see below). |
 
 Plus one fast orthogonal check on the commit message itself:
@@ -44,22 +44,64 @@ Plus one fast orthogonal check on the commit message itself:
                                   │
                                   ▼
    ┌─────────────────────────────────────────────────────────────────────┐
-   │  GitHub                                                            │
-   │  ──────                                                           │
+   │  GitHub Actions — ci.yml (9 parallel jobs)                         │
+   │  ───────────────────                                              │
    │                                                                   │
-   │  PR opened (web or `gh pr create`)                                │
-   │     │                                                             │
-   │     ├─► ci.yml :: lint-test-build  (T0+T1+T2 on runner)           │
-   │     └─► ci.yml :: smoke-e2e        (T3 static + local e2e)       │
+   │  round 1 (no deps, max wall-clock):                               │
+   │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
+   │    │ fmt-check   │  │ guard-deps   │  │ clippy     │  │ build  │ │
+   │    │ (T0) ~1s    │  │ (T0) ~1s     │  │ (T1) ~60s  │  │(T1)~60s│ │
+   │    │             │  │              │  │            │  │   ▼    │ │
+   │    │             │  │              │  │            │  │artifact│ │
+   │    └─────────────┘  └──────────────┘  └────────────┘  └────────┘ │
    │                                                                   │
-   │  merge to main                                                    │
-   │     │                                                             │
-   │     └─► e2e-network.yml            (~25 min, real LLM)            │
+   │  round 2 (depend on build):                                       │
+   │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
+   │    │ test-lib    │  │ test-tests   │  │ test-doc   │  │ smoke  │ │
+   │    │ (T2) ~30s   │  │ (T2) ~3min   │  │ (T2) ~30s  │  │(T3)~2s │ │
+   │    └─────────────┘  └──────────────┘  └────────────┘  └────────┘ │
+   │    ┌─────────────┐                                               │
+   │    │ e2e         │  ← all 5 jobs in round 2 download the         │
+   │    │ (T3) ~1min  │    moagan-debug artifact from the build job.   │
+   │    └─────────────┘                                               │
    │                                                                   │
-   │  branch protection (post-setup) requires                           │
-   │    ✓ lint-test-build                                              │
-   │    ✓ smoke-e2e                                                    │
-   │  before merge button is enabled.                                  │
+   │  Total wall-clock: ~4 min cold / ~2 min warm                      │
+   │  (vs. ~5-8 min before the parallel refactor)                      │
+   │                                                                   │
+   └─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼ PR merge to main
+                                  │
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │  GitHub Actions — e2e-network.yml (post-merge)                    │
+   │  ─────────────────────────────────────                             │
+   │                                                                   │
+   │  e2e-network (~25 min, real LLM)                                  │
+   │    - builds release binary                                        │
+   │    - runs scripts/e2e_audit_proxy.sh                              │
+   │    - not a PR gate (would block PRs 25 min)                       │
+   │                                                                   │
+   └─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │  GitHub ruleset `protect-main` (id 19743104)                      │
+   │  ──────────────────────────────────────────                       │
+   │                                                                   │
+   │  Required checks before merge (all 9 must be green):             │
+   │    ✓ fmt-check                                                    │
+   │    ✓ guard-deps                                                   │
+   │    ✓ clippy                                                       │
+   │    ✓ build                                                        │
+   │    ✓ test-lib                                                     │
+   │    ✓ test-tests                                                   │
+   │    ✓ test-doc                                                     │
+   │    ✓ smoke                                                        │
+   │    ✓ e2e                                                          │
+   │                                                                   │
+   │  Plus existing rules: deletion, non_fast_forward,                 │
+   │  pull_request, required_linear_history. See                      │
+   │  docs/branch-protection.md for the gh api block.                 │
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -75,6 +117,9 @@ checks from commit to push, not by removing them.
   context-switch anyway while CI runs.
 - **CI is the audit**, not the bottleneck. It re-runs everything in a clean
   environment so a corrupted local cache can never mask a real regression.
+- **Parallelism inside CI** is the second layer of speedup. The 9 jobs run
+  concurrently in two rounds; total wall-clock is ~4 min cold vs. ~5-8 min
+  sequentially.
 
 ## Escape hatches
 
@@ -92,8 +137,8 @@ git push --no-verify
 ```
 
 `--no-verify` does **not** skip CI. Branch protection will still block the
-merge if T3 is red. So `git push --no-verify` is safe-ish: you push faster,
-the CI catches it, you fix it.
+merge if any required check is red. So `git push --no-verify` is safe-ish:
+you push faster, the CI catches it, you fix it.
 
 ## Setup on a fresh clone
 
@@ -126,8 +171,8 @@ $ head -1 .git/hooks/pre-commit
 | Conventional commit check | [`scripts/check-commit-msg.sh`](../scripts/check-commit-msg.sh) |
 | Local validator aggregator | [`scripts/gauntlet.sh`](../scripts/gauntlet.sh) (`--fast`, `--skip-smoke`, …) |
 | Makefile targets (`validate`, `fmt-check`, `lint`, `test-ci`, `smoke`, `e2e`, `e2e-network`) | [`Makefile`](../Makefile) |
-| CI lint+test+build | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) job `lint-test-build` |
-| CI smoke + local e2e | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) job `smoke-e2e` |
+| Composite action (checkout + toolchain + cache) | [`.github/actions/rust-setup/action.yml`](../.github/actions/rust-setup/action.yml) |
+| CI workflow (9 parallel jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 | CI real-LLM e2e (main only) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
-| Branch protection (run once) | [`docs/branch-protection.md`](branch-protection.md) |
+| Branch protection (ruleset apply) | [`docs/branch-protection.md`](branch-protection.md) |
 | Architectural authority | [`docs/proposal-02-rust.md`](proposal-02-rust.md) |
