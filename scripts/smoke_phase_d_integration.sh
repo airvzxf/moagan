@@ -345,38 +345,28 @@ run_test "int_inv_pipeline_runs_are_isolated" \
   "test \"$RUN_DIR_S\" != \"$RUN_DIR_F\" && test \"$RUN_DIR_S\" != \"$RUN_DIR_D\" && test \"$RUN_DIR_S\" != \"$RUN_DIR_B\""
 
 # ---------------------------------------------------------------------
-# SECTION I9 — Validator gauntlet (10 tests; original §29)
+# SECTION I9 — Validator gauntlet (removed; see PR #236)
+#
+# Originally this section ran 10 guard_* checks inside make smoke:
+#   cargo fmt --check, cargo clippy, cargo test, no_anthropic_sdk,
+#   no_forbidden_crates, role_count_is_twenty, plus 4 unit-test
+#   presence checks (grep "mod tests" in phase source files).
+#
+# All 10 are duplicates of checks already enforced by separate CI
+# jobs in ci.yml:
+#   - cargo fmt --check      → ci.yml job `fmt-check` (T0)
+#   - cargo clippy           → ci.yml job `clippy` (T1)
+#   - cargo test             → ci.yml jobs `test-lib` / `test-tests`
+#   - no_anthropic_sdk       → lefthook pre-commit `guard-deps`
+#   - no_forbidden_crates    → lefthook pre-commit `guard-deps`
+#   - role_count_is_twenty   → lefthook pre-commit + test
+#   - unit-test presence     → test-lib / test-tests already cover
+#
+# Keeping them inside smoke made the smoke job slow (clippy alone
+# is ~30-60s), added nothing the rest of the pipeline didn't
+# already catch, and required extra CI components (rustfmt, clippy)
+# to be installed in the smoke job. Removed; see PR #236.
 # ---------------------------------------------------------------------
-
-run_test "guard_fmt_clean" \
-  "cd ${ROOT} && cargo fmt --all -- --check"
-
-run_test "guard_clippy_clean" \
-  "cd ${ROOT} && cargo clippy --all-targets -- -D warnings 2>&1 | tail -1 | grep -qE 'warning|error' && exit 1 || exit 0"
-
-run_test "guard_tests_pass" \
-  "cd ${ROOT} && cargo test --all-targets --quiet 2>&1 | grep -qE '0 failed'"
-
-run_test "guard_no_anthropic_sdk" \
-  "! grep -rnE 'anthropic-sdk\\|claude-sdk' ${ROOT}/Cargo.toml"
-
-run_test "guard_no_forbidden_crates" \
-  "! grep -E '^secrecy|^axum|^hyper|^sqlx|^governor|^figment|^refinery|^askama|^handlebars|^lettre|^inquire|^time\\b' ${ROOT}/Cargo.toml"
-
-run_test "guard_role_count_is_twenty" \
-  "grep -q 'all_roles_are_count_twenty' ${ROOT}/src/llm/role.rs"
-
-run_test "guard_judge_unit_test_passes" \
-  "[[ -f ${ROOT}/src/phases/judge.rs ]] && grep -q 'mod tests' ${ROOT}/src/phases/judge.rs"
-
-run_test "guard_cluster_unit_test_passes" \
-  "[[ -f ${ROOT}/src/phases/cluster_proposals.rs ]] && grep -q 'mod tests' ${ROOT}/src/phases/cluster_proposals.rs"
-
-run_test "guard_synthesize_unit_test_passes" \
-  "[[ -f ${ROOT}/src/phases/synthesize.rs ]] && grep -q 'mod tests' ${ROOT}/src/phases/synthesize.rs"
-
-run_test "guard_checkpoint_unit_test_passes" \
-  "[[ -f ${ROOT}/src/checkpoint/human.rs ]] && grep -q 'mod tests' ${ROOT}/src/checkpoint/human.rs"
 
 # ---------------------------------------------------------------------
 # SECTION I10 — Final summary invariants (6 tests; original §30)
