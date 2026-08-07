@@ -15,37 +15,31 @@ on:
 jobs:
   e2e-network:
     name: "Tier 3 · e2e against real LLM (main only)"
-    runs-on: [self-hosted, Linux, X64, moagan]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      CARGO_INCREMENTAL: "0"
-      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show toolchain
-        run: |
-          cargo --version
-          rustc --version
-
-      - name: Cache cargo target
-        uses: actions/cache@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: target
-          key: ${{ runner.os }}-moagan-target-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-moagan-target-
+          toolchain: 1.97.1
 
-      - name: Cache cargo registry
+      - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: Show toolchain
+        run: |
+          cargo --version
+          rustc --version
 
       - name: Build release binary
         run: cargo build --release

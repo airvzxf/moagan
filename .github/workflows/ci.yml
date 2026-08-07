@@ -14,43 +14,42 @@ on:
 # Required check names (for branch protection required_status_checks.contexts):
 #   - lint-test-build
 #   - smoke-e2e
+#
+# Runs on GitHub-hosted ubuntu-latest (was self-hosted vps-ccx13-runner before
+# commit 5f75000; restored so CI can run without a registered runner image).
+# The Makefile test-ci target mirrors the --skip flags applied below so local
+# pre-push and CI agree on the test set.
 
 jobs:
   lint-test-build:
     name: "Tier 2 · lint + test + build"
-    runs-on: [self-hosted, Linux, X64, moagan]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      CARGO_INCREMENTAL: "0"
-      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Show toolchain
         run: |
           cargo --version
           rustc --version
           clippy-driver --version
-          mold --version
-
-      - name: Cache cargo target
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-moagan-target-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-moagan-target-
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: T0 · fmt-check + guard-deps
         run: |
@@ -73,41 +72,31 @@ jobs:
 
   smoke-e2e:
     name: "Tier 3 · smoke + e2e"
-    runs-on: [self-hosted, Linux, X64, moagan]
-    timeout-minutes: 15
-    needs: lint-test-build
-    env:
-      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      CARGO_INCREMENTAL: "0"
-      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show toolchain
-        run: |
-          cargo --version
-          rustc --version
-
-      - name: Cache cargo target
-        uses: actions/cache@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: target
-          key: ${{ runner.os }}-moagan-target-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-moagan-target-
+          toolchain: 1.97.1
 
-      - name: Cache cargo registry
+      - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build debug binary
-        run: cargo build
+      - name: Show toolchain
+        run: |
+          cargo --version
+          rustc --version
 
       - name: T3 · smoke (static, <2 s)
         run: make smoke
