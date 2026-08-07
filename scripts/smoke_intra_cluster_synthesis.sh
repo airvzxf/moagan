@@ -202,8 +202,8 @@ run_test "synthesize_has_min_cluster_size_default_2" \
 run_test "synthesize_has_force_singletons_default_false" \
   "grep -B 2 -A 2 'force_singletons: false' ${ROOT}/src/phases/synthesize.rs"
 
-run_test "synthesize_uses_synthesizer_role" \
-  "grep -B 1 -A 4 'Role::Synthesizer' ${ROOT}/src/phases/synthesize.rs | grep -q 'Synthesizer'"
+run_test "synthesize_uses_merge_synthesizer_role" \
+  "grep -B 1 -A 4 'Role::MergeSynthesizer' ${ROOT}/src/phases/synthesize.rs | grep -q 'MergeSynthesizer'"
 
 run_test "synthesize_writes_s_NN_naming" \
   "grep -q 'synthesized()' ${ROOT}/src/phases/synthesize.rs && grep -q 's_{:02}' ${ROOT}/src/phases/synthesize.rs && grep -q 'target_id' ${ROOT}/src/phases/synthesize.rs"
@@ -215,7 +215,7 @@ run_test "synthesize_skips_singletons" \
   "grep -B 1 -A 4 'c.member_proposals.len() >= self.min_cluster_size' ${ROOT}/src/phases/synthesize.rs | grep -q 'min_cluster_size'"
 
 run_test "synthesize_handles_empty_cluster_list" \
-  "grep -B 2 -A 4 'eligible.is_empty()' ${ROOT}/src/phases/synthesize.rs | grep -q 'PhaseOutput::Synthesized(Vec::new())'"
+  "grep -B 2 -A 12 'eligible.is_empty()' ${ROOT}/src/phases/synthesize.rs | grep -q 'PhaseOutput::Synthesized(Vec::new())'"
 
 # ---------------------------------------------------------------------
 # SECTION S7 — Synthesized file structure (8 tests)
@@ -289,14 +289,14 @@ run_test "cluster_text_sample_is_string" \
 run_test "pipeline_synthesized_proposal_created" \
   "[[ -f $RUN_DIR_S/synthesized/s_00.json ]]"
 
-run_test "pipeline_synthesized_proposal_has_three_sources" \
-  "test \$(jq -r '.source_proposals | length' $RUN_DIR_S/synthesized/s_00.json 2>/dev/null) -eq 3"
+run_test "pipeline_synthesized_proposal_has_cluster_sources" \
+  "test \$(jq -r '.source_proposals | length' $RUN_DIR_S/synthesized/s_00.json 2>/dev/null) -eq 5"
 
 run_test "pipeline_synthesized_proposal_persisted" \
   "jq -r '.created_unix' $RUN_DIR_S/synthesized/s_00.json 2>/dev/null | grep -qE '^[0-9]+$'"
 
-run_test "pipeline_three_proposals_persisted" \
-  "ls $RUN_DIR_S/proposals/p_*.json | grep -v meta.json | wc -l | grep -qE '^[[:space:]]*3$'"
+run_test "pipeline_proposals_persisted" \
+  "ls $RUN_DIR_S/proposals/p_*.json | grep -v meta.json | wc -l | grep -qE '^[[:space:]]*7$'"
 
 run_test "pipeline_synthesized_id_format_consistent" \
   "jq -r '.id' $RUN_DIR_S/synthesized/s_00.json | grep -qE '^s_[0-9]+$'"
