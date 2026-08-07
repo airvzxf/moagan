@@ -343,9 +343,80 @@ mod tests {
     use super::*;
 
     use crate::sandbox::{Sandbox, SandboxConfig};
+    use std::sync::OnceLock;
 
     fn sandbox() -> Sandbox {
         Sandbox::new(SandboxConfig::new()).unwrap()
+    }
+
+    /// Pre-warm the cargo registry once per test process.
+    ///
+    /// The validator's `cargo check --offline` / `cargo clippy --offline`
+    /// / `cargo test --offline` steps run inside the sandbox with
+    /// `CARGO_NET_OFFLINE=true` (catalog §D.11.9 default-deny network).
+    /// In a CI cold-cache run the registry index under
+    /// `$CARGO_HOME/registry/index/` is empty, so the very first
+    /// `--offline` invocation has nothing to resolve against and the
+    /// cargo subprocess exits non-zero — turning a Pass into a Fail
+    /// for tests like `good_rust_passes_when_cargo_present`.
+    ///
+    /// We cannot warm the registry from inside the sandbox (network
+    /// is off by design). Instead we run `cargo fetch` against a
+    /// throwaway, stdlib-only dummy crate from the *test* process,
+    /// where the harness has the network it needs and a CARGO_HOME
+    /// that mirrors what the sandbox will inherit. The fixture
+    /// crates used by the tests (good_rust, broken_rust, the
+    /// in-`#[test]` artefacts in this file) are also stdlib-only, so
+    /// the dummy's only purpose is to force the registry population.
+    ///
+    /// `OnceLock` guarantees the fetch runs exactly once per test
+    /// binary regardless of how many of the five tests below invoke
+    /// it; cargo keep the registry between runs so subsequent
+    /// `--offline` invocations hit a populated index and pass.
+    static PREWARM: OnceLock<()> = OnceLock::new();
+
+    fn prewarm_cargo_registry() {
+        PREWARM.get_or_init(|| {
+            let tmp = tempfile::tempdir().expect("prewarm tempdir");
+            std::fs::write(
+                tmp.path().join("Cargo.toml"),
+                "[package]\nname = \"moagan_validator_prewarm\"\n\
+                 version = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+                 [lib]\npath = \"src/lib.rs\"\n",
+            )
+            .expect("write manifest");
+            std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir src");
+            std::fs::write(tmp.path().join("src").join("lib.rs"), "").expect("write lib");
+            // `cargo fetch` populates the registry index for the
+            // target crate and resolves any (here: none) external
+            // dependencies. If the test process has no network access
+            // (e.g. a hermetic CI box that blocks egress except for
+            // the registry) the fetch will fail and the validator
+            // tests will flake the same way they did before this
+            // fix. In practice every environment that *can* reach
+            // crates.io at all will warm the registry successfully
+            // on the first call; the leftover empty fixture crate is
+            // discarded when the tempdir is dropped at process
+            // shutdown.
+            let out = std::process::Command::new("cargo")
+                .arg("fetch")
+                .arg("--manifest-path")
+                .arg(tmp.path().join("Cargo.toml"))
+                .output()
+                .expect("spawn cargo fetch for prewarm");
+            assert!(
+                out.status.success(),
+                "prewarm `cargo fetch` failed: stdout={}\nstderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            // Keep `tmp` alive for the lifetime of the test binary:
+            // dropping it would erase the manifest cargo just
+            // resolved against. A leaked `TempDir` on shutdown is
+            // harmless and matches std's behaviour for static
+            // initialisation caches.
+            std::mem::forget(tmp);
+        });
     }
 
     fn good_rust() -> CodeArtifact {
@@ -412,6 +483,7 @@ mod tests {
             // Skip silently: cargo not installed on this host.
             return;
         }
+        prewarm_cargo_registry();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -529,6 +601,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -567,6 +640,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -595,6 +669,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let artifact = CodeArtifact::new(
             "src/lib.rs",
             "rust",
@@ -649,6 +724,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let artifact = CodeArtifact::new(
             "src/lib.rs",
             "rust",
