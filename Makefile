@@ -63,9 +63,7 @@ test:
 	cargo test --all-targets
 
 test-ci:
-	cargo test --all-targets -- \
-		--skip audit_e2e_deep_run_has_exact_external_coverage \
-		--skip llm::response_format_opt_out::tests::env_var_extends_opt_out
+	cargo test --all-targets
 
 test-doc:
 	cargo test --doc
