@@ -349,7 +349,9 @@ mod tests {
         Sandbox::new(SandboxConfig::new()).unwrap()
     }
 
-    /// Pre-warm the cargo registry once per test process.
+    /// Pre-warm a dedicated `CARGO_HOME` once per test process so the
+    /// sandboxed `cargo --offline` steps resolve against a populated
+    /// registry.
     ///
     /// The validator's `cargo check --offline` / `cargo clippy --offline`
     /// / `cargo test --offline` steps run inside the sandbox with
@@ -360,49 +362,77 @@ mod tests {
     /// cargo subprocess exits non-zero — turning a Pass into a Fail
     /// for tests like `good_rust_passes_when_cargo_present`.
     ///
-    /// We cannot warm the registry from inside the sandbox (network
-    /// is off by design). Instead we run `cargo fetch` against a
-    /// throwaway, stdlib-only dummy crate from the *test* process,
-    /// where the harness has the network it needs and a CARGO_HOME
-    /// that mirrors what the sandbox will inherit. The fixture
-    /// crates used by the tests (good_rust, broken_rust, the
-    /// in-`#[test]` artefacts in this file) are also stdlib-only, so
-    /// the dummy's only purpose is to force the registry population.
+    /// The sandbox at `src/sandbox/process.rs:1462` overwrites `HOME`
+    /// to the per-invocation scratch dir. When `CARGO_HOME` is unset
+    /// cargo derives its registry from `${HOME}/.cargo`, so the
+    /// sandbox always sees an empty registry even if the test
+    /// process has a populated `~/.cargo/registry` — that is the
+    /// failure mode the previous fix hit.
     ///
-    /// `OnceLock` guarantees the fetch runs exactly once per test
-    /// binary regardless of how many of the five tests below invoke
-    /// it; cargo keep the registry between runs so subsequent
-    /// `--offline` invocations hit a populated index and pass.
-    static PREWARM: OnceLock<()> = OnceLock::new();
+    /// Cargo respects `CARGO_HOME` over `HOME`; the sandbox
+    /// inherits `CARGO_HOME` because `build_env` does
+    /// `env = std::env::vars().collect()` and only overrides `HOME`
+    /// and `PATH` explicitly. So we:
+    ///
+    /// 1. Allocate a fresh [`tempfile::TempDir`] under `TMPDIR`.
+    /// 2. Run `cargo fetch` against a throwaway stdlib-only dummy
+    ///    crate from the *test* process, which has the network the
+    ///    sandbox refuses. This populates the tempdir's
+    ///    `registry/index/` and `registry/cache/`.
+    /// 3. `set_var("CARGO_HOME", <tempdir>)` so every subsequent
+    ///    `Sandbox::build_env` call copies the populated path into
+    ///    the child's env. The sandboxed `cargo --offline` then
+    ///    resolves against the populated registry.
+    /// 4. Keep the `TempDir` inside the `OnceLock` so the on-disk
+    ///    registry survives the lifetime of the test binary.
+    ///
+    /// `OnceLock` guarantees the fetch + set_var runs exactly once
+    /// per test binary regardless of how many of the five tests
+    /// below invoke it. The `set_var` lives inside `get_or_init` so
+    /// the only thread that mutates the env is the one that wins
+    /// the initialisation race; subsequent callers just observe
+    /// the already-set value via `std::env::var_os`.
+    ///
+    /// Scope of the env leak: `CARGO_HOME` stays set for the
+    /// remainder of the test binary's lifetime. The test binary is
+    /// about to exit when the tests complete, and a parallel
+    /// `cargo test` invocation is a separate process with its own
+    /// env, so the leak is harmless.
+    static CARGO_HOME_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
 
     fn prewarm_cargo_registry() {
-        PREWARM.get_or_init(|| {
-            let tmp = tempfile::tempdir().expect("prewarm tempdir");
+        CARGO_HOME_DIR.get_or_init(|| {
+            let dir = tempfile::Builder::new()
+                .prefix("moagan-validator-cargo-home-")
+                .tempdir()
+                .expect("CARGO_HOME tempdir");
+
+            // Minimal stdlib-only dummy crate; the only purpose is
+            // to force `cargo fetch` to materialise the registry
+            // index. The real fixture crates (good_rust, broken_rust,
+            // the in-`#[test]` artefacts) are also stdlib-only, so
+            // nothing on top of the bare index is required.
+            let dummy = dir.path().join("dummy");
+            std::fs::create_dir_all(dummy.join("src")).expect("mkdir dummy/src");
             std::fs::write(
-                tmp.path().join("Cargo.toml"),
-                "[package]\nname = \"moagan_validator_prewarm\"\n\
-                 version = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
-                 [lib]\npath = \"src/lib.rs\"\n\n\
-                 [dependencies]\nserde_json = \"1\"\n",
+                dummy.join("Cargo.toml"),
+                "[package]\n\
+                 name = \"moagan_validator_prewarm\"\n\
+                 version = \"0.0.0\"\n\
+                 edition = \"2021\"\n\
+                 publish = false\n\n\
+                 [lib]\n\
+                 path = \"src/lib.rs\"\n",
             )
-            .expect("write manifest");
-            std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir src");
-            std::fs::write(tmp.path().join("src").join("lib.rs"), "").expect("write lib");
-            // `cargo fetch` populates the registry index for the
-            // target crate and resolves any (here: none) external
-            // dependencies. If the test process has no network access
-            // (e.g. a hermetic CI box that blocks egress except for
-            // the registry) the fetch will fail and the validator
-            // tests will flake the same way they did before this
-            // fix. In practice every environment that *can* reach
-            // crates.io at all will warm the registry successfully
-            // on the first call; the leftover empty fixture crate is
-            // discarded when the tempdir is dropped at process
-            // shutdown.
+            .expect("write dummy Cargo.toml");
+            std::fs::write(dummy.join("src").join("lib.rs"), "").expect("write dummy lib.rs");
+
             let out = std::process::Command::new("cargo")
                 .arg("fetch")
                 .arg("--manifest-path")
-                .arg(tmp.path().join("Cargo.toml"))
+                .arg(dummy.join("Cargo.toml"))
+                .env("CARGO_HOME", dir.path())
+                .env_remove("CARGO_NET_OFFLINE")
                 .output()
                 .expect("spawn cargo fetch for prewarm");
             assert!(
@@ -411,12 +441,19 @@ mod tests {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr),
             );
-            // Keep `tmp` alive for the lifetime of the test binary:
-            // dropping it would erase the manifest cargo just
-            // resolved against. A leaked `TempDir` on shutdown is
-            // harmless and matches std's behaviour for static
-            // initialisation caches.
-            std::mem::forget(tmp);
+
+            // SAFETY: serialised by `OnceLock::get_or_init`; every
+            // other thread that calls `prewarm_cargo_registry` will
+            // see the initialised `TempDir` and return without
+            // racing on the env. The sandbox's `build_env` reads
+            // `std::env::vars()` at call time, so any subsequent
+            // `RustValidator::check` invocation picks up the new
+            // `CARGO_HOME` via the inherited env.
+            unsafe {
+                std::env::set_var("CARGO_HOME", dir.path());
+            }
+
+            dir
         });
     }
 
