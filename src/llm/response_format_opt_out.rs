@@ -39,7 +39,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_lock<F: FnOnce()>(f: F) {
-        drop(ENV_LOCK.lock());
+        let _guard = ENV_LOCK.lock().unwrap();
         f();
     }
 
@@ -95,11 +95,9 @@ mod tests {
                 "MOAGAN_RESPONSE_FORMAT_OPT_OUT",
                 "my-custom-model,other-model",
             );
-        });
-        assert!(model_skips_response_format("my-custom-model"));
-        assert!(model_skips_response_format("OTHER-MODEL"));
-        assert!(!model_skips_response_format("not-in-the-list"));
-        with_lock(|| unsafe {
+            assert!(model_skips_response_format("my-custom-model"));
+            assert!(model_skips_response_format("OTHER-MODEL"));
+            assert!(!model_skips_response_format("not-in-the-list"));
             std::env::remove_var("MOAGAN_RESPONSE_FORMAT_OPT_OUT");
         });
     }
@@ -108,10 +106,8 @@ mod tests {
     fn env_var_empty_is_ignored() {
         with_lock(|| unsafe {
             std::env::set_var("MOAGAN_RESPONSE_FORMAT_OPT_OUT", "");
-        });
-        assert!(!model_skips_response_format("gpt-4"));
-        assert!(!model_skips_response_format("glm-5.1-not-the-default"));
-        with_lock(|| unsafe {
+            assert!(!model_skips_response_format("gpt-4"));
+            assert!(!model_skips_response_format("glm-5.1-not-the-default"));
             std::env::remove_var("MOAGAN_RESPONSE_FORMAT_OPT_OUT");
         });
     }
@@ -120,10 +116,8 @@ mod tests {
     fn env_var_whitespace_is_trimmed() {
         with_lock(|| unsafe {
             std::env::set_var("MOAGAN_RESPONSE_FORMAT_OPT_OUT", " spaced-model , another ");
-        });
-        assert!(model_skips_response_format("spaced-model"));
-        assert!(model_skips_response_format("another"));
-        with_lock(|| unsafe {
+            assert!(model_skips_response_format("spaced-model"));
+            assert!(model_skips_response_format("another"));
             std::env::remove_var("MOAGAN_RESPONSE_FORMAT_OPT_OUT");
         });
     }
