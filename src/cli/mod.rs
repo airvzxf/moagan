@@ -1089,6 +1089,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             run_b,
             format,
             include_proposals,
+            home_override: None,
         }),
         Cmd::Repair {
             cleanup_orphans,
