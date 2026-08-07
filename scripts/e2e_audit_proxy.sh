@@ -48,7 +48,10 @@
 set -o pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${ROOT}/target/debug/moagan"
+# BIN can be overridden by the calling workflow / env. Defaults to debug
+# (matches `make build`); release workflows (e.g. .github/workflows/e2e-network.yml
+# which runs `cargo build --release`) must set BIN to the release path.
+BIN="${BIN:-${ROOT}/target/debug/moagan}"
 PASS=0
 FAIL=0
 FAILED_TESTS=()
