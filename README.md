@@ -1,5 +1,7 @@
 # Moagan
 
+[![ci](https://github.com/airvzxf/moagan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/airvzxf/moagan/actions/workflows/ci.yml)
+
 > Multi-agent system for technical problems through massive solution exploration, curation, and ranking.
 
 Moagan is a Rust binary that orchestrates multiple LLM providers to explore, validate, critique, repair, judge, and rank competing technical proposals. It enforces hard constraints, preserves real dissent, and only lets synthesis replace its sources when the synthesis proves itself.

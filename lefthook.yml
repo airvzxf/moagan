@@ -1,0 +1,52 @@
+# lefthook.yml — tiered validation hooks for moagan.
+#
+# The dev loop has four tiers. Each tier runs at a different moment so the
+# common cases (fmt, clippy, build) are sub-30s while the slow integration
+# suite (~minutes) only blocks push and CI.
+#
+#   T0  sub-second    fmt-check + guard-deps                → pre-commit (parallel)
+#   T1  seconds       clippy + cargo build                  → pre-commit (parallel)
+#   T2  minutes       cargo test --all-targets              → pre-push
+#   T3  CI only       full gauntlet + smoke + e2e           → .github/workflows/
+#   msg <1 s          conventional commit subject check     → commit-msg
+#
+# Skip flags (escape hatches — use sparingly):
+#   LEFTPHOOK=0                    disable all hooks for one command
+#   git commit --no-verify         bypass pre-commit + commit-msg (NOT recommended)
+#   git push --no-verify           bypass pre-push (NOT recommended)
+#
+# First-time setup on a fresh clone:
+#   pacman -S lefthook           # or: cargo install lefthook
+#   lefthook install             # writes .git/hooks/{pre-commit,pre-push,commit-msg}
+#
+# Reference: docs/validation-tiers.md
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt-check:
+      description: "T0 · cargo fmt --all -- --check"
+      run: make fmt-check
+    guard-deps:
+      description: "T0 · forbidden crates + Anthropic SDK guard"
+      run: make guard-deps
+    lint:
+      description: "T1 · cargo clippy --all-targets -- -D warnings"
+      run: make lint
+    build:
+      description: "T1 · cargo build"
+      run: make build
+
+pre-push:
+  parallel: false
+  commands:
+    test:
+      description: "T2 · cargo test --all-targets (skips known-flaky audit_e2e)"
+      run: make test-ci
+
+commit-msg:
+  parallel: false
+  commands:
+    conventional-commit:
+      description: "enforce Conventional Commits subject format"
+      run: bash scripts/check-commit-msg.sh {1}
