@@ -35,11 +35,18 @@ jobs:
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/registry
-          ~/.cargo/git
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Run validation gauntlet
-        run: make validate
+        run: |
+          set -euo pipefail
+          make fmt-check
+          make guard-deps
+          make lint
+          make test
+          make build
