@@ -382,7 +382,8 @@ mod tests {
                 tmp.path().join("Cargo.toml"),
                 "[package]\nname = \"moagan_validator_prewarm\"\n\
                  version = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
-                 [lib]\npath = \"src/lib.rs\"\n",
+                 [lib]\npath = \"src/lib.rs\"\n\n\
+                 [dependencies]\nserde_json = \"1\"\n",
             )
             .expect("write manifest");
             std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir src");
