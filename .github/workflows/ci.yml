@@ -41,20 +41,5 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Guard against forbidden crates
-        run: make guard-deps
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets
-
-      - name: Build
-        run: cargo build --release
-
-      - name: Documentation
-        run: cargo doc --no-deps
+      - name: Run validation gauntlet
+        run: make validate
