@@ -15,8 +15,9 @@ on:
 #   - lint-test-build
 #   - smoke-e2e
 #
-# Runs on GitHub-hosted ubuntu-latest (was self-hosted vps-ccx13-runner before
-# commit 5f75000; restored so CI can run without a registered runner image).
+# Runs on GitHub-hosted ubuntu-latest (was self-hosted [self-hosted, Linux,
+# X64, moagan] runner before PR #232; switched so CI no longer requires a
+# registered self-hosted runner image that has to be kept online).
 # The Makefile test-ci target mirrors the --skip flags applied below so local
 # pre-push and CI agree on the test set.
 
@@ -97,6 +98,14 @@ jobs:
         run: |
           cargo --version
           rustc --version
+
+      - name: Build debug binary
+        # The 5 smoke_* scripts and the 2 e2e_* scripts that `make smoke` and
+        # `make e2e` invoke each launch `${ROOT}/target/debug/moagan` against
+        # the mock provider. They bail with "moagan binary not built" if the
+        # artefact is missing. The `lint-test-build` job's `make build` ran
+        # in a separate VM and its `target/` does not persist here.
+        run: cargo build
 
       - name: T3 · smoke (static, <2 s)
         run: make smoke
