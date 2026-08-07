@@ -10,6 +10,10 @@ jobs:
   validate:
     runs-on: [self-hosted, Linux, X64, moagan]
     timeout-minutes: 30
+    env:
+      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +23,23 @@ jobs:
           rustc --version
           clippy-driver --version
           mold --version
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-moagan-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-moagan-target-
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Guard against forbidden crates
         run: make guard-deps
