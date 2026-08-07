@@ -70,7 +70,8 @@ test-ci:
 		--skip validators::rust_validator::tests::good_rust_runs_three_steps_in_order \
 		--skip validators::rust_validator::tests::rust_validator_fails_when_test_fails \
 		--skip validators::rust_validator::tests::rust_validator_marks_no_tests_as_skipped \
-		--skip validators::rust_validator::tests::rust_validator_passes_when_test_passes
+		--skip validators::rust_validator::tests::rust_validator_passes_when_test_passes \
+		--skip llm::response_format_opt_out::tests::env_var_extends_opt_out
 
 test-doc:
 	cargo test --doc

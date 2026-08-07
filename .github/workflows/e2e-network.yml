@@ -11,6 +11,12 @@ on:
 # The audit_e2e long-discover block (~20 min) can be skipped by setting
 # MOAGAN_SMOKE_LONG_DISCOVER=1 in the runner environment if needed.
 # Reference: docs/validation-tiers.md (Tier 3, main-only).
+#
+# Uses the same .github/actions/rust-setup composite as ci.yml:
+# Swatinem/rust-cache@v2 (cache-on-failure: true) shares the target/
+# dir across all jobs in the workflow. The previous actions/cache@v4
+# block was replaced in PR #236 to keep cache format consistent across
+# the whole pipeline.
 
 jobs:
   e2e-network:
@@ -20,21 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.1
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - uses: ./.github/actions/rust-setup
 
       - name: Show toolchain
         run: |

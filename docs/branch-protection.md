@@ -78,20 +78,36 @@ gh api /repos/airvzxf/moagan --jq .permissions
 gh api /repos/airvzxf/moagan/rulesets/19743104 > /tmp/ruleset.json
 
 # 3. Build the new ruleset JSON: existing rules + new required_status_checks
+#
+# IMPORTANT: the `context` strings below MUST match the GitHub-reported
+# check name exactly, which is the `name:` field of each job in
+# .github/workflows/ci.yml (NOT the `jobs.<id>` key). Currently:
+#   T0 · fmt-check
+#   T0 · guard-deps
+#   T1 · clippy
+#   T1 · build (populates cargo cache)
+#   T2 · cargo test --lib --bins
+#   T2 · cargo test --tests (integration)
+#   T2 · cargo test --doc
+#   T3 · make smoke (static + 4 pre-existing FAIL)
+#   T3 · make e2e (local mock pipeline)
+# Renaming any of these requires updating this ruleset too, otherwise
+# the merge will be blocked with "9 of 9 required status checks are
+# expected" (the contexts are tracked by display name).
 jq '.rules += [{
   "type": "required_status_checks",
   "parameters": {
     "strict_required_status_checks_policy": true,
     "required_status_checks": [
-      { "context": "fmt-check" },
-      { "context": "guard-deps" },
-      { "context": "clippy" },
-      { "context": "build" },
-      { "context": "test-lib" },
-      { "context": "test-tests" },
-      { "context": "test-doc" },
-      { "context": "smoke" },
-      { "context": "e2e" }
+      { "context": "T0 · fmt-check" },
+      { "context": "T0 · guard-deps" },
+      { "context": "T1 · clippy" },
+      { "context": "T1 · build (populates cargo cache)" },
+      { "context": "T2 · cargo test --lib --bins" },
+      { "context": "T2 · cargo test --tests (integration)" },
+      { "context": "T2 · cargo test --doc" },
+      { "context": "T3 · make smoke (static + 4 pre-existing FAIL)" },
+      { "context": "T3 · make e2e (local mock pipeline)" }
     ]
   }
 }]' /tmp/ruleset.json > /tmp/ruleset-new.json
@@ -138,15 +154,15 @@ Should print:
 {
   "strict_required_status_checks_policy": true,
   "required_status_checks": [
-    { "context": "fmt-check" },
-    { "context": "guard-deps" },
-    { "context": "clippy" },
-    { "context": "build" },
-    { "context": "test-lib" },
-    { "context": "test-tests" },
-    { "context": "test-doc" },
-    { "context": "smoke" },
-    { "context": "e2e" }
+    { "context": "T0 · fmt-check" },
+    { "context": "T0 · guard-deps" },
+    { "context": "T1 · clippy" },
+    { "context": "T1 · build (populates cargo cache)" },
+    { "context": "T2 · cargo test --lib --bins" },
+    { "context": "T2 · cargo test --tests (integration)" },
+    { "context": "T2 · cargo test --doc" },
+    { "context": "T3 · make smoke (static + 4 pre-existing FAIL)" },
+    { "context": "T3 · make e2e (local mock pipeline)" }
   ]
 }
 ```
