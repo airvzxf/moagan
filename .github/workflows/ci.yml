@@ -53,6 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt
@@ -63,6 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - run: make guard-deps
 
@@ -71,6 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
         with:
           components: clippy
@@ -81,6 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - name: cargo build (debug)
         run: cargo build
@@ -98,6 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - name: cargo test (lib + bins)
         run: |
@@ -112,6 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - name: cargo test (integration suite)
         run: |
@@ -126,6 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - name: cargo test --doc
         run: cargo test --doc
@@ -136,6 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - name: Download moagan-debug binary
         uses: actions/download-artifact@v4
@@ -151,6 +159,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - name: Download moagan-debug binary
         uses: actions/download-artifact@v4
