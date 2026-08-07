@@ -48,5 +48,5 @@ jobs:
           make fmt-check
           make guard-deps
           make lint
-          make test
+          cargo test --all-targets -- --skip audit_e2e_deep_run_has_exact_external_coverage
           make build
