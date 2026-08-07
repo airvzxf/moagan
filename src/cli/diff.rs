@@ -44,6 +44,17 @@ pub struct DiffArgs {
     pub format: Option<DiffFormat>,
     /// Emit per-proposal breakdown for the ranking delta.
     pub include_proposals: bool,
+    /// Explicit home override. When `Some`, the dispatcher
+    /// uses the given `MoaganHome` instead of resolving
+    /// `MOAGAN_HOME` from the environment. Production callers
+    /// leave this `None`; tests set it to bypass the global
+    /// env var (the parallel-test race on `MOAGAN_HOME`
+    /// surfaces as a spurious `Error::InvalidState` when two
+    /// tests share the same `meta.sqlite` file via env-var
+    /// mutation). Mirrors `RepairArgs::home_override` from
+    /// PR #129.
+    #[doc(hidden)]
+    pub home_override: Option<MoaganHome>,
 }
 
 /// Output format for `moagan diff`. Mirrors the spectrum already
@@ -95,6 +106,7 @@ pub fn run(args: DiffArgs) -> Result<i32> {
         run_b,
         format,
         include_proposals,
+        home_override,
     } = args;
     let format = format.unwrap_or_default();
 
@@ -110,9 +122,13 @@ pub fn run(args: DiffArgs) -> Result<i32> {
         ));
     }
 
-    // 2. Resolve home + open the index. The MoaganHome is cloned off
-    //    the cached `_home` reference inside RunDir; lightweight.
-    let home = MoaganHome::resolve()?;
+    // 2. Resolve home + open the index. `home_override` lets
+    //    tests inject a tempdir directly so they don't race
+    //    other parallel tests that mutate MOAGAN_HOME; the
+    //    CLI dispatcher always passes `None` so production
+    //    behaviour is unchanged. Mirrors the same override
+    //    pattern used by `RepairArgs` (PR #129).
+    let home = home_override.unwrap_or(MoaganHome::resolve()?);
     let db = Db::open(&home.meta_db_path())?;
 
     // 3. Load both runs + aggregates. A missing run_id surfaces as
@@ -687,15 +703,19 @@ mod tests {
         let tmp = tempdir().expect("tmpdir");
         let cfg_path = tmp.path().join("MOAGAN_HOME");
         std::fs::create_dir_all(&cfg_path).expect("mkdir");
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", &cfg_path);
-        }
+        // Inject the tempdir directly via home_override so we
+        // don't race other parallel tests that mutate
+        // MOAGAN_HOME. Same pattern as
+        // `diff_unknown_run_returns_invalid_state` below and
+        // `RepairArgs::home_override` (PR #129).
+        let home = MoaganHome::at(cfg_path);
         let same = "01900000-0000-0000-0000-000000000000";
         let args = DiffArgs {
             run_a: same.into(),
             run_b: same.into(),
             format: None,
             include_proposals: false,
+            home_override: Some(home),
         };
         let err = run(args).expect_err("self-diff must error");
         assert!(
@@ -715,14 +735,18 @@ mod tests {
         let tmp = tempdir().expect("tmpdir");
         let cfg_path = tmp.path().join("MOAGAN_HOME");
         std::fs::create_dir_all(&cfg_path).expect("mkdir");
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", &cfg_path);
-        }
+        // Inject the tempdir directly via home_override so we
+        // don't race other parallel tests that mutate
+        // MOAGAN_HOME. Same pattern as `RepairArgs::home_override`
+        // (PR #129); see the `reindex_no_diff_returns_zero` test
+        // in src/cli/repair.rs for the long-form rationale.
+        let home = MoaganHome::at(cfg_path);
         let args = DiffArgs {
             run_a: "01900000-0000-0000-0000-000000000000".into(),
             run_b: "01900000-0000-0000-0000-000000000001".into(),
             format: None,
             include_proposals: false,
+            home_override: Some(home),
         };
         let err = run(args).expect_err("unknown run must error");
         assert!(
