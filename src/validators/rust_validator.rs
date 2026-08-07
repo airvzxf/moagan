@@ -343,9 +343,128 @@ mod tests {
     use super::*;
 
     use crate::sandbox::{Sandbox, SandboxConfig};
+    use std::sync::OnceLock;
 
     fn sandbox() -> Sandbox {
         Sandbox::new(SandboxConfig::new()).unwrap()
+    }
+
+    /// Pre-warm a dedicated `CARGO_HOME` once per test process so the
+    /// sandboxed `cargo --offline` steps resolve against a populated
+    /// registry.
+    ///
+    /// The validator's `cargo check --offline` / `cargo clippy --offline`
+    /// / `cargo test --offline` steps run inside the sandbox with
+    /// `CARGO_NET_OFFLINE=true` (catalog §D.11.9 default-deny network).
+    /// In a CI cold-cache run the registry index under
+    /// `$CARGO_HOME/registry/index/` is empty, so the very first
+    /// `--offline` invocation has nothing to resolve against and the
+    /// cargo subprocess exits non-zero — turning a Pass into a Fail
+    /// for tests like `good_rust_passes_when_cargo_present`.
+    ///
+    /// The sandbox at `src/sandbox/process.rs:1462` overwrites `HOME`
+    /// to the per-invocation scratch dir. When `CARGO_HOME` is unset
+    /// cargo derives its registry from `${HOME}/.cargo`, so the
+    /// sandbox always sees an empty registry even if the test
+    /// process has a populated `~/.cargo/registry` — that is the
+    /// failure mode the previous fix hit.
+    ///
+    /// Cargo respects `CARGO_HOME` over `HOME`; the sandbox
+    /// inherits `CARGO_HOME` because `build_env` does
+    /// `env = std::env::vars().collect()` and only overrides `HOME`
+    /// and `PATH` explicitly. Two cases:
+    ///
+    /// 1. **`CARGO_HOME` already set in the test process** (CI with
+    ///    Swatinem, developer with a global registry, etc.): leave
+    ///    it alone. The sandbox will inherit the already-populated
+    ///    registry and `cargo --offline` works.
+    /// 2. **`CARGO_HOME` unset** (local cold cache, a fresh test
+    ///    runner with no global registry): allocate a fresh
+    ///    [`tempfile::TempDir`] under `TMPDIR`, run `cargo fetch`
+    ///    from the *test* process against a throwaway stdlib-only
+    ///    dummy crate to materialise the registry index there, and
+    ///    `set_var("CARGO_HOME", <tempdir>)` so the sandbox
+    ///    inherits the populated path.
+    ///
+    /// `OnceLock` guarantees the fetch + set_var runs exactly once
+    /// per test binary regardless of how many of the five tests
+    /// below invoke it. The `set_var` lives inside `get_or_init` so
+    /// the only thread that mutates the env is the one that wins
+    /// the initialisation race; subsequent callers just observe
+    /// the already-set value via `std::env::var_os`.
+    ///
+    /// Scope of the env leak: when we do set `CARGO_HOME`, it
+    /// stays set for the remainder of the test binary's lifetime.
+    /// The test binary is about to exit when the tests complete,
+    /// and a parallel `cargo test` invocation is a separate process
+    /// with its own env, so the leak is harmless.
+    static CARGO_HOME_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+    fn prewarm_cargo_registry() {
+        // If the caller (CI workflow, dev shell) already exported a
+        // CARGO_HOME, trust it. Swatinem pre-populates
+        // /home/runner/.cargo on GitHub-hosted runners; locally a
+        // developer may have a global registry. Overwriting that
+        // with a tempdir would either (a) drop a populated cache
+        // for no benefit, or (b) leave the tempdir empty if the
+        // subsequent `cargo fetch` cannot reach the network.
+        if std::env::var_os("CARGO_HOME").is_some() {
+            return;
+        }
+        CARGO_HOME_DIR.get_or_init(|| {
+            let dir = tempfile::Builder::new()
+                .prefix("moagan-validator-cargo-home-")
+                .tempdir()
+                .expect("CARGO_HOME tempdir");
+
+            // Minimal stdlib-only dummy crate; the only purpose is
+            // to force `cargo fetch` to materialise the registry
+            // index. The real fixture crates (good_rust, broken_rust,
+            // the in-`#[test]` artefacts) are also stdlib-only, so
+            // nothing on top of the bare index is required.
+            let dummy = dir.path().join("dummy");
+            std::fs::create_dir_all(dummy.join("src")).expect("mkdir dummy/src");
+            std::fs::write(
+                dummy.join("Cargo.toml"),
+                "[package]\n\
+                 name = \"moagan_validator_prewarm\"\n\
+                 version = \"0.0.0\"\n\
+                 edition = \"2021\"\n\
+                 publish = false\n\n\
+                 [lib]\n\
+                 path = \"src/lib.rs\"\n",
+            )
+            .expect("write dummy Cargo.toml");
+            std::fs::write(dummy.join("src").join("lib.rs"), "").expect("write dummy lib.rs");
+
+            let out = std::process::Command::new("cargo")
+                .arg("fetch")
+                .arg("--manifest-path")
+                .arg(dummy.join("Cargo.toml"))
+                .env("CARGO_HOME", dir.path())
+                .env_remove("CARGO_NET_OFFLINE")
+                .output()
+                .expect("spawn cargo fetch for prewarm");
+            assert!(
+                out.status.success(),
+                "prewarm `cargo fetch` failed: stdout={}\nstderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+
+            // SAFETY: serialised by `OnceLock::get_or_init`; every
+            // other thread that calls `prewarm_cargo_registry` will
+            // see the initialised `TempDir` and return without
+            // racing on the env. The sandbox's `build_env` reads
+            // `std::env::vars()` at call time, so any subsequent
+            // `RustValidator::check` invocation picks up the new
+            // `CARGO_HOME` via the inherited env.
+            unsafe {
+                std::env::set_var("CARGO_HOME", dir.path());
+            }
+
+            dir
+        });
     }
 
     fn good_rust() -> CodeArtifact {
@@ -412,6 +531,7 @@ mod tests {
             // Skip silently: cargo not installed on this host.
             return;
         }
+        prewarm_cargo_registry();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -529,6 +649,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -567,6 +688,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -595,6 +717,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let artifact = CodeArtifact::new(
             "src/lib.rs",
             "rust",
@@ -649,6 +772,7 @@ mod tests {
         {
             return;
         }
+        prewarm_cargo_registry();
         let artifact = CodeArtifact::new(
             "src/lib.rs",
             "rust",
