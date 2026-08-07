@@ -110,6 +110,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
       - name: cargo test (lib + bins)
         run: |
           set -euo pipefail
@@ -125,6 +127,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
       - name: cargo test (integration suite)
         run: |
           set -euo pipefail
