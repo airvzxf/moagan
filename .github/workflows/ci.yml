@@ -21,21 +21,21 @@ concurrency:
 #   clippy       ─┤   T1 (no deps, ~60 s)
 #   build        ─┴─► upload-artifact: moagan-debug
 #                       │
-#                       ├─► test-tests  ─┐
-#                       ├─► test-lib    ─┤
-#                       ├─► smoke       ─┤──► test-doc (last, ~5 s)
-#                       └─► e2e         ─┘
+#   test-tests   ────┐
+#   test-lib     ────┤
+#   test-doc     ────┤  T2 (depend on build, parallel)
+#   smoke        ────┤
+#   e2e          ────┘
 #
-# test-doc is intentionally `needs: [test-tests, test-lib, smoke, e2e]`
-# (NOT just `needs: build`) so it always finishes last. It is the fastest
-# check; placing it last lets all the long-running jobs complete first and
-# gives the GitHub UI a single "everything else is done" event before
-# test-doc flashes green ~5 s later.
+# All 5 post-build jobs run in parallel and only depend on `build`. The
+# YAML declaration order is: test-tests, test-lib, smoke, e2e, test-doc.
+# This is purely a visual ordering in the GitHub Actions UI; the actual
+# execution is parallel and the wall-clock critical path is dominated by
+# the slowest of the 5 jobs (typically e2e at ~3 min).
 #
 # Wall-clock critical path:
-#   round 1 = max(fmt-check, guard-deps, clippy, build)                    ~60 s
-#   round 2 = max(test-lib, test-tests, smoke, e2e)                        ~3 min
-#   round 3 = test-doc                                                     ~5 s
+#   round 1 = max(fmt-check, guard-deps, clippy, build)                  ~60 s
+#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e)             ~3 min
 # Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
 #
 # Note on artifact sharing:
@@ -161,7 +161,7 @@ jobs:
 
   test-doc:
     name: 'T2 · cargo test --doc'
-    needs: [test-tests, test-lib, smoke, e2e]
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
