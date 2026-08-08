@@ -359,8 +359,20 @@ impl RunContext {
         self.home.run_dir(self.run_id)
     }
 
-    /// Resolve the active provider by name.
-    pub fn provider(&self) -> Arc<dyn crate::llm::Provider> {
+    /// Resolve the active provider by name. D.19.19: when the
+    /// registry has a `ProviderPool` configured (e.g. the config
+    /// carries two `mock` instances), the pool's round-robin is
+    /// consulted first so consecutive calls land on different
+    /// instances. When the pool is empty or returns `None` (e.g.
+    /// every entry's breaker is open), the call falls back to a
+    /// direct `get(default_provider)` so the legacy single-instance
+    /// path stays bit-for-bit equivalent.
+    pub async fn provider(&self) -> Arc<dyn crate::llm::Provider> {
+        if self.providers.has_pool()
+            && let Some(picked) = self.providers.pick(false).await
+        {
+            return picked;
+        }
         self.providers
             .get(&self.default_provider)
             .expect("default provider must be registered")
@@ -485,7 +497,7 @@ impl RunContext {
         let request_body_sha256 = (self.default_provider == "minimax")
             .then(|| crate::llm::http::request_body_sha256(&req))
             .transpose()?;
-        let provider = self.provider();
+        let provider = self.provider().await;
         let call_id = uuid::Uuid::now_v7().to_string();
         let provider_started = std::time::Instant::now();
         tracing::debug!(

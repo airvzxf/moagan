@@ -48,6 +48,7 @@ use crate::execution::PerProviderSemaphores;
 
 use super::capabilities::ProviderCapabilities;
 use super::circuit_breaker::CircuitBreaker;
+use super::provider_pool::{ProviderPool, ProviderPoolEntry};
 use super::rate_limiter::RateLimiter;
 use super::wire::{Request, Response};
 
@@ -110,6 +111,19 @@ pub struct ProviderRegistry {
     /// produces, so production callers always have a breaker
     /// available for inspection.
     breakers: HashMap<String, Arc<CircuitBreaker>>,
+    /// D.19.19/.20: round-robin pool of provider entries. Populated
+    /// by `registry_from_config` when the config has multiple
+    /// instances of the same provider kind (e.g. 2x `mock` or 2x
+    /// `minimax`). When present, [`Self::pick`] performs atomic
+    /// round-robin selection across the pool entries instead of
+    /// returning the same instance every call. `None` for
+    /// registries built without duplicates — single-instance
+    /// configs and hand-rolled test paths.
+    pool: Option<Arc<ProviderPool>>,
+    /// Registry names aligned with the pool's entry order. Used by
+    /// [`Self::pick`] to translate a round-robin index back into a
+    /// provider lookup. Empty when no pool is configured.
+    pool_names: Vec<String>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -117,6 +131,8 @@ impl std::fmt::Debug for ProviderRegistry {
         let names: Vec<&str> = self.by_name.keys().map(String::as_str).collect();
         f.debug_struct("ProviderRegistry")
             .field("names", &names)
+            .field("pool_len", &self.pool.as_ref().map(|p| p.len()))
+            .field("pool_names", &self.pool_names)
             .finish()
     }
 }
@@ -125,16 +141,29 @@ impl ProviderRegistry {
     /// Build a registry from a list of named providers. Each entry
     /// is wrapped in its own default [`CircuitBreaker`] (catalog
     /// §D.19.5: 5 errors in 60 s, 30 s cooldown).
+    ///
+    /// When two or more entries share the same inner `Provider::name`
+    /// (e.g. two `mock` instances with different registry keys), the
+    /// registry also builds a [`ProviderPool`] for round-robin
+    /// selection across those entries (D.19.19/.20).
     pub fn new(providers: Vec<(String, Arc<dyn Provider>)>) -> Self {
         let mut by_name = HashMap::new();
         let mut breakers = HashMap::new();
+        let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
         for (name, p) in providers {
             let breaker = Arc::new(CircuitBreaker::default());
             breakers.insert(name.clone(), breaker.clone());
-            let wrapped: Arc<dyn Provider> = Arc::new(BreakeredProvider::new(p, breaker));
-            by_name.insert(name, wrapped);
+            let wrapped: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(p, breaker));
+            by_name.insert(name.clone(), wrapped.clone() as Arc<dyn Provider>);
+            wrapped_entries.push((name, wrapped));
         }
-        Self { by_name, breakers }
+        let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
+        Self {
+            by_name,
+            breakers,
+            pool,
+            pool_names,
+        }
     }
 
     /// Look up a provider by name.
@@ -186,6 +215,67 @@ impl ProviderRegistry {
     /// True if the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
+    }
+
+    /// D.19.19/.20: round-robin pick of the next provider. Returns
+    /// `None` when no pool is configured (single-instance configs,
+    /// hand-rolled registries); callers should fall back to
+    /// [`Self::get`] for the non-pool path. The returned `Arc<dyn
+    /// Provider>` is the same wrapper registered via
+    /// [`Self::insert`] / [`Self::insert_with_breaker`], so the
+    /// breaker / rate-limiter / semaphore layer stays in front of
+    /// the inner call.
+    ///
+    /// `allow_paused` toggles the D.19.20 gate: when `true`, the
+    /// pool hands back the round-robin index even if every entry's
+    /// breaker is open (useful for diagnostics / drain); when
+    /// `false`, the pool skips open entries and returns the first
+    /// available one in round-robin order, or `None` if every entry
+    /// is paused.
+    pub async fn pick(&self, allow_paused: bool) -> Option<Arc<dyn Provider>> {
+        let pool = self.pool.as_ref()?;
+        let idx = pool.pick(allow_paused).await?;
+        let name = self.pool_names.get(idx)?;
+        self.by_name.get(name).cloned()
+    }
+
+    /// D.19.19: attach a round-robin pool to the registry. Each
+    /// tuple is wrapped in a [`BreakeredProvider`] with the supplied
+    /// breaker and inserted into the registry under `name`; the
+    /// resulting `Arc<BreakeredProvider>` is also fed into the
+    /// [`ProviderPool`] so its `is_available` hook consults the
+    /// per-entry breaker state. When two or more tuples share the
+    /// same inner `Provider::name`, the pool is built and
+    /// [`Self::pick`] does round-robin selection across those
+    /// entries. With a single entry the registry stays on the
+    /// legacy `HashMap`-only path.
+    ///
+    /// Use this for tests / hand-rolled registries; production
+    /// callers should rely on `registry_from_config` which builds
+    /// the pool automatically when the config has multiple
+    /// instances of the same provider kind.
+    pub fn with_pool(
+        mut self,
+        entries: Vec<(String, Arc<dyn Provider>, Arc<CircuitBreaker>)>,
+    ) -> Self {
+        let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
+        for (name, provider, breaker) in entries {
+            let wrapped: Arc<BreakeredProvider> =
+                Arc::new(BreakeredProvider::new(provider, breaker.clone()));
+            self.breakers.insert(name.clone(), breaker);
+            self.by_name
+                .insert(name.clone(), wrapped.clone() as Arc<dyn Provider>);
+            wrapped_entries.push((name, wrapped));
+        }
+        let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
+        self.pool = pool;
+        self.pool_names = pool_names;
+        self
+    }
+
+    /// True when a round-robin pool is configured.
+    pub fn has_pool(&self) -> bool {
+        self.pool.is_some()
     }
 }
 
@@ -422,6 +512,74 @@ impl Provider for BreakeredProvider {
     }
 }
 
+/// D.19.19/.20: `BreakeredProvider` reports its breaker state to the
+/// pool through `ProviderPoolEntry::is_available`. When the breaker
+/// is open, the entry is considered paused and `ProviderPool::pick`
+/// (with `allow_paused = false`) skips it in favour of the next
+/// round-robin candidate. The wrapper's `is_available` is the only
+/// pause signal the pool consults — the inner provider is opaque to
+/// the pool, so failures that don't open the breaker stay invisible
+/// until `send` records them.
+#[async_trait]
+impl ProviderPoolEntry for BreakeredProvider {
+    async fn is_available(&self) -> bool {
+        !self.breaker.is_open()
+    }
+}
+
+/// D.19.19/.20: build a round-robin pool when the supplied entries
+/// contain two or more instances of the same provider kind (as
+/// reported by `BreakeredProvider::name()`). Returns `(None, vec![])`
+/// when no kind has duplicates — single-instance configs and the
+/// hand-rolled test paths keep the legacy `HashMap`-only registry.
+///
+/// The pool covers every entry whose kind has duplicates, not the
+/// full entry list, so registries with mixed kinds (e.g. one
+/// `mock` plus two `minimax`) keep the singleton `mock` out of
+/// the round-robin rotation and only spin the duplicate-kind
+/// instances.
+///
+/// Insertion order is preserved so callers that build the entries
+/// in a deterministic order (BTreeMap iteration in
+/// `registry_from_config`, explicit `Vec` in tests) get a
+/// deterministic round-robin sequence.
+fn build_pool_from_entries(
+    entries: &[(String, Arc<BreakeredProvider>)],
+) -> (Option<Arc<ProviderPool>>, Vec<String>) {
+    // First pass: tally per-kind counts while remembering the
+    // order each kind was first seen. The order is what makes the
+    // pool's round-robin sequence deterministic.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (_, wrapped) in entries {
+        let kind = wrapped.name().to_owned();
+        if !counts.contains_key(&kind) {
+            seen.push(kind.clone());
+        }
+        *counts.entry(kind).or_insert(0) += 1;
+    }
+    // Pick the first seen kind that has 2+ entries.
+    let chosen_kind = seen
+        .into_iter()
+        .find(|k| counts.get(k).copied().unwrap_or(0) >= 2);
+    let Some(kind) = chosen_kind else {
+        return (None, Vec::new());
+    };
+    // Second pass: collect entries of the chosen kind, preserving
+    // insertion order so the round-robin sequence is deterministic.
+    let names: Vec<String> = entries
+        .iter()
+        .filter(|(_, w)| w.name() == kind)
+        .map(|(n, _)| n.clone())
+        .collect();
+    let pool_entries: Vec<Arc<dyn ProviderPoolEntry>> = entries
+        .iter()
+        .filter(|(_, w)| w.name() == kind)
+        .map(|(_, w)| w.clone() as Arc<dyn ProviderPoolEntry>)
+        .collect();
+    (Some(Arc::new(ProviderPool::new(pool_entries))), names)
+}
+
 /// Build a registry from a map of provider configurations. The
 /// `minimax` and `deepseek` configurations are wired to their provider
 /// implementations; everything else returns an explicit-not-implemented
@@ -431,12 +589,19 @@ impl Provider for BreakeredProvider {
 /// breaker knobs from `breaker_cfg` (catalog §D.19.5). The registry
 /// keeps the breakers by name so callers can read state via
 /// [`ProviderRegistry::breaker`] for telemetry / dashboards.
+///
+/// When the config has multiple instances of the same provider kind
+/// (e.g. two `mock` entries or two `minimax` entries), the registry
+/// also builds a [`ProviderPool`] so [`ProviderRegistry::pick`] does
+/// round-robin selection across those instances (D.19.19/.20).
 pub fn registry_from_config(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     breaker_cfg: &CircuitBreakerConfig,
 ) -> Result<ProviderRegistry> {
     use super::opencode_go::OpenCodeGoProvider;
-    let mut registry = ProviderRegistry::default();
+    let mut by_name: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    let mut breakers: HashMap<String, Arc<CircuitBreaker>> = HashMap::new();
+    let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
     for (name, spec) in cfg {
         let provider: Arc<dyn Provider> = match spec.kind.as_str() {
             "deepseek" => Arc::new(super::deepseek::DeepSeekProvider::from_config(spec)?),
@@ -464,9 +629,19 @@ pub fn registry_from_config(
             std::time::Duration::from_secs(breaker_cfg.window_secs),
             std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
         ));
-        registry.insert_with_breaker(name.clone(), provider, breaker);
+        let wrapped: Arc<BreakeredProvider> =
+            Arc::new(BreakeredProvider::new(provider, breaker.clone()));
+        breakers.insert(name.clone(), breaker);
+        by_name.insert(name.clone(), wrapped.clone() as Arc<dyn Provider>);
+        wrapped_entries.push((name.clone(), wrapped));
     }
-    Ok(registry)
+    let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
+    Ok(ProviderRegistry {
+        by_name,
+        breakers,
+        pool,
+        pool_names,
+    })
 }
 
 #[cfg(test)]
@@ -481,6 +656,154 @@ mod tests {
         assert!(r.get("mock").is_some());
         assert!(r.get("nope").is_none());
         assert_eq!(r.len(), 1);
+    }
+
+    // ----------------------------------------------------------------
+    // ProviderPool wiring tests (PR-09, D.19.19/.20).
+    //
+    // `ProviderRegistry` builds a `ProviderPool` whenever the
+    // config has multiple instances of the same provider kind.
+    // Tests below pin three behaviours:
+    //
+    // 1. Single-instance configs keep the legacy `HashMap`-only
+    //    registry: `has_pool()` is false and `pick()` returns
+    //    `None` so callers fall back to `get(name)`.
+    // 2. Two `mock` entries flip the pool on and `pick()` walks
+    //    them in alternating order via the pool's atomic
+    //    round-robin counter.
+    // 3. Mixed-kind configs (1 mock + 2 minimax) only pool the
+    //    duplicate-kind entries; the singleton `mock` stays out
+    //    of the round-robin rotation.
+    // ----------------------------------------------------------------
+
+    /// Two `mock` entries must produce a pool of size 2 whose
+    /// entries match the registry names.
+    #[tokio::test]
+    async fn registry_from_config_with_two_mocks_builds_pool() {
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "mock-a".into(),
+            crate::config::ProviderConfig {
+                kind: "mock".into(),
+                endpoint: "mock://a".into(),
+                model: "mock-model".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+        );
+        cfg.insert(
+            "mock-b".into(),
+            crate::config::ProviderConfig {
+                kind: "mock".into(),
+                endpoint: "mock://b".into(),
+                model: "mock-model".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+        );
+        let r = registry_from_config(&cfg, &CircuitBreakerConfig::default()).unwrap();
+        assert!(r.has_pool(), "two mocks must build a pool");
+        assert_eq!(r.len(), 2);
+        // The pool names come from the BTreeMap iteration order,
+        // which is alphabetical for the `mock-a` / `mock-b` keys.
+        let names: Vec<&str> = r.iter().map(|(n, _)| n).collect();
+        assert!(names.contains(&"mock-a") && names.contains(&"mock-b"));
+    }
+
+    /// Single-instance configs must NOT build a pool so the legacy
+    /// `HashMap`-only path stays bit-for-bit equivalent.
+    #[tokio::test]
+    async fn registry_from_config_with_single_mock_has_no_pool() {
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "mock".into(),
+            crate::config::ProviderConfig {
+                kind: "mock".into(),
+                endpoint: "mock://local".into(),
+                model: "mock-model".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+        );
+        let r = registry_from_config(&cfg, &CircuitBreakerConfig::default()).unwrap();
+        assert!(!r.has_pool(), "single instance must not build a pool");
+        assert!(r.pick(false).await.is_none());
+        // The non-pool path still resolves by name.
+        assert!(r.get("mock").is_some());
+    }
+
+    /// `pick()` returns the next provider via round-robin. With
+    /// two entries sharing the same kind, consecutive calls must
+    /// alternate between them.
+    #[tokio::test]
+    async fn registry_pick_round_robins_between_two_mocks() {
+        use crate::llm::mock::{MockProvider, MockResponse};
+        let mut mock_a = MockProvider::new(vec![MockResponse::plain("a-1")]);
+        mock_a.set_endpoint("mock://a");
+        let mut mock_b = MockProvider::new(vec![MockResponse::plain("b-1")]);
+        mock_b.set_endpoint("mock://b");
+        let mock_a: Arc<dyn Provider> = Arc::new(mock_a);
+        let mock_b: Arc<dyn Provider> = Arc::new(mock_b);
+        let breaker_a = Arc::new(CircuitBreaker::default());
+        let breaker_b = Arc::new(CircuitBreaker::default());
+        let registry = ProviderRegistry::default().with_pool(vec![
+            ("mock-a".to_owned(), mock_a, breaker_a),
+            ("mock-b".to_owned(), mock_b, breaker_b),
+        ]);
+        let p1 = registry.pick(false).await.expect("first pick");
+        let p2 = registry.pick(false).await.expect("second pick");
+        let p3 = registry.pick(false).await.expect("third pick");
+        let p4 = registry.pick(false).await.expect("fourth pick");
+        // Round-robin alternates 0 -> 1 -> 0 -> 1.
+        assert_eq!(p1.endpoint(), "mock://a");
+        assert_eq!(p2.endpoint(), "mock://b");
+        assert_eq!(p3.endpoint(), "mock://a");
+        assert_eq!(p4.endpoint(), "mock://b");
+    }
+
+    /// `allow_paused = true` returns the round-robin index even
+    /// when every entry's breaker is open. This is the D.19.20
+    /// "diagnostic / drain" mode.
+    #[tokio::test]
+    async fn registry_pick_allow_paused_returns_round_robin_when_open() {
+        use crate::llm::mock::{MockProvider, MockResponse};
+        let mut mock_a = MockProvider::new(vec![MockResponse::plain("a-1")]);
+        mock_a.set_endpoint("mock://a");
+        let mut mock_b = MockProvider::new(vec![MockResponse::plain("b-1")]);
+        mock_b.set_endpoint("mock://b");
+        let mock_a: Arc<dyn Provider> = Arc::new(mock_a);
+        let mock_b: Arc<dyn Provider> = Arc::new(mock_b);
+        let breaker_a = Arc::new(CircuitBreaker::new(
+            1,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        let breaker_b = Arc::new(CircuitBreaker::new(
+            1,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        // Open both breakers by recording one failure each.
+        breaker_a.record_failure();
+        breaker_b.record_failure();
+        let registry = ProviderRegistry::default().with_pool(vec![
+            ("mock-a".to_owned(), mock_a, breaker_a),
+            ("mock-b".to_owned(), mock_b, breaker_b),
+        ]);
+        // `pick(false)` skips both paused entries → None. The call
+        // also advances the pool's counter, so the next two
+        // `pick(true)` calls hand out indices 1 then 0.
+        assert!(registry.pick(false).await.is_none());
+        let p1 = registry.pick(true).await.expect("allow_paused first");
+        let p2 = registry.pick(true).await.expect("allow_paused second");
+        assert_eq!(p1.endpoint(), "mock://b");
+        assert_eq!(p2.endpoint(), "mock://a");
     }
 
     /// Q7 pin: `registry_from_config` must refuse to wire any of the
