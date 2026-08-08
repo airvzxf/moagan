@@ -30,6 +30,7 @@ use crate::discovery::clusterer::{
 };
 use crate::domain::{Cluster, Sketch};
 use crate::error::{Error, Result};
+use crate::llm::embed::HashingEmbedder;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 
@@ -45,10 +46,14 @@ struct ClusterRefinement {
     summary: String,
 }
 
-/// Discovery cluster phase. Reads every sketch, runs the SimHash
-/// pass, then runs the LLM refinement pass per cluster.
+/// Discovery cluster phase. Reads every sketch, runs the
+/// embedder-based clustering pass, then runs the LLM refinement
+/// pass per cluster.
 pub struct DiscoverClusterPhase {
-    /// SimHash threshold. Default 0.7.
+    /// Max "distance" between embeddings for two records to join
+    /// the same cluster (`1 - cosine <= threshold`). Default 0.7
+    /// keeps the same permissiveness as the previous Jaccard-based
+    /// pass.
     pub threshold: f32,
 }
 
@@ -129,8 +134,12 @@ impl Phase for DiscoverClusterPhase {
             ));
         }
 
-        // 1. SimHash pass.
-        let chunks = cluster(&records, self.threshold);
+        // 1. Embedder-based clustering pass (D.1.3). The
+        //    `HashingEmbedder` is dependency-free; `RemoteEmbedder`
+        //    and `fastembed` adapters can drop in later without
+        //    touching this call site.
+        let embedder = HashingEmbedder::default();
+        let chunks = cluster(&records, &embedder, self.threshold);
         let buckets = bucket_by_cluster(&records, &chunks);
 
         // 2. LLM refinement pass — fan-out per cluster, parallel.
