@@ -288,12 +288,17 @@ impl Default for ExportConfig {
 
 /// Track E (E8 partial): knobs for the two D.7.1 catalog roles
 /// that the Discovery flow can opt-into invoke. The fields here
-/// gate the helpers in `src/discovery/persona_angle.rs`; neither
-/// role is auto-invoked today (the integration into
-/// `DiscoveryCoordinator::run` is a separate PR).
+/// gate the helpers in `src/discovery/persona_angle.rs`; the
+/// `auto_pickers` knob added in v0.5 PR-18 (D.13.18) lets the
+/// coordinator auto-invoke both helpers at the START of the
+/// discovery loop (before the matrix fan-out) so the audit
+/// sidecar can confirm `persona_picker` and `angle_picker` calls
+/// precede the matrix generation calls.
 ///
-/// All fields default to "off / no-op" so existing runs are
-/// bit-identical when the section is absent from `config.toml`.
+/// All fields default to "off / no-op" (apart from
+/// `auto_pickers`, which defaults to `true`) so existing runs
+/// are bit-identical when the section is absent from
+/// `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiscoveryWiringConfig {
@@ -325,6 +330,24 @@ pub struct DiscoveryWiringConfig {
     /// Set via `[discovery] tag_threshold = <0..=1>` in
     /// `~/.config/moagan/config.toml`.
     pub tag_threshold: f32,
+    /// D.13.18 (v0.5 PR-18): master switch for the coordinator's
+    /// auto-invocation of `run_with_pickers`. When `true` (the
+    /// default), `DiscoveryCoordinator::run_with_ctx_and_target`
+    /// invokes the persona picker (when `persona_enabled` is
+    /// also set) and the angle picker (when `angle_enabled` is
+    /// also set) at the START of the loop — before the matrix
+    /// fan-out — so the audit sidecar's `calls.jsonl.gz`
+    /// sidecar sees `persona_picker` and `angle_picker` rows
+    /// preceding the matrix-generation rows. When `false`, the
+    /// coordinator skips both helpers and the catalogue roles
+    /// are not invoked unless an out-of-band caller drives
+    /// them. Set via `[discovery] auto_pickers = false` in
+    /// `~/.config/moagan/config.toml` or
+    /// `MOAGAN_DISCOVERY_AUTO_PICKERS=false`. Existing runs that
+    /// did not opt into the catalogue roles see no behavioural
+    /// change because the individual `*_enabled` switches are
+    /// still `false` by default.
+    pub auto_pickers: bool,
 }
 
 impl Default for DiscoveryWiringConfig {
@@ -334,6 +357,7 @@ impl Default for DiscoveryWiringConfig {
             angle_enabled: false,
             angle_clusters_min: 2,
             tag_threshold: crate::discovery::tagger_threshold::DEFAULT_TAGGER_THRESHOLD,
+            auto_pickers: true,
         }
     }
 }
@@ -1169,6 +1193,20 @@ impl Config {
             }
             if let Some(config) = parse_rate_limit_env(&value) {
                 self.research.per_host_rate_limit.insert(host, config);
+            }
+        }
+        // D.13.18 (v0.5 PR-18): master switch for the coordinator's
+        // auto-invocation of `run_with_pickers`. The env-var name
+        // matches the TOML key (`auto_pickers`) so operators can
+        // flip the bit either way without touching the config file.
+        // Garbage / blank exports leave the existing value alone so
+        // a stale export does not silently toggle the helper.
+        if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS") {
+            let normalised = v.trim().to_ascii_lowercase();
+            match normalised.as_str() {
+                "true" | "1" | "yes" | "on" => self.discovery.auto_pickers = true,
+                "false" | "0" | "no" | "off" => self.discovery.auto_pickers = false,
+                _ => {}
             }
         }
         // Track E (catalog §D.19.6): per-provider rate-limit knobs.
