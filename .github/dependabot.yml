@@ -1,0 +1,114 @@
+# Dependabot — moagan
+#
+# Weekly updates for both ecosystems that this repo actually depends on:
+#   - `cargo`        → runtime + dev dependencies pinned in Cargo.lock
+#   - `github-actions` → workflows under .github/workflows/ + composite
+#                         actions under .github/actions/
+#
+# Conventions match the host-AGENTS.md (GPG-signed, conventional commits)
+# and the repo's existing release flow:
+#   - github-actions bumps land as `ci: bump the <group> group with N updates`
+#   - cargo bumps land as `deps: bump the <group> group with N updates`
+#   - every PR lands with labels `dependencies` + the ecosystem tag
+#   - `open-pull-requests-limit` caps concurrent PRs so we never drown
+#   - `groups` collapse related updates into one PR (less review surface)
+#
+# Defense-in-depth: the `ignore` block lists the no-go crates from
+# /AGENTS.md. They are not in Cargo.lock today, but if a transitive advisory
+# ever pulled one in, Dependabot would not be able to upgrade it on its own
+# (forcing a human PR + AGENTS.md review).
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "ci"
+      - "area:ci"
+    commit-message:
+      prefix: "ci"
+      prefix-development: "ci"
+      include: "scope"
+    groups:
+      actions-checkout:
+        patterns: ["actions/checkout"]
+      actions-cache:
+        patterns:
+          - "actions/cache"
+          - "actions/upload-artifact"
+          - "actions/download-artifact"
+      actions-codeql:
+        patterns:
+          - "github/codeql-action"
+      actions-rust:
+        patterns:
+          - "dtolnay/rust-toolchain"
+          - "Swatinem/rust-cache"
+          - "taiki-e/install-action"
+      actions-release:
+        patterns:
+          - "softprops/action-gh-release"
+      actions-others:
+        patterns: ["*"]
+        exclude-patterns:
+          - "actions/checkout"
+          - "actions/cache"
+          - "actions/upload-artifact"
+          - "actions/download-artifact"
+          - "github/codeql-action"
+          - "dtolnay/rust-toolchain"
+          - "Swatinem/rust-cache"
+          - "taiki-e/install-action"
+          - "softprops/action-gh-release"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+      - "area:build"
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps"
+      include: "scope"
+    # Never let Dependabot silently bump a crate that violates AGENTS.md.
+    # The CI guard `make guard-deps` is the authoritative source of truth,
+    # but we also short-circuit Dependabot updates for these names.
+    ignore:
+      - dependency-name: "anthropic-*"
+      - dependency-name: "claude-*"
+      - dependency-name: "secrecy"
+      - dependency-name: "axum"
+      - dependency-name: "hyper"
+      - dependency-name: "sqlx"
+      - dependency-name: "governor"
+      - dependency-name: "figment"
+      - dependency-name: "refinery"
+      - dependency-name: "askama"
+      - dependency-name: "handlebars"
+      - dependency-name: "lettre"
+      - dependency-name: "inquire"
+      - dependency-name: "time"
+    groups:
+      rust-runtime:
+        dependency-type: "production"
+      rust-dev:
+        dependency-type: "development"
+      rust-transitive:
+        dependency-type: "indirect"
+        patterns: ["*"]
+        exclude-patterns: []
