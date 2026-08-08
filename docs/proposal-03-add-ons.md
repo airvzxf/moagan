@@ -2131,7 +2131,7 @@ pub struct DiversityVector {
 
 `DiversityBook` trackea tuplas usadas para evitar repetición. (Inspirado en T03-04 §2; T06-10 §6.2; T12-09.)
 
-#### D.13.19. `MatrixCell` con `seed` documentada como always-None
+#### D.13.19. `MatrixCell` con `seed` documentada como always-None (P — ✅ SPEC-DRIFT resuelto en v0.5 PR-16)
 
 ```rust
 // src/discovery/matrix.rs
@@ -2144,6 +2144,8 @@ pub struct MatrixCell {
 ```
 
 (Inspirado en T16-06 §2.1; T01-10 §6.1.)
+
+> **Estado (v0.5 PR-16, ✅ SPEC-DRIFT resuelto 2026-08):** V4 §6.4 y T01-06 §9.1 especifican la forma `roles × models × temperatures`. La implementación en `src/discovery/matrix.rs:36` usa deliberadamente `dimensions × facets × per_cell`: `MatrixCell` contiene `{ dimension_id, facet_id, label }`, mientras que el `seed` efectivo se deriva externamente, de modo que la tupla por celda es `{ dimension_id, facet_id, label, seed }` y no hay `model_spec`, `role` ni `temperature` por celda. Esta evolución es más flexible porque no exige una instancia de provider diferente para cada celda. La decisión de v0.5 PR-16 (2026-08) es documentar la divergencia, no re-diseñar la matriz; un caso futuro que requiera model/role/temperature por celda será una feature v0.6+, y los futuros contribuidores no deben proponer re-diseñar la matriz sin consultar primero la hoja de ruta v0.5 PR #16.
 
 #### D.13.20. `Cardinality` con `range_usize` per-phase
 
