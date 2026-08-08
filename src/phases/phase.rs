@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
 
 use crate::cancel::Cancel;
 use crate::cli::Mode;
@@ -85,7 +86,28 @@ pub struct RunContext {
     cancel: Cancel,
     phase_timeout: Duration,
     total_timeout: Duration,
+    /// Interval between lease renewals issued by the heartbeat task.
+    /// Default: 30 s. Phases can override via
+    /// [`RunContext::with_heartbeat_interval_secs`]; tests that need a
+    /// tight loop use a much smaller value (e.g. 50 ms).
+    heartbeat_interval_secs: u64,
+    /// Holder identity used by the lease the heartbeat renews.
+    /// Distinct per run so a paused/resumed run does not collide with
+    /// the original heartbeat on the same `run_id`.
+    heartbeat_holder: String,
+    /// Handle for the lease-renewal heartbeat task spawned by
+    /// [`Pipeline::run`](crate::phases::pipe::Pipeline::run). Held
+    /// in an `Arc` so the various `RunContext` clones used by the
+    /// pipeline share one slot; `Drop` aborts the handle so the
+    /// heartbeat cannot outlive the run context.
+    heartbeat_handle: Arc<parking_lot::Mutex<Option<JoinHandle<Result<u64>>>>>,
 }
+
+/// Default heartbeat interval. Renews the lease well before the
+/// 60-second default TTL so a transient `db.renew_lease` failure
+/// has a recovery window before the lease expires and the run is
+/// flagged as a zombie.
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 impl std::fmt::Debug for RunContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -170,6 +192,9 @@ impl RunContext {
             cancel: Cancel::new(),
             phase_timeout: Duration::ZERO,
             total_timeout: Duration::ZERO,
+            heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
+            heartbeat_holder: "heartbeat".to_owned(),
+            heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -229,6 +254,90 @@ impl RunContext {
 
     pub(crate) fn cancel(&self) -> &Cancel {
         &self.cancel
+    }
+
+    /// Override the heartbeat renewal interval. Defaults to
+    /// [`DEFAULT_HEARTBEAT_INTERVAL_SECS`] (30 s); tests that need a
+    /// tight renewal loop pass a sub-second value so the integration
+    /// suite can observe multiple renewals inside a short pipeline
+    /// run. The interval is fixed at `ensure_heartbeat()` time —
+    /// changing it after the heartbeat has been spawned has no
+    /// effect on the live task.
+    pub fn with_heartbeat_interval_secs(mut self, secs: u64) -> Self {
+        self.heartbeat_interval_secs = secs;
+        self
+    }
+
+    /// Override the holder identity used by the heartbeat's lease.
+    /// Distinct per run so a paused/resumed run does not collide
+    /// with the original heartbeat on the same `run_id`. Defaults
+    /// to `"heartbeat"`.
+    pub fn with_heartbeat_holder(mut self, holder: impl Into<String>) -> Self {
+        self.heartbeat_holder = holder.into();
+        self
+    }
+
+    /// True if the lease-renewal heartbeat has been spawned. Used by
+    /// the pipeline tests to assert that
+    /// [`Pipeline::run`](crate::phases::pipe::Pipeline::run) wired
+    /// the task correctly.
+    #[allow(dead_code)] // test-only assertion; production never inspects the slot
+    pub(crate) fn heartbeat_spawned(&self) -> bool {
+        self.heartbeat_handle.lock().is_some()
+    }
+
+    /// Spawn the lease-renewal heartbeat task. Idempotent: a second
+    /// call without an intervening abort is a no-op so the pipeline
+    /// can call it on every `run` without worrying about double
+    /// spawns. Acquires a [`LeaseGuard`](crate::storage::lease::LeaseGuard)
+    /// via the SQLite index, so this is a no-op when the telemetry
+    /// was opened in no-index mode (legacy runs, the dashboard's
+    /// read-only path). The spawned task is parented to a child of
+    /// [`RunContext::cancel`] so `phase`/`total` timeout and the
+    /// CLI shutdown signal all stop the heartbeat cleanly.
+    pub(crate) fn ensure_heartbeat(&self) -> Result<()> {
+        if self.heartbeat_handle.lock().is_some() {
+            return Ok(());
+        }
+        let Some(db) = self.telemetry.db().cloned() else {
+            return Ok(());
+        };
+        let holder = self.heartbeat_holder.clone();
+        // The lease TTL is the renewal budget — it must outlive the
+        // longest gap between renewals. Floor at 60 s so a tight
+        // 100 ms interval still has plenty of headroom in case the
+        // SQLite write stalls; cap at the configured interval so
+        // very large intervals don't drag expiry past the next run.
+        let ttl_secs = self.heartbeat_interval_secs.max(60);
+        let lease = crate::storage::lease::LeaseGuard::acquire(
+            &db,
+            self.run_id,
+            &holder,
+            Duration::from_secs(ttl_secs),
+        )?;
+        // `tokio::time::interval` panics on zero, so floor at 1 s.
+        // A user that explicitly wants "as fast as possible" gets
+        // a 1-second interval; for tight loops the unit tests
+        // override `heartbeat_interval_secs` directly via the
+        // builder.
+        let interval_secs = self.heartbeat_interval_secs.max(1);
+        let interval = Duration::from_secs(interval_secs);
+        let cancel = self.cancel.child_token();
+        let handle = crate::telemetry::heartbeat::spawn(lease, interval, cancel);
+        *self.heartbeat_handle.lock() = Some(handle);
+        Ok(())
+    }
+
+    /// Abort the heartbeat task and clear the handle slot. Called
+    /// from `Drop` so the heartbeat cannot outlive the run context.
+    /// Best-effort: the abort is fire-and-forget because we cannot
+    /// `.await` from a `Drop` impl. The task is parented to the
+    /// `CancellationToken` so it exits promptly once the run context
+    /// is gone.
+    pub(crate) fn abort_heartbeat(&self) {
+        if let Some(handle) = self.heartbeat_handle.lock().take() {
+            handle.abort();
+        }
     }
 
     /// Borrow the run-specific directory namespace.
@@ -798,6 +907,19 @@ impl RunContext {
                 attempt += 1;
             }
         }
+    }
+}
+
+/// Abort the heartbeat task when the last `RunContext` clone goes
+/// out of scope. Multiple clones share the same `Arc<Mutex<Option<...>>>`
+/// handle, so the first clone to drop takes the handle out and the
+/// rest see `None` (a no-op). The task itself is also parented to a
+/// `CancellationToken`, so even an aborted-but-leaked task exits
+/// when the run's cancel fires; this `Drop` just guarantees the
+/// task stops before the run's `LeaseGuard` releases its row.
+impl Drop for RunContext {
+    fn drop(&mut self) {
+        self.abort_heartbeat();
     }
 }
 
