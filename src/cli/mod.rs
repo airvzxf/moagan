@@ -546,6 +546,18 @@ pub enum Cmd {
         /// hang on `intake`'s yes/no prompt).
         #[arg(long, default_value_t = false)]
         non_interactive: bool,
+        /// Opt-in switch for the cross-run facet cache (V4 §6.8 +
+        /// catalog D.13.13). When set, the `discover_facet` phase
+        /// writes derived facet lists to
+        /// `<MOAGAN_HOME>/cache/facets/` keyed by
+        /// `sha256(brief + category_id)` and skips the
+        /// `facet_deriver` LLM call on subsequent runs that share
+        /// the same brief + category. Default `false` so the
+        /// baseline "LLM every run" contract is preserved unless
+        /// the operator explicitly opts in. The TTL is
+        /// `MOAGAN_FACET_CACHE_TTL_SECS` (default 7 days).
+        #[arg(long, default_value_t = false)]
+        cache_facets: bool,
     },
     /// `moagan telemetry` — read-only inspection, dashboard, export,
     /// verify, and retention. v0.3 sub-fase I (T01-06 §10.7 + §10.8
@@ -1133,6 +1145,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             facets_per_dimension,
             cluster_threshold,
             non_interactive,
+            cache_facets,
         } => {
             if cardinality < 80 {
                 return Err(Error::InvalidArgs(format!(
@@ -1153,6 +1166,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     cluster_threshold,
                     out_dir: None,
                     non_interactive,
+                    cache_facets,
                 },
                 &cfg,
             )
