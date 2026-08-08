@@ -29,7 +29,7 @@ list is implicitly **not enforced**.
 | `T2 · cargo test --lib --bins` | ✅ required | |
 | `T2 · cargo test --tests (integration)` | ✅ required | |
 | `T2 · cargo test --doc` | ✅ required | |
-| `T3 · make smoke (static + 4 pre-existing FAIL)` | ✅ required | |
+| `T3 · make smoke` | ✅ required | |
 | `T3 · make e2e (local mock pipeline)` | ✅ required | |
 | `e2e-network` workflow (post-merge) | ❌ **not required** | Runs only on push to main; not a merge gate |
 

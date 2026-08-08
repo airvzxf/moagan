@@ -75,7 +75,7 @@ key. The YAML below shows the two layers for each job from
 | `test-tests` | `T2 · cargo test --tests (integration)` |
 | `test-lib` | `T2 · cargo test --lib --bins` |
 | `test-doc` | `T2 · cargo test --doc` |
-| `smoke` | `T3 · make smoke (static + 4 pre-existing FAIL)` |
+| `smoke` | `T3 · make smoke` |
 | `e2e` | `T3 · make e2e (local mock pipeline)` |
 
 The `context` strings in the `required_status_checks` JSON block are
@@ -115,7 +115,7 @@ gh api /repos/airvzxf/moagan/rulesets/19743104 > /tmp/ruleset.json
 #   T2 · cargo test --lib --bins
 #   T2 · cargo test --tests (integration)
 #   T2 · cargo test --doc
-#   T3 · make smoke (static + 4 pre-existing FAIL)
+#   T3 · make smoke
 #   T3 · make e2e (local mock pipeline)
 # Renaming any of these requires updating this ruleset too, otherwise
 # the merge will be blocked with "9 of 9 required status checks are
@@ -132,7 +132,7 @@ jq '.rules += [{
       { "context": "T2 · cargo test --lib --bins" },
       { "context": "T2 · cargo test --tests (integration)" },
       { "context": "T2 · cargo test --doc" },
-      { "context": "T3 · make smoke (static + 4 pre-existing FAIL)" },
+      { "context": "T3 · make smoke" },
       { "context": "T3 · make e2e (local mock pipeline)" }
     ]
   }
@@ -187,7 +187,7 @@ Should print:
     { "context": "T2 · cargo test --lib --bins" },
     { "context": "T2 · cargo test --tests (integration)" },
     { "context": "T2 · cargo test --doc" },
-    { "context": "T3 · make smoke (static + 4 pre-existing FAIL)" },
+    { "context": "T3 · make smoke" },
     { "context": "T3 · make e2e (local mock pipeline)" }
   ]
 }
@@ -320,29 +320,3 @@ The README badge is wired against `ci.yml`:
 
 The badge reflects the workflow file, not individual jobs. The ruleset
 `required_status_checks` rule depends on the job IDs — keep them in sync.
-
-## Known issue: pre-existing smoke failures
-
-At the time of writing, `make smoke` fails 4 tests in
-`scripts/smoke_intra_cluster_synthesis.sh` (pre-existing on `main`, not
-introduced by the tiered-validation refactor):
-
-```
-Intra-cluster synthesis smoke tests: PASS=74  FAIL=4
-  - synthesize_uses_synthesizer_role
-  - synthesize_handles_empty_cluster_list
-  - pipeline_synthesized_proposal_has_three_sources
-  - pipeline_three_proposals_persisted
-```
-
-These are static grep checks, not runtime tests. Once the ruleset
-`required_status_checks` rule includes `smoke`, the merge button will be
-disabled until these are fixed. They should be fixed in a separate PR before
-the ruleset change is applied, OR the `smoke` context should be temporarily
-removed from the required list.
-
-Recommended order:
-
-1. Land the tiered-validation refactor PR (this document's companion).
-2. Land a separate PR fixing the 4 synthesis smoke tests.
-3. Then apply the ruleset change above (with all 9 contexts required).
