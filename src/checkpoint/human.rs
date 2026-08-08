@@ -42,18 +42,37 @@ pub enum CheckpointKind {
     /// Fired at the end of `DeliverPhase` to confirm the run should
     /// terminate.
     Final,
+    /// Fired at the end of `DiscoverSummaryPhase` (V4 §6.11 +
+    /// T01-06 §9.11). Carries the discovery roll-up counts so the
+    /// question text can show "N categories, M facets, K
+    /// contradictions" without re-reading the disk sidecars. The
+    /// counts are not part of the persisted kind string (the SQLite
+    /// `kind` column is the bare `"discovery"` token — the counts
+    /// travel through the question text and the checkpoint id).
+    Discovery {
+        /// Number of `final/cat_NN.json` documents produced.
+        cat_count: usize,
+        /// Number of facet lists in `facets/`.
+        facet_count: usize,
+        /// Number of `Contradiction` entries in
+        /// `contradictions/contradictions.json`.
+        contradictions: usize,
+    },
     /// Fired at any other point the pipeline defines.
     Custom,
 }
 
 impl CheckpointKind {
     /// Stable lowercase string used in the persisted JSON and the
-    /// SQLite column.
+    /// SQLite column. Discovery collapses to `"discovery"`; the
+    /// roll-up counts travel through the question text and the
+    /// sidecar's `id`, never through the kind token.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Intake => "intake",
             Self::Clarify => "clarify",
             Self::Final => "final",
+            Self::Discovery { .. } => "discovery",
             Self::Custom => "custom",
         }
     }
@@ -65,6 +84,7 @@ impl CheckpointKind {
             Self::Intake => "intake",
             Self::Clarify => "clarify",
             Self::Final => "deliver",
+            Self::Discovery { .. } => "discover_summary",
             Self::Custom => "custom",
         }
     }
@@ -84,6 +104,15 @@ impl FromStr for CheckpointKind {
             "intake" => Ok(Self::Intake),
             "clarify" => Ok(Self::Clarify),
             "final" => Ok(Self::Final),
+            // The roll-up counts are not part of the wire form —
+            // see the `Discovery` variant's doc. `FromStr` round-trip
+            // therefore collapses to the all-zero triple; callers
+            // that need real counts build the variant directly.
+            "discovery" => Ok(Self::Discovery {
+                cat_count: 0,
+                facet_count: 0,
+                contradictions: 0,
+            }),
             "custom" => Ok(Self::Custom),
             other => Err(Error::InvalidArgs(format!(
                 "unknown checkpoint kind: {other}"
@@ -290,9 +319,16 @@ fn parse_resolution(raw: &str, default_yes: bool) -> Resolution {
         };
     }
     let lowered = trimmed.to_lowercase();
-    if matches!(lowered.as_str(), "y" | "yes") {
+    // PR-20: the discovery checkpoint lists four actions
+    // (`approve | review | block | export`) per V4 §6.11 / T01-06
+    // §9.11. We recognise `approve` and `block` as the explicit
+    // yes/no tokens so a user / CI script that types
+    // `approve` (instead of the canonical `y`) still resolves to
+    // `Approved`. `review` and `export` fall through to `Modify`
+    // so the call site can persist them as a modify note.
+    if matches!(lowered.as_str(), "y" | "yes" | "approve") {
         Resolution::Approved
-    } else if matches!(lowered.as_str(), "n" | "no") {
+    } else if matches!(lowered.as_str(), "n" | "no" | "block") {
         Resolution::Rejected
     } else {
         Resolution::Modify(trimmed.to_owned())
@@ -331,6 +367,19 @@ mod tests {
         ] {
             assert_eq!(k.as_str().parse::<CheckpointKind>().unwrap(), k);
         }
+        // PR-20: the Discovery variant round-trips through the
+        // all-zero collapse documented on `FromStr`. The roll-up
+        // counts travel through the question text and the
+        // checkpoint id, not through the kind token.
+        let discovery = CheckpointKind::Discovery {
+            cat_count: 0,
+            facet_count: 0,
+            contradictions: 0,
+        };
+        assert_eq!(
+            discovery.as_str().parse::<CheckpointKind>().unwrap(),
+            discovery
+        );
     }
 
     #[test]
@@ -338,6 +387,12 @@ mod tests {
         assert_eq!(parse_resolution("y", false), Resolution::Approved);
         assert_eq!(parse_resolution("Y", false), Resolution::Approved);
         assert_eq!(parse_resolution("yes", false), Resolution::Approved);
+        // PR-20: the discovery checkpoint exposes `approve` as an
+        // explicit yes token (V4 §6.11 / T01-06 §9.11) so CI
+        // scripts can pipe the literal word without a
+        // translation layer.
+        assert_eq!(parse_resolution("approve", false), Resolution::Approved);
+        assert_eq!(parse_resolution("APPROVE", false), Resolution::Approved);
     }
 
     #[test]
@@ -345,6 +400,10 @@ mod tests {
         assert_eq!(parse_resolution("n", true), Resolution::Rejected);
         assert_eq!(parse_resolution("no", true), Resolution::Rejected);
         assert_eq!(parse_resolution("N", true), Resolution::Rejected);
+        // PR-20: `block` is the discovery checkpoint's explicit
+        // no token.
+        assert_eq!(parse_resolution("block", true), Resolution::Rejected);
+        assert_eq!(parse_resolution("BLOCK", true), Resolution::Rejected);
     }
 
     #[test]
@@ -379,6 +438,19 @@ mod tests {
         assert_eq!(CheckpointKind::Clarify.phase_name(), "clarify");
         assert_eq!(CheckpointKind::Final.phase_name(), "deliver");
         assert_eq!(CheckpointKind::Custom.phase_name(), "custom");
+        // PR-20: discovery checkpoints are owned by the
+        // `discover_summary` phase (V4 §6.11) so the SQLite
+        // index surfaces them next to the rest of the discovery
+        // timeline.
+        assert_eq!(
+            CheckpointKind::Discovery {
+                cat_count: 0,
+                facet_count: 0,
+                contradictions: 0,
+            }
+            .phase_name(),
+            "discover_summary"
+        );
     }
 
     #[test]
@@ -435,6 +507,73 @@ mod tests {
         let opts = CheckpointOpts::with_stdin_override("add a 5GB cap");
         let res = ask(&c, tmp.path(), &opts).unwrap();
         assert_eq!(res, Resolution::Modify("add a 5GB cap".to_owned()));
+    }
+
+    #[test]
+    fn ask_discovery_with_approve_resolves_approved() {
+        // PR-20: the discovery checkpoint lists
+        // `approve | review | block | export`. Piping `approve`
+        // must resolve to `Resolution::Approved` so the manifest
+        // sidecar can be sealed with `discovery.approved = true`.
+        let tmp = tempfile::tempdir().unwrap();
+        let c = Checkpoint::new(
+            CheckpointKind::Discovery {
+                cat_count: 3,
+                facet_count: 12,
+                contradictions: 2,
+            },
+            "discovered 3 categories, 12 facets, 2 contradictions; next action?",
+            true,
+        );
+        let opts = CheckpointOpts::with_stdin_override("approve");
+        let res = ask(&c, tmp.path(), &opts).unwrap();
+        assert_eq!(res, Resolution::Approved);
+        let json = std::fs::read_to_string(tmp.path().join(format!("{}.json", c.id))).unwrap();
+        // The kind token is the bare `"discovery"`; the counts
+        // travel through the question text + the id, not through
+        // the kind column.
+        assert!(json.contains("\"kind\": \"discovery\""));
+        assert!(json.contains("\"phase\": \"discover_summary\""));
+        assert!(json.contains("\"response\": \"approve\""));
+    }
+
+    #[test]
+    fn ask_discovery_with_block_resolves_rejected() {
+        // PR-20: `block` is the explicit no token for the
+        // discovery checkpoint.
+        let tmp = tempfile::tempdir().unwrap();
+        let c = Checkpoint::new(
+            CheckpointKind::Discovery {
+                cat_count: 1,
+                facet_count: 4,
+                contradictions: 0,
+            },
+            "discovered 1 category, 4 facets, 0 contradictions; next action?",
+            true,
+        );
+        let opts = CheckpointOpts::with_stdin_override("block");
+        let res = ask(&c, tmp.path(), &opts).unwrap();
+        assert_eq!(res, Resolution::Rejected);
+    }
+
+    #[test]
+    fn ask_discovery_with_review_resolves_modify() {
+        // PR-20: `review cat_02` (a free-form action prefix) is
+        // captured verbatim so the call site can persist it as
+        // a modify note.
+        let tmp = tempfile::tempdir().unwrap();
+        let c = Checkpoint::new(
+            CheckpointKind::Discovery {
+                cat_count: 2,
+                facet_count: 6,
+                contradictions: 1,
+            },
+            "discovered 2 categories, 6 facets, 1 contradiction; next action?",
+            true,
+        );
+        let opts = CheckpointOpts::with_stdin_override("review cat_02");
+        let res = ask(&c, tmp.path(), &opts).unwrap();
+        assert_eq!(res, Resolution::Modify("review cat_02".to_owned()));
     }
 
     #[test]
