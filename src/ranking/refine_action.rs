@@ -46,7 +46,7 @@ pub enum RefineAction {
 }
 
 impl RefineAction {
-    /// Stable snake-case wire form. The string values are part
+    /// Stable snake_case wire form. The string values are part
     /// of the public audit format (D.5.1) and must not change
     /// without a coordinated migration.
     pub fn as_str(&self) -> &'static str {
@@ -58,6 +58,43 @@ impl RefineAction {
             Self::RerunCritique => "rerun_critique",
             Self::DropProposal => "drop_proposal",
             Self::RequestHumanInput => "request_human_input",
+        }
+    }
+
+    /// Canonical CLI form (kebab-case). The CLI accepts both the
+    /// canonical kebab-case (`tighten-constraint`) and the audit
+    /// snake-case (`tighten_constraint`) forms so an operator can
+    /// paste either into a shell. The wire form for telemetry /
+    /// logs remains `as_str()` snake-case (D.5.1).
+    pub fn as_cli_str(&self) -> &'static str {
+        match self {
+            Self::TightenConstraint => "tighten-constraint",
+            Self::AddEvidence => "add-evidence",
+            Self::SplitProposal => "split-proposal",
+            Self::MergeProposal => "merge-proposal",
+            Self::RerunCritique => "rerun-critique",
+            Self::DropProposal => "drop-proposal",
+            Self::RequestHumanInput => "request-human-input",
+        }
+    }
+}
+
+impl std::str::FromStr for RefineAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalised = s.trim().to_ascii_lowercase().replace('-', "_");
+        match normalised.as_str() {
+            "tighten_constraint" => Ok(Self::TightenConstraint),
+            "add_evidence" => Ok(Self::AddEvidence),
+            "split_proposal" => Ok(Self::SplitProposal),
+            "merge_proposal" => Ok(Self::MergeProposal),
+            "rerun_critique" => Ok(Self::RerunCritique),
+            "drop_proposal" => Ok(Self::DropProposal),
+            "request_human_input" => Ok(Self::RequestHumanInput),
+            other => Err(format!(
+                "unknown refine action '{other}' (expected one of: tighten-constraint, add-evidence, split-proposal, merge-proposal, rerun-critique, drop-proposal, request-human-input)"
+            )),
         }
     }
 }
@@ -109,5 +146,64 @@ mod tests {
         wire_forms.sort_unstable();
         wire_forms.dedup();
         assert_eq!(wire_forms.len(), 7, "wire forms must be unique");
+    }
+
+    /// `FromStr` accepts both the kebab-case CLI form
+    /// (`tighten-constraint`) and the audit snake-case form
+    /// (`tighten_constraint`). Case-insensitive; leading /
+    /// trailing whitespace is trimmed. An unknown action
+    /// returns an error listing every valid form.
+    #[test]
+    fn refine_action_from_str_accepts_both_forms() {
+        use std::str::FromStr;
+
+        let cases = [
+            ("tighten-constraint", RefineAction::TightenConstraint),
+            ("Tighten-Constraint", RefineAction::TightenConstraint),
+            ("tighten_constraint", RefineAction::TightenConstraint),
+            ("TIGHTEN_CONSTRAINT", RefineAction::TightenConstraint),
+            ("add-evidence", RefineAction::AddEvidence),
+            ("add_evidence", RefineAction::AddEvidence),
+            ("split-proposal", RefineAction::SplitProposal),
+            ("merge-proposal", RefineAction::MergeProposal),
+            ("rerun-critique", RefineAction::RerunCritique),
+            ("drop-proposal", RefineAction::DropProposal),
+            ("request-human-input", RefineAction::RequestHumanInput),
+            ("  drop_proposal  ", RefineAction::DropProposal),
+        ];
+        for (raw, expected) in cases {
+            let parsed = RefineAction::from_str(raw)
+                .unwrap_or_else(|e| panic!("failed to parse {raw:?}: {e}"));
+            assert_eq!(parsed, expected, "wrong parse for {raw:?}");
+        }
+
+        // Unknown forms produce a helpful error.
+        let err = RefineAction::from_str("nope").unwrap_err();
+        assert!(err.contains("unknown refine action"), "{err}");
+        assert!(err.contains("tighten-constraint"), "{err}");
+    }
+
+    /// `as_cli_str` returns kebab-case; `as_str` returns
+    /// snake_case; the two are bijective.
+    #[test]
+    fn refine_action_cli_form_is_bijective_with_wire_form() {
+        let all = [
+            RefineAction::TightenConstraint,
+            RefineAction::AddEvidence,
+            RefineAction::SplitProposal,
+            RefineAction::MergeProposal,
+            RefineAction::RerunCritique,
+            RefineAction::DropProposal,
+            RefineAction::RequestHumanInput,
+        ];
+        for action in all {
+            // The CLI form minus the dashes must equal the wire form.
+            assert_eq!(
+                action.as_cli_str().replace('-', "_"),
+                action.as_str(),
+                "as_cli_str / as_str must agree on identifier (variant {:?})",
+                action
+            );
+        }
     }
 }

@@ -207,6 +207,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         created_at_iso: chrono::Utc::now().to_rfc3339(),
         last_resumed_at_iso: None,
         resume_count: 0,
+        prohibited_decisions: Vec::new(),
     };
 
     let final_manifest = run_full_pipeline(
@@ -738,6 +739,7 @@ pub(crate) fn build_manifest(
         created_at_iso: now.to_rfc3339(),
         last_resumed_at_iso: None,
         resume_count: 0,
+        prohibited_decisions: Vec::new(),
     };
 
     // 4. Compute the self-hash over the canonical JSON with

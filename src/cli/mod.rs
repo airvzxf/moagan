@@ -365,18 +365,46 @@ pub enum Cmd {
         #[arg(long, default_value_t = false)]
         verbose: bool,
     },
-    /// Localised refinement: re-run one phase for one proposal.
+    /// Localised refinement. Two sub-modes, mutually exclusive:
+    ///
+    /// - `--action <action>`: invoke
+    ///   `src/phases/refine.rs::dispatch_refine_action` (D.22.2)
+    ///   on the run. The action is one of `tighten-constraint`,
+    ///   `add-evidence`, `split-proposal`, `merge-proposal`,
+    ///   `rerun-critique`, `drop-proposal`, `request-human-input`
+    ///   (kebab-case; snake_case also accepted). Optional
+    ///   `--verdict-detail <text>` supplies the constraint text
+    ///   for `tighten-constraint`.
+    /// - `--proposal <proposal_id>`: re-issue the deliver prompt
+    ///   for one specific proposal and write
+    ///   `final/refined_<proposal_id>.md`.
     Refine {
         /// Run id.
         #[arg(long)]
         run_id: String,
-        /// Proposal id.
+        /// Proposal id (legacy sub-mode: re-run deliver for one
+        /// proposal). Mutually exclusive with `--action`.
+        #[arg(long, conflicts_with = "action", required_unless_present = "action")]
+        proposal: Option<String>,
+        /// Refine action (D.22.2). One of the seven kebab-case
+        /// wire forms (`tighten-constraint`, `add-evidence`,
+        /// `split-proposal`, `merge-proposal`, `rerun-critique`,
+        /// `drop-proposal`, `request-human-input`). Mutually
+        /// exclusive with `--proposal`.
+        #[arg(long, conflicts_with = "proposal", value_parser = clap::value_parser!(crate::ranking::RefineAction))]
+        action: Option<crate::ranking::RefineAction>,
+        /// Verdict detail forwarded to the dispatcher as
+        /// `RefineContext.verdict_detail`. Used by
+        /// `tighten-constraint` (recorded as the appended
+        /// `prohibited_decisions` entry) and `add-evidence`
+        /// (recorded as a source-context note).
         #[arg(long)]
-        proposal: String,
-        /// Mock responses directory. Required when the original run
-        /// used `--provider mock` so the deliver re-run can replay
-        /// the canned responses (the cache layer covers cache hits
-        /// but a cache miss still needs the mock fixtures).
+        verdict_detail: Option<String>,
+        /// Mock responses directory. Required when the original
+        /// run used `--provider mock` so the deliver re-run can
+        /// replay the canned responses (the cache layer covers
+        /// cache hits but a cache miss still needs the mock
+        /// fixtures). Only used by the `--proposal` sub-mode.
         #[arg(long)]
         mock_dir: Option<std::path::PathBuf>,
     },
@@ -975,22 +1003,54 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         Cmd::Refine {
             run_id,
             proposal,
+            action,
+            verdict_detail,
             mock_dir,
         } => {
-            let cfg = Config::load()?;
             let home = Arc::new(global_home.clone());
-            continue_cmd::run_refine(
-                run_id
-                    .parse()
-                    .map_err(|e| Error::InvalidArgs(format!("{e}")))?,
-                &proposal,
-                &cfg,
-                &home,
-                mock_dir.as_deref(),
-            )
-            .await?;
-            println!("refined proposal {proposal} for run {run_id}");
-            Ok(0)
+            let run_id_parsed = run_id
+                .parse()
+                .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
+
+            if let Some(action) = action {
+                // D.22.2: invoke `dispatch_refine_action`.
+                let outcome =
+                    continue_cmd::run_refine_action(run_id_parsed, action, verdict_detail, &home)
+                        .await?;
+                match outcome.prohibited_decisions {
+                    Some(pds) if !pds.is_empty() => {
+                        println!(
+                            "refine action '{}' applied to run {run_id}; prohibited_decisions now [{}]",
+                            action.as_cli_str(),
+                            pds.join(", ")
+                        );
+                    }
+                    _ => {
+                        println!(
+                            "refine action '{}' applied to run {run_id}",
+                            action.as_cli_str()
+                        );
+                    }
+                }
+                if outcome.emitted_telemetry {
+                    println!("refine action emitted a StaleArtifact telemetry event");
+                }
+                Ok(0)
+            } else if let Some(proposal) = proposal.as_deref() {
+                let cfg = Config::load()?;
+                continue_cmd::run_refine(run_id_parsed, proposal, &cfg, &home, mock_dir.as_deref())
+                    .await?;
+                println!("refined proposal {proposal} for run {run_id}");
+                Ok(0)
+            } else {
+                // clap's `required_unless_present` should prevent
+                // this; surface a friendly error anyway so a
+                // programmatic caller (not clap) gets a clear
+                // message.
+                Err(Error::InvalidArgs(
+                    "refine requires either --proposal <id> or --action <action>".into(),
+                ))
+            }
         }
         Cmd::Rerank { run_id } => {
             let cfg = Config::load()?;
