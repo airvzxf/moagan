@@ -62,7 +62,7 @@ pub use gate::GatePhase;
 pub use intake::IntakePhase;
 pub use judge::JudgePhase;
 pub use phase::{Phase, PhaseOutput, RunContext, temperature_for_role};
-pub use pipe::Pipeline;
+pub use pipe::{Pipeline, PipelineKind};
 pub use propose::ProposePhase;
 pub use rank::RankPhase;
 pub use refine::{

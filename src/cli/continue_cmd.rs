@@ -30,6 +30,7 @@ use crate::ids::RunId;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
 use crate::phases::Pipeline;
+use crate::phases::PipelineKind;
 use crate::phases::phase::{Phase, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::ranking::RefineAction;
@@ -37,7 +38,7 @@ use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
 /// Phase J: switch + checkpoint options for `moagan continue`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ContinueOptions {
     /// Switch the provider mid-run (e.g. `minimax` → `mock`).
     pub switch_provider: Option<String>,
@@ -55,6 +56,25 @@ pub struct ContinueOptions {
     /// (interactive operator). Use this when driving `resume`
     /// from a non-TTY stdin (CI, smoke tests).
     pub non_interactive: bool,
+    /// Which canonical pipeline shape the run belongs to. Defaults
+    /// to [`PipelineKind::Linear`] (the historic behaviour for
+    /// `fast | standard | deep | explore | batch` runs). v0.5
+    /// PR-24 introduces [`PipelineKind::Discovery`] so
+    /// `moagan continue --kind discovery` can resume a paused /
+    /// failed `moagan discover` run.
+    pub kind: PipelineKind,
+}
+
+impl Default for ContinueOptions {
+    fn default() -> Self {
+        Self {
+            switch_provider: None,
+            switch_api_key: None,
+            skip_checkpoint: false,
+            non_interactive: false,
+            kind: PipelineKind::Linear,
+        }
+    }
 }
 
 /// Real `moagan continue`. Loads the manifest, finds the last
@@ -89,17 +109,38 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
         ))
     })?;
     eprintln!(
-        "moagan continue {}: resuming after phase {last_phase:?}",
-        run_id.short()
+        "moagan continue {}: resuming after phase {last_phase:?} (kind {:?})",
+        run_id.short(),
+        opts.kind
     );
-    resume_pipeline(
-        home,
-        &manifest,
-        &last_phase,
-        api_key.as_deref(),
-        opts.non_interactive,
-    )
-    .await?;
+    match opts.kind {
+        PipelineKind::Linear => {
+            resume_pipeline(
+                home,
+                &manifest,
+                &last_phase,
+                api_key.as_deref(),
+                opts.non_interactive,
+            )
+            .await?;
+        }
+        PipelineKind::Discovery => {
+            // v0.5 PR-24 (V4 §6.11, T01-06 §10.2): resume a paused
+            // or failed `moagan discover` run. The discovery flow
+            // owns the matrix fan-out via the coordinator and the
+            // post-matrix phases via the post-matrix pipeline; this
+            // helper stitches them back together using the filtered
+            // canonical discovery pipeline as the reference.
+            super::discover::run_resume(
+                home,
+                &manifest,
+                &last_phase,
+                api_key.as_deref(),
+                opts.non_interactive,
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -111,6 +152,22 @@ pub async fn run_resume(home: &MoaganHome, run_id: RunId, non_interactive: bool)
     let opts = ContinueOptions {
         non_interactive,
         ..ContinueOptions::default()
+    };
+    run_continue(home, run_id, opts).await
+}
+
+/// `moagan continue --kind discovery <run_id>` — convenience
+/// wrapper that forces the kind to [`PipelineKind::Discovery`]
+/// without re-typing every [`ContinueOptions`] field. Used by the
+/// CLI dispatcher when the operator passes `--kind discovery`.
+pub async fn run_continue_discovery(
+    home: &MoaganHome,
+    run_id: RunId,
+    opts: ContinueOptions,
+) -> Result<()> {
+    let opts = ContinueOptions {
+        kind: PipelineKind::Discovery,
+        ..opts
     };
     run_continue(home, run_id, opts).await
 }
@@ -798,8 +855,16 @@ pub fn merge_value(base: &mut serde_json::Value, patch: &serde_json::Value) {
 
 /// Resume the pipeline after `last_phase`. Builds the canonical
 /// pipeline for the manifest's mode, then filters via
-/// `Pipeline::resume(canonical, last_phase)`. The filtered list
+/// [`Pipeline::resume_with_kind`] (defaulting to
+/// [`PipelineKind::Linear`] for backwards compatibility with
+/// `moagan continue <run_id>` without `--kind`). The filtered list
 /// runs end-to-end.
+///
+/// Discovery runs dispatch to
+/// [`super::discover::run_resume`] instead of going through this
+/// helper — the discovery flow owns its matrix fan-out via the
+/// coordinator and stitches it back together with the post-matrix
+/// pipeline outside the linear pipeline machinery.
 pub(crate) async fn resume_pipeline(
     home: &MoaganHome,
     manifest: &Manifest,
@@ -810,7 +875,7 @@ pub(crate) async fn resume_pipeline(
     let mode = parse_mode(&manifest.mode)?;
     let cfg = Config::load().unwrap_or_default();
     let canonical = build_canonical_for_resume(&cfg, mode);
-    let resumed = Pipeline::resume(canonical, last_phase)?;
+    let resumed = Pipeline::resume_with_kind(canonical, last_phase, PipelineKind::Linear)?;
     if resumed.is_empty() {
         eprintln!("moagan: nothing left to do after phase {last_phase:?}");
         return Ok(());

@@ -59,6 +59,16 @@ pub struct PhaseEvent {
     pub at_unix: i64,
     /// Optional error message.
     pub error: Option<String>,
+    /// `true` when the event was emitted by a pipeline that was
+    /// produced via [`crate::phases::Pipeline::resume`]; `false`
+    /// for fresh pipeline runs. Defaults to `false` so legacy
+    /// JSONL files written before v0.5 PR-24 deserialize cleanly.
+    /// v0.5 PR-24 (V4 §6.11, T01-06 §10.2): lets `moagan continue
+    /// --kind discovery` distinguish the resumed `discover_matrix`
+    /// fan-out from the original one in
+    /// `telemetry/phases.jsonl.gz`.
+    #[serde(default)]
+    pub resume: bool,
 }
 
 /// One LLM call record.
@@ -409,8 +419,21 @@ impl Telemetry {
         &self.inner.warnings_path
     }
 
-    /// Record a phase event.
-    pub fn phase(&self, phase: &str, seq: i64, status: &str, error: Option<&str>) -> Result<()> {
+    /// Record a phase event. The `resume` flag is `true` when the
+    /// event is emitted by a pipeline produced via
+    /// [`crate::phases::Pipeline::resume`]; `false` for fresh
+    /// pipeline runs. The flag flows into
+    /// `telemetry/phases.jsonl.gz` and the SQLite `phases` mirror so
+    /// post-execution review can distinguish resumed runs from
+    /// fresh ones (v0.5 PR-24).
+    pub fn phase(
+        &self,
+        phase: &str,
+        seq: i64,
+        status: &str,
+        error: Option<&str>,
+        resume: bool,
+    ) -> Result<()> {
         let ev = PhaseEvent {
             run_id: self.inner.run_id.to_string(),
             phase: phase.to_owned(),
@@ -418,6 +441,7 @@ impl Telemetry {
             status: status.to_owned(),
             at_unix: now_unix_secs(),
             error: error.map(str::to_owned),
+            resume,
         };
         let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
         let mut g = self.inner.phases.lock();
@@ -548,7 +572,11 @@ impl Telemetry {
     /// without depending on a separate file. Full `last_heartbeat`
     /// column in SQLite and zombie detection land in v0.2.
     pub fn heartbeat(&self) -> Result<()> {
-        self.phase("heartbeat", 0, "tick", None)
+        // Heartbeats are not part of a pipeline so they always
+        // emit `resume: false`. The flag would only matter inside a
+        // resumed pipeline and the heartbeat fires per-tick from a
+        // background task; it is never "the resumed phase".
+        self.phase("heartbeat", 0, "tick", None, false)
     }
 
     /// Record a warning event. The event is appended to
@@ -701,16 +729,34 @@ mod tests {
             status: "end".into(),
             at_unix: 1,
             error: None,
+            resume: false,
         };
         let j = serde_json::to_string(&ev).unwrap();
         let back: PhaseEvent = serde_json::from_str(&j).unwrap();
         assert_eq!(back.phase, "intake");
+        assert!(!back.resume, "default resume flag must be false");
+    }
+
+    /// v0.5 PR-24: legacy JSONL written before the `resume` field
+    /// was added must still deserialize (with `resume = false`).
+    /// The `serde(default)` on the field handles the missing-key
+    /// case; this test pins the contract.
+    #[test]
+    fn phase_event_round_trip_legacy_jsonl_without_resume() {
+        let legacy_json =
+            r#"{"run_id":"abc","phase":"intake","seq":1,"status":"end","at_unix":1,"error":null}"#;
+        let back: PhaseEvent = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(back.phase, "intake");
+        assert!(
+            !back.resume,
+            "legacy JSONL without `resume` field must default to false"
+        );
     }
 
     #[test]
     fn noop_telemetry_doesnt_panic() {
         let t = Telemetry::noop();
-        t.phase("intake", 1, "end", None).unwrap();
+        t.phase("intake", 1, "end", None, false).unwrap();
         t.call(
             "c1",
             "intake",
@@ -745,7 +791,7 @@ mod tests {
         let run_dir = home.run_dir(RunId::new());
         run_dir.ensure().unwrap();
         let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
-        t.phase("intake", 1, "end", None).unwrap();
+        t.phase("intake", 1, "end", None, false).unwrap();
         t.flush().unwrap();
         let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
         assert!(content.contains("intake"));
@@ -896,8 +942,14 @@ mod tests {
         let run_dir = home.run_dir(RunId::new());
         run_dir.ensure().unwrap();
         let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
-        t.phase("intake", 1, "error", Some("key=sk-cp-aaaaaaaaaaaaaaaaaaaa"))
-            .unwrap();
+        t.phase(
+            "intake",
+            1,
+            "error",
+            Some("key=sk-cp-aaaaaaaaaaaaaaaaaaaa"),
+            false,
+        )
+        .unwrap();
         t.flush().unwrap();
         let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
         assert!(content.contains("[REDACTED:minimax_sk_cp]"));
@@ -921,7 +973,7 @@ mod tests {
         run_dir.ensure().unwrap();
         let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::allow_all(), None).unwrap();
         let secret = "key=sk-cp-aaaaaaaaaaaaaaaaaaaa";
-        t.phase("intake", 1, "error", Some(secret)).unwrap();
+        t.phase("intake", 1, "error", Some(secret), false).unwrap();
         t.flush().unwrap();
         let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
         assert!(
