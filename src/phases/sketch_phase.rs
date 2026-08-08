@@ -65,6 +65,7 @@ use crate::llm::prompts::{KNOWN_APIS_PLACEHOLDER, inject_known_apis, system_prom
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::research::{ResearchFetcher, ResearchSnippet};
+use crate::telemetry::csv_summary::{SketchSummaryRow, write_sketches_summary};
 
 /// Default angles cycled across the fan-out. The list is the
 /// `spec §5.5` recommended set; when `count > angles.len()` the cycle
@@ -447,6 +448,11 @@ impl Phase for SketchPhase {
             let summary_path = ctx.run_dir().final_dir().join("sketches_summary.json");
             let stats = SketchFilterStats::default();
             write_json(&summary_path, &stats)?;
+            // D.17.7: emit the per-model CSV alongside the JSON
+            // summary so `inspect` and downstream consumers can read
+            // either shape. Zero sketches => header-only CSV.
+            let empty_rows: Vec<SketchSummaryRow> = Vec::new();
+            write_sketches_summary(ctx.run_dir().root(), &empty_rows)?;
             return Ok(PhaseOutput::Sketches(Vec::new()));
         }
 
@@ -637,6 +643,17 @@ impl Phase for SketchPhase {
         stats.kept = paths.len();
         let summary_path = ctx.run_dir().final_dir().join("sketches_summary.json");
         write_json(&summary_path, &stats)?;
+        // D.17.7: per-model CSV summary. The sketch phase uses one
+        // model for the entire fan-out, so a single row is emitted
+        // regardless of how many sketches survive the filter.
+        // `total_tokens` is left at zero because `call_with_retry_parse`
+        // discards the response envelope after parsing; populating it
+        // here would require returning both the parsed value and the
+        // `Response` from the retry wrapper, which is out of scope for
+        // this wire-up. Future PRs can wire the response through.
+        let csv_rows: Vec<SketchSummaryRow> =
+            vec![(ctx.default_model.clone(), stats.kept as u64, 0)];
+        write_sketches_summary(ctx.run_dir().root(), &csv_rows)?;
         Ok(PhaseOutput::Sketches(paths))
     }
 }
