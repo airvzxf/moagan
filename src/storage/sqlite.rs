@@ -1929,6 +1929,34 @@ impl Db {
         Ok(deleted > 0)
     }
 
+    /// Read the current fencing token for a (run_id, holder) lease.
+    /// Returns `None` when no row exists for the pair (the lease has
+    /// never been acquired or was released). Used by the
+    /// lease-renewal heartbeat integration tests to assert that the
+    /// loop actually fired without exposing the private connection
+    /// pool to callers.
+    pub fn lease_fence(&self, run_id: RunId, holder: &str) -> Result<Option<u64>> {
+        if self.user_version()? < 8 {
+            return Ok(None);
+        }
+        let conn = self.pool.get()?;
+        let key = format!("{run_id}|{holder}");
+        let fence: Option<String> = conn
+            .query_row(
+                "SELECT fence FROM process_locks WHERE holder = ?",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(raw) = fence else {
+            return Ok(None);
+        };
+        let parsed = raw
+            .parse::<u64>()
+            .map_err(|_| crate::error::Error::Provider("sqlite: invalid lease fence".into()))?;
+        Ok(Some(parsed))
+    }
+
     /// Release a run lease owned by `holder`.
     pub fn release_run_lease(&self, run_id: RunId, holder: &str) -> Result<bool> {
         if self.user_version()? < 8 {

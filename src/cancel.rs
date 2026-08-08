@@ -125,6 +125,26 @@ impl Cancel {
         self.inner.token.cancel();
     }
 
+    /// Clone of the underlying tokio token. Cheap (the token wraps an
+    /// `Arc`); used by callers that need to subscribe a background
+    /// task to the same cooperative cancellation source (the lease
+    /// heartbeat, the audit proxy, the sandbox child reader). The
+    /// returned token fires when **any** clone of this `Cancel`
+    /// signals — the typical pattern is `child_token()` so a
+    /// sub-token's signal does not cascade to siblings.
+    pub fn token(&self) -> TkToken {
+        self.inner.token.clone()
+    }
+
+    /// Child token that mirrors the parent. Cancellation of the
+    /// parent fires the child; cancellation of the child does not
+    /// propagate back. Used by long-running tasks (heartbeat, audit
+    /// proxy) so they exit when the run is cancelled but never
+    /// cancel the run themselves.
+    pub fn child_token(&self) -> TkToken {
+        self.inner.token.child_token()
+    }
+
     /// Cancel with an urgency tier.
     ///
     /// - `Soft` and `Normal` signal the cooperative token only.
@@ -255,6 +275,44 @@ mod tests {
         parent.cancel(CancelReason::UserInterrupt);
         assert!(child.is_cancelled());
         assert_eq!(child.reason(), Some(CancelReason::UserInterrupt));
+    }
+
+    /// `Cancel::token()` returns a `TkToken` clone that mirrors the
+    /// parent. Pinning this so the lease-renewal heartbeat and
+    /// any other future consumer of the raw tokio token observe the
+    /// same cancellation semantics as `Cancel::cancelled()`.
+    #[tokio::test]
+    async fn token_clone_observes_parent_cancellation() {
+        let parent = Cancel::new();
+        let token = parent.token();
+        assert!(!token.is_cancelled());
+        parent.cancel(CancelReason::UserInterrupt);
+        assert!(token.is_cancelled());
+    }
+
+    /// `Cancel::child_token()` returns a child token. Cancelling the
+    /// parent fires the child; cancelling the child does not
+    /// propagate to the parent. Pins the parent-child isolation
+    /// contract that the lease heartbeat relies on (its cancel
+    /// arm must never trigger the run's overall cancel).
+    #[tokio::test]
+    async fn child_token_isolates_cancellation() {
+        let parent = Cancel::new();
+        let child_token = parent.child_token();
+        assert!(!child_token.is_cancelled());
+
+        // Cancel the child first — parent must stay live.
+        child_token.cancel();
+        assert!(child_token.is_cancelled());
+        assert!(
+            !parent.is_cancelled(),
+            "cancelling the child token must NOT cancel the parent"
+        );
+
+        // Now cancel the parent — child must follow.
+        parent.cancel(CancelReason::UserInterrupt);
+        assert!(parent.is_cancelled());
+        assert!(child_token.is_cancelled());
     }
 
     #[tokio::test]

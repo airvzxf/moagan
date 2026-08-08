@@ -56,7 +56,17 @@ impl Pipeline {
     ///
     /// Async so that phases can fan out LLM calls in parallel while
     /// the Tokio runtime drives network and timer progress.
+    ///
+    /// The lease-renewal heartbeat task is spawned as the very first
+    /// step so the run's `process_locks` row is renewed every
+    /// `ctx.heartbeat_interval_secs()` while phases execute. The
+    /// `JoinHandle` is recorded in `ctx`; `RunContext`'s `Drop`
+    /// aborts the handle so the heartbeat cannot outlive the run
+    /// (compliance with AGENTS.md §"No-go list": no `tokio::spawn`
+    /// without a `JoinHandle` recorded or a `CancellationToken`
+    /// parent — both hold here).
     pub async fn run(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
+        ctx.ensure_heartbeat()?;
         let timeout = ctx.total_timeout();
         if timeout.is_zero() {
             return self.run_phases(ctx).await;
@@ -375,5 +385,170 @@ mod tests {
             .push(StubPhase("deliver"));
         let err = Pipeline::resume(canonical, "ghost_phase").unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)), "got: {err}");
+    }
+
+    /// Spin up a temp SQLite DB so the heartbeat can acquire a lease
+    /// and renew it on every interval tick. Mirrors the helpers in
+    /// `src/storage/lease.rs::tests` and `src/storage/sqlite.rs::tests`.
+    fn temp_db() -> crate::storage::sqlite::Db {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("meta.sqlite");
+        std::mem::forget(tmp);
+        crate::storage::sqlite::Db::open(&path).expect("database opens")
+    }
+
+    /// Build a `RunContext` whose telemetry is wired to `db` so the
+    /// heartbeat can acquire a lease. The home directory is
+    /// discarded after construction because the heartbeat never
+    /// touches the filesystem; only the SQLite index matters.
+    fn ctx_with_db(
+        db: crate::storage::sqlite::Db,
+        heartbeat_interval_secs: u64,
+        run_id: crate::ids::RunId,
+    ) -> RunContext {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(tmp.path().to_path_buf()));
+        std::mem::forget(tmp);
+        let run_dir = home.run_dir(run_id);
+        let policy = crate::redact::RedactPolicy::default();
+        let telemetry = crate::telemetry::Telemetry::open(run_id, &run_dir, policy, Some(db))
+            .expect("telemetry opens with db");
+        RunContext::new(
+            run_id,
+            home,
+            Arc::new(crate::llm::ProviderRegistry::default()),
+            "mock".into(),
+            "mock-model".into(),
+            crate::execution::Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".into(),
+        )
+        .with_heartbeat_interval_secs(heartbeat_interval_secs)
+    }
+
+    /// Read the current fence for the run's heartbeat lease via the
+    /// public `Db::lease_fence` helper. The `process_locks` row is
+    /// keyed by `{run_id}|{holder}` (see `Db::renew_lease`), so the
+    /// single-row query returns the live fence after every
+    /// heartbeat renewal.
+    fn read_heartbeat_fence(
+        db: &crate::storage::sqlite::Db,
+        run_id: crate::ids::RunId,
+        holder: &str,
+    ) -> u64 {
+        db.lease_fence(run_id, holder)
+            .expect("lease_fence succeeds")
+            .unwrap_or_else(|| panic!("lease row must exist for run {run_id} / holder {holder}"))
+    }
+
+    /// `Pipeline::run` spawns the lease-renewal heartbeat before the
+    /// phase loop. Without a SQLite index the helper is a no-op
+    /// (legacy runs, dashboard read-only path) so we assert both
+    /// branches: indexed → handle is set; unindexed → handle stays
+    /// `None`.
+    #[tokio::test]
+    async fn pipeline_run_spawns_heartbeat_when_db_is_indexed() {
+        let db = temp_db();
+        let run_id = crate::ids::RunId::new();
+        let ctx = ctx_with_db(db.clone(), 30, run_id);
+
+        assert!(
+            !ctx.heartbeat_spawned(),
+            "heartbeat must not be spawned before pipeline.run"
+        );
+
+        let pipe = Pipeline::new().push(StubPhase("a"));
+        pipe.run(&ctx).await.expect("pipeline succeeds");
+
+        assert!(
+            ctx.heartbeat_spawned(),
+            "pipeline.run must record the heartbeat JoinHandle"
+        );
+        // Drop signals the heartbeat to abort via the cooperative
+        // cancel; the task then unwinds and drops its `LeaseGuard`,
+        // which deletes the row. Yield a couple of times so the
+        // runtime drives the heartbeat to its exit before the
+        // assertion reads the DB.
+        drop(ctx);
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        let row = db
+            .lease_fence(run_id, "heartbeat")
+            .expect("lease_fence succeeds");
+        assert!(
+            row.is_none(),
+            "lease row must be released once RunContext drops the heartbeat"
+        );
+    }
+
+    /// `Pipeline::run` with no SQLite index is a no-op for the
+    /// heartbeat helper: the run still completes, no handle is
+    /// recorded, no lease is acquired.
+    #[tokio::test]
+    async fn pipeline_run_skips_heartbeat_when_db_is_unindexed() {
+        let ctx = empty_ctx();
+        let pipe = Pipeline::new().push(StubPhase("a"));
+        pipe.run(&ctx).await.expect("pipeline succeeds");
+        assert!(
+            !ctx.heartbeat_spawned(),
+            "heartbeat must not spawn without a SQLite index"
+        );
+    }
+
+    /// `Pipeline::run` with a slow phase and the minimum heartbeat
+    /// interval observes at least three lease renewals during the
+    /// run. This is the v0.5 PR-07 acceptance test: a 60-second run
+    /// must show at least 3 distinct `last_heartbeat_unix`
+    /// timestamps; here we use a 3.3-second phase at the 1-second
+    /// minimum interval and verify the same contract via the
+    /// `process_locks.fence` column (which is bumped on every
+    /// renewal).
+    #[tokio::test]
+    async fn pipeline_run_renews_lease_at_least_three_times() {
+        let db = temp_db();
+        let run_id = crate::ids::RunId::new();
+        let ctx = ctx_with_db(db.clone(), 1, run_id);
+
+        // Spawn the heartbeat manually so we can capture the
+        // fence count before the pipeline runs.
+        ctx.ensure_heartbeat().expect("heartbeat spawns");
+        let initial_fence = read_heartbeat_fence(&db, run_id, "heartbeat");
+        assert_eq!(
+            initial_fence, 1,
+            "first lease acquire must yield fence=1, got {initial_fence}"
+        );
+
+        let pipe = Pipeline::new().push(SlowHeartbeatPhase);
+        let _ = pipe.run(&ctx).await.expect("pipeline succeeds");
+
+        let final_fence = read_heartbeat_fence(&db, run_id, "heartbeat");
+        let renewals = final_fence.saturating_sub(initial_fence);
+        assert!(
+            renewals >= 3,
+            "heartbeat must have renewed at least 3 times during the slow phase: \
+             initial={initial_fence}, final={final_fence}, renewals={renewals}"
+        );
+    }
+
+    /// A slow phase tuned so the 1-second renewal interval fires
+    /// roughly four times in the test budget. `tokio::time::interval`
+    /// fires its first tick immediately after spawn, so a 3300 ms
+    /// phase yields 4 ticks (immediate + 1000, 2000, 3000 ms) and
+    /// at least 3 renewals. The assertion above uses `>= 3` so
+    /// timing jitter cannot flake the test.
+    struct SlowHeartbeatPhase;
+    #[async_trait]
+    impl Phase for SlowHeartbeatPhase {
+        fn name(&self) -> &'static str {
+            "slow_heartbeat"
+        }
+        async fn execute(&self, _ctx: &RunContext) -> Result<PhaseOutput> {
+            tokio::time::sleep(std::time::Duration::from_millis(3300)).await;
+            Ok(PhaseOutput::Intake(std::path::PathBuf::from(
+                "slow_heartbeat",
+            )))
+        }
     }
 }
