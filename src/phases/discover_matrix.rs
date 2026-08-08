@@ -30,9 +30,10 @@ use crate::discovery::state::SketchLoopState;
 use crate::discovery::stop_policy::{StopDecision, StopPolicy, StopReason};
 use crate::domain::Sketch;
 use crate::error::{Error, Result};
+use crate::fs_layout::RunDir;
 use crate::llm::Role;
 use crate::llm::prompts::{discover_matrix_system_prompt, system_prompt};
-use crate::phases::phase::{Phase, PhaseOutput, RunContext};
+use crate::phases::phase::{Phase, PhaseOutput, RunContext, temperature_for_role};
 use crate::phases::util::{read_json, write_json};
 use crate::telemetry::event::TelemetryEvent;
 
@@ -83,6 +84,130 @@ impl DiscoverMatrixPhase {
         let path = run_dir.root().join("exploration_matrix.json");
         write_json(&path, &self.matrix)?;
         Ok(path)
+    }
+
+    /// Persist a human-readable draft of one surviving sketch under
+    /// `<run_dir>/drafts/<sketch_id>.md` (PR-22, V4 §6.10). The
+    /// discovery spec promises a `drafts/` directory but no phase
+    /// previously wrote to it; this writer closes the gap by
+    /// emitting one markdown per sketch with the LLM response
+    /// fields plus the run metadata (model, role, temperature)
+    /// so an inspector can read the raw sketch without
+    /// re-parsing the JSON. The path layout matches the spec
+    /// (`<run_dir>/drafts/<id>.md`) so `drafts/cat_NN/borrador.md`
+    /// (V4 §6.10, the per-cluster integration draft) can coexist
+    /// later in `drafts/cat_NN/` without colliding.
+    ///
+    /// Errors propagate so a transient disk failure does not
+    /// silently leave `drafts/` empty while `sketches/` claims
+    /// the run produced the artefact.
+    fn write_draft(
+        run_dir: &RunDir<'_>,
+        sketch: &Sketch,
+        model: &str,
+        temperature: f32,
+        role: &str,
+    ) -> Result<PathBuf> {
+        let drafts_dir = run_dir.drafts();
+        std::fs::create_dir_all(&drafts_dir)?;
+        let path = drafts_dir.join(format!("{}.md", sketch.id));
+        let body = Self::render_draft(sketch, model, temperature, role);
+        // Drafts are leaf artefacts (one per sketch) and are only
+        // ever written by the matrix phase after the sketch JSON
+        // has been durably persisted. A plain `std::fs::write`
+        // matches the sidecar pattern of `sketches_summary.json`
+        // (also a leaf artefact written once after the fan-out)
+        // and avoids spawning the `.meta.json` sidecar that
+        // `AtomicWriter` adds on every other artefact in this
+        // run. The drafts dir is the spec-mandated surface, not
+        // the integrity-checked one, so the sidecar would only
+        // add noise to the inspect CLI output.
+        std::fs::write(&path, body.as_bytes())?;
+        Ok(path)
+    }
+
+    /// Render the markdown body of a draft sidecar. Pure
+    /// function so unit tests can pin the wire format without
+    /// touching the filesystem. The format is a YAML-style
+    /// frontmatter header (greppable, easy to parse) followed
+    /// by the sketch fields rendered as `# / ## / -` blocks so
+    /// the file reads cleanly when opened in any markdown
+    /// viewer.
+    fn render_draft(sketch: &Sketch, model: &str, temperature: f32, role: &str) -> String {
+        let mut out = String::new();
+        out.push_str("---\n");
+        out.push_str(&format!("id: {}\n", sketch.id));
+        if !sketch.angle.is_empty() {
+            out.push_str(&format!("angle: {}\n", sketch.angle));
+        }
+        out.push_str(&format!("model: {model}\n"));
+        out.push_str(&format!("role: {role}\n"));
+        out.push_str(&format!("temperature: {temperature:.1}\n"));
+        out.push_str(&format!(
+            "written_at_unix: {}\n",
+            crate::time::now_unix_secs()
+        ));
+        out.push_str("---\n\n");
+        out.push_str(&format!("# {}\n\n", sketch.id));
+        if !sketch.thesis.is_empty() {
+            out.push_str("## Thesis\n\n");
+            out.push_str(sketch.thesis.trim());
+            out.push_str("\n\n");
+        }
+        if !sketch.key_decisions.is_empty() {
+            out.push_str("## Key decisions\n\n");
+            for d in &sketch.key_decisions {
+                out.push_str("- ");
+                out.push_str(d.trim());
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        if !sketch.architecture_outline.is_empty() {
+            out.push_str("## Architecture outline\n\n");
+            out.push_str(sketch.architecture_outline.trim());
+            out.push_str("\n\n");
+        }
+        if !sketch.assumptions.is_empty() {
+            out.push_str("## Assumptions\n\n");
+            for a in &sketch.assumptions {
+                out.push_str("- ");
+                out.push_str(a.trim());
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        if !sketch.strengths.is_empty() {
+            out.push_str("## Strengths\n\n");
+            for s in &sketch.strengths {
+                out.push_str("- ");
+                out.push_str(s.trim());
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        if !sketch.weaknesses.is_empty() {
+            out.push_str("## Weaknesses\n\n");
+            for w in &sketch.weaknesses {
+                out.push_str("- ");
+                out.push_str(w.trim());
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        if !sketch.hard_constraint_check.is_empty() {
+            out.push_str("## Hard-constraint check\n\n");
+            for (k, v) in &sketch.hard_constraint_check {
+                out.push_str(&format!("- {k}: {v}\n"));
+            }
+            out.push('\n');
+        }
+        if !sketch.expected_validation.is_empty() {
+            out.push_str("## Expected validation\n\n");
+            out.push_str(sketch.expected_validation.trim());
+            out.push('\n');
+        }
+        out
     }
 
     /// Build the user payload for a `(cell, sketch_index)` pair.
@@ -285,6 +410,33 @@ impl Phase for DiscoverMatrixPhase {
             let id = sketch.id.clone();
             let path = sketches_dir.join(format!("{id}.json"));
             write_json(&path, &sketch)?;
+            // PR-22 (V4 §6.10): write a per-sketch human-readable
+            // draft under `drafts/<id>.md` so the discover pipeline
+            // emits the sidecar the spec promises. The metadata
+            // (model, temperature, role) is captured at this point
+            // because the live values live on the `RunContext`
+            // (default_model + role-specific temperature lookup)
+            // and would otherwise have to be reconstructed after
+            // the fact from the telemetry JSONL.
+            let profile_overrides: Option<&std::collections::HashMap<String, f32>> =
+                if ctx.config.profile_temperature_overrides.is_empty() {
+                    None
+                } else {
+                    Some(&ctx.config.profile_temperature_overrides)
+                };
+            let temperature = temperature_for_role(Role::Sketch, profile_overrides);
+            let draft_path = Self::write_draft(
+                &ctx.run_dir(),
+                &sketch,
+                &ctx.default_model,
+                temperature,
+                Role::Sketch.as_str(),
+            )?;
+            tracing::debug!(
+                sketch_id = %id,
+                draft = %draft_path.display(),
+                "draft sidecar written"
+            );
             state.record_completion(id);
             state.save(&run_dir)?;
             surviving.push(sketch);
@@ -431,6 +583,89 @@ mod tests {
         assert!(path.exists());
         let back: ExplorationMatrix = read_json(&path).unwrap();
         assert_eq!(back.cardinality(), 80);
+    }
+
+    /// PR-22 unit test: `render_draft` is a pure function so the
+    /// wire format can be pinned without touching the filesystem.
+    /// Every section heading + the frontmatter fields + the
+    /// thesis bullet are asserted so a future rename or removal
+    /// of a section trips this test before it lands.
+    #[test]
+    fn render_draft_emits_frontmatter_and_section_headings() {
+        let sketch = Sketch {
+            id: "sk_0042".to_owned(),
+            thesis: "Ship a single Rust binary that bundles config, embed, and runtime together."
+                .to_owned(),
+            key_decisions: vec!["static link".into(), "rust runtime".into()],
+            architecture_outline: "A single moagan binary implements every pipeline phase."
+                .to_owned(),
+            assumptions: vec!["Linux + macOS only".into()],
+            strengths: vec!["easy install".into()],
+            weaknesses: vec!["larger binary".into()],
+            hard_constraint_check: [("portable".to_owned(), true)].into_iter().collect(),
+            expected_validation: "Smoke test on a fresh container rebuilds the suite.".to_owned(),
+            angle: "deployment-model:serverless".to_owned(),
+        };
+        let body = DiscoverMatrixPhase::render_draft(&sketch, "mock-model", 1.0, "sketch");
+        assert!(
+            body.starts_with("---\n"),
+            "must open with YAML frontmatter delimiter"
+        );
+        assert!(body.contains("id: sk_0042"));
+        assert!(body.contains("angle: deployment-model:serverless"));
+        assert!(body.contains("model: mock-model"));
+        assert!(body.contains("role: sketch"));
+        assert!(
+            body.contains("temperature: 1.0"),
+            "temperature format must keep one decimal so 1.0 doesn't render as `1`"
+        );
+        assert!(body.contains("written_at_unix: "));
+        assert!(body.contains("\n---\n"));
+        assert!(body.contains("\n# sk_0042\n"));
+        assert!(body.contains("## Thesis"));
+        assert!(body.contains("Ship a single Rust binary"));
+        assert!(body.contains("## Key decisions"));
+        assert!(body.contains("- static link"));
+        assert!(body.contains("- rust runtime"));
+        assert!(body.contains("## Architecture outline"));
+        assert!(body.contains("## Assumptions"));
+        assert!(body.contains("- Linux + macOS only"));
+        assert!(body.contains("## Strengths"));
+        assert!(body.contains("- easy install"));
+        assert!(body.contains("## Weaknesses"));
+        assert!(body.contains("- larger binary"));
+        assert!(body.contains("## Hard-constraint check"));
+        assert!(body.contains("- portable: true"));
+        assert!(body.contains("## Expected validation"));
+        assert!(body.contains("Smoke test on a fresh container rebuilds the suite."));
+    }
+
+    /// PR-22 unit test: a minimal sketch (no angle, no list
+    /// fields, no hard constraints) still renders a valid
+    /// frontmatter + heading. Pins the empty-section skips so a
+    /// future "always render" change can't accidentally emit
+    /// `## Key decisions\n\n` for a sketch that has no
+    /// decisions — which would be the wrong empty section.
+    #[test]
+    fn render_draft_skips_empty_optional_sections() {
+        let sketch = Sketch {
+            id: "sk_empty".to_owned(),
+            thesis: "Single Rust binary pipeline for moagan discovery sketches.".to_owned(),
+            ..Sketch::default()
+        };
+        let body = DiscoverMatrixPhase::render_draft(&sketch, "mock-model", 1.0, "sketch");
+        assert!(body.contains("id: sk_empty"));
+        // No angle line because `sketch.angle.is_empty()`.
+        assert!(!body.contains("angle: "));
+        assert!(body.contains("## Thesis"));
+        assert!(body.contains("Single Rust binary pipeline"));
+        assert!(!body.contains("## Key decisions"));
+        assert!(!body.contains("## Architecture outline"));
+        assert!(!body.contains("## Assumptions"));
+        assert!(!body.contains("## Strengths"));
+        assert!(!body.contains("## Weaknesses"));
+        assert!(!body.contains("## Hard-constraint check"));
+        assert!(!body.contains("## Expected validation"));
     }
 }
 
