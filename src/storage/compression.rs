@@ -280,6 +280,35 @@ pub fn reader(path: &Path, c: Compression) -> io::Result<Box<dyn Read>> {
     })
 }
 
+impl Compression {
+    /// Open a file behind a `Box<dyn Read>` that transparently
+    /// decodes a multi-member compression stream. Mode is detected
+    /// from the file extension. Plain files are wrapped in a
+    /// `BufReader`; `.gz` is decoded with `flate2::MultiGzDecoder`
+    /// (so a sequence of gzip members produced by [`open_gz_append`]
+    /// round-trips byte-for-byte); `.zst` is decoded with
+    /// `zstd::Decoder`.
+    ///
+    /// The single-stream [`reader`] picks `GzDecoder` for `.gz`,
+    /// which is the right choice for tooling that opens a single
+    /// gzip stream produced elsewhere. This method picks
+    /// `MultiGzDecoder` for `.gz`, which is the right choice for
+    /// sidecars emitted by the project's own writer — each
+    /// `flush()` ends a member, so the on-disk file is a sequence
+    /// of complete members.
+    ///
+    /// Refs: D.7.5 (PR-26).
+    pub fn multi_reader(path: &Path) -> io::Result<Box<dyn Read>> {
+        let f = File::open(path)?;
+        let buf = BufReader::new(f);
+        match Self::from_extension(path) {
+            Self::None => Ok(Box::new(buf)),
+            Self::Gz => Ok(Box::new(MultiGzDecoder::new(buf))),
+            Self::Zst => Ok(Box::new(zstd::Decoder::new(buf)?)),
+        }
+    }
+}
+
 // =====================================================================
 // F5 — Streaming zstd writer + run-bundle export
 // =====================================================================
@@ -628,6 +657,75 @@ mod tests {
         let mut buf = String::new();
         r.read_to_string(&mut buf).unwrap();
         assert!(buf.contains("\"phase\":\"gzip\""));
+    }
+
+    /// D.7.5 (PR-26): `Compression::multi_reader` must walk past
+    /// every gzip member in a multi-member stream emitted by
+    /// `open_gz_append`. Each `flush()` finishes one member, so a
+    /// stream of N flushes is N complete members; a single-stream
+    /// `GzDecoder` would stop after the first one. The new method
+    /// uses `MultiGzDecoder` and is the parity counterpart of the
+    /// writer for tooling that opens a sidecar.
+    #[test]
+    fn multi_reader_walks_past_every_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("calls.jsonl.gz");
+
+        let mut w = open_gz_append(&path).unwrap();
+        for i in 0..5 {
+            writeln!(w, "{{\"phase\":\"p\",\"i\":{i}}}").unwrap();
+            w.flush().ok();
+        }
+        drop(w);
+
+        let mut r = Compression::multi_reader(&path).unwrap();
+        let mut buf = String::new();
+        r.read_to_string(&mut buf).unwrap();
+        let lines: Vec<&str> = buf.lines().collect();
+        assert_eq!(
+            lines.len(),
+            5,
+            "multi_reader must decode all 5 members, got {}",
+            lines.len()
+        );
+        for (idx, line) in lines.iter().enumerate() {
+            assert!(line.contains(&format!("\"i\":{idx}")), "line {idx}: {line}");
+        }
+    }
+
+    /// D.7.5 (PR-26): `multi_reader` on a plain `.jsonl` just
+    /// returns a buffered file reader. This is the no-compression
+    /// path of the new helper, symmetric with `reader(.., None)`.
+    #[test]
+    fn multi_reader_handles_uncompressed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("manifest.json");
+        std::fs::write(&path, "{\"k\":1}\n{\"k\":2}\n").unwrap();
+        let mut r = Compression::multi_reader(&path).unwrap();
+        let mut buf = String::new();
+        r.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf.lines().count(), 2);
+        assert!(buf.contains("\"k\":2"));
+    }
+
+    /// D.7.5 (PR-26): `multi_reader` on a single-member gz
+    /// (i.e. one with no intermediate `flush()`) decodes it the
+    /// same as the multi-member case. This guards against a
+    /// regression where the helper accidentally required more
+    /// than one member.
+    #[test]
+    fn multi_reader_handles_single_member_gz() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("single.jsonl.gz");
+
+        let mut w = open_gz_append(&path).unwrap();
+        writeln!(w, "{{\"phase\":\"only\"}}").unwrap();
+        drop(w);
+
+        let mut r = Compression::multi_reader(&path).unwrap();
+        let mut buf = String::new();
+        r.read_to_string(&mut buf).unwrap();
+        assert!(buf.contains("\"phase\":\"only\""));
     }
 
     // -- F5: ZstWriter + tar.zst export ------------------------------
