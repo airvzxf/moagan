@@ -1,12 +1,13 @@
 //! Discovery mode — `discover_facet` phase.
 //!
 //! For each cluster the LLM is asked to derive a list of facets the
-//! category document should cover. The result is persisted to the
-//! cross-run facet cache keyed by `sha256(brief + category_id)`
-//! (V4 §6.8 + catalog decision D.13.13) so a second run with the
-//! same brief and category id is a no-op for the LLM. The TTL is
-//! `DEFAULT_TTL_SECS` (7 days) and is configurable via
-//! `MOAGAN_FACET_CACHE_TTL_SECS`.
+//! category document should cover. When the cross-run facet cache
+//! is enabled (opt-in via the `--cache-facets` CLI flag), the
+//! result is persisted to the cross-run facet cache keyed by
+//! `sha256(brief + category_id)` (V4 §6.8 + catalog decision
+//! D.13.13) so a second run with the same brief and category id
+//! is a no-op for the LLM. The TTL is `DEFAULT_TTL_SECS` (7 days)
+//! and is configurable via `MOAGAN_FACET_CACHE_TTL_SECS`.
 
 use std::path::PathBuf;
 
@@ -32,7 +33,28 @@ fn facet_cache_ttl_secs() -> Option<u64> {
 }
 
 /// Discovery facet phase.
-pub struct DiscoverFacetPhase;
+///
+/// `cache_enabled` controls whether the cross-run facet cache is
+/// used. The default is `false` so the operator must opt in via
+/// the `--cache-facets` CLI flag; this preserves the
+/// "LLM-every-run" baseline the catalog decisions describe and
+/// makes the cache surface explicit.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiscoverFacetPhase {
+    /// When `true`, every cluster goes through
+    /// [`FacetCache::get_or_compute`] so a cache hit skips the
+    /// LLM call. When `false` (the default), the LLM is invoked
+    /// on every cluster and the result is only written to the
+    /// run dir.
+    pub cache_enabled: bool,
+}
+
+impl DiscoverFacetPhase {
+    /// Build a phase with the cache flag set explicitly.
+    pub fn with_cache(cache_enabled: bool) -> Self {
+        Self { cache_enabled }
+    }
+}
 
 /// LLM response schema. The model returns a list of `(name,
 /// description, required)` triples.
@@ -110,91 +132,60 @@ impl Phase for DiscoverFacetPhase {
         let mut paths: Vec<PathBuf> = Vec::new();
         // Open the cross-run facet cache. The cache is keyed by
         // sha256(brief + category_id) and persisted under
-        // MOAGAN_HOME/cache/facets/.
+        // MOAGAN_HOME/cache/facets/. `cache_enabled` gates
+        // whether the phase consults the cache at all; the
+        // structure is still constructed (cheap — just a
+        // PathBuf + Arc counters) so the hit/miss/store paths
+        // share the same `get_or_compute` plumbing.
         let cache = FacetCache::new(ctx.home.cross_run_facet_cache_dir(), facet_cache_ttl_secs());
+        let cache_enabled = self.cache_enabled;
 
         let futures = cluster_paths.iter().enumerate().map(|(idx, path)| {
             let path = path.clone();
             let brief = brief_text.clone();
             let ctx = ctx.clone();
-            let cache = cache.clone();
+            let mut cache = cache.clone();
             async move {
                 let _permit = ctx.parallelism.acquire().await?;
                 let cluster: Cluster = read_json(&path)?;
                 let cat_id = DiscoverFacetPhase::category_id_for(idx);
                 let synthetic_key = crate::discovery::facet::cache_key(&brief, &cat_id);
 
-                // Cache hit → write the cached list to the run
-                // dir and skip the LLM call. The cached list
-                // already has its own cache_key set.
-                if let Some(cached) = cache.lookup(&synthetic_key)? {
-                    let path = std::path::Path::new(&ctx.run_dir().facets())
-                        .join(format!("{cat_id}_facets.json"));
-                    crate::phases::util::write_json(&path, &cached)?;
-                    let _ = ctx.telemetry.warn(
-                        "phase.discover_facet.cache_hit",
-                        "info",
-                        "facet cache hit; skipped LLM call",
-                        serde_json::json!({
-                            "category_id": cat_id,
-                            "cluster_id": cluster.id,
-                            "cache_key": synthetic_key,
-                        }),
-                        crate::telemetry::WarningContext {
-                            phase: Some("discover_facet".into()),
-                            role: Some("tagger".into()),
-                            ..Default::default()
-                        },
-                    );
-                    return Ok::<PathBuf, crate::error::Error>(path);
-                }
+                // The cache hit path always writes the list to
+                // the run dir; the compute path runs the LLM
+                // first and writes the freshly-derived list.
+                // `get_or_compute` collapses the
+                // lookup → compute → store triple into one
+                // call (catalog D.13.13). The inner closure
+                // gets a fresh `RunContext` clone (so the outer
+                // `ctx` stays usable for the run-dir write)
+                // plus cloned `cluster` and `cat_id` so the
+                // outer `&cat_id` reference below keeps
+                // compiling.
+                let list: FacetList = if cache_enabled {
+                    let inner_ctx = ctx.clone();
+                    let cluster_for_payload = cluster.clone();
+                    let cat_id_for_payload = cat_id.clone();
+                    let brief_for_payload = brief.clone();
+                    cache
+                        .get_or_compute(&synthetic_key, || async move {
+                            derive_facets(
+                                &inner_ctx,
+                                &cluster_for_payload,
+                                &cat_id_for_payload,
+                                &brief_for_payload,
+                            )
+                            .await
+                        })
+                        .await?
+                } else {
+                    derive_facets(&ctx, &cluster, &cat_id, &brief).await?
+                };
 
-                let user = DiscoverFacetPhase::user_payload(&cluster, &brief);
-                let raw: FacetDerivation = ctx
-                    .call_with_retry_parse(
-                        crate::llm::Role::FacetDeriver,
-                        crate::llm::prompts::system_prompt(crate::llm::Role::FacetDeriver)
-                            .to_owned(),
-                        user,
-                        crate::llm::prompts::system_prompt(crate::llm::Role::FacetDeriver),
-                        3,
-                    )
-                    .await
-                    .unwrap_or_default();
-                let triples: Vec<(String, String, bool)> = raw
-                    .facets
-                    .into_iter()
-                    .map(|t| (t.name, t.description, t.required))
-                    .collect();
-                let list = FacetList::from_triples(
-                    &cat_id,
-                    &cluster.id,
-                    &brief,
-                    crate::time::now_unix_secs(),
-                    triples,
-                );
-                let path = std::path::Path::new(&ctx.run_dir().facets())
+                let out_path = std::path::Path::new(&ctx.run_dir().facets())
                     .join(format!("{cat_id}_facets.json"));
-                crate::phases::util::write_json(&path, &list)?;
-                // Persist for the next run. A failure here is
-                // non-fatal — the run continues without the cache.
-                if let Err(e) = cache.store(&list) {
-                    let _ = ctx.telemetry.warn(
-                        "phase.discover_facet.cache_store_failed",
-                        "warn",
-                        "facet cache store failed; continuing without persistence",
-                        serde_json::json!({
-                            "category_id": cat_id,
-                            "error": e.to_string(),
-                        }),
-                        crate::telemetry::WarningContext {
-                            phase: Some("discover_facet".into()),
-                            role: Some("tagger".into()),
-                            ..Default::default()
-                        },
-                    );
-                }
-                Ok::<PathBuf, crate::error::Error>(path)
+                crate::phases::util::write_json(&out_path, &list)?;
+                Ok::<PathBuf, crate::error::Error>(out_path)
             }
         });
         let results = join_all(futures).await;
@@ -225,6 +216,42 @@ impl Phase for DiscoverFacetPhase {
 
         Ok(PhaseOutput::Sketches(paths))
     }
+}
+
+/// Run the LLM facet derivation for a single cluster and build
+/// the [`FacetList`] payload. Extracted from the per-cluster
+/// future so the same closure can be passed to
+/// [`FacetCache::get_or_compute`] without duplicating the
+/// retry/parse/parse-or-default pipeline.
+async fn derive_facets(
+    ctx: &RunContext,
+    cluster: &Cluster,
+    cat_id: &str,
+    brief: &str,
+) -> Result<FacetList> {
+    let user = DiscoverFacetPhase::user_payload(cluster, brief);
+    let raw: FacetDerivation = ctx
+        .call_with_retry_parse(
+            crate::llm::Role::FacetDeriver,
+            crate::llm::prompts::system_prompt(crate::llm::Role::FacetDeriver).to_owned(),
+            user,
+            crate::llm::prompts::system_prompt(crate::llm::Role::FacetDeriver),
+            3,
+        )
+        .await
+        .unwrap_or_default();
+    let triples: Vec<(String, String, bool)> = raw
+        .facets
+        .into_iter()
+        .map(|t| (t.name, t.description, t.required))
+        .collect();
+    Ok(FacetList::from_triples(
+        cat_id,
+        &cluster.id,
+        brief,
+        crate::time::now_unix_secs(),
+        triples,
+    ))
 }
 
 #[cfg(test)]
@@ -264,5 +291,22 @@ mod tests {
         assert!(s.contains("cluster_01"));
         assert!(s.contains("auth"));
         assert!(s.contains("BRIEF"));
+    }
+
+    #[test]
+    fn phase_default_has_cache_disabled() {
+        let p = DiscoverFacetPhase::default();
+        assert!(
+            !p.cache_enabled,
+            "default DiscoverFacetPhase must keep the cache off so the LLM-every-run baseline is preserved"
+        );
+    }
+
+    #[test]
+    fn with_cache_constructor_sets_flag() {
+        let p = DiscoverFacetPhase::with_cache(true);
+        assert!(p.cache_enabled);
+        let p = DiscoverFacetPhase::with_cache(false);
+        assert!(!p.cache_enabled);
     }
 }

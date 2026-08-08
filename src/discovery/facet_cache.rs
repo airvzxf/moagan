@@ -175,6 +175,62 @@ impl FacetCache {
         Ok(Some(entry.facet_list))
     }
 
+    /// Look up a facet list by its cache key and, on miss, run
+    /// `compute_fn`, persist the result, and return it. This is
+    /// the canonical replacement for the inline
+    /// `lookup → compute → store` pattern that
+    /// [`crate::phases::discover_facet`] used to spell out
+    /// (catalog decision D.13.13).
+    ///
+    /// Cache-hit path:
+    /// 1. `lookup` returns `Some(list)`.
+    /// 2. `compute_fn` is **not** invoked — the LLM call that
+    ///    the phase would otherwise make is skipped.
+    /// 3. The cached list is returned verbatim.
+    ///
+    /// Cache-miss path:
+    /// 1. `lookup` returns `None`.
+    /// 2. `compute_fn()` is awaited; the resulting `FacetList`
+    ///    must already carry its own `cache_key` (i.e. it was
+    ///    built with `FacetList::from_triples` or an equivalent
+    ///    helper).
+    /// 3. `store` is best-effort: a disk write failure is
+    ///    surfaced as a tracing warning (so the operator can
+    ///    debug a stale cache) and the freshly-computed list is
+    ///    still returned. The cache must never poison a run.
+    ///
+    /// `compute_fn` failures propagate as `Err`; the caller is
+    /// expected to handle them (e.g. by skipping the cluster).
+    /// `&mut self` is intentional: it serialises
+    /// `get_or_compute` calls on the same instance so two
+    /// concurrent tasks racing on the same key can never both
+    /// compute and clobber each other's store. Clones of the
+    /// cache remain independent because each task gets its own
+    /// `FacetCache` clone (the `Arc<AtomicU64>` counters are
+    /// the only shared state).
+    pub async fn get_or_compute<F, Fut>(
+        &mut self,
+        cache_key: &str,
+        compute_fn: F,
+    ) -> Result<FacetList>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<FacetList>>,
+    {
+        if let Some(cached) = self.lookup(cache_key)? {
+            return Ok(cached);
+        }
+        let list = compute_fn().await?;
+        if let Err(e) = self.store(&list) {
+            tracing::warn!(
+                cache_key,
+                error = %e,
+                "facet cache store failed during get_or_compute; continuing without persistence"
+            );
+        }
+        Ok(list)
+    }
+
     /// Persist `list` under its `cache_key`. Existing entries are
     /// overwritten. Returns the path that was written.
     pub fn store(&self, list: &FacetList) -> Result<PathBuf> {
@@ -495,5 +551,127 @@ mod tests {
         assert_eq!(stats.entries, 3);
         assert_eq!(stats.hits, 0);
         assert_eq!(stats.misses, 0);
+    }
+
+    /// `get_or_compute` returns the cached list on hit and does
+    /// NOT invoke `compute_fn`. The compute counter (callers
+    /// track it externally) is the canonical signal that the LLM
+    /// was skipped.
+    #[tokio::test]
+    async fn get_or_compute_returns_cached_value_on_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = FacetCache::new(tmp.path(), Some(60));
+        let list = mk_list("brief", "cat_01");
+        cache.store(&list).unwrap();
+
+        let compute_calls = std::sync::atomic::AtomicUsize::new(0);
+        let counter = &compute_calls;
+        let result = cache
+            .get_or_compute(&list.cache_key, || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { panic!("compute_fn must not run on a cache hit") }
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.category_id, "cat_01");
+        assert_eq!(result.facets.len(), 1);
+        assert_eq!(compute_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// `get_or_compute` runs `compute_fn` on a miss, persists the
+    /// result, and returns it. A subsequent `lookup` sees the
+    /// freshly-stored entry as a hit.
+    #[tokio::test]
+    async fn get_or_compute_runs_compute_fn_on_miss_and_stores() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = FacetCache::new(tmp.path(), Some(60));
+        let list = mk_list("brief", "cat_01");
+
+        let result = cache
+            .get_or_compute(&list.cache_key, || async { Ok(list.clone()) })
+            .await
+            .unwrap();
+        assert_eq!(result.category_id, "cat_01");
+        assert_eq!(
+            cache.count().unwrap(),
+            1,
+            "store must persist the computed list"
+        );
+        let second = cache.lookup(&list.cache_key).unwrap();
+        assert!(second.is_some(), "post-store lookup must hit");
+    }
+
+    /// `compute_fn` failures propagate as `Err` and the cache
+    /// stays empty (no half-written entry). This is the
+    /// canonical "compute failed, don't poison the cache"
+    /// contract.
+    #[tokio::test]
+    async fn get_or_compute_propagates_compute_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = FacetCache::new(tmp.path(), Some(60));
+        let key = "fictional-key";
+
+        let err = cache
+            .get_or_compute(key, || async {
+                Err(crate::error::Error::InvalidState("boom".into()))
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("boom"));
+        assert_eq!(cache.count().unwrap(), 0, "failed compute must not store");
+    }
+
+    /// The cache is best-effort: a `store` failure is logged and
+    /// the freshly-computed list is still returned. The phase
+    /// relies on this so a disk-full cannot abort a run.
+    /// Simulating a portable store failure is tricky (chmod
+    /// tricks are root-bypassable); we use a `cache` rooted
+    /// under a regular file so `create_dir_all` inside `store`
+    /// deterministically fails on every platform.
+    #[tokio::test]
+    async fn get_or_compute_swallows_store_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a regular file and point the cache at a path
+        // *inside* it — `store` will try to `create_dir_all`
+        // the parent of the JSON file (which exists as a file,
+        // not a directory), so the call fails on every
+        // platform.
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let cache_root = blocker.join("cache");
+        let mut cache = FacetCache::new(&cache_root, Some(60));
+        let list = mk_list("brief", "cat_01");
+
+        let result = cache
+            .get_or_compute(&list.cache_key, || async { Ok(list.clone()) })
+            .await
+            .unwrap();
+        // The freshly-computed list must come back even though
+        // the store failed.
+        assert_eq!(result.category_id, "cat_01");
+        assert_eq!(result.facets.len(), 1);
+    }
+
+    /// `get_or_compute` is the documented replacement for the
+    /// inline `lookup → compute → store` triple; the unit
+    /// invariants we care about are: hit-skip-compute,
+    /// miss-compute-and-store, compute-error-propagates,
+    /// store-error-swallowed. The stats counters should
+    /// reflect exactly one lookup per `get_or_compute` call.
+    #[tokio::test]
+    async fn get_or_compute_records_exactly_one_lookup_per_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = FacetCache::new(tmp.path(), Some(60));
+        let list = mk_list("brief", "cat_01");
+        cache.store(&list).unwrap();
+
+        let before = cache.stats();
+        let _ = cache
+            .get_or_compute(&list.cache_key, || async { Ok(list.clone()) })
+            .await
+            .unwrap();
+        let after = cache.stats();
+        assert_eq!(after.hits, before.hits + 1);
+        assert_eq!(after.misses, before.misses);
     }
 }

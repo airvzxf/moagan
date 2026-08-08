@@ -71,7 +71,7 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions) -> Pipeline {
             threshold: opts.cluster_threshold,
         })
         .push(DiscoverContradictPhase::default())
-        .push(DiscoverFacetPhase)
+        .push(DiscoverFacetPhase::with_cache(opts.cache_facets))
         .push(DiscoverExtractPhase)
         .push(DiscoverIntegratePhase)
         .push(DiscoverSummaryPhase)
@@ -104,6 +104,15 @@ pub struct DiscoverOptions {
     /// marker instead of blocking on stdin. Required for CI / smoke
     /// runs where stdin is not a TTY.
     pub non_interactive: bool,
+    /// Enable the cross-run facet cache. When `true`, the
+    /// `discover_facet` phase writes derived facet lists to
+    /// `<MOAGAN_HOME>/cache/facets/` and skips the
+    /// `facet_deriver` LLM call on subsequent runs that share
+    /// the same `(brief, category_id)` (V4 §6.8 + catalog
+    /// D.13.13). Default `false` so the LLM-every-run baseline
+    /// is preserved unless the operator opts in via the
+    /// `--cache-facets` CLI flag.
+    pub cache_facets: bool,
 }
 
 /// Run discovery end-to-end. Returns the run id on success.

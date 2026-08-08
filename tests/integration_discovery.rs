@@ -179,6 +179,7 @@ async fn discovery_pipeline_composes_all_seven_phases() {
         cluster_threshold: 0.7,
         out_dir: None,
         non_interactive: true,
+        cache_facets: false,
     };
     let pipeline = build_discovery_pipeline(&opts);
     let names = pipeline.names();
@@ -400,7 +401,7 @@ async fn discovery_facet_phase_requires_clusters() {
         "discover".into(),
     );
 
-    let phase = DiscoverFacetPhase;
+    let phase = DiscoverFacetPhase::with_cache(false);
     let result = phase.execute(&ctx).await;
     assert!(
         result.is_err(),
@@ -1136,7 +1137,16 @@ fn retry_sketch_mock() -> Arc<MockProvider> {
 /// canonical source of truth for the retry-count surface; the SQLite
 /// mirror holds the same data but the JSONL form is what the
 /// post-execution review (and the audit `verify` CLI) consume.
+///
+/// An empty file (zero LLM calls — e.g. a cache-hit run that
+/// skips the LLM entirely) returns an empty `Vec`. This matches
+/// the `read_to_string` helper in `crate::storage::compression`
+/// which short-circuits on zero-length files.
 fn read_calls_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let metadata = std::fs::metadata(path).expect("stat calls.jsonl.gz");
+    if metadata.len() == 0 {
+        return Vec::new();
+    }
     let bytes = std::fs::read(path).expect("read calls.jsonl.gz");
     let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
     let mut raw = Vec::new();
@@ -1270,4 +1280,187 @@ async fn discovery_retry_sketch_extraction_wires_up_to_discover_matrix() {
         "Ship a single Rust binary that bundles config, embed, and runtime."
     );
     assert!(final_sketch.thesis.trim().len() >= 30);
+}
+
+// ---------------------------------------------------------------------------
+// PR-14 — `FacetCache::get_or_compute` end-to-end.
+//
+// Catalog D.13.13: the second `moagan discover` run with the
+// cross-run facet cache enabled must NOT call the `facet_deriver`
+// LLM role. The 1st run populates the cache via
+// `FacetCache::get_or_compute`'s miss-path; the 2nd run's hit
+// path skips the LLM entirely. We assert the invariant by
+// counting `facet_deriver` rows in `telemetry/calls.jsonl.gz`
+// (the canonical audit surface) for each run.
+
+/// `Role::FacetDeriver` returns the canonical lowercase
+/// `"facet_deriver"` (see `crate::llm::role::Role::as_str`).
+const FACET_DERIVER_ROLE: &str = "facet_deriver";
+
+/// Count entries in `telemetry/calls.jsonl.gz` whose `role`
+/// field equals `target_role`.
+fn count_role_calls(entries: &[serde_json::Value], target_role: &str) -> usize {
+    entries
+        .iter()
+        .filter(|e| e.get("role").and_then(|v| v.as_str()) == Some(target_role))
+        .count()
+}
+
+/// Minimal mock provider that serves a single canned response
+/// regardless of role. The PR-14 integration test only cares
+/// about the *count* of LLM calls per role, not their content.
+fn facet_only_mock() -> Arc<MockProvider> {
+    let mut p = MockProvider::empty();
+    p.push(MockResponse::plain(
+        r#"{"facets":[{"name":"Data Flows","description":"Sequences.","required":true}]}"#,
+    ));
+    p.set_cycle(true);
+    Arc::new(p)
+}
+
+/// Seed two cluster JSON files under `clusters/` so the
+/// `discover_facet` phase has two categories to derive.
+fn seed_two_clusters(run_dir: &moagan::fs_layout::RunDir<'_>) {
+    for (id, label, summary) in [
+        ("cluster_01", "auth", "JWT-based auth"),
+        ("cluster_02", "storage", "Postgres storage"),
+    ] {
+        let cluster = moagan::domain::Cluster {
+            id: id.into(),
+            label: label.into(),
+            summary: summary.into(),
+            category_id: String::new(),
+            members: vec!["sk_001".into(), "sk_002".into()],
+            centroid_simhash: String::new(),
+            cohesion: 0.5,
+            schema_version: "v1".into(),
+        };
+        std::fs::write(
+            run_dir.clusters().join(format!("{id}.json")),
+            serde_json::to_vec_pretty(&cluster).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+/// Build a `RunContext` with the cycle-of-mock facet-only
+/// provider. Mirrors the helper used by
+/// `discovery_pipeline_with_mock_emits_lifecycle` but routes
+/// through `build_registry_for` so the pipeline gets a real
+/// registry (the registry is the production path the phase
+/// uses).
+fn make_facet_ctx(
+    home: Arc<MoaganHome>,
+    run_id: RunId,
+    run_dir: &moagan::fs_layout::RunDir<'_>,
+    mock: Arc<MockProvider>,
+) -> moagan::phases::RunContext {
+    let registry = Arc::new(build_registry_with_mock(mock));
+    let parallelism = Parallelism::new(2);
+    let telemetry = Telemetry::open(run_id, run_dir, RedactPolicy::default(), None).unwrap();
+    moagan::phases::RunContext::new(
+        run_id,
+        home,
+        registry,
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "Design a multi-tenant SaaS backend".into(),
+        "discover".into(),
+    )
+}
+
+#[tokio::test]
+async fn facet_cache_get_or_compute_skips_facet_deriver_on_second_run() {
+    let _guard = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve().unwrap());
+    home.ensure().unwrap();
+
+    // 1st run — cache miss path. Two clusters → 2 facet_deriver
+    // LLM calls expected. The cache writes one entry per cluster
+    // under `<MOAGAN_HOME>/cache/facets/`.
+    let run_id_a = RunId::new();
+    let run_dir_a = home.run_dir(run_id_a);
+    run_dir_a.ensure().unwrap();
+    build_brief(&run_dir_a).unwrap();
+    seed_two_clusters(&run_dir_a);
+
+    let mock_a = facet_only_mock();
+    let ctx_a = make_facet_ctx(Arc::clone(&home), run_id_a, &run_dir_a, mock_a.clone());
+    let phase = DiscoverFacetPhase::with_cache(true);
+    phase.execute(&ctx_a).await.expect("1st run must succeed");
+    ctx_a.telemetry.flush().expect("flush 1st run");
+
+    let calls_a = read_calls_jsonl(ctx_a.telemetry.calls_path());
+    let facet_calls_a = count_role_calls(&calls_a, FACET_DERIVER_ROLE);
+    assert_eq!(
+        facet_calls_a, 2,
+        "1st run must call facet_deriver once per cluster; got {facet_calls_a}"
+    );
+
+    // Cache directory must now contain the persisted entries
+    // (one per cluster). This is the side effect the 2nd run
+    // will read on its hit path.
+    let cache_root = home.cross_run_facet_cache_dir();
+    let entries_after_first: Vec<_> = std::fs::read_dir(&cache_root)
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(
+        entries_after_first.len(),
+        2,
+        "1st run must persist one cache entry per cluster; got {}",
+        entries_after_first.len()
+    );
+
+    // 2nd run — same brief, same clusters, same MOAGAN_HOME.
+    // Cache hit path must skip the LLM call entirely.
+    let run_id_b = RunId::new();
+    let run_dir_b = home.run_dir(run_id_b);
+    run_dir_b.ensure().unwrap();
+    build_brief(&run_dir_b).unwrap();
+    seed_two_clusters(&run_dir_b);
+
+    let mock_b = facet_only_mock();
+    let ctx_b = make_facet_ctx(Arc::clone(&home), run_id_b, &run_dir_b, mock_b.clone());
+    phase.execute(&ctx_b).await.expect("2nd run must succeed");
+    ctx_b.telemetry.flush().expect("flush 2nd run");
+
+    let calls_b = read_calls_jsonl(ctx_b.telemetry.calls_path());
+    let facet_calls_b = count_role_calls(&calls_b, FACET_DERIVER_ROLE);
+    assert_eq!(
+        facet_calls_b, 0,
+        "2nd run with cache enabled must skip facet_deriver entirely; got {facet_calls_b} calls"
+    );
+
+    // Sanity: both runs wrote the same facet files to their
+    // respective run dirs. The cache hit path is supposed to
+    // produce a byte-identical artefact set. Filter to the
+    // `*_facets.json` files only — `phases::util::write_json`
+    // also writes a sibling `*.meta.json` (run-dir metadata)
+    // that we don't want to conflate with the facet payload.
+    let facet_files = |dir: &std::path::Path| -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with("_facets.json"))
+            .collect()
+    };
+    let facets_a = facet_files(&run_dir_a.facets());
+    let facets_b = facet_files(&run_dir_b.facets());
+    assert_eq!(
+        facets_a, facets_b,
+        "both runs must write the same facet-file set; a={facets_a:?}, b={facets_b:?}"
+    );
+    assert_eq!(
+        facets_a.len(),
+        2,
+        "both runs must persist one facet file per cluster"
+    );
 }
