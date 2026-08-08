@@ -439,7 +439,7 @@ impl DiscoveryCoordinator {
             run_id,
             cancel,
             brief: _,
-            legacy,
+            mut legacy,
             state,
             mode,
         } = self;
@@ -465,6 +465,74 @@ impl DiscoveryCoordinator {
             matrix_cardinality = matrix.cardinality(),
             "DiscoveryCoordinator::run_with_ctx built exploration matrix"
         );
+
+        // 1b. D.13.18 (v0.5 PR-18): auto-invoke `run_with_pickers`
+        //     when `Config::discovery.auto_pickers` is `true`
+        //     (the default). The persona picker fires first (it
+        //     needs the candidate persona pool) and the angle
+        //     picker fires second (it needs a cluster list). The
+        //     synthetic lists are derived from the matrix's own
+        //     dimensions + cells so a fresh coordinator run has
+        //     non-empty inputs that satisfy the per-picker gates
+        //     (`pick_persona` requires `!candidates.is_empty()`,
+        //     `pick_angle` requires
+        //     `clusters.len() > angle_clusters_min`); both
+        //     short-circuit otherwise and the audit sidecar's
+        //     `calls.jsonl.gz` would miss the `persona_picker` /
+        //     `angle_picker` rows the v0.5 PR-18 contract
+        //     promises. The matrix fan-out below issues
+        //     `Role::Sketch` calls, so the picker rows in
+        //     `calls.jsonl.gz` always precede the matrix rows by
+        //     construction. Both pickers stay opt-in via their
+        //     individual `*_enabled` flags so an operator can
+        //     disable just one without flipping `auto_pickers`.
+        if ctx.config.discovery.auto_pickers {
+            let auto_candidates: Vec<String> =
+                matrix.dimensions.iter().map(|d| d.id.clone()).collect();
+            let auto_clusters: Vec<String> = matrix.iter_cells().map(|c| c.label.clone()).collect();
+            if ctx.config.discovery.persona_enabled && !auto_candidates.is_empty() && target > 4 {
+                match persona_angle::pick_persona(&ctx, auto_candidates).await {
+                    Ok(Some(persona)) => {
+                        tracing::info!(persona = %persona, "persona selected (auto-invoke)");
+                        TelemetryEvent::PhaseStart {
+                            run_id: run_id.to_string(),
+                            phase: format!("persona_selection:{persona}"),
+                            at_unix: crate::time::now_unix_secs(),
+                        }
+                        .emit();
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "persona picker failed during auto-invoke; continuing without persona"
+                        );
+                    }
+                }
+            }
+            if ctx.config.discovery.angle_enabled
+                && auto_clusters.len() > ctx.config.discovery.angle_clusters_min
+            {
+                match persona_angle::pick_angle(&ctx, &mut legacy, auto_clusters).await {
+                    Ok(Some(angle)) => {
+                        tracing::info!(angle = %angle, "angle selected (auto-invoke)");
+                        TelemetryEvent::PhaseStart {
+                            run_id: run_id.to_string(),
+                            phase: format!("angle_selection:{angle}"),
+                            at_unix: crate::time::now_unix_secs(),
+                        }
+                        .emit();
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "angle picker failed during auto-invoke; continuing without angle"
+                        );
+                    }
+                }
+            }
+        }
 
         // 2. Read the canonical brief from disk so the LLM payload
         //    matches what the upstream intake + clarify phases
