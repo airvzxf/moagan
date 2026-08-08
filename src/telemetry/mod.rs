@@ -783,18 +783,24 @@ mod tests {
 
     #[test]
     fn open_writes_to_run_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_dir = home.run_dir(RunId::new());
-        run_dir.ensure().unwrap();
-        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
-        t.phase("intake", 1, "end", None, false).unwrap();
-        t.flush().unwrap();
-        let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
-        assert!(content.contains("intake"));
+        // Use `with_moagan_home` to serialise the MOAGAN_HOME env
+        // mutation with the rest of the test suite and to
+        // auto-restore the previous value. The previous direct
+        // `unsafe { std::env::set_var(...) }` calls (with no
+        // cleanup) raced with sibling tests under default cargo
+        // parallelism; that race surfaced as a flake in
+        // `open_writes_to_run_dir` itself on the 10×-iteration
+        // diagnostic loop (1/10 fail in CI-rerun analysis).
+        crate::test_support::with_moagan_home("open_writes_to_run_dir", |_home| {
+            let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+            let run_dir = home.run_dir(RunId::new());
+            run_dir.ensure().unwrap();
+            let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
+            t.phase("intake", 1, "end", None, false).unwrap();
+            t.flush().unwrap();
+            let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
+            assert!(content.contains("intake"));
+        });
     }
 
     /// U1: every real (non-cache-hit) LLM call must produce a row in
@@ -802,93 +808,95 @@ mod tests {
     /// `provider_rollups`. Cache hits must NOT inflate the rollup.
     #[test]
     fn call_emits_outbox_event_and_provider_rollup() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
-        let db = Db::open(&home.meta_db_path()).unwrap();
-        db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
-            .unwrap();
-        let t =
-            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone())).unwrap();
-        // Real call: should write outbox + rollup.
-        t.call(
-            "call-1",
-            "intake",
-            "intake",
-            "minimax",
-            "MiniMax-M3",
-            "ck-1",
-            Some("hash1"),
-            false,
-            Some(200),
-            100,
-            50,
-            0,
-            0,
-            1,
-            2,
-            None,
-            0,
-        )
-        .unwrap();
-        t.flush().unwrap();
-        let ob_count = db
-            .list_outbox_events_for_run(&run_id.to_string())
-            .unwrap()
-            .len();
-        assert_eq!(ob_count, 1, "expected one outbox_events row");
-        // Check the provider rollup via a public read path. The
-        // public surface for rollups is the `provider_usage_for_run`
-        // view per-run; for the global rollup we use a small
-        // public helper below.
-        let rollup = db
-            .get_provider_rollup("minimax", "MiniMax-M3")
-            .unwrap()
-            .expect("rollup must exist");
-        assert_eq!(rollup.calls, 1);
-        assert_eq!(rollup.input_tokens, 100);
-        assert_eq!(rollup.output_tokens, 50);
+        crate::test_support::with_moagan_home(
+            "call_emits_outbox_event_and_provider_rollup",
+            |_home| {
+                let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+                let run_id = RunId::new();
+                let run_dir = home.run_dir(run_id);
+                run_dir.ensure().unwrap();
+                let db = Db::open(&home.meta_db_path()).unwrap();
+                db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
+                    .unwrap();
+                let t =
+                    Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))
+                        .unwrap();
+                // Real call: should write outbox + rollup.
+                t.call(
+                    "call-1",
+                    "intake",
+                    "intake",
+                    "minimax",
+                    "MiniMax-M3",
+                    "ck-1",
+                    Some("hash1"),
+                    false,
+                    Some(200),
+                    100,
+                    50,
+                    0,
+                    0,
+                    1,
+                    2,
+                    None,
+                    0,
+                )
+                .unwrap();
+                t.flush().unwrap();
+                let ob_count = db
+                    .list_outbox_events_for_run(&run_id.to_string())
+                    .unwrap()
+                    .len();
+                assert_eq!(ob_count, 1, "expected one outbox_events row");
+                // Check the provider rollup via a public read path. The
+                // public surface for rollups is the `provider_usage_for_run`
+                // view per-run; for the global rollup we use a small
+                // public helper below.
+                let rollup = db
+                    .get_provider_rollup("minimax", "MiniMax-M3")
+                    .unwrap()
+                    .expect("rollup must exist");
+                assert_eq!(rollup.calls, 1);
+                assert_eq!(rollup.input_tokens, 100);
+                assert_eq!(rollup.output_tokens, 50);
 
-        // Cache hit: must NOT add another outbox row or rollup tick.
-        t.call(
-            "call-2",
-            "intake",
-            "intake",
-            "minimax",
-            "MiniMax-M3",
-            "ck-2",
-            Some("hash2"),
-            true,
-            Some(200),
-            100,
-            50,
-            0,
-            0,
-            3,
-            4,
-            None,
-            0,
-        )
-        .unwrap();
-        t.flush().unwrap();
-        let ob_after_hit = db
-            .list_outbox_events_for_run(&run_id.to_string())
-            .unwrap()
-            .len();
-        assert_eq!(
-            ob_after_hit, 1,
-            "cache hit must not produce a second outbox row"
+                // Cache hit: must NOT add another outbox row or rollup tick.
+                t.call(
+                    "call-2",
+                    "intake",
+                    "intake",
+                    "minimax",
+                    "MiniMax-M3",
+                    "ck-2",
+                    Some("hash2"),
+                    true,
+                    Some(200),
+                    100,
+                    50,
+                    0,
+                    0,
+                    3,
+                    4,
+                    None,
+                    0,
+                )
+                .unwrap();
+                t.flush().unwrap();
+                let ob_after_hit = db
+                    .list_outbox_events_for_run(&run_id.to_string())
+                    .unwrap()
+                    .len();
+                assert_eq!(
+                    ob_after_hit, 1,
+                    "cache hit must not produce a second outbox row"
+                );
+                let rollup2 = db
+                    .get_provider_rollup("minimax", "MiniMax-M3")
+                    .unwrap()
+                    .expect("rollup must exist");
+                assert_eq!(rollup2.calls, 1, "cache hit must not bump the rollup");
+            },
         );
-        let rollup2 = db
-            .get_provider_rollup("minimax", "MiniMax-M3")
-            .unwrap()
-            .expect("rollup must exist");
-        assert_eq!(rollup2.calls, 1, "cache hit must not bump the rollup");
     }
 
     /// U1.3: a warning whose message contains a known secret pattern
@@ -896,64 +904,64 @@ mod tests {
     /// `pattern_kind`.
     #[test]
     fn warn_writes_redact_audit_row_when_message_contains_secret() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
-        let db = Db::open(&home.meta_db_path()).unwrap();
-        db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
-            .unwrap();
-        let t =
-            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone())).unwrap();
-        t.warn(
-            "secret_in_payload",
-            "error",
-            "API key=sk-cp-aaaaaaaaaaaaaaaaaaaa leaked into the prompt",
-            serde_json::Value::Null,
-            WarningContext {
-                phase: Some("intake".into()),
-                role: Some("intake".into()),
-                call_id: Some("call-x".into()),
-                attempt: Some(1),
+        crate::test_support::with_moagan_home(
+            "warn_writes_redact_audit_row_when_message_contains_secret",
+            |_home| {
+                let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+                let run_id = RunId::new();
+                let run_dir = home.run_dir(run_id);
+                run_dir.ensure().unwrap();
+                let db = Db::open(&home.meta_db_path()).unwrap();
+                db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
+                    .unwrap();
+                let t =
+                    Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))
+                        .unwrap();
+                t.warn(
+                    "secret_in_payload",
+                    "error",
+                    "API key=sk-cp-aaaaaaaaaaaaaaaaaaaa leaked into the prompt",
+                    serde_json::Value::Null,
+                    WarningContext {
+                        phase: Some("intake".into()),
+                        role: Some("intake".into()),
+                        call_id: Some("call-x".into()),
+                        attempt: Some(1),
+                    },
+                )
+                .unwrap();
+                t.flush().unwrap();
+                let count = db
+                    .list_redact_audit_for_run(&run_id.to_string())
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.pattern_kind == "sk_cp_api_key")
+                    .count();
+                assert_eq!(count, 1, "expected one redact_audit row for sk_cp_api_key");
             },
-        )
-        .unwrap();
-        t.flush().unwrap();
-        let count = db
-            .list_redact_audit_for_run(&run_id.to_string())
-            .unwrap()
-            .iter()
-            .filter(|r| r.pattern_kind == "sk_cp_api_key")
-            .count();
-        assert_eq!(count, 1, "expected one redact_audit row for sk_cp_api_key");
+        );
     }
 
     #[test]
     fn redacts_secrets_in_phase() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_dir = home.run_dir(RunId::new());
-        run_dir.ensure().unwrap();
-        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
-        t.phase(
-            "intake",
-            1,
-            "error",
-            Some("key=sk-cp-aaaaaaaaaaaaaaaaaaaa"),
-            false,
-        )
-        .unwrap();
-        t.flush().unwrap();
-        let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
-        assert!(content.contains("[REDACTED:minimax_sk_cp]"));
-        assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
+        crate::test_support::with_moagan_home("redacts_secrets_in_phase", |_home| {
+            let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+            let run_dir = home.run_dir(RunId::new());
+            run_dir.ensure().unwrap();
+            let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
+            t.phase(
+                "intake",
+                1,
+                "error",
+                Some("key=sk-cp-aaaaaaaaaaaaaaaaaaaa"),
+                false,
+            )
+            .unwrap();
+            t.flush().unwrap();
+            let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
+            assert!(content.contains("[REDACTED:minimax_sk_cp]"));
+            assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
+        });
     }
 
     /// W1 fix: `RedactPolicy::allow_all()` (the runtime equivalent of
@@ -964,93 +972,91 @@ mod tests {
     /// land on disk.
     #[test]
     fn redact_in_telemetry_false_keeps_raw_secrets_on_disk() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_dir = home.run_dir(RunId::new());
-        run_dir.ensure().unwrap();
-        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::allow_all(), None).unwrap();
-        let secret = "key=sk-cp-aaaaaaaaaaaaaaaaaaaa";
-        t.phase("intake", 1, "error", Some(secret), false).unwrap();
-        t.flush().unwrap();
-        let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
-        assert!(
-            content.contains(secret),
-            "raw secret should remain visible when redact_in_telemetry=false"
-        );
-        assert!(
-            !content.contains("[REDACTED:"),
-            "no redaction marker should appear when the policy is disabled"
+        crate::test_support::with_moagan_home(
+            "redact_in_telemetry_false_keeps_raw_secrets_on_disk",
+            |_home| {
+                let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+                let run_dir = home.run_dir(RunId::new());
+                run_dir.ensure().unwrap();
+                let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::allow_all(), None)
+                    .unwrap();
+                let secret = "key=sk-cp-aaaaaaaaaaaaaaaaaaaa";
+                t.phase("intake", 1, "error", Some(secret), false).unwrap();
+                t.flush().unwrap();
+                let content = crate::storage::compression::read_to_string(t.phases_path()).unwrap();
+                assert!(
+                    content.contains(secret),
+                    "raw secret should remain visible when redact_in_telemetry=false"
+                );
+                assert!(
+                    !content.contains("[REDACTED:"),
+                    "no redaction marker should appear when the policy is disabled"
+                );
+            },
         );
     }
 
     #[test]
     fn warn_writes_jsonl_and_mirrors_to_sqlite() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
-        let db = Db::open(&home.meta_db_path()).unwrap();
-        db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
+        crate::test_support::with_moagan_home("warn_writes_jsonl_and_mirrors_to_sqlite", |_home| {
+            let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+            let run_id = RunId::new();
+            let run_dir = home.run_dir(run_id);
+            run_dir.ensure().unwrap();
+            let db = Db::open(&home.meta_db_path()).unwrap();
+            db.register_run(run_id, "fast", "running", "0.1.0", None, None, None)
+                .unwrap();
+            let t = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone()))
+                .unwrap();
+            let ctx = WarningContext {
+                phase: Some("critique".into()),
+                role: Some("critique".into()),
+                call_id: Some("c1".into()),
+                attempt: Some(0),
+            };
+            t.warn(
+                "model.json_repair_applied",
+                "warn",
+                "colon repair",
+                serde_json::json!({"repair_kind": "colon", "bytes_before": 42, "bytes_after": 43}),
+                ctx,
+            )
             .unwrap();
-        let t =
-            Telemetry::open(run_id, &run_dir, RedactPolicy::default(), Some(db.clone())).unwrap();
-        let ctx = WarningContext {
-            phase: Some("critique".into()),
-            role: Some("critique".into()),
-            call_id: Some("c1".into()),
-            attempt: Some(0),
-        };
-        t.warn(
-            "model.json_repair_applied",
-            "warn",
-            "colon repair",
-            serde_json::json!({"repair_kind": "colon", "bytes_before": 42, "bytes_after": 43}),
-            ctx,
-        )
-        .unwrap();
-        t.flush().unwrap();
+            t.flush().unwrap();
 
-        let content = std::fs::read_to_string(t.warnings_path()).unwrap();
-        assert!(content.contains("model.json_repair_applied"));
-        assert!(content.contains("colon"));
-        assert!(content.contains("\"phase\":\"critique\""));
+            let content = std::fs::read_to_string(t.warnings_path()).unwrap();
+            assert!(content.contains("model.json_repair_applied"));
+            assert!(content.contains("colon"));
+            assert!(content.contains("\"phase\":\"critique\""));
 
-        let summary = db.warnings_summary(run_id).unwrap();
-        assert_eq!(summary.len(), 1);
-        assert_eq!(summary[0].code, "model.json_repair_applied");
-        assert_eq!(summary[0].count, 1);
-        assert_eq!(summary[0].first_message, "colon repair");
+            let summary = db.warnings_summary(run_id).unwrap();
+            assert_eq!(summary.len(), 1);
+            assert_eq!(summary[0].code, "model.json_repair_applied");
+            assert_eq!(summary[0].count, 1);
+            assert_eq!(summary[0].first_message, "colon repair");
+        });
     }
 
     #[test]
     fn warn_redacts_secrets_in_message() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_dir = home.run_dir(RunId::new());
-        run_dir.ensure().unwrap();
-        let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
-        t.warn(
-            "model.retry_provider",
-            "warn",
-            "got 401 with key=sk-cp-aaaaaaaaaaaaaaaaaaaa",
-            serde_json::json!({}),
-            WarningContext::default(),
-        )
-        .unwrap();
-        t.flush().unwrap();
-        let content = std::fs::read_to_string(t.warnings_path()).unwrap();
-        assert!(content.contains("[REDACTED:minimax_sk_cp]"));
-        assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
+        crate::test_support::with_moagan_home("warn_redacts_secrets_in_message", |_home| {
+            let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+            let run_dir = home.run_dir(RunId::new());
+            run_dir.ensure().unwrap();
+            let t = Telemetry::open(RunId::new(), &run_dir, RedactPolicy::default(), None).unwrap();
+            t.warn(
+                "model.retry_provider",
+                "warn",
+                "got 401 with key=sk-cp-aaaaaaaaaaaaaaaaaaaa",
+                serde_json::json!({}),
+                WarningContext::default(),
+            )
+            .unwrap();
+            t.flush().unwrap();
+            let content = std::fs::read_to_string(t.warnings_path()).unwrap();
+            assert!(content.contains("[REDACTED:minimax_sk_cp]"));
+            assert!(!content.contains("aaaaaaaaaaaaaaaaaaaa"));
+        });
     }
 }
 
