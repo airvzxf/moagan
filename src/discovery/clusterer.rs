@@ -1,22 +1,31 @@
-//! Discovery clustering — SimHash + LLM refinement helpers.
+//! Discovery clustering — Embedder + cosine similarity (D.1.3).
 //!
 //! The clustering algorithm:
 //!
-//! 1. Each sketch is fingerprinted by SimHash on its concatenated
-//!    `thesis + key_decisions + architecture_outline`. The hash is
-//!    Jaccard-equivalent for sets of tokens.
-//! 2. K-means-style clustering via the existing `cluster_by_simhash`
-//!    helper in `src/ranking/cluster.rs` (re-used, no duplicates).
+//! 1. Each sketch is embedded via the injected [`Embedder`]
+//!    (default `HashingEmbedder`, 256-dim FNV-1a). Embeddings are
+//!    L2-normalised so cosine similarity collapses to a dot
+//!    product.
+//! 2. Pairwise clustering via union-find: two records join the
+//!    same cluster when `1 - cosine <= threshold`, i.e.
+//!    `cosine >= 1 - threshold`. The threshold keeps the same
+//!    "max distance" semantic as the previous Jaccard-based pass
+//!    so existing call-sites do not need re-tuning.
 //! 3. The LLM-refinement pass over each cluster (handled by the
 //!    phase; this module only owns the cluster-label merge logic).
 //!
 //! The cluster id format is `cluster_NN` (zero-padded) so files
 //! sort naturally. The category id `cat_NN` is assigned later by
 //! the integrator phase based on cluster density.
+//!
+//! Dependency injection via `&dyn Embedder` keeps the door open for
+//! the `RemoteEmbedder` and `fastembed` adapters (D.1.3 follow-up,
+//! deferred) without touching this module's API.
 
 use std::collections::BTreeMap;
 
-use crate::ranking::cluster::cluster_by_simhash;
+use crate::llm::embed::{Embedder, cosine};
+use crate::ranking::cluster::jaccard_distance;
 
 /// One sketch-record ready to be clustered. The clustering input is
 /// the concat of `text` and `id` is preserved so the phase can map
@@ -29,7 +38,7 @@ pub struct SketchRecord {
     pub text: String,
 }
 
-/// Result of the SimHash clustering pass.
+/// Result of the embedder-based clustering pass.
 #[derive(Debug, Clone)]
 pub struct ClusterChunk {
     /// Zero-based index in the original input list.
@@ -38,10 +47,18 @@ pub struct ClusterChunk {
     pub texts: Vec<String>,
 }
 
-/// Run the SimHash clustering pass on the records.
-pub fn cluster(records: &[SketchRecord], threshold: f32) -> Vec<ClusterChunk> {
+/// Run the embedder-based clustering pass on the records. Two
+/// records join the same cluster when the cosine similarity of
+/// their embeddings exceeds `1 - threshold`. The `threshold` keeps
+/// the same "max distance" semantic as the previous Jaccard-based
+/// pass so existing call-sites do not need re-tuning.
+pub fn cluster(
+    records: &[SketchRecord],
+    embedder: &dyn Embedder,
+    threshold: f32,
+) -> Vec<ClusterChunk> {
     let texts: Vec<String> = records.iter().map(|r| r.text.clone()).collect();
-    let groups = cluster_by_simhash(&texts, threshold);
+    let groups = cluster_by_embedder(&texts, embedder, threshold);
     groups
         .into_iter()
         .map(|member_indices| {
@@ -52,6 +69,52 @@ pub fn cluster(records: &[SketchRecord], threshold: f32) -> Vec<ClusterChunk> {
             }
         })
         .collect()
+}
+
+/// Embedder-based clustering helper. Embeds each text via
+/// `embedder`, then uses union-find over the
+/// `1 - cosine <= threshold` predicate. Pairs whose cosine
+/// similarity is at least `1 - threshold` join the same cluster.
+///
+/// Exposed for integration tests that want to compare the
+/// embedder-based grouping against the legacy Jaccard grouping
+/// without going through the `SketchRecord` wrapper.
+pub fn cluster_by_embedder(
+    texts: &[String],
+    embedder: &dyn Embedder,
+    threshold: f32,
+) -> Vec<Vec<usize>> {
+    let n = texts.len();
+    let embeddings: Vec<Vec<f32>> = texts.iter().map(|t| embedder.embed(t)).collect();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    fn union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+            parent[hi] = lo;
+        }
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if 1.0 - cosine(&embeddings[i], &embeddings[j]) <= threshold {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+    let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        clusters.entry(root).or_default().push(i);
+    }
+    clusters.into_values().collect()
 }
 
 /// Map a `ClusterChunk` index back to the sketch ids in the
@@ -82,7 +145,7 @@ pub fn cohesion(records: &[SketchRecord], chunk: &ClusterChunk) -> f32 {
         for j in (i + 1)..n {
             let a = &records[chunk.member_indices[i]].text;
             let b = &records[chunk.member_indices[j]].text;
-            let d = crate::ranking::cluster::jaccard_distance(a, b);
+            let d = jaccard_distance(a, b);
             total += 1.0 - d;
         }
     }
@@ -112,6 +175,7 @@ pub fn bucket_by_cluster(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::embed::HashingEmbedder;
 
     fn r(id: &str, text: &str) -> SketchRecord {
         SketchRecord {
@@ -127,16 +191,20 @@ mod tests {
             r("sk_002", "ROYGBIV color order canonical standard"),
             r("sk_003", "factor primes algorithm"),
         ];
-        let cs = cluster(&records, 0.9);
+        let embedder = HashingEmbedder::default();
+        let cs = cluster(&records, &embedder, 0.9);
         assert_eq!(cs.len(), 2);
         // The two ROYGBIV records must be in the same cluster.
-        let cs0 = &cs[0];
-        assert!(cs0.member_indices.contains(&0) || cs0.member_indices.contains(&1));
+        let merged = cs
+            .iter()
+            .find(|c| c.member_indices.contains(&0) && c.member_indices.contains(&1));
+        assert!(merged.is_some(), "expected sk_001 + sk_002 to merge");
     }
 
     #[test]
     fn cluster_handles_empty() {
-        let cs = cluster(&[], 0.5);
+        let embedder = HashingEmbedder::default();
+        let cs = cluster(&[], &embedder, 0.5);
         assert!(cs.is_empty());
     }
 
@@ -206,5 +274,33 @@ mod tests {
         let b = bucket_by_cluster(&records, &chunks);
         let keys: Vec<_> = b.keys().cloned().collect();
         assert_eq!(keys, vec!["cluster_00", "cluster_01"]);
+    }
+
+    #[test]
+    fn cluster_by_embedder_merges_close_texts() {
+        // Two texts sharing most tokens yield cosine > 0.85. The
+        // third is disjoint. Threshold 0.15 (cosine >= 0.85) merges
+        // only the similar pair.
+        let texts = vec![
+            "Postgres connection pool with sqlx and tokio async runtime".to_string(),
+            "Postgres connection pool with sqlx and tokio async runtime for rust backend"
+                .to_string(),
+            "Quantum mechanics probability distribution function".to_string(),
+        ];
+        let embedder = HashingEmbedder::default();
+        let v0 = embedder.embed(&texts[0]);
+        let v1 = embedder.embed(&texts[1]);
+        let sim = crate::llm::embed::cosine(&v0, &v1);
+        assert!(sim > 0.85, "expected cosine > 0.85, got {sim}");
+        let groups = cluster_by_embedder(&texts, &embedder, 0.15);
+        assert_eq!(groups.len(), 2);
+        let merged = groups
+            .iter()
+            .find(|g| g.contains(&0) && g.contains(&1))
+            .expect("expected texts[0] + texts[1] to cluster together");
+        let mut sorted = merged.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1]);
+        assert!(groups.iter().any(|g| g == &vec![2]));
     }
 }
