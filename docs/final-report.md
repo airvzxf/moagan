@@ -111,7 +111,15 @@
 |---|---|---|
 | #172 | 48b98d3 | Tier A: M#1 is_retriable + M#2 is_circuit_opening + Rubric validation |
 | #170 | 832c05 | F4 provider capabilities + wire formats unification |
-| #195 | 921474a | AnthropicCompat + invalidate ledger + BLAKE3 default |
+| #195 | 921474a | AnthropicCompat + **invalidate ledger** + BLAKE3 default |
+
+> **Documented as not implemented**: `invalidate_ledger` does not
+> exist in `src/` (`rg invalidate_ledger src/` returns 0 hits). H2 was
+> effectively closed by `outbox_tx::record_with` (PR #198) which
+> provides the equivalent atomicity. AnthropicCompat and BLAKE3
+> default in this row are real (PRs #195 and #204 respectively); the
+> `invalidate ledger` part is historical fiction preserved for the
+> audit trail. See v0.5 audit (PR #253) and v0.5 PR-13 for resolution.
 | #201 | 9cfea3c | StaleArtifact wire-up + JsonRepairV2 re-call (Path C) |
 | #202 | d4236d5 | PersonaPicker + AnglePicker auto-invoke in Coordinator |
 | #203 | 94a17b9 | invalidate_downstream + SynthesisRequest + v012 versioned manifest |
