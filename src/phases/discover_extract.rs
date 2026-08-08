@@ -8,8 +8,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use futures::future::join_all;
 
+use crate::discovery::DiscoveryContext;
 use crate::discovery::extractor::{render_body, unique_sources};
 use crate::discovery::facet::slug;
+use crate::discovery::tagger_threshold::TaggerThreshold;
 use crate::domain::{Cluster, FacetExtraction, FacetList, Sketch};
 use crate::error::{Error, Result};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
@@ -27,6 +29,7 @@ impl DiscoverExtractPhase {
         facet_id: &str,
         facet_desc: &str,
         sketches: &[Sketch],
+        context: &DiscoveryContext,
     ) -> String {
         let sk_lines: Vec<String> = sketches
             .iter()
@@ -36,6 +39,10 @@ impl DiscoverExtractPhase {
             "Cluster:\n  id: {id}\n  label: {label}\n\n\
              Facet: {facet_id}\n  description: {facet_desc}\n\n\
              Source sketches:\n{sk}\n\n\
+             Discovery context (D.13.5):\n  brief_hash: {brief_hash}\n  \
+             matrix_hash: {matrix_hash}\n  tagger_threshold: {tagger}\n  \
+             sketch_count: {sketch_count}\n  contradiction_count: {contra_count}\n  \
+             facet_count: {facet_count}\n\n\
              Return a JSON object with three fields:\n\
              - \"body\": 200-800 words of markdown covering this facet.\n\
              - \"sources\": list of sketch ids that contributed.\n\
@@ -46,6 +53,12 @@ impl DiscoverExtractPhase {
             facet_id = facet_id,
             facet_desc = facet_desc,
             sk = sk_lines.join("\n"),
+            brief_hash = context.brief_hash,
+            matrix_hash = context.matrix_hash,
+            tagger = context.tagger_threshold,
+            sketch_count = context.sketch_ids.len(),
+            contra_count = context.contradiction_ids.len(),
+            facet_count = context.facet_ids.len(),
         )
     }
 
@@ -63,6 +76,28 @@ impl DiscoverExtractPhase {
         }
         Ok(out)
     }
+
+    /// Build + persist the [`DiscoveryContext`] sidecar so the
+    /// run carries a typed record of every artefact the upstream
+    /// phases produced. Returns the hydrated context for the
+    /// caller to embed in the LLM payloads.
+    fn build_and_persist_context(ctx: &RunContext) -> Result<DiscoveryContext> {
+        let threshold =
+            TaggerThreshold::from_config_value(Some(ctx.config.discovery.tag_threshold));
+        let dc = DiscoveryContext::build_with_threshold(&ctx.run_dir(), Some(threshold.value));
+        let path = dc.persist(&ctx.run_dir())?;
+        tracing::info!(
+            sketches = dc.sketch_ids.len(),
+            contradictions = dc.contradiction_ids.len(),
+            facets = dc.facet_ids.len(),
+            brief_hash = %dc.brief_hash,
+            matrix_hash = %dc.matrix_hash,
+            tagger_threshold = dc.tagger_threshold,
+            path = %path.display(),
+            "discovery_context.json persisted"
+        );
+        Ok(dc)
+    }
 }
 
 #[async_trait]
@@ -76,6 +111,11 @@ impl Phase for DiscoverExtractPhase {
         let clusters_dir = ctx.run_dir().clusters();
         let extractions_dir = ctx.run_dir().extractions();
         let _ = std::fs::create_dir_all(&extractions_dir);
+
+        // D.13.5: build + persist the composite discovery context
+        // so resume and the integrator phase can both verify the
+        // upstream artefact surface stayed consistent.
+        let discovery_context = DiscoverExtractPhase::build_and_persist_context(ctx)?;
 
         let mut facet_paths: Vec<PathBuf> = std::fs::read_dir(&facets_dir)?
             .filter_map(|r| r.ok())
@@ -173,6 +213,7 @@ impl Phase for DiscoverExtractPhase {
                 let sketches = sketches.clone();
                 let cat_dir = cat_dir.clone();
                 let ctx = ctx.clone();
+                let discovery_context = discovery_context.clone();
                 async move {
                     let _permit = ctx.parallelism.acquire().await?;
                     let user = DiscoverExtractPhase::user_payload(
@@ -180,6 +221,7 @@ impl Phase for DiscoverExtractPhase {
                         &facet_id,
                         &facet_desc,
                         &sketches,
+                        &discovery_context,
                     );
                     let raw: FacetExtraction = ctx
                         .call_with_retry_parse(
@@ -296,8 +338,11 @@ mod tests {
             thesis: "alpha thesis".into(),
             ..Default::default()
         };
-        let s = DiscoverExtractPhase::user_payload(&c, "data-flows", "data flows", &[sk]);
+        let dc = DiscoveryContext::default();
+        let s = DiscoverExtractPhase::user_payload(&c, "data-flows", "data flows", &[sk], &dc);
         assert!(s.contains("data-flows"));
         assert!(s.contains("sk_001: alpha thesis"));
+        assert!(s.contains("brief_hash"));
+        assert!(s.contains("tagger_threshold"));
     }
 }

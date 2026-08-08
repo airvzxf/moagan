@@ -25,55 +25,13 @@ use std::collections::HashSet;
 
 use crate::domain::{Cluster, Sketch};
 
-/// Newtype around `String` so the outlier API returns a stable
-/// id type instead of leaking the underlying string storage. The
-/// spec (D.13.2) names the type `SketchId`; the project's
-/// existing sketches already use a `String` id (`sk_<NN>`) so
-/// `SketchId` is a thin wrapper that the saturation tracker and
-/// the outlier detector share.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-#[serde(transparent)]
-pub struct SketchId(pub String);
-
-impl SketchId {
-    /// Build a `SketchId` from a borrowed string. Does not
-    /// validate the id shape; callers can pass any string (e.g.
-    /// `"sk_0001"`).
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    /// Borrow the underlying string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for SketchId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<String> for SketchId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for SketchId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
-    }
-}
-
-impl AsRef<str> for SketchId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
+// `SketchId` was originally declared here. PR-23 (D.13.5) moved
+// the canonical declaration to `super::id` so the three discovery
+// id newtypes (`SketchId`, `ContradictionId`, `FacetId`) live
+// together. Re-export the type for backward compatibility with
+// callers that import `crate::discovery::outlier::SketchId`
+// (notably `tests/integration_pr19_stop_policy.rs`).
+pub use super::id::SketchId;
 
 /// Detect outlier sketches. A sketch is an outlier when:
 ///
@@ -240,20 +198,6 @@ mod tests {
             members: members.iter().map(|m| m.to_string()).collect(),
             ..Cluster::default()
         }
-    }
-
-    #[test]
-    fn sketch_id_new_wraps_string() {
-        let s = SketchId::new("sk_001");
-        assert_eq!(s.as_str(), "sk_001");
-        assert_eq!(s.to_string(), "sk_001");
-    }
-
-    #[test]
-    fn sketch_id_from_str_and_string() {
-        let a: SketchId = "sk_002".into();
-        let b: SketchId = String::from("sk_002").into();
-        assert_eq!(a, b);
     }
 
     #[test]

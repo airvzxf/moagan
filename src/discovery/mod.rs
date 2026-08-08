@@ -10,12 +10,14 @@
 //! together).
 
 pub mod clusterer;
+pub mod context;
 pub mod contradiction;
 pub mod coordinator;
 pub mod epistemic_legacy;
 pub mod extractor;
 pub mod facet;
 pub mod facet_cache;
+pub mod id;
 pub mod integrator;
 pub mod matrix;
 pub mod matrix_seed;
@@ -32,8 +34,10 @@ pub mod tag_decision;
 pub mod tagger;
 pub mod tagger_threshold;
 
+pub use context::DiscoveryContext;
 pub use coordinator::{DiscoveryCoordinator, DiscoveryOutcome};
-pub use outlier::{SketchId, detectar_outliers, detectar_outliers_with_threshold};
+pub use id::{ContradictionId, FacetId, SketchId};
+pub use outlier::{detectar_outliers, detectar_outliers_with_threshold};
 pub use stop_policy::{
     BlockReason, DEFAULT_COLA_RESERVA, DEFAULT_DISCOVERY_HARD_CAP, DEFAULT_MAX_SKETCHES,
     DEFAULT_MIN_SKETCHES, DEFAULT_OUTLIER_DISTANCE, DEFAULT_SATURATION_THRESHOLD, StopDecision,
