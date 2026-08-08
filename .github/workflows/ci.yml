@@ -21,16 +21,21 @@ concurrency:
 #   clippy       ─┤   T1 (no deps, ~60 s)
 #   build        ─┴─► upload-artifact: moagan-debug
 #                       │
-#   test-lib     ────┐  │
-#   test-tests   ────┤  │  T2 (depend on build, parallel)
-#   test-doc     ────┘  │
-#                       │
-#   smoke        ────┐  │  T3 (depend on build, download-artifact)
-#   e2e          ────┘  │
+#   test-tests   ────┐
+#   test-lib     ────┤
+#   test-doc     ────┤  T2 (depend on build, parallel)
+#   smoke        ────┤
+#   e2e          ────┘
+#
+# All 5 post-build jobs run in parallel and only depend on `build`. The
+# YAML declaration order is: test-tests, test-lib, smoke, e2e, test-doc.
+# This is purely a visual ordering in the GitHub Actions UI; the actual
+# execution is parallel and the wall-clock critical path is dominated by
+# the slowest of the 5 jobs (typically e2e at ~3 min).
 #
 # Wall-clock critical path:
-#   round 1 = max(fmt-check, guard-deps, clippy, build)       ~60 s
-#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e) ~3 min
+#   round 1 = max(fmt-check, guard-deps, clippy, build)                  ~60 s
+#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e)             ~3 min
 # Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
 #
 # Note on artifact sharing:
@@ -102,19 +107,6 @@ jobs:
       - name: cargo build (debug)
         run: cargo build
 
-  test-lib:
-    name: 'T2 · cargo test --lib --bins'
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt,clippy
-      - name: cargo test (lib + bins)
-        run: cargo test --lib --bins
-
   test-tests:
     name: 'T2 · cargo test --tests (integration)'
     needs: build
@@ -128,16 +120,18 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
-  test-doc:
-    name: 'T2 · cargo test --doc'
+  test-lib:
+    name: 'T2 · cargo test --lib --bins'
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
-      - name: cargo test --doc
-        run: cargo test --doc
+        with:
+          components: rustfmt,clippy
+      - name: cargo test (lib + bins)
+        run: cargo test --lib --bins
 
   smoke:
     name: 'T3 · make smoke (static + 4 pre-existing FAIL)'
@@ -164,3 +158,14 @@ jobs:
         run: cargo build
       - name: make e2e
         run: make e2e
+
+  test-doc:
+    name: 'T2 · cargo test --doc'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - name: cargo test --doc
+        run: cargo test --doc
