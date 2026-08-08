@@ -13,11 +13,11 @@ use crate::secret::SecretString;
 use super::capabilities::ProviderCapabilities;
 use super::circuit_breaker::CircuitBreaker;
 use super::http::{
-    MessagesResponseBody, body_from_request, build_client, build_headers, classify_status,
-    retry_after,
+    MessagesResponseBody, build_client, build_headers, classify_status, retry_after,
 };
 use super::provider::Provider;
 use super::wire::{Request, Response};
+use super::wire_format::{AnthropicWire, WireFormat};
 
 /// `minimax` provider. Talks to the Anthropic-compatible
 /// `/v1/messages` endpoint.
@@ -126,7 +126,7 @@ impl Provider for MinimaxProvider {
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let result = async {
             let url = self.messages_url();
-            let body = body_from_request(req);
+            let body = AnthropicWire.encode_body(req)?;
             let mut attempt: u32 = 0;
             loop {
                 attempt += 1;
@@ -142,7 +142,7 @@ impl Provider for MinimaxProvider {
                     .client
                     .post(&url)
                     .headers(headers)
-                    .json(&body)
+                    .body(body.clone())
                     .send()
                     .await;
                 match result {
@@ -410,5 +410,95 @@ mod tests {
             assert_eq!(p.name(), "minimax");
             assert_eq!(p.endpoint(), "https://api.minimax.io/anthropic/v1");
         }
+    }
+
+    /// v0.5 PR-12 parity test: the canonical `minimax` provider
+    /// now serializes the request body via
+    /// `AnthropicWire::encode_body` (instead of the legacy
+    /// `body_from_request`). This test pins the contract: the JSON
+    /// posted to the upstream `/v1/messages` endpoint must carry
+    /// the Anthropic-compatible shape (`model`, `max_tokens`,
+    /// `system`, `messages: [{role: "user", content: ...}]`) and
+    /// must NOT regress to an empty body or a different schema.
+    #[tokio::test]
+    async fn minimax_send_posts_anthropic_compatible_body() {
+        use std::sync::{Arc, Mutex};
+
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let captured_for_responder = captured.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "dummy"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(move |req: &wiremock::Request| {
+                captured_for_responder
+                    .lock()
+                    .expect("capture lock")
+                    .replace(req.body.clone());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 4,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = test_provider(server.uri());
+        let req = Request {
+            role: crate::llm::role::Role::Intake,
+            model: "MiniMax-M3".into(),
+            system: "you are minimax".into(),
+            user: "hello upstream".into(),
+            max_tokens: 32,
+            temperature: Some(0.4),
+            top_p: Some(0.9),
+            response_schema: None,
+            stream: false,
+        };
+        let (status, resp) = provider
+            .send(&req)
+            .await
+            .expect("minimax send should succeed against the mock server");
+        assert_eq!(status, 200);
+        assert_eq!(resp.text, "ok");
+
+        let bytes = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("mock server captured the request body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("captured body is valid JSON");
+        // Anthropic-compatible shape contract:
+        assert_eq!(json["model"], "MiniMax-M3");
+        assert_eq!(json["max_tokens"], 32);
+        assert_eq!(json["system"], "you are minimax");
+        assert_eq!(
+            json["messages"],
+            serde_json::json!([{"role": "user", "content": "hello upstream"}]),
+            "messages must be the Anthropic-compatible user-only array"
+        );
+        let temp = json["temperature"].as_f64().expect("temperature numeric");
+        assert!((temp - 0.4).abs() < 1e-6, "temperature must round-trip");
+        let top_p = json["top_p"].as_f64().expect("top_p numeric");
+        assert!((top_p - 0.9).abs() < 1e-6, "top_p must round-trip");
+        // `thinking` must remain absent (never set by M-series
+        // request path — the reference sweep relies on thinking
+        // staying ON implicitly).
+        assert!(
+            json.get("thinking").is_none(),
+            "minimax must not emit thinking control, got: {json}"
+        );
     }
 }
