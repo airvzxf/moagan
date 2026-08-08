@@ -65,6 +65,9 @@ mod sql_v012 {
 mod sql_v013 {
     pub(super) const V013: &str = include_str!("migrations/v013_closing_tables.sql");
 }
+mod sql_v014 {
+    pub(super) const V014: &str = include_str!("migrations/v014_calls_retry_count.sql");
+}
 
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
@@ -409,6 +412,12 @@ impl Db {
                 Ok(())
             })?;
         }
+        if current < 14 {
+            apply_step(&conn, 14, || -> Result<()> {
+                conn.execute_batch(sql_v014::V014)?;
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 
@@ -573,13 +582,14 @@ impl Db {
         started_unix: i64,
         ended_unix: i64,
         error: Option<&str>,
+        retry_count: u32,
     ) -> Result<()> {
         let conn = self.pool.get()?;
         let http_status_u16 = http_status.and_then(|s| u16::try_from(s).ok());
         let status = call_status(http_status_u16, error);
         conn.execute(
-            "INSERT INTO calls (call_id, run_id, phase, role, provider, model, cache_key, body_sha256, cache_hit, http_status, input_tokens, output_tokens, cache_read, cache_creation, started_unix, ended_unix, error, status) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO calls (call_id, run_id, phase, role, provider, model, cache_key, body_sha256, cache_hit, http_status, input_tokens, output_tokens, cache_read, cache_creation, started_unix, ended_unix, error, status, retry_count) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 call_id,
                 run_id.to_string(),
@@ -599,6 +609,7 @@ impl Db {
                 ended_unix,
                 error,
                 status,
+                retry_count as i64,
             ],
         )?;
         Ok(())
@@ -827,7 +838,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT call_id, phase, role, provider, model, cache_key, body_sha256, cache_hit, http_status, \
                      input_tokens, output_tokens, cache_read, cache_creation, started_unix, \
-                     ended_unix, error \
+                     ended_unix, error, retry_count \
              FROM calls WHERE run_id = ? ORDER BY started_unix ASC",
         )?;
         let rows = stmt
@@ -849,6 +860,7 @@ impl Db {
                     started_unix: r.get(13)?,
                     ended_unix: r.get::<_, Option<i64>>(14)?,
                     error: r.get(15)?,
+                    retry_count: r.get::<_, i64>(16)? as u32,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1557,6 +1569,14 @@ pub struct CallRow {
     pub ended_unix: Option<i64>,
     /// Error message, if any.
     pub error: Option<String>,
+    /// Zero-indexed retry number for this call. `0` is the first
+    /// attempt; `1` is the second attempt, etc. Persisted by the
+    /// canonical retry loop in
+    /// `crate::phases::phase::call_with_retry_parse` so the
+    /// post-execution review can answer "how many retries did this
+    /// LLM call take?" by reading a single SQL query instead of
+    /// correlating warnings to call records.
+    pub retry_count: u32,
 }
 
 /// Row read from `runs`.
@@ -2401,6 +2421,7 @@ mod tests {
             100,
             101,
             None,
+            0,
         )
         .unwrap();
         let runs = db.list_runs(10).unwrap();
@@ -2410,6 +2431,7 @@ mod tests {
         assert_eq!(calls[0].body_sha256.as_deref(), Some("sha256"));
         assert_eq!(calls[0].started_unix, 100);
         assert_eq!(calls[0].ended_unix, Some(101));
+        assert_eq!(calls[0].retry_count, 0);
     }
 
     /// The pipeline writes three events per phase (start, end, error)
@@ -2816,6 +2838,7 @@ mod tests {
             1_700_000_000,
             1_700_000_005,
             None,
+            0,
         )
         .unwrap();
         db.record_call(
@@ -2836,6 +2859,7 @@ mod tests {
             1_700_000_010,
             1_700_000_011,
             None,
+            0,
         )
         .unwrap();
         db.record_call(
@@ -2856,6 +2880,7 @@ mod tests {
             1_700_000_020,
             1_700_000_030,
             Some("provider error"),
+            1,
         )
         .unwrap();
         db.accumulate_usage(run_id, "minimax", "MiniMax-M3", 3, 300, 130, 10, 0)
@@ -2945,6 +2970,7 @@ mod tests {
             1_700_000_100,
             1_700_000_101,
             None,
+            0,
         )
         .unwrap();
         db.accumulate_usage(run_id, "mock", "mock-model", 1, 1_000, 500, 0, 0)
@@ -3491,14 +3517,15 @@ mod tests {
         }
     }
 
-    /// Re-opening a DB that already has v013 applied stays at
-    /// v013 without error. The runner's `if current < N` gates
+    /// Re-opening a DB that already has v014 applied stays at
+    /// v014 without error. The runner's `if current < N` gates
     /// make this trivially true, but the test pins the contract:
     /// `CREATE TABLE IF NOT EXISTS` is idempotent at the SQL
     /// level so a third, fourth, ... open of the same DB also
-    /// succeeds.
+    /// succeeds. (The original v013 wording predates the
+    /// `calls.retry_count` migration landed in v014.)
     #[test]
-    fn v013_migration_is_idempotent() {
+    fn v014_migration_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("meta.sqlite");
         let _db = Db::open(&path).expect("first open");
@@ -3509,21 +3536,19 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 13,
-            "user_version must stay at 13 across consecutive reopens, got {v}"
+            v, 14,
+            "user_version must stay at 14 across consecutive reopens, got {v}"
         );
-        // Each v013 table still has exactly one row in
-        // sqlite_master (no duplicate from re-execution).
-        for table in ["run_state", "discovery_dedup", "plan_state"] {
-            let n: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
-                    params![table],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(n, 1, "v013 table {table} duplicated across reopens");
-        }
+        // v014 added a single ALTER TABLE so no new tables to
+        // probe; the column existence check below is enough.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('calls') WHERE name = 'retry_count'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "calls.retry_count column missing on reopen");
     }
 
     /// `apply_step` must roll the schema change back when the

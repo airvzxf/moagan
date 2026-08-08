@@ -374,6 +374,7 @@ fn call_event(id: &str, ts: i64, hash: Option<&str>, cache_hit: bool) -> CallEve
         ended_unix: ts + 1,
         error: None,
         status: Some("ok".into()),
+        retry_count: 0,
     }
 }
 
