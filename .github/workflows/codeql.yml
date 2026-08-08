@@ -35,10 +35,29 @@ jobs:
         uses: github/codeql-action/init@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e # v3
         with:
           languages: ${{ matrix.language }}
-          # 'security-and-quality' is the default query pack from
-          # https://github.com/github/codeql – it covers the lgtm.com
-          # queries the public advisory database pulls from.
-          queries: security-and-quality
+          # 'security-extended' adds the lower-severity and
+          # lower-precision queries on top of the default
+          # 'security-and-quality' suite. The trade-off is more
+          # findings in the Security tab (most are warnings that
+          # don't block merges because the alert threshold is
+          # 'warning', not 'error'). The project does not enable
+          # code-scanning merge protection, so the extra findings
+          # are informational only.
+          queries: security-extended
+          # paths-ignore is NOT a top-level input of the CodeQL
+          # action (per github/codeql-action init/action.yml); it
+          # lives inside the `config` block which is a YAML string
+          # in the same format as a codeql-config.yml file. We
+          # skip:
+          #   - target/**         – gitignored, defensive explicit
+          #   - tests/fixtures/** – JSON mocks for the mock LLM
+          #                         provider; no security surface
+          #   - **/*.lock         – Cargo.lock is generated
+          config: |
+            paths-ignore:
+              - 'target/**'
+              - 'tests/fixtures/**'
+              - '**/*.lock'
           # build-mode is hard-coded to `none` for Rust: the CodeQL
           # CLI (v2.26.x as of writing) does NOT support `autobuild`
           # for Rust — only `none` is accepted by the Rust extractor.
