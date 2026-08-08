@@ -149,14 +149,14 @@ echo "${BOLD}Git hygiene${RESET}"
 # HEAD can be a squash-merge (web-flow signed E); the real GPG signature lives
 # on the original commit before the squash. Search all refs (incl. remote
 # branches) for any non-merge commit with signature G in the last 50 commits.
-G_COUNT=$(git log --all --remotes --no-merges --format='%G?' -50 | grep -c '^G$' || true)
+G_COUNT=$(git log --all --remotes --no-merges --format='%G?' -50 | grep -Ec '^G$|^U$' || true)
 if [[ "$G_COUNT" -gt 0 ]]; then
-  LAST_G=$(git log --all --remotes --no-merges --format='%H %G? %s' -50 | grep ' G ' | head -1)
+  LAST_G=$(git log --all --remotes --no-merges --format='%H %G? %s' -50 | grep -E ' (G|U) ' | head -1)
   G_HASH=$(echo "$LAST_G" | awk '{print $1}')
-  printf "  %s✓%s %-50s %s(%d G-signed commits in last 50, latest %s)%s\n" "$GREEN" "$RESET" "GPG-signed commits exist" "$BLUE" "$G_COUNT" "${G_HASH:0:7}" "$RESET"
+  printf "  %s✓%s %-50s %s(%d G/U-signed commits in last 50, latest %s)%s\n" "$GREEN" "$RESET" "GPG-signed commits exist" "$BLUE" "$G_COUNT" "${G_HASH:0:7}" "$RESET"
   PASS_COUNT=$((PASS_COUNT + 1))
 else
-  printf "  %s✗%s %-50s %s(no G-signed commits in last 50)%s\n" "$RED" "$RESET" "GPG-signed commits exist" "$BLUE" "" "$RESET"
+  printf "  %s✗%s %-50s %s(no G/U-signed commits in last 50)%s\n" "$RED" "$RESET" "GPG-signed commits exist" "$BLUE" "" "$RESET"
   FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 echo
