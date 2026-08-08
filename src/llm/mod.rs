@@ -8,6 +8,7 @@ pub mod budget;
 pub mod cache;
 pub mod capabilities;
 pub mod circuit_breaker;
+pub mod control_tokens;
 pub mod deepseek;
 pub mod embed;
 pub mod http;

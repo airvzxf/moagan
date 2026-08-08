@@ -25,9 +25,13 @@
 //!     context.
 //!  2. BOM strip. A leading `\u{FEFF}` is dropped so UTF-8 editors
 //!     that save with BOM don't trip up the model.
-//!  3. Control token strip. ASCII control bytes (< 0x20) except
-//!     `\n` and `\t` are removed so accidentally-pasted terminal
-//!     escapes or stray NULs don't leak into the prompt.
+//!  3. Control token strip. ASCII control bytes (`\u{0000}`–
+//!     `\u{001F}`) except `\n`, `\r`, and `\t`, plus the DEL
+//!     byte (`\u{007F}`), are removed so accidentally-pasted
+//!     terminal escapes or stray NULs don't leak into the
+//!     prompt. The strip is the centralised helper
+//!     [`crate::llm::control_tokens::strip`] (catalog
+//!     10-integrada-v0 §D.7.2; roadmap PR-27).
 //!
 //! The normalised string is fed both to the LLM call and persisted
 //! in `Intake.raw_prompt` so a re-run with the same CLI prompt
@@ -57,11 +61,14 @@
 
 use async_trait::async_trait;
 
+use std::borrow::Cow;
+
 use crate::checkpoint::{Checkpoint, CheckpointKind, CheckpointOpts};
 use crate::config::Config;
 use crate::domain::{HostilePromptReport, Intake};
 use crate::error::{Error, Result};
 use crate::llm::Role;
+use crate::llm::control_tokens;
 use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
@@ -561,20 +568,20 @@ pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
     //    token. Drop it unconditionally when present.
     let no_bom: &str = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
 
-    // 2. Control-token strip. Remove ASCII control bytes (< 0x20)
-    //    except LF (`\n`) and tab (`\t`). Other whitespace (CR, FF,
-    //    VT) and NULs do not belong in a natural-language prompt.
-    let no_control: String = no_bom
-        .chars()
-        .filter(|c| {
-            if *c == '\n' || *c == '\t' {
-                true
-            } else {
-                let code = *c as u32;
-                code >= 0x20
-            }
-        })
-        .collect();
+    // 2. Control-token strip. Route through the centralised
+    //    helper (catalog §D.7.2; roadmap PR-27) so every LLM
+    //    input/output parser in the codebase shares one
+    //    definition of "what is a control byte?". The helper
+    //    preserves `\n`, `\r`, and `\t` (legitimate whitespace)
+    //    and removes everything else in `\u{0000}`–`\u{001F}`
+    //    plus DEL (`\u{007F}`).
+    let no_control: Cow<'_, str> = control_tokens::strip(no_bom);
+    // `Cow<str>` does not implement `Borrow<str>` in a way that
+    // lets us reuse the original `String` allocation when
+    // stripping was a no-op, so we materialise a `String` for
+    // the byte-cap step. The helper still saves the per-char
+    // filter scan when the input is clean.
+    let no_control: String = no_control.into_owned();
 
     // 3. Byte cap. When the cleaned text still exceeds the cap,
     //    truncate and surface a warning so the operator can see
@@ -738,43 +745,50 @@ mod tests {
         assert_eq!(out, "hello world");
     }
 
-    /// E9: ASCII control bytes (< 0x20) except `\n` and `\t` are
-    /// removed from the raw prompt. NULs, CRs, FF, VT, BEL, ESC,
-    /// etc. — all dropped. Newlines and tabs preserved (they're
-    /// legitimate whitespace in natural-language prompts). The
-    /// check also covers that multi-byte UTF-8 characters with
-    /// codepoints >= 0x80 are NOT touched (the `< 0x20` test only
-    /// matches the ASCII control range).
+    /// E9: ASCII control bytes (< 0x20) except `\n`, `\r`, and
+    /// `\t` are removed from the raw prompt. NULs, BEL, FF, VT,
+    /// ESC, etc. — all dropped. Newline, CR, and tab are
+    /// preserved (legitimate whitespace in natural-language
+    /// prompts and JSON output). The check also covers that
+    /// multi-byte UTF-8 characters with codepoints >= 0x80 are
+    /// NOT touched (the central helper only acts on the ASCII
+    /// control range and DEL).
     #[test]
     fn intake_strips_control_tokens_preserving_newlines() {
         // Build a string with a deliberate mix of control bytes
-        // (NUL, SOH, STX, ETX, CR, SO, US) and legitimate
-        // whitespace, plus a non-ASCII codepoint (`ñ`) to confirm
-        // the filter does not touch multi-byte UTF-8 sequences.
-        // Bare CR is constructed via `push('\r')` so the source
-        // file stays CR-free (Rust strings forbid a literal 0x0D).
-        let mut raw = String::from("line1\nline2\tcol2\n");
-        for c in ['\0', '\u{01}', '\u{02}', '\u{03}', '\r', '\u{0E}', '\u{1F}'] {
+        // (NUL, SOH, STX, ETX, SO, US) and legitimate whitespace,
+        // plus a non-ASCII codepoint (`ñ`) to confirm the filter
+        // does not touch multi-byte UTF-8 sequences. Bare CR is
+        // constructed via `push('\r')` so the source file stays
+        // CR-free (Rust strings forbid a literal 0x0D).
+        let mut raw = String::from("line1\nline2\rline3\tcol3\n");
+        for c in ['\0', '\u{01}', '\u{02}', '\u{03}', '\u{0E}', '\u{1F}'] {
             raw.push(c);
         }
         raw.push_str("acento: ñ");
         let out = normalize_raw_prompt(&raw);
-        // Newline + tab preserved, control bytes gone.
-        assert!(out.contains("line1\nline2\tcol2"));
+        // Newline + CR + tab preserved, control bytes gone.
+        assert!(out.contains("line1\nline2\rline3\tcol3"));
         // Non-ASCII preserved.
         assert!(out.contains("ñ"));
         // No remaining control bytes (< 0x20) other than the
-        // legitimate newline / tab.
+        // legitimate newline / CR / tab.
         for c in out.chars() {
             let code = c as u32;
             if code < 0x20 {
-                assert!(c == '\n' || c == '\t', "leaked control byte: {c:?}");
+                assert!(
+                    c == '\n' || c == '\r' || c == '\t',
+                    "leaked control byte: {c:?}"
+                );
             }
         }
-        // Sanity: the count of `\n` and `\t` matches the input.
+        // Sanity: the count of `\n`, `\r`, and `\t` matches the
+        // input.
         let newlines = out.chars().filter(|c| *c == '\n').count();
+        let crs = out.chars().filter(|c| *c == '\r').count();
         let tabs = out.chars().filter(|c| *c == '\t').count();
         assert_eq!(newlines, 2, "expected 2 newlines preserved");
+        assert_eq!(crs, 1, "expected 1 CR preserved");
         assert_eq!(tabs, 1, "expected 1 tab preserved");
     }
 
