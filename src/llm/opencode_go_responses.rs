@@ -27,6 +27,7 @@ use crate::secret::SecretString;
 use super::capabilities::ProviderCapabilities;
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
+use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use super::sse_parser::{SseError, SseParser};
 use super::wire::{Request, Response, Usage};
 
@@ -245,6 +246,12 @@ impl Provider for OpenCodeGoResponsesProvider {
                             }
                         }
                         let usage = parsed.usage.unwrap_or_default();
+                        // D.29.2: enforce the centralised response
+                        // cap (10 MiB) before constructing the
+                        // Response. Done on the accumulated text so
+                        // the byte count is the actual payload
+                        // length the pipeline will see.
+                        check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
                         let response = Response {
                             text,
                             finish_reason: None,
@@ -387,6 +394,11 @@ impl OpenCodeGoResponsesProvider {
             "Provider HTTP stage (sse)"
         );
         let (text, usage) = accumulate_sse_responses(&bytes)?;
+        // D.29.2: enforce the centralised response cap (10 MiB)
+        // on the SSE-accumulated text. SSE streams can grow
+        // indefinitely if a misconfigured model keeps emitting
+        // tokens; the cap turns that into a hard error.
+        check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
         let response = Response {
             text,
             finish_reason: None,

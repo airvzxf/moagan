@@ -19,10 +19,10 @@
 //! E9 (catalog 10-integrada-v0 §D.20): the raw prompt is normalised
 //! before it reaches the LLM. Three passes run in order:
 //!
-//!  1. Byte-cap at [`MAX_NORMALIZED_INPUT_BYTES`] (256 KiB).
-//!     Oversized briefs are truncated with a warning; the rest of
-//!     the pipeline keeps working without ballooning the LLM
-//!     context.
+//!  1. Byte-cap at [`crate::llm::size_limits::MAX_PROMPT_BYTES`]
+//!     (250 KiB). Oversized briefs are truncated with a warning;
+//!     the rest of the pipeline keeps working without ballooning
+//!     the LLM context.
 //!  2. BOM strip. A leading `\u{FEFF}` is dropped so UTF-8 editors
 //!     that save with BOM don't trip up the model.
 //!  3. Control token strip. ASCII control bytes (`\u{0000}`–
@@ -70,6 +70,7 @@ use crate::error::{Error, Result};
 use crate::llm::Role;
 use crate::llm::control_tokens;
 use crate::llm::prompts::system_prompt;
+use crate::llm::size_limits::MAX_PROMPT_BYTES;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 
@@ -95,12 +96,6 @@ pub fn compute_config_hash(config: &Config) -> Result<String> {
         .map_err(|e| Error::InvalidState(format!("config_hash: toml serialize failed: {e}")))?;
     Ok(blake3::hash(serialized.as_bytes()).to_hex().to_string())
 }
-
-/// E9: hard byte cap for the normalised raw prompt. Briefs larger
-/// than 256 KiB are truncated before the LLM call so the context
-/// budget cannot be exhausted by a single paste. Matches
-/// proposal-03 §D.20.4.
-pub const MAX_NORMALIZED_INPUT_BYTES: usize = 256 * 1024;
 
 /// E10: how the intake phase handles the
 /// `Role::HostilePromptDetector` verdict. The default is
@@ -561,7 +556,11 @@ fn build_user_message(ctx: &RunContext, normalised_raw: &str) -> Result<String> 
 /// byte cap), control-token strip next (cheap, runs on the full
 /// string), byte cap last (so the cap operates on the cleaned
 /// text). The function is total and side-effect free, so callers
-/// can run it without touching the run context.
+/// can run it without touching the run context. The byte cap is
+/// [`MAX_PROMPT_BYTES`] (D.29.2) — the centralised 250 KiB
+/// constant from `crate::llm::size_limits`. The cap is enforced
+/// by truncation (not error) because a 250 KiB paste must not
+/// abort a run the operator started deliberately.
 pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
     // 1. BOM strip. A leading BOM (U+FEFF) is invisible in most
     //    editors but breaks the LLM's tokeniser on the first
@@ -588,10 +587,10 @@ pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
     //    "this prompt was too big" in the telemetry stream. The
     //    truncation is character-aware (operates on the
     //    already-cleaned `String`) so we never slice mid-codepoint.
-    if no_control.len() > MAX_NORMALIZED_INPUT_BYTES {
-        let mut truncated = String::with_capacity(MAX_NORMALIZED_INPUT_BYTES);
+    if no_control.len() > MAX_PROMPT_BYTES {
+        let mut truncated = String::with_capacity(MAX_PROMPT_BYTES);
         for c in no_control.chars() {
-            if truncated.len() + c.len_utf8() > MAX_NORMALIZED_INPUT_BYTES {
+            if truncated.len() + c.len_utf8() > MAX_PROMPT_BYTES {
                 break;
             }
             truncated.push(c);
@@ -599,7 +598,7 @@ pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
         tracing::warn!(
             original_bytes = raw.len(),
             truncated_bytes = truncated.len(),
-            cap_bytes = MAX_NORMALIZED_INPUT_BYTES,
+            cap_bytes = MAX_PROMPT_BYTES,
             stage = "intake.normalized_truncated",
             "Intake phase"
         );
@@ -711,18 +710,20 @@ mod tests {
     // -- E9: normalize_raw_prompt --------------------------------------
 
     /// E9: an oversized raw prompt is truncated at the byte cap.
-    /// The cap is 256 KiB; the test pushes 300 KiB and expects the
-    /// output to be at the cap, never larger. UTF-8 boundary safety
-    /// is also pinned (the truncation walks chars, not bytes).
+    /// The cap is 250 KiB (D.29.2: `MAX_PROMPT_BYTES`); the test
+    /// pushes a string 50 KiB over the cap and expects the
+    /// output to be at the cap, never larger. UTF-8 boundary
+    /// safety is also pinned (the truncation walks chars, not
+    /// bytes).
     #[test]
     fn intake_truncates_oversized_brief() {
-        let big = "a".repeat(MAX_NORMALIZED_INPUT_BYTES + 50_000);
+        let big = "a".repeat(MAX_PROMPT_BYTES + 50_000);
         let out = normalize_raw_prompt(&big);
         assert!(
-            out.len() <= MAX_NORMALIZED_INPUT_BYTES,
+            out.len() <= MAX_PROMPT_BYTES,
             "truncated len {} > cap {}",
             out.len(),
-            MAX_NORMALIZED_INPUT_BYTES
+            MAX_PROMPT_BYTES
         );
         // Sanity: ASCII input means chars().count() == len().
         assert_eq!(out.chars().count(), out.len());

@@ -20,6 +20,7 @@ use super::capabilities::ProviderCapabilities;
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
 use super::response_format_opt_out;
+use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use super::wire::{Request, Response, Usage};
 
 /// Generic OpenAI-compat provider.
@@ -257,8 +258,17 @@ impl Provider for OpenAiCompatProvider {
                         let finish_reason = choice.finish_reason;
                         let truncated = finish_reason.as_deref() == Some("length");
                         let usage = parsed.usage.unwrap_or_default();
+                        let text = choice.message.content;
+                        // D.29.2: enforce the centralised response
+                        // cap (10 MiB) so a runaway provider cannot
+                        // force us to hold a 100 MiB string in
+                        // memory. The check happens AFTER the JSON
+                        // decode so the byte count is the actual
+                        // payload length (not the wire bytes,
+                        // which include JSON-escape overhead).
+                        check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
                         let response = Response {
-                            text: choice.message.content,
+                            text,
                             finish_reason,
                             truncated,
                             usage: Usage {

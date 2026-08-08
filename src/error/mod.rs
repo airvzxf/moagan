@@ -198,6 +198,20 @@ pub enum Error {
     /// a malformed user input, not a degraded run state.
     #[error("path traversal detected: {0}")]
     PathTraversal(String),
+
+    /// D.29.2: a payload exceeded its configured size cap. The
+    /// inner string carries the `{label}: {bytes} > {cap}` form
+    /// from `crate::llm::size_limits::check_size` so the
+    /// post-mortem log can pinpoint which budget blew
+    /// (`prompt` / `response` / `attachment`). Maps to
+    /// [`ExitCode::ProviderError`] because an oversized LLM
+    /// response body is functionally equivalent to HTTP 413
+    /// from the upstream, and the breaker policy for an
+    /// HTTP-413-shaped error already lives there. Not
+    /// circuit-opening: a single oversized response does not
+    /// mean the provider is unhealthy.
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
 }
 
 impl Error {
@@ -225,6 +239,7 @@ impl Error {
             Self::DiscoveryQualityTooLow { .. } => ErrorCode::InvalidState,
             Self::HostilePrompt(_) => ErrorCode::HostilePrompt,
             Self::PathTraversal(_) => ErrorCode::InvalidArgs,
+            Self::PayloadTooLarge(_) => ErrorCode::InputTooLarge,
         }
     }
 
@@ -244,6 +259,7 @@ impl Error {
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
             Self::HostilePrompt(_) => ExitCode::ContextError,
             Self::PathTraversal(_) => ExitCode::InvalidArgs,
+            Self::PayloadTooLarge(_) => ExitCode::ProviderError,
         }
     }
 
@@ -620,6 +636,13 @@ mod tests {
         assert_eq!(
             Error::HostilePrompt("ignore previous instructions".into()).code(),
             ErrorCode::HostilePrompt
+        );
+        // D.29.2: oversized payloads share the `InputTooLarge`
+        // bucket so the wire form does not fork from the
+        // proposal-03 intent (D.20.4 used `InputTooLarge`).
+        assert_eq!(
+            Error::PayloadTooLarge("response: 11000000 > 10485760".into()).code(),
+            ErrorCode::InputTooLarge
         );
     }
 
