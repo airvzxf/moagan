@@ -2145,47 +2145,45 @@ mod tests {
     /// shape.
     #[test]
     fn manifest_with_lineage_paths_round_trips() {
-        use crate::fs_layout::{MoaganHome, RunPaths};
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = MoaganHome::resolve().unwrap();
-        let paths = RunPaths::resolve(&home, RunId::new());
-        let lineage = LineagePaths::from_run_paths(&paths);
-        let m = Manifest {
-            schema_version: "v1".into(),
-            run_id: RunId::new(),
-            mode: "fast".into(),
-            status: "completed".into(),
-            created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
-            updated_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
-            client_version: "0.3.0".into(),
-            brief_sha256: String::new(),
-            brief_blake3: String::new(),
-            provider: "mock".into(),
-            model: "mock-1".into(),
-            phases: Vec::new(),
-            usage: crate::domain::ManifestUsage::default(),
-            manifest_blake3: String::new(),
-            parent_run_id: None,
-            shared_brief_hash: None,
-            context_refs: Vec::new(),
-            lineage_paths: Some(lineage.clone()),
-            cli_prompt: None,
-            config_hash: None,
-            created_at_iso: "2026-01-01T00:00:00+00:00".into(),
-            last_resumed_at_iso: None,
-            resume_count: 0,
-            prohibited_decisions: Vec::new(),
-        };
-        let j = serde_json::to_string(&m).unwrap();
-        let back: Manifest = serde_json::from_str(&j).unwrap();
-        let lp = back.lineage_paths.expect("lineage_paths preserved");
-        assert_eq!(lp, lineage);
-        // Spot-check the keys.
-        assert!(lp.relative.contains_key("brief"));
-        assert!(lp.absolute.contains_key("final"));
+        crate::test_support::with_moagan_home("manifest_with_lineage_paths_round_trips", |_home| {
+            use crate::fs_layout::{MoaganHome, RunPaths};
+            let home = MoaganHome::resolve().unwrap();
+            let paths = RunPaths::resolve(&home, RunId::new());
+            let lineage = LineagePaths::from_run_paths(&paths);
+            let m = Manifest {
+                schema_version: "v1".into(),
+                run_id: RunId::new(),
+                mode: "fast".into(),
+                status: "completed".into(),
+                created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+                updated_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+                client_version: "0.3.0".into(),
+                brief_sha256: String::new(),
+                brief_blake3: String::new(),
+                provider: "mock".into(),
+                model: "mock-1".into(),
+                phases: Vec::new(),
+                usage: crate::domain::ManifestUsage::default(),
+                manifest_blake3: String::new(),
+                parent_run_id: None,
+                shared_brief_hash: None,
+                context_refs: Vec::new(),
+                lineage_paths: Some(lineage.clone()),
+                cli_prompt: None,
+                config_hash: None,
+                created_at_iso: "2026-01-01T00:00:00+00:00".into(),
+                last_resumed_at_iso: None,
+                resume_count: 0,
+                prohibited_decisions: Vec::new(),
+            };
+            let j = serde_json::to_string(&m).unwrap();
+            let back: Manifest = serde_json::from_str(&j).unwrap();
+            let lp = back.lineage_paths.expect("lineage_paths preserved");
+            assert_eq!(lp, lineage);
+            // Spot-check the keys.
+            assert!(lp.relative.contains_key("brief"));
+            assert!(lp.absolute.contains_key("final"));
+        });
     }
 
     // -- F5: schema v2 + lifecycle metadata ---------------------------
