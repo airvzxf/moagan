@@ -27,6 +27,7 @@ use crate::llm::prompts::system_prompt;
 use crate::phases::judge::Aggregated;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
+use crate::telemetry::dashboard_static;
 
 /// Deliver phase.
 pub struct DeliverPhase;
@@ -124,6 +125,25 @@ impl Phase for DeliverPhase {
                     ));
                 }
             }
+        }
+
+        // D.17.8: drop the static dashboard HTML into the run
+        // directory so the dashboard server can serve a self-
+        // contained page that fetches `/api/runs` and renders the
+        // run table. `write_dashboard` is idempotent (it
+        // `create_dir_all` + `write` the same constant HTML), so
+        // re-runs of `deliver` from `moagan rerank` are safe.
+        // The io::Error is intentionally not propagated: a
+        // transient failure to write the dashboard HTML must not
+        // roll back the deliver phase's portfolio; the worst case
+        // is a missing UI page, which the operator can regenerate
+        // by re-running the dashboard command.
+        if let Err(e) = dashboard_static::write_dashboard(ctx.run_dir().root()) {
+            tracing::warn!(
+                run_id = %ctx.run_id,
+                error = %e,
+                "failed to write dashboard.html; portfolio surface still written"
+            );
         }
 
         Ok(PhaseOutput::Deliver(md_path))
