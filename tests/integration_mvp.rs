@@ -1111,6 +1111,161 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
     Ok(())
 }
 
+/// D.17.7: the sketch phase emits `telemetry/sketches_summary.csv`
+/// alongside the existing JSON summary. The helper signature is
+/// per-model aggregation (`model,sketch_count,total_tokens`), so a
+/// single row is produced for the whole fan-out because every sketch
+/// is generated through the same `default_model` provider.
+///
+/// `explore` is the smallest sketch-producing pipeline that still
+/// exercises the full `intake → clarify → route → sketch` flow with
+/// the mock provider.
+#[test]
+fn sketch_phase_emits_csv_summary() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    use moagan::domain::Sketch;
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain(intake_json()));
+    mp.push(MockResponse::plain(clarify_json()));
+    // The route decision carries `sketches: 4` so the explore-mode
+    // pipeline variant below sees `count = 4` (the smallest
+    // non-zero sketch count in the mode table).
+    let route_sketch4 = r#"{
+  "mode": "explore",
+  "reason": "Force a small sketch fan-out to exercise the CSV writer",
+  "sketches": 4,
+  "proposals": 0,
+  "judges": 0
+}"#;
+    mp.push(MockResponse::plain(route_sketch4));
+    let theses = [
+        "Sketch 0 lists the rainbow colours in canonical ROYGBIV order with no commentary.",
+        "Sketch 1 prints the colours in a column with a one-word label beside each name.",
+        "Sketch 2 emits the order as a single sentence plus a memory hook for later review.",
+        "Sketch 3 tabulates the wavelength of each colour from a published reference table.",
+    ];
+    for (i, thesis) in theses.iter().enumerate() {
+        let sk = Sketch {
+            id: format!("sk_{i:03}"),
+            thesis: (*thesis).into(),
+            key_decisions: vec![format!("d{i}-1")],
+            architecture_outline: format!("outline {i}"),
+            assumptions: vec![],
+            strengths: vec![format!("s{i}")],
+            weaknesses: vec![format!("w{i}")],
+            hard_constraint_check: std::collections::BTreeMap::new(),
+            expected_validation: format!("ev {i}"),
+            angle: format!("angle-{i}"),
+        };
+        mp.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+    }
+    mp.set_cycle(false);
+
+    let provider = Arc::new(mp);
+    let run_id = RunId::new();
+    let ctx = build_run_context(home.clone(), provider, run_id);
+
+    let pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(SketchPhase { count: 4 });
+
+    pollster::block_on(pipeline.run(&ctx))?;
+    ctx.telemetry.flush()?;
+
+    let run_dir = home.run_dir(run_id);
+    let csv_path = run_dir.telemetry().join("sketches_summary.csv");
+    assert!(
+        csv_path.exists(),
+        "sketches_summary.csv must exist at {}",
+        csv_path.display()
+    );
+    let csv_text = std::fs::read_to_string(&csv_path)?;
+    let mut lines = csv_text.lines();
+    assert_eq!(
+        lines.next(),
+        Some("model,sketch_count,total_tokens"),
+        "CSV must start with the documented header"
+    );
+    // The helper emits one row per model. All sketches in a single
+    // phase use `ctx.default_model` ("mock-model" in this test), so
+    // we expect exactly one data row.
+    let row = lines
+        .next()
+        .expect("expected at least one data row after the header");
+    let mut fields = row.split(',');
+    assert_eq!(fields.next(), Some("mock-model"));
+    assert_eq!(
+        fields.next(),
+        Some("4"),
+        "row must report the four kept sketches"
+    );
+    // `total_tokens` is left at zero by the wire-up (see the comment
+    // in `SketchPhase::execute`). Pin the contract here so a future
+    // refactor that DOES populate it cannot silently break the
+    // shape of the file.
+    assert_eq!(fields.next(), Some("0"));
+    assert!(
+        lines.next().is_none(),
+        "no further rows expected; got {:?}",
+        lines.collect::<Vec<_>>()
+    );
+
+    // The empty-CSV branch (count == 0) must still emit the file
+    // with just the header. Production `build_pipeline_for_mode`
+    // omits `SketchPhase` entirely when `mode.runs_sketches()` is
+    // false (`fast`); here we explicitly insert `SketchPhase { count: 0 }`
+    // to drive the early-return branch directly.
+    let tmp2 = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp2.path());
+    }
+    let home2 = Arc::new(MoaganHome::resolve()?);
+    home2.ensure()?;
+    let mut mp2 = MockProvider::empty();
+    mp2.push(MockResponse::plain(intake_json()));
+    mp2.push(MockResponse::plain(clarify_json()));
+    mp2.push(MockResponse::plain(route_json())); // "sketches": 0
+    mp2.set_cycle(false);
+    let mp2 = Arc::new(mp2);
+    let run_id2 = RunId::new();
+    let ctx2 = build_run_context(home2.clone(), mp2, run_id2);
+
+    let empty_pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(SketchPhase { count: 0 });
+    pollster::block_on(empty_pipeline.run(&ctx2))?;
+    ctx2.telemetry.flush()?;
+    let fast_csv = home2
+        .run_dir(run_id2)
+        .telemetry()
+        .join("sketches_summary.csv");
+    assert!(
+        fast_csv.exists(),
+        "SketchPhase{{count: 0}} must still emit the CSV (header-only)"
+    );
+    let fast_text = std::fs::read_to_string(&fast_csv)?;
+    let mut fast_lines = fast_text.lines();
+    assert_eq!(fast_lines.next(), Some("model,sketch_count,total_tokens"));
+    assert!(
+        fast_lines.next().is_none(),
+        "count == 0 must produce a header-only CSV"
+    );
+
+    Ok(())
+}
+
 #[derive(Debug)]
 struct DelayedJudgeProvider {
     active: AtomicUsize,
