@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      skip_long_discover:
+        description: 'Skip the ~20 min card80 long-discover block (real LLM, ~5 min). Default: full 25 min run.'
+        type: boolean
+        required: false
+        default: false
 
 # Minimum token permissions: read repo contents. The MINIMAX_API_KEY is
 # consumed via `secrets.*` and never written back to the repo.
@@ -14,7 +20,10 @@ permissions:
 # Intentionally NOT part of the per-PR pipeline: it costs API calls and
 # ~25 minutes of runner time. Run only after merge to main.
 # The audit_e2e long-discover block (~20 min) can be skipped by setting
-# MOAGAN_SMOKE_LONG_DISCOVER=1 in the runner environment if needed.
+# MOAGAN_SMOKE_LONG_DISCOVER=1 in the runner environment. The
+# `workflow_dispatch` input `skip_long_discover` exposes that knob
+# without editing the workflow file (push-to-main behaviour is
+# unchanged — the full card80 block runs every time).
 # Reference: docs/validation-tiers.md (Tier 3, main-only).
 #
 # Uses the same .github/actions/rust-setup composite as ci.yml:
@@ -58,4 +67,9 @@ jobs:
           # The e2e_audit_proxy.sh script checks BIN at target/debug/moagan by
           # default. The workflow builds release, so override the path.
           BIN: ${{ github.workspace }}/target/release/moagan
+          # Expose the `skip_long_discover` input as the env var the
+          # e2e_audit_proxy.sh script reads (default: 0 = full card80
+          # block). Push events ignore the input; workflow_dispatch with
+          # `skip_long_discover: true` overrides to '1' for a ~5 min run.
+          MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: make e2e-network
