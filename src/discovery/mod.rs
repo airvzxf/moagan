@@ -19,6 +19,7 @@ pub mod facet_cache;
 pub mod integrator;
 pub mod matrix;
 pub mod matrix_seed;
+pub mod outlier;
 pub mod pause;
 pub mod persona_angle;
 pub mod resume;
@@ -26,8 +27,15 @@ pub mod saturation;
 pub mod saturation_event;
 pub mod sketch_retry;
 pub mod state;
+pub mod stop_policy;
 pub mod tag_decision;
 pub mod tagger;
 pub mod tagger_threshold;
 
 pub use coordinator::{DiscoveryCoordinator, DiscoveryOutcome};
+pub use outlier::{SketchId, detectar_outliers, detectar_outliers_with_threshold};
+pub use stop_policy::{
+    BlockReason, DEFAULT_COLA_RESERVA, DEFAULT_DISCOVERY_HARD_CAP, DEFAULT_MAX_SKETCHES,
+    DEFAULT_MIN_SKETCHES, DEFAULT_OUTLIER_DISTANCE, DEFAULT_SATURATION_THRESHOLD, StopDecision,
+    StopPolicy, StopReason,
+};
