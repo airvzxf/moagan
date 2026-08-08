@@ -8,11 +8,51 @@ use crate::error::{Error, Result};
 
 use super::phase::{Phase, PhaseOutput, RunContext};
 
+/// Which canonical pipeline shape the resumed run belongs to.
+///
+/// `moagan run` builds a [`PipelineKind::Linear`] pipeline
+/// (`fast | standard | deep | explore | batch`) with the 15 linear
+/// phases. `moagan discover` builds a [`PipelineKind::Discovery`]
+/// pipeline that prepends `intake + clarify` to the eight
+/// `discover_*` phases. The two shapes share `intake` and `clarify`
+/// but diverge everywhere else, so the canonical phase order
+/// (and therefore the resume semantics) depends on the kind.
+///
+/// v0.5 PR-24 (V4 §6.11, T01-06 §10.2) splits the canonical
+/// phase list by kind so `Pipeline::resume` can dispatch to the
+/// right index when a paused/failed discovery run is resumed
+/// with `moagan continue --kind discovery`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineKind {
+    /// Linear run pipeline (`fast | standard | deep | explore | batch`).
+    /// Phases: `intake → clarify → route → decompose? → sketch? →
+    /// propose → validate? → cluster_proposals? → synthesize? →
+    /// gate → critique → repair → judge → adversary? → rank →
+    /// deliver`.
+    Linear,
+    /// Discovery pipeline (`moagan discover`). Phases: `intake →
+    /// clarify → discover_matrix → discover_tag → discover_cluster
+    /// → discover_contradict → discover_facet → discover_extract
+    /// → discover_integrate → discover_summary`. The matrix fan-out
+    /// itself is owned by [`crate::discovery::coordinator::DiscoveryCoordinator`]
+    /// when the operator runs `moagan discover`; the phase list
+    /// here is the canonical reference order for resume and for
+    /// tests that exercise the discovery flow without the
+    /// coordinator.
+    Discovery,
+}
+
 /// Pipeline of phases. Built from a list of `Box<dyn Phase>` and
 /// executed in order.
 #[derive(Default)]
 pub struct Pipeline {
     phases: Vec<Box<dyn Phase>>,
+    /// `Some(last_phase)` when this pipeline was constructed via
+    /// [`Pipeline::resume`]; `None` for fresh pipelines. The flag
+    /// is read by [`Pipeline::run`] so every phase event emitted
+    /// on a resumed pipeline carries `resume: true` in
+    /// `telemetry/phases.jsonl.gz` (and the SQLite mirror).
+    resume_from: Option<String>,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -33,6 +73,23 @@ impl Pipeline {
     pub fn push<P: Phase + 'static>(mut self, phase: P) -> Self {
         self.phases.push(Box::new(phase));
         self
+    }
+
+    /// Mark this pipeline as the continuation of a paused/failed
+    /// run. The flag flows into [`Pipeline::run`] so every phase
+    /// event emitted by the resumed pipeline carries
+    /// `resume: true`. Set automatically by [`Pipeline::resume`];
+    /// callers should not need to invoke this directly.
+    fn with_resume_from(mut self, last_phase: &str) -> Self {
+        self.resume_from = Some(last_phase.to_owned());
+        self
+    }
+
+    /// `true` when this pipeline was produced by
+    /// [`Pipeline::resume`] (so phase events should carry the
+    /// `resume: true` flag).
+    pub fn is_resumed(&self) -> bool {
+        self.resume_from.is_some()
     }
 
     /// Number of registered phases.
@@ -85,10 +142,12 @@ impl Pipeline {
     }
 
     async fn run_phases(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
+        let resume = self.is_resumed();
         let mut outputs = Vec::with_capacity(self.phases.len());
         for (i, phase) in self.phases.iter().enumerate() {
             let seq = i as i64;
-            ctx.telemetry.phase(phase.name(), seq, "start", None)?;
+            ctx.telemetry
+                .phase(phase.name(), seq, "start", None, resume)?;
             let timeout = ctx.phase_timeout();
             let result = if timeout.is_zero() {
                 phase.execute(ctx).await
@@ -109,10 +168,17 @@ impl Pipeline {
                 }
             };
             match &result {
-                Ok(_) => ctx.telemetry.phase(phase.name(), seq, "end", None)?,
+                Ok(_) => ctx
+                    .telemetry
+                    .phase(phase.name(), seq, "end", None, resume)?,
                 Err(e) => {
-                    ctx.telemetry
-                        .phase(phase.name(), seq, "error", Some(&e.to_string()))?;
+                    ctx.telemetry.phase(
+                        phase.name(),
+                        seq,
+                        "error",
+                        Some(&e.to_string()),
+                        resume,
+                    )?;
                 }
             }
             outputs.push(result?);
@@ -128,42 +194,98 @@ impl Pipeline {
     /// point.
     ///
     /// Discovery and `continue`/`rerun` do not use this list; they
-    /// use their own builders.
+    /// use [`Pipeline::canonical_phase_order_for(PipelineKind::Discovery)`]
+    /// instead. Prefer the explicit `*_for(kind)` form in new code;
+    /// this wrapper stays so existing callers keep compiling.
     pub fn canonical_phase_order() -> &'static [&'static str] {
-        // Names mirror the pipeline builder; do NOT introduce phases
-        // here without also updating `build_pipeline_for_mode`.
-        // `decompose` is `deep`-only and lands after `route`; the
-        // rest of the pipeline picks it up from `Mode::Deep`.
-        // `adversary` (D.22.1, D.12.5) lands between `judge` and
-        // `rank` so the pattern-based report runs on the freshly
-        // judged panel; the pipeline builder inserts it only when
-        // the run is `Mode::Deep` or `--adversary` is set, so modes
-        // that don't want the report keep the empty slot.
-        &[
-            "intake",
-            "clarify",
-            "route",
-            "decompose",
-            "sketch",
-            "propose",
-            "validate",
-            "cluster_proposals",
-            "synthesize",
-            "gate",
-            "critique",
-            "repair",
-            "judge",
-            "adversary",
-            "rank",
-            "deliver",
-        ]
+        Self::canonical_phase_order_for(PipelineKind::Linear)
+    }
+
+    /// Canonical ordering of phases for a given pipeline kind. The
+    /// returned list is the exact order produced by the
+    /// corresponding builder (`build_pipeline_for_mode` for
+    /// [`PipelineKind::Linear`], the flat discovery builder in
+    /// `src/cli/discover.rs` for [`PipelineKind::Discovery`]). Tests
+    /// pin the order so a future re-ordering surfaces as a failing
+    /// test rather than a silently wrong resume point.
+    ///
+    /// v0.5 PR-24: this is the entry point that lets
+    /// [`Pipeline::resume`] filter a discovery pipeline correctly.
+    /// Without this split, `Pipeline::resume(canonical, "clarify")`
+    /// on a discovery canonical pipeline errors out with
+    /// `unknown phase "discover_matrix"`.
+    pub fn canonical_phase_order_for(kind: PipelineKind) -> &'static [&'static str] {
+        match kind {
+            // Linear names mirror the pipeline builder; do NOT
+            // introduce phases here without also updating
+            // `build_pipeline_for_mode`. `decompose` is `deep`-only
+            // and lands after `route`; the rest of the pipeline
+            // picks it up from `Mode::Deep`. `adversary` (D.22.1,
+            // D.12.5) lands between `judge` and `rank` so the
+            // pattern-based report runs on the freshly judged panel;
+            // the pipeline builder inserts it only when the run is
+            // `Mode::Deep` or `--adversary` is set, so modes that
+            // don't want the report keep the empty slot.
+            PipelineKind::Linear => &[
+                "intake",
+                "clarify",
+                "route",
+                "decompose",
+                "sketch",
+                "propose",
+                "validate",
+                "cluster_proposals",
+                "synthesize",
+                "gate",
+                "critique",
+                "repair",
+                "judge",
+                "adversary",
+                "rank",
+                "deliver",
+            ],
+            // Discovery mirrors the flat builder in
+            // `src/cli/discover.rs::build_discovery_pipeline`: the
+            // pre-matrix phases (`intake + clarify`) seed the brief,
+            // then the eight `discover_*` phases fan out sketches,
+            // tag/cluster/contradict, derive facets, extract per-
+            // facet markdown, integrate per category, and finally
+            // produce the executive summary. When the operator runs
+            // `moagan discover` end-to-end the matrix fan-out is
+            // driven by the coordinator, but the canonical phase
+            // order here is the single source of truth for resume
+            // and for tests that exercise the discovery flow
+            // without the coordinator.
+            PipelineKind::Discovery => &[
+                "intake",
+                "clarify",
+                "discover_matrix",
+                "discover_tag",
+                "discover_cluster",
+                "discover_contradict",
+                "discover_facet",
+                "discover_extract",
+                "discover_integrate",
+                "discover_summary",
+            ],
+        }
     }
 
     /// Build a `BTreeMap<phase_name, canonical_index>` so callers can
     /// compare phase names without an ad-hoc Vec lookup. Indexes are
-    /// stable across runs of the same `mode`.
+    /// stable across runs of the same `mode`. Backwards-compat
+    /// wrapper around [`Pipeline::phase_index_for`]; new code
+    /// should prefer the explicit `*_for(kind)` form.
     pub fn phase_index() -> BTreeMap<&'static str, usize> {
-        Self::canonical_phase_order()
+        Self::phase_index_for(PipelineKind::Linear)
+    }
+
+    /// Kind-aware variant of [`Pipeline::phase_index`]. The returned
+    /// map contains every phase in
+    /// [`Pipeline::canonical_phase_order_for(kind)`] keyed by its
+    /// canonical index.
+    pub fn phase_index_for(kind: PipelineKind) -> BTreeMap<&'static str, usize> {
+        Self::canonical_phase_order_for(kind)
             .iter()
             .enumerate()
             .map(|(i, n)| (*n, i))
@@ -178,18 +300,42 @@ impl Pipeline {
     ///
     /// `last_phase` is the phase name returned by
     /// `Db::last_completed_phase(run_id)`. Errors out when
-    /// `last_phase` is unknown (typo / out-of-band name).
+    /// `last_phase` is unknown (typo / out-of-band name) for the
+    /// linear kind.
     ///
     /// The "skip phases whose canonical index <= last_phase" rule
     /// mirrors the T01-06 §10.2 pseudocode
     /// (`Pipeline::resume(manifest, db, last_phase)`): the run is
     /// treated as "this phase is done; pick up from the next one".
+    ///
+    /// Backwards-compat wrapper around [`Pipeline::resume_with_kind`]
+    /// that hard-codes [`PipelineKind::Linear`]; new code should
+    /// pass the kind explicitly (especially for discovery runs).
     pub fn resume(canonical: Pipeline, last_phase: &str) -> Result<Self> {
-        let idx_map = Self::phase_index();
+        Self::resume_with_kind(canonical, last_phase, PipelineKind::Linear)
+    }
+
+    /// Kind-aware [`Pipeline::resume`]. The `kind` selects which
+    /// canonical phase list the cutoff lookup uses:
+    /// [`PipelineKind::Discovery`] resolves `last_phase` against
+    /// the eight `discover_*` phases plus the shared `intake +
+    /// clarify` pre-matrix pair, while [`PipelineKind::Linear`]
+    /// resolves against the 15-phase linear pipeline.
+    ///
+    /// The returned pipeline carries the `resume_from` marker; its
+    /// [`Pipeline::run`] emits phase events with `resume: true` in
+    /// `telemetry/phases.jsonl.gz` so post-execution review can
+    /// distinguish resumed runs from fresh ones.
+    pub fn resume_with_kind(
+        canonical: Pipeline,
+        last_phase: &str,
+        kind: PipelineKind,
+    ) -> Result<Self> {
+        let idx_map = Self::phase_index_for(kind);
         let cutoff = *idx_map.get(last_phase).ok_or_else(|| {
-            Error::InvalidState(format!("unknown phase {last_phase:?} in resume"))
+            Error::InvalidState(format!("unknown phase {last_phase:?} in {kind:?} resume"))
         })?;
-        let canonical_idx_map = canonical_index_for(&canonical)?;
+        let canonical_idx_map = canonical_index_for(&canonical, kind)?;
         let kept: Vec<Box<dyn Phase>> = canonical
             .phases
             .into_iter()
@@ -200,7 +346,11 @@ impl Pipeline {
                     .unwrap_or(false)
             })
             .collect();
-        Ok(Self { phases: kept })
+        Ok(Self {
+            phases: kept,
+            resume_from: Some(last_phase.to_owned()),
+        })
+        .map(|p| p.with_resume_from(last_phase))
     }
 
     /// `Pipeline::resume` with a manifest convenience wrapper. The
@@ -220,12 +370,13 @@ impl Pipeline {
 }
 
 /// Walk the canonical pipeline's phase list and assign each
-/// phase a canonical index from `Pipeline::canonical_phase_order()`.
-/// Phases not in the canonical list (e.g. the `cluster_proposals`
-/// alias used in deep mode) get `usize::MAX` so the resume filter
-/// keeps them past the cutoff.
-fn canonical_index_for(pipeline: &Pipeline) -> Result<BTreeMap<String, usize>> {
-    let canonical = Pipeline::canonical_phase_order();
+/// phase a canonical index from
+/// [`Pipeline::canonical_phase_order_for(kind)`]. Phases not in
+/// the canonical list (e.g. the `cluster_proposals` alias used in
+/// deep mode) get `usize::MAX` so the resume filter keeps them past
+/// the cutoff.
+fn canonical_index_for(pipeline: &Pipeline, kind: PipelineKind) -> Result<BTreeMap<String, usize>> {
+    let canonical = Pipeline::canonical_phase_order_for(kind);
     let mut map: BTreeMap<String, usize> = BTreeMap::new();
     for phase in pipeline.phases.iter() {
         let name = phase.name();

@@ -116,6 +116,30 @@ impl std::fmt::Display for Mode {
     }
 }
 
+/// CLI-facing variant of [`crate::phases::PipelineKind`] for
+/// `moagan continue --kind <linear|discovery>`. Lives here because
+/// clap derive macros need it next to the subcommand definition;
+/// the dispatcher maps it back to the canonical
+/// [`crate::phases::PipelineKind`] before calling
+/// [`crate::cli::continue_cmd::run_continue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum ContinueKindArg {
+    /// Linear pipeline (`fast | standard | deep | explore | batch`).
+    Linear,
+    /// Discovery pipeline (`moagan discover`). v0.5 PR-24.
+    Discovery,
+}
+
+impl From<ContinueKindArg> for crate::phases::PipelineKind {
+    fn from(value: ContinueKindArg) -> Self {
+        match value {
+            ContinueKindArg::Linear => crate::phases::PipelineKind::Linear,
+            ContinueKindArg::Discovery => crate::phases::PipelineKind::Discovery,
+        }
+    }
+}
+
 /// Top-level CLI.
 #[derive(Debug, Parser)]
 #[command(
@@ -288,6 +312,20 @@ pub enum Cmd {
         /// the file lands in PR C.5 (K.2 wires `continue_cmd.rs`).
         #[arg(long, default_value_t = false)]
         from_pause: bool,
+        /// v0.5 PR-24 (V4 §6.11, T01-06 §10.2): which pipeline kind
+        /// the run belongs to. Defaults to `linear` for the
+        /// historic `fast | standard | deep | explore | batch`
+        /// runs. `discovery` resumes a `moagan discover` run by
+        /// stitching the coordinator (matrix fan-out) with the
+        /// post-matrix pipeline (`discover_tag → ... →
+        /// discover_summary`) using the filtered canonical
+        /// discovery pipeline as the reference. Without this
+        /// flag, `moagan continue <discover_run_id>` fails with
+        /// `unknown phase "discover_matrix"` because the linear
+        /// canonical list does not include the `discover_*`
+        /// phases.
+        #[arg(long, value_enum, default_value_t = ContinueKindArg::Linear)]
+        kind: ContinueKindArg,
         /// Phase J: switch the provider mid-run (e.g. `minimax` →
         /// `mock`). The change is recorded in `provider_changes`
         /// and on `manifest.json#provider`; the in-flight
@@ -932,6 +970,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         Cmd::Continue {
             run_id,
             from_pause,
+            kind,
             switch_provider,
             switch_api_key,
             skip_checkpoint,
@@ -943,6 +982,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // in PR C.5 (K.2 wires `continue_cmd.rs`). Until then,
             // `--from-pause` is a no-op-ish probe that confirms the
             // file is present and well-formed.
+            //
+            // v0.5 PR-24: `--kind discovery` forces a discovery
+            // resume even though the run was registered as a
+            // discovery run (manifest.mode = "discover"). Without
+            // this, the linear `parse_mode` rejects `"discover"`
+            // and the resume fails with `unknown mode "discover"`.
+            // `--from-pause` does not accept `--kind`; the pause
+            // path always uses the linear pipeline because the
+            // pause file records phase names from the linear list.
             if from_pause {
                 let id = run_id.ok_or_else(|| {
                     Error::InvalidArgs(
@@ -965,6 +1013,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     switch_api_key,
                     skip_checkpoint,
                     non_interactive,
+                    kind: kind.into(),
                 },
             )
             .await?;
