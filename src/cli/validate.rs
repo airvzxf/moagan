@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::domain::{Brief, Proposal};
 use crate::error::{Error, IoError, Result};
+use crate::fs_layout::safe_path;
 use crate::phases::gate::structural_check;
 
 /// CLI arguments for `moagan validate <brief_path>`.
@@ -92,13 +93,21 @@ pub fn run(args: ValidateArgs) -> Result<i32> {
 /// - missing file   → `Error::InvalidArgs`  (exit 2)
 /// - malformed JSON → `Error::InvalidArgs`  (exit 2)
 /// - other I/O      → `Error::Io`           (exit 8)
+/// - path traversal → `Error::PathTraversal` (D.29.1, exit 2)
 fn parse_brief(path: &Path) -> Result<Brief> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
+    // D.29.1: refuse `..` traversals and symlinks that escape the
+    // brief's parent directory. The parent dir is the natural root
+    // because the operator picked a specific file to validate;
+    // confining access to siblings prevents the obvious
+    // `../../etc/passwd` shortcut and any symlink that points
+    // outside.
+    let safe = safe_path(path.parent().unwrap_or(Path::new("/")), path)?;
+    let text = std::fs::read_to_string(&safe).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            Error::InvalidArgs(format!("brief not found: {}", path.display()))
+            Error::InvalidArgs(format!("brief not found: {}", safe.display()))
         } else {
             Error::Io(IoError::Read {
-                path: path.to_path_buf(),
+                path: safe.clone(),
                 source: e,
             })
         }
@@ -106,7 +115,7 @@ fn parse_brief(path: &Path) -> Result<Brief> {
     serde_json::from_str::<Brief>(&text).map_err(|e| {
         Error::InvalidArgs(format!(
             "brief at {} is not valid JSON: {e}",
-            path.display()
+            safe.display()
         ))
     })
 }

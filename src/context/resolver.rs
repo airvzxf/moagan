@@ -18,6 +18,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::fs_layout::safe_path;
+
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
@@ -93,12 +95,18 @@ pub fn resolve_classify(input: &str, home: &MoaganHome) -> Result<ContextRef> {
 /// classifies as file or directory; `None` otherwise. Symlinks are
 /// followed by `metadata()` so a symlink to a file is a
 /// `FilePath` and a symlink to a directory is a `DirPath`.
+///
+/// D.29.1: rejects `..` traversal or symlink escapes via
+/// [`safe_path`]. The parent directory is the natural root: the
+/// candidate must live next to whatever the operator named.
 fn resolve_path(path: &Path) -> Option<ContextRef> {
-    let meta = std::fs::metadata(path).ok()?;
+    let root = path.parent().unwrap_or(Path::new("/"));
+    let safe = safe_path(root, path).ok()?;
+    let meta = std::fs::metadata(&safe).ok()?;
     if meta.is_file() {
-        Some(ContextRef::FilePath(path.to_path_buf()))
+        Some(ContextRef::FilePath(safe))
     } else if meta.is_dir() {
-        Some(ContextRef::DirPath(path.to_path_buf()))
+        Some(ContextRef::DirPath(safe))
     } else {
         None
     }

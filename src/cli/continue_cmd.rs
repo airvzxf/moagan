@@ -25,7 +25,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::domain::{Brief, Intake, Manifest};
 use crate::error::{Error, Result};
-use crate::fs_layout::MoaganHome;
+use crate::fs_layout::{MoaganHome, safe_path};
 use crate::ids::RunId;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
@@ -333,7 +333,12 @@ pub fn run_import(
     source_path: &Path,
     target_runs_dir: Option<&Path>,
 ) -> Result<()> {
-    let source_manifest_path = source_path.join("manifest.json");
+    // D.29.1: reject `..` traversal or symlink escapes in the
+    // operator-supplied source directory before any I/O. The
+    // canonical source dir is the natural root for the safety
+    // check: anything outside it is suspicious.
+    let safe_source = safe_path(source_path.parent().unwrap_or(source_path), source_path)?;
+    let source_manifest_path = safe_source.join("manifest.json");
     if !source_manifest_path.is_file() {
         return Err(Error::InvalidArgs(format!(
             "source manifest not found at {}",
@@ -361,10 +366,10 @@ pub fn run_import(
         )));
     }
     fs::create_dir_all(&target_runs)?;
-    move_dir(source_path, &dest).map_err(|e| {
+    move_dir(&safe_source, &dest).map_err(|e| {
         Error::InvalidState(format!(
             "failed to move {} -> {}: {e}",
-            source_path.display(),
+            safe_source.display(),
             dest.display()
         ))
     })?;
