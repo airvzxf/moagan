@@ -61,7 +61,7 @@ pub use discover_tag::DiscoverTagPhase;
 pub use gate::GatePhase;
 pub use intake::IntakePhase;
 pub use judge::JudgePhase;
-pub use phase::{Phase, PhaseOutput, RunContext};
+pub use phase::{Phase, PhaseOutput, RunContext, temperature_for_role};
 pub use pipe::Pipeline;
 pub use propose::ProposePhase;
 pub use rank::RankPhase;

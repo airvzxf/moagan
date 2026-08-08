@@ -1164,7 +1164,14 @@ fn max_tokens_for_role(role: Role) -> u32 {
 /// A future release will let providers override these defaults through
 /// the per-role `prompts/registry.rs` configuration block, but the
 /// values here are the contract.
-fn temperature_for_role(
+///
+/// `pub` (re-exported via [`crate::phases`]) so persistence helpers
+/// outside `phase.rs` — currently
+/// [`crate::phases::discover_matrix::DiscoverMatrixPhase::write_draft`]
+/// writing the V4 §6.10 `drafts/<sketch_id>.md` sidecar — can
+/// stamp the same temperature the LLM call was issued with without
+/// having to inline the lookup table.
+pub fn temperature_for_role(
     role: Role,
     profile_overrides: Option<&std::collections::HashMap<String, f32>>,
 ) -> f32 {
