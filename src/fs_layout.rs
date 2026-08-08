@@ -13,6 +13,96 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, IoError, Result};
 use crate::ids::RunId;
 
+/// Canonicalize a caller-supplied path and reject escapes (D.29.1).
+///
+/// `candidate` is treated as either an absolute path or a path
+/// relative to `root`. The helper canonicalises the joined path and
+/// returns `Error::PathTraversal` if the result falls outside
+/// `root`. Two attack surfaces are covered:
+///
+/// - `..` traversal inside a relative candidate
+///   (`../../etc/passwd` resolves to `/etc/passwd` on Unix).
+/// - Symlinks whose target sits outside `root` (canonicalisation
+///   follows symlinks and exposes the true destination).
+///
+/// On non-Unix platforms the helper still rejects `..` via the
+/// lexical check, but symlink-following is delegated to the
+/// underlying `canonicalize` call.
+///
+/// # Errors
+///
+/// - [`Error::PathTraversal`] when the candidate escapes `root`
+///   (either via `..` or via a symlink).
+/// - [`Error::Io`] when `canonicalize` fails for any reason other
+///   than the path not existing (a missing target file is OK —
+///   the helper is meant to validate the *input* path, not the
+///   target's existence).
+pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    // Cheap lexical rejection of `..` even before canonicalisation,
+    // so the helper surfaces a clean error on inputs that the OS
+    // would also reject for an absent parent segment.
+    for comp in joined.components() {
+        if matches!(comp, std::path::Component::ParentDir) {
+            return Err(Error::PathTraversal(format!(
+                "{} contains `..`",
+                candidate.display()
+            )));
+        }
+    }
+    let canonical_root = root.canonicalize().map_err(|e| {
+        Error::Io(IoError::Raw(std::io::Error::new(
+            e.kind(),
+            format!(
+                "safe_path: cannot canonicalize root {}: {e}",
+                root.display()
+            ),
+        )))
+    })?;
+    // `canonicalize` may fail when the candidate does not yet exist
+    // (e.g. a brand-new directory a CLI flag just told us to
+    // create). Fall back to canonicalising the parent and re-joining
+    // the trailing component so we still get the symlink check.
+    let canonical_candidate = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            let parent = joined.parent().unwrap_or(&joined);
+            let tail = joined
+                .file_name()
+                .ok_or_else(|| {
+                    Error::PathTraversal(format!(
+                        "safe_path: candidate {} has no filename component",
+                        candidate.display()
+                    ))
+                })?
+                .to_owned();
+            let canon_parent = parent.canonicalize().map_err(|e| {
+                Error::Io(IoError::Raw(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "safe_path: cannot canonicalize parent of {}: {e}",
+                        candidate.display()
+                    ),
+                )))
+            })?;
+            canon_parent.join(tail)
+        }
+    };
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(Error::PathTraversal(format!(
+            "{} resolves to {} which is outside root {}",
+            candidate.display(),
+            canonical_candidate.display(),
+            canonical_root.display()
+        )));
+    }
+    Ok(canonical_candidate)
+}
+
 /// Resolved root directory for all moagan state.
 #[derive(Debug, Clone)]
 pub struct MoaganHome {
@@ -728,5 +818,148 @@ mod tests {
         let j = serde_json::to_string(&paths).unwrap();
         let back: RunPaths = serde_json::from_str(&j).unwrap();
         assert_eq!(paths, back);
+    }
+
+    // -- D.29.1 — `safe_path` helper ----------------------------------
+
+    /// Absolute path that lives under `root` resolves to its
+    /// canonical form. The helper must not block legitimate
+    /// in-tree usage.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_accepts_in_tree_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("inside/file.json");
+        std::fs::create_dir_all(tmp.path().join("inside")).unwrap();
+        std::fs::write(&nested, b"{}").unwrap();
+        let resolved = safe_path(tmp.path(), &nested).unwrap();
+        assert_eq!(resolved, nested.canonicalize().unwrap());
+    }
+
+    /// Relative path that stays under `root` resolves correctly.
+    /// Mirrors the natural CLI usage `moagan run --brief
+    /// briefs/foo.json` where the candidate is supplied relative
+    /// to the working directory or home.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_accepts_relative_under_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
+        std::fs::write(tmp.path().join("sub/inside.md"), b"# ok").unwrap();
+        let resolved = safe_path(tmp.path(), Path::new("sub/inside.md")).unwrap();
+        assert!(resolved.starts_with(tmp.path().canonicalize().unwrap()));
+    }
+
+    /// `../../etc/passwd` as a relative candidate must be
+    /// rejected by the lexical `..` check even before
+    /// canonicalisation runs. The error is `Error::PathTraversal`.
+    #[test]
+    fn safe_path_rejects_dotdot_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = safe_path(tmp.path(), Path::new("../../etc/passwd")).unwrap_err();
+        assert!(
+            matches!(err, Error::PathTraversal(_)),
+            "expected PathTraversal, got {err:?}"
+        );
+    }
+
+    /// Absolute `/etc/passwd` outside the root is rejected by
+    /// the canonicalisation + `starts_with` check.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_rejects_absolute_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = safe_path(tmp.path(), Path::new("/etc/passwd")).unwrap_err();
+        assert!(
+            matches!(err, Error::PathTraversal(_)),
+            "expected PathTraversal, got {err:?}"
+        );
+    }
+
+    /// `~/sensitive` style paths expand to the user's home and
+    /// sit outside the configured root. The lexical check does
+    /// not fire (no `..`) so the canonicalisation check is the
+    /// line of defence.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_rejects_tilde_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Build a candidate that resolves outside `tmp` but does
+        // not contain `..` segments. `..` would be caught by the
+        // lexical check; this one exercises the
+        // canonicalisation+`starts_with` branch.
+        let sibling = tmp.path().parent().unwrap().join(format!(
+            "moagan-tilde-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&sibling).unwrap();
+        let victim = sibling.join("secret.txt");
+        std::fs::write(&victim, b"top secret").unwrap();
+
+        let err = safe_path(tmp.path(), &victim).unwrap_err();
+        assert!(
+            matches!(err, Error::PathTraversal(_)),
+            "expected PathTraversal, got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// A symlink whose target sits outside `root` is rejected.
+    /// `canonicalize` follows the link and exposes the
+    /// out-of-tree destination, so the `starts_with` check fires.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim_dir = tmp.path().parent().unwrap().join(format!(
+            "moagan-symlink-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let victim = victim_dir.join("secret.txt");
+        std::fs::write(&victim, b"x").unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("inside")).unwrap();
+        std::os::unix::fs::symlink(&victim, tmp.path().join("inside/poison")).unwrap();
+
+        let err = safe_path(tmp.path(), Path::new("inside/poison")).unwrap_err();
+        assert!(
+            matches!(err, Error::PathTraversal(_)),
+            "expected PathTraversal, got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&victim_dir).ok();
+    }
+
+    /// A symlink whose target stays inside `root` is accepted.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_accepts_symlink_inside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("real")).unwrap();
+        std::fs::write(tmp.path().join("real/data.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(
+            tmp.path().join("real/data.json"),
+            tmp.path().join("data.json"),
+        )
+        .unwrap();
+
+        let resolved = safe_path(tmp.path(), Path::new("data.json")).unwrap();
+        assert!(resolved.starts_with(tmp.path().canonicalize().unwrap()));
+    }
+
+    /// `Error::PathTraversal` maps to `ErrorCode::InvalidArgs`
+    /// and `ExitCode::InvalidArgs` (exit 2) so CI scripts can
+    /// branch on the conventional "bad input" exit code.
+    #[test]
+    fn path_traversal_error_maps_to_invalid_args() {
+        use crate::ExitCode;
+        use crate::error_code::ErrorCode;
+        let err = Error::PathTraversal("../../etc/passwd".into());
+        assert_eq!(err.code(), ErrorCode::InvalidArgs);
+        assert_eq!(err.exit_code() as i32, ExitCode::InvalidArgs as i32);
     }
 }

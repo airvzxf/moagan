@@ -188,6 +188,16 @@ pub enum Error {
     /// input) and refusing to continue is the safe default.
     #[error("hostile prompt: {0}")]
     HostilePrompt(String),
+
+    /// D.29.1 (`safe_path` helper): a caller-supplied path either
+    /// contained `..` traversal or resolved through a symlink to
+    /// a location outside the declared root. The inner string is
+    /// the offending candidate as supplied so operators see the
+    /// exact input that triggered the rejection. Maps to
+    /// [`ExitCode::InvalidArgs`] (exit 2) because the violation is
+    /// a malformed user input, not a degraded run state.
+    #[error("path traversal detected: {0}")]
+    PathTraversal(String),
 }
 
 impl Error {
@@ -214,6 +224,7 @@ impl Error {
             Self::NeedsInput(_) => ErrorCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ErrorCode::InvalidState,
             Self::HostilePrompt(_) => ErrorCode::HostilePrompt,
+            Self::PathTraversal(_) => ErrorCode::InvalidArgs,
         }
     }
 
@@ -232,6 +243,7 @@ impl Error {
             Self::NeedsInput(_) => ExitCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
             Self::HostilePrompt(_) => ExitCode::ContextError,
+            Self::PathTraversal(_) => ExitCode::InvalidArgs,
         }
     }
 
