@@ -1,0 +1,64 @@
+name: Feature request
+description: Propose a new capability for moagan. For bugs use the bug template.
+title: "[feat] "
+labels: ["enhancement", "area:unknown"]
+assignees: ["airvzxf"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests should be small, scoped, and tied to a
+        problem, not a solution. If your change is large enough to
+        move the architectural authority, open a doc PR instead and
+        link to the proposal section.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: "What doesn't work today? What does the user have to do instead?"
+      placeholder: |
+        Right now the user has to hand-edit `config.toml` to enable
+        the second-tier model. We want a CLI flag for it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: "What user-facing change do you want?"
+      placeholder: |
+        Add `--provider-override <name>` to `moagan run`. The flag
+        should take precedence over both the config file and the
+        `MOAGAN_PROVIDER` env var.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: "What other shapes did you consider, and why is the proposed one better?"
+    validations:
+      required: false
+
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation impact
+      description: "Which doc needs to change? (README, docs/proposal-*.md, AGENTS.md, …)"
+      placeholder: "Probably docs/proposal-02-rust.md §5.3."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues and PRs and did not find a duplicate.
+          required: true
+        - label: I am willing to open a PR implementing this if the design is accepted.
+          required: false

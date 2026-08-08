@@ -1,0 +1,109 @@
+name: Bug report
+description: Confirm a reproducible bug in moagan. For security issues, use the security template instead.
+title: "[bug] "
+labels: ["bug", "area:unknown"]
+assignees: ["airvzxf"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please fill in the sections below
+        verbatim — the GitHub UI should auto-fill most of them.
+
+  - type: input
+    id: version
+    attributes:
+      label: moagan version
+      description: "`moagan --version` output, or the commit SHA if you ran from source."
+      placeholder: "v0.5.0 (commit 11729099)"
+    validations:
+      required: true
+
+  - type: input
+    id: contact
+    attributes:
+      label: How to reproduce
+      description: |
+        Commands run, prompt text, config file. The more verbatim the
+        better. Wrap inline code in backticks and paste blocks in
+        triple-backticks.
+      placeholder: |
+        ```
+        export MOAGAN_PROVIDER=mock
+        moagan run --mode fast --provider mock --prompt "..."
+        ```
+    validations:
+      required: true
+
+  - type: input
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: "Expected: portfolio.md contains 3 candidates."
+      required: true
+
+  - type: input
+    id: actual
+    attributes:
+      label: Actual behaviour
+      placeholder: "Actual: portfolio.md is empty."
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Pipeline mode
+      description: "Which `--mode` were you running?"
+      options:
+        - fast
+        - standard
+        - deep
+        - explore
+        - batch
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - mock
+        - minimax
+        - other (please describe in the body)
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: "Paste the output of `uname -a`, `rustc --version`, and the `~/.config/moagan/config.toml` (with secrets redacted)."
+      placeholder: |
+        ```
+        Linux 7.1.3-arch2-1
+        rustc 1.97.1
+        # MOAGAN_PROVIDER is set; no other env vars.
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / traceback
+      description: "Paste the last ~50 lines of stderr. Redact any API keys — moagan's `RedactWriter` should already do this, but check."
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have reproduced the bug on `main` (latest commit).
+          required: true
+        - label: I have searched existing issues and did not find a duplicate.
+          required: true
+        - label: I have not included any API keys, `.env` content, or other secrets.
+          required: true

@@ -1,0 +1,41 @@
+# CODEOWNERS — moagan
+#
+# GitHub consults this file when PRs touch the listed paths. The matching
+# owner gets auto-assigned and the ruleset can demand their review via
+# `pull_request.require_code_owner_review: true` (see docs/branch-protection.md).
+#
+# Sole maintainer for now (@airvzxf) — the per-area rows exist so we can
+# fan out to future co-maintainers without rewriting the file.
+#
+# Order matters: the last matching rule wins. Keep the most specific
+# paths last.
+
+# Default: every file belongs to the project owner.
+/.github/                     @airvzxf
+/.github/CODEOWNERS           @airvzxf
+
+# Architecture / spec — only the owner can change the normative sources.
+# Anything that mutates the architecturally authoritative docs/ requires
+# an explicit human review.
+/docs/                        @airvzxf
+/docs/ARCHITECTURE.md         @airvzxf
+/docs/proposal-*.md           @airvzxf
+/docs/branch-protection.md    @airvzxf
+/docs/validation-tiers.md     @airvzxf
+
+# Build / dependency manifests — touching these is a forced upgrade.
+/Cargo.toml                   @airvzxf
+/Cargo.lock                   @airvzxf
+/lefthook.yml                 @airvzxf
+/rustfmt.toml                 @airvzxf
+/.clippy.toml                 @airvzxf
+/.github/dependabot.yml       @airvzxf
+
+# Source code lives under src/ — owner reviews every PR that touches it.
+/src/                         @airvzxf
+/tests/                       @airvzxf
+/scripts/                     @airvzxf
+/Makefile                     @airvzxf
+
+# Everything else still routes to the owner.
+*                             @airvzxf
