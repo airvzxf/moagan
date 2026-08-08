@@ -51,27 +51,29 @@ Plus one fast orthogonal check on the commit message itself:
    │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
    │    │ fmt-check   │  │ guard-deps   │  │ clippy     │  │ build  │ │
    │    │ (T0) ~1s    │  │ (T0) ~1s     │  │ (T1) ~60s  │  │(T1)~60s│ │
-   │    │             │  │              │  │            │  │   ▼    │ │
-   │    │             │  │              │  │            │  │artifact│ │
    │    └─────────────┘  └──────────────┘  └────────────┘  └────────┘ │
    │                                                                   │
-   │  round 2 (depend on build):                                       │
+   │  round 2 (depend on build, no artifact sharing):                 │
    │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
    │    │ test-lib    │  │ test-tests   │  │ test-doc   │  │ smoke  │ │
    │    │ (T2) ~30s   │  │ (T2) ~3min   │  │ (T2) ~30s  │  │(T3)~2s │ │
    │    └─────────────┘  └──────────────┘  └────────────┘  └────────┘ │
    │    ┌─────────────┐                                               │
-   │    │ e2e         │  ← all 5 jobs in round 2 download the         │
-   │    │ (T3) ~1min  │    moagan-debug artifact from the build job.   │
-   │    └─────────────┘                                               │
+   │    │ e2e         │  ← all 5 jobs run `cargo build` themselves;   │
+   │    │ (T3) ~1min  │    Swatinem/rust-cache keeps the link step    │
+   │    └─────────────┘    at ~5–15 s.                              │
    │                                                                   │
    │  Total wall-clock: ~4 min cold / ~2 min warm                      │
-   │  (vs. ~5-8 min before the parallel refactor)                      │
+   │  (vs. ~5-8 min before the parallel refactor)                     │
+   │                                                                   │
+   │  Informational scans (NOT merge gates, run on every PR):         │
+   │    • codeql         — Rust security queries (SARIF upload)        │
+   │    • cargo-audit   — RustSec advisories JSON artifact             │
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼ PR merge to main
-                                  │
+                                   │
+                                   ▼ PR merge to main
+                                   │
    ┌─────────────────────────────────────────────────────────────────────┐
    │  GitHub Actions — e2e-network.yml (post-merge)                    │
    │  ─────────────────────────────────────                             │
@@ -82,8 +84,24 @@ Plus one fast orthogonal check on the commit message itself:
    │    - not a PR gate (would block PRs 25 min)                       │
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
+                                   │
+                                   ▼ git tag vX.Y.Z
+                                   │
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │  GitHub Actions — release.yml (tag-triggered)                     │
+   │  ────────────────────────────────────                             │
+   │                                                                   │
+   │  build      → cargo build --release --locked                      │
+   │             → SHA-256 / SHA-512 checksums                         │
+   │             → CycloneDX SBOM (anchore/sbom-action)                │
+   │             → bundle → upload-artifact                            │
+   │  publish    → download-artifact                                    │
+   │             → softprops/action-gh-release (auto notes, optional  │
+   │               prerelease when the tag contains '-')              │
+   │                                                                   │
+   └─────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
    ┌─────────────────────────────────────────────────────────────────────┐
    │  GitHub ruleset `protect-main` (id 19743104)                      │
    │  ──────────────────────────────────────────                       │
@@ -174,5 +192,15 @@ $ head -1 .git/hooks/pre-commit
 | Composite action (checkout + toolchain + cache) | [`.github/actions/rust-setup/action.yml`](../.github/actions/rust-setup/action.yml) |
 | CI workflow (9 parallel jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 | CI real-LLM e2e (main only) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
+| CI informational: code scanning | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) |
+| CI informational: dependency audit | [`.github/workflows/cargo-audit.yml`](../.github/workflows/cargo-audit.yml) |
+| CI release pipeline (tag-triggered) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
+| Dependabot config (cargo + github-actions) | [`.github/dependabot.yml`](../.github/dependabot.yml) |
+| Code ownership / review fan-out | [`.github/CODEOWNERS`](../.github/CODEOWNERS) |
+| Security policy (private disclosure channel) | [`.github/SECURITY.md`](../.github/SECURITY.md) |
+| Contributing guide | [`.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md) |
+| PR template | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) |
+| Issue templates (bug / feature / security) | [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/) |
+| GitHub Copilot instructions | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) |
 | Branch protection (ruleset apply) | [`docs/branch-protection.md`](branch-protection.md) |
 | Architectural authority | [`docs/proposal-02-rust.md`](proposal-02-rust.md) |

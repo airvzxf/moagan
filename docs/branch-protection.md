@@ -41,7 +41,10 @@ Existing rules in `protect-main`:
 | `non_fast_forward` | ✓ | Prevents force-pushes to `main`. |
 | `pull_request` | ✓ | Requires a PR before merging. `required_approving_review_count: 0`, `dismiss_stale_reviews_on_push: true`, `required_review_thread_resolution: true`, allowed merge methods: `squash`, `rebase`. |
 | `required_linear_history` | ✓ | Enforces linear history. |
-| **`required_status_checks`** | ✗ **MISSING** | The CI gate. This is what we add. |
+| `required_status_checks` | ✓ | The 9 CI contexts from `ci.yml`. *See [Job IDs vs display names](#job-ids-vs-display-names) below.* |
+| **`block_force_pushes`** | optional | Redundant with `non_fast_forward`; keep the latter only. |
+| **`required_signatures`** | optional | Could be added to enforce signed commits at the ruleset level on top of the local `commit.gpgsign` config. |
+| **`pull_request.require_code_owner_review`** | optional | With `.github/CODEOWNERS` in place, this makes reviews from `@airvzxf` mandatory for any PR that touches a CODEOWNERS-listed path. |
 
 The classic branch-protection endpoint returns HTTP 404
 (`/branches/main/protection`) — that endpoint is deprecated in favour of
@@ -55,11 +58,33 @@ A single new rule to the existing ruleset:
 |---|---|---|
 | `required_status_checks` | `strict: true`, 9 contexts: `fmt-check`, `guard-deps`, `clippy`, `build`, `test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e` | Each of the 9 parallel jobs in `.github/workflows/ci.yml` must be green before merge. `strict: true` forces the PR to be up to date with `main` first. |
 
-The 9 job IDs come from the `jobs.<id>` keys in the workflow YAML (NOT the
-`name:` field — those can be human-readable). They are case-sensitive.
+## Job IDs vs display names
+
+The ruleset `required_status_checks` rule uses the human-readable
+`name:` of each job as the context string, **not** the `jobs.<id>`
+key. The YAML below shows the two layers for each job from
+`.github/workflows/ci.yml`:
+
+| Job ID (`jobs.<id>`) | Display name (`name:`) |
+|---|---|
+| `fmt-check` | `T0 · fmt-check` |
+| `guard-deps` | `T0 · guard-deps` |
+| `clippy` | `T1 · clippy` |
+| `build` | `T1 · build (populates cargo cache)` |
+| `test-tests` | `T2 · cargo test --tests (integration)` |
+| `test-lib` | `T2 · cargo test --lib --bins` |
+| `test-doc` | `T2 · cargo test --doc` |
+| `smoke` | `T3 · make smoke (static + 4 pre-existing FAIL)` |
+| `e2e` | `T3 · make e2e (local mock pipeline)` |
+
+The `context` strings in the `required_status_checks` JSON block are
+the right-hand column. They are case-sensitive and must match what
+GitHub renders in the PR's "Checks" tab.
 
 `e2e-network` is intentionally NOT in the required list — it runs only
 post-merge on `main` (it's the 25-minute real-LLM audit, not a PR gate).
+The new `codeql` and `cargo-audit` workflows are also informational;
+they show up as checks but do not block merges.
 
 ## Apply it — copy-paste block
 
@@ -173,10 +198,64 @@ Re-run the GET-modify-PUT cycle whenever:
 
 - A new required status check is added to `.github/workflows/ci.yml` (add it
   to `required_status_checks[].context`).
-- A CI job is renamed (the `context` array must match the new job ID — they
-  are case-sensitive and are the `jobs.<id>` key in the workflow YAML).
+- A CI job is renamed (the `context` array must match the new display name —
+  they are case-sensitive and are the `name:` field of the job, not the
+  `jobs.<id>` key; see [Job IDs vs display names](#job-ids-vs-display-names)).
 - You move from solo to team (set `required_approving_review_count > 0` on
-  the `pull_request` rule).
+  the `pull_request` rule, and flip `require_code_owner_review: true` once
+  co-maintainers are added to `.github/CODEOWNERS`).
+- `.github/CODEOWNERS` is added or its paths change — the ruleset
+  `pull_request` rule must be re-PUT to toggle
+  `require_code_owner_review` accordingly (see "Optional hardening" below).
+
+## Optional hardening (apply after this PR lands)
+
+The ruleset accepts two further rules that the initial PR does not turn
+on. Apply them with the same GET-modify-PUT cycle:
+
+```bash
+# 1. GET
+gh api /repos/airvzxf/moagan/rulesets/19743104 > /tmp/ruleset.json
+
+# 2. Add `required_signatures` and `require_code_owner_review`.
+#    The jq filter below is additive — it merges the new rules into the
+#    existing array instead of replacing it.
+jq '
+  .rules |= (
+    if (map(.type) | index("required_signatures")) then . else . + [{
+      "type": "required_signatures"
+    }] end
+  )
+  | .rules |= (
+    map(
+      if .type == "pull_request" then
+        .parameters.require_code_owner_review = true
+      else . end
+    )
+  )
+' /tmp/ruleset.json > /tmp/ruleset-new.json
+
+# 3. PUT
+gh api \
+  --method PUT \
+  -H "Accept: application/vnd.github+json" \
+  /repos/airvzxf/moagan/rulesets/19743104 \
+  --input /tmp/ruleset-new.json
+
+# 4. Verify
+gh api /repos/airvzxf/moagan/rulesets/19743104 \
+  --jq '{rules: [.rules[].type], pull_request: [.rules[] | select(.type=="pull_request") | .parameters.require_code_owner_review]}'
+```
+
+After the PUT, the ruleset will:
+
+1. Reject any commit landing on `main` that is not GPG-signed (block of
+   last-resort enforcement on top of the local `commit.gpgsign=true`).
+2. Demand a review from `@airvzxf` on every PR that touches a
+   `CODEOWNERS`-listed path.
+
+Both are optional today (single-maintainer repo) but worth turning on
+before the first external contributor lands.
 
 ## Status badge
 
