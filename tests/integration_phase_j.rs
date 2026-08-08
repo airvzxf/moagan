@@ -291,7 +291,7 @@ fn resume_skips_completed_phases() -> Result<()> {
     let (_tmp, _home) = fresh_home();
     let cfg = Config::default();
     let canonical =
-        moagan::cli::run::build_pipeline_for_mode(moagan::cli::Mode::Standard, &cfg, true);
+        moagan::cli::run::build_pipeline_for_mode(moagan::cli::Mode::Standard, &cfg, true, false);
     let resumed = pollster::block_on(async { Pipeline::resume(canonical, "clarify") })?;
     // The canonical standard pipeline starts with intake → clarify
     // → route → sketch → propose → ...; the resumed version starts
@@ -450,6 +450,7 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
         &cfg,
         Some(mock_dir),
         true,
+        false,
         stub,
         parent_manifest.cli_prompt.clone().unwrap_or_default(),
         None,
@@ -575,12 +576,33 @@ fn import_rejects_duplicate_run_id() -> Result<()> {
 /// `Pipeline::canonical_phase_order` is stable and exposes every
 /// phase the dispatcher knows about. The test pins the list length
 /// so a future phase addition (K, L, …) becomes a failing test.
+/// PR-11 (D.22.1, D.12.5) added the `adversary` slot between
+/// `judge` and `rank`; the count moved from 15 to 16.
 #[test]
 fn canonical_phase_order_is_stable_and_documented() {
     let canonical = Pipeline::canonical_phase_order();
-    assert_eq!(canonical.len(), 15, "{:?}", canonical);
+    assert_eq!(canonical.len(), 16, "{:?}", canonical);
     assert_eq!(canonical[0], "intake");
     assert_eq!(canonical[canonical.len() - 1], "deliver");
+    // The new `adversary` slot lives between `judge` and `rank`
+    // so the deterministic pattern-based report runs on the
+    // freshly judged panel.
+    let judge_idx = canonical
+        .iter()
+        .position(|n| *n == "judge")
+        .expect("judge slot present");
+    let rank_idx = canonical
+        .iter()
+        .position(|n| *n == "rank")
+        .expect("rank slot present");
+    let adv_idx = canonical
+        .iter()
+        .position(|n| *n == "adversary")
+        .expect("adversary slot present");
+    assert!(
+        adv_idx > judge_idx && adv_idx < rank_idx,
+        "adversary slot must sit between judge ({judge_idx}) and rank ({rank_idx}); got {adv_idx}"
+    );
 }
 
 // =====================================================================

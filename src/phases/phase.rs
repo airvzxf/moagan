@@ -1277,6 +1277,12 @@ pub enum PhaseOutput {
     /// Phase D: a list of `adversaries/p_*.json` files. Empty when
     /// the panel of judges agreed and the adversary never fired.
     Adversaries(Vec<PathBuf>),
+    /// Phase D follow-up (D.22.1, D.12.5): `rankings/adversary_report.json`
+    /// was written. Carries the seven-pattern deterministic verdict
+    /// produced by [`crate::phases::adversary::AdversaryPhase`].
+    /// Complementary to `Adversaries` (which holds the LLM-emitted
+    /// per-proposal adversary reports); the two coexist.
+    PatternAdversary(PathBuf),
     /// Phase G: `problem_graph.json` was written. Empty path means
     /// the phase was skipped or short-circuited to a trivial graph.
     ProblemGraph(PathBuf),

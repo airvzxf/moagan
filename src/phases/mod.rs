@@ -6,6 +6,7 @@
 //! Phase D adds `cluster_proposals` + `synthesize` between critique
 //! and judge, and an adversary branch inside `judge` (V4 §5.13).
 
+pub mod adversary;
 pub mod budget;
 pub mod budget_cascade;
 pub mod cardinality;
@@ -38,6 +39,10 @@ pub mod synthesize;
 pub mod util;
 pub mod validate;
 
+pub use adversary::{
+    AdversaryPhase, PATTERN_ADVERSARY_SCHEMA_VERSION, PatternAdversaryReport,
+    PatternAdversarySection, ProposalPatternVerdict,
+};
 pub use budget::{BudgetObserver, BudgetPolicy, PressureLevel};
 pub use budget_cascade::cascade_reduce;
 pub use clarify::ClarifyPhase;

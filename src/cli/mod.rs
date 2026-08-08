@@ -196,6 +196,18 @@ pub enum Cmd {
         /// flag is a no-op there.
         #[arg(long, default_value_t = false)]
         no_replace_sources: bool,
+        /// D.22.1, D.12.5: opt-in for the deterministic pattern-based
+        /// adversary pass that runs the seven patterns from
+        /// `src/ranking/adversary_patterns.rs::run_all_patterns`
+        /// against the just-judged proposals and writes
+        /// `rankings/adversary_report.json`. The pass is also enabled
+        /// automatically for `Mode::Deep` (the only mode where the
+        /// seven-pattern cost is amortised); the explicit flag wins
+        /// on conflict because operators can disable it for deep via
+        /// the inverse. Default `false` (off for `fast`/`standard`/
+        /// `explore`/`batch`).
+        #[arg(long, default_value_t = false)]
+        adversary: bool,
         /// Phase J: reference to an upstream context. Accepts a
         /// UUID v7 (a previous `moagan run` id) or a filesystem
         /// path to a `.md` file or a directory of them. The
@@ -751,6 +763,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             non_interactive,
             max_parallelism,
             no_replace_sources,
+            adversary,
             context,
             context_summary,
             context_full,
@@ -894,6 +907,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     non_interactive,
                     max_parallelism,
                     no_replace_sources,
+                    adversary,
                     context,
                     context_scope: scope,
                 },
