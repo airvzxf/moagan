@@ -3,9 +3,19 @@
 //! Parses `data: <json>\n\n` events from an OpenAI-format SSE stream
 //! and yields each complete JSON payload. Handles the
 //! `[DONE]` sentinel that OpenAI uses to terminate the stream.
+//!
+//! Before handing the payload to `serde_json` we route it through
+//! [`crate::llm::control_tokens::strip`] (catalog §D.7.2; roadmap
+//! PR-27) so a stray terminal-escape byte pasted by an operator
+//! upstream, or a NUL leaked from a misbehaving middleware,
+//! cannot blow up JSON parsing with an `invalid control character`
+//! error. The helper preserves `\n`, `\r`, and `\t` which are the
+//! only raw control bytes valid inside a JSON string value.
 
 use serde::de::DeserializeOwned;
 use std::io::BufRead;
+
+use super::control_tokens;
 
 /// Streaming parser for OpenAI-format Server-Sent Events.
 ///
@@ -44,7 +54,15 @@ impl<R: BufRead> SseParser<R> {
                 if payload == "[DONE]" {
                     return Ok(None);
                 }
-                let parsed: T = serde_json::from_str(payload).map_err(SseError::Parse)?;
+                // Defensive control-token strip (catalog §D.7.2):
+                // upstream providers occasionally emit raw control
+                // bytes inside the JSON payload (e.g. terminal-escape
+                // sequences that a paste accidentally dragged into the
+                // response). The helper preserves `\n`, `\r`, and `\t`
+                // — the only control bytes valid inside a JSON string
+                // — and drops everything else.
+                let cleaned = control_tokens::strip(payload);
+                let parsed: T = serde_json::from_str(cleaned.as_ref()).map_err(SseError::Parse)?;
                 return Ok(Some(parsed));
             }
         }
