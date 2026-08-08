@@ -1747,3 +1747,168 @@ async fn facet_cache_get_or_compute_skips_facet_deriver_on_second_run() {
         "both runs must persist one facet file per cluster"
     );
 }
+
+/// D.13.5: when `discover_extract` runs over a run dir that
+/// already contains a brief, a matrix, sketches, contradictions,
+/// and facet lists, it must persist a `discovery_context.json`
+/// sidecar. The sidecar must round-trip through serde_json and
+/// carry every id vector the upstream phases produced plus the
+/// brief/matrix hashes and the tagger threshold.
+#[tokio::test]
+async fn discovery_extract_emits_discovery_context_sidecar() {
+    let _guard = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve().unwrap());
+    home.ensure().unwrap();
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().unwrap();
+
+    // Pre-populate every artefact the sidecar builder scans.
+    let brief = serde_json::json!({"topic": "auth", "summary": "test"});
+    std::fs::write(run_dir.brief(), serde_json::to_vec(&brief).unwrap()).unwrap();
+    let matrix = serde_json::json!({"cardinality": 4, "cells": 4});
+    std::fs::write(
+        run_dir.root().join("exploration_matrix.json"),
+        serde_json::to_vec(&matrix).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(run_dir.sketches()).unwrap();
+    // `seed_two_clusters` references `sk_001` and `sk_002` as
+    // cluster members; write those exact ids so the
+    // `discover_extract` skip-empty-cluster check passes.
+    for sk_id in ["sk_001", "sk_002", "sk_0001"] {
+        std::fs::write(
+            run_dir.sketches().join(format!("{sk_id}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "id": sk_id,
+                "thesis": format!("alpha thesis for {sk_id}"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let contra = serde_json::json!([{"id": "c_01", "severity": "high"}]);
+    std::fs::write(
+        run_dir.contradictions().join("contradictions.json"),
+        serde_json::to_vec(&contra).unwrap(),
+    )
+    .unwrap();
+    // Seed the cluster + facet list so discover_extract has
+    // data to extract from.
+    seed_two_clusters(&run_dir);
+    let facet_list = serde_json::json!({
+        "category_id": "cat_01",
+        "cluster_id": "cluster_01",
+        "facets": [
+            {"id": "data-flows", "description": "", "required": true},
+        ],
+        "cache_key": "",
+        "created_unix": 0,
+        "schema_version": "v1",
+    });
+    std::fs::write(
+        run_dir.facets().join("cat_01.json"),
+        serde_json::to_vec(&facet_list).unwrap(),
+    )
+    .unwrap();
+    let facet_list_b = serde_json::json!({
+        "category_id": "cat_02",
+        "cluster_id": "cluster_02",
+        "facets": [
+            {"id": "trade-offs", "description": "", "required": true},
+        ],
+        "cache_key": "",
+        "created_unix": 0,
+        "schema_version": "v1",
+    });
+    std::fs::write(
+        run_dir.facets().join("cat_02.json"),
+        serde_json::to_vec(&facet_list_b).unwrap(),
+    )
+    .unwrap();
+
+    let mock = build_cycle_mock();
+    let registry = Arc::new(build_registry_with_mock(mock.clone()));
+    let parallelism = Parallelism::new(1);
+    let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).unwrap();
+    let ctx = RunContext::new(
+        run_id,
+        Arc::clone(&home),
+        Arc::clone(&registry),
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "p".into(),
+        "discover".into(),
+    );
+
+    let phase = DiscoverExtractPhase;
+    phase.execute(&ctx).await.expect("discover_extract");
+
+    let sidecar_path = run_dir.root().join("discovery_context.json");
+    assert!(
+        sidecar_path.exists(),
+        "discover_extract must persist discovery_context.json (D.13.5)"
+    );
+
+    // Parse the sidecar and verify the 6 fields.
+    let raw = std::fs::read_to_string(&sidecar_path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(value.get("sketch_ids").is_some());
+    assert!(value.get("contradiction_ids").is_some());
+    assert!(value.get("facet_ids").is_some());
+    assert!(value.get("brief_hash").is_some());
+    assert!(value.get("matrix_hash").is_some());
+    assert!(value.get("tagger_threshold").is_some());
+
+    let sketch_ids = value.get("sketch_ids").unwrap().as_array().unwrap();
+    assert!(
+        sketch_ids
+            .iter()
+            .any(|v| v == &serde_json::json!("sk_0001")),
+        "sketch_ids must contain sk_0001; got {sketch_ids:?}"
+    );
+
+    let contra_ids = value.get("contradiction_ids").unwrap().as_array().unwrap();
+    assert!(
+        contra_ids.iter().any(|v| v == &serde_json::json!("c_01")),
+        "contradiction_ids must contain c_01; got {contra_ids:?}"
+    );
+
+    let facet_ids = value.get("facet_ids").unwrap().as_array().unwrap();
+    assert!(
+        facet_ids
+            .iter()
+            .any(|v| v == &serde_json::json!("cat_01:data-flows")),
+        "facet_ids must contain cat_01:data-flows; got {facet_ids:?}"
+    );
+    assert!(
+        facet_ids
+            .iter()
+            .any(|v| v == &serde_json::json!("cat_02:trade-offs")),
+        "facet_ids must contain cat_02:trade-offs; got {facet_ids:?}"
+    );
+
+    let brief_hash = value.get("brief_hash").unwrap().as_str().unwrap();
+    assert_eq!(
+        brief_hash.len(),
+        64,
+        "brief_hash must be a 64-char BLAKE3 hex digest"
+    );
+    let matrix_hash = value.get("matrix_hash").unwrap().as_str().unwrap();
+    assert_eq!(
+        matrix_hash.len(),
+        64,
+        "matrix_hash must be a 64-char BLAKE3 hex digest"
+    );
+    let tagger_threshold = value.get("tagger_threshold").unwrap().as_f64().unwrap();
+    assert!(
+        (0.0..=1.0).contains(&tagger_threshold),
+        "tagger_threshold must be in 0..=1; got {tagger_threshold}"
+    );
+}

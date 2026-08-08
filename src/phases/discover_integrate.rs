@@ -13,8 +13,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use futures::future::join_all;
 
+use crate::discovery::DiscoveryContext;
 use crate::discovery::extractor::join_markdown;
 use crate::discovery::integrator::{build_doc, local_join, meets_safeguards};
+use crate::discovery::tagger_threshold::TaggerThreshold;
 use crate::domain::{CategoryDoc, Cluster, FacetExtraction, FacetList};
 use crate::error::{Error, Result};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
@@ -27,11 +29,15 @@ impl DiscoverIntegratePhase {
     /// Build the LLM user payload. The integrator receives the
     /// per-facet markdown and the cluster summary, and is asked to
     /// return a `CategoryDoc` JSON object.
-    fn user_payload(label: &str, joined: &str) -> String {
+    fn user_payload(label: &str, joined: &str, context: &DiscoveryContext) -> String {
         format!(
             "Cluster label: {label}\n\n\
              Per-facet extractions (already joined in display order):\n\n\
              {joined}\n\n\
+             Discovery context (D.13.5):\n  brief_hash: {brief_hash}\n  \
+             matrix_hash: {matrix_hash}\n  tagger_threshold: {tagger}\n  \
+             sketch_count: {sketch_count}\n  contradiction_count: {contra_count}\n  \
+             facet_count: {facet_count}\n\n\
              Return a JSON object with one field:\n\
              - \"body\": the integrated markdown document.\n\n\
              Preserve every citation from the per-facet extracts. \
@@ -39,6 +45,12 @@ impl DiscoverIntegratePhase {
              Respond only with JSON.",
             label = label,
             joined = joined,
+            brief_hash = context.brief_hash,
+            matrix_hash = context.matrix_hash,
+            tagger = context.tagger_threshold,
+            sketch_count = context.sketch_ids.len(),
+            contra_count = context.contradiction_ids.len(),
+            facet_count = context.facet_ids.len(),
         )
     }
 
@@ -63,6 +75,30 @@ impl DiscoverIntegratePhase {
         }
         Ok(out)
     }
+
+    /// Build + persist the [`DiscoveryContext`] sidecar. The
+    /// integrator phase runs after `discover_extract`, so by the
+    /// time it executes the context sidecar already exists; we
+    /// re-emit it so a resume that landed directly on the
+    /// integrator (skipping the extract phase) still carries a
+    /// fresh context record.
+    fn build_and_persist_context(ctx: &RunContext) -> Result<DiscoveryContext> {
+        let threshold =
+            TaggerThreshold::from_config_value(Some(ctx.config.discovery.tag_threshold));
+        let dc = DiscoveryContext::build_with_threshold(&ctx.run_dir(), Some(threshold.value));
+        let path = dc.persist(&ctx.run_dir())?;
+        tracing::info!(
+            sketches = dc.sketch_ids.len(),
+            contradictions = dc.contradiction_ids.len(),
+            facets = dc.facet_ids.len(),
+            brief_hash = %dc.brief_hash,
+            matrix_hash = %dc.matrix_hash,
+            tagger_threshold = dc.tagger_threshold,
+            path = %path.display(),
+            "discovery_context.json persisted from integrator phase"
+        );
+        Ok(dc)
+    }
 }
 
 #[async_trait]
@@ -76,6 +112,11 @@ impl Phase for DiscoverIntegratePhase {
         let clusters_dir = ctx.run_dir().clusters();
         let final_dir = ctx.run_dir().final_dir();
         let _ = std::fs::create_dir_all(&final_dir);
+
+        // D.13.5: build + persist the composite discovery context
+        // so resume and the summary phase can verify the upstream
+        // artefact surface stayed consistent.
+        let discovery_context = DiscoverIntegratePhase::build_and_persist_context(ctx)?;
 
         let mut facet_paths: Vec<PathBuf> = std::fs::read_dir(&facets_dir)?
             .filter_map(|r| r.ok())
@@ -118,6 +159,7 @@ impl Phase for DiscoverIntegratePhase {
         let futures = facet_paths.iter().map(|facet_path| {
             let facet_path = facet_path.clone();
             let ctx = ctx.clone();
+            let discovery_context = discovery_context.clone();
             async move {
                 let _permit = ctx.parallelism.acquire().await?;
                 let list: FacetList = read_json(&facet_path)?;
@@ -162,7 +204,11 @@ impl Phase for DiscoverIntegratePhase {
                 let extractions =
                     DiscoverIntegratePhase::load_extractions(&ctx, &list.category_id)?;
                 let joined = join_markdown(&extractions);
-                let user = DiscoverIntegratePhase::user_payload(&cluster.label, &joined);
+                let user = DiscoverIntegratePhase::user_payload(
+                    &cluster.label,
+                    &joined,
+                    &discovery_context,
+                );
                 let raw: Result<CategoryDoc> = ctx
                     .call_with_retry_parse(
                         crate::llm::Role::Integrator,
@@ -308,9 +354,12 @@ mod tests {
 
     #[test]
     fn user_payload_contains_label() {
-        let s = DiscoverIntegratePhase::user_payload("auth", "## body");
+        let dc = DiscoveryContext::default();
+        let s = DiscoverIntegratePhase::user_payload("auth", "## body", &dc);
         assert!(s.contains("auth"));
         assert!(s.contains("## body"));
+        assert!(s.contains("brief_hash"));
+        assert!(s.contains("tagger_threshold"));
     }
 
     #[test]
