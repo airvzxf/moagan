@@ -808,6 +808,101 @@ fn second_identical_call_is_served_from_cache() -> Result<()> {
 }
 
 #[test]
+fn prompt_cache_short_circuits_identical_call() -> Result<()> {
+    // PR-06 / D.6.4: two `Role::Propose` invocations with identical
+    // `(role, system, user)` must result in exactly one HTTP call.
+    // The second invocation short-circuits through `PromptCache`
+    // without recomputing the content-hash lookup. The mock is
+    // pre-loaded with two responses so a regression that dropped the
+    // cache (and let the second call reach the provider) would be
+    // caught by the response-text assertion as well as the calls
+    // table.
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+        std::env::set_var("MOAGAN_CONFIG", "/dev/null/moagan-test-config");
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let mut mp = MockProvider::empty();
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"first","approach":"","tradeoffs":[],"evidence":[]}"#,
+    ));
+    mp.push(MockResponse::plain(
+        r#"{"id":"p_000","summary":"second","approach":"","tradeoffs":[],"evidence":[]}"#,
+    ));
+    mp.set_cycle(false);
+
+    let run_id = RunId::new();
+    let (ctx, db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "fast");
+
+    let r1 =
+        pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
+    assert!(r1.text.contains("\"first\""));
+
+    let r2 =
+        pollster::block_on(ctx.call(moagan::llm::Role::Propose, "system".into(), "user".into()))?;
+    // Cache hit on the second call: must return the first response,
+    // not the second one the mock would have served. If the
+    // PromptCache wiring regressed, r2.text would contain "second".
+    assert!(r2.text.contains("\"first\""));
+    assert!(!r2.text.contains("\"second\""));
+
+    // SQLite records both calls, the second with cache_hit=1.
+    let calls =
+        moagan::storage::sqlite::Db::open(&home.meta_db_path())?.list_calls_for_run(run_id)?;
+    assert_eq!(calls.len(), 2);
+    let misses = calls.iter().filter(|c| c.cache_hit == 0).count();
+    let hits = calls.iter().filter(|c| c.cache_hit == 1).count();
+    assert_eq!(misses, 1, "exactly one miss expected (real HTTP call)");
+    assert_eq!(hits, 1, "exactly one hit expected (PromptCache shortcut)");
+    assert_eq!(calls[0].cache_key, calls[1].cache_key);
+
+    // JSONL mirrors: both calls produce a record, but only the
+    // first one carries the real http_status from the provider.
+    // The role-scoped invariant from the PR-06 verification rule
+    // ("only 1 entry per role+prompt_id in calls.jsonl.gz") is
+    // expressed as: exactly one row where cache_hit=false.
+    ctx.telemetry.flush()?;
+    let calls_jsonl = moagan::storage::compression::read_to_string(ctx.telemetry.calls_path())?;
+    let role_propose_lines = calls_jsonl
+        .lines()
+        .filter(|line| line.contains("\"role\":\"propose\""))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        role_propose_lines.len(),
+        2,
+        "two call records expected for Role::Propose"
+    );
+    let propose_misses = role_propose_lines
+        .iter()
+        .filter(|line| line.contains("\"cache_hit\":false"))
+        .count();
+    assert_eq!(
+        propose_misses, 1,
+        "exactly one row with cache_hit=false for Role::Propose"
+    );
+
+    // After the second call, the PromptCache index must contain the
+    // (role, cache_key) mapping that was registered on the first
+    // call. Without it, the next lookup_by_id would miss and the
+    // index would be silently bypassed.
+    let expected_prompt_id = format!("propose@{}", calls[0].cache_key);
+    assert!(
+        ctx.prompt_cache
+            .lock()
+            .lookup_by_id(&expected_prompt_id)
+            .is_some(),
+        "PromptCache index must be populated after a successful call"
+    );
+
+    let _ = db;
+    Ok(())
+}
+
+#[test]
 fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
     // Regression: if the first response is cached and broken, the
     // retry would otherwise keep returning the same broken response.
