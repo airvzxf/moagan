@@ -313,6 +313,18 @@ pub struct DiscoveryWiringConfig {
     /// picker expects at least one existing angle to anchor
     /// against.
     pub angle_clusters_min: usize,
+    /// D.13.9: similarity cutoff the tagger applies before it
+    /// accepts a `primary` tag. Sketches whose
+    /// `similarity_to_category` falls below this value are
+    /// demoted to `"uncategorized"` by `tagger::sanitise`. The
+    /// default matches
+    /// [`crate::discovery::tagger_threshold::DEFAULT_TAGGER_THRESHOLD`]
+    /// (`0.6`) so existing runs are bit-identical. Out-of-range
+    /// values fall back to the default via
+    /// [`crate::discovery::tagger_threshold::TaggerThreshold::from_config_value`].
+    /// Set via `[discovery] tag_threshold = <0..=1>` in
+    /// `~/.config/moagan/config.toml`.
+    pub tag_threshold: f32,
 }
 
 impl Default for DiscoveryWiringConfig {
@@ -321,6 +333,7 @@ impl Default for DiscoveryWiringConfig {
             persona_enabled: false,
             angle_enabled: false,
             angle_clusters_min: 2,
+            tag_threshold: crate::discovery::tagger_threshold::DEFAULT_TAGGER_THRESHOLD,
         }
     }
 }

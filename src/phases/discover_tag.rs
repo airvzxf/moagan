@@ -12,7 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::discovery::tagger::{UNCATEGORIZED_THRESHOLD, sanitise, uncategorized_ratio};
+use crate::discovery::tagger::{sanitise, uncategorized_ratio};
+use crate::discovery::tagger_threshold::TaggerThreshold;
 use crate::domain::{Sketch, SketchTags};
 use crate::error::{Error, Result};
 use crate::llm::Role;
@@ -59,6 +60,8 @@ impl Phase for DiscoverTagPhase {
         }
 
         let system = Arc::new(system_prompt(Role::Tagger).to_owned());
+        let threshold =
+            TaggerThreshold::from_config_value(Some(ctx.config.discovery.tag_threshold));
         let futures = paths.iter().map(|path| {
             let path = path.clone();
             let system = Arc::clone(&system);
@@ -79,7 +82,7 @@ impl Phase for DiscoverTagPhase {
                 if tags.sketch_id.is_empty() {
                     tags.sketch_id = sketch.id.clone();
                 }
-                sanitise(&mut tags);
+                sanitise(&mut tags, &threshold);
                 Ok::<(PathBuf, SketchTags), crate::error::Error>((path, tags))
             }
         });
@@ -119,12 +122,17 @@ impl Phase for DiscoverTagPhase {
         }
 
         // Index file: maps each sketch path to its tag path, plus a
-        // tally of (sketch path, primary, subcategory).
+        // tally of (sketch path, primary, subcategory). The
+        // `uncategorized_threshold` mirrors the value that
+        // `TaggerThreshold::from_config_value` actually applied so
+        // a downstream phase reading the index sees the effective
+        // cutoff (the configured value, or the default if the config
+        // field was absent / out-of-range).
         let index: serde_json::Value = serde_json::json!({
             "version": "v1",
             "tags_dir": "tags",
             "sketches_dir": "sketches",
-            "uncategorized_threshold": UNCATEGORIZED_THRESHOLD,
+            "uncategorized_threshold": threshold.value,
             "uncategorized_ratio": uncategorized_ratio(&all_tags),
             "tally": all_tags.iter().map(|t| serde_json::json!({
                 "sketch_id": t.sketch_id,
