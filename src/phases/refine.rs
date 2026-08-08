@@ -241,12 +241,24 @@ pub fn dispatch_refine_action(action: RefineAction, mut ctx: RefineContext) -> R
         },
         RefineAction::DropProposal => {
             ctx.proposal.replaced_by = Some(DROPPED_SENTINEL.to_owned());
+            // PR-15 (D.22.5): every upstream-invalidating decision
+            // emits `TelemetryEvent::StaleArtifact`. The dispatch
+            // plan carries the event so the orchestrator emits it
+            // through `Telemetry::dispatch` (or via the fallback
+            // `plan.emit_telemetry()` helper). The path follows
+            // the `RequestHumanInput` arm so downstream consumers
+            // can match a single `path` namespace.
+            let event = TelemetryEvent::StaleArtifact {
+                path: format!("proposals/{}.json", ctx.proposal.id),
+                age_secs: 0,
+                at_unix: crate::time::now_unix_secs(),
+            };
             RefineDispatchPlan {
                 action,
                 proposal: ctx.proposal,
                 synthesis_request: ctx.synthesis_request.clone(),
                 system_prompt: ctx.system_prompt.clone(),
-                telemetry_event: None,
+                telemetry_event: Some(event),
                 target_role: None,
             }
         }
@@ -323,7 +335,39 @@ mod tests {
         let plan = dispatch_refine_action(RefineAction::DropProposal, ctx);
         assert_eq!(plan.action, RefineAction::DropProposal);
         assert_eq!(plan.proposal.replaced_by.as_deref(), Some(DROPPED_SENTINEL));
-        assert!(plan.telemetry_event.is_none());
+        // PR-15 (D.22.5): DropProposal now emits StaleArtifact
+        // alongside the `replaced_by` stamp so the audit pipeline
+        // sees every upstream-invalidating decision. The assertion
+        // moved to the dedicated `refine_action_dispatch_drop_emits_stale_event`
+        // test below so the sidecar and telemetry contracts stay
+        // decoupled.
+        assert!(plan.telemetry_event.is_some());
+    }
+
+    /// PR-15 (D.22.5): `RefineAction::DropProposal` emits a
+    /// `TelemetryEvent::StaleArtifact` so the audit pipeline
+    /// surfaces every upstream-invalidating decision. Pinned
+    /// here alongside the existing `RequestHumanInput` emission
+    /// so a future refactor that drops the event trips the test
+    /// before the change lands in production.
+    #[test]
+    fn refine_action_dispatch_drop_emits_stale_event() {
+        let ctx = RefineContext::new(sample_proposal("p_drop_001"));
+        let plan = dispatch_refine_action(RefineAction::DropProposal, ctx);
+
+        let event = plan
+            .telemetry_event
+            .as_ref()
+            .expect("DropProposal must emit a StaleArtifact event");
+        match event {
+            TelemetryEvent::StaleArtifact { path, age_secs, .. } => {
+                assert_eq!(path, "proposals/p_drop_001.json");
+                assert_eq!(*age_secs, 0);
+            }
+            other => panic!("expected StaleArtifact event, got {:?}", other),
+        }
+
+        plan.emit_telemetry();
     }
 
     #[test]
