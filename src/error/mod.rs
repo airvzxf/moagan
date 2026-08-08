@@ -189,7 +189,6 @@ pub enum Error {
     #[error("hostile prompt: {0}")]
     HostilePrompt(String),
 
-<<<<<<< HEAD
     /// D.29.1 (`safe_path` helper): a caller-supplied path either
     /// contained `..` traversal or resolved through a symlink to
     /// a location outside the declared root. The inner string is
@@ -239,11 +238,8 @@ impl Error {
             Self::NeedsInput(_) => ErrorCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ErrorCode::InvalidState,
             Self::HostilePrompt(_) => ErrorCode::HostilePrompt,
-<<<<<<< HEAD
             Self::PathTraversal(_) => ErrorCode::InvalidArgs,
-=======
             Self::PayloadTooLarge(_) => ErrorCode::InputTooLarge,
->>>>>>> 9759cf0 (feat(llm): centralized size caps (D.29.2))
         }
     }
 
@@ -262,11 +258,8 @@ impl Error {
             Self::NeedsInput(_) => ExitCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
             Self::HostilePrompt(_) => ExitCode::ContextError,
-<<<<<<< HEAD
             Self::PathTraversal(_) => ExitCode::InvalidArgs,
-=======
             Self::PayloadTooLarge(_) => ExitCode::ProviderError,
->>>>>>> 9759cf0 (feat(llm): centralized size caps (D.29.2))
         }
     }
 

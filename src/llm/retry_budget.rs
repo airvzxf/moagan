@@ -148,12 +148,8 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::NeedsInput(_)
         | Error::DiscoveryQualityTooLow { .. }
         | Error::HostilePrompt(_)
-<<<<<<< HEAD
         | Error::PathTraversal(_)
         | Error::PayloadTooLarge(_)
-=======
-        | Error::PayloadTooLarge(_)
->>>>>>> 9759cf0 (feat(llm): centralized size caps (D.29.2))
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
     }
