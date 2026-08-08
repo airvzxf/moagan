@@ -39,11 +39,12 @@ Existing rules in `protect-main`:
 |---|---|---|
 | `deletion` | ✓ | Prevents deleting `main`. |
 | `non_fast_forward` | ✓ | Prevents force-pushes to `main`. |
-| `pull_request` | ✓ | Requires a PR before merging. `required_approving_review_count: 0`, `dismiss_stale_reviews_on_push: true`, `require_code_owner_review: true`, `require_last_push_approval: true`, `required_review_thread_resolution: true`, allowed merge methods: `squash`, `rebase`. |
+| `pull_request` | ✓ | Requires a PR before merging. `required_approving_review_count: 0`, `dismiss_stale_reviews_on_push: true`, `require_code_owner_review: true`, `require_last_push_approval: false`, `required_review_thread_resolution: true`, allowed merge methods: `squash`, `rebase`. |
 | `required_linear_history` | ✓ | Enforces linear history. |
 | `required_status_checks` | ✓ | The 9 CI contexts from `ci.yml`. *See [Job IDs vs display names](#job-ids-vs-display-names) below.* |
 | `required_signatures` | ✓ | Every commit landing on `main` must be GPG-signed. Last-resort enforcement on top of the local `commit.gpgsign=true` config. |
 | **`block_force_pushes`** | ✗ skipped | Redundant with `non_fast_forward`; keep the latter only. |
+| **`require_last_push_approval`** | ✗ off | Off because the only current maintainer is also the author of every PR. Would need a self-approval that GitHub rejects. Turn on once a second maintainer is added. |
 | **`required_approving_review_count > 0`** | ✗ skipped | Single-maintainer repo. Flip to `1` when co-maintainers are added. |
 
 The classic branch-protection endpoint returns HTTP 404
