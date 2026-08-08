@@ -24,6 +24,7 @@ use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
+use crate::llm::prompt_cache::PromptCache;
 use crate::llm::{ProviderRegistry, Request, Response, Role};
 use crate::telemetry::{Telemetry, WarningContext};
 
@@ -52,7 +53,16 @@ pub struct RunContext {
     /// Consulted before every provider call and populated after a
     /// successful call so subsequent runs of the same prompt reuse
     /// the cached response (compliance with T01-06 §3.3).
-    pub cache: Cache,
+    pub cache: Arc<Cache>,
+    /// D.6.4: in-process index over the cross-run cache, keyed by a
+    /// stable `(role, cache_key)` `prompt_id`. Consulted before the
+    /// content-hash cache lookup so an in-flight repeat of the
+    /// same call short-circuits without recomputing the hash.
+    /// `Arc<parking_lot::Mutex<...>>` so `RunContext` stays cheaply
+    /// cloneable across phases and the lock lives as long as the
+    /// last `RunContext` handle. The critical section is just a
+    /// `HashMap::get`/`HashMap::insert`.
+    pub prompt_cache: Arc<parking_lot::Mutex<PromptCache>>,
     /// Loaded `Config` for the run. Phases that take user-tunable
     /// knobs (gate forbidden-techs / min / max length, validate
     /// sandbox timeout, etc.) MUST read from this field instead of
@@ -166,11 +176,14 @@ impl RunContext {
         mode: String,
         config: Arc<Config>,
     ) -> Self {
-        let cache = Cache::new(CacheConfig {
+        let cache = Arc::new(Cache::new(CacheConfig {
             root: home.cross_run_cache_dir(),
             cross_run: true,
             ..Default::default()
-        });
+        }));
+        let prompt_cache = Arc::new(parking_lot::Mutex::new(PromptCache::new(Arc::clone(
+            &cache,
+        ))));
         Self {
             run_id,
             home,
@@ -182,6 +195,7 @@ impl RunContext {
             raw_prompt,
             mode,
             cache,
+            prompt_cache,
             config,
             interactive: true,
             context_block: None,
@@ -384,11 +398,26 @@ impl RunContext {
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
-        if let Some(entry) = self.cache.lookup(&cache_key)? {
+        // D.6.4: consult the prompt cache first. The `prompt_id` is
+        // `(role, cache_key)` so distinct calls with the same role
+        // but different inputs do not collide on the index. The
+        // underlying content-hash cache still owns durability; the
+        // prompt cache is a hot-path shortcut.
+        let prompt_id = format!("{}@{}", role.as_str(), cache_key);
+        if let Some(entry) = self.prompt_cache.lock().lookup_by_id(&prompt_id) {
             return self.record_cache_hit(entry, role, &cache_key, started_unix);
         }
-        self.dispatch_to_provider(req, Some(cache_key), started_unix)
+        if let Some(entry) = self.cache.lookup(&cache_key)? {
+            self.prompt_cache
+                .lock()
+                .register(&prompt_id, cache_key.clone());
+            return self.record_cache_hit(entry, role, &cache_key, started_unix);
+        }
+        self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix)
             .await
+            .inspect(|_response| {
+                self.prompt_cache.lock().register(&prompt_id, cache_key);
+            })
     }
 
     /// Provider call without consulting the cache. Used on parse-
