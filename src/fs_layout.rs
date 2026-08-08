@@ -384,9 +384,13 @@ impl RunPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_MOAGAN_HOME_LOCK;
 
     #[test]
     fn home_resolves_to_data_dir() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -399,6 +403,9 @@ mod tests {
 
     #[test]
     fn ensure_creates_layout() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -411,6 +418,9 @@ mod tests {
 
     #[test]
     fn run_dir_ensure_supports_external_audit() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -426,6 +436,9 @@ mod tests {
 
     #[test]
     fn run_dir_external_audit_verify_path() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -438,6 +451,9 @@ mod tests {
 
     #[test]
     fn run_dir_paths() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -454,6 +470,9 @@ mod tests {
 
     #[test]
     fn run_dir_ensure_creates_subdirs() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -472,6 +491,9 @@ mod tests {
     /// so the discovery phases never have to mkdir themselves.
     #[test]
     fn run_dir_ensure_creates_discovery_dirs() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -490,6 +512,9 @@ mod tests {
     /// Discovery path helpers return the right subdirectory name.
     #[test]
     fn discovery_path_helpers() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -509,6 +534,9 @@ mod tests {
     /// synthesize phase never has to mkdir itself.
     #[test]
     fn run_dir_ensure_creates_synthesized_dir() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -523,6 +551,9 @@ mod tests {
     /// name (no surprises during debugging).
     #[test]
     fn synthesized_path_helper() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -535,6 +566,9 @@ mod tests {
     /// Phase D also adds `cluster_proposals/` and `adversaries/`.
     #[test]
     fn run_dir_ensure_creates_phase_d_dirs() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -550,6 +584,9 @@ mod tests {
     /// return the right subdirectory names.
     #[test]
     fn phase_d_path_helpers() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -566,6 +603,9 @@ mod tests {
     /// eight keys (D.12.16).
     #[test]
     fn run_paths_resolve_returns_both_maps() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -582,6 +622,9 @@ mod tests {
     /// Every documented key is present in both maps.
     #[test]
     fn run_paths_resolve_contains_all_documented_keys() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -613,6 +656,9 @@ mod tests {
     /// never absolute).
     #[test]
     fn run_paths_relative_are_run_relative() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -631,6 +677,9 @@ mod tests {
     /// demand, but the parent dirs exist).
     #[test]
     fn run_paths_absolute_resolve_to_existing_dirs() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
@@ -667,6 +716,9 @@ mod tests {
     /// `Manifest.lineage_paths` (M.5) without bespoke plumbing.
     #[test]
     fn run_paths_round_trips_json() {
+        let _g = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
