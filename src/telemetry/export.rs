@@ -564,33 +564,34 @@ mod tests {
     /// scenario.
     #[test]
     fn collect_files_summary_picks_expected_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
-        std::fs::write(run_dir.manifest(), b"{}").unwrap();
-        std::fs::write(run_dir.brief(), b"{}").unwrap();
-        std::fs::write(run_dir.rankings().join("ranking.json"), b"{}").unwrap();
-        std::fs::write(run_dir.proposals().join("p_1.json"), b"{}").unwrap();
-        std::fs::create_dir_all(run_dir.telemetry()).unwrap();
-        std::fs::write(run_dir.telemetry().join("calls.jsonl.gz"), b"gz").unwrap();
+        crate::test_support::with_moagan_home(
+            "collect_files_summary_picks_expected_paths",
+            |_home| {
+                let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+                let run_id = RunId::new();
+                let run_dir = home.run_dir(run_id);
+                run_dir.ensure().unwrap();
+                std::fs::write(run_dir.manifest(), b"{}").unwrap();
+                std::fs::write(run_dir.brief(), b"{}").unwrap();
+                std::fs::write(run_dir.rankings().join("ranking.json"), b"{}").unwrap();
+                std::fs::write(run_dir.proposals().join("p_1.json"), b"{}").unwrap();
+                std::fs::create_dir_all(run_dir.telemetry()).unwrap();
+                std::fs::write(run_dir.telemetry().join("calls.jsonl.gz"), b"gz").unwrap();
 
-        let summary = collect_files(&run_dir, ExportLevel::Summary).unwrap();
-        let summary_paths: Vec<&str> = summary.iter().map(|(_, p)| p.as_str()).collect();
-        assert!(summary_paths.contains(&"manifest.json"));
-        assert!(summary_paths.contains(&"brief.json"));
-        assert!(summary_paths.contains(&"rankings/ranking.json"));
-        assert!(summary_paths.contains(&"proposals/p_1.json"));
-        // Summary must NOT include the gzip telemetry stream.
-        assert!(!summary_paths.contains(&"telemetry/calls.jsonl.gz"));
+                let summary = collect_files(&run_dir, ExportLevel::Summary).unwrap();
+                let summary_paths: Vec<&str> = summary.iter().map(|(_, p)| p.as_str()).collect();
+                assert!(summary_paths.contains(&"manifest.json"));
+                assert!(summary_paths.contains(&"brief.json"));
+                assert!(summary_paths.contains(&"rankings/ranking.json"));
+                assert!(summary_paths.contains(&"proposals/p_1.json"));
+                // Summary must NOT include the gzip telemetry stream.
+                assert!(!summary_paths.contains(&"telemetry/calls.jsonl.gz"));
 
-        let full = collect_files(&run_dir, ExportLevel::Full).unwrap();
-        let full_paths: Vec<&str> = full.iter().map(|(_, p)| p.as_str()).collect();
-        assert!(full_paths.contains(&"telemetry/calls.jsonl.gz"));
+                let full = collect_files(&run_dir, ExportLevel::Full).unwrap();
+                let full_paths: Vec<&str> = full.iter().map(|(_, p)| p.as_str()).collect();
+                assert!(full_paths.contains(&"telemetry/calls.jsonl.gz"));
+            },
+        );
     }
 
     #[test]

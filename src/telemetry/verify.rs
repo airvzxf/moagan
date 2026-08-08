@@ -363,34 +363,32 @@ mod tests {
 
     #[test]
     fn verify_round_trip_with_export() {
-        // End-to-end: bundle a fake run, then verify it.
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = crate::fs_layout::MoaganHome::resolve().unwrap();
-        let run_id = crate::ids::RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
-        std::fs::write(run_dir.manifest(), b"{}").unwrap();
-        std::fs::write(run_dir.brief(), b"{}").unwrap();
-        std::fs::write(run_dir.rankings().join("ranking.json"), b"{}").unwrap();
-        std::fs::write(run_dir.proposals().join("p_01.json"), b"{}").unwrap();
+        crate::test_support::with_moagan_home("verify_round_trip_with_export", |_home| {
+            // End-to-end: bundle a fake run, then verify it.
+            let home = crate::fs_layout::MoaganHome::resolve().unwrap();
+            let run_id = crate::ids::RunId::new();
+            let run_dir = home.run_dir(run_id);
+            run_dir.ensure().unwrap();
+            std::fs::write(run_dir.manifest(), b"{}").unwrap();
+            std::fs::write(run_dir.brief(), b"{}").unwrap();
+            std::fs::write(run_dir.rankings().join("ranking.json"), b"{}").unwrap();
+            std::fs::write(run_dir.proposals().join("p_01.json"), b"{}").unwrap();
 
-        // Bundle as tar.gz.
-        let archive = tmp.path().join("bundle.tar.gz");
-        let _ = crate::telemetry::export::export_run(
-            &run_dir,
-            run_id,
-            crate::cli::telemetry_cmd::ExportLevel::Summary,
-            crate::cli::telemetry_cmd::ExportFormat::TarGz,
-            &archive,
-        )
-        .unwrap();
+            // Bundle as tar.gz.
+            let archive = _home.join("bundle.tar.gz");
+            let _ = crate::telemetry::export::export_run(
+                &run_dir,
+                run_id,
+                crate::cli::telemetry_cmd::ExportLevel::Summary,
+                crate::cli::telemetry_cmd::ExportFormat::TarGz,
+                &archive,
+            )
+            .unwrap();
 
-        // Verify — should be all OK.
-        let report = verify(&archive).unwrap();
-        assert!(report.rows.iter().all(|r| r.verdict.label() == "OK"));
-        assert!(report.ok_count() >= 4);
+            // Verify — should be all OK.
+            let report = verify(&archive).unwrap();
+            assert!(report.rows.iter().all(|r| r.verdict.label() == "OK"));
+            assert!(report.ok_count() >= 4);
+        });
     }
 }
