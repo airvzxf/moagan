@@ -207,3 +207,120 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
         .expect("query runs.status");
     assert_eq!(status, "completed", "expected runs.status='completed'");
 }
+
+/// D.14.7 (`v0.5 roadmap PR-01`): wire up `moagan run --prompt -`
+/// so the literal "-" is replaced with the contents of stdin before
+/// the pipeline runs. The mock provider returns canned responses, so
+/// the only on-disk evidence of the substitution is
+/// `manifest.json::cli_prompt`, which `src/cli/run.rs:205` writes
+/// straight from `opts.prompt` (and `src/cli/mod.rs:856-858` is now
+/// the boot point that resolves the `-` sentinel — see the W1
+/// comment in the dispatcher).
+///
+/// Test flow:
+///   1. Spawn `moagan run --prompt - --provider mock --mock-dir ...`
+///      with `Stdio::piped()` for stdin.
+///   2. Write "hello world" into the child's stdin and close it,
+///      so `read_prompt_from_stdin` reads the literal string.
+///   3. Read the canonical `manifest.json` and verify
+///      `cli_prompt == "hello world"`.
+///   4. Cross-check the smoke-gate artifacts (`final/portfolio.md`
+///      and `rankings/ranking.json`) so the run actually completed
+///      end-to-end.
+#[test]
+fn mock_run_prompt_dash_reads_from_stdin() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let bin = std::env::var("CARGO_BIN_EXE_moagan")
+        .expect("CARGO_BIN_EXE_moagan — run via `cargo test`, not directly");
+
+    let tmp = tempfile::TempDir::new().expect("tmpdir");
+
+    let mut child = Command::new(&bin)
+        .arg("run")
+        .arg("--mode")
+        .arg("fast")
+        .arg("--provider")
+        .arg("mock")
+        .arg("--mock-dir")
+        .arg("tests/fixtures/mock_provider")
+        .arg("--prompt")
+        .arg("-")
+        .arg("--non-interactive")
+        .arg("--runs-dir")
+        .arg(tmp.path())
+        .env_remove("MINIMAX_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn moagan run --prompt -");
+
+    // Feed the prompt into stdin and close the pipe so the child's
+    // `read_to_string` returns EOF and the prompt is fully captured.
+    {
+        let mut stdin = child.stdin.take().expect("child stdin pipe");
+        stdin
+            .write_all(b"hello world")
+            .expect("write prompt to stdin");
+        // Drop stdin here, closing the pipe.
+    }
+
+    let out = child.wait_with_output().expect("wait moagan run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "mock run failed: status={:?}\nstdout={stdout}\nstderr={stderr}",
+        out.status
+    );
+
+    // ---- Locate the run id -------------------------------------------------
+    // src/cli/mod.rs:875 prints `run id: <full-uuid>` on success.
+    let run_id = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run id: "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| panic!("run id not found in stdout:\nstdout={stdout}\nstderr={stderr}"))
+        .to_string();
+    assert_eq!(run_id.len(), 36, "expected hyphenated uuid, got {run_id}");
+
+    // ---- Verify cli_prompt was resolved from stdin -------------------------
+    // The mock provider returns canned responses regardless of the
+    // prompt, so the only on-disk evidence of the `--prompt -`
+    // wire-up is the verbatim `cli_prompt` field on `manifest.json`.
+    // It is set from `opts.prompt` in `src/cli/run.rs:205` BEFORE
+    // the redactor in `src/cli/run.rs:392-399` runs, so the literal
+    // stdin bytes (including the trailing newline dropped by
+    // `read_to_string` on EOF — none here since we write exactly
+    // "hello world" with no trailing \n) survive end-to-end.
+    let manifest_path = tmp.path().join(".runs").join(&run_id).join("manifest.json");
+    let manifest_raw = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| panic!("read manifest.json at {}: {e}", manifest_path.display()));
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_raw)
+        .unwrap_or_else(|e| panic!("parse manifest.json: {e}\nbody={manifest_raw}"));
+    let cli_prompt = manifest
+        .get("cli_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("manifest.cli_prompt missing or null:\n{manifest_raw}"));
+    assert_eq!(
+        cli_prompt, "hello world",
+        "manifest.cli_prompt must equal the stdin content; got {cli_prompt:?}"
+    );
+
+    // ---- Smoke-gate artifacts ----------------------------------------------
+    // The fixture drives the full pipeline (intake + clarify + route
+    // + propose x3 + critique x6 + judge x9 + deliver = 22 calls),
+    // so on a successful mock run the canonical sidecars must exist.
+    let run_root = tmp.path().join(".runs").join(&run_id);
+    assert!(
+        run_root.join("final").join("portfolio.md").exists(),
+        "final/portfolio.md missing — run did not complete end-to-end"
+    );
+    assert!(
+        run_root.join("rankings").join("ranking.json").exists(),
+        "rankings/ranking.json missing — run did not complete end-to-end"
+    );
+}

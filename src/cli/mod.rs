@@ -745,7 +745,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         Cmd::Run {
             mode,
             provider,
-            prompt,
+            mut prompt,
             runs_dir,
             mock_dir,
             non_interactive,
@@ -872,6 +872,17 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     Error::InvalidArgs(format!("--model: provider '{selected}' is not in config"))
                 })?;
                 spec.model = resolved;
+            }
+            // D.14.7: `--prompt -` reads the prompt body from stdin
+            // instead of treating the literal string as the prompt.
+            // The substitution happens here, BEFORE `RunOptions` is
+            // constructed, so the pipeline sees the resolved prompt
+            // through `opts.prompt` (manifest.cli_prompt, intake
+            // raw_prompt, etc.) and every downstream consumer
+            // (cache keys, redaction, intake normalisation) picks
+            // up the same string.
+            if flags_batch::prompt_is_stdin(&prompt) {
+                prompt = flags_batch::read_prompt_from_stdin()?;
             }
             let run_id = run::run(
                 run::RunOptions {
