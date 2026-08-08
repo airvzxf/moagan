@@ -106,6 +106,7 @@ fn populate_home() -> MoaganHome {
         1_700_000_000,
         1_700_000_005,
         None,
+        0,
     )
     .unwrap();
     db.record_call(
@@ -126,6 +127,7 @@ fn populate_home() -> MoaganHome {
         1_700_000_010,
         1_700_000_011,
         None,
+        0,
     )
     .unwrap();
     db.accumulate_usage(run_id, "minimax", "MiniMax-M3", 2, 100, 50, 10, 0)

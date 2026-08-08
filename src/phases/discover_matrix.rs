@@ -18,11 +18,13 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use futures::future::join_all;
 
 use crate::discovery::matrix::{ExplorationMatrix, MatrixCell};
+use crate::discovery::sketch_retry::retry_sketch_extraction;
 use crate::discovery::state::SketchLoopState;
 use crate::domain::Sketch;
 use crate::error::{Error, Result};
@@ -86,8 +88,8 @@ impl DiscoverMatrixPhase {
     fn user_payload(brief: &str, cell: &MatrixCell, index: usize) -> String {
         format!(
             "{brief}\n\n\
-             Use dimension=\"{dim_id}\" and facet=\"{facet_id}\" (label: \"{label}\") and \
-             produce exactly one sketch (cell index {index}).",
+         Use dimension=\"{dim_id}\" and facet=\"{facet_id}\" (label: \"{label}\") and \
+         produce exactly one sketch (cell index {index}).",
             brief = brief,
             dim_id = cell.dimension_id,
             facet_id = cell.facet_id,
@@ -136,9 +138,10 @@ impl Phase for DiscoverMatrixPhase {
         // Build the future list (cell, index-in-cell, sketch_id).
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let brief_arc = Arc::new(brief_text);
+        let system_arc = Arc::clone(&system);
         let futures = cells.iter().flat_map(|cell| {
             let brief = Arc::clone(&brief_arc);
-            let system = Arc::clone(&system);
+            let system = Arc::clone(&system_arc);
             let counter = Arc::clone(&counter);
             (0..per_cell).map(move |_i| {
                 let cell = cell.clone();
@@ -151,15 +154,70 @@ impl Phase for DiscoverMatrixPhase {
                     let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let id = format!("sk_{:04}", n);
                     let user = DiscoverMatrixPhase::user_payload(brief.as_str(), &cell, n);
-                    let mut sketch: Sketch = ctx
-                        .call_with_retry_parse(
-                            Role::Sketch,
-                            system.as_str().to_owned(),
-                            user,
-                            system_prompt(Role::Sketch),
-                            5,
-                        )
-                        .await?;
+                    // D.34.1 / PR-05: drive the sketch extraction
+                    // through the bounded retry helper in
+                    // `src/discovery/sketch_retry.rs`
+                    // (`retry_sketch_extraction`). The helper
+                    // applies exponential backoff independent of
+                    // the per-mode retry budget, so the
+                    // matrix's worst-case 3 retries survive even
+                    // when the run mode is `fast` (which would
+                    // otherwise cap retries at 1 attempt). Each
+                    // attempt threads its index through the new
+                    // `calls.retry_count` column so the post-
+                    // execution review can correlate the JSONL /
+                    // SQLite call record with the warnings stream
+                    // without scraping stderr. With `max_retries=3`
+                    // and 2 broken responses followed by a valid
+                    // one, the helper consumes exactly 3 mock calls
+                    // (retry_count 0, 1, 2) — matching the spec's
+                    // `retry_count` 0, 1, 2 contract.
+                    let retry_counter = Arc::new(AtomicU32::new(0));
+                    let mut sketch: Sketch = retry_sketch_extraction(3, || {
+                        let ctx = ctx.clone();
+                        let user = user.clone();
+                        let system = system.as_str().to_owned();
+                        let counter = Arc::clone(&retry_counter);
+                        let schema_hint = system_prompt(Role::Sketch).to_owned();
+                        async move {
+                            let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                            let result: Result<Sketch> = async {
+                                // First attempt (`attempt == 0`)
+                                // goes through the cache-aware
+                                // path so re-running the same
+                                // prompt reuses a prior response.
+                                // Retries bypass the cache so a
+                                // previously cached broken
+                                // response does not poison the
+                                // retry budget (the original
+                                // `call_with_retry_parse` follows
+                                // the same rule; pin it here so
+                                // the matrix does too).
+                                let started_unix = crate::time::now_unix_secs();
+                                let raw = if attempt == 0 {
+                                    ctx.call_with_retry(Role::Sketch, system, user, attempt)
+                                        .await?
+                                } else {
+                                    ctx.call_uncached(
+                                        Role::Sketch,
+                                        system,
+                                        user,
+                                        started_unix,
+                                        attempt,
+                                    )
+                                    .await?
+                                };
+                                ctx.parse_model_json::<Sketch>(
+                                    Role::Sketch,
+                                    &raw.text,
+                                    &schema_hint,
+                                )
+                            }
+                            .await;
+                            result
+                        }
+                    })
+                    .await?;
                     if sketch.id.is_empty() {
                         sketch.id = id.clone();
                     }

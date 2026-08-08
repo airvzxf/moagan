@@ -105,6 +105,14 @@ pub struct CallEvent {
     /// was added deserialize with `status = None`; readers must treat
     /// that as `unknown` (see migration v003).
     pub status: Option<String>,
+    /// Zero-indexed retry attempt for this call. `0` is the first
+    /// attempt, `1` is the second, etc. Persisted by the canonical
+    /// retry loop in `phases::phase::call_with_retry_parse` so
+    /// `calls.jsonl.gz` rows expose the same `retry_count` the
+    /// warnings stream carries on `attempt`. Defaults to `0` for
+    /// pre-migration rows so legacy files deserialize cleanly.
+    #[serde(default)]
+    pub retry_count: u32,
 }
 
 /// One warning event. Streamed to `telemetry/warnings.jsonl` and
@@ -446,6 +454,7 @@ impl Telemetry {
         started_unix: i64,
         ended_unix: i64,
         error: Option<&str>,
+        retry_count: u32,
     ) -> Result<()> {
         let ev = CallEvent {
             run_id: self.inner.run_id.to_string(),
@@ -466,6 +475,7 @@ impl Telemetry {
             ended_unix,
             error: error.map(str::to_owned),
             status: Some(crate::storage::sqlite::call_status(http_status, error).to_string()),
+            retry_count,
         };
         let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
         let mut g = self.inner.calls.lock();
@@ -494,6 +504,7 @@ impl Telemetry {
                     started_unix,
                     ended_unix,
                     error,
+                    retry_count,
                 )
             };
             let call_result = if cache_hit {
@@ -717,6 +728,7 @@ mod tests {
             1,
             2,
             None,
+            0,
         )
         .unwrap();
         t.heartbeat().unwrap();
@@ -775,6 +787,7 @@ mod tests {
             1,
             2,
             None,
+            0,
         )
         .unwrap();
         t.flush().unwrap();
@@ -813,6 +826,7 @@ mod tests {
             3,
             4,
             None,
+            0,
         )
         .unwrap();
         t.flush().unwrap();

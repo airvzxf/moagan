@@ -379,6 +379,23 @@ impl RunContext {
     /// in the `calls` table. A miss falls through to the provider
     /// and the response is stored for the next run.
     pub async fn call(&self, role: Role, system: String, user: String) -> Result<Response> {
+        self.call_with_retry(role, system, user, 0).await
+    }
+
+    /// Like [`Self::call`] but tags the resulting `calls` row with
+    /// the supplied `retry_count`. The canonical retry loop in
+    /// [`Self::call_with_retry_parse`] threads the current attempt
+    /// index through this parameter so the JSONL/SQLite `calls` row
+    /// mirrors the warnings stream's `attempt` value and the
+    /// `retry_count` field every consumer (dashboard, audit,
+    /// post-execution review) already aggregates.
+    pub(crate) async fn call_with_retry(
+        &self,
+        role: Role,
+        system: String,
+        user: String,
+        retry_count: u32,
+    ) -> Result<Response> {
         let profile_overrides: Option<&std::collections::HashMap<String, f32>> =
             if self.config.profile_temperature_overrides.is_empty() {
                 None
@@ -405,15 +422,15 @@ impl RunContext {
         // prompt cache is a hot-path shortcut.
         let prompt_id = format!("{}@{}", role.as_str(), cache_key);
         if let Some(entry) = self.prompt_cache.lock().lookup_by_id(&prompt_id) {
-            return self.record_cache_hit(entry, role, &cache_key, started_unix);
+            return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
         }
         if let Some(entry) = self.cache.lookup(&cache_key)? {
             self.prompt_cache
                 .lock()
                 .register(&prompt_id, cache_key.clone());
-            return self.record_cache_hit(entry, role, &cache_key, started_unix);
+            return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
         }
-        self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix)
+        self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
             .await
             .inspect(|_response| {
                 self.prompt_cache.lock().register(&prompt_id, cache_key);
@@ -422,13 +439,17 @@ impl RunContext {
 
     /// Provider call without consulting the cache. Used on parse-
     /// failure retries (see `call_with_retry_parse`) so a previously
-    /// cached broken response does not poison the retry.
+    /// cached broken response does not poison the retry. The
+    /// `retry_count` parameter tags the resulting row so the retry
+    /// loop's attempt index survives into the JSONL / SQLite
+    /// `calls.retry_count` column.
     pub(crate) async fn call_uncached(
         &self,
         role: Role,
         system: String,
         user: String,
         started_unix: i64,
+        retry_count: u32,
     ) -> Result<Response> {
         let profile_overrides: Option<&std::collections::HashMap<String, f32>> =
             if self.config.profile_temperature_overrides.is_empty() {
@@ -447,7 +468,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
         };
-        self.dispatch_to_provider(req, None, started_unix).await
+        self.dispatch_to_provider(req, None, started_unix, retry_count)
+            .await
     }
 
     /// Send the prepared request to the provider, record telemetry,
@@ -458,6 +480,7 @@ impl RunContext {
         req: Request,
         cache_key: Option<String>,
         started_unix: i64,
+        retry_count: u32,
     ) -> Result<Response> {
         let request_body_sha256 = (self.default_provider == "minimax")
             .then(|| crate::llm::http::request_body_sha256(&req))
@@ -469,6 +492,7 @@ impl RunContext {
             call_id = %call_id,
             phase = req.role.as_str(),
             stage = "provider.send.started",
+            retry_count,
             "LLM call stage"
         );
         let result = provider.send(&req).await;
@@ -478,6 +502,7 @@ impl RunContext {
             stage = "provider.send.completed",
             elapsed_ms = provider_started.elapsed().as_millis(),
             success = result.is_ok(),
+            retry_count,
             "LLM call stage"
         );
         let ended_unix = crate::time::now_unix_secs();
@@ -486,7 +511,7 @@ impl RunContext {
             phase: Some(phase_name.to_owned()),
             role: Some(phase_name.to_owned()),
             call_id: Some(call_id.clone()),
-            attempt: Some(0),
+            attempt: Some(retry_count),
         };
         match &result {
             Ok((status, response)) => {
@@ -537,6 +562,7 @@ impl RunContext {
                     started_unix,
                     ended_unix,
                     None,
+                    retry_count,
                 ) {
                     tracing::warn!(
                         call_id = %call_id,
@@ -595,6 +621,7 @@ impl RunContext {
                     started_unix,
                     ended_unix,
                     Some(&e.to_string()),
+                    retry_count,
                 ) {
                     tracing::warn!(
                         call_id = %call_id,
@@ -618,6 +645,7 @@ impl RunContext {
         role: Role,
         cache_key: &str,
         started_unix: i64,
+        retry_count: u32,
     ) -> Result<Response> {
         let response = entry.response;
         let ended_unix = crate::time::now_unix_secs();
@@ -640,6 +668,7 @@ impl RunContext {
             started_unix,
             ended_unix,
             None,
+            retry_count,
         );
         if response.truncated {
             let _ = self.telemetry.warn(
@@ -655,7 +684,7 @@ impl RunContext {
                     phase: Some(phase_name.to_owned()),
                     role: Some(phase_name.to_owned()),
                     call_id: Some(call_id),
-                    attempt: Some(0),
+                    attempt: Some(retry_count),
                 },
             );
         }
@@ -751,6 +780,7 @@ impl RunContext {
                 crate::llm::prompts::system_prompt(Role::JsonRepairV2).to_owned(),
                 user,
                 crate::time::now_unix_secs(),
+                u32::MAX,
             )
             .await
             .ok()?;
@@ -829,12 +859,15 @@ impl RunContext {
             // First attempt uses the cached path so re-running the
             // same prompt reuses the prior response. Retries bypass
             // the cache so a previously cached broken response does
-            // not poison the retry loop.
+            // not poison the retry loop. `attempt` also becomes the
+            // `retry_count` tag on the persisted `calls` row so the
+            // JSONL/SQLite telemetry mirrors the warnings stream.
             let started_unix = crate::time::now_unix_secs();
             let response = if attempt == 0 {
-                self.call(role, system.clone(), user.clone()).await
+                self.call_with_retry(role, system.clone(), user.clone(), attempt)
+                    .await
             } else {
-                self.call_uncached(role, system.clone(), user.clone(), started_unix)
+                self.call_uncached(role, system.clone(), user.clone(), started_unix, attempt)
                     .await
             };
             let warn_ctx = || WarningContext {

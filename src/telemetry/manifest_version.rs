@@ -49,7 +49,7 @@ mod tests {
         assert_eq!(version, 2);
     }
     #[test]
-    fn v012_migration_is_idempotent() {
+    fn v014_migration_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("meta.sqlite3");
         let first = Db::open(&path).unwrap();
@@ -61,7 +61,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
     #[test]
     fn current_manifest_version_constant_is_2() {

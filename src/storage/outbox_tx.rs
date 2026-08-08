@@ -106,6 +106,7 @@ mod tests {
                 1,
                 2,
                 None,
+                0,
             )?;
             Ok("sidecar-ok".into())
         })

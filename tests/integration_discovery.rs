@@ -38,7 +38,7 @@ use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     DiscoverClusterPhase, DiscoverContradictPhase, DiscoverExtractPhase, DiscoverFacetPhase,
     DiscoverIntegratePhase, DiscoverMatrixPhase, DiscoverSummaryPhase, DiscoverTagPhase, Phase,
-    RunContext,
+    PhaseOutput, RunContext,
 };
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -1059,4 +1059,215 @@ async fn discovery_tag_threshold_out_of_range_falls_back_to_default() {
         "uncategorized",
         "1.5 must be rejected by the validator and fall back to 0.6, demoting the 0.5 tag; got: {tag_text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// D.34.1 / PR-05 — `retry_sketch_extraction` consumer wiring.
+//
+// The PR wires `src/discovery/sketch_retry::retry_sketch_extraction`
+// into `discover_matrix` so the sketch fan-out drives retries through
+// the bounded exponential-backoff helper instead of the canonical
+// `RunContext::call_with_retry_parse` loop. The helper has its own
+// `max_retries+1` budget independent of the per-mode retry budget
+// (D.21.6), so `fast` mode (which caps the canonical loop at 1
+// attempt) still gets the 3 attempts the matrix needs to recover
+// from transient JSON malformation.
+//
+// The mock below returns 3 responses in order: two invalid JSON
+// payloads followed by a valid Sketch. With `max_retries=3` the
+// helper consumes exactly 3 mock calls, threads the per-attempt
+// index into the new `calls.retry_count` column (added by
+// migration v014), and persists the successful sketch on the 3rd
+// attempt. The assertions below pin every part of that contract.
+//
+// What we lock down:
+//
+// 1. The mock recorded exactly 3 LLM calls.
+// 2. The `telemetry/calls.jsonl.gz` sidecar holds 3 entries
+//    (one per attempt, in `started_unix` order).
+// 3. The 3 entries carry `retry_count` 0, 1, 2 in that order —
+//    the post-execution review can now answer "how many retries
+//    did this sketch take?" by reading the JSONL row alone.
+// 4. The persisted sketch under `sketches/` is the successful
+//    3rd response and meets the minimum-thesis gate (≥30 chars).
+//
+// Mode note: the test deliberately uses `"discover"` mode (which
+// the canonical retry budget maps to `Standard`). That keeps the
+// per-mode budget out of the picture so we exercise the
+// `retry_sketch_extraction` helper on its own — the helper's own
+// `max_retries=3` ceiling caps the loop, and the 2nd attempt
+// succeeds so no further iterations are issued.
+// ---------------------------------------------------------------------------
+
+/// Valid Sketch JSON the mock surfaces on the 3rd call. Kept here
+/// (rather than reusing `sketch_json()`) so the assertion that
+/// pins the persisted sketch's `thesis` text matches exactly.
+fn retry_sketch_valid_payload() -> String {
+    serde_json::json!({
+        "id": "sk_0000",
+        "thesis": "Ship a single Rust binary that bundles config, embed, and runtime.",
+        "key_decisions": ["static link", "rust runtime", "embedded assets"],
+        "architecture_outline": "A single moagan binary implements every pipeline phase. The CLI parses argv, dispatches to the phase graph, and persists artefacts in MOAGAN_HOME.",
+        "assumptions": ["Linux + macOS only", "x86_64 baseline"],
+        "strengths": ["easy install", "no runtime deps"],
+        "weaknesses": ["larger binary", "slower cold start"],
+        "hard_constraint_check": {"portable": true, "self_contained": true},
+        "expected_validation": "Smoke test on a fresh container rebuilds the suite from a single tarball.",
+        "angle": "",
+    })
+    .to_string()
+}
+
+/// Build a mock provider with two invalid-JSON responses followed
+/// by one valid Sketch payload. `set_cycle(false)` so calls past
+/// the queued set would error — but the retry helper must consume
+/// exactly these 3 and return.
+fn retry_sketch_mock() -> Arc<MockProvider> {
+    let mut p = MockProvider::empty();
+    p.push(MockResponse::plain("not-json-at-all"));
+    p.push(MockResponse::plain("{still-broken"));
+    p.push(MockResponse::plain(retry_sketch_valid_payload()));
+    p.set_cycle(false);
+    Arc::new(p)
+}
+
+/// Read `telemetry/calls.jsonl.gz` (gzip JSONL, one event per line)
+/// and decode every line as a generic `Value`. The calls file is the
+/// canonical source of truth for the retry-count surface; the SQLite
+/// mirror holds the same data but the JSONL form is what the
+/// post-execution review (and the audit `verify` CLI) consume.
+fn read_calls_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let bytes = std::fs::read(path).expect("read calls.jsonl.gz");
+    let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+    let mut raw = Vec::new();
+    use std::io::Read;
+    decoder.read_to_end(&mut raw).expect("gunzip calls.jsonl");
+    raw.split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("calls.jsonl json"))
+        .collect()
+}
+
+#[tokio::test]
+async fn discovery_retry_sketch_extraction_wires_up_to_discover_matrix() {
+    let _guard = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve().unwrap());
+    home.ensure().unwrap();
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().unwrap();
+    build_brief(&run_dir).unwrap();
+
+    let mock = retry_sketch_mock();
+    let registry = Arc::new(build_registry_with_mock(Arc::clone(&mock)));
+    let parallelism = Parallelism::new(1);
+    let telemetry =
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("telemetry open");
+    let ctx = RunContext::new(
+        run_id,
+        Arc::clone(&home),
+        registry,
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "design a single-binary CLI".into(),
+        "discover".into(),
+    );
+
+    // 1 cell × 1 sketch_per_cell = 1 sketch. The phase will run
+    // the retry helper once, which consumes the 3 mock calls in
+    // order (2 broken JSON + 1 valid Sketch).
+    let matrix = DiscoverMatrixPhase::from_dimensions(1, 1, 1);
+    let output = matrix.execute(&ctx).await.expect("phase execute");
+    ctx.telemetry.flush().expect("telemetry flush");
+
+    // Assertion 1: the mock recorded exactly 3 LLM calls.
+    let recorded = mock.calls();
+    assert_eq!(
+        recorded.len(),
+        3,
+        "expected 3 mock calls (2 fails + 1 success), got {}",
+        recorded.len()
+    );
+
+    // Assertion 2: calls.jsonl.gz has 3 entries (one per LLM call,
+    // regardless of parse outcome).
+    let calls_path = ctx.telemetry.calls_path().to_path_buf();
+    let calls_entries = read_calls_jsonl(&calls_path);
+    assert_eq!(
+        calls_entries.len(),
+        3,
+        "calls.jsonl.gz must hold one entry per LLM call"
+    );
+
+    // Assertion 3: the 3 entries carry `retry_count` 0, 1, 2 in
+    // started_unix order. The JSONL file is append-only, but we
+    // still sort defensively in case the gzip writer ever batches
+    // entries.
+    let mut sorted = calls_entries.clone();
+    sorted.sort_by_key(|entry| {
+        entry
+            .get("started_unix")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    });
+    let retry_counts: Vec<u64> = sorted
+        .iter()
+        .map(|entry| {
+            entry
+                .get("retry_count")
+                .and_then(|v| v.as_u64())
+                .expect("retry_count u64")
+        })
+        .collect();
+    assert_eq!(
+        retry_counts,
+        vec![0, 1, 2],
+        "retry_count must be 0, 1, 2 in started_unix order, got {retry_counts:?}"
+    );
+    // The 2nd retry (index 2) must carry the successful sketch's
+    // `cache_key`; the 1st and 2nd retries (0, 1) recorded parse
+    // failures. `parse_model_json` always wraps its failure in
+    // `Error::SchemaViolation`, which `call_with_retry_parse`
+    // surfaces as the `model.retry_parse` warning; the canonical
+    // retry path bypasses the cache on retries so the 1st call's
+    // broken response cannot be re-served from cache. We don't
+    // pin the cache_key here (BLAKE3 hashes are too noisy to be
+    // stable across refactors) but the call_id column must be
+    // unique per attempt — that's the contract the audit CLI
+    // relies on to dedupe retry rows.
+    let call_ids: std::collections::HashSet<_> = sorted
+        .iter()
+        .map(|entry| {
+            entry
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .expect("call_id")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        call_ids.len(),
+        3,
+        "each retry must allocate a fresh call_id, got {call_ids:?}"
+    );
+
+    // Assertion 4: the persisted sketch is the successful 3rd
+    // response and meets the minimum-thesis gate (≥30 chars).
+    let PhaseOutput::Sketches(paths) = output else {
+        panic!("expected PhaseOutput::Sketches");
+    };
+    assert_eq!(paths.len(), 1, "expected exactly 1 sketch persisted");
+    let final_sketch: moagan::domain::Sketch =
+        moagan::phases::util::read_json(&paths[0]).expect("sketch json");
+    assert_eq!(
+        final_sketch.thesis,
+        "Ship a single Rust binary that bundles config, embed, and runtime."
+    );
+    assert!(final_sketch.thesis.trim().len() >= 30);
 }
