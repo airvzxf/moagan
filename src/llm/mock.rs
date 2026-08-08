@@ -104,6 +104,27 @@ impl MockProvider {
         Self::new(Vec::new())
     }
 
+    /// Override the `name()` reported by the trait methods. Useful
+    /// when the same `MockProvider` instance stands in for one of
+    /// several distinct provider kinds in a pool test (D.19.19:
+    /// `ProviderPool` distinguishes entries by `inner.name()`).
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
+    /// Override the `endpoint()` reported by the trait methods.
+    /// Pairs with [`Self::set_name`] so tests that pin
+    /// `Provider::endpoint` (telemetry, dashboards) can assert
+    /// which entry the pool actually picked.
+    pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
+        self.endpoint = endpoint.into();
+    }
+
+    /// Override the `model()` reported by the trait methods.
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
+
     /// Push a response onto the queue.
     pub fn push(&mut self, response: MockResponse) {
         self.responses.push(response);
