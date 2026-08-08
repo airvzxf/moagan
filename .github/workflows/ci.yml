@@ -112,7 +112,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/rust-setup
       - name: cargo build (debug)
-        run: cargo build
+        run: cargo build --locked
 
   test-tests:
     name: 'T2 · cargo test --tests (integration)'
@@ -138,10 +138,10 @@ jobs:
         with:
           components: rustfmt,clippy
       - name: cargo test (lib + bins)
-        run: cargo test --lib --bins
+        run: cargo test --lib --bins --no-fail-fast
 
   smoke:
-    name: 'T3 · make smoke (static + 4 pre-existing FAIL)'
+    name: 'T3 · make smoke'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -149,7 +149,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/rust-setup
       - name: cargo build (debug, for smoke + e2e binaries)
-        run: cargo build
+        run: cargo build --locked
       - name: make smoke
         run: make smoke
 
@@ -162,7 +162,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/rust-setup
       - name: cargo build (debug, for smoke + e2e binaries)
-        run: cargo build
+        run: cargo build --locked
       - name: make e2e
         run: make e2e
 

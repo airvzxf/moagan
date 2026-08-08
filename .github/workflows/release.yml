@@ -13,9 +13,10 @@ on:
         required: true
         type: string
 
-# Releases need to write tags and create a GitHub Release page.
-permissions:
-  contents: write
+# Releases need to write tags and create a GitHub Release page, but only the
+# `publish` job does — the `build` job only reads repo contents. Scoping
+# `contents: write` to the `publish` job applies the principle of least
+# privilege at the workflow level.
 
 # Do not let two release jobs for the same tag run in parallel; the
 # second one would race the upload.
@@ -28,6 +29,8 @@ jobs:
     name: 'Build · release binary'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - name: Checkout at ref
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -127,6 +130,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Download bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
