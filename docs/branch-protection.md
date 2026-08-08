@@ -39,12 +39,12 @@ Existing rules in `protect-main`:
 |---|---|---|
 | `deletion` | ✓ | Prevents deleting `main`. |
 | `non_fast_forward` | ✓ | Prevents force-pushes to `main`. |
-| `pull_request` | ✓ | Requires a PR before merging. `required_approving_review_count: 0`, `dismiss_stale_reviews_on_push: true`, `required_review_thread_resolution: true`, allowed merge methods: `squash`, `rebase`. |
+| `pull_request` | ✓ | Requires a PR before merging. `required_approving_review_count: 0`, `dismiss_stale_reviews_on_push: true`, `require_code_owner_review: true`, `require_last_push_approval: true`, `required_review_thread_resolution: true`, allowed merge methods: `squash`, `rebase`. |
 | `required_linear_history` | ✓ | Enforces linear history. |
 | `required_status_checks` | ✓ | The 9 CI contexts from `ci.yml`. *See [Job IDs vs display names](#job-ids-vs-display-names) below.* |
-| **`block_force_pushes`** | optional | Redundant with `non_fast_forward`; keep the latter only. |
-| **`required_signatures`** | optional | Could be added to enforce signed commits at the ruleset level on top of the local `commit.gpgsign` config. |
-| **`pull_request.require_code_owner_review`** | optional | With `.github/CODEOWNERS` in place, this makes reviews from `@airvzxf` mandatory for any PR that touches a CODEOWNERS-listed path. |
+| `required_signatures` | ✓ | Every commit landing on `main` must be GPG-signed. Last-resort enforcement on top of the local `commit.gpgsign=true` config. |
+| **`block_force_pushes`** | ✗ skipped | Redundant with `non_fast_forward`; keep the latter only. |
+| **`required_approving_review_count > 0`** | ✗ skipped | Single-maintainer repo. Flip to `1` when co-maintainers are added. |
 
 The classic branch-protection endpoint returns HTTP 404
 (`/branches/main/protection`) — that endpoint is deprecated in favour of
@@ -206,27 +206,91 @@ Re-run the GET-modify-PUT cycle whenever:
   co-maintainers are added to `.github/CODEOWNERS`).
 - `.github/CODEOWNERS` is added or its paths change — the ruleset
   `pull_request` rule must be re-PUT to toggle
-  `require_code_owner_review` accordingly (see "Optional hardening" below).
+  `require_code_owner_review` accordingly (see [Optional hardening](#optional-hardeningskip-already-applied--kept-here-for-reference) below).
 
-## Optional hardening (apply after this PR lands)
+## Repo-level Actions hardening (applied)
 
-The ruleset accepts two further rules that the initial PR does not turn
-on. Apply them with the same GET-modify-PUT cycle:
+These live on the repo settings, not on the ruleset:
+
+```bash
+# 1. SHA-pinning required — every action referenced from a workflow
+#    must be pinned to a commit SHA. The legacy tag-style references
+#    (e.g. actions/checkout@v4) were already replaced by the
+#    ci(workflow) commit in the same dependency-hardening PR.
+gh api -X PUT /repos/airvzxf/moagan/actions/permissions \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  --input '{"enabled": true, "allowed_actions": "all", "sha_pinning_required": true}'
+
+# 2. Default workflow token is read-only. A workflow that needs
+#    write access must declare it explicitly in the workflow's
+#    `permissions:` block.
+gh api -X PUT /repos/airvzxf/moagan/actions/permissions/workflow \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  --input '{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": false}'
+
+# 3. Use the PR title as the squash-commit subject and the PR body as
+#    the commit body. Combined with `Closes #N` in the template, this
+#    preserves the issue link in the squash commit.
+gh api -X PATCH /repos/airvzxf/moagan \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  --input '{
+    "use_squash_pr_title_as_default": true,
+    "squash_merge_commit_title": "PR_TITLE",
+    "squash_merge_commit_message": "PR_BODY",
+    "delete_branch_on_merge": true,
+    "web_commit_signoff_required": true
+  }'
+```
+
+After these land, the GitHub UI will:
+
+- Reject any workflow whose `uses:` references a tag rather than a SHA.
+- Reject any workflow that requests a write scope without declaring it
+  in a `permissions:` block.
+- Use the PR title as the commit title on every squash merge.
+- Delete the source branch automatically after merge.
+- Require a web-editor sign-off for commits made via the GitHub web UI.
+
+
+
+## Optional hardening (skip / already applied — kept here for reference)
+
+### `required_signatures` — applied
 
 ```bash
 # 1. GET
 gh api /repos/airvzxf/moagan/rulesets/19743104 > /tmp/ruleset.json
 
-# 2. Add `required_signatures` and `require_code_owner_review`.
-#    The jq filter below is additive — it merges the new rules into the
-#    existing array instead of replacing it.
+# 2. Add required_signatures if missing
 jq '
   .rules |= (
     if (map(.type) | index("required_signatures")) then . else . + [{
       "type": "required_signatures"
     }] end
   )
-  | .rules |= (
+' /tmp/ruleset.json > /tmp/ruleset-new.json
+
+# 3. PUT (after stripping read-only fields: id, node_id, created_at,
+#    updated_at, _links, source_type, source, current_user_can_bypass)
+gh api \
+  --method PUT \
+  -H "Accept: application/vnd.github+json" \
+  /repos/airvzxf/moagan/rulesets/19743104 \
+  --input /tmp/ruleset-new.json
+```
+
+### `require_code_owner_review` — applied
+
+```bash
+# 1. GET
+gh api /repos/airvzxf/moagan/rulesets/19743104 > /tmp/ruleset.json
+
+# 2. Flip require_code_owner_review on the pull_request rule
+jq '
+  .rules |= (
     map(
       if .type == "pull_request" then
         .parameters.require_code_owner_review = true
@@ -235,27 +299,15 @@ jq '
   )
 ' /tmp/ruleset.json > /tmp/ruleset-new.json
 
-# 3. PUT
-gh api \
-  --method PUT \
-  -H "Accept: application/vnd.github+json" \
-  /repos/airvzxf/moagan/rulesets/19743104 \
-  --input /tmp/ruleset-new.json
-
-# 4. Verify
-gh api /repos/airvzxf/moagan/rulesets/19743104 \
-  --jq '{rules: [.rules[].type], pull_request: [.rules[] | select(.type=="pull_request") | .parameters.require_code_owner_review]}'
+# 3. PUT (same read-only field strip as above)
 ```
 
-After the PUT, the ruleset will:
+### `required_approving_review_count > 0` — NOT applied
 
-1. Reject any commit landing on `main` that is not GPG-signed (block of
-   last-resort enforcement on top of the local `commit.gpgsign=true`).
-2. Demand a review from `@airvzxf` on every PR that touches a
-   `CODEOWNERS`-listed path.
-
-Both are optional today (single-maintainer repo) but worth turning on
-before the first external contributor lands.
+Flip this when co-maintainers are added. With the current single-owner
+setup it would block every PR until the owner self-approves, which is
+the same as the current behaviour with `require_code_owner_review: true`
+minus the dry-run.
 
 ## Status badge
 
