@@ -32,6 +32,7 @@ use crate::llm::prompts::system_prompt;
 use crate::phases::Pipeline;
 use crate::phases::phase::{Phase, RunContext};
 use crate::phases::util::{read_json, write_json};
+use crate::ranking::RefineAction;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
@@ -433,6 +434,118 @@ pub async fn run_refine(
     let json_path = final_dir.join(format!("refined_{proposal_id}.json"));
     write_json(&json_path, &report)?;
     Ok(md_path)
+}
+
+/// Outcome of a [`run_refine_action`] invocation. Returned to the
+/// CLI dispatcher in `src/cli/mod.rs` so it can render a one-line
+/// summary to the operator without re-reading the manifest.
+#[derive(Debug, Clone)]
+pub struct RefineActionOutcome {
+    /// The action the dispatcher applied (echoed back for the
+    /// CLI's success message).
+    pub action: RefineAction,
+    /// For `TightenConstraint`, the new (post-dispatch) cumulative
+    /// `prohibited_decisions` vector that the CLI persisted back
+    /// to `manifest.json`. `None` for actions that do not mutate
+    /// the synthesis request.
+    pub prohibited_decisions: Option<Vec<String>>,
+    /// Whether the dispatcher emitted a `TelemetryEvent`. The CLI
+    /// forwards the event via `tracing::info!` regardless.
+    pub emitted_telemetry: bool,
+}
+
+/// `moagan refine --run-id <id> --action <action>` — apply a
+/// [`RefineAction`] to an existing run via
+/// [`crate::phases::refine::dispatch_refine_action`].
+///
+/// The dispatcher is a pure function (no I/O, no LLM, no DB).
+/// This wrapper:
+///
+/// 1. Loads the run's manifest via [`RefineContext::from_run`].
+/// 2. Injects the operator-supplied `verdict_detail` so
+///    `TightenConstraint` has something to append.
+/// 3. Calls `dispatch_refine_action` and receives a
+///    [`crate::phases::refine::RefineDispatchPlan`].
+/// 4. Applies the plan:
+///    - `TightenConstraint`: writes the augmented
+///      `prohibited_decisions` back to `manifest.json` (atomic)
+///      so a subsequent `moagan rerun` re-feeds the same
+///      constraint to the synthesizer.
+///    - `DropProposal`: prints a clear message — `DropProposal`
+///      needs a specific proposal id (the `RefineAction` enum
+///      does not carry one), so the CLI surfaces a "no specific
+///      proposal id supplied" note. The orchestrator that fired
+///      the verdict applies the drop itself.
+///    - `AddEvidence`, `RerunCritique`, `SplitProposal`,
+///      `MergeProposal`, `RequestHumanInput`: print a one-line
+///      summary; the dispatcher already logged via `tracing` for
+///      `SplitProposal` / `MergeProposal` and emitted the
+///      `StaleArtifact` event for `RequestHumanInput`.
+/// 5. Returns a [`RefineActionOutcome`] so the CLI dispatcher
+///    can render a single success line.
+pub async fn run_refine_action(
+    run_id: RunId,
+    action: RefineAction,
+    verdict_detail: Option<String>,
+    home: &Arc<MoaganHome>,
+) -> Result<RefineActionOutcome> {
+    let run_dir = home.run_dir(run_id);
+    if !run_dir.root().exists() {
+        return Err(Error::InvalidState(format!(
+            "run {run_id} not found under {}",
+            home.runs_dir().display()
+        )));
+    }
+
+    let mut ctx = crate::phases::refine::RefineContext::from_run(home, run_id)?;
+    if let Some(detail) = verdict_detail
+        && !detail.is_empty()
+    {
+        ctx.verdict_detail = detail;
+    }
+
+    let plan = crate::phases::refine::dispatch_refine_action(action, ctx);
+
+    // Apply the plan: for `TightenConstraint` the augmented
+    // `prohibited_decisions` is persisted back to `manifest.json`
+    // so the next `moagan rerun` picks it up. Other actions are
+    // either pure no-ops (the dispatcher already logged via
+    // `tracing`) or surface a side-effect we explicitly skip at
+    // the CLI layer (DropProposal needs a proposal id; the enum
+    // does not carry one).
+    let mut persisted_prohibited: Option<Vec<String>> = None;
+    if matches!(plan.action, RefineAction::TightenConstraint) {
+        let mut manifest = load_manifest(home, run_id)?;
+        manifest.prohibited_decisions = plan.synthesis_request.prohibited_decisions.clone();
+        manifest.updated_at = chrono::Utc::now();
+        manifest_blake3_recompute(&mut manifest);
+        write_manifest_to_disk(home, &manifest)?;
+        persisted_prohibited = Some(manifest.prohibited_decisions);
+    }
+
+    // Forward the dispatcher's optional telemetry event so the
+    // operator sees the `StaleArtifact` hit (RequestHumanInput).
+    plan.emit_telemetry();
+
+    let emitted_telemetry = plan.telemetry_event.is_some();
+    Ok(RefineActionOutcome {
+        action: plan.action,
+        prohibited_decisions: persisted_prohibited,
+        emitted_telemetry,
+    })
+}
+
+/// Recompute `manifest.manifest_blake3` after mutating fields. The
+/// BLAKE3 hash is computed over the canonical JSON with the
+/// `manifest_blake3` field blanked out, so callers must set the
+/// hash to `""` before serialising. This helper handles the cycle:
+/// blank → serialise → hash → stamp.
+fn manifest_blake3_recompute(manifest: &mut Manifest) {
+    let mut canonical = manifest.clone();
+    canonical.manifest_blake3 = String::new();
+    if let Ok(bytes) = serde_json::to_vec(&canonical) {
+        manifest.manifest_blake3 = blake3::hash(&bytes).to_hex().to_string();
+    }
 }
 
 /// `moagan rerank <run_id>` — re-run the rank phase against the

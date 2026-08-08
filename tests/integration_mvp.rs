@@ -246,6 +246,7 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
         created_at_iso: chrono::Utc::now().to_rfc3339(),
         last_resumed_at_iso: None,
         resume_count: 0,
+        prohibited_decisions: Vec::new(),
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     moagan::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;

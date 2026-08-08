@@ -424,6 +424,18 @@ pub struct Manifest {
     /// continue`. Default 0; saturates on overflow so a long-lived
     /// run cannot panic.
     pub resume_count: u32,
+    /// D.22.2 (v0.5 PR-08): cumulative `prohibited_decisions`
+    /// recorded by `moagan refine <run> tighten-constraint`. Each
+    /// entry is the `verdict_detail` from the
+    /// `RefineAction::TightenConstraint` dispatcher that the CLI
+    /// has persisted back to disk. Mirrors the
+    /// `SynthesisRequest::prohibited_decisions` block that the
+    /// dispatcher augments so a subsequent `moagan rerun` can
+    /// re-feed the same constraints. Empty for runs that pre-date
+    /// the field; legacy readers parse it as empty via
+    /// `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prohibited_decisions: Vec<String>,
 }
 
 /// Numeric manifest schema version. Bumped to `2` by F5 to add
@@ -2106,6 +2118,7 @@ mod tests {
             created_at_iso: "2026-01-01T00:00:00+00:00".into(),
             last_resumed_at_iso: None,
             resume_count: 0,
+            prohibited_decisions: Vec::new(),
         };
         let j = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&j).unwrap();

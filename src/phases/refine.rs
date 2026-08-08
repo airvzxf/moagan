@@ -36,8 +36,11 @@
 //! on those tests as a contract.
 
 use crate::discovery::epistemic_legacy::EpistemicLegacy;
-use crate::domain::Proposal;
 use crate::domain::synthesis_request::SynthesisRequest;
+use crate::domain::{Manifest, Proposal};
+use crate::error::Result;
+use crate::fs_layout::MoaganHome;
+use crate::ids::RunId;
 use crate::llm::Role;
 use crate::ranking::RefineAction;
 use crate::telemetry::event::TelemetryEvent;
@@ -97,6 +100,52 @@ impl RefineContext {
             legacy: EpistemicLegacy::empty(),
             verdict_detail: String::new(),
         }
+    }
+
+    /// Build a [`RefineContext`] from a run's manifest sidecar.
+    ///
+    /// The dispatcher needs the active synthesis request, the
+    /// epistemic legacy, and the verdict detail. The CLI only has
+    /// a `RunId`, so this constructor:
+    ///
+    /// 1. Loads `<home>/.runs/<run_id>/manifest.json` and uses
+    ///    `manifest.prohibited_decisions` (D.22.2 / v0.5 PR-08) as
+    ///    the seed for `synthesis_request.prohibited_decisions`. A
+    ///    subsequent `TightenConstraint` call appends the
+    ///    `verdict_detail`; the CLI persists the resulting vector
+    ///    back to the manifest so the next refinement accumulates.
+    /// 2. Loads the per-MOAGAN_HOME [`EpistemicLegacy`] so
+    ///    `AddEvidence` can append a "Sources from past runs"
+    ///    block to the augmented system prompt.
+    /// 3. Leaves `system_prompt` empty (the CLI does not have the
+    ///    next LLM call's system prompt in scope; the
+    ///    `AddEvidence` action appends to whatever the caller
+    ///    pre-populated).
+    /// 4. Leaves `proposal` defaulted (the dispatcher only mutates
+    ///    `proposal.replaced_by` for `DropProposal`, which the CLI
+    ///    handles separately — see `cli::continue_cmd::run_refine_action`).
+    /// 5. Leaves `verdict_detail` empty; the CLI caller injects the
+    ///    operator-supplied detail via the returned context.
+    ///
+    /// Returns `Err` when the manifest is missing or unparsable so
+    /// the CLI surfaces a clear error rather than silently
+    /// dispatching on empty state.
+    pub fn from_run(home: &MoaganHome, run_id: RunId) -> Result<Self> {
+        let run_dir = home.run_dir(run_id);
+        let manifest_path = run_dir.manifest();
+        let manifest: Manifest = crate::phases::util::read_json(&manifest_path)?;
+        let mut synthesis_request = SynthesisRequest::new();
+        // Carry forward any `prohibited_decisions` previously
+        // recorded by a `tighten-constraint` invocation so the next
+        // dispatch accumulates rather than resets.
+        synthesis_request.prohibited_decisions = manifest.prohibited_decisions.clone();
+        Ok(Self {
+            proposal: Proposal::default(),
+            synthesis_request,
+            system_prompt: String::new(),
+            legacy: EpistemicLegacy::load(),
+            verdict_detail: String::new(),
+        })
     }
 }
 
@@ -244,6 +293,7 @@ pub fn dispatch_refine_action(action: RefineAction, mut ctx: RefineContext) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Manifest;
 
     fn sample_proposal(id: &str) -> Proposal {
         Proposal {
@@ -332,5 +382,51 @@ mod tests {
         assert_eq!(plan_merge.action, RefineAction::MergeProposal);
         assert!(plan_merge.proposal.replaced_by.is_none());
         assert!(plan_merge.telemetry_event.is_none());
+    }
+
+    #[test]
+    fn refine_context_from_run_seeds_prohibited_decisions_from_manifest() {
+        use crate::atomic::writer::AtomicWriter;
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = RunId::new();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+
+        // Seed a manifest with two pre-existing prohibited decisions
+        // so `from_run` carries them forward into the context.
+        let manifest = Manifest {
+            schema_version: crate::domain::SCHEMA_VERSION.to_string(),
+            run_id,
+            mode: "fast".into(),
+            status: "completed".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            prohibited_decisions: vec!["monolith".into(), "sync_rpc".into()],
+            ..Default::default()
+        };
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        AtomicWriter::new()
+            .write(&run_dir.manifest(), &bytes)
+            .unwrap();
+
+        let mut ctx = RefineContext::from_run(&home, run_id).unwrap();
+        assert_eq!(
+            ctx.synthesis_request.prohibited_decisions,
+            vec!["monolith".to_owned(), "sync_rpc".to_owned()]
+        );
+
+        // A subsequent `TightenConstraint` call with a verdict_detail
+        // appends to the carried-forward list.
+        ctx.verdict_detail = "vague about auth model".into();
+        let plan = dispatch_refine_action(RefineAction::TightenConstraint, ctx);
+        assert_eq!(
+            plan.synthesis_request.prohibited_decisions,
+            vec![
+                "monolith".to_owned(),
+                "sync_rpc".to_owned(),
+                "vague about auth model".to_owned(),
+            ]
+        );
     }
 }
