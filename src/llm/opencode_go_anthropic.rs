@@ -30,6 +30,7 @@ use super::capabilities::ProviderCapabilities;
 use super::http::{body_from_request, build_client, build_headers, classify_status, retry_after};
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
+use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use super::wire::{Request, Response, Usage};
 
 /// OpenCode Go provider routed through the Anthropic-compatible
@@ -179,6 +180,13 @@ impl Provider for OpenCodeGoAnthropicProvider {
                             "Provider HTTP stage"
                         );
                         let resp = parsed.into_response();
+                        // D.29.2: enforce the centralised response
+                        // cap (10 MiB) on the decoded text. Done
+                        // here (not inside `into_response`) so the
+                        // helper signature stays total and the
+                        // tests for the deserialiser don't need to
+                        // stand up the cap machinery.
+                        check_size("response", resp.text.len(), MAX_RESPONSE_BYTES)?;
                         return Ok((status_code, resp));
                     }
                     let body = resp.text().await.unwrap_or_default();
@@ -374,6 +382,81 @@ mod tests {
             "got text: {:?}",
             resp.text
         );
+    }
+
+    /// D.29.2: the response cap (`MAX_RESPONSE_BYTES`, 10 MiB)
+    /// is enforced at the `send` boundary, not inside
+    /// `into_response` (the deserialiser stays total and pure).
+    /// The test pins the contract end-to-end: a response whose
+    /// joined text exceeds the cap surfaces as
+    /// `Error::PayloadTooLarge` so a runaway provider cannot
+    /// force the dispatcher to hold a 100 MiB string in memory.
+    #[test]
+    fn send_rejects_payloads_over_response_cap() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let oversized = "a".repeat(super::super::size_limits::MAX_RESPONSE_BYTES + 1);
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content": [{"type": "text", "text": oversized}],
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                    }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoAnthropicProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: server.uri(),
+                    model: "minimax-m3".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Sketch,
+                model: "minimax-m3".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1024,
+                temperature: Some(0.7),
+                top_p: Some(0.95),
+                response_schema: None,
+                stream: false,
+            };
+            let err = p
+                .send(&req)
+                .await
+                .expect_err("oversized body must fail with PayloadTooLarge");
+            match err {
+                Error::PayloadTooLarge(msg) => {
+                    assert!(
+                        msg.contains("response"),
+                        "label must propagate, got {msg:?}"
+                    );
+                    assert!(
+                        msg.contains(
+                            &(super::super::size_limits::MAX_RESPONSE_BYTES + 1).to_string()
+                        ),
+                        "byte count must propagate, got {msg:?}"
+                    );
+                }
+                other => panic!("expected Error::PayloadTooLarge, got {other:?}"),
+            }
+        });
     }
 
     #[test]

@@ -32,6 +32,7 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::llm::provider::Provider;
+use crate::llm::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use crate::llm::wire::{Request, Response, Usage};
 
 /// JSON shape sent to the `/v1/messages` endpoint.
@@ -197,6 +198,12 @@ impl AnthropicCompatProvider {
             cache_creation: usage.cache_creation_input_tokens.unwrap_or(0),
         };
         let truncated = matches!(parsed.stop_reason.as_deref(), Some("max_tokens"));
+        // D.29.2: enforce the centralised response cap (10 MiB)
+        // on the decoded text. Done before the Response struct
+        // is built so the helper can short-circuit via `?` and
+        // the variant does not need a `From` impl for the
+        // oversized case.
+        check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
         Ok(Response {
             text,
             finish_reason: parsed.stop_reason,
@@ -362,6 +369,78 @@ mod tests {
         assert_eq!(resp.usage.input_tokens, 12);
         assert_eq!(resp.usage.output_tokens, 34);
         assert!(!resp.truncated);
+    }
+
+    /// D.29.2: `decode_body` enforces the centralised response
+    /// cap (10 MiB). A response whose joined text exceeds the
+    /// cap fails with `Error::PayloadTooLarge(...)` before the
+    /// `Response` struct is built. The wire form carries the
+    /// `"response"` label so the post-mortem log can pinpoint
+    /// which budget blew.
+    #[test]
+    fn decode_body_rejects_payloads_over_response_cap() {
+        // Build a single text block whose length is one byte
+        // over the cap. JSON-escape overhead (`\n` -> `\\n`,
+        // quotes, etc.) is not counted — only the decoded `text`
+        // length is, per D.29.2.
+        let oversized = "a".repeat(super::super::size_limits::MAX_RESPONSE_BYTES + 1);
+        let body = serde_json::json!({
+            "content": [
+                {"type": "text", "text": oversized}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let err = AnthropicCompatProvider::decode_body(&bytes)
+            .expect_err("oversized body must fail with PayloadTooLarge");
+        match err {
+            Error::PayloadTooLarge(msg) => {
+                assert!(
+                    msg.contains("response"),
+                    "label must propagate, got {msg:?}"
+                );
+                assert!(
+                    msg.contains(&(super::super::size_limits::MAX_RESPONSE_BYTES + 1).to_string()),
+                    "byte count must propagate, got {msg:?}"
+                );
+            }
+            other => panic!("expected Error::PayloadTooLarge, got {other:?}"),
+        }
+    }
+
+    /// D.29.2: `decode_body` accepts a body whose joined text
+    /// sits exactly at the cap. The cap is an upper bound; a
+    /// byte-for-byte equality must NOT trigger `PayloadTooLarge`.
+    /// (Bigger than `MAX_RESPONSE_BYTES / 2` because JSON
+    /// escaping doubles the body bytes for printable ASCII; the
+    /// cap test runs against the decoded `text` length.)
+    #[test]
+    fn decode_body_accepts_payloads_at_response_cap() {
+        let at_cap = "a".repeat(super::super::size_limits::MAX_RESPONSE_BYTES);
+        let body = serde_json::json!({
+            "content": [
+                {"type": "text", "text": at_cap}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let resp = AnthropicCompatProvider::decode_body(&bytes).expect("at-cap body must succeed");
+        assert_eq!(
+            resp.text.len(),
+            super::super::size_limits::MAX_RESPONSE_BYTES
+        );
     }
 
     #[test]

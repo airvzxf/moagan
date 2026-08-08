@@ -127,10 +127,13 @@ pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
 ///   closest "non-actionable" bucket — `Truncated` is also
 ///   non-actionable in production).
 /// - Everything else (`InvalidArgs`, `InvalidApiKey`,
-///   `InvalidState`, `Cancelled`, `Cancel`) -> `Transport` (the
-///   classification is moot because the retry loop bails on the
-///   first error in these cases, but a deterministic mapping
-///   keeps the matrix total over `Error`).
+///   `InvalidState`, `Cancelled`, `Cancel`, `PayloadTooLarge`) ->
+///   `Transport` (the classification is moot because the retry
+///   loop bails on the first error in these cases, but a
+///   deterministic mapping keeps the matrix total over
+///   `Error`). `PayloadTooLarge` lands here because retrying the
+///   same call would just receive another oversized body — the
+///   cap is a contract, not a flaky transient.
 pub fn reason_from_error(err: &Error) -> RetryReason {
     match err {
         Error::Timeout(_) => RetryReason::Timeout,
@@ -145,7 +148,12 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::NeedsInput(_)
         | Error::DiscoveryQualityTooLow { .. }
         | Error::HostilePrompt(_)
+<<<<<<< HEAD
         | Error::PathTraversal(_)
+        | Error::PayloadTooLarge(_)
+=======
+        | Error::PayloadTooLarge(_)
+>>>>>>> 9759cf0 (feat(llm): centralized size caps (D.29.2))
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
     }
