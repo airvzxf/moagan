@@ -1,19 +1,47 @@
 //! Discovery mode — `discover_summary` phase.
 //!
 //! Reads every `final/cat_NN.json` and the `tags/index.json` tally
-//! to produce two summary files:
+//! to produce three summary files:
 //!
 //! - `final/summary.md` — executive index (counts + categories by
 //!   density).
 //! - `final/uncategorized.md` — when ≥ 3 sketches landed in
 //!   `uncategorized` (V4 §6.10).
+//! - `discovery.json` — discovery sub-manifest sealed with the
+//!   human checkpoint decision (V4 §6.11 + T01-06 §9.11).
+//!
+//! The checkpoint fires once, at the end of discovery, with four
+//! actions: `Approve | ReviewTopics | Block | ExportRaw`. The
+//! response is parsed into [`Resolution`] (Approved / Rejected /
+//! Modify) and the section written by this phase reflects whichever
+//! action fired:
+//!
+//! - `Approved` — `discovery.approved = true`,
+//!   `discovery.human_checkpoint.decision = "approve"`.
+//! - `Rejected` (the `block` token) — `discovery.approved = false`,
+//!   `discovery.human_checkpoint.decision = "block"`, and the
+//!   phase returns [`Error::Cancelled`] so the CLI surfaces the
+//!   abort to the operator (no point continuing past a blocked
+//!   discovery — V4 §6.11 explicit).
+//! - `Modify` (anything else, including the `review` / `export`
+//!   tokens with optional arguments) — the verbatim text is
+//!   persisted via [`crate::checkpoint::persist_modify_note`] so
+//!   the next `moagan discover` cycle can surface the operator's
+//!   intent. `approved` stays `false` (the user did not bless the
+//!   output) and the section's decision mirrors the raw text so
+//!   the audit trail records what was actually typed.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{CategoryDoc, DiscoverySummary, UncategorizedDoc};
+use crate::checkpoint::{
+    Checkpoint, CheckpointKind, CheckpointOpts, Resolution, persist_modify_note,
+};
+use crate::domain::{
+    CategoryDoc, DiscoverySection, DiscoverySummary, HumanCheckpointDecision, UncategorizedDoc,
+};
 use crate::error::{Error, Result};
 // `RunId` is referenced in the unit tests; the import is dead in the
 // production build but the test module re-exports it.
@@ -21,6 +49,13 @@ use crate::error::{Error, Result};
 use crate::ids::RunId;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::write_json;
+use crate::time::now_unix_secs;
+
+/// Filename of the discovery sub-manifest written by this phase.
+/// Lives at the run root (next to `manifest.json`, `brief.json`,
+/// etc.) so a `moagan inspect <run>` lookup does not need to know
+/// about discovery-specific directory layout.
+const DISCOVERY_SECTION_FILE: &str = "discovery.json";
 
 /// Path constants used by the summary phase. Captured for
 /// diagnostics and to keep the JSON index self-describing.
@@ -94,6 +129,64 @@ impl DiscoverSummaryPhase {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         Ok(docs)
+    }
+
+    /// Count the facet lists persisted under `facets/` by
+    /// `discover_facet`. Each list is one `<cat_id>_facets.json`,
+    /// so we count `.json` siblings of the dir. Missing / empty
+    /// directories collapse to `0` so the roll-up is honest on
+    /// truncated runs.
+    fn count_facet_lists(facets_dir: &Path) -> usize {
+        match std::fs::read_dir(facets_dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                .count(),
+            Err(_) => 0,
+        }
+    }
+
+    /// Read `contradictions/contradictions.json` and return the
+    /// number of `Contradiction` rows it carries. Missing file /
+    /// parse failure collapse to `0` — the count is for the
+    /// human-checkpoint prompt, not the audit trail.
+    fn count_contradictions(contradictions_dir: &Path) -> usize {
+        let path = contradictions_dir.join("contradictions.json");
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                match serde_json::from_slice::<Vec<crate::domain::Contradiction>>(&bytes) {
+                    Ok(items) => items.len(),
+                    Err(_) => 0,
+                }
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// Build the question text the operator sees at the discovery
+    /// checkpoint. Mirrors V4 §6.11 / T01-06 §9.11 — the four
+    /// actions are listed verbatim so a user who has not read
+    /// the docs can still pick one.
+    fn build_question(cat_count: usize, facet_count: usize, contradictions: usize) -> String {
+        format!(
+            "discovered {cat_count} categor{}, {facet_count} facet{}, \
+             {contradictions} contradiction{}; next action? \
+             [approve|review|block|export]",
+            if cat_count == 1 { "y" } else { "ies" },
+            if facet_count == 1 { "" } else { "s" },
+            if contradictions == 1 { "" } else { "s" },
+        )
+    }
+
+    /// Persist the [`DiscoverySection`] sidecar at
+    /// `<run_dir>/discovery.json`. The atomic writer keeps the
+    /// on-disk shape identical to every other Phase D sidecar
+    /// so the dashboard / inspect CLI can treat them
+    /// uniformly.
+    fn write_discovery_section(run_root: &Path, section: &DiscoverySection) -> Result<PathBuf> {
+        let path = run_root.join(DISCOVERY_SECTION_FILE);
+        write_json(&path, section)?;
+        Ok(path)
     }
 
     /// Render the executive summary as markdown.
@@ -204,7 +297,95 @@ impl Phase for DiscoverSummaryPhase {
             uncategorized_paths.push(uncat_md);
         }
 
-        let mut outputs: Vec<PathBuf> = vec![md_path];
+        // V4 §6.11 / T01-06 §9.11 — fire the single human
+        // checkpoint at the end of discovery. We collect the
+        // roll-up counts before the prompt so the user sees an
+        // honest "discovered N categories, M facets, K
+        // contradictions" framing instead of an opaque
+        // "approve? [Y/n]" line.
+        let cat_count = docs.len();
+        let facet_count = DiscoverSummaryPhase::count_facet_lists(&ctx.run_dir().facets());
+        let contradictions_count =
+            DiscoverSummaryPhase::count_contradictions(&ctx.run_dir().contradictions());
+        let question =
+            DiscoverSummaryPhase::build_question(cat_count, facet_count, contradictions_count);
+        let cp = Checkpoint::new(
+            CheckpointKind::Discovery {
+                cat_count,
+                facet_count,
+                contradictions: contradictions_count,
+            },
+            question.clone(),
+            true,
+        );
+        let opts = CheckpointOpts {
+            interactive: ctx.interactive,
+            // Allow tests (and CI scripts) to pre-canned a
+            // response without standing up a TTY. The
+            // `human.rs::ask` helper threads this through
+            // `parse_resolution` so the same y/yes/approve
+            // vocabulary works in both modes.
+            stdin_override: None,
+            telemetry: Some(ctx.telemetry.clone()),
+        };
+        let checkpoint_id = cp.id.clone();
+        let resolution = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
+        // Non-interactive runs (`--non-interactive`,
+        // `Mode::Batch`) short-circuit through
+        // [`crate::checkpoint::skip`] which persists a
+        // `<skipped:non_interactive>` marker on the
+        // checkpoint sidecar. We surface the same marker on
+        // the discovery sub-manifest so a dashboard query
+        // can distinguish "the operator pressed approve" from
+        // "the prompt was suppressed by the run mode". The
+        // `approved` flag stays `false` in that case: the
+        // operator never pressed approve, the run just did
+        // not have a human in the loop.
+        let (approved, decision) = if !ctx.interactive {
+            (false, "<skipped:non_interactive>".to_owned())
+        } else {
+            match &resolution {
+                Resolution::Approved => (true, "approve".to_owned()),
+                Resolution::Rejected => (false, "block".to_owned()),
+                Resolution::Modify(text) => (false, text.clone()),
+            }
+        };
+        // Persist the operator's verbatim text (anything that
+        // was not approve/block) as a modify note so the next
+        // discovery cycle can re-feed it into the LLM prompts
+        // (D.22.1 / catalog decision on modify-note plumbing).
+        if let Resolution::Modify(text) = &resolution {
+            persist_modify_note(ctx.run_dir().root(), "discover_summary", text)?;
+        }
+        let human_checkpoint = Some(HumanCheckpointDecision {
+            decision: decision.clone(),
+            at_unix: now_unix_secs(),
+            checkpoint_id: checkpoint_id.clone(),
+        });
+        let section = DiscoverySection {
+            cat_count,
+            facet_count,
+            contradictions: contradictions_count,
+            human_checkpoint,
+            approved,
+            schema_version: "v1".into(),
+        };
+        let discovery_path =
+            DiscoverSummaryPhase::write_discovery_section(ctx.run_dir().root(), &section)?;
+
+        // V4 §6.11 explicit: a blocked discovery cannot
+        // continue. Surface the abort to the caller so the CLI
+        // exits non-zero and the operator sees the decision in
+        // the log. We still wrote the sidecar above so the
+        // audit trail records the block even when the run
+        // terminates here.
+        if let Resolution::Rejected = &resolution {
+            return Err(Error::Cancelled(
+                "user blocked the discovery checkpoint".into(),
+            ));
+        }
+
+        let mut outputs: Vec<PathBuf> = vec![md_path, discovery_path];
         outputs.extend(uncategorized_paths);
 
         if outputs.is_empty() {

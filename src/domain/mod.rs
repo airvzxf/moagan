@@ -749,6 +749,65 @@ pub struct DiscoverySummary {
     pub schema_version: String,
 }
 
+/// Captured human-checkpoint decision for the discovery sub-pipeline
+/// (V4 §6.11 + T01-06 §9.11). The string form of `decision` is the
+/// `Resolution` action that fired: `approve`, `review`, `block`,
+/// `export`, `modify`, or `reject`. We keep it as a `String` (not an
+/// enum) so a future action (e.g. `rerun`) lands without a schema
+/// bump.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HumanCheckpointDecision {
+    /// Decision action (`approve`, `review`, `block`, `export`,
+    /// `modify`, `reject`).
+    pub decision: String,
+    /// Unix seconds at capture time. Mirrors
+    /// `HumanCheckpoint.at_unix` for the parent sidecar.
+    pub at_unix: i64,
+    /// Id of the parent `HumanCheckpoint` (`h_<uuid7>`). The JSON
+    /// sidecar is the canonical record; the field lets
+    /// `moagan inspect` correlate the decision back to the
+    /// verbatim question + response without re-parsing every
+    /// `checkpoints/h_<NN>.json`.
+    pub checkpoint_id: String,
+}
+
+/// Discovery sub-manifest written by `discover_summary` after the
+/// human checkpoint fires (V4 §6.11 + T01-06 §9.11). Persisted at
+/// `<run_dir>/discovery.json` so the post-execution review and the
+/// `moagan inspect` CLI can answer "did the user approve the
+/// discovery output?" without parsing every per-checkpoint sidecar.
+/// The on-disk filename is the "discovery manifest"; the structure
+/// is `Manifest.discovery` in spec-speak so the roadmap and the
+/// integration test can refer to `discovery.approved = true` and
+/// `discovery.human_checkpoint.decision = "approve"` uniformly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscoverySection {
+    /// Number of `final/cat_NN.json` documents produced.
+    pub cat_count: usize,
+    /// Number of facet lists in `facets/`.
+    pub facet_count: usize,
+    /// Number of `Contradiction` entries in
+    /// `contradictions/contradictions.json`.
+    pub contradictions: usize,
+    /// Captured human-checkpoint decision. `None` for runs that
+    /// pre-date the field (e.g. legacy sidecars from before
+    /// PR-20) and for non-interactive runs that short-circuited
+    /// the prompt to a `<skipped:non_interactive>` marker (the
+    /// `approved` flag captures that distinction).
+    pub human_checkpoint: Option<HumanCheckpointDecision>,
+    /// `true` when the user (or the CI script) approved the
+    /// discovery output. The default `false` covers runs that
+    /// exited via `<skipped:non_interactive>` so a dashboard
+    /// query can still distinguish "approved" from "never
+    /// asked".
+    pub approved: bool,
+    /// Schema version. Always `"v1"` for v0.5; bumping requires
+    /// a sidecar migration.
+    pub schema_version: String,
+}
+
 // =====================================================================
 // Phase D (Plan B sub-phase D) — domain types.
 //                                       See V4 §5.12, §5.13 and
