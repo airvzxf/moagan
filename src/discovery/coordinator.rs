@@ -29,15 +29,23 @@ use serde::{Deserialize, Serialize};
 use crate::cancel::Cancel;
 use crate::cli::Mode;
 use crate::domain::Brief;
+use crate::domain::Sketch;
+use crate::error::Error;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
+use crate::llm::prompts::discover_matrix_system_prompt;
 use crate::phases::cardinality::Cardinality;
 use crate::phases::phase::RunContext;
+use crate::phases::util::{read_json, write_json};
 use crate::telemetry::event::TelemetryEvent;
 
 use super::epistemic_legacy::EpistemicLegacy;
+use super::matrix::{ExplorationMatrix, MatrixCell};
 use super::persona_angle;
+use super::saturation::SaturationTracker;
+use super::sketch_retry::retry_sketch_extraction;
 use super::state::SketchLoopState;
+use super::stop_policy::{StopDecision, StopPolicy, StopReason};
 
 /// Public outcome summary used by callers (and tests).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +359,280 @@ impl DiscoveryCoordinator {
             legacy_used: !legacy.known_failures.is_empty(),
         })
     }
+
+    /// PR-17 (PR B.7 real driver): drives the sketch loop with the
+    /// supplied [`RunContext`], calling the LLM through the canonical
+    /// retry / parse / telemetry pipeline for every `(cell, sketch_index)`
+    /// pair. This replaces the placeholder body of
+    /// [`DiscoveryCoordinator::run`] for callers that have a real
+    /// [`RunContext`] available; the existing 19 unit tests keep
+    /// working because they exercise the placeholder path through
+    /// [`DiscoveryCoordinator::run`] / [`DiscoveryCoordinator::run_with_pickers`].
+    ///
+    /// When `target_override` is `Some(n)`, the matrix is sized from
+    /// `n` instead of `Cardinality::for_mode_default(mode).soft`. The
+    /// CLI uses this to honour `--cardinality` directly so the
+    /// matrix actually fans out to the operator-requested sketch
+    /// count (the mode-derived default is too small for discovery —
+    /// the spec mandates ≥80 sketches).
+    ///
+    /// # Flow
+    ///
+    /// 1. Build the [`ExplorationMatrix`] from `target` (either the
+    ///    caller-supplied `target_override` or the mode-derived
+    ///    `Cardinality::for_mode_default(mode).soft`). The matrix is
+    ///    persisted to `<run_dir>/exploration_matrix.json` so a
+    ///    follow-up run can verify reproducibility.
+    /// 2. Read the canonical brief from `<run_dir>/brief.json` (the
+    ///    file the upstream `intake` / `clarify` phases wrote).
+    ///    The brief is the user payload the LLM sees for every cell.
+    /// 3. Load any previously-persisted [`SketchLoopState`] so a
+    ///    crashed mid-loop run can resume from the last completed
+    ///    sketch. A missing or schema-mismatched file is normal on
+    ///    a fresh run and starts the loop from scratch.
+    /// 4. Initialize a [`SaturationTracker`] with the default
+    ///    [`StopPolicy`] so the loop observes the spec's
+    ///    `~60 sketches at 50% saturation` contract.
+    /// 5. Iterate over every `(cell, sketch_index)` pair. Each
+    ///    iteration:
+    ///    - Acquires a parallelism permit (`ctx.parallelism`) so the
+    ///      fan-out honours the operator-configured cap.
+    ///    - Drives the LLM call through
+    ///      [`retry_sketch_extraction`] (D.34.1 / PR-05) so the
+    ///      matrix's 3-attempt ceiling survives even in `fast` mode.
+    ///    - Persists the sketch to `<run_dir>/sketches/sk_<NNNN>.json`.
+    ///    - Records the completion in the [`SketchLoopState`] and
+    ///      atomically writes the state file so a crashed resume can
+    ///      recover from disk.
+    ///    - Updates the [`SaturationTracker`] and applies the
+    ///      [`StopDecision`]. A `Stop { Saturated }` decision emits
+    ///      a [`TelemetryEvent::DiscoverySaturated`] so the
+    ///      post-execution review can correlate the saturation trip
+    ///      with the cluster mean-similarity signal.
+    ///    - Yields cooperatively via `tokio::task::yield_now` so
+    ///      cancellation and the cancel-token probe remain prompt.
+    /// 6. On a clean stop (target reached OR `StopDecision::Stop`),
+    ///    deletes the persisted state file so the next run starts
+    ///    fresh. The sketches under `<run_dir>/sketches/` survive
+    ///    and feed the downstream tag / cluster / facet phases.
+    /// 7. Returns a [`DiscoveryOutcome`] that downstream code can
+    ///    inspect via `legacy_used` and the per-run counters.
+    pub async fn run_with_ctx(
+        self,
+        ctx: Arc<RunContext>,
+    ) -> Result<DiscoveryOutcome, CoordinatorError> {
+        self.run_with_ctx_and_target(ctx, None).await
+    }
+
+    /// Variant of [`DiscoveryCoordinator::run_with_ctx`] that
+    /// accepts an explicit cardinality target. The CLI uses this to
+    /// honour `--cardinality` directly; tests and callers that
+    /// want the mode-derived default should stick with
+    /// [`DiscoveryCoordinator::run_with_ctx`].
+    pub async fn run_with_ctx_and_target(
+        self,
+        ctx: Arc<RunContext>,
+        target_override: Option<usize>,
+    ) -> Result<DiscoveryOutcome, CoordinatorError> {
+        let DiscoveryCoordinator {
+            home,
+            run_id,
+            cancel,
+            brief: _,
+            legacy,
+            state,
+            mode,
+        } = self;
+
+        let run_dir = {
+            let handle = home.run_dir(run_id);
+            handle.ensure()?;
+            handle.root().to_path_buf()
+        };
+        let strategy = state.current_strategy.clone();
+        let mode_target = Cardinality::for_mode_default(mode).soft;
+        let target = target_override.unwrap_or(mode_target);
+
+        // 1. Build and persist the matrix so a follow-up run can
+        //    verify reproducibility without re-running the fan-out.
+        let matrix = ExplorationMatrix::default_for(target);
+        let matrix_path = run_dir.join("exploration_matrix.json");
+        write_json(&matrix_path, &matrix)?;
+        tracing::info!(
+            cells = matrix.cells(),
+            per_cell = matrix.sketches_per_cell,
+            target,
+            matrix_cardinality = matrix.cardinality(),
+            "DiscoveryCoordinator::run_with_ctx built exploration matrix"
+        );
+
+        // 2. Read the canonical brief from disk so the LLM payload
+        //    matches what the upstream intake + clarify phases
+        //    produced. The brief is always present on a fresh run
+        //    because the pipeline's pre-matrix phases (intake,
+        //    clarify) write it before the coordinator starts.
+        let brief: serde_json::Value = read_json(&home.run_dir(run_id).brief())?;
+        let brief_text = serde_json::to_string(&brief).map_err(Error::from)?;
+        let system = Arc::new(discover_matrix_system_prompt().to_owned());
+
+        let sketches_dir = run_dir.join("sketches");
+        std::fs::create_dir_all(&sketches_dir).map_err(Error::from)?;
+
+        // 3. Load (or initialize) the persisted state so a crashed
+        //    mid-loop run resumes from the last successful sketch
+        //    instead of redoing the whole fan-out.
+        let mut state = match SketchLoopState::load(&run_dir)? {
+            Some(persisted) => {
+                tracing::info!(
+                    completed = persisted.completed_sketches.len(),
+                    failed = persisted.failed_attempts,
+                    "DiscoveryCoordinator::run_with_ctx resuming from persisted state"
+                );
+                persisted
+            }
+            None => SketchLoopState::new(strategy),
+        };
+
+        // 4. Initialize the saturation tracker with the default
+        //    policy. The matrix's cardinality drives the target.
+        let policy = StopPolicy::default();
+        let mut tracker = SaturationTracker::with_policy(target.max(matrix.cardinality()), policy);
+
+        // Replay the already-completed count into the tracker so a
+        // resume picks up the right `completed` baseline.
+        tracker.record_completions(state.completed_sketches.len());
+
+        let per_cell = matrix.sketches_per_cell.max(1);
+        let cells: Vec<MatrixCell> = matrix.iter_cells().collect();
+        let total = cells.len() * per_cell;
+
+        // 5. Main loop: fan out every (cell, sketch_index) pair.
+        let mut n: usize = state.completed_sketches.len();
+        let mut stop_reason: Option<StopReason> = None;
+        for cell in cells.iter() {
+            for sketch_index in 0..per_cell {
+                if cancel.is_cancelled() {
+                    return Err(cancel.into_error().into());
+                }
+                if n >= total {
+                    break;
+                }
+                let _permit = ctx.parallelism.acquire().await?;
+                let id = format!("sk_{:04}", n);
+                let user = build_user_payload(&brief_text, cell, sketch_index);
+
+                let cell_for_angle = cell.clone();
+                let system_for_attempt = system.clone();
+                let user_for_attempt = user.clone();
+                let id_for_attempt = id.clone();
+                let ctx_for_attempt = ctx.clone();
+                let n_for_attempt = n;
+
+                let sketch_result = retry_sketch_extraction(3, || {
+                    let ctx = ctx_for_attempt.clone();
+                    let user = user_for_attempt.clone();
+                    let system = system_for_attempt.to_string();
+                    let id = id_for_attempt.clone();
+                    let cell = cell_for_angle.clone();
+                    let attempt = n_for_attempt;
+                    async move {
+                        let started_unix = crate::time::now_unix_secs();
+                        let raw = if attempt == 0 {
+                            ctx.call_with_retry(crate::llm::Role::Sketch, system, user, 0)
+                                .await?
+                        } else {
+                            ctx.call_uncached(
+                                crate::llm::Role::Sketch,
+                                system,
+                                user,
+                                started_unix,
+                                attempt as u32,
+                            )
+                            .await?
+                        };
+                        let schema_hint =
+                            crate::llm::prompts::system_prompt(crate::llm::Role::Sketch).to_owned();
+                        let mut sketch: Sketch = ctx.parse_model_json(
+                            crate::llm::Role::Sketch,
+                            &raw.text,
+                            &schema_hint,
+                        )?;
+                        if sketch.id.is_empty() {
+                            sketch.id = id;
+                        }
+                        sketch.angle = format!("{}:{}", cell.dimension_id, cell.facet_id);
+                        Ok::<Sketch, Error>(sketch)
+                    }
+                })
+                .await;
+
+                match sketch_result {
+                    Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
+                        let path = sketches_dir.join(format!("{}.json", sketch.id));
+                        write_json(&path, &sketch)?;
+                        state.record_completion(sketch.id.clone());
+                        state.save(&run_dir)?;
+                        tracker.record_completions(1);
+                        let decision = tracker.update(&[sketch], &[]);
+                        if let StopDecision::Stop { reason } = decision {
+                            tracing::info!(
+                                reason = ?reason,
+                                completed = tracker.completed,
+                                target = tracker.target,
+                                "DiscoveryCoordinator::run_with_ctx: tracker returned Stop"
+                            );
+                            if matches!(reason, StopReason::Saturated) {
+                                TelemetryEvent::DiscoverySaturated {
+                                    run_id: run_id.to_string(),
+                                    coverage: tracker.coverage(),
+                                    at_unix: crate::time::now_unix_secs(),
+                                }
+                                .emit();
+                            }
+                            stop_reason = Some(reason);
+                            break;
+                        }
+                    }
+                    Ok(_) => {
+                        state.record_failure();
+                        state.save(&run_dir)?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            sketch_id = %id,
+                            error = %e,
+                            "sketch extraction failed after retries; recording failure"
+                        );
+                        state.record_failure();
+                        state.save(&run_dir)?;
+                    }
+                }
+
+                n += 1;
+                tokio::task::yield_now().await;
+            }
+            if stop_reason.is_some() {
+                break;
+            }
+        }
+
+        // 6. Clean up the persisted state file on a clean stop
+        //    (either the target was reached or the tracker said
+        //    `Stop`). The sketches under <run_dir>/sketches/ stay
+        //    on disk so downstream phases can read them.
+        state.mark_done();
+        SketchLoopState::delete(&run_dir)?;
+
+        let _ = stop_reason; // Reserved for the future post-stop telemetry surface.
+        let _ = legacy;
+
+        Ok(DiscoveryOutcome {
+            run_id,
+            sketches_completed: state.completed_sketches.len(),
+            sketches_failed: state.failed_attempts as usize,
+            legacy_used: false,
+        })
+    }
 }
 
 /// Errors produced by [`DiscoveryCoordinator`].
@@ -361,6 +643,25 @@ pub enum CoordinatorError {
     /// out of the coordinator without bespoke mapping.
     #[error(transparent)]
     Error(#[from] crate::error::Error),
+}
+
+/// Build the user payload the LLM sees for one `(cell, sketch_index)`
+/// pair. Mirrors `DiscoverMatrixPhase::user_payload` so the coordinator
+/// and the flat-pipeline path emit equivalent prompts — a
+/// `moagan discover` run driven by the coordinator produces the same
+/// sketch text a flat-pipeline run would, which is the parity
+/// guarantee PR-17 ships.
+fn build_user_payload(brief: &str, cell: &MatrixCell, sketch_index: usize) -> String {
+    format!(
+        "{brief}\n\n\
+         Use dimension=\"{dim_id}\" and facet=\"{facet_id}\" (label: \"{label}\") and \
+         produce exactly one sketch (cell index {sketch_index}).",
+        brief = brief,
+        dim_id = cell.dimension_id,
+        facet_id = cell.facet_id,
+        label = cell.label,
+        sketch_index = sketch_index,
+    )
 }
 
 /// Returns the directory where run-specific sketch state lives.
@@ -961,5 +1262,256 @@ mod tests {
             .enable_all()
             .build()
             .expect("build current-thread runtime")
+    }
+
+    // -----------------------------------------------------------------
+    // PR-17 regression tests: the new `run_with_ctx` path actually
+    // drives LLM calls and persists sketches to disk. The 16
+    // pre-existing tests in this module only exercise the
+    // placeholder body (state.record_completion + yield_now);
+    // they would never have caught a wiring regression where the
+    // coordinator looped zero times or never wrote a sketch JSON.
+    // -----------------------------------------------------------------
+
+    /// Sketch payload the mock surfaces for every `Role::Sketch`
+    /// call. Mirrors the structure `DiscoverMatrixPhase::execute`
+    /// uses so the coordinator's parse path matches the flat
+    /// pipeline's byte-for-byte. The 35-char thesis clears the
+    /// 30-char minimum-thesis gate the matrix phase applies.
+    fn sketch_payload(id: &str) -> String {
+        format!(
+            r#"{{
+              "id": "{id}",
+              "thesis": "Use Rust and SQLite for a single binary backend with strong typing.",
+              "key_decisions": ["single binary", "embedded sqlite"],
+              "architecture_outline": "The CLI binary owns the database, the cache, and the agent registry.",
+              "assumptions": ["users are comfortable with one process per run"],
+              "strengths": ["simple deployment", "easy to test"],
+              "weaknesses": ["no horizontal scaling"],
+              "hard_constraint_check": {{"single_binary": true}},
+              "expected_validation": "Build a 1k-line Rust crate that compiles in <2s.",
+              "angle": "minimalist"
+            }}"#
+        )
+    }
+
+    /// Build a [`RunContext`] wired to the supplied scripted
+    /// provider. Mirrors `build_picker_ctx` but uses the standard
+    /// `mock` registry so the coordinator's LLM calls go through
+    /// the production `RunContext::call_with_retry` path.
+    fn build_run_ctx(home: MoaganHome, scripted: Arc<ScriptedProvider>) -> Arc<RunContext> {
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), scripted);
+        let cfg = Arc::new(crate::config::Config::default());
+        Arc::new(RunContext::new_with_config(
+            RunId::new(),
+            Arc::new(home),
+            Arc::new(registry),
+            "mock".to_owned(),
+            "mock-model".to_owned(),
+            crate::execution::Parallelism::new(1),
+            crate::telemetry::Telemetry::noop(),
+            String::new(),
+            "standard".to_owned(),
+            cfg,
+        ))
+    }
+
+    /// `run_with_ctx` actually drives LLM calls and persists one
+    /// `sk_<NNNN>.json` per `(cell, sketch_index)` pair. Without a
+    /// real LLM call the placeholder body would either panic on the
+    /// brief read or leave the sketches directory empty — this
+    /// test pins the happy path so a future refactor cannot silently
+    /// drop the LLM wiring.
+    #[test]
+    fn coordinator_run_with_ctx_produces_sketches() {
+        let rt = single_thread_runtime();
+        let scripted = ScriptedProvider::new(vec![
+            sketch_payload("sk_0000"),
+            sketch_payload("sk_0001"),
+            sketch_payload("sk_0002"),
+            sketch_payload("sk_0003"),
+            sketch_payload("sk_0004"),
+            sketch_payload("sk_0005"),
+            sketch_payload("sk_0006"),
+            sketch_payload("sk_0007"),
+        ]);
+        let scripted_for_ctx = scripted.clone();
+        let outcome = with_moagan_home("discovery-coordinator-with-ctx", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let run_id = RunId::new();
+            let run_dir = home.run_dir(run_id);
+            run_dir.ensure().unwrap();
+            let brief = serde_json::json!({
+                "problem": "Design a multi-tenant SaaS backend",
+                "objectives": ["Auth", "Storage"],
+                "constraints": ["Rust single binary"],
+                "non_goals": [],
+                "open_questions": [],
+                "raw_prompt": "Design a multi-tenant SaaS backend"
+            });
+            std::fs::write(run_dir.brief(), serde_json::to_vec_pretty(&brief).unwrap()).unwrap();
+
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                run_id,
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            let ctx = build_run_ctx(home.clone(), scripted_for_ctx);
+            rt.block_on(coordinator_inner.run_with_ctx(ctx))
+        })
+        .expect("run_with_ctx should succeed with mock provider");
+
+        let target = Cardinality::for_mode_default(Mode::Standard).soft;
+        // `ExplorationMatrix::default_for(target)` produces
+        // `4 dims × 2 facets × max(target/8, 1) = 8` sketches; the
+        // mode-derived soft target (7) is a lower bound the matrix
+        // rounds up to fill its 8 cells. The coordinator's actual
+        // fan-out is the matrix's cardinality (8), not the soft
+        // target (7), so the assertion uses the matrix-driven value.
+        let matrix_card =
+            crate::discovery::matrix::ExplorationMatrix::default_for(target).cardinality();
+        assert_eq!(
+            outcome.sketches_completed, matrix_card,
+            "matrix cardinality must be reached end-to-end (target={target}, matrix={matrix_card})"
+        );
+        assert!(
+            scripted.calls.load(std::sync::atomic::Ordering::SeqCst) >= matrix_card,
+            "coordinator must issue one LLM call per (cell, sketch_index) pair"
+        );
+    }
+
+    /// `run_with_ctx` persists each successful sketch as
+    /// `<run_dir>/sketches/sk_<NNNN>.json`. The audit fix-list
+    /// requires this to be the canonical location because the
+    /// downstream `discover_tag`, `discover_cluster`, and
+    /// `discover_facet` phases all read from that directory.
+    #[test]
+    fn coordinator_run_with_ctx_persists_sketches_to_disk() {
+        let rt = single_thread_runtime();
+        let scripted = ScriptedProvider::new(vec![
+            sketch_payload("sk_0000"),
+            sketch_payload("sk_0001"),
+            sketch_payload("sk_0002"),
+            sketch_payload("sk_0003"),
+            sketch_payload("sk_0004"),
+            sketch_payload("sk_0005"),
+            sketch_payload("sk_0006"),
+            sketch_payload("sk_0007"),
+        ]);
+        let scripted_for_ctx = scripted.clone();
+        with_moagan_home("discovery-coordinator-with-ctx-persists", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let run_id = RunId::new();
+            let run_dir = home.run_dir(run_id);
+            run_dir.ensure().unwrap();
+            let brief = serde_json::json!({
+                "problem": "Design a multi-tenant SaaS backend",
+                "objectives": ["Auth", "Storage"],
+                "constraints": ["Rust single binary"],
+                "non_goals": [],
+                "open_questions": [],
+                "raw_prompt": "Design a multi-tenant SaaS backend"
+            });
+            std::fs::write(run_dir.brief(), serde_json::to_vec_pretty(&brief).unwrap()).unwrap();
+
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                run_id,
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            let ctx = build_run_ctx(home.clone(), scripted_for_ctx);
+            let outcome = rt.block_on(coordinator_inner.run_with_ctx(ctx))?;
+            assert!(outcome.sketches_completed > 0);
+
+            let sketches_dir = run_dir.sketches();
+            let mut entries: Vec<_> = std::fs::read_dir(&sketches_dir)
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                .collect();
+            assert!(
+                !entries.is_empty(),
+                "coordinator must persist at least one sketch to disk; looked in {}",
+                sketches_dir.display()
+            );
+            entries.sort_by_key(|e| e.file_name());
+            let first_name = entries[0].file_name().into_string().unwrap();
+            assert!(
+                first_name.starts_with("sk_") && first_name.ends_with(".json"),
+                "sketch filenames must follow the sk_<NNNN>.json convention; got {first_name}"
+            );
+            Ok::<_, CoordinatorError>(())
+        })
+        .expect("run_with_ctx should succeed");
+    }
+
+    /// `run_with_ctx` cleans up the persisted `<run_dir>/.discovery_state.json`
+    /// on a clean exit so the next run starts fresh (same contract the
+    /// placeholder `run` enforces). Without this guard a stale state
+    /// file could trick a follow-up run into resuming from a phantom
+    /// baseline.
+    #[test]
+    fn coordinator_run_with_ctx_cleans_up_state_file() {
+        let rt = single_thread_runtime();
+        let scripted = ScriptedProvider::new(vec![
+            sketch_payload("sk_0000"),
+            sketch_payload("sk_0001"),
+            sketch_payload("sk_0002"),
+            sketch_payload("sk_0003"),
+            sketch_payload("sk_0004"),
+            sketch_payload("sk_0005"),
+            sketch_payload("sk_0006"),
+            sketch_payload("sk_0007"),
+        ]);
+        let scripted_for_ctx = scripted.clone();
+        with_moagan_home("discovery-coordinator-with-ctx-cleanup", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let run_id = RunId::new();
+            let run_dir = home.run_dir(run_id);
+            run_dir.ensure().unwrap();
+            let brief = serde_json::json!({
+                "problem": "Design a multi-tenant SaaS backend",
+                "objectives": ["Auth", "Storage"],
+                "constraints": ["Rust single binary"],
+                "non_goals": [],
+                "open_questions": [],
+                "raw_prompt": "Design a multi-tenant SaaS backend"
+            });
+            std::fs::write(run_dir.brief(), serde_json::to_vec_pretty(&brief).unwrap()).unwrap();
+
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                run_id,
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            let ctx = build_run_ctx(home.clone(), scripted_for_ctx);
+            rt.block_on(coordinator_inner.run_with_ctx(ctx))
+                .expect("run_with_ctx should succeed");
+
+            let state_path = home.runs_dir().join(run_id.to_string()).join(STATE_FILE);
+            assert!(
+                !state_path.exists(),
+                "completed run_with_ctx must delete the persisted state file"
+            );
+        });
     }
 }

@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::discovery::{DiscoveryCoordinator, DiscoveryOutcome};
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::MoaganHome;
@@ -57,6 +58,15 @@ use super::run::build_registry_for;
 /// 7. discover_extract (per-facet markdown).
 /// 8. discover_integrate (one `final/cat_NN.md` per cluster).
 /// 9. discover_summary (executive index + optional uncategorized).
+///
+/// PR-17 (Coordinator wire-up) preserves this builder as a
+/// "flat-pipeline" reference path. The CLI dispatcher
+/// ([`run`]) now drives the sketch fan-out through
+/// [`DiscoveryCoordinator::run_with_ctx`] and stitches the
+/// post-matrix phases back together via
+/// [`build_post_matrix_pipeline`]; the flat builder stays
+/// available for unit tests that want to inspect the canonical
+/// 10-phase order in isolation.
 pub fn build_discovery_pipeline(opts: &DiscoverOptions) -> Pipeline {
     Pipeline::new()
         .push(IntakePhase)
@@ -66,6 +76,33 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions) -> Pipeline {
             opts.facets_per_dimension,
             opts.cardinality,
         ))
+        .push(DiscoverTagPhase)
+        .push(DiscoverClusterPhase {
+            threshold: opts.cluster_threshold,
+        })
+        .push(DiscoverContradictPhase::default())
+        .push(DiscoverFacetPhase::with_cache(opts.cache_facets))
+        .push(DiscoverExtractPhase)
+        .push(DiscoverIntegratePhase)
+        .push(DiscoverSummaryPhase)
+}
+
+/// Build the pre-matrix pipeline (intake + clarify). PR-17 splits the
+/// discovery flow so the sketch fan-out is driven by
+/// [`DiscoveryCoordinator::run_with_ctx`], not by the pipeline runner.
+/// Keeping `intake` + `clarify` in the pipeline preserves the
+/// pause/resume hooks at those phase boundaries.
+fn build_pre_matrix_pipeline() -> Pipeline {
+    Pipeline::new().push(IntakePhase).push(ClarifyPhase)
+}
+
+/// Build the post-matrix pipeline (tag → cluster → … → summary).
+/// PR-17 keeps these phases in the flat pipeline runner; the
+/// coordinator owns only the matrix part. The pipeline's per-phase
+/// cancel token still surfaces as a `StopDecision` at the matrix
+/// boundary when the operator presses Ctrl-C.
+fn build_post_matrix_pipeline(opts: &DiscoverOptions) -> Pipeline {
+    Pipeline::new()
         .push(DiscoverTagPhase)
         .push(DiscoverClusterPhase {
             threshold: opts.cluster_threshold,
@@ -167,11 +204,57 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
     .with_interactive(!opts.non_interactive);
 
-    let pipeline = build_discovery_pipeline(&opts);
+    let pipeline = build_pre_matrix_pipeline();
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
     let _outputs = tokio::select! {
         result = &mut pipeline_future => result?,
+        _ = tokio::signal::ctrl_c() => {
+            ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
+            return Err(ctx.cancel().into_error());
+        }
+    };
+
+    // PR-17: drive the sketch fan-out through the discovery
+    // coordinator instead of the flat `DiscoverMatrixPhase`. The
+    // coordinator owns its own crash-recovery state machine
+    // (`SketchLoopState`) and applies the spec's saturation
+    // stop policy via `SaturationTracker`. The cancel token is
+    // the same handle the pre-matrix pipeline honoured, so a
+    // Ctrl-C during the matrix part still short-circuits the
+    // loop cleanly.
+    let coordinator = DiscoveryCoordinator::new(
+        (*home).clone(),
+        run_id,
+        ctx.cancel().clone(),
+        crate::domain::Brief::default(),
+        "deployment-model:serverless".to_owned(),
+        crate::cli::Mode::Fast,
+    );
+    let coordinator_ctx = Arc::new(ctx.clone());
+    let coordinator_future =
+        coordinator.run_with_ctx_and_target(coordinator_ctx.clone(), Some(opts.cardinality));
+    tokio::pin!(coordinator_future);
+    let outcome: DiscoveryOutcome = tokio::select! {
+        result = &mut coordinator_future => result.map_err(|e| match e {
+            crate::discovery::coordinator::CoordinatorError::Error(inner) => inner,
+        })?,
+        _ = tokio::signal::ctrl_c() => {
+            ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
+            return Err(ctx.cancel().into_error());
+        }
+    };
+    tracing::info!(
+        sketches_completed = outcome.sketches_completed,
+        sketches_failed = outcome.sketches_failed,
+        "DiscoveryCoordinator::run_with_ctx finished; running post-matrix pipeline"
+    );
+
+    let post_pipeline = build_post_matrix_pipeline(&opts);
+    let post_future = post_pipeline.run(&ctx);
+    tokio::pin!(post_future);
+    let _outputs = tokio::select! {
+        result = &mut post_future => result?,
         _ = tokio::signal::ctrl_c() => {
             ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
             return Err(ctx.cancel().into_error());
