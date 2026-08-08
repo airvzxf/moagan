@@ -30,11 +30,21 @@
 //! governs the parent-process env var.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 /// Process-wide mutex serialising tests that mutate `MOAGAN_HOME`.
 /// Held for the duration of [`with_moagan_home`].
-pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+///
+/// Uses `parking_lot::ReentrantMutex` (not `std::sync::Mutex`)
+/// because the self-test in this module
+/// (`with_moagan_home_sets_and_restores_env`) holds the lock for
+/// its own `unsafe { std::env::* }` mutations and then calls
+/// `with_moagan_home` (which itself locks). `std::sync::Mutex`
+/// would deadlock; `parking_lot::ReentrantMutex` increments the
+/// lock count on the same thread and unlocks at the matching
+/// drop. Sibling tests that do not hold the lock continue to be
+/// serialised correctly because the lock is observed across
+/// threads.
+pub static ENV_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMutex::new(());
 
 /// Run `f` with `MOAGAN_HOME` set to a unique tempdir.
 ///
@@ -51,7 +61,7 @@ pub fn with_moagan_home<F, R>(label: &str, f: F) -> R
 where
     F: FnOnce(&Path) -> R,
 {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _guard = ENV_LOCK.lock();
     let dir = unique_tempdir(label);
     let prev = std::env::var_os("MOAGAN_HOME");
     // SAFETY: serialised by ENV_LOCK; no other thread reads or
@@ -96,6 +106,13 @@ mod tests {
 
     #[test]
     fn with_moagan_home_sets_and_restores_env() {
+        // Hold the global ENV_LOCK for the entire test so the
+        // direct `unsafe { std::env::* }` mutations below (and the
+        // final assertions) cannot race with sibling tests that
+        // mutate MOAGAN_HOME via `with_moagan_home` (which itself
+        // serialises on the same lock).
+        let _guard = ENV_LOCK.lock();
+
         // Sanity check: starting from "unset", the helper sets
         // MOAGAN_HOME during the closure and removes it on the
         // way out.
