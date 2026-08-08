@@ -39,8 +39,21 @@ jobs:
           # https://github.com/github/codeql – it covers the lgtm.com
           # queries the public advisory database pulls from.
           queries: security-and-quality
-          # Don't fail the build if the autobuilder can't find a build
-          # system; we still want the static analysis surface.
+          # build-mode is hard-coded to `none` for Rust: the CodeQL
+          # CLI (v2.26.x as of writing) does NOT support `autobuild`
+          # for Rust — only `none` is accepted by the Rust extractor.
+          # The init step fails with:
+          #   "Rust does not support the autobuild build mode.
+          #    Please try using one of the following build modes
+          #    instead: none."
+          # if anything else is passed. The downstream effect is
+          # that the analysis is lexical / ast-only — there is no
+          # dataflow pass on Rust code at this time. Findings that
+          # would require dataflow (e.g. tainted input flowing
+          # through src/audit/proxy.rs into the HTTP forwarder,
+          # path traversal in src/audit/verify.rs) are not in
+          # CodeQL's surface area; the project's own audit contract
+          # tests in src/audit/ cover those instead.
           build-mode: none
 
       - name: Perform CodeQL Analysis
