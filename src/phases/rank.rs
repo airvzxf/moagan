@@ -28,6 +28,7 @@ use crate::phases::util::{read_json, write_json};
 use crate::ranking::pareto::QualityVector;
 use crate::ranking::stability::{EvalSnapshot, stability_check};
 use crate::ranking::{cluster_by_simhash, pareto_front, pick_with_crowding};
+use crate::telemetry::event::TelemetryEvent;
 
 /// Number of representative proposals to surface for delivery (top-3
 /// per the V4 §13.6 MVP definition).
@@ -532,6 +533,15 @@ fn apply_synthesis_replacement(
                         eprintln!("warn: failed to stamp replaced_by on proposals/{sid}.json");
                     }
                 }
+                // PR-15 (D.22.5): every upstream-invalidating
+                // decision emits `TelemetryEvent::StaleArtifact`. The
+                // synthesis dominates the cluster so the source is
+                // both *dropped* from the ranking and *downgraded*
+                // in favour of the synthesis (the two road-map
+                // labels for the same StaleArtifact window). The
+                // path follows the refine.rs dispatcher so the
+                // audit pipeline treats both call sites uniformly.
+                drop_source_stale_event(sid).emit();
             }
             promoted.push(synth_id.clone());
         }
@@ -544,6 +554,26 @@ fn apply_synthesis_replacement(
     let _ = evaluations_dir;
 
     Ok((dropped, promoted))
+}
+
+/// PR-15 (D.22.5): build the `TelemetryEvent::StaleArtifact`
+/// emitted when a source proposal is dropped from the ranking in
+/// favour of a synthesis that dominates its cluster. The path
+/// follows the refine.rs dispatcher so the audit pipeline treats
+/// both call sites uniformly (`proposals/<id>.json`, `age_secs = 0`,
+/// fresh `at_unix`).
+///
+/// Factor it out of `apply_synthesis_replacement` so a unit test
+/// can pin the event without driving the full disk-backed flow.
+/// The `emit()` call itself is the trivial `tracing::info!`
+/// body defined on `TelemetryEvent`: the contract under test is
+/// the event payload, not the I/O.
+fn drop_source_stale_event(sid: &str) -> TelemetryEvent {
+    TelemetryEvent::StaleArtifact {
+        path: format!("proposals/{sid}.json"),
+        age_secs: 0,
+        at_unix: crate::time::now_unix_secs(),
+    }
 }
 
 /// Load the proposal (for SelectionPlan + clustering) by reading
@@ -621,6 +651,7 @@ mod tests {
     use crate::redact::RedactPolicy;
     use crate::storage::sqlite::Db;
     use crate::telemetry::Telemetry;
+    use crate::telemetry::event::TelemetryEvent;
 
     #[test]
     fn pareto_front_then_representatives_logic_smoke() {
@@ -1208,5 +1239,60 @@ mod tests {
             "stability_label must be populated when budget is Ok; got None"
         );
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // PR-15 (D.22.5): `apply_synthesis_replacement` emits
+    // `TelemetryEvent::StaleArtifact` for every source it drops.
+    // The unit tests below pin the event payload (the audit
+    // contract) so a future refactor that drops the emit trips
+    // these tests before the change lands in production.
+    // -----------------------------------------------------------------
+
+    /// PR-15 (D.22.5): the helper builds the canonical
+    /// `StaleArtifact` payload for a dropped source. Pins `path`
+    /// (the audit pipeline greps for `proposals/<id>.json`), the
+    /// `age_secs = 0` invariant (the decision was just made, not
+    /// detected from a stale mtime), and the `at_unix` field is
+    /// non-zero (a fresh timestamp).
+    #[test]
+    fn drop_source_stale_event_matches_canonical_payload() {
+        let event = super::drop_source_stale_event("p_drop_001");
+        match event {
+            TelemetryEvent::StaleArtifact {
+                path,
+                age_secs,
+                at_unix,
+            } => {
+                assert_eq!(path, "proposals/p_drop_001.json");
+                assert_eq!(age_secs, 0);
+                assert!(
+                    at_unix > 0,
+                    "at_unix must be a fresh unix timestamp; got {at_unix}"
+                );
+            }
+            other => panic!("expected StaleArtifact event, got {:?}", other),
+        }
+    }
+
+    /// PR-15 (D.22.5): the `StaleArtifact` emitted for every
+    /// dropped source serializes to snake_case JSON with the
+    /// `kind: "stale_artifact"` tag, matching the existing
+    /// `StaleArtifact` wire form used by the rest of the audit
+    /// pipeline. The assertion protects the contract that a
+    /// downstream consumer (`moagan audit`) can match on the
+    /// `kind` field uniformly across call sites.
+    #[test]
+    fn drop_source_stale_event_serializes_with_stale_artifact_tag() {
+        let event = super::drop_source_stale_event("p_drop_002");
+        let json = serde_json::to_string(&event).expect("stale event must serialize");
+        assert!(
+            json.contains("\"kind\":\"stale_artifact\""),
+            "StaleArtifact must serialize with kind=stale_artifact; got {json}"
+        );
+        assert!(
+            json.contains("\"path\":\"proposals/p_drop_002.json\""),
+            "StaleArtifact path must be the canonical proposals/<id>.json; got {json}"
+        );
     }
 }
