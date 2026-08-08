@@ -1,0 +1,50 @@
+name: cargo-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly cadence so the advisory graph tracks RustSec in near real-time.
+    - cron: '37 5 * * *'
+  workflow_dispatch:
+
+# Read-only token. We only fetch public advisory data and read Cargo.lock.
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 'cargo-audit · RustSec advisories'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2
+        with:
+          tool: cargo-audit
+
+      - name: Run cargo audit (JSON)
+        # `--json` writes a stable report to stdout that we capture for the
+        # artifact; `--no-fetch` would skip the advisory DB refresh but we
+        # want the network call to make sure the daily cron is using the
+        # latest data.
+        run: cargo audit --json --no-dev 2>&1 | tee audit.json
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: cargo-audit-report
+          path: audit.json
+          retention-days: 14
+          if-no-files-found: warn
