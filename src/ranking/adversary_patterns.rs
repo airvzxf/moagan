@@ -26,11 +26,23 @@
 
 /// One of the seven adversary patterns the judge phase evaluates
 /// per proposal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AdversaryPattern {
     /// `(max - min)` of the per-judge scores is above the spread
     /// threshold. Catches a single dissenting judge whose score
     /// is far from the rest.
+    #[default]
     ScoreSpread,
     /// Standard deviation of the per-judge scores is above the
     /// dispersion threshold. Catches a panel that broadly
@@ -83,7 +95,7 @@ impl AdversaryPattern {
 /// Verdict for one pattern. The judge phase collects these into a
 /// `Vec<PatternVerdict>` and dispatches a [`super::refine_action::RefineAction`]
 /// for every entry with `fired == true`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PatternVerdict {
     /// Which pattern produced this verdict.
     pub pattern: AdversaryPattern,

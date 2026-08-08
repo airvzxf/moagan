@@ -134,6 +134,11 @@ impl Pipeline {
         // here without also updating `build_pipeline_for_mode`.
         // `decompose` is `deep`-only and lands after `route`; the
         // rest of the pipeline picks it up from `Mode::Deep`.
+        // `adversary` (D.22.1, D.12.5) lands between `judge` and
+        // `rank` so the pattern-based report runs on the freshly
+        // judged panel; the pipeline builder inserts it only when
+        // the run is `Mode::Deep` or `--adversary` is set, so modes
+        // that don't want the report keep the empty slot.
         &[
             "intake",
             "clarify",
@@ -148,6 +153,7 @@ impl Pipeline {
             "critique",
             "repair",
             "judge",
+            "adversary",
             "rank",
             "deliver",
         ]

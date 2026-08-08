@@ -16,9 +16,9 @@ use crate::fs_layout::{MoaganHome, RunDir, RunPaths};
 use crate::ids::RunId;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
-    ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DecomposePhase, DeliverPhase, GatePhase,
-    IntakePhase, JudgePhase, Pipeline, ProposePhase, RankPhase, RepairPhase, RoutePhase,
-    RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
+    AdversaryPhase, ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DecomposePhase,
+    DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline, ProposePhase, RankPhase,
+    RepairPhase, RoutePhase, RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
 };
 use crate::redact::{self, RedactPolicy};
 use crate::secret::SecretString;
@@ -50,6 +50,14 @@ pub struct RunOptions {
     /// (V4 §5.13 "no sustituye automáticamente"). Default `false`
     /// (replacement ON for `standard`/`deep`/`batch`).
     pub no_replace_sources: bool,
+    /// D.22.1, D.12.5: opt-in for the deterministic pattern-based
+    /// adversary pass that runs the seven patterns from
+    /// `src/ranking/adversary_patterns.rs::run_all_patterns`
+    /// against the just-judged proposals and writes
+    /// `rankings/adversary_report.json`. The pipeline also enables
+    /// this flag automatically for `Mode::Deep` runs (the only mode
+    /// where the report cost is amortised). Default `false`.
+    pub adversary: bool,
     /// Phase J: optional reference to an upstream context
     /// (`--context`). Resolved into a `ContextRef` before the
     /// pipeline starts.
@@ -216,6 +224,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         cfg,
         opts.mock_dir.clone(),
         opts.non_interactive,
+        opts.adversary,
         stub,
         opts.prompt.clone(),
         context_block,
@@ -260,6 +269,7 @@ pub async fn run_full_pipeline(
     cfg: &Config,
     mock_dir: Option<PathBuf>,
     non_interactive: bool,
+    adversary: bool,
     stub: Manifest,
     raw_prompt: String,
     context_block: Option<String>,
@@ -332,7 +342,14 @@ pub async fn run_full_pipeline(
     // every mode that runs SynthesizePhase (`standard`/`deep`/`batch`).
     // `fast` never runs synthesis so the flag is a no-op there.
     let replace_sources_enabled = !matches!(mode, Mode::Fast);
-    let pipeline = build_pipeline_for_mode(mode, cfg, replace_sources_enabled);
+    // D.22.1, D.12.5: the deterministic pattern-based adversary
+    // pass is opt-in. The CLI flag `--adversary` overrides the
+    // per-mode default; `Mode::Deep` enables the pass by default
+    // because it is the only mode where the seven-pattern cost is
+    // amortised across a meaningful judge panel. `fast` and
+    // `standard` keep the report off unless the operator asks.
+    let adversary_enabled = adversary || mode == Mode::Deep;
+    let pipeline = build_pipeline_for_mode(mode, cfg, replace_sources_enabled, adversary_enabled);
 
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
@@ -584,10 +601,19 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
 /// `SynthesizePhase`. `fast` skips synthesis entirely so the flag is
 /// off there; the rest default to ON. The CLI flag
 /// `--no-replace-sources` overrides the per-mode default.
+///
+/// Phase D follow-up (`adversary_enabled` flag): the deterministic
+/// pattern-based adversary pass (`AdversaryPhase`) is opt-in. The
+/// CLI flag `--adversary` overrides the per-mode default; `deep`
+/// enables it automatically because it is the only mode where the
+/// seven-pattern cost is amortised across a meaningful judge
+/// panel. The phase writes `rankings/adversary_report.json` with
+/// one section per [`AdversaryPattern`].
 pub fn build_pipeline_for_mode(
     mode: Mode,
     cfg: &Config,
     replace_sources_enabled: bool,
+    adversary_enabled: bool,
 ) -> Pipeline {
     let shape = pipeline_shape(mode, cfg);
     let proposals = shape.proposals;
@@ -648,8 +674,8 @@ pub fn build_pipeline_for_mode(
     //   so the rank phase can fold the synthesized proposal into
     //   the same ranking. The synthesized proposal competes with
     //   its sources per §5.13.
-    // - The adversary pass is a conditional branch inside
-    //   `JudgePhase` so it stays out of the pipeline vector.
+    // - The LLM-based adversary pass remains a conditional branch
+    //   inside `JudgePhase` so it stays out of the pipeline vector.
     // - `fast` skips both: the loop is meant to stay fast.
     if !matches!(mode, Mode::Fast) {
         pipeline = pipeline
@@ -666,6 +692,18 @@ pub fn build_pipeline_for_mode(
         .push(JudgePhase {
             judges,
             ..JudgePhase::default()
+        })
+        // D.22.1, D.12.5: deterministic pattern-based adversary
+        // pass. Inserted between `judge` and `rank` (the canonical
+        // order in `Pipeline::canonical_phase_order`) so the
+        // seven-pattern report runs on the freshly judged panel.
+        // Opt-in: the pipeline builder toggles `enable` based on
+        // `Mode::Deep` (default on) or the `--adversary` CLI flag.
+        // When disabled, the phase still writes a (mostly empty)
+        // sidecar so the dashboard distinguishes "ran with no
+        // proposals" from "phase was skipped".
+        .push(AdversaryPhase {
+            enable: adversary_enabled,
         })
         .push(RankPhase {
             config: cfg_arc.clone(),

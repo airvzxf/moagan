@@ -204,13 +204,19 @@ pub async fn run_rerun(
     //
     // The parent manifest's `parent_run_id`, `shared_brief_hash`,
     // `context_refs`, and `lineage_paths` are preserved on the
-    // stub so the post-pipeline rebuild round-trips them.
+    // stub so the post-pipeline rebuild round-trips them. The
+    // `adversary` flag is sourced from the resumed run's mode
+    // (deep → on; everything else → off) so the resumed run keeps
+    // the same per-mode wiring as the original.
+    let mode = super::run::parse_mode(&new_manifest.mode)?;
+    let adversary_enabled = mode == super::Mode::Deep;
     let final_manifest = super::run::run_full_pipeline(
         home.clone(),
         db.clone(),
         &cfg,
         None,
         true,
+        adversary_enabled,
         new_manifest,
         raw_prompt,
         context_block,
@@ -872,10 +878,13 @@ pub(crate) async fn resume_pipeline(
 
 /// Build the canonical pipeline for `mode`. Mirrors
 /// `super::run::build_pipeline_for_mode` without the per-run
-/// knobs (replace_sources_enabled, etc.) — a resumed run uses the
-/// defaults.
+/// knobs (replace_sources_enabled, adversary_enabled, etc.) — a
+/// resumed run uses the defaults. The `adversary_enabled` knob
+/// defaults to the same per-mode rule the `run` path uses
+/// (`Mode::Deep` → on; everything else → off) so a resumed deep
+/// run still gets the seven-pattern report.
 pub(crate) fn build_canonical_for_resume(cfg: &Config, mode: super::Mode) -> Pipeline {
-    super::run::build_pipeline_for_mode(mode, cfg, true)
+    super::run::build_pipeline_for_mode(mode, cfg, true, mode == super::Mode::Deep)
 }
 
 /// Parse the manifest's mode string into the `Mode` enum. Re-export
