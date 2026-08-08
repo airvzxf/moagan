@@ -20,8 +20,9 @@ D.13.x + D.34.x + D.1.13), **G** (JSON output paths A + B + C), y
 **K** (cuarta etapa K.1-K.4) **cerrados**. Tracks **E1-E10** (LLM
 wiring), **F1-F5** (storage + checkpoint + manifest), **M** (Tier A
 correctness), **J#5** (dashboard graph), **T1-T7** (telemetry + CLI +
-error) **cerrados** en la misma ventana. PRs **H1+H2+H3**
-(AnthropicCompat + invalidate ledger + BLAKE3 default, #204), **J1**
+error) **cerrados** en la misma ventana. PRs **H1+H2+H3** (AnthropicCompat + **invalidate ledger** + BLAKE3 default,
+#204; **invalidate ledger is documented as not implemented — see note below**),
+**J1**
 (Cardinality::for_mode + judge quorum, #205), **J3** (dashboard
 /api/lineage + K.4 auth, #212), y el **D.13.15 exhaustivo** (HardIncompat
 13 variantes, +this commit) **cerrados**. Crate version `0.4.0`
@@ -80,7 +81,15 @@ catálogo D.x o del roadmap prospectivo K.x.)
 | 26 | #201 | refine + llm | D.22.5 + Path C | `StaleArtifact` + `JsonRepairV2` re-call |
 | 27 | #202 | discovery | E8 wire | auto-invoke `PersonaPicker` + `AnglePicker` |
 | 28 | #203 | ranking + storage | — | `invalidate_downstream` + `SynthesisRequest` + v012 |
-| 29 | #204 | llm + storage | H1 + H2 + H3 | `AnthropicCompat.send` + invalidate ledger + BLAKE3 |
+| 29 | #204 | llm + storage | H1 + H2 + H3 | `AnthropicCompat.send` + **invalidate ledger** (no implementado, ver nota) + BLAKE3 |
+
+> **Documented as not implemented (v0.5 PR-13, docs-only resolution):**
+> `invalidate_ledger` does not exist in `src/` (`rg invalidate_ledger src/`
+> returns 0 hits). The H2 atomicity guarantee is provided by
+> `outbox_tx::record_with` (wired in `src/telemetry/mod.rs` and
+> `src/reconcile/mod.rs` since PR #198). H1 (`AnthropicCompat.send`) and
+> H3 (BLAKE3 default) in this row are real. Historical claim preserved
+> for the audit trail. See v0.5 audit (PR #253) and v0.5 PR-13.
 | 30 | #205 | domain + phases | J1 | `HardIncompat` extended + `Cardinality::for_mode` + quorum |
 | 31 | #210 | phases + cli | D.21.3 + D.28.3+4 | `SelectionPlan::keep_top/diverse/outlier` + startup reconcile sweep |
 | 32 | #212 | telemetry + storage + research | J3 | dashboard `/api/lineage` + v013 + K.4 auth |
