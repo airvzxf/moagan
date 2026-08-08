@@ -1,6 +1,11 @@
 # Moagan
 
 [![ci](https://github.com/airvzxf/moagan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/airvzxf/moagan/actions/workflows/ci.yml)
+[![release](https://github.com/airvzxf/moagan/actions/workflows/release.yml/badge.svg)](https://github.com/airvzxf/moagan/actions/workflows/release.yml)
+[![codeql](https://github.com/airvzxf/moagan/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/airvzxf/moagan/actions/workflows/codeql.yml)
+[![cargo-audit](https://github.com/airvzxf/moagan/actions/workflows/cargo-audit.yml/badge.svg?branch=main)](https://github.com/airvzxf/moagan/actions/workflows/cargo-audit.yml)
+[![Dependabot](https://img.shields.io/badge/dependabot-enabled-02569b?logo=dependabot)](https://github.com/airvzxf/moagan/blob/main/.github/dependabot.yml)
+[![AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://github.com/airvzxf/moagan/blob/main/LICENSE)
 
 > Multi-agent system for technical problems through massive solution exploration, curation, and ranking.
 

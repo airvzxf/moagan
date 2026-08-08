@@ -1,0 +1,41 @@
+name: Security report
+description: Private disclosure of a vulnerability. Do not use this for general support questions.
+title: "[security] "
+labels: ["security"]
+assignees: ["airvzxf"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Stop.** If you have a security-sensitive issue, please do
+        NOT continue this public form. Instead, follow the private
+        channel in `.github/SECURITY.md`:
+
+        - Email: `israel.alberto.rv@gmail.com` (prefix `[moagan security]`)
+        - GitHub Security Advisories: use the "Report a vulnerability"
+          button on the Security tab.
+
+        This issue form is only for non-sensitive triage questions
+        (e.g. "is X considered in scope?"). Anything that describes
+        an exploit or a fix should go through the private channel
+        above so we can coordinate disclosure.
+
+  - type: dropdown
+    id: triage_kind
+    attributes:
+      label: What kind of report is this?
+      options:
+        - "Out-of-scope question (handled in public)"
+        - "Confirmation that something is in scope (no exploit details)"
+        - "I have a sensitive report — please contact me privately"
+    validations:
+      required: true
+
+  - type: textarea
+    id: contact
+    attributes:
+      label: How should we reach you?
+      description: "Email or GitHub handle. We will not publish this."
+    validations:
+      required: false

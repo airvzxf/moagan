@@ -1,0 +1,22 @@
+# Issue chooser — moagan
+#
+# `blank_issues_enabled: false` disables the "Open a blank issue" path so
+# reporters always go through a template. The contact links below mirror
+# `.github/SECURITY.md`; GitHub will display them as a "Helpful resources"
+# sidebar in the issue picker.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security disclosure (private)
+    url: https://github.com/airvzxf/moagan/security/advisories/new
+    about: |
+      Report a vulnerability here. *Do not* open a public issue for
+      security-sensitive findings.
+  - name: Discussions / Q&A
+    url: https://github.com/airvzxf/moagan/discussions
+    about: |
+      Open-ended questions and design conversations go in GitHub
+      Discussions (currently disabled at the repo level; until
+      Discussions are enabled, please ping the maintainer in an
+      issue).

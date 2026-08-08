@@ -1,0 +1,159 @@
+name: release
+
+on:
+  push:
+    # Conventional SemVer tag. The 'v' prefix is required because the
+    # AGENTS.md release flow uses `git tag -s vX.Y.Z` locally.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.5.0). Must exist on the remote.'
+        required: true
+        type: string
+
+# Releases need to write tags and create a GitHub Release page.
+permissions:
+  contents: write
+
+# Do not let two release jobs for the same tag run in parallel; the
+# second one would race the upload.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 'Build · release binary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout at ref
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.97.1
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cache-on-failure: true
+
+      - name: Build release binary (stripped)
+        run: cargo build --release --locked
+
+      - name: Locate binary
+        id: locate
+        run: |
+          set -euo pipefail
+          BIN="${{ github.workspace }}/target/release/moagan"
+          if [[ ! -x "$BIN" ]]; then
+            echo "ERROR: release binary not found at $BIN" >&2
+            exit 1
+          fi
+          echo "path=$BIN" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c '%s' "$BIN")" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA-256 checksum
+        id: sha256
+        run: |
+          BIN="${{ steps.locate.outputs.path }}"
+          pushd "$(dirname "$BIN")"
+          sha256sum "$(basename "$BIN")" > "$BIN.sha256"
+          echo "sha256=$BIN.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA-512 checksum
+        id: sha512
+        run: |
+          BIN="${{ steps.locate.outputs.path }}"
+          pushd "$(dirname "$BIN")"
+          sha512sum "$(basename "$BIN")" > "$BIN.sha512"
+          echo "sha512=$BIN.sha512" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM (CycloneDX JSON)
+        # Anchore's sbom-action builds a CycloneDX JSON in-tree. The
+        # default 'docker' build-mode would spin Docker; we use 'auto'
+        # which detects cargo and produces a Cargo-aware SBOM.
+        uses: anchore/sbom-action@fc46e51fd3cb168ffb36c6d1915723c47db58abb # v0.17.7
+        with:
+          format: cyclonedx-json
+          artifact-name: moagan.sbom.cdx.json
+          # 'auto' lets the action pick cargo if it sees a Cargo.toml
+          # and is the recommended setting per the action README.
+          build-mode: auto
+
+      - name: Smoke gate (binary sanity)
+        # The release artifact must at least load and reach the clap
+        # parser before it gets uploaded. This is the "release-smoke"
+        # pattern from ftp-deployment-action: catch a broken build
+        # before signing & publishing. Full smoke (make smoke) runs
+        # in the regular CI pipeline; here we only need to know the
+        # binary is well-formed.
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.locate.outputs.path }}"
+          "$BIN" --version
+          "$BIN" --help | head -20
+
+      - name: Bundle artifacts
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.locate.outputs.path }}"
+          ART_DIR="${{ runner.temp }}/release-artifacts"
+          mkdir -p "$ART_DIR"
+          cp "$BIN" "$ART_DIR/moagan"
+          cp "$BIN.sha256" "$ART_DIR/moagan.sha256"
+          cp "$BIN.sha512" "$ART_DIR/moagan.sha512"
+          cp "${{ github.workspace }}/moagan.sbom.cdx.json" "$ART_DIR/"
+          ls -la "$ART_DIR"
+
+      - name: Upload bundle for the publisher job
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: moagan-release-bundle
+          path: ${{ runner.temp }}/release-artifacts/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: 'Publish · GitHub Release'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
+        with:
+          name: moagan-release-bundle
+          path: release/
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "moagan v${{ steps.meta.outputs.version }}"
+          generate_release_notes: true
+          # Upload all artefacts in the bundle (binary + sha256 + sha512 + SBOM).
+          files: |
+            release/moagan
+            release/moagan.sha256
+            release/moagan.sha512
+            release/moagan.sbom.cdx.json
+          fail_on_unmatched_files: true
+          # Mark this as the latest release unless the tag is a pre-release.
+          prerelease: ${{ contains(steps.meta.outputs.version, '-') }}
