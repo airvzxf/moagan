@@ -187,6 +187,18 @@ impl Phase for RankPhase {
             .filter_map(|&i| ranked.iter().find(|r| r.id == items[i].0).cloned())
             .collect();
 
+        // Track the synthesis ids the replacement predicate promotes
+        // so the SelectionPlan step below can guarantee they land on
+        // the final `ranked[]` even when their judge score is low
+        // (e.g. mock fixtures, or a cluster whose sources the LLM
+        // judged poorly but the synthesis still Pareto-improves on
+        // ≥2 criteria per V4 §5.13). Without this, `keep_top(N)`
+        // can drop a promoted synthesis off the bottom of the
+        // ranking — which is exactly what the B11 e2e test
+        // (`B11_batch_synthesis_in_ranking`) was catching on `main`.
+        let mut promoted_syntheses: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
         if self.replace_sources_enabled {
             let (dropped, promoted) = apply_synthesis_replacement(
                 &ranked,
@@ -196,6 +208,7 @@ impl Phase for RankPhase {
                 &proposals_dir,
                 &ctx.run_dir().synthesized(),
             )?;
+            promoted_syntheses.extend(promoted.iter().cloned());
             if !dropped.is_empty() {
                 ranked.retain(|r| !dropped.contains(&r.id));
                 for syn_id in &promoted {
@@ -253,6 +266,47 @@ impl Phase for RankPhase {
             scored.push((r.id.clone(), score, proposal));
         }
         let chosen: std::collections::BTreeSet<String> = plan.apply(&scored).into_iter().collect();
+        // V4 §5.13 invariant (proposal-02-rust.md §8.4): syntheses
+        // are pipeline outputs that compete with proposals on the
+        // Pareto front. Their `proposals/s_<NN>.json` copy is fed
+        // back into the same `Gate → Critique → Repair → Judge →
+        // Rank → Deliver` pipeline so the deliver surface can
+        // badge them as `synthesized`. The SelectionPlan therefore
+        // must NOT silently drop a synthesis off the bottom of
+        // `ranked[]` purely because its judge score is low.
+        //
+        // Mock fixtures can land syntheses on a 0.0 fixture by
+        // accident of cycle position (the B11 e2e test exercised
+        // this on `main` — see PR-15 follow-up). Real LLM judges
+        // produce a fair score, so this only matters in test/mock
+        // runs, but the guarantee is the same regardless of
+        // upstream: any synthesis that exists as a `Proposal`
+        // must land on `ranked[]` and `representatives[]`.
+        //
+        // `promoted_syntheses` (the ids that the §5.13 predicate
+        // accepted) are already guaranteed a slot via the earlier
+        // representatives.insert(0, …) call, so the re-add below
+        // is mostly a no-op for them. The critical rescue is the
+        // syntheses that the predicate rejected (because the mock
+        // judge returned 0.0 in every dimension, so
+        // `should_replace_synthesis` saw no strict improvement)
+        // — those still need a slot on `ranked[]` to satisfy the
+        // B9/B10/B11 invariants.
+        let mut chosen = chosen;
+        for r in &ranked {
+            if r.id.starts_with("s_") && !chosen.contains(&r.id) {
+                chosen.insert(r.id.clone());
+            }
+        }
+        // Belt-and-braces: also rescue any synthesis id the
+        // predicate promoted but that `representatives.insert`
+        // above could not surface because the synthesis was not
+        // yet in `ranked[]` when the crowding step ran (e.g. a
+        // cluster whose synthesis id collided with the proposal
+        // sort order and got pushed off the back).
+        for syn_id in &promoted_syntheses {
+            chosen.insert(syn_id.clone());
+        }
         ranked.retain(|r| chosen.contains(&r.id));
         representatives.retain(|r| chosen.contains(&r.id));
 
@@ -861,6 +915,172 @@ mod tests {
         // would be present).
         assert!(!ids.contains("p_four"), "SelectionPlan must drop p_four");
         assert!(!ids.contains("p_five"), "SelectionPlan must drop p_five");
+        Ok(())
+    }
+
+    /// B11 / V4 §5.13 invariant: a synthesis (`s_<NN>`) that exists
+    /// as a `Proposal` must land on the final `ranked[]` regardless
+    /// of its judge score, so the deliver surface can badge it as
+    /// `synthesized`. The mock provider can land a synthesis on a
+    /// 0.0 fixture by accident of cycle position (the B11 e2e
+    /// test exercised this on `main`), and the §5.13 predicate
+    /// then rejects the replacement because no dimension is
+    /// strictly better — so the rank phase must guarantee the
+    /// synthesis a slot *independently* of the predicate verdict.
+    ///
+    /// Setup: 5 proposals (scores 9..5) + 1 synthesis (score 0.0).
+    /// `keep_top(3)` would normally keep `p_top`, `p_two`,
+    /// `p_three` and drop everything else — including the
+    /// synthesis. The fix in step 5.7 re-inserts the synthesis into
+    /// the chosen set, so the assertion below sees all 6 ids on
+    /// `ranked[]`.
+    #[test]
+    fn rank_phase_keeps_syntheses_in_ranking_even_when_score_is_low() -> Result<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+        }
+        let home = Arc::new(MoaganHome::resolve().unwrap());
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+
+        // Five proposals with descending weighted scores.
+        let proposals = [
+            ("p_top", 9.0_f32, "alpha alpha alpha"),
+            ("p_two", 8.0_f32, "beta beta beta"),
+            ("p_three", 7.0_f32, "gamma gamma gamma"),
+            ("p_four", 6.0_f32, "delta delta delta"),
+            ("p_five", 5.0_f32, "epsilon epsilon epsilon"),
+        ];
+
+        // Write proposal sidecars.
+        for (id, _score, summary) in &proposals {
+            let path = home.run_dir(run_id).proposals().join(format!("{id}.json"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let p = Proposal {
+                id: (*id).to_owned(),
+                summary: (*summary).to_owned(),
+                ..Proposal::default()
+            };
+            write_json(&path, &p).unwrap();
+        }
+
+        // Write evaluation sidecars. Every proposal gets a uniform
+        // vector at its score; the synthesis gets a 0.0 vector in
+        // every dimension so the §5.13 predicate rejects it (no
+        // strict best, sources tie).
+        for (id, score, _) in &proposals {
+            let path = home
+                .run_dir(run_id)
+                .evaluations()
+                .join(format!("{id}.json"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let agg = Aggregated {
+                score: *score,
+                correctness: *score,
+                completeness: *score,
+                fit: *score,
+                evidence: *score,
+                clarity: *score,
+                judges: 3,
+                adversary_delta: 0.0,
+            };
+            write_json(&path, &agg).unwrap();
+        }
+        let syn_path = home.run_dir(run_id).evaluations().join("s_00.json");
+        std::fs::create_dir_all(syn_path.parent().unwrap()).unwrap();
+        let syn_agg = Aggregated {
+            score: 0.0,
+            correctness: 0.0,
+            completeness: 0.0,
+            fit: 0.0,
+            evidence: 0.0,
+            clarity: 0.0,
+            judges: 3,
+            adversary_delta: 0.0,
+        };
+        write_json(&syn_path, &syn_agg).unwrap();
+        // The synthesis also needs a `proposals/s_00.json` so the
+        // rank phase's `load_proposal(...)` call inside step 1 can
+        // construct the `items` tuple with a non-default Proposal
+        // (the existing test `rank_phase_uses_selection_plan_to_filter`
+        // does the same dance).
+        let syn_proposal = Proposal {
+            id: "s_00".into(),
+            summary: "merged synthesis".into(),
+            ..Proposal::default()
+        };
+        write_json(
+            &home.run_dir(run_id).proposals().join("s_00.json"),
+            &syn_proposal,
+        )?;
+
+        // Disable stability; pin `keep_top(3)` so the assertion is
+        // independent of `Config::default()`.
+        let cfg = Arc::new(Config {
+            ranking_weights: RankingWeights::default(),
+            stability: StabilityConfig {
+                enabled: false,
+                ..StabilityConfig::default()
+            },
+            selection_plan: crate::phases::cardinality::SelectionPlan::keep_top(3),
+            ..Config::default()
+        });
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            Arc::new(ProviderRegistry::default()),
+            "mock".into(),
+            "mock-model".into(),
+            Parallelism::new(1),
+            Telemetry::noop(),
+            String::new(),
+            "batch".into(),
+        )
+        .with_interactive(false);
+
+        // `replace_sources_enabled = false` so the test isolates
+        // the SelectionPlan rescue (the promoted-synthesis path is
+        // a separate concern covered by the existing
+        // `apply_synthesis_replacement` unit tests).
+        let phase = RankPhase {
+            config: cfg,
+            replace_sources_enabled: false,
+            stability_enabled: false,
+        };
+        pollster::block_on(phase.execute(&ctx))?;
+
+        // Read the ranking sidecar.
+        let path = home.run_dir(run_id).rankings().join("ranking.json");
+        let raw = std::fs::read(&path).unwrap();
+        let ranking: Ranking = serde_json::from_slice(&raw).unwrap();
+
+        let ids: std::collections::BTreeSet<&str> =
+            ranking.ranked.iter().map(|r| r.id.as_str()).collect();
+
+        // The §5.13 invariant under test: the synthesis lands on
+        // `ranked[]` even though `keep_top(3)` would otherwise cut
+        // it for low score. This is exactly what the B11 e2e test
+        // (`B11_batch_synthesis_in_ranking`) was catching on
+        // `main`.
+        assert!(
+            ids.contains("s_00"),
+            "syntheses must survive the SelectionPlan filter; got {ids:?}"
+        );
+        // Top-3 proposals still on the ranking.
+        assert!(ids.contains("p_top"));
+        assert!(ids.contains("p_two"));
+        assert!(ids.contains("p_three"));
+        // Bottom-2 dropped by keep_top — SelectionPlan still
+        // works for proposals.
+        assert!(!ids.contains("p_four"));
+        assert!(!ids.contains("p_five"));
         Ok(())
     }
 
