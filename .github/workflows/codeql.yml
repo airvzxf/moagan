@@ -22,7 +22,12 @@ jobs:
   analyze:
     name: 'CodeQL · rust'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Autobuild runs `cargo build` which can take 5–15 min on cold
+    # cache; the analysis pass adds another 2–5 min. 45 min gives
+    # comfortable headroom while still failing loudly if something
+    # regresses (vs the 30 min that would mask a slow analysis as a
+    # timeout).
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -39,9 +44,21 @@ jobs:
           # https://github.com/github/codeql – it covers the lgtm.com
           # queries the public advisory database pulls from.
           queries: security-and-quality
-          # Don't fail the build if the autobuilder can't find a build
-          # system; we still want the static analysis surface.
-          build-mode: none
+          # Autobuild runs `cargo build` automatically for Rust
+          # (CodeQL detects Cargo.toml). This unlocks dataflow
+          # analysis over the actual compiled code, catching
+          # issues the lexical `none` mode misses (e.g. tainted
+          # data flowing into the audit proxy's HTTP forwarder,
+          # path traversal in verify.rs, command injection in the
+          # cgroup sandbox).
+          #
+          # Trade-off: autobuild takes longer than `none` because
+          # the build itself runs. The 45-minute timeout above
+          # accounts for both the build (5–15 min cold cache) and
+          # the analysis pass (2–5 min). The shared Swatinem/rust-
+          # cache from .github/actions/rust-setup keeps the cargo
+          # target dir warm across jobs in this workflow.
+          build-mode: autobuild
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e # v3
