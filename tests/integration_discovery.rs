@@ -827,3 +827,236 @@ fn error_discovery_quality_too_low_serializes_with_counts() {
         "DiscoveryQualityTooLow must map to INVALID_STATE"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D.13.9 — `TaggerThreshold` consumer wiring.
+//
+// The PR wires `src/discovery/tagger_threshold::TaggerThreshold` into the
+// `discover_tag` phase so the similarity cutoff the tagger applies to
+// demote a sketch to `"uncategorized"` is configurable via
+// `[discovery] tag_threshold = <0..=1>` in `config.toml` instead of the
+// previously hard-coded `0.6`.
+//
+// The tests below pin the contract end-to-end:
+//
+// 1. A TOML with `[discovery] tag_threshold = 0.42` round-trips into the
+//    `Config` struct without losing the value (so `moagan discover
+//    --config-path tmp.toml --provider mock` honours the operator override).
+// 2. With `tag_threshold = 0.42` a sketch whose `similarity_to_category`
+//    is `0.5` (between `0.42` and the old default `0.6`) keeps its
+//    `primary` tag instead of being demoted to `"uncategorized"`.
+// 3. With the default `tag_threshold = 0.6` the same `0.5`-similarity
+//    sketch is demoted to `"uncategorized"`. The pair proves the
+//    threshold the phase actually applies is the configured one, not
+//    the hard-coded `0.6`.
+// 4. The persisted `tags/index.json` records the effective
+//    `uncategorized_threshold` so downstream phases (cluster,
+//    contradiction, facet, integrate, summary) see the same cutoff
+//    that `sanitise` applied — no drift between the wire log and the
+//    tag assignments.
+// ---------------------------------------------------------------------------
+
+/// Tag JSON whose `similarity_to_category` sits in the `[0.42, 0.6)`
+/// band so the threshold knob has a visible effect: kept at `0.42`,
+/// demoted at the documented `0.6` default.
+fn tag_json_with_similarity(similarity: f32) -> String {
+    format!(
+        r#"{{
+  "sketch_id": "sk_test",
+  "primary": "auth",
+  "secondary": ["session-mgmt"],
+  "subcategory": "session-mgmt",
+  "difficulty": "medium",
+  "similarity_to_category": {similarity},
+  "notes": "JWT-based",
+  "schema_version": "v1"
+}}"#
+    )
+}
+
+/// Build a minimal `Sketch` JSON so the tag phase has at least one
+/// sketch to fan out over. The fan-out is 1 sketch → 1 LLM tag call,
+/// which keeps the test fast and deterministic.
+fn sketch_only_one_json() -> &'static str {
+    r#"{
+  "id": "sk_test",
+  "thesis": "Use Rust and SQLite for a single binary backend.",
+  "key_decisions": ["single binary"],
+  "architecture_outline": "Single binary.",
+  "assumptions": ["users are comfortable with one process per run"],
+  "strengths": ["simple deployment"],
+  "weaknesses": ["no horizontal scaling"],
+  "hard_constraint_check": {"no_serverless": true},
+  "expected_validation": "Compiles",
+  "angle": "minimalist"
+}"#
+}
+
+#[test]
+fn discovery_config_toml_parses_tag_threshold() {
+    // Pin the canonical TOML surface so an operator typing
+    // `[discovery] tag_threshold = 0.42` into `~/.config/moagan/config.toml`
+    // gets exactly that value reaching `Config::discovery.tag_threshold`.
+    let raw = r#"
+        [discovery]
+        tag_threshold = 0.42
+    "#;
+    let cfg: Config = toml::from_str(raw).expect("discovery tag_threshold parses");
+    assert!(
+        (cfg.discovery.tag_threshold - 0.42).abs() < 1e-6,
+        "tag_threshold must surface exactly as written, got {}",
+        cfg.discovery.tag_threshold
+    );
+    // Sanity: the rest of the discovery wiring defaults are preserved
+    // when only one field is provided.
+    assert!(!cfg.discovery.persona_enabled);
+    assert!(!cfg.discovery.angle_enabled);
+    assert_eq!(cfg.discovery.angle_clusters_min, 2);
+}
+
+#[test]
+fn discovery_tag_threshold_default_matches_documented_default() {
+    // The default of `tag_threshold` must match the documented
+    // `DEFAULT_TAGGER_THRESHOLD` so existing runs are bit-identical
+    // (no `Config` in the file → tagger uses 0.6 as before).
+    let cfg = Config::default();
+    assert!(
+        (cfg.discovery.tag_threshold - 0.6).abs() < 1e-6,
+        "default tag_threshold must be 0.6, got {}",
+        cfg.discovery.tag_threshold
+    );
+}
+
+/// Shared harness: run the tag phase against a single sketch with a
+/// mock that emits `tag_json_with_similarity(similarity)` and the
+/// given `tag_threshold` in the discovery config. Returns the temp
+/// home (the caller must keep it alive while reading the persisted
+/// files), the run dir, the tag path, and the index path.
+async fn run_tag_phase_with_threshold(
+    similarity: f32,
+    tag_threshold: f32,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let _guard = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve().unwrap());
+    home.ensure().unwrap();
+    let run_id = RunId::new();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().unwrap();
+    build_brief(&run_dir).unwrap();
+
+    let sketch_path = run_dir.sketches().join("sk_test.json");
+    std::fs::create_dir_all(run_dir.sketches()).unwrap();
+    std::fs::write(&sketch_path, sketch_only_one_json().as_bytes()).unwrap();
+
+    let mut mock = MockProvider::empty();
+    mock.push(MockResponse::plain(tag_json_with_similarity(similarity)));
+    let registry = Arc::new(build_registry_with_mock(Arc::new(mock)));
+
+    let mut cfg = Config::default();
+    cfg.discovery.tag_threshold = tag_threshold;
+
+    let parallelism = Parallelism::new(1);
+    let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).unwrap();
+    let ctx = RunContext::new_with_config(
+        run_id,
+        Arc::clone(&home),
+        Arc::clone(&registry),
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "Design a multi-tenant SaaS backend".into(),
+        "discover".into(),
+        Arc::new(cfg),
+    );
+
+    let phase = DiscoverTagPhase;
+    let result = phase.execute(&ctx).await;
+    assert!(
+        result.is_ok(),
+        "discover_tag must succeed with one sketch: {result:?}"
+    );
+
+    let tag_path = run_dir.tags().join("sk_test_tags.json");
+    let index_path = run_dir.tags().join("index.json");
+    assert!(tag_path.exists(), "tag file must be persisted");
+    assert!(index_path.exists(), "index file must be persisted");
+    (tmp, run_dir.root().to_path_buf(), tag_path, index_path)
+}
+
+#[tokio::test]
+async fn discovery_tag_threshold_042_keeps_midrange_similarity() {
+    // similarity = 0.5 is BELOW the documented default 0.6 but ABOVE
+    // the configured 0.42 — so the operator's TOML override must win
+    // and the tag stays as "auth" instead of being demoted.
+    let (_tmp, _run_root, tag_path, index_path) = run_tag_phase_with_threshold(0.5, 0.42).await;
+
+    let tag_text = std::fs::read_to_string(&tag_path).unwrap();
+    let tag: serde_json::Value = serde_json::from_str(&tag_text).unwrap();
+    assert_eq!(
+        tag["primary"].as_str().unwrap(),
+        "auth",
+        "0.5 >= 0.42 must keep the tag, got tag JSON: {tag_text}"
+    );
+
+    // The persisted index mirrors the effective threshold so downstream
+    // phases (cluster / contradict / facet / integrate / summary) see
+    // the same cutoff that `sanitise` actually applied.
+    let index_text = std::fs::read_to_string(&index_path).unwrap();
+    let index: serde_json::Value = serde_json::from_str(&index_text).unwrap();
+    assert!(
+        (index["uncategorized_threshold"].as_f64().unwrap() - 0.42).abs() < 1e-6,
+        "index must record the configured threshold, got: {index_text}"
+    );
+}
+
+#[tokio::test]
+async fn discovery_tag_threshold_default_demotes_midrange_similarity() {
+    // Same sketch, same similarity = 0.5 — but with the documented
+    // default (0.6) the tag must be demoted to "uncategorized". This
+    // proves the wire-up is not silently pinning the old const: with
+    // no override the existing behaviour (demote below 0.6) is
+    // preserved.
+    let (_tmp, _run_root, tag_path, index_path) = run_tag_phase_with_threshold(0.5, 0.6).await;
+
+    let tag_text = std::fs::read_to_string(&tag_path).unwrap();
+    let tag: serde_json::Value = serde_json::from_str(&tag_text).unwrap();
+    assert_eq!(
+        tag["primary"].as_str().unwrap(),
+        "uncategorized",
+        "0.5 < 0.6 must demote the tag, got tag JSON: {tag_text}"
+    );
+
+    let index_text = std::fs::read_to_string(&index_path).unwrap();
+    let index: serde_json::Value = serde_json::from_str(&index_text).unwrap();
+    assert!(
+        (index["uncategorized_threshold"].as_f64().unwrap() - 0.6).abs() < 1e-6,
+        "index must record the default threshold when not overridden, got: {index_text}"
+    );
+}
+
+#[tokio::test]
+async fn discovery_tag_threshold_out_of_range_falls_back_to_default() {
+    // Out-of-range operator input must NOT corrupt the phase: the
+    // `TaggerThreshold::from_config_value` validator clamps back to
+    // the documented default so a stale / malformed TOML still
+    // produces the expected demotion behaviour.
+    let (_tmp, _run_root, tag_path, _index_path) = run_tag_phase_with_threshold(0.5, 1.5).await;
+
+    let tag_text = std::fs::read_to_string(&tag_path).unwrap();
+    let tag: serde_json::Value = serde_json::from_str(&tag_text).unwrap();
+    assert_eq!(
+        tag["primary"].as_str().unwrap(),
+        "uncategorized",
+        "1.5 must be rejected by the validator and fall back to 0.6, demoting the 0.5 tag; got: {tag_text}"
+    );
+}

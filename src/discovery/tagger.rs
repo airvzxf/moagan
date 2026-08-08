@@ -3,26 +3,19 @@
 //! This module is the pure helper. The phase that wires it into the
 //! pipeline lives in `src/phases/discover_tag.rs`.
 
+use crate::discovery::tagger_threshold::TaggerThreshold;
 use crate::domain::SketchTags;
-
-/// Categorise a sketch. The actual LLM call lives in the phase;
-/// here we only own the schema and the validation rules.
-///
-/// `primary` is the canonical category. If the similarity score is
-/// below [`UNCATEGORIZED_THRESHOLD`] the snippet is forced into
-/// `"uncategorized"` regardless of `primary`.
-pub const UNCATEGORIZED_THRESHOLD: f32 = 0.6;
 
 /// Hard enum of the difficulty values the tagger contract accepts.
 pub const DIFFICULTY_VALUES: &[&str] = &["low", "medium", "high"];
 
 /// Sanitise a tagger response. Mutates the input in place:
-/// - If `similarity_to_category < UNCATEGORIZED_THRESHOLD`, set
-///   `primary` to `"uncategorized"`.
+/// - If `similarity_to_category < threshold.value`, set `primary` to
+///   `"uncategorized"`.
 /// - If `difficulty` is not one of `DIFFICULTY_VALUES`, default to
 ///   `"medium"`.
-pub fn sanitise(tags: &mut SketchTags) {
-    if tags.similarity_to_category < UNCATEGORIZED_THRESHOLD {
+pub fn sanitise(tags: &mut SketchTags, threshold: &TaggerThreshold) {
+    if tags.similarity_to_category < threshold.value {
         tags.primary = "uncategorized".into();
     }
     if !DIFFICULTY_VALUES.contains(&tags.difficulty.as_str()) {
@@ -59,32 +52,50 @@ mod tests {
         }
     }
 
+    fn default_threshold() -> TaggerThreshold {
+        TaggerThreshold::default()
+    }
+
     #[test]
     fn sanitise_demotes_low_similarity_to_uncategorized() {
         let mut t = mk_tags("auth", 0.4, "low");
-        sanitise(&mut t);
+        sanitise(&mut t, &default_threshold());
         assert_eq!(t.primary, "uncategorized");
     }
 
     #[test]
     fn sanitise_keeps_high_similarity() {
         let mut t = mk_tags("auth", 0.92, "high");
-        sanitise(&mut t);
+        sanitise(&mut t, &default_threshold());
         assert_eq!(t.primary, "auth");
     }
 
     #[test]
     fn sanitise_fixes_unknown_difficulty() {
         let mut t = mk_tags("auth", 0.9, "impossible");
-        sanitise(&mut t);
+        sanitise(&mut t, &default_threshold());
         assert_eq!(t.difficulty, "medium");
     }
 
     #[test]
     fn sanitise_keeps_known_difficulty() {
         let mut t = mk_tags("auth", 0.9, "low");
-        sanitise(&mut t);
+        sanitise(&mut t, &default_threshold());
         assert_eq!(t.difficulty, "low");
+    }
+
+    #[test]
+    fn sanitise_respects_configured_threshold() {
+        let threshold = TaggerThreshold::from_config_value(Some(0.42));
+        let mut kept = mk_tags("auth", 0.5, "low");
+        sanitise(&mut kept, &threshold);
+        assert_eq!(kept.primary, "auth", "0.5 >= 0.42 must keep the tag");
+        let mut demoted = mk_tags("auth", 0.4, "low");
+        sanitise(&mut demoted, &threshold);
+        assert_eq!(
+            demoted.primary, "uncategorized",
+            "0.4 < 0.42 must demote the tag"
+        );
     }
 
     #[test]
@@ -105,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn uncategorized_threshold_is_the_documented_default() {
-        assert!((UNCATEGORIZED_THRESHOLD - 0.6).abs() < 1e-6);
+    fn tagger_threshold_default_matches_documented_default() {
+        assert!((TaggerThreshold::default().value - 0.6).abs() < 1e-6);
     }
 }

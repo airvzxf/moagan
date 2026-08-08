@@ -6,6 +6,7 @@ pub const DEFAULT_TAGGER_THRESHOLD: f32 = 0.6;
 
 /// Wraps a tagger threshold so configuration can validate the
 /// value before it reaches the tagger.
+#[derive(Debug, Clone, Copy)]
 pub struct TaggerThreshold {
     /// Threshold value in `[0.0, 1.0]`.
     pub value: f32,
