@@ -134,52 +134,49 @@ pub fn resolve(home: &MoaganHome, raw: &str) -> Result<ContextRef> {
 mod tests {
     use super::*;
 
-    fn tmp_home() -> (tempfile::TempDir, MoaganHome) {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = MoaganHome::resolve().unwrap();
-        (tmp, home)
-    }
-
     /// A valid UUID v7 classifies as `RunId`, no IO needed.
     #[test]
     fn resolve_classify_uuid_v7() {
-        let (_tmp, home) = tmp_home();
-        let id = RunId::new();
-        let r = resolve_classify(&id.to_string(), &home).unwrap();
-        assert_eq!(r, ContextRef::RunId(id));
-        assert_eq!(r.kind(), "run_id");
-        assert_eq!(r.source(), id.to_string());
+        crate::test_support::with_moagan_home("resolve_classify_uuid_v7", |_home| {
+            let home = MoaganHome::resolve().unwrap();
+            let id = RunId::new();
+            let r = resolve_classify(&id.to_string(), &home).unwrap();
+            assert_eq!(r, ContextRef::RunId(id));
+            assert_eq!(r.kind(), "run_id");
+            assert_eq!(r.source(), id.to_string());
+        });
     }
 
     /// A path to an existing `.md` file classifies as `FilePath`.
     #[test]
     fn resolve_classify_path_md() {
-        let (tmp, home) = tmp_home();
-        let path = tmp.path().join("notes.md");
-        std::fs::write(&path, "# notes").unwrap();
-        let r = resolve_classify(path.to_str().unwrap(), &home).unwrap();
-        assert_eq!(r.kind(), "path");
-        match r {
-            ContextRef::FilePath(p) => assert_eq!(p, path),
-            other => panic!("expected FilePath, got {other:?}"),
-        }
+        crate::test_support::with_moagan_home("resolve_classify_path_md", |home| {
+            let path = home.join("notes.md");
+            std::fs::write(&path, "# notes").unwrap();
+            let home_arc = MoaganHome::resolve().unwrap();
+            let r = resolve_classify(path.to_str().unwrap(), &home_arc).unwrap();
+            assert_eq!(r.kind(), "path");
+            match r {
+                ContextRef::FilePath(p) => assert_eq!(p, path),
+                other => panic!("expected FilePath, got {other:?}"),
+            }
+        });
     }
 
     /// A path to an existing directory classifies as `DirPath`.
     #[test]
     fn resolve_classify_path_dir() {
-        let (tmp, home) = tmp_home();
-        let dir = tmp.path().join("ctx");
-        std::fs::create_dir_all(&dir).unwrap();
-        let r = resolve_classify(dir.to_str().unwrap(), &home).unwrap();
-        assert_eq!(r.kind(), "dir");
-        match r {
-            ContextRef::DirPath(p) => assert_eq!(p, dir),
-            other => panic!("expected DirPath, got {other:?}"),
-        }
+        crate::test_support::with_moagan_home("resolve_classify_path_dir", |home| {
+            let dir = home.join("ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            let home_arc = MoaganHome::resolve().unwrap();
+            let r = resolve_classify(dir.to_str().unwrap(), &home_arc).unwrap();
+            assert_eq!(r.kind(), "dir");
+            match r {
+                ContextRef::DirPath(p) => assert_eq!(p, dir),
+                other => panic!("expected DirPath, got {other:?}"),
+            }
+        });
     }
 
     /// A string that's neither a UUID nor an existing path is a
@@ -187,12 +184,14 @@ mod tests {
     /// silently dropping it would be worse than failing.
     #[test]
     fn resolve_classify_unknown_errors() {
-        let (tmp, home) = tmp_home();
-        let missing = tmp.path().join("ghost").display().to_string();
-        let err = resolve_classify(&missing, &home).unwrap_err();
-        assert!(matches!(err, Error::InvalidArgs(_)), "got: {err}");
-        let msg = err.to_string();
-        assert!(msg.contains("context"), "msg: {msg}");
+        crate::test_support::with_moagan_home("resolve_classify_unknown_errors", |home| {
+            let missing = home.join("ghost").display().to_string();
+            let home_arc = MoaganHome::resolve().unwrap();
+            let err = resolve_classify(&missing, &home_arc).unwrap_err();
+            assert!(matches!(err, Error::InvalidArgs(_)), "got: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains("context"), "msg: {msg}");
+        });
     }
 
     /// `resolve` validates that a UUID-shaped context actually points
@@ -200,21 +199,25 @@ mod tests {
     /// `Error::InvalidArgs`.
     #[test]
     fn resolve_missing_run_dir_errors() {
-        let (_tmp, home) = tmp_home();
-        let fake = uuid::Uuid::now_v7().to_string();
-        let err = resolve(&home, &fake).unwrap_err();
-        assert!(matches!(err, Error::InvalidArgs(_)), "got: {err}");
+        crate::test_support::with_moagan_home("resolve_missing_run_dir_errors", |_home| {
+            let home = MoaganHome::resolve().unwrap();
+            let fake = uuid::Uuid::now_v7().to_string();
+            let err = resolve(&home, &fake).unwrap_err();
+            assert!(matches!(err, Error::InvalidArgs(_)), "got: {err}");
+        });
     }
 
     /// `resolve` accepts an existing run dir.
     #[test]
     fn resolve_existing_run_dir_ok() {
-        let (_tmp, home) = tmp_home();
-        home.ensure().unwrap();
-        let id = RunId::new();
-        std::fs::create_dir_all(home.runs_dir().join(id.to_string())).unwrap();
-        let r = resolve(&home, &id.to_string()).unwrap();
-        assert_eq!(r, ContextRef::RunId(id));
+        crate::test_support::with_moagan_home("resolve_existing_run_dir_ok", |_home| {
+            let home = MoaganHome::resolve().unwrap();
+            home.ensure().unwrap();
+            let id = RunId::new();
+            std::fs::create_dir_all(home.runs_dir().join(id.to_string())).unwrap();
+            let r = resolve(&home, &id.to_string()).unwrap();
+            assert_eq!(r, ContextRef::RunId(id));
+        });
     }
 
     /// `classify_no_io` does no filesystem probe.
