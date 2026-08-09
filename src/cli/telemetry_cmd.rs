@@ -1086,20 +1086,18 @@ mod tests {
 
     #[test]
     fn list_empty_index_prints_marker() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let cmd = TelemetryCmd::List {
-            runs_dir: Some(tmp.path().to_path_buf()),
-            limit: 5,
-            run: None,
-        };
-        // Empty DB doesn't exist yet; the open call creates it. We
-        // capture stdout via the dispatch returning Ok(0) so the
-        // test only checks the no-error / no-panic contract.
-        let code = pollster::block_on(cmd.dispatch());
-        assert_eq!(code.unwrap(), 0);
+        crate::test_support::with_moagan_home("telemetry_list_empty_index", |home| {
+            let cmd = TelemetryCmd::List {
+                runs_dir: Some(home.to_path_buf()),
+                limit: 5,
+                run: None,
+            };
+            // Empty DB doesn't exist yet; the open call creates it. We
+            // capture stdout via the dispatch returning Ok(0) so the
+            // test only checks the no-error / no-panic contract.
+            let code = pollster::block_on(cmd.dispatch());
+            assert_eq!(code.unwrap(), 0);
+        });
     }
 
     #[test]

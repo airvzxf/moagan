@@ -571,18 +571,16 @@ mod tests {
 
     #[test]
     fn matrix_persists() {
-        let p = DiscoverMatrixPhase::with_cardinality(80);
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
-        let run_dir = home.run_dir(crate::ids::RunId::new());
-        run_dir.ensure().unwrap();
-        let path = p.persist_matrix_for_test(&run_dir).unwrap();
-        assert!(path.exists());
-        let back: ExplorationMatrix = read_json(&path).unwrap();
-        assert_eq!(back.cardinality(), 80);
+        crate::test_support::with_moagan_home("discover_matrix_persists", |_home| {
+            let p = DiscoverMatrixPhase::with_cardinality(80);
+            let home = Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
+            let run_dir = home.run_dir(crate::ids::RunId::new());
+            run_dir.ensure().unwrap();
+            let path = p.persist_matrix_for_test(&run_dir).unwrap();
+            assert!(path.exists());
+            let back: ExplorationMatrix = read_json(&path).unwrap();
+            assert_eq!(back.cardinality(), 80);
+        });
     }
 
     /// PR-22 unit test: `render_draft` is a pure function so the

@@ -364,14 +364,15 @@ mod tests {
 
     #[test]
     fn load_extractions_handles_missing_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
-        let ctx = test_ctx(home.clone(), crate::ids::RunId::new());
-        let r = DiscoverIntegratePhase::load_extractions(&ctx, "cat_99");
-        assert!(r.is_err());
+        crate::test_support::with_moagan_home(
+            "discover_integrate_load_extractions_missing_dir",
+            |_home| {
+                let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
+                let ctx = test_ctx(home.clone(), crate::ids::RunId::new());
+                let r = DiscoverIntegratePhase::load_extractions(&ctx, "cat_99");
+                assert!(r.is_err());
+            },
+        );
     }
 
     fn test_ctx(

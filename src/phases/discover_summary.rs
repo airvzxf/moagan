@@ -752,14 +752,15 @@ mod tests {
 
     #[test]
     fn read_tag_index_defaults_when_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
-        let ctx = test_ctx(home, crate::ids::RunId::new());
-        let idx = DiscoverSummaryPhase::read_tag_index(&ctx).unwrap();
-        assert!(idx.tally.is_empty());
+        crate::test_support::with_moagan_home(
+            "discover_summary_read_tag_index_defaults",
+            |_home| {
+                let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
+                let ctx = test_ctx(home, crate::ids::RunId::new());
+                let idx = DiscoverSummaryPhase::read_tag_index(&ctx).unwrap();
+                assert!(idx.tally.is_empty());
+            },
+        );
     }
 
     fn test_ctx(
@@ -782,17 +783,18 @@ mod tests {
 
     #[test]
     fn empty_run_yields_zero_documents() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
-        let run_id = crate::ids::RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
-        let ctx = test_ctx(home, run_id);
-        let docs = DiscoverSummaryPhase::read_category_docs(&ctx).unwrap();
-        assert!(docs.is_empty());
+        crate::test_support::with_moagan_home(
+            "discover_summary_empty_run_zero_documents",
+            |_home| {
+                let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
+                let run_id = crate::ids::RunId::new();
+                let run_dir = home.run_dir(run_id);
+                run_dir.ensure().unwrap();
+                let ctx = test_ctx(home, run_id);
+                let docs = DiscoverSummaryPhase::read_category_docs(&ctx).unwrap();
+                assert!(docs.is_empty());
+            },
+        );
     }
 
     /// Snapshot test for PR-21: V4 §6.10 requires `uncategorized.md`
@@ -804,194 +806,195 @@ mod tests {
     /// contract is enforceable without an LLM call.
     #[test]
     fn render_uncategorized_includes_v4_six_ten_sections() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
-        let run_id = crate::ids::RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().unwrap();
+        crate::test_support::with_moagan_home(
+            "discover_summary_render_uncategorized_six_ten",
+            |_home| {
+                let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
+                let run_id = crate::ids::RunId::new();
+                let run_dir = home.run_dir(run_id);
+                run_dir.ensure().unwrap();
 
-        // Three uncategorized sketch files. The tally below drives
-        // `## Sketches` and `## Ideas sueltas`; the file content
-        // drives `## Ideas sueltas`'s thesis text.
-        // `RunDir::ensure` does not include `sketches/` (the
-        // directory is created lazily by the sketch phase), so we
-        // create it explicitly here.
-        std::fs::create_dir_all(run_dir.sketches()).unwrap();
-        for (id, thesis) in [
-            ("sk_aaa", "alpha: minimal viable backend"),
-            ("sk_bbb", "beta: serverless-first approach"),
-            ("sk_ccc", "gamma: durable execution layer"),
-        ] {
-            let path = run_dir.sketches().join(format!("{id}.json"));
-            std::fs::write(
-                &path,
-                format!(
-                    r#"{{"id":"{id}","thesis":"{thesis}","key_decisions":[],"architecture_outline":"","assumptions":[],"strengths":[],"weaknesses":[],"hard_constraint_check":{{}},"expected_validation":"","angle":""}}"#
-                ),
-            )
-            .unwrap();
-        }
+                // Three uncategorized sketch files. The tally below drives
+                // `## Sketches` and `## Ideas sueltas`; the file content
+                // drives `## Ideas sueltas`'s thesis text.
+                // `RunDir::ensure` does not include `sketches/` (the
+                // directory is created lazily by the sketch phase), so we
+                // create it explicitly here.
+                std::fs::create_dir_all(run_dir.sketches()).unwrap();
+                for (id, thesis) in [
+                    ("sk_aaa", "alpha: minimal viable backend"),
+                    ("sk_bbb", "beta: serverless-first approach"),
+                    ("sk_ccc", "gamma: durable execution layer"),
+                ] {
+                    let path = run_dir.sketches().join(format!("{id}.json"));
+                    std::fs::write(
+                        &path,
+                        format!(
+                            r#"{{"id":"{id}","thesis":"{thesis}","key_decisions":[],"architecture_outline":"","assumptions":[],"strengths":[],"weaknesses":[],"hard_constraint_check":{{}},"expected_validation":"","angle":""}}"#
+                        ),
+                    )
+                    .unwrap();
+                }
 
-        // One cluster so `## Temas recurrentes` has content to
-        // project. Members reference the uncategorized sketches so
-        // the cluster centroid is non-empty even if irrelevant to
-        // the test — we only care about the section's presence
-        // and ordering.
-        let cluster = crate::domain::Cluster {
-            id: "cluster_01".into(),
-            label: "deployment".into(),
-            summary: "Focuses on rollout strategy".into(),
-            members: vec!["sk_aaa".into(), "sk_bbb".into()],
-            cohesion: 0.81,
-            ..Default::default()
-        };
-        write_json(&run_dir.clusters().join("cluster_01.json"), &cluster).unwrap();
+                // One cluster so `## Temas recurrentes` has content to
+                // project. Members reference the uncategorized sketches so
+                // the cluster centroid is non-empty even if irrelevant to
+                // the test — we only care about the section's presence
+                // and ordering.
+                let cluster = crate::domain::Cluster {
+                    id: "cluster_01".into(),
+                    label: "deployment".into(),
+                    summary: "Focuses on rollout strategy".into(),
+                    members: vec!["sk_aaa".into(), "sk_bbb".into()],
+                    cohesion: 0.81,
+                    ..Default::default()
+                };
+                write_json(&run_dir.clusters().join("cluster_01.json"), &cluster).unwrap();
 
-        // One contradiction so `## Contradicciones detectadas` is
-        // populated. The fixture is hand-rolled; the
-        // `discover_contradict` phase writes the same shape.
-        let contradiction = crate::domain::Contradiction {
-            id: "c_01".into(),
-            cluster_a: "cluster_01".into(),
-            cluster_b: "cluster_02".into(),
-            topic: "consistency".into(),
-            description: "Linearizable vs eventual".into(),
-            severity: "high".into(),
-            ..Default::default()
-        };
-        let contradictions = vec![contradiction];
-        std::fs::create_dir_all(run_dir.contradictions()).unwrap();
-        write_json(
-            &run_dir.contradictions().join("contradictions.json"),
-            &contradictions,
-        )
-        .unwrap();
+                // One contradiction so `## Contradicciones detectadas` is
+                // populated. The fixture is hand-rolled; the
+                // `discover_contradict` phase writes the same shape.
+                let contradiction = crate::domain::Contradiction {
+                    id: "c_01".into(),
+                    cluster_a: "cluster_01".into(),
+                    cluster_b: "cluster_02".into(),
+                    topic: "consistency".into(),
+                    description: "Linearizable vs eventual".into(),
+                    severity: "high".into(),
+                    ..Default::default()
+                };
+                let contradictions = vec![contradiction];
+                std::fs::create_dir_all(run_dir.contradictions()).unwrap();
+                write_json(
+                    &run_dir.contradictions().join("contradictions.json"),
+                    &contradictions,
+                )
+                .unwrap();
 
-        // One facet list with two facets; only the first has an
-        // extraction so `## Preguntas abiertas` lists the second
-        // (unanswered) one.
-        let facet_list = crate::domain::FacetList {
-            category_id: "cat_01".into(),
-            cluster_id: "cluster_01".into(),
-            facets: vec![
-                crate::domain::Facet {
-                    id: "data-flows".into(),
-                    description: "Sequence of data through the system".into(),
-                    required: true,
-                },
-                crate::domain::Facet {
-                    id: "failure-modes".into(),
-                    description: "What breaks first under load".into(),
-                    required: true,
-                },
-            ],
-            ..Default::default()
-        };
-        write_json(&run_dir.facets().join("cat_01_facets.json"), &facet_list).unwrap();
+                // One facet list with two facets; only the first has an
+                // extraction so `## Preguntas abiertas` lists the second
+                // (unanswered) one.
+                let facet_list = crate::domain::FacetList {
+                    category_id: "cat_01".into(),
+                    cluster_id: "cluster_01".into(),
+                    facets: vec![
+                        crate::domain::Facet {
+                            id: "data-flows".into(),
+                            description: "Sequence of data through the system".into(),
+                            required: true,
+                        },
+                        crate::domain::Facet {
+                            id: "failure-modes".into(),
+                            description: "What breaks first under load".into(),
+                            required: true,
+                        },
+                    ],
+                    ..Default::default()
+                };
+                write_json(&run_dir.facets().join("cat_01_facets.json"), &facet_list).unwrap();
 
-        // Extraction for `data-flows` only — `failure-modes`
-        // remains unanswered.
-        let ext_dir = run_dir.extractions().join("cat_01");
-        std::fs::create_dir_all(&ext_dir).unwrap();
-        let extraction = crate::domain::FacetExtraction {
-            facet_id: "data-flows".into(),
-            category_id: "cat_01".into(),
-            body: "_No content available for data-flows._".into(),
-            sources: vec!["sk_aaa".into()],
-            schema_version: "v1".into(),
-        };
-        write_json(&ext_dir.join("faceta_data-flows.json"), &extraction).unwrap();
+                // Extraction for `data-flows` only — `failure-modes`
+                // remains unanswered.
+                let ext_dir = run_dir.extractions().join("cat_01");
+                std::fs::create_dir_all(&ext_dir).unwrap();
+                let extraction = crate::domain::FacetExtraction {
+                    facet_id: "data-flows".into(),
+                    category_id: "cat_01".into(),
+                    body: "_No content available for data-flows._".into(),
+                    sources: vec!["sk_aaa".into()],
+                    schema_version: "v1".into(),
+                };
+                write_json(&ext_dir.join("faceta_data-flows.json"), &extraction).unwrap();
 
-        // Tag index: three uncategorized sketches. Other tags are
-        // present so the filter must skip them.
-        let tag_index = TagIndex {
-            tally: vec![
-                TagTally {
-                    sketch_id: "sk_aaa".into(),
-                    primary: "uncategorized".into(),
-                    subcategory: String::new(),
-                    difficulty: "low".into(),
-                },
-                TagTally {
-                    sketch_id: "sk_bbb".into(),
-                    primary: "uncategorized".into(),
-                    subcategory: String::new(),
-                    difficulty: "low".into(),
-                },
-                TagTally {
-                    sketch_id: "sk_ccc".into(),
-                    primary: "uncategorized".into(),
-                    subcategory: String::new(),
-                    difficulty: "low".into(),
-                },
-                TagTally {
-                    sketch_id: "sk_ddd".into(),
-                    primary: "auth".into(),
-                    subcategory: String::new(),
-                    difficulty: "low".into(),
-                },
-            ],
-        };
+                // Tag index: three uncategorized sketches. Other tags are
+                // present so the filter must skip them.
+                let tag_index = TagIndex {
+                    tally: vec![
+                        TagTally {
+                            sketch_id: "sk_aaa".into(),
+                            primary: "uncategorized".into(),
+                            subcategory: String::new(),
+                            difficulty: "low".into(),
+                        },
+                        TagTally {
+                            sketch_id: "sk_bbb".into(),
+                            primary: "uncategorized".into(),
+                            subcategory: String::new(),
+                            difficulty: "low".into(),
+                        },
+                        TagTally {
+                            sketch_id: "sk_ccc".into(),
+                            primary: "uncategorized".into(),
+                            subcategory: String::new(),
+                            difficulty: "low".into(),
+                        },
+                        TagTally {
+                            sketch_id: "sk_ddd".into(),
+                            primary: "auth".into(),
+                            subcategory: String::new(),
+                            difficulty: "low".into(),
+                        },
+                    ],
+                };
 
-        let ctx = test_ctx(home, run_id);
-        let body = DiscoverSummaryPhase::render_uncategorized(&ctx, &tag_index).unwrap();
+                let ctx = test_ctx(home, run_id);
+                let body = DiscoverSummaryPhase::render_uncategorized(&ctx, &tag_index).unwrap();
 
-        // Section order is the contract — V4 §6.10 enumerates the
-        // six headings in this sequence.
-        let pos = |needle: &str| {
-            body.find(needle)
-                .unwrap_or_else(|| panic!("missing `{needle}`"))
-        };
-        let resumen = pos("## Resumen");
-        let sketches = pos("## Sketches");
-        let ideas = pos("## Ideas sueltas");
-        let temas = pos("## Temas recurrentes");
-        let contradicciones = pos("## Contradicciones detectadas");
-        let preguntas = pos("## Preguntas abiertas");
-        assert!(resumen < sketches, "## Resumen must precede ## Sketches");
-        assert!(
-            sketches < ideas,
-            "## Sketches must precede ## Ideas sueltas"
-        );
-        assert!(
-            ideas < temas,
-            "## Ideas sueltas must precede ## Temas recurrentes"
-        );
-        assert!(
-            temas < contradicciones,
-            "## Temas recurrentes must precede ## Contradicciones detectadas"
-        );
-        assert!(
-            contradicciones < preguntas,
-            "## Contradicciones detectadas must precede ## Preguntas abiertas"
-        );
+                // Section order is the contract — V4 §6.10 enumerates the
+                // six headings in this sequence.
+                let pos = |needle: &str| {
+                    body.find(needle)
+                        .unwrap_or_else(|| panic!("missing `{needle}`"))
+                };
+                let resumen = pos("## Resumen");
+                let sketches = pos("## Sketches");
+                let ideas = pos("## Ideas sueltas");
+                let temas = pos("## Temas recurrentes");
+                let contradicciones = pos("## Contradicciones detectadas");
+                let preguntas = pos("## Preguntas abiertas");
+                assert!(resumen < sketches, "## Resumen must precede ## Sketches");
+                assert!(
+                    sketches < ideas,
+                    "## Sketches must precede ## Ideas sueltas"
+                );
+                assert!(
+                    ideas < temas,
+                    "## Ideas sueltas must precede ## Temas recurrentes"
+                );
+                assert!(
+                    temas < contradicciones,
+                    "## Temas recurrentes must precede ## Contradicciones detectadas"
+                );
+                assert!(
+                    contradicciones < preguntas,
+                    "## Contradicciones detectadas must precede ## Preguntas abiertas"
+                );
 
-        // Sanity: each section surfaces at least one entry from
-        // its source so the test would catch a regression where
-        // the wiring breaks but the headings survive.
-        assert!(
-            body.contains("minimal viable backend"),
-            "## Ideas sueltas must include the sketch thesis"
-        );
-        assert!(
-            body.contains("cluster_01") && body.contains("deployment"),
-            "## Temas recurrentes must project the cluster label and id"
-        );
-        assert!(
-            body.contains("`cluster_01` vs `cluster_02`"),
-            "## Contradicciones detectadas must include the cluster pair"
-        );
-        assert!(
-            body.contains("failure-modes"),
-            "## Preguntas abiertas must include the unanswered facet"
-        );
-        // Resolved facet must NOT appear in the unanswered list.
-        assert!(
-            !body.contains("`cat_01/data-flows`:"),
-            "## Preguntas abiertas must not list facets that have an extraction"
+                // Sanity: each section surfaces at least one entry from
+                // its source so the test would catch a regression where
+                // the wiring breaks but the headings survive.
+                assert!(
+                    body.contains("minimal viable backend"),
+                    "## Ideas sueltas must include the sketch thesis"
+                );
+                assert!(
+                    body.contains("cluster_01") && body.contains("deployment"),
+                    "## Temas recurrentes must project the cluster label and id"
+                );
+                assert!(
+                    body.contains("`cluster_01` vs `cluster_02`"),
+                    "## Contradicciones detectadas must include the cluster pair"
+                );
+                assert!(
+                    body.contains("failure-modes"),
+                    "## Preguntas abiertas must include the unanswered facet"
+                );
+                // Resolved facet must NOT appear in the unanswered list.
+                assert!(
+                    !body.contains("`cat_01/data-flows`:"),
+                    "## Preguntas abiertas must not list facets that have an extraction"
+                );
+            },
         );
     }
 }
