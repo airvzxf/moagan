@@ -316,10 +316,7 @@ mod tests {
 
     #[test]
     fn discovery_context_persist_load_round_trip() {
-        with_moagan_home("discovery_context_persist_load", |home| {
-            unsafe {
-                std::env::set_var("MOAGAN_HOME", home);
-            }
+        with_moagan_home("discovery_context_persist_load", |_home| {
             let home_arc =
                 std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().expect("resolve home"));
             let run_id = crate::ids::RunId::new();
@@ -339,10 +336,7 @@ mod tests {
 
     #[test]
     fn discovery_context_load_returns_none_when_absent() {
-        with_moagan_home("discovery_context_load_absent", |home| {
-            unsafe {
-                std::env::set_var("MOAGAN_HOME", home);
-            }
+        with_moagan_home("discovery_context_load_absent", |_home| {
             let home_arc =
                 std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().expect("resolve home"));
             let run_dir = home_arc.run_dir(crate::ids::RunId::new());
@@ -354,10 +348,7 @@ mod tests {
 
     #[test]
     fn discovery_context_build_scans_run_dir() {
-        with_moagan_home("discovery_context_build", |home| {
-            unsafe {
-                std::env::set_var("MOAGAN_HOME", home);
-            }
+        with_moagan_home("discovery_context_build", |_home| {
             let home_arc =
                 std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().expect("resolve home"));
             let run_id = crate::ids::RunId::new();
@@ -434,10 +425,7 @@ mod tests {
 
     #[test]
     fn discovery_context_build_handles_missing_artefacts() {
-        with_moagan_home("discovery_context_missing", |home| {
-            unsafe {
-                std::env::set_var("MOAGAN_HOME", home);
-            }
+        with_moagan_home("discovery_context_missing", |_home| {
             let home_arc =
                 std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().expect("resolve home"));
             let run_dir = home_arc.run_dir(crate::ids::RunId::new());
@@ -459,10 +447,7 @@ mod tests {
 
     #[test]
     fn discovery_context_build_falls_back_when_threshold_out_of_range() {
-        with_moagan_home("discovery_context_threshold", |home| {
-            unsafe {
-                std::env::set_var("MOAGAN_HOME", home);
-            }
+        with_moagan_home("discovery_context_threshold", |_home| {
             let home_arc =
                 std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().expect("resolve home"));
             let run_dir = home_arc.run_dir(crate::ids::RunId::new());
@@ -479,10 +464,7 @@ mod tests {
 
     #[test]
     fn discovery_context_path_is_run_root() {
-        with_moagan_home("discovery_context_path", |home| {
-            unsafe {
-                std::env::set_var("MOAGAN_HOME", home);
-            }
+        with_moagan_home("discovery_context_path", |_home| {
             let home_arc =
                 std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().expect("resolve home"));
             let run_dir = home_arc.run_dir(crate::ids::RunId::new());
