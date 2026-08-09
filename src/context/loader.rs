@@ -390,16 +390,6 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn tmp_home() -> (tempfile::TempDir, MoaganHome) {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let home = MoaganHome::resolve().unwrap();
-        home.ensure().unwrap();
-        (tmp, home)
-    }
-
     /// Empty input → empty hash.
     #[test]
     fn compute_shared_brief_hash_deterministic() {
@@ -437,59 +427,68 @@ mod tests {
     /// `Summary` scope reads `final/*.md` and only that.
     #[test]
     fn load_from_run_id_summary_reads_final_md() {
-        let (_tmp, home) = tmp_home();
-        let id = RunId::new();
-        let run_dir = home.run_dir(id);
-        run_dir.ensure().unwrap();
-        std::fs::create_dir_all(run_dir.final_dir()).unwrap();
-        let mut f = std::fs::File::create(run_dir.final_dir().join("portfolio.md")).unwrap();
-        writeln!(f, "# portfolio").unwrap();
-        // A sketch file must NOT be picked up under Summary scope.
-        std::fs::create_dir_all(run_dir.sketches()).unwrap();
-        let mut g = std::fs::File::create(run_dir.sketches().join("sk_001.json")).unwrap();
-        writeln!(g, "{{}}").unwrap();
+        crate::test_support::with_moagan_home("load_from_run_id_summary_reads_final_md", |_home| {
+            let home = MoaganHome::resolve().unwrap();
+            home.ensure().unwrap();
+            let id = RunId::new();
+            let run_dir = home.run_dir(id);
+            run_dir.ensure().unwrap();
+            std::fs::create_dir_all(run_dir.final_dir()).unwrap();
+            let mut f = std::fs::File::create(run_dir.final_dir().join("portfolio.md")).unwrap();
+            writeln!(f, "# portfolio").unwrap();
+            // A sketch file must NOT be picked up under Summary scope.
+            std::fs::create_dir_all(run_dir.sketches()).unwrap();
+            let mut g = std::fs::File::create(run_dir.sketches().join("sk_001.json")).unwrap();
+            writeln!(g, "{{}}").unwrap();
 
-        let loaded = load_from_run_id(&home, id, ContextScope::Summary).unwrap();
-        assert_eq!(loaded.parent_run_id, Some(id));
-        // 1 parent_run_id stamp + 1 file = 2.
-        assert_eq!(loaded.context_refs.len(), 2, "{:?}", loaded.context_refs);
-        let file_record = loaded
-            .context_refs
-            .iter()
-            .find(|r| r.source_path.ends_with("portfolio.md"))
-            .expect("portfolio.md record missing");
-        assert_eq!(file_record.context_type, "path");
-        assert!(loaded.brief_excerpt.contains("portfolio"));
-        assert!(!loaded.brief_excerpt.contains("sk_001"));
-        assert!(loaded.shared_brief_hash.is_some());
+            let loaded = load_from_run_id(&home, id, ContextScope::Summary).unwrap();
+            assert_eq!(loaded.parent_run_id, Some(id));
+            // 1 parent_run_id stamp + 1 file = 2.
+            assert_eq!(loaded.context_refs.len(), 2, "{:?}", loaded.context_refs);
+            let file_record = loaded
+                .context_refs
+                .iter()
+                .find(|r| r.source_path.ends_with("portfolio.md"))
+                .expect("portfolio.md record missing");
+            assert_eq!(file_record.context_type, "path");
+            assert!(loaded.brief_excerpt.contains("portfolio"));
+            assert!(!loaded.brief_excerpt.contains("sk_001"));
+            assert!(loaded.shared_brief_hash.is_some());
+        });
     }
 
     /// `SummaryFull` scope also reads the sketch JSONs.
     #[test]
     fn load_from_run_id_summary_full_reads_sketches() {
-        let (_tmp, home) = tmp_home();
-        let id = RunId::new();
-        let run_dir = home.run_dir(id);
-        run_dir.ensure().unwrap();
-        std::fs::create_dir_all(run_dir.final_dir()).unwrap();
-        std::fs::write(run_dir.final_dir().join("portfolio.md"), "# p").unwrap();
-        std::fs::create_dir_all(run_dir.sketches()).unwrap();
-        std::fs::write(
-            run_dir.sketches().join("sk_001.json"),
-            "{\"id\":\"sk_001\"}",
-        )
-        .unwrap();
-        std::fs::write(
-            run_dir.sketches().join("sk_002.json"),
-            "{\"id\":\"sk_002\"}",
-        )
-        .unwrap();
+        crate::test_support::with_moagan_home(
+            "load_from_run_id_summary_full_reads_sketches",
+            |_home| {
+                let home = MoaganHome::resolve().unwrap();
+                home.ensure().unwrap();
+                let id = RunId::new();
+                let run_dir = home.run_dir(id);
+                run_dir.ensure().unwrap();
+                std::fs::create_dir_all(run_dir.final_dir()).unwrap();
+                std::fs::write(run_dir.final_dir().join("portfolio.md"), "# p").unwrap();
+                std::fs::create_dir_all(run_dir.sketches()).unwrap();
+                std::fs::write(
+                    run_dir.sketches().join("sk_001.json"),
+                    "{\"id\":\"sk_001\"}",
+                )
+                .unwrap();
+                std::fs::write(
+                    run_dir.sketches().join("sk_002.json"),
+                    "{\"id\":\"sk_002\"}",
+                )
+                .unwrap();
 
-        let loaded = load_from_run_id(&home, id, ContextScope::SummaryFull).unwrap();
-        // 1 final + 2 sketches + 1 parent_run_id stamp = 4.
-        assert!(loaded.context_refs.len() >= 3, "{:?}", loaded.context_refs);
-        assert!(loaded.brief_excerpt.contains("sk_001"));
-        assert!(loaded.brief_excerpt.contains("sk_002"));
+                let loaded = load_from_run_id(&home, id, ContextScope::SummaryFull).unwrap();
+                // 1 final + 2 sketches + 1 parent_run_id stamp = 4.
+                assert!(loaded.context_refs.len() >= 3, "{:?}", loaded.context_refs);
+                assert!(loaded.brief_excerpt.contains("sk_001"));
+                assert!(loaded.brief_excerpt.contains("sk_002"));
+            },
+        );
     }
 
     /// Loading a single `.md` file returns one record and the
