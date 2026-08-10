@@ -938,9 +938,18 @@ impl Config {
         Self::default()
     }
 
-    /// Load configuration from `~/.config/moagan/config.toml` if it
-    /// exists, then apply `MOAGAN_*` env overrides. Returns defaults if
-    /// no file is present.
+    /// Load configuration from the resolved config file (PR-B2
+    /// strict precedence) and apply `MOAGAN_*` env overrides. Returns
+    /// defaults if no file is present.
+    ///
+    /// Precedence (highest first):
+    /// 1. `$MOAGAN_CONFIG` if set.
+    /// 2. `./moagan.toml` or `./.moagan.toml` in the cwd.
+    /// 3. `${XDG_CONFIG_HOME:-~/.config}/moagan/config.toml`.
+    /// 4. Built-in defaults.
+    ///
+    /// A present cwd file (2) short-circuits the XDG lookup (3) — the
+    /// two layers never merge in memory.
     ///
     /// When the user's TOML overrides the `[providers]` table, we merge
     /// it with `default_providers()`: any provider in the user's TOML
@@ -950,13 +959,23 @@ impl Config {
     /// break existing operator configs that only override a subset.
     pub fn load() -> Result<Self> {
         let path = default_config_path();
-        let mut cfg = if path.exists() {
-            let raw = std::fs::read_to_string(&path)?;
-            toml::from_str(&raw).map_err(|e| {
-                crate::Error::InvalidArgs(format!("config parse error at {path:?}: {e}"))
-            })?
-        } else {
-            Self::default()
+        let mut cfg = match path.as_ref() {
+            Some(p) if p.exists() => {
+                let raw = std::fs::read_to_string(p)?;
+                Self::warn_unknown_provider_keys(p, &raw);
+                tracing::info!(
+                    path = %p.display(),
+                    "config: loaded from {}",
+                    p.display()
+                );
+                toml::from_str(&raw).map_err(|e| {
+                    crate::Error::InvalidArgs(format!("config parse error at {p:?}: {e}"))
+                })?
+            }
+            _ => {
+                tracing::info!("config: no file loaded; using built-in defaults");
+                Self::default()
+            }
         };
         // Merge user's [providers] table with the defaults: user entries win.
         let defaults = default_providers();
@@ -965,6 +984,51 @@ impl Config {
         }
         cfg.apply_env_overrides();
         Ok(cfg)
+    }
+
+    /// Inspect the raw TOML for any `[providers.<name>]` table that
+    /// only contains keys that `ProviderConfig` does NOT recognise
+    /// (e.g. `api_key = "..."`). The most common offender is an
+    /// operator putting the key into `moagan.toml` instead of
+    /// `api_keys.toml`; without this warning the field is silently
+    /// dropped by serde and the operator wonders why the key is
+    /// missing. The warning fires once per offending table.
+    fn warn_unknown_provider_keys(path: &std::path::Path, raw: &str) {
+        const KNOWN: &[&str] = &[
+            "kind",
+            "endpoint",
+            "model",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "hard_incompatibilities",
+            "omit_max_tokens",
+        ];
+        let parsed: toml::Value = match toml::from_str(raw) {
+            Ok(v) => v,
+            Err(_) => return, // the main parse will surface the error.
+        };
+        let Some(table) = parsed.get("providers").and_then(|v| v.as_table()) else {
+            return;
+        };
+        for (name, value) in table {
+            let Some(sub) = value.as_table() else {
+                continue;
+            };
+            let has_known = sub.keys().any(|k| KNOWN.contains(&k.as_str()));
+            if has_known {
+                continue;
+            }
+            let unknown: Vec<&str> = sub.keys().map(String::as_str).collect();
+            tracing::warn!(
+                path = %path.display(),
+                provider = %name,
+                unknown_keys = ?unknown,
+                "config: [providers.{name}] only contains unknown keys {:?}; \
+                 these are ignored (api_key belongs in api_keys.toml, not moagan.toml)",
+                unknown,
+            );
+        }
     }
 
     /// Load a domain-specific profile by name.
@@ -1371,25 +1435,131 @@ impl Config {
     }
 }
 
-fn default_config_path() -> PathBuf {
+/// Resolve the config-file path. Precedence (PR-B2, strict — no
+/// merge between layers):
+///
+/// 1. `$MOAGAN_CONFIG` if set (verbatim, unchanged).
+/// 2. `./moagan.toml`  (cwd primary file name).
+/// 3. `./.moagan.toml` (cwd hidden alt name).
+/// 4. `${XDG_CONFIG_HOME:-~/.config}/moagan/config.toml`
+///    (user-level XDG fallback, only when NO cwd file exists).
+/// 5. `./config.toml`  (last-resort, current working directory).
+///
+/// The cwd check stops at the first hit — a present cwd file
+/// short-circuits the user-level XDG lookup so the two layers
+/// never mix in memory. This is the operator's "use these exact
+/// settings for this run" signal.
+fn default_config_path() -> Option<PathBuf> {
     if let Ok(env) = std::env::var("MOAGAN_CONFIG") {
-        return PathBuf::from(env);
+        let path = PathBuf::from(env);
+        return Some(path);
+    }
+    for cwd_candidate in ["moagan.toml", ".moagan.toml"] {
+        let p = PathBuf::from(cwd_candidate);
+        if p.exists() {
+            return Some(p);
+        }
     }
     if let Some(proj) = directories::ProjectDirs::from("", "", "moagan") {
-        return proj.config_dir().join("config.toml");
+        return Some(proj.config_dir().join("config.toml"));
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("moagan")
-            .join("config.toml");
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("moagan")
+                .join("config.toml"),
+        );
     }
-    PathBuf::from("config.toml")
+    Some(PathBuf::from("config.toml"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises every test in this module that mutates process-wide
+    /// state (`MOAGAN_CONFIG`, `HOME`, `XDG_CONFIG_HOME`, current
+    /// working directory). Acquired at the top of each such test;
+    /// released on Drop.
+    static TEST_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that snapshots the current working directory on
+    /// creation and restores it on Drop. Used by the cwd-precedence
+    /// tests so a failed assertion cannot leak the changed cwd into
+    /// subsequent tests running on the same thread.
+    struct CwdGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn new() -> Self {
+            Self {
+                original: std::env::current_dir().expect("current_dir"),
+            }
+        }
+        fn chdir(&self, p: &std::path::Path) {
+            std::env::set_current_dir(p).expect("set_current_dir");
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    /// RAII guard that snapshots selected env vars on creation and
+    /// restores them on Drop. Used so a failed assertion cannot leak
+    /// mutated env vars into the next test on the same thread.
+    /// Includes `XDG_CONFIG_HOME` because the `directories` crate
+    /// uses it in preference to `HOME` when computing the XDG config
+    /// dir; pinning it makes the XDG-fallback tests deterministic on
+    /// CI runners that may have `XDG_CONFIG_HOME` exported.
+    struct EnvGuard {
+        moagan_config: Option<String>,
+        home: Option<std::ffi::OsString>,
+        xdg_config_home: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                moagan_config: std::env::var("MOAGAN_CONFIG").ok(),
+                home: std::env::var_os("HOME"),
+                xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.moagan_config {
+                Some(v) => unsafe {
+                    std::env::set_var("MOAGAN_CONFIG", v);
+                },
+                None => unsafe {
+                    std::env::remove_var("MOAGAN_CONFIG");
+                },
+            }
+            match &self.home {
+                Some(v) => unsafe {
+                    std::env::set_var("HOME", v);
+                },
+                None => unsafe {
+                    std::env::remove_var("HOME");
+                },
+            }
+            match &self.xdg_config_home {
+                Some(v) => unsafe {
+                    std::env::set_var("XDG_CONFIG_HOME", v);
+                },
+                None => unsafe {
+                    std::env::remove_var("XDG_CONFIG_HOME");
+                },
+            }
+        }
+    }
 
     #[test]
     fn defaults_are_sane() {
@@ -2515,6 +2685,320 @@ mod tests {
         assert!(
             gpt.omit_max_tokens,
             "TOML round-trip must preserve omit_max_tokens"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // PR-B2: strict cwd-overrides-user config precedence.
+    //
+    // Each test acquires `TEST_CONFIG_LOCK` for the duration of its
+    // env-var mutations and restores both cwd and HOME on Drop. The
+    // tests run on the shared process-wide state so a leaked cwd
+    // change would poison every subsequent test in the module.
+    // ----------------------------------------------------------------
+
+    /// A unique sentinel marker in a `moagan.toml` is the
+    /// observable: if `Config::load` reads the file we wrote, the
+    /// resulting `Config.providers` contains the provider with our
+    /// marker. Otherwise (defaults / wrong file), the marker is
+    /// absent. We use a provider name that cannot collide with the
+    /// built-in defaults.
+    fn write_marker_toml(dir: &std::path::Path, marker: &str) -> std::path::PathBuf {
+        let body = format!(
+            r#"
+[providers.{marker}]
+kind = "mock"
+endpoint = "mock://{marker}"
+model = "mock-{marker}"
+"#
+        );
+        let p = dir.join("moagan.toml");
+        std::fs::write(&p, body).expect("write cwd moagan.toml");
+        p
+    }
+
+    #[test]
+    fn cwd_moagan_toml_overrides_user_xdg() {
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::new();
+        let _cwd = CwdGuard::new();
+        unsafe {
+            std::env::remove_var("MOAGAN_CONFIG");
+        }
+
+        let cwd_dir = tempfile::tempdir().unwrap();
+        _cwd.chdir(cwd_dir.path());
+
+        // Build a fake user XDG layout: $HOME/.config/moagan/config.toml.
+        let home_dir = tempfile::tempdir().unwrap();
+        let xdg_dir = home_dir.path().join(".config").join("moagan");
+        std::fs::create_dir_all(&xdg_dir).unwrap();
+        let xdg_body = r#"
+[providers.user_xdg_marker]
+kind = "mock"
+endpoint = "mock://user-xdg"
+model = "mock-user-xdg"
+"#;
+        std::fs::write(xdg_dir.join("config.toml"), xdg_body).unwrap();
+        unsafe {
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
+        }
+
+        // Write the cwd file with a DIFFERENT marker.
+        write_marker_toml(cwd_dir.path(), "cwd_marker");
+
+        let cfg = Config::load().expect("Config::load succeeds");
+        assert!(
+            cfg.providers.contains_key("cwd_marker"),
+            "cwd moagan.toml must be loaded; providers: {:?}",
+            cfg.providers.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !cfg.providers.contains_key("user_xdg_marker"),
+            "user XDG config.toml must be IGNORED when cwd file is present (strict precedence)"
+        );
+    }
+
+    #[test]
+    fn moagan_config_env_var_overrides_cwd_file() {
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::new();
+        let _cwd = CwdGuard::new();
+
+        // Build three disjoint directories: cwd, env-var target,
+        // and a fake HOME (so the XDG fallback does not collide).
+        let cwd_dir = tempfile::tempdir().unwrap();
+        let env_dir = tempfile::tempdir().unwrap();
+        let home_dir = tempfile::tempdir().unwrap();
+        _cwd.chdir(cwd_dir.path());
+        unsafe {
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
+        }
+
+        // Cwd file says "cwd_marker" — must be IGNORED.
+        write_marker_toml(cwd_dir.path(), "cwd_marker");
+
+        // Env-var file says "env_var_marker" — must WIN.
+        let env_path = env_dir.path().join("env_var_config.toml");
+        std::fs::write(
+            &env_path,
+            r#"
+[providers.env_var_marker]
+kind = "mock"
+endpoint = "mock://env-var"
+model = "mock-env-var"
+"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_CONFIG", &env_path);
+        }
+
+        let cfg = Config::load().expect("Config::load succeeds");
+        assert!(
+            cfg.providers.contains_key("env_var_marker"),
+            "MOAGAN_CONFIG must win over cwd file; providers: {:?}",
+            cfg.providers.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !cfg.providers.contains_key("cwd_marker"),
+            "cwd file must be IGNORED when MOAGAN_CONFIG is set"
+        );
+    }
+
+    #[test]
+    fn user_xdg_used_when_no_cwd_file() {
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::new();
+        let _cwd = CwdGuard::new();
+        unsafe {
+            std::env::remove_var("MOAGAN_CONFIG");
+        }
+
+        let cwd_dir = tempfile::tempdir().unwrap();
+        let home_dir = tempfile::tempdir().unwrap();
+        let xdg_dir = home_dir.path().join(".config").join("moagan");
+        std::fs::create_dir_all(&xdg_dir).unwrap();
+        std::fs::write(
+            xdg_dir.join("config.toml"),
+            r#"
+[providers.user_xdg_only_marker]
+kind = "mock"
+endpoint = "mock://user-xdg-only"
+model = "mock-user-xdg-only"
+"#,
+        )
+        .unwrap();
+        _cwd.chdir(cwd_dir.path()); // cwd has no moagan.toml
+        unsafe {
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
+        }
+
+        let cfg = Config::load().expect("Config::load succeeds");
+        assert!(
+            cfg.providers.contains_key("user_xdg_only_marker"),
+            "user XDG config.toml must be loaded when no cwd file exists"
+        );
+    }
+
+    #[test]
+    fn hidden_dotfile_alt_name_is_consulted() {
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::new();
+        let _cwd = CwdGuard::new();
+        unsafe {
+            std::env::remove_var("MOAGAN_CONFIG");
+        }
+
+        let cwd_dir = tempfile::tempdir().unwrap();
+        _cwd.chdir(cwd_dir.path());
+        // The XDG fallback must NOT be touched when the cwd has
+        // any moagan.toml variant, even the hidden one.
+        let home_dir = tempfile::tempdir().unwrap();
+        let xdg_dir = home_dir.path().join(".config").join("moagan");
+        std::fs::create_dir_all(&xdg_dir).unwrap();
+        std::fs::write(
+            xdg_dir.join("config.toml"),
+            r#"
+[providers.user_xdg_dotfile_test]
+kind = "mock"
+endpoint = "mock://user-xdg"
+model = "mock-user-xdg"
+"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
+        }
+        // Write the hidden alt-name only.
+        std::fs::write(
+            cwd_dir.path().join(".moagan.toml"),
+            r#"
+[providers.hidden_dotfile_marker]
+kind = "mock"
+endpoint = "mock://hidden-dotfile"
+model = "mock-hidden-dotfile"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load().expect("Config::load succeeds");
+        assert!(
+            cfg.providers.contains_key("hidden_dotfile_marker"),
+            "./.moagan.toml must be honoured as an alt cwd file name"
+        );
+        assert!(
+            !cfg.providers.contains_key("user_xdg_dotfile_test"),
+            "user XDG must be IGNORED when the hidden cwd file exists"
+        );
+    }
+
+    #[test]
+    fn existing_xdg_only_setup_still_loads() {
+        // Backward-compat: a setup that has ONLY the user XDG file
+        // (the pre-PR-B2 default) and no cwd file must continue to
+        // load identically. We assert that all default providers are
+        // present and the user's provider is wired in.
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::new();
+        let _cwd = CwdGuard::new();
+        unsafe {
+            std::env::remove_var("MOAGAN_CONFIG");
+        }
+
+        let cwd_dir = tempfile::tempdir().unwrap();
+        let home_dir = tempfile::tempdir().unwrap();
+        let xdg_dir = home_dir.path().join(".config").join("moagan");
+        std::fs::create_dir_all(&xdg_dir).unwrap();
+        // Operator overrides ONLY the model's temperature on the
+        // `minimax` entry; everything else is default.
+        std::fs::write(
+            xdg_dir.join("config.toml"),
+            r#"
+[providers.minimax]
+temperature = 0.42
+"#,
+        )
+        .unwrap();
+        _cwd.chdir(cwd_dir.path()); // empty cwd
+        unsafe {
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
+        }
+
+        let cfg = Config::load().expect("Config::load succeeds");
+        assert_eq!(
+            cfg.providers.get("minimax").unwrap().temperature,
+            Some(0.42),
+            "operator's temperature override must reach the config"
+        );
+        // Defaults still present.
+        assert!(cfg.providers.contains_key("minimax"));
+        assert!(cfg.providers.contains_key("mock"));
+        assert!(cfg.providers.contains_key("deepseek"));
+    }
+
+    #[test]
+    fn warn_unknown_provider_keys_does_not_panic() {
+        // The helper walks the raw TOML and emits warnings for
+        // `[providers.X]` tables whose only keys are unknown to
+        // `ProviderConfig` (e.g. `api_key = "..."`). The test pins
+        // the behaviour: it must not panic and must produce the
+        // expected `tracing::warn!` line (we don't assert on the
+        // log capture here — that's covered by the existing
+        // tracing subscriber test rig).
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::new();
+        let _cwd = CwdGuard::new();
+        unsafe {
+            std::env::remove_var("MOAGAN_CONFIG");
+        }
+
+        let cwd_dir = tempfile::tempdir().unwrap();
+        _cwd.chdir(cwd_dir.path());
+        let home_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
+        }
+        std::fs::write(
+            cwd_dir.path().join("moagan.toml"),
+            r#"
+[providers.minimax]
+api_key = "this-belongs-in-api_keys.toml"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load().expect("Config::load succeeds despite unknown keys");
+        // The unknown `api_key` field is silently dropped by serde
+        // (its default behaviour for unknown keys); the rest of the
+        // default provider entry is kept.
+        assert!(
+            cfg.providers.contains_key("minimax"),
+            "minimax entry must survive even though the user only wrote unknown keys"
         );
     }
 }

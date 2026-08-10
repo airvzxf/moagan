@@ -150,16 +150,23 @@ impl OpenCodeGoProvider {
         Ok(Self { inner: provider })
     }
 
-    /// Build from config using `OPENCODE_GO_API_KEY`.
+    /// Build from config, resolving the API key via the unified
+    /// helper (PR-B2). The helper honours `<MOAGAN_HOME>/api_keys.toml`
+    /// first, then falls back to the direct `OPENCODE_GO_API_KEY`
+    /// env var so existing CI / shell setups keep working untouched.
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
-        let key = std::env::var("OPENCODE_GO_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
+        let key = super::api_keys::lookup_key("opencode_go", None)
             .ok_or_else(|| {
                 Error::InvalidApiKey(
-                    "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
+                    "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or api_keys.toml"
                         .into(),
                 )
+            })?
+            .map_err(|e| match e {
+                Error::InvalidApiKey(msg) => Error::InvalidApiKey(format!(
+                    "opencode_go: {msg}; check api_keys.toml and the env var fallback"
+                )),
+                other => other,
             })?;
         Self::new(spec, SecretString::new(key))
     }

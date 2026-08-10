@@ -415,14 +415,28 @@ impl RunContext {
             } else {
                 Some(&self.config.profile_temperature_overrides)
             };
+        // PR-B2: per-provider temperature/top_p from the active
+        // provider's `ProviderConfig`. These are consulted BEFORE the
+        // hard-coded per-role table so a user who wrote
+        // `[providers.minimax] temperature = 0.42` actually gets 0.42.
+        let (provider_temperature, provider_top_p) = self
+            .config
+            .providers
+            .get(&self.default_provider)
+            .map(|s| (s.temperature, s.top_p))
+            .unwrap_or((None, None));
         let req = Request {
             role,
             model: self.default_model.clone(),
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(temperature_for_role(role, profile_overrides)),
-            top_p: Some(0.95),
+            temperature: Some(resolve_temperature(
+                role,
+                profile_overrides,
+                provider_temperature,
+            )),
+            top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
             stream: false,
         };
@@ -470,14 +484,27 @@ impl RunContext {
             } else {
                 Some(&self.config.profile_temperature_overrides)
             };
+        // PR-B2: per-provider temperature/top_p from the active
+        // provider's `ProviderConfig`. Mirrors the lookup in
+        // `call_with_retry` so the cache-miss path is consistent.
+        let (provider_temperature, provider_top_p) = self
+            .config
+            .providers
+            .get(&self.default_provider)
+            .map(|s| (s.temperature, s.top_p))
+            .unwrap_or((None, None));
         let req = Request {
             role,
             model: self.default_model.clone(),
             system,
             user,
             max_tokens: max_tokens_for_role(role),
-            temperature: Some(temperature_for_role(role, profile_overrides)),
-            top_p: Some(0.95),
+            temperature: Some(resolve_temperature(
+                role,
+                profile_overrides,
+                provider_temperature,
+            )),
+            top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
             stream: false,
         };
@@ -1226,6 +1253,36 @@ pub fn temperature_for_role(
     }
 }
 
+/// PR-B2: extend [`temperature_for_role`] to honour the active
+/// provider's `ProviderConfig::temperature` as a base.
+///
+/// Precedence (highest first):
+/// 1. Profile-defined override for `role` (when present).
+/// 2. `provider_base` (when `Some`) — the per-provider default from
+///    `[providers.<name>].temperature` in the user's TOML.
+/// 3. The hard-coded per-role default from [`temperature_for_role`].
+///
+/// Without this helper, a user that writes
+/// `[providers.minimax] temperature = 0.42` sees their value parsed
+/// into `ProviderConfig.temperature` but the call layer still stamps
+/// the per-role default into every request (the user-reported
+/// "config-key ignored" bug class).
+pub fn resolve_temperature(
+    role: Role,
+    profile_overrides: Option<&std::collections::HashMap<String, f32>>,
+    provider_base: Option<f32>,
+) -> f32 {
+    if let Some(map) = profile_overrides
+        && let Some(v) = map.get(role.as_str())
+    {
+        return *v;
+    }
+    if let Some(base) = provider_base {
+        return base;
+    }
+    temperature_for_role(role, profile_overrides)
+}
+
 /// Outcome of a phase. Each variant corresponds to a sidecar file
 /// that the phase is responsible for writing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1287,6 +1344,7 @@ pub trait Phase: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProviderConfig;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1581,6 +1639,252 @@ mod tests {
             temperature_for_role(Role::Clarify, Some(&map)),
             0.0,
             "unknown key must not influence unrelated roles"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // PR-B2: `resolve_temperature` and per-provider temperature /
+    // top_p wiring into `call_with_retry`.
+    //
+    // These tests pin the precedence contract end-to-end (the
+    // helper + the call site) so a future refactor cannot silently
+    // route around the user's `[providers.X].temperature` knob.
+    // ----------------------------------------------------------------
+
+    /// Profile override still wins over the per-provider base.
+    /// (Spec: "profile overrides still win over the per-provider
+    /// value".)
+    #[test]
+    fn resolve_temperature_profile_overrides_provider_base() {
+        let map = std::collections::HashMap::new();
+        let mut map = map;
+        map.insert("sketch".to_owned(), 0.25_f32);
+        assert_eq!(
+            resolve_temperature(Role::Sketch, Some(&map), Some(0.9)),
+            0.25,
+            "profile override must beat the per-provider base"
+        );
+    }
+
+    /// Provider base wins over the role default when no profile
+    /// override is present.
+    #[test]
+    fn resolve_temperature_provider_base_beats_role_default() {
+        assert_eq!(
+            resolve_temperature(Role::Sketch, None, Some(0.42)),
+            0.42,
+            "per-provider temperature must beat the per-role default (Sketch=1.0)"
+        );
+        assert_eq!(
+            resolve_temperature(Role::Clarify, None, Some(0.42)),
+            0.42,
+            "per-provider temperature must beat the per-role default (Clarify=0.0)"
+        );
+    }
+
+    /// When no profile override AND no provider base are present,
+    /// the helper falls through to the existing role defaults.
+    #[test]
+    fn resolve_temperature_no_base_falls_back_to_role_default() {
+        assert_eq!(
+            resolve_temperature(Role::Sketch, None, None),
+            1.0,
+            "no profile, no provider base → role default (Sketch)"
+        );
+        assert_eq!(
+            resolve_temperature(Role::Clarify, None, None),
+            0.0,
+            "no profile, no provider base → role default (Clarify)"
+        );
+    }
+
+    /// A `RecordingProvider` that captures the `Request` it received.
+    /// Used by the call-layer test below to assert that the user's
+    /// `[providers.X].temperature = 0.42` actually reaches the wire.
+    /// The `captured` slot is shared via `Arc<Mutex<...>>` so the
+    /// test body can read what `send` recorded.
+    struct RecordingProvider {
+        captured: Arc<parking_lot::Mutex<Option<crate::llm::Request>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::Provider for RecordingProvider {
+        fn name(&self) -> &str {
+            "recording"
+        }
+        fn model(&self) -> &str {
+            "recording-model"
+        }
+        fn endpoint(&self) -> &str {
+            "mock://recording"
+        }
+        async fn send(&self, req: &crate::llm::Request) -> Result<(u16, crate::llm::Response)> {
+            *self.captured.lock() = Some(req.clone());
+            Ok((
+                200,
+                crate::llm::Response {
+                    text: r#"{"ok":true}"#.into(),
+                    finish_reason: Some("end_turn".into()),
+                    truncated: false,
+                    usage: Default::default(),
+                },
+            ))
+        }
+    }
+
+    /// End-to-end: a `Config` that has `temperature = 0.42` on the
+    /// active provider must reach `Request.temperature` inside
+    /// `call_with_retry`, NOT the per-role default (Sketch = 1.0).
+    /// This is the bug the audit surfaced: the field was parsed but
+    /// the call layer stamped the role default instead.
+    #[tokio::test]
+    async fn call_with_retry_honors_provider_temperature() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::open(
+            run_id,
+            &home.run_dir(run_id),
+            crate::redact::RedactPolicy::default(),
+            None,
+        )
+        .expect("Telemetry::open");
+
+        let captured = Arc::new(parking_lot::Mutex::new(None));
+        let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
+            captured: Arc::clone(&captured),
+        });
+        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let mut registry = ProviderRegistry::default();
+        registry.insert("recording".into(), provider_dyn);
+
+        // Build a Config with the active provider carrying
+        // temperature=0.42 and top_p=0.5.
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "recording".to_owned(),
+            ProviderConfig {
+                kind: "mock".to_owned(),
+                endpoint: "mock://recording".to_owned(),
+                model: "recording-model".to_owned(),
+                max_tokens: Some(1024),
+                temperature: Some(0.42),
+                top_p: Some(0.5),
+                ..ProviderConfig::default()
+            },
+        );
+        let ctx = RunContext::new_with_config(
+            run_id,
+            home,
+            Arc::new(registry),
+            "recording".into(),
+            "recording-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "standard".into(),
+            Arc::new(cfg),
+        );
+
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Sketch,
+                String::new(),
+                String::new(),
+                "Value",
+                1,
+            )
+            .await;
+        assert!(result.is_ok(), "call should succeed: {result:?}");
+        let recorded = captured
+            .lock()
+            .clone()
+            .expect("provider captured the request");
+        assert_eq!(
+            recorded.temperature,
+            Some(0.42),
+            "call_with_retry must stamp per-provider temperature (0.42), NOT the role default (Sketch=1.0)"
+        );
+        assert_eq!(
+            recorded.top_p,
+            Some(0.5),
+            "call_with_retry must stamp per-provider top_p (0.5), NOT the hard-coded 0.95"
+        );
+    }
+
+    /// When no provider temperature is set, the call layer falls
+    /// back to the per-role default (the legacy behaviour). Pins
+    /// the "no field → no behaviour change" requirement.
+    #[tokio::test]
+    async fn call_with_retry_falls_back_to_role_default_when_provider_temperature_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::open(
+            run_id,
+            &home.run_dir(run_id),
+            crate::redact::RedactPolicy::default(),
+            None,
+        )
+        .expect("Telemetry::open");
+
+        let captured = Arc::new(parking_lot::Mutex::new(None));
+        let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
+            captured: Arc::clone(&captured),
+        });
+        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let mut registry = ProviderRegistry::default();
+        registry.insert("recording".into(), provider_dyn);
+
+        // Provider has NO temperature/top_p set (None).
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "recording".to_owned(),
+            ProviderConfig {
+                kind: "mock".to_owned(),
+                endpoint: "mock://recording".to_owned(),
+                model: "recording-model".to_owned(),
+                max_tokens: Some(1024),
+                temperature: None,
+                top_p: None,
+                ..ProviderConfig::default()
+            },
+        );
+        let ctx = RunContext::new_with_config(
+            run_id,
+            home,
+            Arc::new(registry),
+            "recording".into(),
+            "recording-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "standard".into(),
+            Arc::new(cfg),
+        );
+
+        let _ = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Sketch,
+                String::new(),
+                String::new(),
+                "Value",
+                1,
+            )
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.temperature,
+            Some(1.0),
+            "without provider temperature, the per-role default (Sketch=1.0) must apply"
+        );
+        assert_eq!(
+            recorded.top_p,
+            Some(0.95),
+            "without provider top_p, the hard-coded 0.95 must apply"
         );
     }
 }

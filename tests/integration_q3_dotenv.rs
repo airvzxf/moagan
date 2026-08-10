@@ -39,10 +39,23 @@ fn version_succeeds_with_dotenv_in_current_directory() {
 #[test]
 fn doctor_loads_api_key_from_dotenv() {
     let tmp = tempfile::tempdir().unwrap();
-    fs::write(tmp.path().join(".env"), "MINIMAX_API_KEY=from-dotenv\n").unwrap();
+    // PR-B2: the doctor now checks every keyed provider kind
+    // (minimax / deepseek / opencode_go). Pre-PR-B2 only
+    // MINIMAX_API_KEY was checked; to keep this test passing we
+    // supply the other two via direct env (the dotenv test only
+    // exercises MINIMAX).
+    fs::write(
+        tmp.path().join(".env"),
+        "MINIMAX_API_KEY=from-dotenv\n\
+         DEEPSEEK_API_KEY=from-dotenv\n\
+         OPENCODE_GO_API_KEY=from-dotenv\n",
+    )
+    .unwrap();
 
     let output = run_in(tmp.path(), &["doctor"])
         .env_remove("MINIMAX_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENCODE_GO_API_KEY")
         .env_remove("MOAGAN_QUIET")
         .env("MOAGAN_HOME", tmp.path().join("home"))
         .env("MOAGAN_CONFIG", tmp.path().join("missing.toml"))
@@ -61,10 +74,15 @@ fn dotenv_does_not_override_existing_environment() {
     let tmp = tempfile::tempdir().unwrap();
     let dotenv_home = tmp.path().join("from-dotenv");
     let shell_home = tmp.path().join("from-shell");
+    // PR-B2: dotenv must set every keyed provider kind so the
+    // doctor check has every key to resolve.
     fs::write(
         tmp.path().join(".env"),
         format!(
-            "MINIMAX_API_KEY=from-dotenv-BBB\nMOAGAN_HOME={}\n",
+            "MINIMAX_API_KEY=from-dotenv-BBB\n\
+             DEEPSEEK_API_KEY=from-dotenv-BBB\n\
+             OPENCODE_GO_API_KEY=from-dotenv-BBB\n\
+             MOAGAN_HOME={}\n",
             dotenv_home.display()
         ),
     )
@@ -72,6 +90,8 @@ fn dotenv_does_not_override_existing_environment() {
 
     let output = run_in(tmp.path(), &["doctor"])
         .env("MINIMAX_API_KEY", "from-shell-AAA")
+        .env("DEEPSEEK_API_KEY", "from-shell-AAA")
+        .env("OPENCODE_GO_API_KEY", "from-shell-AAA")
         .env("MOAGAN_HOME", &shell_home)
         .env("MOAGAN_CONFIG", tmp.path().join("missing.toml"))
         .env("MOAGAN_QUIET", "1")

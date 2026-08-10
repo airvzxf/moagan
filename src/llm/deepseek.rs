@@ -31,15 +31,22 @@ impl DeepSeekProvider {
         Ok(Self(OpenAiCompatProvider::new(spec, api_key)?))
     }
 
-    /// Build from config using `DEEPSEEK_API_KEY`.
+    /// Build from config, resolving the API key via the unified
+    /// helper (PR-B2). The helper honours `<MOAGAN_HOME>/api_keys.toml`
+    /// first, then falls back to the direct `DEEPSEEK_API_KEY` env var
+    /// so existing CI / shell setups keep working untouched.
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
-        let key = std::env::var("DEEPSEEK_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
+        let key = super::api_keys::lookup_key("deepseek", None)
             .ok_or_else(|| {
                 Error::InvalidApiKey(
-                    "DEEPSEEK_API_KEY not set; provide via env, --api-key, or config file".into(),
+                    "DEEPSEEK_API_KEY not set; provide via env, --api-key, or api_keys.toml".into(),
                 )
+            })?
+            .map_err(|e| match e {
+                Error::InvalidApiKey(msg) => Error::InvalidApiKey(format!(
+                    "deepseek: {msg}; check api_keys.toml and the env var fallback"
+                )),
+                other => other,
             })?;
         Self::new(spec, SecretString::new(key))
     }
