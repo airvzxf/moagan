@@ -1433,6 +1433,35 @@ impl Config {
             .get(name)
             .ok_or_else(|| crate::Error::InvalidArgs(format!("unknown provider: {name}")))
     }
+
+    /// Whether `Role::JsonRepairV2` should fire on parse failure for
+    /// this run mode. The decision is consumed at the single
+    /// `call_with_retry_parse` gate in `phases::phase`.
+    ///
+    /// Default-on for `discover` (`moagan discover` spawns 40-500
+    /// sketches; the extra LLM call cost amortises across the
+    /// matrix fan-out, and the stubborn-model failure modes that
+    /// `JsonRepairV2` catches — truncated brackets inside a
+    /// think-block, prose-prefixed JSON the tolerant extractor
+    /// cannot splice — are exactly the modes stubborn models
+    /// exhibit at the sketch-fan-out scale). Every other mode
+    /// respects the explicit `llm.json_repair_v2_enabled` config
+    /// flag (default `false`) so the token-cost surprise stays
+    /// opt-in.
+    ///
+    /// `mode` is the same lowercase string the run dispatcher
+    /// stores on [`crate::phases::RunContext::mode`] (e.g.
+    /// `"discover"` for `moagan discover`). The match is
+    /// exhaustive via the catch-all: an unknown mode string
+    /// (corrupted manifest, future mode added without updating
+    /// this helper) falls back to the explicit config flag,
+    /// which preserves today's behaviour.
+    pub fn json_repair_v2_enabled_for_mode(&self, mode: &str) -> bool {
+        if mode == "discover" {
+            return true;
+        }
+        self.llm.json_repair_v2_enabled
+    }
 }
 
 /// Resolve the config-file path. Precedence (PR-B2, strict — no
@@ -1612,6 +1641,90 @@ mod tests {
         assert!(cfg.provider("minimax").is_ok());
         assert!(cfg.provider("mock").is_ok());
         assert!(cfg.provider("does-not-exist").is_err());
+    }
+
+    /// PR-C1 (cluster C, JSON robustness): the helper defaults the
+    /// repair path to ON for the `discover` subcommand so the
+    /// matrix fan-out (40-500 sketches) amortises the extra LLM
+    /// call. Pin the per-mode decision matrix.
+    #[test]
+    fn json_repair_v2_enabled_for_mode_true_for_discovery() {
+        let cfg = Config::default();
+        assert!(
+            !cfg.llm.json_repair_v2_enabled,
+            "fixture: the typed config field starts at false so the helper \
+             can override it for discover without a config-file change"
+        );
+        assert!(cfg.json_repair_v2_enabled_for_mode("discover"));
+    }
+
+    /// Other modes honour the typed config flag (default `false`),
+    /// so a 4-sketch pipeline never pays the extra LLM-call cost
+    /// unless the operator opts in.
+    #[test]
+    fn json_repair_v2_enabled_for_mode_false_for_other_modes_by_default() {
+        let cfg = Config::default();
+        for mode in ["fast", "standard", "deep", "explore", "batch"] {
+            assert!(
+                !cfg.json_repair_v2_enabled_for_mode(mode),
+                "mode {mode} should default to off when the typed flag is false"
+            );
+        }
+    }
+
+    /// When the operator explicitly sets
+    /// `llm.json_repair_v2_enabled = true`, every non-`discover`
+    /// mode picks it up. `discover` is already on regardless, so
+    /// the explicit flag is idempotent for it.
+    #[test]
+    fn json_repair_v2_enabled_for_mode_true_for_other_modes_when_explicitly_set() {
+        let mut cfg = Config::default();
+        cfg.llm.json_repair_v2_enabled = true;
+        for mode in ["fast", "standard", "deep", "explore", "batch"] {
+            assert!(
+                cfg.json_repair_v2_enabled_for_mode(mode),
+                "mode {mode} should follow the explicit typed flag"
+            );
+        }
+        // Discover is already true regardless of the explicit flag.
+        assert!(cfg.json_repair_v2_enabled_for_mode("discover"));
+    }
+
+    /// The env-var override path (`MOAGAN_JSON_REPAIR_V2_ENABLED`)
+    /// populates the same typed field, so the helper sees it via
+    /// `apply_env_overrides` and propagates to non-`discover`
+    /// modes. Pin the wiring end-to-end: set the env var, run
+    /// `apply_env_overrides`, and assert the helper agrees.
+    #[test]
+    fn json_repair_v2_enabled_for_mode_env_var_override() {
+        unsafe {
+            std::env::set_var("MOAGAN_JSON_REPAIR_V2_ENABLED", "true");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert!(
+            cfg.llm.json_repair_v2_enabled,
+            "env var should have flipped the typed field via apply_env_overrides"
+        );
+        // Non-`discover` modes pick up the flag via the helper.
+        assert!(cfg.json_repair_v2_enabled_for_mode("standard"));
+        // `discover` is on regardless — the env var is a no-op for it.
+        assert!(cfg.json_repair_v2_enabled_for_mode("discover"));
+        unsafe {
+            std::env::remove_var("MOAGAN_JSON_REPAIR_V2_ENABLED");
+        }
+    }
+
+    /// Unknown mode strings (corrupted manifest, future mode
+    /// without a helper update) fall through to the typed flag so
+    /// the default behaviour is preserved.
+    #[test]
+    fn json_repair_v2_enabled_for_mode_unknown_mode_falls_back_to_typed_flag() {
+        let cfg = Config::default();
+        assert!(!cfg.json_repair_v2_enabled_for_mode("unknown"));
+        let mut cfg = Config::default();
+        cfg.llm.json_repair_v2_enabled = true;
+        assert!(cfg.json_repair_v2_enabled_for_mode("unknown"));
     }
 
     #[test]

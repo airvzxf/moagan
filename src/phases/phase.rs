@@ -985,7 +985,7 @@ impl RunContext {
                         let max_attempts = b.max_attempts.min(ceiling + 1);
                         if attempt + 1 >= max_attempts {
                             if b.use_json_repair
-                                && self.config.llm.json_repair_v2_enabled
+                                && self.config.json_repair_v2_enabled_for_mode(&self.mode)
                                 && let Some(value) = self
                                     .call_json_repair_v2::<T>(role, &resp.text, schema_hint)
                                     .await
@@ -1540,6 +1540,82 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(script.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// PR-C1 (cluster C, JSON robustness): `moagan discover` runs
+    /// spawn the matrix fan-out at the `RunContext::mode == "discover"`
+    /// sentinel, so the `JsonRepairV2` re-call should fire by
+    /// default — the operator never had to opt in via
+    /// `llm.json_repair_v2_enabled`. Pin that the gate
+    /// (`Config::json_repair_v2_enabled_for_mode`) routes the
+    /// `discover` mode string to `true` regardless of the typed
+    /// config field.
+    #[tokio::test]
+    async fn json_repair_v2_fires_for_discovery_mode_with_default_config() {
+        let (_temp, mut ctx, script) = retry_context(vec![
+            Ok((200, response(r#"{"broken":"unterminated}"#))),
+            Ok((
+                200,
+                response(
+                    r#"{"malformed":"broken","target_schema":"intake","repaired":"{\"ok\":true}","notes":"fixed","schema_version":"json_repair_v2.v1"}"#,
+                ),
+            )),
+        ]);
+        assert!(
+            !ctx.config.llm.json_repair_v2_enabled,
+            "fixture: typed config flag must stay false so the helper is \
+             the only thing that flips the gate for discover"
+        );
+        ctx.mode = "discover".into();
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Intake: {problem, objectives[]}",
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            2,
+            "first call: original Intake (malformed); second call: JsonRepairV2 re-call"
+        );
+    }
+
+    /// PR-C1: for non-`discover` modes the helper routes through the
+    /// typed config field (default `false`), so a `fast` run with
+    /// a broken first response surfaces `SchemaViolation` instead
+    /// of paying for the repair re-call. Mirrors today's behaviour
+    /// — the `fast` mode cost profile is unchanged.
+    #[tokio::test]
+    async fn json_repair_v2_skipped_for_fast_mode_with_default_config() {
+        let (_temp, mut ctx, script) = retry_context(vec![
+            Ok((200, response(r#"{"broken":"unterminated}"#))),
+            Ok((200, response(r#"{"ok":true}"#))),
+        ]);
+        assert!(!ctx.config.llm.json_repair_v2_enabled);
+        ctx.mode = "fast".into();
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Intake: {problem, objectives[]}",
+                5,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(Error::SchemaViolation(_))),
+            "fast mode with default config must not invoke the repair re-call"
+        );
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            1,
+            "fast mode is single-shot (no retry, no repair)"
+        );
     }
 
     #[test]
