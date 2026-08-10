@@ -78,9 +78,14 @@ Plus one fast orthogonal check on the commit message itself:
    │  GitHub Actions — e2e-network.yml (post-merge)                    │
    │  ─────────────────────────────────────                             │
    │                                                                   │
-   │  e2e-network (~25 min, real LLM)                                  │
+   │  e2e-network (3-row strategy.matrix, real LLM, ~25 min wall-clock)│
+   │    - card80   ~25 min   (timeout-minutes: 28)                     │
+   │    - fast     ~2  min   (timeout-minutes: 6)                      │
+   │    - explore  ~8  min   (timeout-minutes: 12)                     │
+   │    - all three rows run in parallel on push;                       │
+   │      workflow_dispatch inputs.section can narrow to a single row │
    │    - builds release binary                                        │
-   │    - runs scripts/e2e_audit_proxy.sh                              │
+   │    - runs scripts/e2e_audit_proxy.sh with MOAGAN_SMOKE_SECTION=<row>│
    │    - not a PR gate (would block PRs 25 min)                       │
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘
