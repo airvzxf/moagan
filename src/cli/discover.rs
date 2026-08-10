@@ -28,6 +28,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::cli::flags_batch;
 use crate::config::Config;
 use crate::discovery::{DiscoveryCoordinator, DiscoveryOutcome};
 use crate::error::{Error, Result};
@@ -200,6 +201,17 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         None,
     )?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
+    // PR-B1: `--max-parallelism` is validated up-front (D.15.5:
+    // hard cap 64 simultaneous LLM calls). Today the flag is parsed
+    // but the value is passed through `Parallelism::new` unchecked;
+    // a typo like `--max-parallelism 4096` silently raises the
+    // semaphore and overwhelms the upstream rate-limit. The
+    // helper in `flags_batch.rs` is the same one the cheatsheet
+    // (`docs/cli-cheatsheet.md` §1 row 5) promises, so we surface
+    // its exact error message.
+    if let Some(n) = opts.max_parallelism {
+        flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
+    }
     let max_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
     let parallelism = Parallelism::new(max_parallelism);
 
@@ -652,5 +664,24 @@ mod tests {
     fn parse_cardinality_requires_value() {
         let e = parse_cardinality(&["--cardinality".to_string()], 80).unwrap_err();
         assert!(e.to_string().contains("needs a value"));
+    }
+
+    /// PR-B1 (B1.4): `discover` validates `--max-parallelism`
+    /// against the same hard cap (64) as `run`. Today the flag
+    /// is parsed but the value is forwarded unchecked to
+    /// `Parallelism::new`; a typo like `--max-parallelism 4096`
+    /// silently raises the semaphore. Pin the helper contract
+    /// here so the discovery path can never drift from the run
+    /// path.
+    #[test]
+    fn max_parallelism_cap_holds_for_discover() {
+        // Exactly the cap: accepted.
+        assert!(flags_batch::validate_max_parallelism(64).is_ok());
+        // One above the cap: rejected with the documented message.
+        let err = flags_batch::validate_max_parallelism(65).expect_err("must error");
+        assert!(
+            err.contains("exceeds maximum 64"),
+            "error must mention the cap; got {err:?}"
+        );
     }
 }

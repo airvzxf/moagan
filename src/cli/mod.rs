@@ -384,8 +384,11 @@ pub enum Cmd {
         /// is set the original `manifest.execution_policy` is
         /// carried over verbatim; `--matrix-override` may still
         /// patch specific fields without rebuilding the whole
-        /// pipeline.
-        #[arg(long, default_value_t = true)]
+        /// pipeline. Pass `--same-config=false` to opt out of the
+        /// override (the cloned manifest is the authoritative
+        /// config; any `--matrix-override` JSON is silently
+        /// ignored).
+        #[arg(long, action = clap::ArgAction::Set, default_value_t = true, value_parser = clap::value_parser!(bool))]
         same_config: bool,
     },
     /// Import a run directory from another `MOAGAN_HOME` into
@@ -1033,7 +1036,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             run_id,
             override_json,
             matrix_override,
-            same_config: _,
+            same_config,
         } => {
             let parsed: crate::ids::RunId = run_id
                 .parse()
@@ -1042,7 +1045,19 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // if both are set, prefer `--matrix-override` (the
             // spec-blessed name).
             let raw = matrix_override.or(override_json);
-            continue_cmd::run_rerun(&global_home, parsed, raw).await?;
+            // `--same-config` is now wired through to the rerun
+            // helper instead of being destructured with `_: ` and
+            // discarded (PR-B1). When `true` (default) the
+            // helper treats the parent's config as immutable and
+            // folds `--matrix-override` on top; `--same-config=false`
+            // suppresses the override entirely.
+            tracing::info!(
+                run_id = %parsed,
+                same_config,
+                has_override = raw.is_some(),
+                "rerun dispatch"
+            );
+            continue_cmd::run_rerun(&global_home, parsed, raw, same_config).await?;
             Ok(0)
         }
         Cmd::Import {
@@ -1469,5 +1484,52 @@ mod tests {
 
         unlock_env(guard);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// PR-B1 (B1.2): `moagan rerun --same-config=false` is parsed
+    /// at the CLI layer and reaches the dispatcher. The previous
+    /// audit had the dispatcher destructuring it with `_: ` so
+    /// the value was discarded; the wire-up routes it through to
+    /// `continue_cmd::run_rerun`. Pin the parsed shape here so a
+    /// future clap refactor cannot silently drop the field.
+    #[test]
+    fn rerun_cli_parses_same_config_default_true() {
+        let cli =
+            Cli::try_parse_from(["moagan", "rerun", "--run-id", "01HF3Z1K9R5X7QYABCDEF01234"])
+                .expect("parse must succeed");
+        match cli.cmd {
+            Cmd::Rerun { same_config, .. } => {
+                assert!(same_config, "default for --same-config must remain `true`");
+            }
+            other => panic!("expected Cmd::Rerun, got {other:?}"),
+        }
+    }
+
+    /// PR-B1 (B1.2): `--same-config=false` reaches the dispatcher
+    /// intact. The flag is now wired through; the dispatcher
+    /// passes the parsed bool to `run_rerun` instead of
+    /// discarding it with `_: `. The clap `action = Set` +
+    /// `default_value_t = true` combination makes
+    /// `--same-config=false` round-trip as expected (the cheatsheet
+    /// documents this combination under §4 row 2).
+    #[test]
+    fn rerun_cli_parses_same_config_false() {
+        let cli = Cli::try_parse_from([
+            "moagan",
+            "rerun",
+            "--run-id",
+            "01HF3Z1K9R5X7QYABCDEF01234",
+            "--same-config=false",
+        ])
+        .expect("parse must succeed");
+        match cli.cmd {
+            Cmd::Rerun { same_config, .. } => {
+                assert!(
+                    !same_config,
+                    "--same-config=false must round-trip to the dispatcher"
+                );
+            }
+            other => panic!("expected Cmd::Rerun, got {other:?}"),
+        }
     }
 }
