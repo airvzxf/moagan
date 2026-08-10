@@ -6,7 +6,7 @@ The caller passes the three judge scores (each in 0..=10) plus the
 candidate shortlist (id + summary + approach) and expects one
 candidate id back as the winner.
 
-Sampling: T=0.2, top_p=0.85, max_tokens=1048576. The low temperature
+Sampling: T=0.2, top_p=0.85, max_tokens=1000000. The low temperature
 keeps the tiebreaker stable across runs of the same cluster so
 snapshot diffs are meaningful; top_p leaves room for a small amount
 of variance when the disagreement is genuine.

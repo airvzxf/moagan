@@ -7,7 +7,7 @@ malformed text plus the `target_schema` (the role name whose
 shape the output should match) and expects a repaired JSON
 string back.
 
-Sampling: T=0.0, top_p=0.5, max_tokens=1048576. The temperature is
+Sampling: T=0.0, top_p=0.5, max_tokens=1000000. The temperature is
 zero because the repair is mechanical: two runs against the same
 malformed text must produce the same repair. top_p=0.5 leaves a
 small headroom for tokens the local repair explicitly cannot

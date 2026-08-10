@@ -495,10 +495,27 @@ impl RunContext {
         started_unix: i64,
         retry_count: u32,
     ) -> Result<Response> {
-        let request_body_sha256 = (self.default_provider == "minimax")
-            .then(|| crate::llm::http::request_body_sha256(&req))
-            .transpose()?;
+        // Apply the same per-provider cap that the provider will apply inside
+        // `send()`, so the body_sha256 matches the body that actually leaves the
+        // process. Cloned here because `req` is consumed by `provider.send(&req)`
+        // downstream and we don't want to mutate the caller's view.
         let provider = self.provider().await;
+        let hash_input = match self
+            .config
+            .providers
+            .get(&self.default_provider)
+            .and_then(|spec| spec.max_tokens)
+        {
+            Some(cap) if req.max_tokens > cap => {
+                let mut clamped = req.clone();
+                clamped.max_tokens = cap;
+                clamped
+            }
+            _ => req.clone(),
+        };
+        let request_body_sha256 = (self.default_provider == "minimax")
+            .then(|| crate::llm::http::request_body_sha256(&hash_input))
+            .transpose()?;
         let call_id = uuid::Uuid::now_v7().to_string();
         let provider_started = std::time::Instant::now();
         tracing::debug!(
@@ -1037,7 +1054,7 @@ fn parse_mode_str(s: &str) -> Mode {
 }
 
 /// Per-role `max_tokens` ceiling. As of v0.6 every role uses the same
-/// `DEFAULT_MAX_TOKENS` (1_048_576) so prose-heavy outputs are never
+/// `DEFAULT_MAX_TOKENS` (1_000_000) so prose-heavy outputs are never
 /// truncated mid-thought. Calibrated per observation that the model
 /// legitimately needs much more headroom than the previous
 /// 512..=32_768 ceilings. The Anthropic-compatible request path uses
@@ -1069,7 +1086,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // report.
         Role::Synthesizer => DEFAULT_MAX_TOKENS,
         Role::Adversary => DEFAULT_MAX_TOKENS,
-        // Phase G (v0.3). Decomposer: T01-06 §4.2 originally suggested 3000; with the v0.6 unified ceiling of 1 MiB this concern is moot.
+        // Phase G (v0.3). Decomposer: T01-06 §4.2 originally suggested 3000; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
         Role::Decomposer => DEFAULT_MAX_TOKENS,
         Role::MergeSynthesizer => DEFAULT_MAX_TOKENS,
         Role::RecoveryExplainer => DEFAULT_MAX_TOKENS,

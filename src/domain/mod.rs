@@ -924,7 +924,7 @@ pub struct RationaleExtract {
 ///
 /// Carries the proposal the critic is attacking plus the structured
 /// adversarial findings. The critic is deterministic (T=0.0, top_p=0.1,
-/// max_tokens=1048576), so two runs against the same input produce the
+/// max_tokens=1000000), so two runs against the same input produce the
 /// same payload. `#[serde(default)]` keeps the validator accepting
 /// empty objects (the same contract as the other P-role types).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -948,7 +948,7 @@ pub struct TiefighterCriticReport {
 ///
 /// Picks which persona (system prompt variant) a downstream phase
 /// should adopt for the current run. Sampling contract
-/// (T=0.3, top_p=0.9, max_tokens=1048576) balances determinism with
+/// (T=0.3, top_p=0.9, max_tokens=1000000) balances determinism with
 /// enough variance to escape obvious ties; callers that want a
 /// hard lock can re-run with T=0.0 in `role_settings`.
 /// `#[serde(default)]` keeps the validator accepting empty
@@ -998,7 +998,7 @@ pub struct AnglePickerReport {
 /// the normal weighted-aggregation cannot pick a winner. The
 /// `judge_scores` echo the raw panel and `candidates` echo the
 /// shortlist the panel voted on so downstream phases can audit the
-/// decision. Sampling (T=0.2, top_p=0.85, max_tokens=1048576) keeps the
+/// decision. Sampling (T=0.2, top_p=0.85, max_tokens=1000000) keeps the
 /// tiebreaker stable while leaving room for a small amount of
 /// variance when the disagreement is genuine.
 /// `#[serde(default)]` keeps the validator accepting empty objects.
@@ -1046,7 +1046,7 @@ pub struct CandidateEntry {
 /// Optional second-pass LLM call used when the local heuristic
 /// in `src/phases/util.rs::repair_m3_brackets` cannot turn a
 /// malformed model output into valid JSON. The repair is
-/// mechanical (T=0.0, top_p=0.5, max_tokens=1048576), so two runs
+/// mechanical (T=0.0, top_p=0.5, max_tokens=1000000), so two runs
 /// against the same malformed text must produce the same
 /// `repaired` payload. `#[serde(default)]` keeps the validator
 /// accepting empty objects.
@@ -1073,7 +1073,7 @@ pub struct JsonRepairV2Report {
 /// Pre-processor that classifies incoming text as `safe`,
 /// `suspicious`, or `hostile` so the orchestrator can
 /// short-circuit or quarantine the request. Fully deterministic
-/// (T=0.0, top_p=0.1, max_tokens=1048576) because a flaky detector
+/// (T=0.0, top_p=0.1, max_tokens=1000000) because a flaky detector
 /// would cause false negatives in the quarantine path.
 /// `#[serde(default)]` keeps the validator accepting empty
 /// objects.

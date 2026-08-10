@@ -12,12 +12,12 @@ use super::role::Role;
 /// Default `max_tokens` ceiling for every role and provider.
 ///
 /// Raised from the previous per-role values (512..=32_768) to a single
-/// `1_048_576` (1 MiB) ceiling so prose-heavy roles no longer truncate
+/// `1_000_000` ceiling so prose-heavy roles no longer truncate
 /// mid-thought. The Anthropic-compatible request path uses this number
 /// verbatim; the OpenAI-compat provider additionally clamps to the
 /// per-provider `ProviderConfig::max_tokens`, which by default is also
 /// this constant.
-pub const DEFAULT_MAX_TOKENS: u32 = 1_048_576;
+pub const DEFAULT_MAX_TOKENS: u32 = 1_000_000;
 
 /// Sampling settings registered for an opt-in role.
 #[derive(Debug, Clone, Copy, PartialEq)]

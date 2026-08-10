@@ -34,7 +34,7 @@ pub struct OpenAiCompatProvider {
     max_retries: u32,
     /// Per-provider hard cap on `max_tokens` (set from
     /// `ProviderConfig::max_tokens`). The default is
-    /// `DEFAULT_MAX_TOKENS` (1,048,576), so the per-role runtime
+    /// `DEFAULT_MAX_TOKENS` (1,000,000), so the per-role runtime
     /// value normally fits under the cap. The clamp below exists
     /// for the rare cases where a TOML override sets a smaller
     /// provider-specific limit, so the upstream never rejects the
@@ -227,7 +227,7 @@ impl Provider for OpenAiCompatProvider {
             // Apply per-provider max_tokens cap. Done AFTER the
             // body construction so the cap is visible regardless of
             // upstream choice. The default of DEFAULT_MAX_TOKENS
-            // (1,048,576) does not clamp any role under normal
+            // (1,000,000) does not clamp any role under normal
             // configuration; the branch only triggers when a TOML
             // override sets a smaller per-provider limit.
             let body = match self.provider_max_tokens {

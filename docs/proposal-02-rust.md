@@ -268,8 +268,8 @@ insta = { version = "1.39", features = ["yaml"] }
 
 | # | Ambigüedad en la propuesta | Decisión | Razón |
 |---|---|---|---|
-| 1 | "Sketches de 400–800 tokens" sin tope duro para outputs de LLM | `max_tokens` uniforme por rol en `prompts/registry.rs`; todos los roles usan 1_048_576 como techo. | Evita truncamientos ambiguos con un techo uniforme para todos los roles. |
-| 2 | "Tagger ligero" sin parámetros | Tagger: `temperature=0`, `top_p=0.2`, `max_tokens=1_048_576`, JSON mode forzado. | Determinismo + techo uniforme para todos los roles. |
+| 1 | "Sketches de 400–800 tokens" sin tope duro para outputs de LLM | `max_tokens` uniforme por rol en `prompts/registry.rs`; todos los roles usan 1_000_000 como techo. | Evita truncamientos ambiguos con un techo uniforme para todos los roles. |
+| 2 | "Tagger ligero" sin parámetros | Tagger: `temperature=0`, `top_p=0.2`, `max_tokens=1_000_000`, JSON mode forzado. | Determinismo + techo uniforme para todos los roles. |
 | 3 | "Embedding ligero" para clustering | **No se descargan modelos**. Clustering usa `hash_lsh` sobre texto tokenizado (SimHash 64-bit) + segunda pasada con LLM sólo si se piden `cluster_label` y `cluster_summary`. Embeddings locales (fastText) son demasiado pesados para MVP; se documenta como mejora. | Mantiene binario sin assets externos. |
 | 4 | Forma de "JSON mode forzado" en providers que no lo soportan | Proveedor implementa `supports_json_mode()`; si false, prompt indica `Responde únicamente con un JSON válido. Sin texto fuera del JSON.` y se valida con `jsonschema`. | Portabilidad. |
 | 5 | "Sin seeds" pero hace falta reproducibilidad | Sistema detecta duplicados por hash del input completo (prompt + parámetros_llm + fase + modelo). No garantiza misma salida, sí garantiza que no se duplican inputs. | Honra la propuesta. |
@@ -653,7 +653,7 @@ Contenido:
   "provider": "minimax",
   "model": "MiniMax-M3",
   "endpoint": "https://api.minimax.io/anthropic/v1/messages",
-  "request": { "messages": [...], "temperature": 0.6, "top_p": 0.95, "max_tokens": 1048576 },
+  "request": { "messages": [...], "temperature": 0.6, "top_p": 0.95, "max_tokens": 1000000 },
   "response": { "raw": "...", "parsed": {...} },
   "usage": { "input_tokens": 123, "output_tokens": 456, "total_tokens": 579 },
   "stored_at": "2026-07-24T10:31:00Z",
@@ -763,25 +763,25 @@ Los placeholders del prompt se sustituyen en `prompts/registry.rs::render(role, 
 
 | role_id | descripción | temperatura default | top_p | max_tokens | json_mode |
 |---|---|---:|---:|---:|---|
-| `intake` | Normalizar el prompt | 0.0 | 0.2 | 1_048_576 | true |
-| `clarify` | Detectar ambigüedades | 0.2 | 0.8 | 1_048_576 | true |
-| `router` | Decidir modo | 0.0 | 0.2 | 1_048_576 | true |
-| `decomposer` | DAG (sólo deep) | 0.3 | 0.9 | 1_048_576 | true |
-| `sketcher` | Sketch corto | 0.7 | 0.95 | 1_048_576 | true |
-| `proposer` | Propuesta completa | 0.6 | 0.95 | 1_048_576 | true |
-| `critic_correctness` | Crítica de corrección | 0.2 | 0.8 | 1_048_576 | true |
-| `critic_constraint` | Crítica de ajuste | 0.2 | 0.8 | 1_048_576 | true |
-| `critic_security` | Crítica de seguridad | 0.2 | 0.8 | 1_048_576 | true |
-| `judge_correctness` | Juez 1 | 0.0 | 0.2 | 1_048_576 | true |
-| `judge_completeness` | Juez 2 | 0.0 | 0.2 | 1_048_576 | true |
-| `judge_feasibility` | Juez 3 | 0.0 | 0.2 | 1_048_576 | true |
-| `adversary` | Revisión adversaria | 0.3 | 0.9 | 1_048_576 | true |
-| `repairer` | Reparación | 0.4 | 0.9 | 1_048_576 | true |
-| `tagger` | Tags discovery | 0.0 | 0.2 | 1_048_576 | true |
-| `facet_deriver` | Facetas discovery | 0.0 | 0.2 | 1_048_576 | true |
-| `extractor` | Extracción por faceta | 0.2 | 0.8 | 1_048_576 | true |
-| `integrator` | Borrador integrado | 0.3 | 0.9 | 1_048_576 | true |
-| `refiner` | Refinador de fluency | 0.2 | 0.8 | 1_048_576 | true |
+| `intake` | Normalizar el prompt | 0.0 | 0.2 | 1_000_000 | true |
+| `clarify` | Detectar ambigüedades | 0.2 | 0.8 | 1_000_000 | true |
+| `router` | Decidir modo | 0.0 | 0.2 | 1_000_000 | true |
+| `decomposer` | DAG (sólo deep) | 0.3 | 0.9 | 1_000_000 | true |
+| `sketcher` | Sketch corto | 0.7 | 0.95 | 1_000_000 | true |
+| `proposer` | Propuesta completa | 0.6 | 0.95 | 1_000_000 | true |
+| `critic_correctness` | Crítica de corrección | 0.2 | 0.8 | 1_000_000 | true |
+| `critic_constraint` | Crítica de ajuste | 0.2 | 0.8 | 1_000_000 | true |
+| `critic_security` | Crítica de seguridad | 0.2 | 0.8 | 1_000_000 | true |
+| `judge_correctness` | Juez 1 | 0.0 | 0.2 | 1_000_000 | true |
+| `judge_completeness` | Juez 2 | 0.0 | 0.2 | 1_000_000 | true |
+| `judge_feasibility` | Juez 3 | 0.0 | 0.2 | 1_000_000 | true |
+| `adversary` | Revisión adversaria | 0.3 | 0.9 | 1_000_000 | true |
+| `repairer` | Reparación | 0.4 | 0.9 | 1_000_000 | true |
+| `tagger` | Tags discovery | 0.0 | 0.2 | 1_000_000 | true |
+| `facet_deriver` | Facetas discovery | 0.0 | 0.2 | 1_000_000 | true |
+| `extractor` | Extracción por faceta | 0.2 | 0.8 | 1_000_000 | true |
+| `integrator` | Borrador integrado | 0.3 | 0.9 | 1_000_000 | true |
+| `refiner` | Refinador de fluency | 0.2 | 0.8 | 1_000_000 | true |
 
 ### 4.3. Schemas JSON de salida (muestra)
 
