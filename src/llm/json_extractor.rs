@@ -8,6 +8,11 @@
 //! caller can slice `&input[start..end]` without remapping.
 
 use serde::de::DeserializeOwned;
+use thiserror::Error;
+
+use super::control_tokens;
+use super::json_strategy::JsonRecoveryStrategy;
+use super::wire::Request;
 
 /// Errors returned by [`extract_tolerant_json`] and [`extract_and_parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +253,143 @@ fn find_balanced_end(bytes: &[u8], start: usize, open: char) -> Option<usize> {
     None
 }
 
+/// Strategy-aware parse error. Returned by [`parse_with_strategy`]
+/// when every recovery pass that the chosen strategy enables has
+/// been exhausted. The variant encodes which strategy was active
+/// so the post-execution review can tell at a glance whether a
+/// failure is "model produced malformed JSON on a path that has no
+/// recovery" (`Strict`) or "every recovery pass the strategy
+/// enables failed" (`Lenient`).
+///
+/// This is intentionally distinct from
+/// [`crate::phases::util::ParseError`]: the latter is the
+/// legacy "all strategies in the recovery chain failed" enum
+/// used by [`crate::phases::util::parse_json_with_recovery`].
+/// Adding the strategy here keeps the recovery decision
+/// self-contained in the [`parse_with_strategy`] wrapper and
+/// avoids a `phases → llm` circular dependency.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ParseError {
+    /// The strict strategy's direct parse failed. No tolerant
+    /// extraction, no m3 repair, no retry — the wrapper hands
+    /// back the original `serde_json` error verbatim so the
+    /// caller can surface it as `Error::SchemaViolation`.
+    #[error("strict parse failed: {0}")]
+    Strict(String),
+    /// The lenient / continuation / prompt-prefill strategy's
+    /// full recovery chain failed. The recovery chain runs
+    /// [`extract_tolerant_json`] (Path B) followed by the m3
+    /// repair pipeline; this variant fires when every pass
+    /// failed. The original error message is preserved for the
+    /// caller's diagnostic.
+    #[error("lenient recovery failed: {0}")]
+    Lenient(String),
+}
+
+impl ParseError {
+    /// Borrow the underlying error message. Used by the phase
+    /// layer's retry loop to enrich the warning payload without
+    /// having to match on the variant first.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Strict(s) | Self::Lenient(s) => s,
+        }
+    }
+}
+
+/// Strategic wrapper over the existing tolerant-extraction and
+/// m3-repair chain. The wrapper decides which subset of the
+/// recovery pipeline runs based on `strategy`:
+///
+/// - [`Strict`](JsonRecoveryStrategy::Strict) — direct parse
+///   only. If the response is not valid JSON, return
+///   [`ParseError::Strict`] immediately. The other helpers
+///   ([`extract_tolerant_json`], the m3 repair pipeline) are
+///   NOT consulted; use this for models that already honour
+///   `response_format: json_object` strictly.
+/// - [`Lenient`](JsonRecoveryStrategy::Lenient) — the full
+///   recovery chain: code-fence strip → direct parse → control-
+///   token strip → tolerant extraction (PR-C3 iterative
+///   brackets + PR-C4 chat-template strip) → m3 repair on the
+///   extracted candidate → m3 repair on the full input. If
+///   every pass fails, return [`ParseError::Lenient`].
+/// - [`Continuation`](JsonRecoveryStrategy::Continuation) —
+///   same as `Lenient` for the single parse attempt; the
+///   continuation re-call itself lives in
+///   [`crate::phases::phase::RunContext::call_with_retry_parse`]
+///   and is driven by
+///   [`crate::llm::json_strategy::max_continuation_attempts`].
+/// - [`PromptPrefill`](JsonRecoveryStrategy::PromptPrefill) —
+///   same as `Lenient` for the single parse attempt; the
+///   prefill retry lives in the dispatcher (also in
+///   `call_with_retry_parse`) and is driven by
+///   [`crate::llm::json_strategy::needs_assistant_prefill`].
+///
+/// The wrapper is `async` so the dispatcher can call it without
+/// a separate sync-vs-async boundary; the body has no `.await`
+/// calls because the recovery chain is purely synchronous.
+/// `model` and `request` are kept on the signature for future
+/// diagnostic use (e.g. logging which model / role produced a
+/// specific failure); today they are unused.
+pub async fn parse_with_strategy<T: DeserializeOwned>(
+    strategy: JsonRecoveryStrategy,
+    model: &str,
+    request: &Request,
+    raw: &str,
+) -> Result<T, ParseError> {
+    let _ = model;
+    let _ = request;
+    match strategy {
+        JsonRecoveryStrategy::Strict => parse_strict(raw),
+        JsonRecoveryStrategy::Lenient
+        | JsonRecoveryStrategy::Continuation
+        | JsonRecoveryStrategy::PromptPrefill => parse_lenient(raw),
+    }
+}
+
+/// Direct parse only. Returns [`ParseError::Strict`] with the
+/// underlying `serde_json` error verbatim if the payload is not
+/// valid JSON.
+fn parse_strict<T: DeserializeOwned>(raw: &str) -> Result<T, ParseError> {
+    match serde_json::from_str::<T>(raw) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(ParseError::Strict(e.to_string())),
+    }
+}
+
+/// Full recovery chain. Mirrors the order
+/// [`crate::phases::util::parse_model_json_traced`] runs, but
+/// without the per-pass `FnMut(RepairEvent)` sink — the wrapper
+/// emits a single `ParseError::Lenient` on the failure path so
+/// the caller's retry loop does not have to drive a sink. The
+/// dispatcher still emits its own `model.json_repair_applied`
+/// warnings via the existing
+/// [`crate::phases::phase::RunContext::parse_model_json`] helper
+/// when the user-facing parse path is used; this wrapper is for
+/// the strategy-aware retry loop, which does not need the per-
+/// pass warning stream because the chain runs at most once per
+/// retry attempt.
+///
+/// Note: `phases::util::parse_model_json_traced` already imports
+/// the tolerant extractor and m3 repair helpers from
+/// `llm::control_tokens` / `llm::json_extractor`. Reusing it here
+/// is a deliberate cycle at the module level — both modules
+/// expose functions to each other — but the call graph never
+/// recurses: `parse_lenient` calls `parse_model_json_traced`,
+/// which calls `extract_tolerant_json` / m3 repair, none of
+/// which call back into `parse_lenient`.
+fn parse_lenient<T: DeserializeOwned>(raw: &str) -> Result<T, ParseError> {
+    let _ = control_tokens::strip_response_text;
+    let _ = extract_tolerant_json;
+    // Reuse the existing traced chain with a no-op sink. The
+    // dispatcher does not need per-pass repair warnings on this
+    // path because the wrapper fires at most once per retry
+    // attempt — emitting one warning per recovery pass would
+    // multiply warnings by the retry count.
+    crate::phases::util::parse_model_json_traced::<T, _>(raw, |_event| {})
+        .map_err(|e| ParseError::Lenient(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +553,181 @@ mod tests {
         let input = "answer list: [1, 2, 3]";
         let (start, end) = extract_tolerant_json(input).unwrap();
         assert_eq!(&input[start..end], "[1, 2, 3]");
+    }
+
+    // --- parse_with_strategy wrapper tests -------------------------
+
+    use super::{ParseError, parse_with_strategy};
+    use crate::llm::role::Role;
+    use crate::llm::wire::{Message, Request};
+
+    fn stub_request(model: &str) -> Request {
+        Request {
+            role: Role::Sketch,
+            model: model.to_owned(),
+            system: String::new(),
+            user: String::new(),
+            max_tokens: 0,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_strategy_passes_well_formed_json() {
+        let raw = r#"{"answer": 42}"#;
+        let parsed: serde_json::Value = parse_with_strategy(
+            JsonRecoveryStrategy::Strict,
+            "gpt-5.6-luna",
+            &stub_request("gpt-5.6-luna"),
+            raw,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parsed, serde_json::json!({"answer": 42}));
+    }
+
+    #[tokio::test]
+    async fn strict_strategy_rejects_prose_prefix_directly() {
+        // Strict skips tolerant extraction. Prose-prefixed JSON
+        // would normally be recovered by the Lenient pipeline;
+        // Strict surfaces the parse error verbatim so the
+        // post-execution review can see when a strict model
+        // genuinely broke the contract.
+        let raw = "Sure, here you go: {\"answer\": 42}";
+        let err = parse_with_strategy::<serde_json::Value>(
+            JsonRecoveryStrategy::Strict,
+            "gpt-5.6-luna",
+            &stub_request("gpt-5.6-luna"),
+            raw,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ParseError::Strict(_)),
+            "Strict must return ParseError::Strict on direct parse failure, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lenient_strategy_recovers_prose_prefixed_json() {
+        // Lenient runs the full recovery chain — direct parse
+        // fails, tolerant extraction succeeds.
+        let raw = "Sure, here you go: {\"answer\": 42}";
+        let parsed: serde_json::Value = parse_with_strategy(
+            JsonRecoveryStrategy::Lenient,
+            "kimi-k3",
+            &stub_request("kimi-k3"),
+            raw,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parsed, serde_json::json!({"answer": 42}));
+    }
+
+    #[tokio::test]
+    async fn lenient_strategy_recovers_chat_template_wrapped_payload() {
+        // PR-C4: chat-template markers (`[BOS]`, `[EOS]`, …)
+        // confuse the tolerant extractor until the control-token
+        // strip runs first. Lenient's chain applies the strip
+        // before the tolerant extraction.
+        let raw = "\n[BOS]{\"answer\": 42}[EOS]\n";
+        let parsed: serde_json::Value = parse_with_strategy(
+            JsonRecoveryStrategy::Lenient,
+            "kimi-k2.7-code",
+            &stub_request("kimi-k2.7-code"),
+            raw,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parsed, serde_json::json!({"answer": 42}));
+    }
+
+    #[tokio::test]
+    async fn lenient_strategy_returns_parse_error_when_chain_exhausted() {
+        // Genuinely-broken JSON: the recovery chain cannot turn
+        // the input into valid JSON, so Lenient returns
+        // ParseError::Lenient.
+        let raw = "this is not json at all";
+        let err = parse_with_strategy::<serde_json::Value>(
+            JsonRecoveryStrategy::Lenient,
+            "kimi-k3",
+            &stub_request("kimi-k3"),
+            raw,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ParseError::Lenient(_)),
+            "Lenient must return ParseError::Lenient on chain exhaustion, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_strategy_runs_lenient_chain_for_single_parse() {
+        // The Continuation strategy runs Lenient for the single
+        // parse attempt; the continuation re-call lives in
+        // `phases::phase::RunContext::call_with_retry_parse`.
+        // A well-formed payload must parse identically to Lenient.
+        let raw = r#"{"answer": 42}"#;
+        let parsed: serde_json::Value = parse_with_strategy(
+            JsonRecoveryStrategy::Continuation,
+            "minimax-m3",
+            &stub_request("minimax-m3"),
+            raw,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parsed, serde_json::json!({"answer": 42}));
+    }
+
+    #[tokio::test]
+    async fn prompt_prefill_strategy_runs_lenient_chain_for_single_parse() {
+        // The PromptPrefill strategy runs Lenient for the single
+        // parse attempt; the prefill re-call lives in
+        // `phases::phase::RunContext::call_with_retry_parse`.
+        let raw = r#"{"answer": 42}"#;
+        let parsed: serde_json::Value = parse_with_strategy(
+            JsonRecoveryStrategy::PromptPrefill,
+            "deepseek-v4-pro",
+            &stub_request("deepseek-v4-pro"),
+            raw,
+        )
+        .await
+        .unwrap();
+        assert_eq!(parsed, serde_json::json!({"answer": 42}));
+    }
+
+    #[tokio::test]
+    async fn parse_error_message_helper_returns_underlying_error() {
+        // The dispatcher converts ParseError → Error::SchemaViolation
+        // via the `message()` helper. Pin the contract so the
+        // helper stays total across both variants.
+        let strict = ParseError::Strict("oops".to_owned());
+        assert_eq!(strict.message(), "oops");
+        let lenient = ParseError::Lenient("also oops".to_owned());
+        assert_eq!(lenient.message(), "also oops");
+    }
+
+    #[tokio::test]
+    async fn request_extra_messages_field_is_accepted_but_unused() {
+        // The wrapper keeps `request` as a future-proofing
+        // parameter; today the parse chain does not inspect it.
+        // A request that carries an `extra_messages` payload
+        // must NOT change the parse result.
+        let raw = r#"{"answer": 42}"#;
+        let mut req = stub_request("deepseek-v4-flash");
+        req.extra_messages = vec![Message {
+            role: "assistant".into(),
+            content: "{".into(),
+        }];
+        let parsed: serde_json::Value =
+            parse_with_strategy(JsonRecoveryStrategy::Strict, "deepseek-v4-flash", &req, raw)
+                .await
+                .unwrap();
+        assert_eq!(parsed, serde_json::json!({"answer": 42}));
     }
 }

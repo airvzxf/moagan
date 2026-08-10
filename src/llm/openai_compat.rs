@@ -76,19 +76,56 @@ impl OpenAiCompatProvider {
     /// request, applying the role-based JSON output mode and the
     /// per-model opt-out from `response_format_opt_out`. Extracted so
     /// tests can assert on the wire shape without a live HTTP call.
+    ///
+    /// For models whose [`crate::llm::json_strategy::JsonRecoveryStrategy`]
+    /// is `PromptPrefill` (e.g. `deepseek-v4-pro`,
+    /// `deepseek-v4-flash`), this function also appends an
+    /// assistant prefill message of `{` after the user turn so the
+    /// model continues with a JSON object body. The prefill is a
+    /// response-side hint; the cross-run cache key
+    /// ([`crate::llm::wire::build_cache_key`]) deliberately
+    /// IGNORES the equivalent `Request::extra_messages` field so
+    /// the steady-state cache stays valid when the prefill retry
+    /// fires.
     fn build_chat_request(&self, req: &Request) -> ChatRequest<'_> {
+        let strategy = crate::llm::json_strategy::strategy_for(&self.model, None);
+        let mut messages: Vec<ChatMessage> = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: req.system.clone(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: req.user.clone(),
+            },
+        ];
+        // PR-C5 (PromptPrefill): the caller may have supplied
+        // `extra_messages` directly (e.g. the dispatcher
+        // builds a fresh Request on the prefill retry with
+        // `extra_messages = [{assistant, "{"}]`). Push those
+        // verbatim so the wire shape mirrors what the caller
+        // asked for. When the caller did not supply any
+        // `extra_messages` and the per-model default strategy
+        // is `PromptPrefill`, auto-inject the `{` prefill so
+        // callers who never set `extra_messages` still get
+        // the response-side hint on the steady-state path.
+        for m in &req.extra_messages {
+            messages.push(ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            });
+        }
+        if req.extra_messages.is_empty()
+            && crate::llm::json_strategy::needs_assistant_prefill(strategy)
+        {
+            messages.push(ChatMessage {
+                role: "assistant".into(),
+                content: "{".into(),
+            });
+        }
         ChatRequest {
             model: &self.model,
-            messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: req.system.clone(),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: req.user.clone(),
-                },
-            ],
+            messages,
             max_tokens: req.max_tokens,
             temperature: req.temperature,
             top_p: req.top_p,
@@ -429,6 +466,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         }
     }
 
@@ -527,5 +565,88 @@ mod tests {
                 "non-opted-out model {model} must keep response_format: json_object, got: {value}"
             );
         }
+    }
+
+    /// PR-C5: the `PromptPrefill` strategy injects an assistant
+    /// prefill of `{` for `deepseek-v4-pro` / `deepseek-v4-flash`
+    /// so the model continues with a JSON object body. The prefill
+    /// appears as the LAST message in the messages array (after
+    /// the user turn) so the model sees
+    /// `[system, user, assistant:]` and continues the JSON.
+    #[test]
+    fn prompt_prefill_appends_assistant_brace_message() {
+        let p = provider_with_model(
+            "deepseek",
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+        );
+        let body =
+            p.build_chat_request(&json_request(crate::llm::Role::Route, "deepseek-v4-flash"));
+        let value = serde_json::to_value(&body).unwrap();
+        let messages = value
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .expect("body must carry a messages array");
+        assert_eq!(
+            messages.len(),
+            3,
+            "PromptPrefill must append a third message, got: {value}"
+        );
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "{");
+    }
+
+    /// PR-C5: the `PromptPrefill` strategy does NOT inject the
+    /// prefill for non-prefill models (e.g. `kimi-k3`). The wire
+    /// shape stays at two messages (system + user) so today's
+    /// behaviour for non-deepseek models is bit-identical.
+    #[test]
+    fn non_prefill_models_skip_assistant_message() {
+        let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", "kimi-k3");
+        let body = p.build_chat_request(&json_request(crate::llm::Role::Route, "kimi-k3"));
+        let value = serde_json::to_value(&body).unwrap();
+        let messages = value
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .expect("body must carry a messages array");
+        assert_eq!(
+            messages.len(),
+            2,
+            "non-prefill models must NOT append a third message, got: {value}"
+        );
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    /// PR-C5: when the caller already populated
+    /// `Request::extra_messages` (e.g. a phase-layer override
+    /// that wants bespoke extra messages) the per-model prefill
+    /// must NOT clobber it. The caller-supplied messages win.
+    #[test]
+    fn prompt_prefill_does_not_overwrite_existing_extra_messages() {
+        let p = provider_with_model(
+            "deepseek",
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+        );
+        let mut req = json_request(crate::llm::Role::Route, "deepseek-v4-flash");
+        req.extra_messages = vec![crate::llm::wire::Message {
+            role: "assistant".into(),
+            content: "[CUSTOM]".into(),
+        }];
+        let body = p.build_chat_request(&req);
+        let value = serde_json::to_value(&body).unwrap();
+        let messages = value
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .expect("body must carry a messages array");
+        // Exactly the caller's two extra messages are present,
+        // NOT the per-model default `{` prefill.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(
+            messages[2]["content"], "[CUSTOM]",
+            "caller-supplied extra_messages must win over the per-model prefill"
+        );
     }
 }

@@ -448,6 +448,7 @@ impl RunContext {
             top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
@@ -520,6 +521,7 @@ impl RunContext {
             top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
@@ -574,6 +576,7 @@ impl RunContext {
             top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
@@ -628,6 +631,7 @@ impl RunContext {
             top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
@@ -942,6 +946,216 @@ impl RunContext {
         }
     }
 
+    /// PR-C5 (Track C): strategy-aware parse wrapper. Dispatches the
+    /// per-model [`crate::llm::json_strategy::JsonRecoveryStrategy`]
+    /// to either [`crate::llm::json_extractor::parse_with_strategy`]
+    /// (for `Strict`, which has no repair telemetry) or the
+    /// existing traced chain
+    /// [`crate::phases::util::parse_model_json_traced`] (for
+    /// `Lenient` / `Continuation` / `PromptPrefill`, which
+    /// surface `model.json_repair_applied` warnings through the
+    /// sink). The wrapper converts the chain's error into
+    /// `Error::SchemaViolation` so the existing retry-budget
+    /// logic keeps its diagnostic shape, and runs the role-aware
+    /// schema validation that [`Self::parse_model_json`] used to
+    /// bundle.
+    ///
+    /// The `Request` parameter is currently unused (the wrapper
+    /// keeps it for future diagnostic enrichment); we pass a
+    /// placeholder that mirrors the call site so future
+    /// `request.extra_messages` plumbing has somewhere to attach.
+    async fn parse_with_strategy_inner<T>(
+        &self,
+        strategy: crate::llm::json_strategy::JsonRecoveryStrategy,
+        raw: &str,
+        role: Role,
+        _schema_hint: &str,
+    ) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        use crate::llm::json_extractor::{self, ParseError};
+        let phase_name = role.as_str();
+        // Build a placeholder Request for the wrapper's
+        // diagnostic-context parameter. The wrapper does not
+        // inspect the request today; passing a synthesised
+        // skeleton keeps the signature future-proof without
+        // forcing the caller to thread the original Request
+        // through every retry.
+        let placeholder = Request {
+            role,
+            model: self.default_model.clone(),
+            system: String::new(),
+            user: String::new(),
+            max_tokens: 0,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+        };
+        let value: serde_json::Value = match strategy {
+            // Strict path: direct parse only. No repair telemetry
+            // because the chain is one-shot.
+            crate::llm::json_strategy::JsonRecoveryStrategy::Strict => {
+                match json_extractor::parse_with_strategy::<serde_json::Value>(
+                    strategy,
+                    &self.default_model,
+                    &placeholder,
+                    raw,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(ParseError::Strict(msg)) => {
+                        return Err(crate::Error::SchemaViolation(format!(
+                            "model output is not valid JSON: {msg}"
+                        )));
+                    }
+                    Err(ParseError::Lenient(_)) => {
+                        unreachable!("Strict strategy must surface ParseError::Strict on failure")
+                    }
+                }
+            }
+            // Lenient / Continuation / PromptPrefill paths: drive
+            // the traced chain directly so repair events surface
+            // as `model.json_repair_applied` warnings through the
+            // telemetry sink. This preserves the contract the
+            // `json_repair_emits_model_json_repair_applied_warning`
+            // integration test pins.
+            crate::llm::json_strategy::JsonRecoveryStrategy::Lenient
+            | crate::llm::json_strategy::JsonRecoveryStrategy::Continuation
+            | crate::llm::json_strategy::JsonRecoveryStrategy::PromptPrefill => {
+                match crate::phases::util::parse_model_json_traced::<serde_json::Value, _>(
+                    raw,
+                    |ev| {
+                        let _ = self.telemetry.warn(
+                            "model.json_repair_applied",
+                            "warn",
+                            "model JSON was auto-corrected",
+                            serde_json::json!({
+                                "repair_kind": ev.kind.as_str(),
+                                "bytes_before": ev.bytes_before,
+                                "bytes_after": ev.bytes_after,
+                                "bytes_delta": ev.bytes_after as i64 - ev.bytes_before as i64,
+                            }),
+                            crate::telemetry::WarningContext {
+                                phase: Some(phase_name.to_owned()),
+                                role: Some(phase_name.to_owned()),
+                                call_id: None,
+                                attempt: None,
+                            },
+                        );
+                    },
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(crate::Error::SchemaViolation(format!(
+                            "model output is not valid JSON: {e}"
+                        )));
+                    }
+                }
+            }
+        };
+        // Schema validation: keep the role-aware diagnostic so
+        // the post-execution review can see which field tripped
+        // the role's contract.
+        if let Err(schema_err) = role.validate_json(&value) {
+            let _ = self.telemetry.warn(
+                "model.schema_mismatch",
+                "warn",
+                "model JSON failed role schema check",
+                serde_json::json!({
+                    "schema_mismatch": schema_err.to_string(),
+                }),
+                crate::telemetry::WarningContext {
+                    phase: Some(phase_name.to_owned()),
+                    role: Some(phase_name.to_owned()),
+                    call_id: None,
+                    attempt: None,
+                },
+            );
+            return Err(schema_err);
+        }
+        serde_json::from_value(value).map_err(|e| {
+            crate::Error::SchemaViolation(format!(
+                "model output did not deserialise into {}: {e}",
+                std::any::type_name::<T>()
+            ))
+        })
+    }
+
+    /// PR-C5: one-shot assistant-prefill retry. Builds a fresh
+    /// `Request` with `extra_messages = [{role:"assistant",
+    /// content:"{"}]` and dispatches via [`Self::call_uncached`] so
+    /// the prefill response does not poison the steady-state cache.
+    /// Returns `Ok(Some(v))` on a successful recovery, `Ok(None)`
+    /// when the helper decided not to retry (transport error,
+    /// schema still wrong after retry), or `Err(e)` when the retry
+    /// surfaced a non-recoverable error.
+    async fn retry_with_assistant_prefill<T>(
+        &self,
+        role: Role,
+        system: &str,
+        user: &str,
+        schema_hint: &str,
+    ) -> crate::error::Result<Option<T>>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        use crate::llm::json_strategy::strategy_for;
+        let prefill_strategy = strategy_for(&self.default_model, None);
+        // The prefill path is only meaningful on the OpenAI-compat
+        // body builder (Anthropic-compat and the Responses API
+        // ignore `extra_messages`). When the body builder does not
+        // honour prefill, skip the retry and let the caller fall
+        // through to the normal budget logic.
+        if !crate::llm::json_strategy::needs_assistant_prefill(prefill_strategy) {
+            return Ok(None);
+        }
+        let mut req = Request {
+            role,
+            model: self.default_model.clone(),
+            system: system.to_owned(),
+            user: user.to_owned(),
+            max_tokens: crate::phases::phase::max_tokens_for_role(role),
+            temperature: None,
+            top_p: Some(0.95),
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![crate::llm::wire::Message {
+                role: "assistant".to_owned(),
+                content: "{".to_owned(),
+            }],
+        };
+        // Re-apply the same per-provider cap that the dispatch
+        // path applies so the wire body matches what the cache
+        // expects on the non-prefill path.
+        let provider_top_p = self
+            .config
+            .providers
+            .get(&self.default_provider)
+            .and_then(|s| s.top_p);
+        req.top_p = Some(provider_top_p.unwrap_or(0.95));
+        let started = crate::time::now_unix_secs();
+        let response = self.dispatch_to_provider(req, None, started, 0).await?;
+        // Run the lenient pipeline against the prefill response.
+        // If it still fails to parse, return None so the caller
+        // can fall through to the normal parse-failure budget.
+        match self
+            .parse_with_strategy_inner::<T>(
+                crate::llm::json_strategy::JsonRecoveryStrategy::Lenient,
+                &response.text,
+                role,
+                schema_hint,
+            )
+            .await
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn call_json_repair_v2<T>(&self, role: Role, raw: &str, schema_hint: &str) -> Option<T>
     where
         T: serde::de::DeserializeOwned,
@@ -1075,6 +1289,7 @@ impl RunContext {
                 top_p: Some(provider_top_p.unwrap_or(0.95)),
                 response_schema: None,
                 stream: false,
+                extra_messages: vec![],
             };
 
             let started = crate::time::now_unix_secs();
@@ -1210,13 +1425,26 @@ impl RunContext {
     where
         T: serde::de::DeserializeOwned,
     {
+        use crate::llm::json_strategy::{self, JsonRecoveryStrategy};
         use crate::llm::retry_budget::{self, RetryBudget, RetryReason};
 
         let phase_name = role.as_str();
         let mode = parse_mode_str(&self.mode);
+        // Resolve the JSON recovery strategy once per call. The
+        // lookup consults the per-model table plus the (future)
+        // profile-overrides hook; the dispatch loop below consults
+        // the strategy on every parse attempt.
+        let strategy = json_strategy::strategy_for(&self.default_model, None);
         // The legacy `max_retries` parameter is now a hard ceiling.
         // The actual cap is `min(budget.max_attempts, ceiling + 1)`.
         let ceiling = max_retries;
+        // Tracks whether the `PromptPrefill` strategy has already
+        // fired its one-shot assistant-prefill retry. The retry
+        // is a response-side hint, not a transport retry, so it
+        // does NOT consume the legacy retry budget. After the
+        // first prefill retry, the loop falls back to the normal
+        // parse-failure budget.
+        let mut prefill_attempted: bool = false;
 
         // The budget is computed on the FIRST error (see the
         // `unwrap_or_else` below) and then frozen for the rest of
@@ -1265,65 +1493,126 @@ impl RunContext {
             };
 
             let decision = match response {
-                Ok(resp) => match self.parse_model_json::<T>(role, &resp.text, schema_hint) {
-                    Ok(v) => {
-                        if attempt > 0 {
+                Ok(resp) => {
+                    // Strategy-aware parse: the wrapper chooses
+                    // Strict (direct parse only) vs Lenient (full
+                    // recovery chain). Continuation and PromptPrefill
+                    // run Lenient for the single parse attempt and
+                    // rely on the post-parse retry paths below.
+                    let parse_outcome = self
+                        .parse_with_strategy_inner::<T>(strategy, &resp.text, role, schema_hint)
+                        .await;
+                    match parse_outcome {
+                        Ok(v) => {
+                            if attempt > 0 {
+                                let _ = self.telemetry.warn(
+                                    "model.recovered_after_retry",
+                                    "info",
+                                    "model answer recovered after retry",
+                                    serde_json::json!({
+                                        "attempts": attempt + 1,
+                                    }),
+                                    warn_ctx(),
+                                );
+                            }
+                            return Ok(v);
+                        }
+                        Err(e) => {
+                            // PR-C5: prompt-prefill retry. When the
+                            // strategy is `PromptPrefill` and we
+                            // have not yet retried, build a fresh
+                            // Request with an assistant prefill of
+                            // `{` and dispatch via the cache-bypass
+                            // path. The retry is a response-side
+                            // hint — it does NOT consume the legacy
+                            // retry budget — so we fire exactly
+                            // once. If the prefill retry still fails
+                            // to parse, fall through to the normal
+                            // parse-failure budget below.
+                            if strategy == JsonRecoveryStrategy::PromptPrefill && !prefill_attempted
+                            {
+                                prefill_attempted = true;
+                                match self
+                                    .retry_with_assistant_prefill::<T>(
+                                        role,
+                                        &system,
+                                        &user,
+                                        schema_hint,
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(v)) => {
+                                        let _ = self.telemetry.warn(
+                                            "model.prefill_recovered",
+                                            "info",
+                                            "model answer recovered after assistant prefill retry",
+                                            serde_json::json!({
+                                                "attempts": attempt + 1,
+                                            }),
+                                            warn_ctx(),
+                                        );
+                                        return Ok(v);
+                                    }
+                                    Ok(None) | Err(_) => {
+                                        // Either the helper decided not
+                                        // to retry, or the retry call
+                                        // itself failed. Fall through
+                                        // to the normal budget logic;
+                                        // the error from the helper is
+                                        // already logged via the
+                                        // helper's own telemetry path
+                                        // (or will be surfaced by the
+                                        // existing `parse_with_retry`
+                                        // retry on the next attempt).
+                                    }
+                                }
+                            }
+                            // `parse_with_strategy_inner` always
+                            // wraps its failure in
+                            // `Error::SchemaViolation`, so we
+                            // re-check the raw payload: parseable as
+                            // a generic `serde_json::Value` means
+                            // the failure is a schema mismatch (the
+                            // JSON shape did not match the role's
+                            // contract); not parseable means the
+                            // failure is a genuine parse error.
+                            let reason =
+                                if serde_json::from_str::<serde_json::Value>(&resp.text).is_ok() {
+                                    RetryReason::Schema
+                                } else {
+                                    RetryReason::Parse
+                                };
+                            let b =
+                                budget.unwrap_or_else(|| retry_budget::budget_for(mode, reason));
+                            budget = Some(b);
+                            let max_attempts = b.max_attempts.min(ceiling + 1);
+                            if attempt + 1 >= max_attempts {
+                                if b.use_json_repair
+                                    && self.config.json_repair_v2_enabled_for_mode(&self.mode)
+                                    && let Some(value) = self
+                                        .call_json_repair_v2::<T>(role, &resp.text, schema_hint)
+                                        .await
+                                {
+                                    return Ok(value);
+                                }
+                                return Err(e);
+                            }
                             let _ = self.telemetry.warn(
-                                "model.recovered_after_retry",
-                                "info",
-                                "model answer recovered after retry",
+                                "model.retry_parse",
+                                "warn",
+                                "model response parse failed; retrying",
                                 serde_json::json!({
-                                    "attempts": attempt + 1,
+                                    "attempt": attempt + 1,
+                                    "max_attempts": max_attempts,
+                                    "use_json_repair": b.use_json_repair,
+                                    "error": e.to_string(),
                                 }),
                                 warn_ctx(),
                             );
+                            Decision::Retry
                         }
-                        return Ok(v);
                     }
-                    Err(e) => {
-                        // `parse_model_json` always wraps its
-                        // failure in `Error::SchemaViolation`, so we
-                        // re-check the raw payload: parseable as a
-                        // generic `serde_json::Value` means the
-                        // failure is a schema mismatch (the JSON
-                        // shape did not match the role's contract);
-                        // not parseable means the failure is a
-                        // genuine parse error.
-                        let reason =
-                            if serde_json::from_str::<serde_json::Value>(&resp.text).is_ok() {
-                                RetryReason::Schema
-                            } else {
-                                RetryReason::Parse
-                            };
-                        let b = budget.unwrap_or_else(|| retry_budget::budget_for(mode, reason));
-                        budget = Some(b);
-                        let max_attempts = b.max_attempts.min(ceiling + 1);
-                        if attempt + 1 >= max_attempts {
-                            if b.use_json_repair
-                                && self.config.json_repair_v2_enabled_for_mode(&self.mode)
-                                && let Some(value) = self
-                                    .call_json_repair_v2::<T>(role, &resp.text, schema_hint)
-                                    .await
-                            {
-                                return Ok(value);
-                            }
-                            return Err(e);
-                        }
-                        let _ = self.telemetry.warn(
-                            "model.retry_parse",
-                            "warn",
-                            "model response parse failed; retrying",
-                            serde_json::json!({
-                                "attempt": attempt + 1,
-                                "max_attempts": max_attempts,
-                                "use_json_repair": b.use_json_repair,
-                                "error": e.to_string(),
-                            }),
-                            warn_ctx(),
-                        );
-                        Decision::Retry
-                    }
-                },
+                }
                 Err(e) => {
                     if !should_retry_error(&e) {
                         tracing::debug!(error = ?e, code = ?e.code(), "non-retriable error, bailing out");
@@ -1721,6 +2010,13 @@ mod tests {
     fn retry_context(
         outcomes: Vec<Result<(u16, Response)>>,
     ) -> (tempfile::TempDir, RunContext, Arc<RetryScript>) {
+        retry_context_with_model("retry-model", outcomes)
+    }
+
+    fn retry_context_with_model(
+        model: &str,
+        outcomes: Vec<Result<(u16, Response)>>,
+    ) -> (tempfile::TempDir, RunContext, Arc<RetryScript>) {
         let temp = tempfile::tempdir().unwrap();
         let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
         home.ensure().unwrap();
@@ -1743,7 +2039,7 @@ mod tests {
             home,
             Arc::new(registry),
             "retry".into(),
-            "retry-model".into(),
+            model.into(),
             Parallelism::new(1),
             telemetry,
             String::new(),
@@ -2608,5 +2904,146 @@ mod tests {
              (0.3), NOT the per-provider config (0.99) and NOT the \
              per-role default (Sketch=1.0)"
         );
+    }
+
+    // ===========================================================
+    // PR-C5: per-model JSON recovery strategy on the retry loop
+    // ===========================================================
+    //
+    // Each test stands up a `RetryScript` mock provider whose
+    // queue returns the responses the test wants the loop to
+    // observe, then drives `call_with_retry_parse` with the
+    // model name pinned to the strategy being tested.
+
+    /// `Strict` strategy: a malformed payload fails fast — the
+    /// dispatcher does NOT consult tolerant extraction, m3
+    /// repair, continuation, or prefill. The retry loop returns
+    /// the schema-violation error after the first attempt.
+    #[tokio::test]
+    async fn strategy_strict_fails_fast_on_malformed_payload() {
+        let bad = "this is not json at all";
+        let (temp, ctx, script) =
+            retry_context_with_model("gpt-5.6-luna", vec![Ok((200, response(bad)))]);
+        let result: Result<serde_json::Value> = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                "system".into(),
+                "user".into(),
+                "hint",
+                0,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "Strict must fail fast on bad input, got: {result:?}"
+        );
+        // Exactly one provider call — no recovery retries.
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            1,
+            "Strict must NOT retry on parse failure"
+        );
+        let _ = temp;
+    }
+
+    /// `Lenient` strategy: a prose-prefixed payload is recovered
+    /// by the tolerant extractor. No retry needed; the loop
+    /// succeeds on the first attempt.
+    #[tokio::test]
+    async fn strategy_lenient_recovers_prose_prefixed_payload() {
+        let good = "Sure, here you go: {\"answer\": 42}";
+        let (temp, ctx, script) =
+            retry_context_with_model("kimi-k3", vec![Ok((200, response(good)))]);
+        let result: serde_json::Value = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                "system".into(),
+                "user".into(),
+                "hint",
+                0,
+            )
+            .await
+            .expect("Lenient must recover the prose-prefixed JSON");
+        assert_eq!(result, serde_json::json!({"answer": 42}));
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            1,
+            "Lenient must NOT retry on successful recovery"
+        );
+        let _ = temp;
+    }
+
+    /// `Continuation` strategy: a malformed payload triggers the
+    /// focused continuation re-call. The retry path issues the
+    /// `Role::Continuation` call (which uses a separate script
+    /// queue here) and parses its envelope. This test stubs
+    /// the second call to return a valid continuation envelope.
+    #[tokio::test]
+    async fn strategy_continuation_re_calls_on_truncated_response() {
+        // First call: truncated response that the dispatcher will
+        // hand to `continue_truncated_response` to extend.
+        let first = truncated_response("{\"answer\": 42");
+        // The continuation re-call returns a JSON envelope with
+        // the missing tail plus `finished: true`.
+        let second = continuation_envelope(", \"trail\": true}", true);
+        let (temp, ctx, script) =
+            retry_context_with_model("minimax-m3", vec![Ok((200, first)), Ok((200, second))]);
+        let result: serde_json::Value = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                "system".into(),
+                "user".into(),
+                "hint",
+                0,
+            )
+            .await
+            .expect("Continuation must stitch the truncated payload");
+        assert_eq!(
+            result,
+            serde_json::json!({"answer": 42, "trail": true}),
+            "stitched payload must round-trip"
+        );
+        assert!(
+            script.calls.load(Ordering::SeqCst) >= 2,
+            "Continuation must fire at least one re-call"
+        );
+        let _ = temp;
+    }
+
+    /// `PromptPrefill` strategy: when the first call returns
+    /// genuinely malformed JSON (not recoverable by the lenient
+    /// chain), the dispatcher retries ONCE with an assistant
+    /// prefill of `{` appended via `Request::extra_messages`.
+    /// The retry uses `call_uncached` so the prefill response
+    /// does not poison the steady-state cache.
+    #[tokio::test]
+    async fn strategy_prompt_prefill_retries_with_assistant_brace() {
+        // First call returns genuinely-broken JSON that the
+        // lenient chain cannot repair.
+        let bad = "totally not json: <<<>>>";
+        // Second call (the prefill retry) returns valid JSON so
+        // the parse pipeline recovers.
+        let good = "{\"answer\": 42}";
+        let (temp, ctx, script) = retry_context_with_model(
+            "deepseek-v4-flash",
+            vec![Ok((200, response(bad))), Ok((200, response(good)))],
+        );
+        let result: serde_json::Value = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                "system".into(),
+                "user".into(),
+                "hint",
+                0,
+            )
+            .await
+            .expect("PromptPrefill must recover via the prefill retry");
+        assert_eq!(result, serde_json::json!({"answer": 42}));
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            2,
+            "PromptPrefill must fire exactly one prefill retry"
+        );
+        let _ = temp;
     }
 }
