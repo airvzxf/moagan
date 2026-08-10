@@ -455,7 +455,27 @@ impl DiscoveryCoordinator {
 
         // 1. Build and persist the matrix so a follow-up run can
         //    verify reproducibility without re-running the fan-out.
-        let matrix = ExplorationMatrix::default_for(target);
+        //
+        // PR-D1: pull the per-provider temperature profiles and the
+        // optional default profile from `ctx.config.discovery_matrix`
+        // (the CLI merged its `--temperature-profile` flags on top
+        // of the persisted `[discovery]` block before constructing
+        // the `RunContext`, so the values here are the final ones).
+        // When the operator sets neither, the map is empty and the
+        // default profile falls back to `TemperatureProfile::default()`
+        // (`[1.0] × 1`) — bit-identical to v0.5.
+        let temperature_profiles = ctx.config.discovery_matrix.temperature_profiles.clone();
+        let default_profile = ctx
+            .config
+            .discovery_matrix
+            .default_profile
+            .clone()
+            .unwrap_or_default();
+        let matrix = ExplorationMatrix::default_for_with_profiles(
+            target,
+            temperature_profiles,
+            default_profile,
+        );
         let matrix_path = run_dir.join("exploration_matrix.json");
         write_json(&matrix_path, &matrix)?;
         tracing::info!(
@@ -563,6 +583,18 @@ impl DiscoveryCoordinator {
 
         // 4. Initialize the saturation tracker with the default
         //    policy. The matrix's cardinality drives the target.
+        //
+        // PR-D1: the tracker's target is the matrix's TOTAL fan-out
+        // — `cells × sketches_per_cell × profile_total` — so the
+        // saturation / outlier checks fire against the operator's
+        // full profile expansion, not the v0.5 cardinality. With
+        // the default profile (`[1.0] × 1`) this collapses to
+        // `cells × sketches_per_cell` (v0.5). The `target_override`
+        // wins when supplied so a CLI flag like `--cardinality 200`
+        // still overrides the per-cell fan-out math.
+        // (The loop computes the real `total` after resolving the
+        //  profile below; we re-initialise the tracker once we
+        //  know the real expansion factor.)
         let policy = StopPolicy::default();
         let mut tracker = SaturationTracker::with_policy(target.max(matrix.cardinality()), policy);
 
@@ -572,115 +604,167 @@ impl DiscoveryCoordinator {
 
         let per_cell = matrix.sketches_per_cell.max(1);
         let cells: Vec<MatrixCell> = matrix.iter_cells().collect();
-        let total = cells.len() * per_cell;
+        // PR-D1: per-provider temperature profile expansion. The
+        // coordinator (the actual `moagan discover` driver) honours
+        // the matrix's `temperature_profiles` map the same way the
+        // flat `DiscoverMatrixPhase` does, so an operator who sets
+        // `--temperature-profile 'provider=<model>;temperatures=...;replicas=...'`
+        // observes the fan-out regardless of which code path the run
+        // takes. The default profile is `[1.0] × 1`, so the
+        // unconfigured case collapses to the v0.5 `(cells ×
+        // per_cell)` total.
+        let profile = matrix.profile_for(&ctx.default_model).clone();
+        let profile_temperatures: Vec<f32> = profile.temperatures.clone();
+        let profile_replicas: usize = profile.replicas_per_temperature.max(1);
+        let total = cells.len() * profile_temperatures.len() * profile_replicas * per_cell;
+        // PR-D1: re-anchor the saturation tracker's target to the
+        // real total so the saturation / outlier checks fire
+        // against the operator's full profile expansion. With the
+        // default profile (`[1.0] × 1`) the new `total` equals
+        // the matrix cardinality, so v0.5 runs are unaffected.
+        // With a configured profile the tracker can run the longer
+        // loop before declaring `OutliersCollected` or
+        // `MaxSketchesReached`. We also bump the policy's
+        // `min_sketches` floor proportionally so the
+        // `outliers_cap = min_sketches / 2` safety net scales with
+        // the expansion (the cap is a ratio against the floor; if
+        // the floor doesn't grow, a `[2 temps × 2 replicas]`
+        // profile would trip OutliersCollected after just 20
+        // calls).
+        let profile_expansion = profile_temperatures.len() * profile_replicas;
+        let mut expanded_policy = policy;
+        expanded_policy.min_sketches = expanded_policy
+            .min_sketches
+            .saturating_mul(profile_expansion.max(1));
+        tracker = SaturationTracker::with_policy(total.max(target), expanded_policy);
 
-        // 5. Main loop: fan out every (cell, sketch_index) pair.
+        // 5. Main loop: fan out every (cell, temperature, replica, sketch_index) tuple.
         let mut n: usize = state.completed_sketches.len();
         let mut stop_reason: Option<StopReason> = None;
-        for cell in cells.iter() {
-            for sketch_index in 0..per_cell {
-                if cancel.is_cancelled() {
-                    return Err(cancel.into_error().into());
-                }
-                if n >= total {
-                    break;
-                }
-                let _permit = ctx.parallelism.acquire().await?;
-                let id = format!("sk_{:04}", n);
-                let user = build_user_payload(&brief_text, cell, sketch_index);
-
-                let cell_for_angle = cell.clone();
-                let system_for_attempt = system.clone();
-                let user_for_attempt = user.clone();
-                let id_for_attempt = id.clone();
-                let ctx_for_attempt = ctx.clone();
-                let n_for_attempt = n;
-
-                let sketch_result = retry_sketch_extraction(3, || {
-                    let ctx = ctx_for_attempt.clone();
-                    let user = user_for_attempt.clone();
-                    let system = system_for_attempt.to_string();
-                    let id = id_for_attempt.clone();
-                    let cell = cell_for_angle.clone();
-                    let attempt = n_for_attempt;
-                    async move {
-                        let started_unix = crate::time::now_unix_secs();
-                        let raw = if attempt == 0 {
-                            ctx.call_with_retry(crate::llm::Role::Sketch, system, user, 0)
-                                .await?
-                        } else {
-                            ctx.call_uncached(
-                                crate::llm::Role::Sketch,
-                                system,
-                                user,
-                                started_unix,
-                                attempt as u32,
-                            )
-                            .await?
-                        };
-                        let schema_hint =
-                            crate::llm::prompts::system_prompt(crate::llm::Role::Sketch).to_owned();
-                        let mut sketch: Sketch = ctx.parse_model_json(
-                            crate::llm::Role::Sketch,
-                            &raw.text,
-                            &schema_hint,
-                        )?;
-                        if sketch.id.is_empty() {
-                            sketch.id = id;
+        'outer: for cell in cells.iter() {
+            for &temperature in profile_temperatures.iter() {
+                for _replica in 0..profile_replicas {
+                    for sketch_index in 0..per_cell {
+                        if cancel.is_cancelled() {
+                            return Err(cancel.into_error().into());
                         }
-                        sketch.angle = format!("{}:{}", cell.dimension_id, cell.facet_id);
-                        Ok::<Sketch, Error>(sketch)
-                    }
-                })
-                .await;
+                        if n >= total {
+                            break 'outer;
+                        }
+                        let _permit = ctx.parallelism.acquire().await?;
+                        let id = format!("sk_{:04}", n);
+                        let user = build_user_payload(&brief_text, cell, sketch_index);
 
-                match sketch_result {
-                    Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
-                        let path = sketches_dir.join(format!("{}.json", sketch.id));
-                        write_json(&path, &sketch)?;
-                        state.record_completion(sketch.id.clone());
-                        state.save(&run_dir)?;
-                        tracker.record_completions(1);
-                        let decision = tracker.update(&[sketch], &[]);
-                        if let StopDecision::Stop { reason } = decision {
-                            tracing::info!(
-                                reason = ?reason,
-                                completed = tracker.completed,
-                                target = tracker.target,
-                                "DiscoveryCoordinator::run_with_ctx: tracker returned Stop"
-                            );
-                            if matches!(reason, StopReason::Saturated) {
-                                TelemetryEvent::DiscoverySaturated {
-                                    run_id: run_id.to_string(),
-                                    coverage: tracker.coverage(),
-                                    at_unix: crate::time::now_unix_secs(),
+                        let cell_for_angle = cell.clone();
+                        let system_for_attempt = system.clone();
+                        let user_for_attempt = user.clone();
+                        let id_for_attempt = id.clone();
+                        let ctx_for_attempt = ctx.clone();
+                        let n_for_attempt = n;
+
+                        let sketch_result = retry_sketch_extraction(3, || {
+                            let ctx = ctx_for_attempt.clone();
+                            let user = user_for_attempt.clone();
+                            let system = system_for_attempt.to_string();
+                            let id = id_for_attempt.clone();
+                            let cell = cell_for_angle.clone();
+                            let attempt = n_for_attempt;
+                            async move {
+                                let started_unix = crate::time::now_unix_secs();
+                                // PR-D1: stamp the explicit
+                                // `temperature` from the active
+                                // profile so the cache key in
+                                // `src/llm/cache/mod.rs:117`
+                                // differentiates across
+                                // `(cell, temperature, replica)`
+                                // tuples. Retries bypass the
+                                // cache (the original
+                                // `call_with_retry_parse` rule;
+                                // pinned here so the coordinator
+                                // mirrors it).
+                                let raw = if attempt == 0 {
+                                    ctx.call_with_retry_at_temp(
+                                        crate::llm::Role::Sketch,
+                                        system,
+                                        user,
+                                        0,
+                                        temperature,
+                                    )
+                                    .await?
+                                } else {
+                                    ctx.call_uncached_at_temp(
+                                        crate::llm::Role::Sketch,
+                                        system,
+                                        user,
+                                        started_unix,
+                                        attempt as u32,
+                                        temperature,
+                                    )
+                                    .await?
+                                };
+                                let schema_hint =
+                                    crate::llm::prompts::system_prompt(crate::llm::Role::Sketch)
+                                        .to_owned();
+                                let mut sketch: Sketch = ctx.parse_model_json(
+                                    crate::llm::Role::Sketch,
+                                    &raw.text,
+                                    &schema_hint,
+                                )?;
+                                if sketch.id.is_empty() {
+                                    sketch.id = id;
                                 }
-                                .emit();
+                                sketch.angle = format!("{}:{}", cell.dimension_id, cell.facet_id);
+                                Ok::<Sketch, Error>(sketch)
                             }
-                            stop_reason = Some(reason);
-                            break;
+                        })
+                        .await;
+
+                        match sketch_result {
+                            Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
+                                let path = sketches_dir.join(format!("{}.json", sketch.id));
+                                write_json(&path, &sketch)?;
+                                state.record_completion(sketch.id.clone());
+                                state.save(&run_dir)?;
+                                tracker.record_completions(1);
+                                let decision = tracker.update(&[sketch], &[]);
+                                if let StopDecision::Stop { reason } = decision {
+                                    tracing::info!(
+                                        reason = ?reason,
+                                        completed = tracker.completed,
+                                        target = tracker.target,
+                                        "DiscoveryCoordinator::run_with_ctx: tracker returned Stop"
+                                    );
+                                    if matches!(reason, StopReason::Saturated) {
+                                        TelemetryEvent::DiscoverySaturated {
+                                            run_id: run_id.to_string(),
+                                            coverage: tracker.coverage(),
+                                            at_unix: crate::time::now_unix_secs(),
+                                        }
+                                        .emit();
+                                    }
+                                    stop_reason = Some(reason);
+                                    break 'outer;
+                                }
+                            }
+                            Ok(_) => {
+                                state.record_failure();
+                                state.save(&run_dir)?;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    sketch_id = %id,
+                                    error = %e,
+                                    "sketch extraction failed after retries; recording failure"
+                                );
+                                state.record_failure();
+                                state.save(&run_dir)?;
+                            }
                         }
-                    }
-                    Ok(_) => {
-                        state.record_failure();
-                        state.save(&run_dir)?;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            sketch_id = %id,
-                            error = %e,
-                            "sketch extraction failed after retries; recording failure"
-                        );
-                        state.record_failure();
-                        state.save(&run_dir)?;
+
+                        n += 1;
+                        tokio::task::yield_now().await;
                     }
                 }
-
-                n += 1;
-                tokio::task::yield_now().await;
-            }
-            if stop_reason.is_some() {
-                break;
             }
         }
 
@@ -1581,5 +1665,291 @@ mod tests {
                 "completed run_with_ctx must delete the persisted state file"
             );
         });
+    }
+
+    /// Test helper (PR-D1): a provider that captures the resolved
+    /// sampling temperature from every `Request` it receives so
+    /// the per-provider temperature profile tests can assert on
+    /// each call's temperature (the v0.5 `ScriptedProvider` only
+    /// counts calls — it doesn't record the resolved wire
+    /// parameters). The responses are scripted so the coordinator
+    /// can complete the matrix fan-out deterministically.
+    struct TemperatureRecordingProvider {
+        outcomes: parking_lot::Mutex<Vec<String>>,
+        calls: std::sync::atomic::AtomicUsize,
+        temperatures: parking_lot::Mutex<Vec<f32>>,
+    }
+
+    impl TemperatureRecordingProvider {
+        fn new(responses: Vec<String>) -> Arc<Self> {
+            Arc::new(Self {
+                outcomes: parking_lot::Mutex::new(responses),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                temperatures: parking_lot::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::Provider for TemperatureRecordingProvider {
+        fn name(&self) -> &str {
+            "mock-coordinator-temperature-recorder"
+        }
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+        fn endpoint(&self) -> &str {
+            "mock://coordinator-temperature-recorder"
+        }
+        async fn send(
+            &self,
+            req: &crate::llm::Request,
+        ) -> crate::Result<(u16, crate::llm::Response)> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(t) = req.temperature {
+                self.temperatures.lock().push(t);
+            }
+            let text = self
+                .outcomes
+                .lock()
+                .pop()
+                .expect("TemperatureRecordingProvider was drained");
+            Ok((
+                200,
+                crate::llm::Response {
+                    text,
+                    finish_reason: Some("end_turn".into()),
+                    truncated: false,
+                    usage: Default::default(),
+                },
+            ))
+        }
+    }
+
+    /// PR-D1: when the operator does NOT set any
+    /// `--temperature-profile` flags and the persisted
+    /// `[discovery_matrix]` block is empty, the coordinator must
+    /// spawn exactly the same number of LLM calls as the v0.5
+    /// fan-out (the audit's "bit-identical default" promise).
+    /// Pin the default profile's `total() == 1` property so a
+    /// future refactor cannot silently inflate the loop.
+    #[test]
+    fn phase_continue_does_not_loop_when_profile_is_default() {
+        let rt = single_thread_runtime();
+        // 4 dims × 2 facets × 1 sketch per cell = 8 sketches
+        // (the matrix's default cardinality at the
+        // `Cardinality::for_mode_default(Mode::Standard).soft = 7`
+        // floor rounds up to fill the 8 cells).
+        let target = Cardinality::for_mode_default(Mode::Standard).soft;
+        let matrix_card =
+            crate::discovery::matrix::ExplorationMatrix::default_for(target).cardinality();
+        let scripted = TemperatureRecordingProvider::new(
+            (0..matrix_card)
+                .map(|i| sketch_payload(&format!("sk_{i:04}")))
+                .collect(),
+        );
+        let scripted_for_ctx = scripted.clone();
+        with_moagan_home("discovery-coordinator-default-profile", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let run_id = RunId::new();
+            let run_dir = home.run_dir(run_id);
+            run_dir.ensure().unwrap();
+            let brief = serde_json::json!({
+                "problem": "Design a multi-tenant SaaS backend",
+                "objectives": ["Auth"],
+                "constraints": ["Rust single binary"],
+                "non_goals": [],
+                "open_questions": [],
+                "raw_prompt": "Design a multi-tenant SaaS backend"
+            });
+            std::fs::write(run_dir.brief(), serde_json::to_vec_pretty(&brief).unwrap()).unwrap();
+
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                run_id,
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            // The default Config has an empty `discovery_matrix`;
+            // the matrix picks up `[1.0] × 1` from
+            // `TemperatureProfile::default()`.
+            let mut registry = crate::llm::ProviderRegistry::default();
+            registry.insert("mock".into(), scripted_for_ctx);
+            let cfg = Arc::new(crate::config::Config::default());
+            let ctx = Arc::new(RunContext::new_with_config(
+                run_id,
+                Arc::new(home.clone()),
+                Arc::new(registry),
+                "mock".to_owned(),
+                "mock-model".to_owned(),
+                crate::execution::Parallelism::new(1),
+                crate::telemetry::Telemetry::noop(),
+                String::new(),
+                "standard".to_owned(),
+                cfg,
+            ));
+            rt.block_on(coordinator_inner.run_with_ctx(ctx))
+                .expect("run_with_ctx should succeed with default profile");
+        });
+        let calls = scripted.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            calls, matrix_card,
+            "default profile ([1.0] × 1) must produce exactly the v0.5 sketch count \
+             (matrix cardinality = {matrix_card}); got {calls}"
+        );
+        let recorded = scripted.temperatures.lock().clone();
+        // The default profile's temperatures list is `[1.0]` so
+        // every recorded call must carry `1.0`. Any drift here is
+        // a regression on the "bit-identical default" promise.
+        assert!(
+            recorded.iter().all(|&t| (t - 1.0).abs() < f32::EPSILON),
+            "every recorded temperature must be 1.0 (the default profile); got {recorded:?}"
+        );
+    }
+
+    /// PR-D1: when the operator sets a per-provider temperature
+    /// profile, the coordinator fans out the matrix across the
+    /// `(cell, temperature, replica)` Cartesian product. The
+    /// test asserts:
+    ///
+    /// * The total number of LLM calls equals `cells × per_cell ×
+    ///   Σ(providers: |temperatures| × replicas)`.
+    /// * The recorded temperatures match the expected per-provider
+    ///   profile (the `mock-model` profile has 2 temperatures × 2
+    ///   replicas; the `other-model` profile has 1 temperature ×
+    ///   1 replica — but it never fires because the active
+    ///   provider's model is `mock-model`).
+    /// * The mock provider's model name (`"mock-model"`) is used
+    ///   as the lookup key; a typo in the profile map key would
+    ///   fall back to `default_profile` and the test would fail.
+    #[test]
+    fn phase_continue_iterates_per_provider_and_per_replica() {
+        let rt = single_thread_runtime();
+        // Build the profile map the coordinator will read.
+        // The active provider's model name (`mock-model`) keys
+        // into this map.
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert(
+            "mock-model".to_owned(),
+            crate::discovery::matrix::TemperatureProfile {
+                temperatures: vec![0.0, 0.5],
+                replicas_per_temperature: 2,
+            },
+        );
+        profiles.insert(
+            "other-model".to_owned(),
+            crate::discovery::matrix::TemperatureProfile {
+                temperatures: vec![0.7],
+                replicas_per_temperature: 1,
+            },
+        );
+        let default_profile = crate::discovery::matrix::TemperatureProfile {
+            temperatures: vec![0.99],
+            replicas_per_temperature: 1,
+        };
+        // The coordinator uses `default_for_with_profiles(target)`
+        // internally (target = `Cardinality::for_mode_default(Standard).soft = 7`).
+        // For target=7 the default matrix has 4 dims × 2 facets
+        // = 8 cells × max(7/8, 1) per_cell = 1 sketch per cell.
+        // Cardinality = 8. With the active provider's profile
+        // (`[0.0, 0.5] × 2 = 4`) the total fan-out is 8 × 4 = 32.
+        let target = Cardinality::for_mode_default(Mode::Standard).soft;
+        let matrix = crate::discovery::matrix::ExplorationMatrix::default_for_with_profiles(
+            target,
+            profiles.clone(),
+            default_profile,
+        );
+        let expected_calls =
+            matrix.cells() * matrix.sketches_per_cell * matrix.profile_for("mock-model").total();
+        let scripted = TemperatureRecordingProvider::new(
+            (0..expected_calls)
+                .map(|i| sketch_payload(&format!("sk_{i:04}")))
+                .collect(),
+        );
+        let scripted_for_ctx = scripted.clone();
+        with_moagan_home("discovery-coordinator-iterates-per-provider", |tmp| {
+            EpistemicLegacy::empty()
+                .save_to(&tmp.join("epistemic_legacy.json"))
+                .unwrap();
+            let home = MoaganHome::at(tmp.to_path_buf());
+            let run_id = RunId::new();
+            let run_dir = home.run_dir(run_id);
+            run_dir.ensure().unwrap();
+            let brief = serde_json::json!({
+                "problem": "Design a multi-tenant SaaS backend",
+                "objectives": ["Auth"],
+                "constraints": ["Rust single binary"],
+                "non_goals": [],
+                "open_questions": [],
+                "raw_prompt": "Design a multi-tenant SaaS backend"
+            });
+            std::fs::write(run_dir.brief(), serde_json::to_vec_pretty(&brief).unwrap()).unwrap();
+
+            let coordinator_inner = DiscoveryCoordinator::new(
+                home.clone(),
+                run_id,
+                Cancel::new(),
+                Brief::default(),
+                "deployment-model:serverless".to_owned(),
+                Mode::Standard,
+            );
+            let mut registry = crate::llm::ProviderRegistry::default();
+            registry.insert("mock".into(), scripted_for_ctx);
+            // Build the effective Config with the explicit profile
+            // map; the coordinator reads it via
+            // `ctx.config.discovery_matrix.temperature_profiles`.
+            let cfg = crate::config::Config {
+                discovery_matrix: crate::config::DiscoveryMatrixConfig {
+                    temperature_profiles: matrix.temperature_profiles.clone(),
+                    default_profile: Some(matrix.default_profile.clone()),
+                },
+                ..crate::config::Config::default()
+            };
+            let ctx = Arc::new(RunContext::new_with_config(
+                run_id,
+                Arc::new(home.clone()),
+                Arc::new(registry),
+                "mock".to_owned(),
+                "mock-model".to_owned(),
+                crate::execution::Parallelism::new(1),
+                crate::telemetry::Telemetry::noop(),
+                String::new(),
+                "standard".to_owned(),
+                Arc::new(cfg),
+            ));
+            rt.block_on(coordinator_inner.run_with_ctx(ctx))
+                .expect("run_with_ctx should succeed with explicit profile");
+        });
+        let calls = scripted.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            calls, expected_calls,
+            "explicit profile must drive a fan-out of cells × per_cell × (temperatures × replicas); \
+             expected {expected_calls}, got {calls}"
+        );
+        let recorded = scripted.temperatures.lock().clone();
+        assert_eq!(
+            recorded.len(),
+            expected_calls,
+            "every call must record its temperature; expected {expected_calls} entries, got {}",
+            recorded.len()
+        );
+        // The active provider's model is `mock-model`, so the
+        // recorded temperatures must come from the `mock-model`
+        // profile (`[0.0, 0.5] × 2`). No call may carry the
+        // `other-model` profile's `0.7` or the default profile's
+        // `0.99` — a typo in the lookup key would silently fall
+        // back to the default and trip this assertion.
+        for (i, &t) in recorded.iter().enumerate() {
+            assert!(
+                (t - 0.0).abs() < f32::EPSILON || (t - 0.5).abs() < f32::EPSILON,
+                "call #{i} carried unexpected temperature {t}; the active provider's \
+                 profile must be `[0.0, 0.5] × 2`"
+            );
+        }
     }
 }

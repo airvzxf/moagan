@@ -473,6 +473,112 @@ impl RunContext {
             })
     }
 
+    /// Like [`Self::call_with_retry`] but stamps the request with an
+    /// EXPLICIT sampling temperature (bypassing
+    /// [`crate::phases::phase::resolve_temperature`] / the per-role
+    /// defaults / the active provider's `ProviderConfig::temperature`
+    /// / `profile_temperature_overrides`).
+    ///
+    /// PR-D1: the discovery matrix phase iterates every `(cell,
+    /// replica)` pair against a per-provider
+    /// [`crate::discovery::matrix::TemperatureProfile`]; each profile
+    /// carries an explicit list of temperatures the loop must walk,
+    /// so the resolved temperature must come from the profile — not
+    /// the role table. The cache key in [`crate::llm::cache::Cache`]
+    /// includes the resolved temperature, so distinct temperatures
+    /// cache distinctly and the per-cell temperature buckets form
+    /// naturally (the audit confirmed this property; pinned here so
+    /// the wire path stays consistent).
+    ///
+    /// `profile_overrides` (the active domain profile's per-role
+    /// overrides) and the per-provider base temperature are still
+    /// consulted when the matrix's profile defaults to a single-shot
+    /// `[1.0] × 1`, but the explicit `temperature` parameter always
+    /// wins — there is no upstream indirection.
+    pub(crate) async fn call_with_retry_at_temp(
+        &self,
+        role: Role,
+        system: String,
+        user: String,
+        retry_count: u32,
+        temperature: f32,
+    ) -> Result<Response> {
+        let (_provider_temperature, provider_top_p) = self
+            .config
+            .providers
+            .get(&self.default_provider)
+            .map(|s| (s.temperature, s.top_p))
+            .unwrap_or((None, None));
+        let system = render_system_prompt_with_prefix(&role, &self.default_model, &system);
+        let req = Request {
+            role,
+            model: self.default_model.clone(),
+            system,
+            user,
+            max_tokens: max_tokens_for_role(role),
+            temperature: Some(temperature),
+            top_p: Some(provider_top_p.unwrap_or(0.95)),
+            response_schema: None,
+            stream: false,
+        };
+        let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
+        let started_unix = crate::time::now_unix_secs();
+        let prompt_id = format!("{}@{}", role.as_str(), cache_key);
+        if let Some(entry) = self.prompt_cache.lock().lookup_by_id(&prompt_id) {
+            return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
+        }
+        if let Some(entry) = self.cache.lookup(&cache_key)? {
+            self.prompt_cache
+                .lock()
+                .register(&prompt_id, cache_key.clone());
+            return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
+        }
+        self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
+            .await
+            .inspect(|_response| {
+                self.prompt_cache.lock().register(&prompt_id, cache_key);
+            })
+    }
+
+    /// Provider-uncached variant of [`Self::call_with_retry_at_temp`]
+    /// used by the discovery matrix's retry path (see
+    /// `discover_matrix::retry_sketch_extraction`). Mirrors
+    /// [`Self::call_uncached`] but stamps the explicit temperature
+    /// instead of consulting `resolve_temperature`. The
+    /// `retry_count` parameter tags the resulting `calls` row so
+    /// the retry loop's attempt index survives into the JSONL /
+    /// SQLite `calls.retry_count` column.
+    pub(crate) async fn call_uncached_at_temp(
+        &self,
+        role: Role,
+        system: String,
+        user: String,
+        started_unix: i64,
+        retry_count: u32,
+        temperature: f32,
+    ) -> Result<Response> {
+        let (_provider_temperature, provider_top_p) = self
+            .config
+            .providers
+            .get(&self.default_provider)
+            .map(|s| (s.temperature, s.top_p))
+            .unwrap_or((None, None));
+        let system = render_system_prompt_with_prefix(&role, &self.default_model, &system);
+        let req = Request {
+            role,
+            model: self.default_model.clone(),
+            system,
+            user,
+            max_tokens: max_tokens_for_role(role),
+            temperature: Some(temperature),
+            top_p: Some(provider_top_p.unwrap_or(0.95)),
+            response_schema: None,
+            stream: false,
+        };
+        self.dispatch_to_provider(req, None, started_unix, retry_count)
+            .await
+    }
+
     /// Provider call without consulting the cache. Used on parse-
     /// failure retries (see `call_with_retry_parse`) so a previously
     /// cached broken response does not poison the retry. The
@@ -2423,6 +2529,84 @@ mod tests {
             recorded.top_p,
             Some(0.95),
             "without provider top_p, the hard-coded 0.95 must apply"
+        );
+    }
+
+    /// PR-D1: `call_with_retry_at_temp` stamps the explicit
+    /// `temperature` parameter straight into `Request.temperature`
+    /// — bypassing `resolve_temperature`, the per-role default,
+    /// and `ProviderConfig::temperature`. The discovery matrix
+    /// phase relies on this property to drive every `(cell,
+    /// temperature, replica)` triple with the operator-chosen
+    /// temperature; any indirection (e.g. consulting the role
+    /// default or the provider config) would silently collapse
+    /// the fan-out back to v0.5.
+    #[tokio::test]
+    async fn call_with_retry_at_temp_stamps_provided_temperature() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::open(
+            run_id,
+            &home.run_dir(run_id),
+            crate::redact::RedactPolicy::default(),
+            None,
+        )
+        .expect("Telemetry::open");
+
+        let captured = Arc::new(parking_lot::Mutex::new(None));
+        let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
+            captured: Arc::clone(&captured),
+        });
+        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let mut registry = ProviderRegistry::default();
+        registry.insert("recording".into(), provider_dyn);
+
+        // Config sets a different per-provider temperature; the
+        // explicit parameter must still win. This proves
+        // `call_with_retry_at_temp` does NOT consult the provider
+        // config — only the `temperature` parameter.
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "recording".to_owned(),
+            ProviderConfig {
+                kind: "mock".to_owned(),
+                endpoint: "mock://recording".to_owned(),
+                model: "recording-model".to_owned(),
+                max_tokens: Some(1024),
+                temperature: Some(0.99),
+                top_p: Some(0.5),
+                ..ProviderConfig::default()
+            },
+        );
+        let ctx = RunContext::new_with_config(
+            run_id,
+            home,
+            Arc::new(registry),
+            "recording".into(),
+            "recording-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "standard".into(),
+            Arc::new(cfg),
+        );
+
+        let result = ctx
+            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.3)
+            .await;
+        assert!(result.is_ok(), "call should succeed: {result:?}");
+        let recorded = captured
+            .lock()
+            .clone()
+            .expect("provider captured the request");
+        assert_eq!(
+            recorded.temperature,
+            Some(0.3),
+            "call_with_retry_at_temp must stamp the explicit parameter \
+             (0.3), NOT the per-provider config (0.99) and NOT the \
+             per-role default (Sketch=1.0)"
         );
     }
 }

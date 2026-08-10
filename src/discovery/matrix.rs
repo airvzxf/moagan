@@ -7,7 +7,66 @@
 //! it samples the *space* systematically rather than rotating
 //! through a fixed list of personas.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+
+use serde::{Deserialize, Serialize};
+
+/// Per-provider sampling temperature profile (PR-D1, V4 §6.4
+/// evolution).
+///
+/// A `TemperatureProfile` is the explicit knob an operator uses to
+/// override the role-default sampling temperature for one provider's
+/// matrix fan-out. The matrix phase reads `(temperatures,
+/// replicas_per_temperature)` and fires `temperatures ×
+/// replicas_per_temperature` LLM calls per `(cell, replica)` pair for
+/// the named provider; every other provider in the same run keeps the
+/// [`Self::default()`] single-shot contract so a profile that is not
+/// configured for a provider produces a byte-identical request set to
+/// the v0.5 behaviour.
+///
+/// The default (`[1.0] × 1`) is deliberate: the matrix phase's
+/// pre-PR-D1 loop was `cells × sketches_per_cell`, one call per
+/// `(cell, sketch_index)` pair at the role-default temperature
+/// (`Role::Sketch` = `1.0`). Keeping `temperatures = vec![1.0]` and
+/// `replicas_per_temperature = 1` reproduces that exact fan-out so
+/// operators who never set a profile see no behavioural change.
+///
+/// Validation rules (enforced at the CLI spec-parser level so a
+/// `Vec<f32>` parsed from TOML or clap never carries garbage):
+///
+/// * `temperatures` must be non-empty.
+/// * Every temperature must be in `0.0..=2.0` (the documented LLM
+///   sampling band — providers outside the band reject the request).
+/// * `replicas_per_temperature` must be `>= 1`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemperatureProfile {
+    /// Sampling temperatures the matrix phase should iterate per
+    /// `(cell, replica)` pair. Default `vec![1.0]` — one call at
+    /// the role default.
+    pub temperatures: Vec<f32>,
+    /// How many LLM calls to fire per `(cell, temperature)` pair.
+    /// Default `1` — same fan-out as v0.5.
+    pub replicas_per_temperature: usize,
+}
+
+impl Default for TemperatureProfile {
+    fn default() -> Self {
+        Self {
+            temperatures: vec![1.0],
+            replicas_per_temperature: 1,
+        }
+    }
+}
+
+impl TemperatureProfile {
+    /// Total iterations per cell = `temperatures.len() *
+    /// replicas_per_temperature`. The matrix phase uses this to size
+    /// the inner loop and to surface the per-provider expansion to
+    /// `ExplorationMatrix::cardinality`.
+    pub fn total(&self) -> usize {
+        self.temperatures.len() * self.replicas_per_temperature.max(1)
+    }
+}
 
 /// One dimension in the exploration matrix. A dimension is a
 /// high-level axis of variation the user wants to explore (e.g.
@@ -51,6 +110,22 @@ pub struct ExplorationMatrix {
     /// (4 dims × 2 facets × 10 = 80 sketches, the user's chosen
     /// floor).
     pub sketches_per_cell: usize,
+    /// Per-provider sampling-temperature profiles keyed by the
+    /// provider's MODEL name (e.g. `"MiniMax-M3"`, `"deepseek-v4-flash"`,
+    /// `"mimo-v2.5"` — the same string stored on the `Request` /
+    /// `ProviderConfig`). A provider not in this map uses
+    /// [`Self::default_profile`]. Default empty so the matrix is
+    /// bit-identical to the v0.5 behaviour when no profile is
+    /// configured (PR-D1).
+    #[serde(default)]
+    pub temperature_profiles: HashMap<String, TemperatureProfile>,
+    /// Default profile applied to providers absent from
+    /// [`Self::temperature_profiles`]. Default
+    /// [`TemperatureProfile::default()`] (`[1.0] × 1`) so the
+    /// unconfigured case reproduces the v0.5 single-shot behaviour
+    /// byte-for-byte.
+    #[serde(default)]
+    pub default_profile: TemperatureProfile,
 }
 
 impl ExplorationMatrix {
@@ -58,7 +133,23 @@ impl ExplorationMatrix {
     /// explicit one is supplied. The defaults target the four most
     /// universally-applicable axes: deployment model, storage
     /// strategy, consistency model, and observability.
+    ///
+    /// Equivalent to `default_for_with_profiles(cardinality,
+    /// HashMap::new(), TemperatureProfile::default())` — the v0.5
+    /// single-shot contract is preserved bit-identically.
     pub fn default_for(cardinality: usize) -> Self {
+        Self::default_for_with_profiles(cardinality, HashMap::new(), TemperatureProfile::default())
+    }
+
+    /// Variant of [`Self::default_for`] that accepts explicit
+    /// per-provider temperature profiles. Use this when the CLI
+    /// `--temperature-profile` flags (or the `[discovery]`
+    /// `config.toml` block) supplied a non-empty map.
+    pub fn default_for_with_profiles(
+        cardinality: usize,
+        temperature_profiles: HashMap<String, TemperatureProfile>,
+        default_profile: TemperatureProfile,
+    ) -> Self {
         let dims = vec![
             Dimension {
                 id: "deployment-model".into(),
@@ -122,13 +213,37 @@ impl ExplorationMatrix {
         Self {
             dimensions: dims,
             sketches_per_cell: per_cell,
+            temperature_profiles,
+            default_profile,
         }
     }
 
     /// Build a matrix from explicit `dimensions` and `facets_per_dim`.
     /// The facets inside each dimension are auto-generated from the
     /// count (`f1`, `f2`, …, `fN`).
+    ///
+    /// Equivalent to `from_dimensions_with_profiles(num_dimensions,
+    /// facets_per_dim, HashMap::new(),
+    /// TemperatureProfile::default())` — preserves v0.5 behaviour.
     pub fn from_dimensions(num_dimensions: usize, facets_per_dim: usize) -> Self {
+        Self::from_dimensions_with_profiles(
+            num_dimensions,
+            facets_per_dim,
+            HashMap::new(),
+            TemperatureProfile::default(),
+        )
+    }
+
+    /// Variant of [`Self::from_dimensions`] that accepts explicit
+    /// per-provider temperature profiles. Same shape as the
+    /// no-profile constructor; the profile parameters are stored on
+    /// the matrix so the discovery phase can iterate per-provider.
+    pub fn from_dimensions_with_profiles(
+        num_dimensions: usize,
+        facets_per_dim: usize,
+        temperature_profiles: HashMap<String, TemperatureProfile>,
+        default_profile: TemperatureProfile,
+    ) -> Self {
         let dims = (0..num_dimensions)
             .map(|i| Dimension {
                 id: format!("dim-{i:02}"),
@@ -146,13 +261,37 @@ impl ExplorationMatrix {
         Self {
             dimensions: dims,
             sketches_per_cell: per_cell,
+            temperature_profiles,
+            default_profile,
         }
     }
 
-    /// Total number of sketches the matrix will request. The formula
-    /// is `sum(dimensions.facets) * sketches_per_cell` — each cell is
-    /// one `(dimension, facet)` pair, and each cell produces
-    /// `sketches_per_cell` sketches.
+    /// Resolve the temperature profile for a given provider model
+    /// name. Falls back to [`Self::default_profile`] when the provider
+    /// is not in [`Self::temperature_profiles`]. The lookup is
+    /// case-sensitive on the model name string — operators should
+    /// pass the exact `ProviderConfig::model` value (e.g.
+    /// `"MiniMax-M3"`) when configuring the map.
+    pub fn profile_for(&self, provider_model: &str) -> &TemperatureProfile {
+        self.temperature_profiles
+            .get(provider_model)
+            .unwrap_or(&self.default_profile)
+    }
+
+    /// Total number of sketches the matrix will request against a
+    /// single provider. The formula is `cells() * sketches_per_cell *
+    /// profile.total()` for one provider. The matrix phase iterates
+    /// per-provider, so callers that fan out across multiple
+    /// providers should sum this across the active set; for the
+    /// common single-provider case the value matches the v0.5
+    /// `cells() * sketches_per_cell` (because the default profile is
+    /// `[1.0] × 1`, which contributes a factor of 1).
+    ///
+    /// Note: this method returns the per-provider expansion factor —
+    /// it does NOT add profiles across providers because the matrix
+    /// does not own the provider list (the coordinator / CLI does).
+    /// The discovery phase applies `profile_for(provider).total()`
+    /// itself.
     pub fn cardinality(&self) -> usize {
         self.cells() * self.sketches_per_cell
     }
@@ -289,5 +428,117 @@ mod tests {
         let j = serde_json::to_string(&m).unwrap();
         let back: ExplorationMatrix = serde_json::from_str(&j).unwrap();
         assert_eq!(back.cardinality(), 80);
+    }
+
+    // ---- PR-D1: TemperatureProfile + per-provider profile tests ----
+
+    /// PR-D1: the default profile is bit-identical to the v0.5
+    /// single-shot contract. `TemperatureProfile::default()` must
+    /// produce exactly one call per `(cell, replica)` pair at the
+    /// role-default temperature (`1.0` for `Role::Sketch`). Any
+    /// drift here is the user-facing "magic switch" the audit
+    /// rejected.
+    #[test]
+    fn temperature_profile_default_is_one_temp_one_replica() {
+        let p = TemperatureProfile::default();
+        assert_eq!(p.temperatures, vec![1.0]);
+        assert_eq!(p.replicas_per_temperature, 1);
+        assert_eq!(p.total(), 1);
+    }
+
+    /// PR-D1: total iterations = `len(temperatures) ×
+    /// replicas_per_temperature`. The `[0.0, 0.3] × 3` example from
+    /// the spec yields 6 — exactly the per-cell fan-out the
+    /// discovery phase will request.
+    #[test]
+    fn temperature_profile_total_multiplies() {
+        let p = TemperatureProfile {
+            temperatures: vec![0.0, 0.3],
+            replicas_per_temperature: 3,
+        };
+        assert_eq!(p.total(), 6);
+    }
+
+    /// PR-D1: `profile_for` returns the explicit profile when the
+    /// provider model is present, otherwise falls back to
+    /// `default_profile`. The matrix's default profile is what
+    /// unconfigured providers inherit.
+    #[test]
+    fn exploration_matrix_profile_for_returns_explicit_then_default() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0, 0.3, 0.7, 1.0],
+                replicas_per_temperature: 4,
+            },
+        );
+        let default_profile = TemperatureProfile {
+            temperatures: vec![0.5],
+            replicas_per_temperature: 2,
+        };
+        let m = ExplorationMatrix::default_for_with_profiles(80, profiles, default_profile);
+        let explicit = m.profile_for("MiniMax-M3");
+        assert_eq!(explicit.temperatures, vec![0.0, 0.3, 0.7, 1.0]);
+        assert_eq!(explicit.replicas_per_temperature, 4);
+        let fallback = m.profile_for("deepseek-v4-flash");
+        assert_eq!(fallback.temperatures, vec![0.5]);
+        assert_eq!(fallback.replicas_per_temperature, 2);
+    }
+
+    /// PR-D1: with the default profile (`[1.0] × 1`) and an empty
+    /// per-provider map, `cardinality()` matches v0.5 — the
+    /// `total()` factor is `1`, so the formula is unchanged.
+    #[test]
+    fn exploration_matrix_cardinality_unchanged_when_no_profiles() {
+        let m = ExplorationMatrix::default_for(80);
+        assert_eq!(m.profile_for("anything").total(), 1);
+        assert_eq!(m.cardinality(), 80);
+    }
+
+    /// PR-D1: the matrix's profile constructors preserve v0.5
+    /// `cardinality` when called without explicit profiles. Pin
+    /// `default_for` and `from_dimensions` to the no-profile path so
+    /// the audit's "bit-identical default" promise survives
+    /// refactors.
+    #[test]
+    fn exploration_matrix_constructors_default_to_no_profiles() {
+        let m1 = ExplorationMatrix::default_for(80);
+        assert!(m1.temperature_profiles.is_empty());
+        assert_eq!(m1.default_profile, TemperatureProfile::default());
+
+        let m2 = ExplorationMatrix::from_dimensions(3, 2);
+        assert!(m2.temperature_profiles.is_empty());
+        assert_eq!(m2.default_profile, TemperatureProfile::default());
+    }
+
+    /// PR-D1: a profile-configured matrix round-trips through
+    /// JSON. The persisted `exploration_matrix.json` artefact must
+    /// carry the per-provider map so a resumed run picks it up
+    /// without re-deriving from the CLI flags.
+    #[test]
+    fn exploration_matrix_round_trips_with_profiles() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0, 0.7],
+                replicas_per_temperature: 2,
+            },
+        );
+        let m = ExplorationMatrix::default_for_with_profiles(
+            80,
+            profiles,
+            TemperatureProfile {
+                temperatures: vec![0.5],
+                replicas_per_temperature: 1,
+            },
+        );
+        let j = serde_json::to_string(&m).unwrap();
+        let back: ExplorationMatrix = serde_json::from_str(&j).unwrap();
+        let restored = back.profile_for("MiniMax-M3");
+        assert_eq!(restored.temperatures, vec![0.0, 0.7]);
+        assert_eq!(restored.replicas_per_temperature, 2);
+        assert_eq!(back.default_profile.temperatures, vec![0.5]);
     }
 }

@@ -180,6 +180,7 @@ async fn discovery_pipeline_composes_all_seven_phases() {
         out_dir: None,
         non_interactive: true,
         cache_facets: false,
+        temperature_profiles: Vec::new(),
     };
     let pipeline = build_discovery_pipeline(&opts);
     let names = pipeline.names();
@@ -983,6 +984,8 @@ fn build_matrix_with_n_sketches(total: usize) -> moagan::phases::DiscoverMatrixP
                 label: "F1".into(),
             }],
         }],
+        temperature_profiles: std::collections::HashMap::new(),
+        default_profile: moagan::discovery::matrix::TemperatureProfile::default(),
     };
     moagan::phases::DiscoverMatrixPhase { matrix }
 }
