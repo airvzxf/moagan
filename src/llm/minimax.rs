@@ -237,6 +237,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -258,6 +259,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -281,6 +283,7 @@ mod tests {
             temperature: None,
             top_p: None,
             hard_incompatibilities: vec![],
+            omit_max_tokens: false,
         };
         let r = MinimaxProvider::from_config(&cfg);
         assert!(matches!(r, Err(Error::InvalidApiKey(_))));
@@ -296,6 +299,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -419,6 +423,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             };
             let p = MinimaxProvider::new(&cfg, SecretString::new("dummy".into()))
                 .expect("MinimaxProvider::new should accept every canonical model");
@@ -479,6 +484,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -576,6 +582,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
