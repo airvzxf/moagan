@@ -39,6 +39,27 @@ impl std::error::Error for ExtractError {}
 /// `input`. The returned range can be sliced directly against `input`
 /// without remapping because the scan walks the original bytes and
 /// only advances the cursor past JS comments / prose.
+///
+/// # Expected pre-processing
+///
+/// This function only *selects* a substring; it never rewrites the
+/// input, precisely so the returned offsets stay valid against the
+/// caller's own string. Two sanitising passes therefore run in the
+/// caller, ahead of this one — see
+/// [`crate::phases::util::parse_model_json_traced`]:
+///
+/// 1. [`crate::llm::control_tokens::strip_chat_template_tokens`] —
+///    chat-template markers (`<|im_start|>`, `<system>`, `[BOS]`,
+///    …). Without it, a leading `[BOS]` is indistinguishable from a
+///    JSON array delimiter: the scan below locks onto the `[`, finds
+///    the bare word `BOS` where a value should be, and reports
+///    [`ExtractError::UnbalancedBraces`].
+/// 2. [`crate::llm::control_tokens::strip`] — ASCII control bytes
+///    and DEL.
+///
+/// The passes this function still performs itself, in order: strip a
+/// leading UTF-8 BOM, skip JS comments and prose prefix, then
+/// brace-balance to the matching close delimiter.
 pub fn extract_tolerant_json(input: &str) -> Result<(usize, usize), ExtractError> {
     let bytes = input.as_bytes();
     // Strip an optional leading UTF-8 BOM if present.
@@ -230,6 +251,7 @@ fn find_balanced_end(bytes: &[u8], start: usize, open: char) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::control_tokens;
     use serde::Deserialize;
 
     #[test]
@@ -237,6 +259,46 @@ mod tests {
         let input = "Sure! Here is the JSON you requested:\n{\"answer\": 42}";
         let (start, end) = extract_tolerant_json(input).unwrap();
         assert_eq!(&input[start..end], "{\"answer\": 42}");
+    }
+
+    /// A ChatML-wrapped payload run through the response-path strip
+    /// and then the extractor. The `<|im_start|>` / `<system>`
+    /// markers become spaces, the prose between them is dropped as
+    /// an ordinary prose prefix, and the inner object comes back
+    /// intact.
+    ///
+    /// The markers in *this* payload are ones the extractor already
+    /// tolerated before the strip existed (they contain no `[`, so
+    /// nothing hijacks the delimiter scan) — the case that genuinely
+    /// needed the strip is the bracket family, covered by
+    /// `extract_tolerant_json_needs_strip_for_bracket_tokens` below.
+    #[test]
+    fn extract_tolerant_json_handles_chat_template_wrapped_response() {
+        let raw = "<|im_start|>\n<system>some prose</system>\n{\"x\":\"v\"}<|im_end|>";
+        let cleaned = control_tokens::strip_response_text(raw);
+        let (start, end) = extract_tolerant_json(&cleaned).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&cleaned[start..end]).unwrap();
+        assert_eq!(value, serde_json::json!({ "x": "v" }));
+    }
+
+    /// Regression lock on the case the strip exists for: `[BOS]`
+    /// reads as a JSON array delimiter, so without the strip the
+    /// extractor locks onto it and fails. Both spellings — canonical
+    /// and the `[BO S]` typo — are covered.
+    #[test]
+    fn extract_tolerant_json_needs_strip_for_bracket_tokens() {
+        for raw in ["[BOS]{\"x\":\"v\"}[EOS]", "[BO S]{\"x\":\"v\"}[EOS ]"] {
+            // Without the strip the delimiter scan is hijacked.
+            assert_eq!(
+                extract_tolerant_json(raw).unwrap_err(),
+                ExtractError::UnbalancedBraces
+            );
+            // With it, the inner object is recovered.
+            let cleaned = control_tokens::strip_response_text(raw);
+            let (start, end) = extract_tolerant_json(&cleaned).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&cleaned[start..end]).unwrap();
+            assert_eq!(value, serde_json::json!({ "x": "v" }));
+        }
     }
 
     #[test]

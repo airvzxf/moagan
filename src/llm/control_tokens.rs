@@ -23,8 +23,105 @@
 //! The function returns [`Cow<'_, str>`] so the no-op path (no
 //! control bytes present) borrows from the input without
 //! allocating. That keeps the cost negligible on the hot path.
+//!
+//! # Chat-template markers
+//!
+//! [`strip_chat_template_tokens`] covers a second, unrelated class
+//! of noise: the template markers that chat-tuned open-source models
+//! (ChatML, Llama-3, Mistral, Qwen) sometimes leak into their own
+//! output — `<|im_start|>`, `<system>`, `[BOS]` and friends. Those
+//! are ordinary printable text, so the ASCII strip above cannot see
+//! them, yet they break the JSON extractor just as effectively.
+//!
+//! [`strip_response_text`] chains both passes for call sites on the
+//! model-response path that want the whole sanitising treatment in
+//! one line.
 
 use std::borrow::Cow;
+
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+/// Every chat-template marker the response path strips, as a single
+/// alternation. One compiled regex means one pass over the input and
+/// one `replace_all` allocation at most.
+///
+/// Families, in the order they appear in the alternation:
+///
+/// - **Bracket tokens** (`[BOS]`, `[EOS]`) — matched
+///   case-insensitively via the scoped `(?i:…)` group, with an
+///   optional single space inside the brackets so the observed
+///   `[BO S]` / `[EOS ]` typos are caught too. These come first
+///   because they are the only family that can otherwise be
+///   mistaken for a JSON array delimiter.
+/// - **ChatML pair tokens** — `<|im_start|>`, `<|im_end|>` and the
+///   sibling end-of-turn markers emitted by Llama-3 / Qwen /
+///   Gemma chat templates.
+/// - **Section markers** — `<system>`, `<assistant>`, `<user>` and
+///   their closing forms, matched case-sensitively because
+///   lowercase is what the templates emit and a looser match would
+///   start eating legitimate prose.
+static CHAT_TEMPLATE_MARKERS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(concat!(
+        r"(?i:\[BO ?S\]|\[EOS ?\])",
+        r"|<\|im_start\|>|<\|im_end\|>|<\|eot_id\|>|<\|end_of_turn\|>|<\|endoftext\|>",
+        r"|</?system>|</?assistant>|</?user>",
+    ))
+    .expect("invalid chat-template marker regex")
+});
+
+/// Strip chat-template control markers from `input`, replacing each
+/// with a single space.
+///
+/// Open-source chat-template models (ChatML, Llama-3, Mistral, Qwen)
+/// occasionally leak their own template markers into the response
+/// body, particularly when JSON mode nudges the model into opening
+/// with a section header. Those markers derail
+/// [`crate::llm::json_extractor::extract_tolerant_json`]: `[BOS]` in
+/// particular reads as a JSON array delimiter, so the extractor
+/// locks onto it, finds the bare word `BOS` where a JSON value
+/// should be, and reports `UnbalancedBraces` on an otherwise-valid
+/// payload.
+///
+/// The replacement is a single space rather than the empty string so
+/// that word boundaries survive: `{"a":1}<|im_end|>{"b":2}` must not
+/// collapse into two adjacent values with nothing between them.
+///
+/// # Scope
+///
+/// This is a blunt textual pass — it has no notion of JSON string
+/// boundaries, so a marker sitting *inside* a string value (say
+/// `{"note":"<system>"}`) would be replaced too. That is why the
+/// response path only reaches this helper *after* a direct
+/// `serde_json` parse of the untouched payload has already failed:
+/// well-formed JSON is returned before the strip ever runs. See
+/// [`crate::phases::util::parse_model_json_traced`].
+///
+/// Returns [`Cow::Borrowed`] when no marker was present, so the
+/// common clean-response path allocates nothing.
+pub fn strip_chat_template_tokens(input: &str) -> Cow<'_, str> {
+    CHAT_TEMPLATE_MARKERS.replace_all(input, " ")
+}
+
+/// Response-path entry point: run both sanitising passes over `input`.
+///
+/// Applies [`strip_chat_template_tokens`] (chat-template markers)
+/// followed by [`strip`] (ASCII control bytes and DEL), so a call
+/// site only needs one line to get a fully sanitised payload. The
+/// chat-template pass runs first because its replacement introduces
+/// only spaces, which the control-byte pass is happy to leave alone.
+///
+/// Returns [`Cow::Borrowed`] when neither pass changed anything.
+pub fn strip_response_text(input: &str) -> Cow<'_, str> {
+    match strip_chat_template_tokens(input) {
+        // Nothing stripped: the borrow still points at `input`, so
+        // the control-byte pass can keep borrowing from it.
+        Cow::Borrowed(borrowed) => strip(borrowed),
+        // Markers were stripped: `owned` is a local, so the second
+        // pass has to hand back an owned string of its own.
+        Cow::Owned(owned) => Cow::Owned(strip(&owned).into_owned()),
+    }
+}
 
 /// Strip ASCII control bytes and the C1 DEL byte from `s`,
 /// preserving `\n`, `\r`, and `\t`.
@@ -226,5 +323,84 @@ mod tests {
         let input = "\u{001F}a\u{0020}b\u{007E}c\u{007F}d";
         let out = strip(input);
         assert_eq!(out.as_ref(), "a b~cd");
+    }
+
+    /// ChatML pair tokens wrapping a JSON payload are removed. The
+    /// role tag (`assistant`) is deliberately *not* stripped — it
+    /// is ordinary prose, and dropping the prose prefix is the JSON
+    /// extractor's job, not this helper's. What matters here is
+    /// that the markers are gone and the JSON body survives
+    /// byte-for-byte.
+    #[test]
+    fn strip_chat_template_tokens_chatml_markers() {
+        let input = "<|im_start|>assistant\n{\"a\":1}<|im_end|>";
+        let out = strip_chat_template_tokens(input);
+        assert!(!out.contains("<|im_start|>"));
+        assert!(!out.contains("<|im_end|>"));
+        assert!(out.contains("{\"a\":1}"));
+        assert_eq!(out.trim(), "assistant\n{\"a\":1}");
+    }
+
+    /// Section markers are removed and the text they wrapped is
+    /// left behind.
+    #[test]
+    fn strip_chat_template_tokens_section_markers() {
+        let input = "<system>foo</system>";
+        let out = strip_chat_template_tokens(input);
+        assert_eq!(out.trim(), "foo");
+    }
+
+    /// Bracket tokens are matched case-insensitively and tolerate
+    /// the single-space typo variants (`[BO S]`, `[EOS ]`) that
+    /// show up in real model output.
+    #[test]
+    fn strip_chat_template_tokens_brackets_with_typo() {
+        let out = strip_chat_template_tokens("[BO S]hello[EOS ]");
+        assert_eq!(out.trim(), "hello");
+        // Canonical spellings and lowercase both match.
+        assert_eq!(strip_chat_template_tokens("[BOS]hi[EOS]").trim(), "hi");
+        assert_eq!(strip_chat_template_tokens("[bos]hi[eos]").trim(), "hi");
+    }
+
+    /// Marker-free input must borrow: the clean-response path is
+    /// the common case and it should not allocate.
+    #[test]
+    fn strip_chat_template_tokens_returns_borrowed_on_no_op() {
+        let input = "{\"x\":1}";
+        let out = strip_chat_template_tokens(input);
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), input);
+    }
+
+    /// Families mixed in one payload. The section marker sitting
+    /// between the opening brace and the first key is eaten, while
+    /// the JSON braces either side of it are preserved — the
+    /// replacement is a space, so the value stays parseable.
+    #[test]
+    fn strip_chat_template_tokens_combined_pass() {
+        let input = "<|im_start|><system>{</system>\"a\":1}<|im_end|>";
+        let out = strip_chat_template_tokens(input);
+        assert_eq!(out.trim(), "{ \"a\":1}");
+    }
+
+    /// The combined response-path helper runs both passes: the
+    /// chat-template markers *and* the ASCII control bytes that
+    /// [`strip`] handles.
+    #[test]
+    fn strip_response_text_applies_both_passes() {
+        let input = "<|im_start|>\u{0000}{\"a\":1}\u{007F}<|im_end|>";
+        let out = strip_response_text(input);
+        assert_eq!(out.trim(), "{\"a\":1}");
+    }
+
+    /// Input clean under both passes borrows end-to-end — the
+    /// chained helper must not allocate just because it composes
+    /// two `Cow`-returning functions.
+    #[test]
+    fn strip_response_text_returns_borrowed_on_no_op() {
+        let input = "{\"x\":1}";
+        let out = strip_response_text(input);
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), input);
     }
 }
