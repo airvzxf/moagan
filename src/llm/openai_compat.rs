@@ -139,7 +139,7 @@ struct ResponseFormat {
 /// (Propose delivers markdown but parses a JSON header; the
 /// actual markdown body is not autostructured) and free-text roles
 /// (Sketch, FinalReport) are NOT in this list.
-fn role_requires_json(role: crate::llm::Role) -> bool {
+pub(crate) fn role_requires_json(role: crate::llm::Role) -> bool {
     use crate::llm::Role::*;
     matches!(
         role,

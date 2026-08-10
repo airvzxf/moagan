@@ -25,8 +25,10 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
+use super::openai_compat::role_requires_json;
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
+use super::response_format_opt_out::model_skips_response_format;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use super::sse_parser::{SseError, SseParser};
 use super::wire::{Request, Response, Usage};
@@ -148,7 +150,30 @@ struct ResponsesRequest<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    /// OpenAI-style JSON output mode. Mirrors the OpenAI-compat
+    /// gating: omitted for free-text roles (`Sketch`, `FinalReport`,
+    /// etc.) and for models on the `response_format_opt_out` list.
+    /// `Capabilities::for_opencode_go_responses` advertises
+    /// `supports_response_format: true` because the Responses API
+    /// still honours the field, so a JSON role on a non-opted-out
+    /// model must send it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponsesResponseFormat>,
     stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+/// Compute the gate the OpenAI-compat path uses to decide whether
+/// to send `response_format: { type: "json_object" }`. Kept local
+/// so the wire builder can stay a free function and so the
+/// `#[cfg(test)]` block can drive it directly.
+fn wants_response_format(role: crate::llm::Role, model: &str) -> bool {
+    role_requires_json(role) && !model_skips_response_format(model)
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +253,13 @@ impl Provider for OpenCodeGoResponsesProvider {
                 max_tokens,
                 temperature: req.temperature,
                 top_p: req.top_p,
+                response_format: if wants_response_format(req.role, &self.model) {
+                    Some(ResponsesResponseFormat {
+                        kind: "json_object",
+                    })
+                } else {
+                    None
+                },
                 stream: false,
             };
             let request_started = std::time::Instant::now();
@@ -345,6 +377,13 @@ fn build_responses_body<'a>(
         },
         temperature: req.temperature,
         top_p: req.top_p,
+        response_format: if wants_response_format(req.role, model) {
+            Some(ResponsesResponseFormat {
+                kind: "json_object",
+            })
+        } else {
+            None
+        },
         stream,
     }
 }
@@ -946,5 +985,104 @@ data: [DONE]\n\n",
                 "max_tokens must be present with the requested value, got body={body}"
             );
         });
+    }
+
+    fn json_request(role: crate::llm::Role, model: &str) -> Request {
+        Request {
+            role,
+            model: model.into(),
+            system: "system".into(),
+            user: "user".into(),
+            max_tokens: 128,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+        }
+    }
+
+    /// JSON role + non-opted-out model → `response_format` must be
+    /// serialised as `{"type":"json_object"}`. Pins the contract
+    /// the capability matrix advertises
+    /// (`supports_response_format: true`).
+    #[test]
+    fn responses_wire_sets_response_format_when_role_requires_json_and_model_is_not_opted_out() {
+        let req = json_request(crate::llm::Role::Intake, "gpt-5.6-luna");
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(
+            value.get("response_format"),
+            Some(&serde_json::json!({"type": "json_object"})),
+            "Intake role + gpt-5.6-luna must include response_format, got: {value}"
+        );
+    }
+
+    /// `Sketch` is a free-text role and is NOT in `role_requires_json`,
+    /// so the field must stay absent even on a non-opted-out model.
+    #[test]
+    fn responses_wire_omits_response_format_for_role_sketch() {
+        let req = json_request(crate::llm::Role::Sketch, "gpt-5.6-luna");
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert!(
+            value.get("response_format").is_none(),
+            "Sketch role must drop response_format, got: {value}"
+        );
+    }
+
+    /// Model on the opt-out list + JSON role → field must stay
+    /// absent so the upstream returns raw markdown instead of
+    /// prose-prefixed JSON.
+    #[test]
+    fn responses_wire_omits_response_format_for_opted_out_model() {
+        let req = json_request(crate::llm::Role::Intake, "kimi-k3");
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert!(
+            value.get("response_format").is_none(),
+            "opted-out model kimi-k3 must drop response_format, got: {value}"
+        );
+    }
+
+    /// The pre-existing fields (`model`, `instructions`, `input`,
+    /// `max_tokens`, `temperature`, `top_p`, `stream`) are untouched
+    /// regardless of the gate. Guards against a regression that
+    /// would re-shape the body when adding the new field.
+    #[test]
+    fn responses_wire_includes_other_fields_unaffected() {
+        let req = Request {
+            role: crate::llm::Role::Route,
+            model: "gpt-5.6-luna".into(),
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: 256,
+            temperature: Some(0.4),
+            top_p: Some(0.9),
+            response_schema: None,
+            stream: false,
+        };
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["model"], "gpt-5.6-luna");
+        assert_eq!(value["instructions"], "sys");
+        assert_eq!(value["input"], "user");
+        assert_eq!(value["max_tokens"], 256);
+        let temp = value["temperature"].as_f64().unwrap();
+        assert!(
+            (temp - 0.4).abs() < 1e-6,
+            "temperature must round-trip, got {temp} in {value}"
+        );
+        let top_p = value["top_p"].as_f64().unwrap();
+        assert!(
+            (top_p - 0.9).abs() < 1e-6,
+            "top_p must round-trip, got {top_p} in {value}"
+        );
+        assert_eq!(value["stream"], false);
+        // Gate was true (Route + gpt-5.6-luna), so the new field
+        // is also present.
+        assert_eq!(
+            value["response_format"],
+            serde_json::json!({"type": "json_object"})
+        );
     }
 }
