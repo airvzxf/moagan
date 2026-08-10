@@ -610,6 +610,7 @@ data: [DONE]\n\n";
                 top_p: None,
                 response_schema: None,
                 stream: true,
+                extra_messages: vec![],
             };
             let (status, response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -667,6 +668,7 @@ data: {not json}\n\n";
                 top_p: None,
                 response_schema: None,
                 stream: true,
+                extra_messages: vec![],
             };
             let err = p.send(&req).await.unwrap_err();
             match err {
@@ -723,6 +725,7 @@ data: {not json}\n\n";
                 top_p: None,
                 response_schema: None,
                 stream: false,
+                extra_messages: vec![],
             };
             let (status, response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -797,6 +800,7 @@ data: [DONE]\n\n";
                 top_p: None,
                 response_schema: None,
                 stream: false,
+                extra_messages: vec![],
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -851,6 +855,7 @@ data: [DONE]\n\n",
                 top_p: None,
                 response_schema: None,
                 stream: true,
+                extra_messages: vec![],
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -908,6 +913,7 @@ data: [DONE]\n\n",
                 top_p: None,
                 response_schema: None,
                 stream: false,
+                extra_messages: vec![],
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -969,6 +975,7 @@ data: [DONE]\n\n",
                 top_p: None,
                 response_schema: None,
                 stream: false,
+                extra_messages: vec![],
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -998,6 +1005,7 @@ data: [DONE]\n\n",
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         }
     }
 
@@ -1060,6 +1068,7 @@ data: [DONE]\n\n",
             top_p: Some(0.9),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let body = build_responses_body(&req, &req.model, false, false);
         let value: serde_json::Value = serde_json::to_value(&body).unwrap();

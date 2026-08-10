@@ -368,6 +368,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         }
     }
 
