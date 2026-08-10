@@ -1,6 +1,7 @@
 //! Shared helpers for phases that need to read JSON from disk, write
 //! JSON to disk atomically, and parse LLM responses.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use serde::Serialize;
@@ -9,6 +10,7 @@ use thiserror::Error;
 
 use crate::atomic::writer::AtomicWriter;
 use crate::error::Result;
+use crate::llm::control_tokens;
 use crate::llm::json_extractor;
 use crate::redact::detect_stale;
 
@@ -185,20 +187,28 @@ pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
 /// previous one failed:
 ///
 /// 1. **Direct parse** on the trimmed input.
-/// 2. **Tolerant extraction (Path B)** — carves out the first
+/// 2. **Control-token strip** — [`control_tokens::strip_response_text`]
+///    removes chat-template markers (`<|im_start|>`, `<system>`,
+///    `[BOS]`, …) and ASCII control bytes, then the direct parse is
+///    retried. Deliberately sequenced *after* step 1 so a
+///    well-formed payload carrying a marker inside a string value
+///    is returned intact and never reaches the strip. Every later
+///    step operates on the cleaned text.
+/// 3. **Tolerant extraction (Path B)** — carves out the first
 ///    balanced JSON value, dropping prose prefix/suffix, JS
 ///    comments, and a leading BOM. If the candidate parses, return.
-/// 3. **M3 repair on the extracted candidate** — the bracket /
+/// 4. **M3 repair on the extracted candidate** — the bracket /
 ///    separator / colon chain runs on the Path B candidate; each
 ///    repair pass that fires emits a [`RepairEvent`] via `sink`.
-/// 4. **M3 repair on the full input** — the same chain runs on the
-///    trimmed input as the final fallback; events fire via `sink`.
+/// 5. **M3 repair on the full input** — the same chain runs on the
+///    cleaned input as the final fallback; events fire via `sink`.
 ///
-/// The Path B step itself does not emit `RepairEvent`s because it
-/// does not modify the input — it only selects a substring. The
-/// companion helper [`parse_json_with_recovery`] exposes the same
-/// recovery chain without an external sink (it emits
-/// `tracing::debug!` events instead).
+/// Neither the strip nor the Path B step emits `RepairEvent`s: the
+/// strip only removes markers that were never part of the JSON, and
+/// Path B does not modify the input at all — it only selects a
+/// substring. The companion helper [`parse_json_with_recovery`]
+/// exposes the same recovery chain without an external sink (it
+/// emits `tracing::debug!` events instead).
 pub fn parse_model_json_traced<T, F>(raw: &str, mut sink: F) -> Result<T>
 where
     T: DeserializeOwned,
@@ -208,8 +218,22 @@ where
     if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
         return Ok(v);
     }
-    if let Ok((start, end)) = json_extractor::extract_tolerant_json(&trimmed) {
-        let candidate = &trimmed[start..end];
+    // Sanitising pass: chat-template markers and ASCII control
+    // bytes. It runs *after* the direct parse so a well-formed
+    // payload that legitimately contains a marker inside a string
+    // value (`{"note":"<system>"}`) is returned untouched above and
+    // never reaches the strip.
+    let cleaned = control_tokens::strip_response_text(&trimmed);
+    if let Cow::Owned(stripped) = &cleaned {
+        // Something was removed: retry the direct parse, which is
+        // enough on its own for payloads whose only defect was a
+        // wrapping marker pair.
+        if let Ok(v) = serde_json::from_str::<T>(stripped) {
+            return Ok(v);
+        }
+    }
+    if let Ok((start, end)) = json_extractor::extract_tolerant_json(&cleaned) {
+        let candidate = &cleaned[start..end];
         if let Ok(v) = serde_json::from_str::<T>(candidate) {
             return Ok(v);
         }
@@ -227,17 +251,17 @@ where
             }
         }
     }
-    let (repaired, repairs) = repair_m3_brackets_with_trace(&trimmed);
+    let (repaired, repairs) = repair_m3_brackets_with_trace(&cleaned);
     let Some(repaired) = repaired else {
-        let e = serde_json::from_str::<T>(&trimmed)
+        let e = serde_json::from_str::<T>(&cleaned)
             .err()
             .expect("parse failed above");
-        let tail = safe_tail(&trimmed, 500);
+        let tail = safe_tail(&cleaned, 500);
         return Err(crate::Error::SchemaViolation(format!(
             "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
-            trimmed.len(),
+            cleaned.len(),
             tail,
-            trimmed
+            cleaned
         )));
     };
     for r in repairs {
@@ -1475,6 +1499,44 @@ mod tests {
         })
         .unwrap();
         assert!(kinds.is_empty());
+    }
+
+    /// Chain-level cover for the control-token strip: a payload
+    /// wrapped in chat-template markers parses to the inner JSON
+    /// with no marker text leaking into the returned `Value`. The
+    /// bracket family is the case that actually needs the strip —
+    /// `[BOS]` otherwise hijacks the extractor's delimiter scan.
+    /// No `RepairEvent` fires: the strip is not a repair.
+    #[test]
+    fn traced_strips_chat_template_markers_from_wrapped_payload() {
+        for s in [
+            "<|im_start|>assistant\n{\"a\":1,\"b\":\"ok\"}<|im_end|>",
+            "[BOS]{\"a\":1,\"b\":\"ok\"}[EOS]",
+            "[BO S]{\"a\":1,\"b\":\"ok\"}[EOS ]",
+            "<system>here it is</system>\n{\"a\":1,\"b\":\"ok\"}",
+        ] {
+            let mut kinds: Vec<RepairKind> = Vec::new();
+            let v: Sample = parse_model_json_traced(s, |ev| kinds.push(ev.kind))
+                .unwrap_or_else(|e| panic!("payload {s:?} should parse: {e}"));
+            assert_eq!(
+                v,
+                Sample {
+                    a: 1,
+                    b: "ok".to_owned(),
+                }
+            );
+            assert!(kinds.is_empty(), "strip must not report a repair");
+        }
+    }
+
+    /// The strip must not reach well-formed JSON: a marker sitting
+    /// inside a string value is part of the data, and the direct
+    /// parse at the top of the chain returns before the strip runs.
+    #[test]
+    fn traced_preserves_chat_template_markers_inside_string_values() {
+        let s = r#"{"a":1,"b":"<system>[BOS]<|im_end|>"}"#;
+        let v: Sample = parse_model_json_traced(s, |_| {}).unwrap();
+        assert_eq!(v.b, "<system>[BOS]<|im_end|>");
     }
 
     #[test]
