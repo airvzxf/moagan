@@ -599,6 +599,25 @@ pub enum Cmd {
         /// `MOAGAN_FACET_CACHE_TTL_SECS` (default 7 days).
         #[arg(long, default_value_t = false)]
         cache_facets: bool,
+        /// PR-D1: per-provider sampling-temperature profile. May
+        /// be passed multiple times; each occurrence applies one
+        /// profile to the named provider model. The spec grammar is
+        /// `provider=<model>;temperatures=<csv>;replicas=<n>`:
+        ///
+        /// * `provider=<model>` — provider MODEL name (the same
+        ///   string stored on `ProviderConfig::model`, e.g.
+        ///   `MiniMax-M3`, `mimo-v2.5`).
+        /// * `temperatures=<csv>` — comma-separated floats in
+        ///   `0.0..=2.0`. At least one value required.
+        /// * `replicas=<n>` — integer `>= 1`.
+        ///
+        /// Multiple specs for the same provider are allowed; the
+        /// LAST one wins (documented in `cli::discover`).
+        /// Providers without a spec fall back to the matrix's
+        /// `default_profile` (`[1.0] × 1`), which reproduces the
+        /// v0.5 single-shot contract byte-for-byte. Default empty.
+        #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
+        temperature_profiles: Vec<String>,
     },
     /// `moagan telemetry` — read-only inspection, dashboard, export,
     /// verify, and retention. v0.3 sub-fase I (T01-06 §10.7 + §10.8
@@ -1210,12 +1229,23 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             cluster_threshold,
             non_interactive,
             cache_facets,
+            temperature_profiles,
         } => {
             if cardinality < 80 {
                 return Err(Error::InvalidArgs(format!(
                     "cardinality {cardinality} below the discovery minimum of 80"
                 )));
             }
+            // PR-D1: parse the CLI `--temperature-profile` specs into
+            // a typed `Vec<TemperatureProfileSpec>`. Each spec is
+            // validated (provider non-empty, every temperature in
+            // `0.0..=2.0`, replicas >= 1) so a malformed flag surfaces
+            // as `Error::InvalidArgs` instead of silently collapsing
+            // the matrix to the default profile.
+            let parsed_profiles = temperature_profiles
+                .iter()
+                .map(|s| discover::TemperatureProfileSpec::parse(s))
+                .collect::<std::result::Result<Vec<_>, Error>>()?;
             let cfg = Config::load()?;
             let run_id = discover::run(
                 discover::DiscoverOptions {
@@ -1231,6 +1261,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     out_dir: None,
                     non_interactive,
                     cache_facets,
+                    temperature_profiles: parsed_profiles,
                 },
                 &cfg,
             )

@@ -2131,7 +2131,7 @@ pub struct DiversityVector {
 
 `DiversityBook` trackea tuplas usadas para evitar repetición. (Inspirado en T03-04 §2; T06-10 §6.2; T12-09.)
 
-#### D.13.19. `MatrixCell` con `seed` documentada como always-None (P — ✅ SPEC-DRIFT resuelto en v0.5 PR-16)
+#### D.13.19. `MatrixCell` con `seed` documentada como always-None (P — ✅ RESOLVED v0.6 (PR-D1))
 
 ```rust
 // src/discovery/matrix.rs
@@ -2145,7 +2145,7 @@ pub struct MatrixCell {
 
 (Inspirado en T16-06 §2.1; T01-10 §6.1.)
 
-> **Estado (v0.5 PR-16, ✅ SPEC-DRIFT resuelto 2026-08):** V4 §6.4 y T01-06 §9.1 especifican la forma `roles × models × temperatures`. La implementación en `src/discovery/matrix.rs:36` usa deliberadamente `dimensions × facets × per_cell`: `MatrixCell` contiene `{ dimension_id, facet_id, label }`, mientras que el `seed` efectivo se deriva externamente, de modo que la tupla por celda es `{ dimension_id, facet_id, label, seed }` y no hay `model_spec`, `role` ni `temperature` por celda. Esta evolución es más flexible porque no exige una instancia de provider diferente para cada celda. La decisión de v0.5 PR-16 (2026-08) es documentar la divergencia, no re-diseñar la matriz; un caso futuro que requiera model/role/temperature por celda será una feature v0.6+, y los futuros contribuidores no deben proponer re-diseñar la matriz sin consultar primero la hoja de ruta v0.5 PR #16.
+> **Estado (v0.6 PR-D1, ✅ RESOLVED 2026-08):** V4 §6.4 y T01-06 §9.1 especifican la forma `roles × models × temperatures`. La implementación en `src/discovery/matrix.rs:36` usa deliberadamente `dimensions × facets × per_cell`, y a partir de v0.6 PR-D1 esa forma se complementa con un perfil de temperaturas **por-provider**, no por-celda: `ExplorationMatrix` lleva `temperature_profiles: HashMap<String, TemperatureProfile>` (key = `ProviderConfig::model`, ej. `"MiniMax-M3"`) y `default_profile: TemperatureProfile`; cada `TemperatureProfile` es `{ temperatures: Vec<f32>, replicas_per_temperature: usize }`. Así, la tupla efectiva por celda es `{ dimension_id, facet_id, label, seed, provider_model, temperature, replica }` y el fan-out total es `dimensions × facets × sketches_per_cell × (Σ_per_provider temperatures × replicas)`. El default (`temperatures = vec![1.0]`, `replicas_per_temperature = 1`) reproduce el contrato v0.5 byte-for-byte, por lo que los runs no configurados son bit-identical. La decisión de v0.5 PR-16 (documentar la divergencia sin re-diseñar la matriz) se mantiene; PR-D1 evoluciona la `temperature` axis **fuera** del `MatrixCell` para preservar el struct estable y permitir expansión multi-provider. Operadores configuran perfiles via CLI `--temperature-profile 'provider=<model>;temperatures=<csv>;replicas=<n>'` (formato `key=value;...`, validado) o via el bloque `[discovery_matrix]` en `~/.config/moagan/config.toml` (`temperature_profiles` + `default_profile`). CLI gana en conflicto. Implementación: `src/discovery/matrix.rs` (tipos), `src/phases/phase.rs` (`call_with_retry_at_temp` / `call_uncached_at_temp` — bypassan `resolve_temperature` para estampar la temperatura explícita en `Request.temperature`; cache key en `src/llm/cache/mod.rs:117` ya diferenciaba por temperatura), `src/phases/discover_matrix.rs` y `src/discovery/coordinator.rs` (loop per-provider), `src/cli/mod.rs` + `src/cli/discover.rs` (CLI surface), `src/config/mod.rs` (`DiscoveryMatrixConfig`).
 
 #### D.13.20. `Cardinality` con `range_usize` per-phase
 
