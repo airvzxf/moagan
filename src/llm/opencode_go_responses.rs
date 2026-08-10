@@ -40,6 +40,14 @@ pub struct OpenCodeGoResponsesProvider {
     api_key: SecretString,
     client: reqwest::Client,
     max_retries: u32,
+    /// Per-provider hard cap on `max_tokens` (set from
+    /// `ProviderConfig::max_tokens`). The default is
+    /// `DEFAULT_MAX_TOKENS` (1,000,000), so the per-role runtime
+    /// value normally fits under the cap. The clamp below exists
+    /// for the rare cases where a TOML override sets a smaller
+    /// provider-specific limit, so the upstream never rejects the
+    /// request.
+    provider_max_tokens: Option<u32>,
 }
 
 impl OpenCodeGoResponsesProvider {
@@ -59,6 +67,7 @@ impl OpenCodeGoResponsesProvider {
             api_key,
             client,
             max_retries: 3,
+            provider_max_tokens: spec.max_tokens,
         })
     }
 
@@ -182,6 +191,11 @@ impl Provider for OpenCodeGoResponsesProvider {
         let url = self.responses_url();
         if req.stream {
             return self.send_streaming(req, &url).await;
+        }
+        // Apply per-provider max_tokens cap (mirrors OpenAiCompatProvider).
+        let mut req = req.clone();
+        if let Some(cap) = self.provider_max_tokens {
+            req.max_tokens = req.max_tokens.min(cap);
         }
         let mut attempt: u32 = 0;
         loop {
@@ -361,7 +375,12 @@ impl OpenCodeGoResponsesProvider {
     /// response, and returns a single aggregated `Response` with
     /// the joined text and the terminal usage block.
     async fn send_streaming(&self, req: &Request, url: &str) -> Result<(u16, Response)> {
-        let body = build_responses_body(req, &self.model, true);
+        // Apply per-provider max_tokens cap (mirrors OpenAiCompatProvider).
+        let mut req = req.clone();
+        if let Some(cap) = self.provider_max_tokens {
+            req.max_tokens = req.max_tokens.min(cap);
+        }
+        let body = build_responses_body(&req, &self.model, true);
         let request_started = std::time::Instant::now();
         let resp = self
             .client
@@ -652,5 +671,116 @@ data: [DONE]\n\n";
         assert_eq!(text, "Hello world");
         assert_eq!(usage.input_tokens, 3);
         assert_eq!(usage.output_tokens, 4);
+    }
+
+    #[test]
+    fn send_clamps_max_tokens_to_provider_cap() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{body_partial_json, method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            // body_partial_json only matches when the outbound
+            // request body literally carries max_tokens:8192; if the
+            // clamp regresses the upstream would see 1_000_000 and
+            // wiremock would fall through to its default 404, which
+            // the provider turns into an Error::Provider — failing
+            // the test.
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .and(body_partial_json(serde_json::json!({
+                    "max_tokens": 8192,
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: Some(8192),
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+        });
+    }
+
+    #[test]
+    fn send_streaming_clamps_max_tokens_to_provider_cap() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{body_partial_json, method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .and(body_partial_json(serde_json::json!({
+                    "max_tokens": 8192,
+                    "stream": true,
+                })))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            "data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n\
+data: [DONE]\n\n",
+                        ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: Some(8192),
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: true,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+        });
     }
 }

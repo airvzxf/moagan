@@ -56,7 +56,7 @@ pub enum Role {
     /// output and the cluster summary, then proposes 3-6 facets
     /// the category document should cover. Uses temperature 0.0
     /// and top_p 0.2 for determinism (T01-06 §4.2 role table:
-    /// max_tokens=DEFAULT_MAX_TOKENS (1,048,576), same as every
+    /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000), same as every
     /// other role).
     FacetDeriver,
     /// Extractor — discovery mode. Pulls the per-facet markdown
@@ -81,7 +81,7 @@ pub enum Role {
     /// Decomposer — Phase G. Splits a deep-mode brief into a DAG of
     /// sub-questions so downstream phases (sketch, propose) can fan
     /// out by node instead of by angle. T=0.3, max_tokens=DEFAULT_MAX_TOKENS
-    /// (1,048,576) per T01-06 §4.2 role table. Skipped entirely when
+    /// (1,000,000) per T01-06 §4.2 role table. Skipped entirely when
     /// the brief does not meet the `should_decompose` ladder
     /// (`Proposal::trivial`).
     Decomposer,
@@ -93,7 +93,7 @@ pub enum Role {
     RationaleExtractor,
     /// TiefighterCritic — D.7.1 catalog role. Adversarial critic
     /// that targets the weakest spot of a proposal. Deterministic
-    /// (`T=0.0, top_p=0.1, max_tokens=DEFAULT_MAX_TOKENS (1,048,576)`)
+    /// (`T=0.0, top_p=0.1, max_tokens=DEFAULT_MAX_TOKENS (1,000,000)`)
     /// so two runs against the same input produce the same critique.
     /// Opt-in: no phase calls it automatically; callers wire it up
     /// explicitly.
@@ -101,26 +101,26 @@ pub enum Role {
     /// PersonaPicker — D.7.1 catalog role. Picks which persona
     /// (system prompt variant) a downstream phase should adopt
     /// for the current run. Sampling (T=0.3, top_p=0.9,
-    /// max_tokens=DEFAULT_MAX_TOKENS (1,048,576)). Opt-in.
+    /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000)). Opt-in.
     PersonaPicker,
     /// AnglePicker — D.7.1 catalog role. Picks the next
     /// exploration angle a downstream phase should chase. Higher
     /// variance (T=0.7, top_p=0.95, max_tokens=DEFAULT_MAX_TOKENS
-    /// (1,048,576)) so the picker escapes the obvious angles and
+    /// (1,000,000)) so the picker escapes the obvious angles and
     /// surfaces the *next* one. Opt-in.
     AnglePicker,
     /// FinalDisagreement — D.7.1 catalog role. Tiebreaker for
     /// when the 3 base judges disagree so strongly that the
     /// normal weighted-aggregation cannot pick a winner. Low
     /// temperature (`T=0.2, top_p=0.85, max_tokens=DEFAULT_MAX_TOKENS
-    /// (1,048,576)`) keeps the call stable so snapshot diffs are
+    /// (1,000,000)`) keeps the call stable so snapshot diffs are
     /// meaningful. Opt-in.
     FinalDisagreement,
     /// JsonRepairV2 — D.7.1 catalog role. Optional second-pass
     /// LLM call used when the local heuristic in
     /// `src/phases/util.rs::repair_m3_brackets` cannot turn a
     /// malformed model output into valid JSON. Deterministic
-    /// (`T=0.0, top_p=0.5, max_tokens=DEFAULT_MAX_TOKENS (1,048,576)`)
+    /// (`T=0.0, top_p=0.5, max_tokens=DEFAULT_MAX_TOKENS (1,000,000)`)
     /// so re-runs against the same malformed text produce the
     /// same repair. Opt-in: no phase invokes it automatically;
     /// Track G keeps the local heuristic as the only repair path.
@@ -129,7 +129,7 @@ pub enum Role {
     /// that classifies incoming text as `safe`, `suspicious`,
     /// or `hostile` so the orchestrator can short-circuit or
     /// quarantine the request. Fully deterministic
-    /// (`T=0.0, top_p=0.1, max_tokens=DEFAULT_MAX_TOKENS (1,048,576)`)
+    /// (`T=0.0, top_p=0.1, max_tokens=DEFAULT_MAX_TOKENS (1,000,000)`)
     /// because a flaky detector would cause false negatives in the
     /// quarantine path. Opt-in.
     HostilePromptDetector,
@@ -223,22 +223,22 @@ impl Role {
                 "RationaleExtractor: {rationale, evidence[], assumptions[]}"
             }
             Self::TiefighterCritic => {
-                "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=1048576)"
+                "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=1000000)"
             }
             Self::PersonaPicker => {
-                "PersonaPicker: {candidates[]} (persona selector; T=0.3, top_p=0.9, max_tokens=1048576)"
+                "PersonaPicker: {candidates[]} (persona selector; T=0.3, top_p=0.9, max_tokens=1000000)"
             }
             Self::AnglePicker => {
-                "AnglePicker: {problem, existing_angles[]} (exploration angle selector; T=0.7, top_p=0.95, max_tokens=1048576)"
+                "AnglePicker: {problem, existing_angles[]} (exploration angle selector; T=0.7, top_p=0.95, max_tokens=1000000)"
             }
             Self::FinalDisagreement => {
-                "FinalDisagreement: {judge_scores[], candidates[], winner_id, margin, rationale} (judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1048576)"
+                "FinalDisagreement: {judge_scores[], candidates[], winner_id, margin, rationale} (judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1000000)"
             }
             Self::JsonRepairV2 => {
-                "JsonRepairV2: {malformed, target_schema, repaired, notes} (LLM re-call for malformed JSON; T=0.0, top_p=0.5, max_tokens=1048576)"
+                "JsonRepairV2: {malformed, target_schema, repaired, notes} (LLM re-call for malformed JSON; T=0.0, top_p=0.5, max_tokens=1000000)"
             }
             Self::HostilePromptDetector => {
-                "HostilePromptDetector: {input, verdict, confidence, reasons[], recommended_action} (prompt-injection guard; T=0.0, top_p=0.1, max_tokens=1048576)"
+                "HostilePromptDetector: {input, verdict, confidence, reasons[], recommended_action} (prompt-injection guard; T=0.0, top_p=0.1, max_tokens=1000000)"
             }
         }
     }

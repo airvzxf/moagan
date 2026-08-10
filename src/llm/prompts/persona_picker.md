@@ -6,7 +6,7 @@ ids in `candidates`; you must choose exactly one and explain why in
 one sentence. Opt-in: no phase invokes you automatically; callers
 that need adaptive persona selection wire you in explicitly.
 
-Sampling: T=0.3, top_p=0.9, max_tokens=1048576. The small variance is
+Sampling: T=0.3, top_p=0.9, max_tokens=1000000. The small variance is
 deliberate so ties between close candidates break without flipping
 back and forth across runs of the same brief.
 

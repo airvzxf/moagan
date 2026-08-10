@@ -691,15 +691,15 @@ T01-06 §4.2 tiene 19 roles. Se proponen los siguientes **sin romper los existen
 
 | role_id | temp | top_p | max_tokens | json_mode | Fuente |
 |---|---:|---:|---:|---:|---|
-| `tiefighter_critic` | 0.4 | 0.9 | 1_048_576 | true | T18-09 §5; T05-01 |
-| `final_disagreement` | 0.3 | 0.8 | 1_048_576 | true | T20-10 §3.5 |
-| `merge_synthesizer` | 0.2 | 0.7 | 1_048_576 | true | T20-01; T18-04 |
-| `persona_picker` | 0.0 | 0.2 | 1_048_576 | true | T07-06 §5.4 |
-| `angle_picker` | 0.0 | 0.2 | 1_048_576 | true | T07-06 §5.4 |
-| `json_repair_v2` | 0.0 | 0.1 | 1_048_576 | true | T03-04 §7.4 |
-| `hostile_prompt_detector` | 0.0 | 0.1 | 1_048_576 | true | T00-03 §4.5; T20-10 §4.1 |
-| `recovery_explainer` | 0.0 | 0.1 | 1_048_576 | true | T20-06; T00-08 |
-| `rationale_extractor` | 0.2 | 0.7 | 1_048_576 | true | T20-04 |
+| `tiefighter_critic` | 0.4 | 0.9 | 1_000_000 | true | T18-09 §5; T05-01 |
+| `final_disagreement` | 0.3 | 0.8 | 1_000_000 | true | T20-10 §3.5 |
+| `merge_synthesizer` | 0.2 | 0.7 | 1_000_000 | true | T20-01; T18-04 |
+| `persona_picker` | 0.0 | 0.2 | 1_000_000 | true | T07-06 §5.4 |
+| `angle_picker` | 0.0 | 0.2 | 1_000_000 | true | T07-06 §5.4 |
+| `json_repair_v2` | 0.0 | 0.1 | 1_000_000 | true | T03-04 §7.4 |
+| `hostile_prompt_detector` | 0.0 | 0.1 | 1_000_000 | true | T00-03 §4.5; T20-10 §4.1 |
+| `recovery_explainer` | 0.0 | 0.1 | 1_000_000 | true | T20-06; T00-08 |
+| `rationale_extractor` | 0.2 | 0.7 | 1_000_000 | true | T20-04 |
 
 #### D.7.2. Sanitización de control tokens antes de parsear
 

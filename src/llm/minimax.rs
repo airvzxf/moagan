@@ -30,6 +30,14 @@ pub struct MinimaxProvider {
     client: Client,
     max_retries: u32,
     breaker: CircuitBreaker,
+    /// Per-provider hard cap on `max_tokens` (set from
+    /// `ProviderConfig::max_tokens`). The default is
+    /// `DEFAULT_MAX_TOKENS` (1,000,000), so the per-role runtime
+    /// value normally fits under the cap. The clamp below exists
+    /// for the rare cases where a TOML override sets a smaller
+    /// provider-specific limit, so the upstream never rejects the
+    /// request.
+    provider_max_tokens: Option<u32>,
 }
 
 impl MinimaxProvider {
@@ -50,6 +58,7 @@ impl MinimaxProvider {
             client,
             max_retries: 3,
             breaker: CircuitBreaker::default(),
+            provider_max_tokens: spec.max_tokens,
         })
     }
 
@@ -126,7 +135,14 @@ impl Provider for MinimaxProvider {
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let result = async {
             let url = self.messages_url();
-            let body = AnthropicWire.encode_body(req)?;
+            // Apply per-provider max_tokens cap (mirrors
+            // OpenAiCompatProvider::send). Clone once before the
+            // retry loop so the body is identical across attempts.
+            let mut req = req.clone();
+            if let Some(cap) = self.provider_max_tokens {
+                req.max_tokens = req.max_tokens.min(cap);
+            }
+            let body = AnthropicWire.encode_body(&req)?;
             let mut attempt: u32 = 0;
             loop {
                 attempt += 1;
@@ -454,7 +470,19 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = test_provider(server.uri());
+        let provider = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: server.uri(),
+                model: "MiniMax-M3".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+            SecretString::new("dummy".into()),
+        )
+        .expect("MinimaxProvider::new should accept the mock endpoint");
         let req = Request {
             role: crate::llm::role::Role::Intake,
             model: "MiniMax-M3".into(),
@@ -499,6 +527,87 @@ mod tests {
         assert!(
             json.get("thinking").is_none(),
             "minimax must not emit thinking control, got: {json}"
+        );
+    }
+
+    /// Per-provider `max_tokens` cap from `ProviderConfig::max_tokens`
+    /// must clamp the value sent on the wire, mirroring the
+    /// `OpenAiCompatProvider` behaviour. With `max_tokens: Some(8192)`
+    /// and a `Request { max_tokens: 1_000_000, .. }`, the JSON body
+    /// the mock server captures must carry `"max_tokens":8192`.
+    #[tokio::test]
+    async fn send_clamps_max_tokens_to_provider_cap() {
+        use std::sync::{Arc, Mutex};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let captured_for_responder = captured.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &wiremock::Request| {
+                captured_for_responder
+                    .lock()
+                    .expect("capture lock")
+                    .replace(req.body.clone());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: server.uri(),
+                model: "MiniMax-M3".into(),
+                max_tokens: Some(8192),
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+            },
+            SecretString::new("dummy".into()),
+        )
+        .expect("MinimaxProvider::new should accept the cap");
+
+        let req = Request {
+            role: crate::llm::role::Role::Intake,
+            model: "MiniMax-M3".into(),
+            system: String::new(),
+            user: "hello".into(),
+            max_tokens: 1_000_000,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+        };
+        let (status, _resp) = provider
+            .send(&req)
+            .await
+            .expect("minimax send should succeed against the mock server");
+        assert_eq!(status, 200);
+
+        let bytes = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("mock server captured the request body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("captured body is valid JSON");
+        assert_eq!(
+            json["max_tokens"], 8192,
+            "provider_max_tokens cap must clamp the wire value, got body: {json}"
         );
     }
 }

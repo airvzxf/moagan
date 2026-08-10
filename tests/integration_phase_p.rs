@@ -7,7 +7,7 @@ fn merge_synthesizer_prompt_is_registered() {
     assert!(!system_prompt(Role::MergeSynthesizer).is_empty());
     assert_eq!(
         role_settings(Role::MergeSynthesizer).unwrap().max_tokens,
-        1_048_576
+        1_000_000
     );
 }
 
