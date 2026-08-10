@@ -26,6 +26,16 @@
 #                                 can be tight on a busy CI runner.
 #                                 Increase this when the explore test
 #                                 keeps timing out.
+#   MOAGAN_SMOKE_SECTION           select which SECTION A sub-block to
+#                                 run. One of `all` (default), `card80`
+#                                 (the ~25 min discover), `fast` (the
+#                                 ~2 min mode-fast run), or `explore`
+#                                 (the ~8 min mode-explore run). The
+#                                 CI workflow uses this to split the
+#                                 suite into a 3-row matrix; locally
+#                                 it lets the operator iterate on a
+#                                 single sub-block without paying the
+#                                 ~25 min card80 cost.
 #
 # Notes on the explore-mode correlation (audit_pairs +
 # audit_verify): the cross-run LLM cache is consulted first
@@ -72,6 +82,7 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 : "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
+: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore
 
 # ---------------------------------------------------------------------
 # helpers
@@ -157,17 +168,33 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   # This is a long-running end-to-end test (~25 min) so we cap it
   # at $MOAGAN_SMOKE_TIMEOUT (default 3600s) and treat any
   # successful discovery start as a pass. When MOAGAN_SMOKE_LONG_DISCOVER=1
-  # the entire block is skipped (CI fast path).
+  # the entire block is skipped (CI fast path). The outer
+  # MOAGAN_SMOKE_SECTION guard below makes this block opt-in for
+  # the matrix split; the inner SKIP_CARD80 check keeps the
+  # LONG_DISCOVER fast-path behaviour intact.
   if [[ "$MOAGAN_SMOKE_LONG_DISCOVER" == "1" ]]; then
-    echo "SKIP: proxy_e2e_card80_* (MOAGAN_SMOKE_LONG_DISCOVER=1)"
-    # 37 run_test calls below; count them so PASS total stays
-    # consistent across invocations.
-    PASS=$((PASS + 37))
+    SKIP_CARD80=1
+    # Only bump the PASS counter when the card80 block would have
+    # run anyway (i.e. section is 'all' or 'card80'). When the
+    # operator narrows the run to a different section, the card80
+    # tests are skipped by the outer guard and never count toward
+    # PASS — keeping the totals section-independent.
+    if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "card80" ]]; then
+      echo "SKIP: proxy_e2e_card80_* (MOAGAN_SMOKE_LONG_DISCOVER=1)"
+      # 37 run_test calls below; count them so PASS total stays
+      # consistent across invocations.
+      PASS=$((PASS + 37))
+    fi
+  elif [[ "$MOAGAN_SMOKE_SECTION" != "all" && "$MOAGAN_SMOKE_SECTION" != "card80" ]]; then
+    # A different section is selected; the card80 block is skipped
+    # by the outer guard below, so flag it here too so any
+    # downstream logic that branches on SKIP_CARD80 stays correct.
     SKIP_CARD80=1
   else
     SKIP_CARD80=0
   fi
 
+  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "card80" ]]; then
   if [[ "$SKIP_CARD80" == "0" ]]; then
     WORK_PROXY_1=$(mkhome)
     PORTFILE_1="$WORK_PROXY_1/portfile"
@@ -346,9 +373,11 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     fi
     rm -rf "$WORK_PROXY_1"
   fi # SKIP_CARD80
+  fi # MOAGAN_SMOKE_SECTION card80
 
   # Second proxy run: a non-discovery run (run --mode fast) to
   # ensure the proxy also captures non-discovery flows.
+  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "fast" ]]; then
   WORK_PROXY_2=$(mkhome)
   PORTFILE_2="$WORK_PROXY_2/portfile"
   if start_proxy "$WORK_PROXY_2" "$PORTFILE_2"; then
@@ -369,9 +398,11 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     stop_proxy
   fi
   rm -rf "$WORK_PROXY_2"
+  fi # MOAGAN_SMOKE_SECTION fast
 
   # Third proxy run: explore mode to verify the proxy works with
   # alternative modes.
+  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "explore" ]]; then
   WORK_PROXY_3=$(mkhome)
   PORTFILE_3="$WORK_PROXY_3/portfile"
   if start_proxy "$WORK_PROXY_3" "$PORTFILE_3"; then
@@ -402,6 +433,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     stop_proxy
   fi
   rm -rf "$WORK_PROXY_3"
+  fi # MOAGAN_SMOKE_SECTION explore
 else
   echo "SKIP: real proxy e2e tests (MINIMAX_API_KEY not present)"
 fi

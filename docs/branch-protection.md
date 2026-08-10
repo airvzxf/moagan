@@ -84,8 +84,19 @@ GitHub renders in the PR's "Checks" tab.
 
 `e2e-network` is intentionally NOT in the required list — it runs only
 post-merge on `main` (it's the 25-minute real-LLM audit, not a PR gate).
-The new `codeql` and `cargo-audit` workflows are also informational;
-they show up as checks but do not block merges.
+As of PR #337 the workflow is a 3-row `strategy.matrix` (see
+`docs/validation-tiers.md` for the wall-clock breakdown); the three
+matrix jobs surface under the following display names and remain
+informational — none of them are required status checks:
+
+| Job ID (`jobs.<id>`) | Display name (`name:`) |
+|---|---|
+| `e2e-network` | `Tier 3 · e2e against real LLM (main only) — card80` |
+| `e2e-network` | `Tier 3 · e2e against real LLM (main only) — fast` |
+| `e2e-network` | `Tier 3 · e2e against real LLM (main only) — explore` |
+
+The `codeql` and `cargo-audit` workflows are also informational; they
+show up as checks but do not block merges.
 
 ## Apply it — copy-paste block
 
