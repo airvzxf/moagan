@@ -1479,8 +1479,9 @@ mod tests {
     use super::*;
 
     /// Serialises every test in this module that mutates process-wide
-    /// state (`MOAGAN_CONFIG`, `HOME`, current working directory).
-    /// Acquired at the top of each such test; released on Drop.
+    /// state (`MOAGAN_CONFIG`, `HOME`, `XDG_CONFIG_HOME`, current
+    /// working directory). Acquired at the top of each such test;
+    /// released on Drop.
     static TEST_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// RAII guard that snapshots the current working directory on
@@ -1511,9 +1512,14 @@ mod tests {
     /// RAII guard that snapshots selected env vars on creation and
     /// restores them on Drop. Used so a failed assertion cannot leak
     /// mutated env vars into the next test on the same thread.
+    /// Includes `XDG_CONFIG_HOME` because the `directories` crate
+    /// uses it in preference to `HOME` when computing the XDG config
+    /// dir; pinning it makes the XDG-fallback tests deterministic on
+    /// CI runners that may have `XDG_CONFIG_HOME` exported.
     struct EnvGuard {
         moagan_config: Option<String>,
         home: Option<std::ffi::OsString>,
+        xdg_config_home: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
@@ -1521,6 +1527,7 @@ mod tests {
             Self {
                 moagan_config: std::env::var("MOAGAN_CONFIG").ok(),
                 home: std::env::var_os("HOME"),
+                xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
             }
         }
     }
@@ -1541,6 +1548,14 @@ mod tests {
                 },
                 None => unsafe {
                     std::env::remove_var("HOME");
+                },
+            }
+            match &self.xdg_config_home {
+                Some(v) => unsafe {
+                    std::env::set_var("XDG_CONFIG_HOME", v);
+                },
+                None => unsafe {
+                    std::env::remove_var("XDG_CONFIG_HOME");
                 },
             }
         }
@@ -2730,6 +2745,7 @@ model = "mock-user-xdg"
         std::fs::write(xdg_dir.join("config.toml"), xdg_body).unwrap();
         unsafe {
             std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
         }
 
         // Write the cwd file with a DIFFERENT marker.
@@ -2764,6 +2780,7 @@ model = "mock-user-xdg"
         _cwd.chdir(cwd_dir.path());
         unsafe {
             std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
         }
 
         // Cwd file says "cwd_marker" — must be IGNORED.
@@ -2826,6 +2843,7 @@ model = "mock-user-xdg-only"
         _cwd.chdir(cwd_dir.path()); // cwd has no moagan.toml
         unsafe {
             std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
         }
 
         let cfg = Config::load().expect("Config::load succeeds");
@@ -2866,6 +2884,7 @@ model = "mock-user-xdg"
         .unwrap();
         unsafe {
             std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
         }
         // Write the hidden alt-name only.
         std::fs::write(
@@ -2923,6 +2942,7 @@ temperature = 0.42
         _cwd.chdir(cwd_dir.path()); // empty cwd
         unsafe {
             std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
         }
 
         let cfg = Config::load().expect("Config::load succeeds");
@@ -2961,6 +2981,7 @@ temperature = 0.42
         let home_dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", home_dir.path().join(".config"));
         }
         std::fs::write(
             cwd_dir.path().join("moagan.toml"),
