@@ -691,15 +691,15 @@ T01-06 §4.2 tiene 19 roles. Se proponen los siguientes **sin romper los existen
 
 | role_id | temp | top_p | max_tokens | json_mode | Fuente |
 |---|---:|---:|---:|---:|---|
-| `tiefighter_critic` | 0.4 | 0.9 | 4000 | true | T18-09 §5; T05-01 |
-| `final_disagreement` | 0.3 | 0.8 | 2000 | true | T20-10 §3.5 |
-| `merge_synthesizer` | 0.2 | 0.7 | 4000 | true | T20-01; T18-04 |
-| `persona_picker` | 0.0 | 0.2 | 200 | true | T07-06 §5.4 |
-| `angle_picker` | 0.0 | 0.2 | 200 | true | T07-06 §5.4 |
-| `json_repair_v2` | 0.0 | 0.1 | 2000 | true | T03-04 §7.4 |
-| `hostile_prompt_detector` | 0.0 | 0.1 | 256 | true | T00-03 §4.5; T20-10 §4.1 |
-| `recovery_explainer` | 0.0 | 0.1 | 1000 | true | T20-06; T00-08 |
-| `rationale_extractor` | 0.2 | 0.7 | 1500 | true | T20-04 |
+| `tiefighter_critic` | 0.4 | 0.9 | 1_048_576 | true | T18-09 §5; T05-01 |
+| `final_disagreement` | 0.3 | 0.8 | 1_048_576 | true | T20-10 §3.5 |
+| `merge_synthesizer` | 0.2 | 0.7 | 1_048_576 | true | T20-01; T18-04 |
+| `persona_picker` | 0.0 | 0.2 | 1_048_576 | true | T07-06 §5.4 |
+| `angle_picker` | 0.0 | 0.2 | 1_048_576 | true | T07-06 §5.4 |
+| `json_repair_v2` | 0.0 | 0.1 | 1_048_576 | true | T03-04 §7.4 |
+| `hostile_prompt_detector` | 0.0 | 0.1 | 1_048_576 | true | T00-03 §4.5; T20-10 §4.1 |
+| `recovery_explainer` | 0.0 | 0.1 | 1_048_576 | true | T20-06; T00-08 |
+| `rationale_extractor` | 0.2 | 0.7 | 1_048_576 | true | T20-04 |
 
 #### D.7.2. Sanitización de control tokens antes de parsear
 
@@ -4098,7 +4098,7 @@ La mayoría de las 278 adiciones son **aditivas** (no tocan T01-06). Las pocas q
 
 | Sección T01-06 | Modificación | Tipo | Justificación |
 |---|---|---|---|
-| §0.5 #1 (max_tokens) | No tocar | OK | T01-06 ya tiene per-role |
+| §0.5 #1 (max_tokens) | No tocar (techo uniforme) | OK | T01-06 define el ceiling compartido por rol (v0.6) |
 | §3.2 hash_input | Sustituir SHA-256 con BLAKE3 (manteniendo SHA-256 para export) | Sustitución menor | T02-02 §0.1; T13-04 §1.1(1) muestran que BLAKE3 es 5–10x más rápido en hot path |
 | §3.3 cache | Añadir `cache_key` con quantized temperature | Aditiva | Mejora ~20% hit rate sin perder calidad |
 | §4.7 retries | Añadir jitter ±50% | Aditiva | T20-02 §5.5 |

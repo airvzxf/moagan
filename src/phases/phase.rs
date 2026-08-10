@@ -25,6 +25,7 @@ use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
 use crate::llm::prompt_cache::PromptCache;
+use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::llm::{ProviderRegistry, Request, Response, Role};
 use crate::telemetry::{Telemetry, WarningContext};
 
@@ -1035,102 +1036,60 @@ fn parse_mode_str(s: &str) -> Mode {
     }
 }
 
-/// Per-role `max_tokens` ceiling. Calibrated for the v0.1 smoke
-/// (`minimax` Claude-style endpoint that accepts up to 128K output)
-/// and revised upward after empirical observation that the model
-/// legitimately needs much more headroom for prose-heavy roles.
-///
-/// The model is **not** an algorithm with fixed output length —
-/// `critique` may produce a paragraph explaining a borderline
-/// score; `propose` may include a code block; `repair` may carry
-/// the full original proposal plus a diff; `deliver` may render
-/// a long portfolio with multiple sections. Hard-coding low
-/// ceilings (`max_tokens=1500` for judge, `4000` for critique)
-/// truncates these legitimately large responses mid-thought,
-/// surfaces `finish_reason=max_tokens` warnings, and forces the
-/// retry loop into additional cost.
-///
-/// New calibration (2026-07-27, powers-of-two so the ceilings are
-/// round numbers operators can reason about):
-///
-///   intake    1024    rephrase + extract, schema is tight
-///   clarify   2048    brief with several assumptions
-///   route      512    single JSON object
-///   sketch    1024    single JSON object, ~500 tokens
-///   propose  32768    full approach with code/tradeoffs/evidence
-///   gate      1024    single JSON object
-///   critique  8192    paragraph-length verdict with suggestions
-///   repair   16384    full proposal + diff
-///   judge     2048    rubric breakdown + comments
-///   rank      2048    ordered ranking + representatives
-///   deliver   8192    portfolio with title/summary/recommendation +
-///                     alternatives + next_steps
-///
-/// A future release will let providers override these defaults
-/// through the per-role `prompts/registry.rs` configuration block,
-/// but the values here are the contract: when the model wants to
-/// write more, let it; when it wants less, it returns less.
+/// Per-role `max_tokens` ceiling. As of v0.6 every role uses the same
+/// `DEFAULT_MAX_TOKENS` (1_048_576) so prose-heavy outputs are never
+/// truncated mid-thought. Calibrated per observation that the model
+/// legitimately needs much more headroom than the previous
+/// 512..=32_768 ceilings. The Anthropic-compatible request path uses
+/// this number verbatim; the OpenAI-compat provider additionally
+/// clamps to the per-provider `ProviderConfig::max_tokens` cap.
 fn max_tokens_for_role(role: Role) -> u32 {
     match role {
-        // Reasoning models (DeepSeek v4, qwen3.x, kimi) consume
-        // 400-700 tokens on chain-of-thought before the JSON
-        // envelope. 1024 was enough for MiniMax M3 but truncates
-        // reasoning models mid-string. 2048 covers the
-        // reasoning+envelope for both families.
-        Role::Intake => 2048,
-        Role::Clarify => 2048,
-        Role::Route => 2048,
-        Role::Sketch => 1024,
-        Role::Propose => 32768,
-        Role::Gate => 1024,
-        Role::Critique => 8192,
-        Role::Repair => 16384,
-        Role::Judge => 2048,
-        Role::Rank => 2048,
-        Role::Deliver => 8192,
+        Role::Intake => DEFAULT_MAX_TOKENS,
+        Role::Clarify => DEFAULT_MAX_TOKENS,
+        Role::Route => DEFAULT_MAX_TOKENS,
+        Role::Sketch => DEFAULT_MAX_TOKENS,
+        Role::Propose => DEFAULT_MAX_TOKENS,
+        Role::Gate => DEFAULT_MAX_TOKENS,
+        Role::Critique => DEFAULT_MAX_TOKENS,
+        Role::Repair => DEFAULT_MAX_TOKENS,
+        Role::Judge => DEFAULT_MAX_TOKENS,
+        Role::Rank => DEFAULT_MAX_TOKENS,
+        Role::Deliver => DEFAULT_MAX_TOKENS,
         // Discovery (Plan B sub-phase B). Per docs/v0.2-status.md and
         // proposal-01-concept.md §6.5–§6.10.
-        Role::Tagger => 512,
-        // T01-06 §4.2: facet_deriver has a 1024-token budget — larger
-        // than tagger's 512 because the output carries 3-6 facet
-        // triples (name + description + required).
-        Role::FacetDeriver => 1024,
-        Role::Extractor => 3000,
-        Role::Integrator => 4000,
+        Role::Tagger => DEFAULT_MAX_TOKENS,
+        // facet_deriver carries 3-6 facet triples (name + description + required).
+        Role::FacetDeriver => DEFAULT_MAX_TOKENS,
+        Role::Extractor => DEFAULT_MAX_TOKENS,
+        Role::Integrator => DEFAULT_MAX_TOKENS,
         // Phase D (Plan B sub-phase D). Synthesizer reuses the
         // integrator ceiling (markdown body + structured fields).
         // Adversary stays short: it returns weaknesses, not a long
         // report.
-        Role::Synthesizer => 4000,
-        Role::Adversary => 2048,
-        // Phase G (v0.3). Decomposer: T01-06 §4.2 says 3000; we
-        // round up to 4096 so the JSON can carry a multi-node
-        // graph without truncating the `dependencies` arrays.
-        Role::Decomposer => 4096,
-        Role::MergeSynthesizer => 4000,
-        Role::RecoveryExplainer => 1000,
-        Role::RationaleExtractor => 1500,
+        Role::Synthesizer => DEFAULT_MAX_TOKENS,
+        Role::Adversary => DEFAULT_MAX_TOKENS,
+        // Phase G (v0.3). Decomposer: T01-06 §4.2 originally suggested 3000; with the v0.6 unified ceiling of 1 MiB this concern is moot.
+        Role::Decomposer => DEFAULT_MAX_TOKENS,
+        Role::MergeSynthesizer => DEFAULT_MAX_TOKENS,
+        Role::RecoveryExplainer => DEFAULT_MAX_TOKENS,
+        Role::RationaleExtractor => DEFAULT_MAX_TOKENS,
         // Track H batch-1: D.7.1 catalog opt-in roles. Each carries
         // its own sampling contract (see `role_settings` in
         // `src/llm/prompts.rs`); these are the runtime ceilings
         // used when the catalog role is invoked outside any phase.
-        Role::TiefighterCritic => 2048,
-        // persona_picker is a short routing decision; the 512-token
-        // ceiling matches its role_settings (see prompts.rs).
-        Role::PersonaPicker => 512,
-        // angle_picker is a routing decision with a one-line
-        // rationale; the 1024-token ceiling matches role_settings.
-        Role::AnglePicker => 1024,
-        // Track H batch-2: tiebreaker ceiling per D.7.1 (1536).
-        Role::FinalDisagreement => 1536,
+        Role::TiefighterCritic => DEFAULT_MAX_TOKENS,
+        // persona_picker is a short routing decision; the ceiling matches its role_settings (see prompts.rs).
+        Role::PersonaPicker => DEFAULT_MAX_TOKENS,
+        // angle_picker is a routing decision with a one-line rationale; the ceiling matches role_settings.
+        Role::AnglePicker => DEFAULT_MAX_TOKENS,
+        // Track H batch-2: tiebreaker ceiling per D.7.1.
+        Role::FinalDisagreement => DEFAULT_MAX_TOKENS,
         // Track H batch-2 (commit 2): LLM re-call for malformed
-        // JSON. 1024 is enough to carry a repaired payload plus
-        // the audit fields.
-        Role::JsonRepairV2 => 1024,
-        // Track H batch-2 (commit 3): prompt-injection guard. The
-        // 512-token ceiling matches the role contract (verdict +
-        // reasons + recommended_action).
-        Role::HostilePromptDetector => 512,
+        // JSON — carries a repaired payload plus the audit fields.
+        Role::JsonRepairV2 => DEFAULT_MAX_TOKENS,
+        // Track H batch-2 (commit 3): prompt-injection guard. The ceiling matches the role contract (verdict + reasons + recommended_action).
+        Role::HostilePromptDetector => DEFAULT_MAX_TOKENS,
     }
 }
 

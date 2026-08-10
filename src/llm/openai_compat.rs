@@ -33,11 +33,12 @@ pub struct OpenAiCompatProvider {
     client: Client,
     max_retries: u32,
     /// Per-provider hard cap on `max_tokens` (set from
-    /// `ProviderConfig::max_tokens`). OpenAI-compat backends vary
-    /// wildly on this — DeepSeek accepts 8192, Moonshot accepts
-    /// 32k, OpenCode Go proxies typically 8k. When the per-role
-    /// `max_tokens_for_role` exceeds this cap, we clamp on the way
-    /// out so the upstream doesn't reject the request with 400.
+    /// `ProviderConfig::max_tokens`). The default is
+    /// `DEFAULT_MAX_TOKENS` (1,048,576), so the per-role runtime
+    /// value normally fits under the cap. The clamp below exists
+    /// for the rare cases where a TOML override sets a smaller
+    /// provider-specific limit, so the upstream never rejects the
+    /// request with 400.
     provider_max_tokens: Option<u32>,
 }
 
@@ -225,10 +226,10 @@ impl Provider for OpenAiCompatProvider {
             let body = self.build_chat_request(req);
             // Apply per-provider max_tokens cap. Done AFTER the
             // body construction so the cap is visible regardless of
-            // upstream choice. The default of 8192 covers DeepSeek
-            // v4 (max 8k) and OpenCode Go (max 8k per the user
-            // roster). Propose (32k) and Repair (16k) roles are
-            // clamped.
+            // upstream choice. The default of DEFAULT_MAX_TOKENS
+            // (1,048,576) does not clamp any role under normal
+            // configuration; the branch only triggers when a TOML
+            // override sets a smaller per-provider limit.
             let body = match self.provider_max_tokens {
                 Some(cap) if body.max_tokens > cap => ChatRequest {
                     max_tokens: cap,
