@@ -698,6 +698,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         temperature: Some(0.6),
         top_p: Some(0.95),
         hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
+        omit_max_tokens: false,
     };
     m.insert("minimax".to_owned(), make_minimax("MiniMax-M3"));
     m.insert("minimax-m3".to_owned(), make_minimax("MiniMax-M3"));
@@ -715,6 +716,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         temperature: Some(0.6),
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
+        omit_max_tokens: false,
     };
     m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
     // OpenCode Go models per the 2026-08-04 operator roster. The
@@ -734,6 +736,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         temperature: Some(1.0),
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
+        omit_max_tokens: false,
     };
     // All 18 OpenCode Go providers share the same base URL. The
     // dispatcher (`OpenCodeGoProvider::new`) appends the model-specific
@@ -815,6 +818,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             temperature: None,
             top_p: None,
             hard_incompatibilities: vec![],
+            omit_max_tokens: false,
         },
     );
     m
@@ -904,6 +908,13 @@ pub struct ProviderConfig {
     /// Crate names that must never appear in `Cargo.toml` together with
     /// this provider — runtime vs static guard.
     pub hard_incompatibilities: Vec<String>,
+    /// When `true`, omit the `max_tokens` field from the wire body
+    /// entirely. Required for providers whose wire format rejects the
+    /// *presence* of the field (e.g. OpenAI Responses when the upstream
+    /// model is `gpt-5.6-luna`). Default `false` — backward-compatible
+    /// with all providers that DO accept the field.
+    #[serde(default)]
+    pub omit_max_tokens: bool,
 }
 
 impl Default for ProviderConfig {
@@ -916,6 +927,7 @@ impl Default for ProviderConfig {
             temperature: None,
             top_p: None,
             hard_incompatibilities: vec![],
+            omit_max_tokens: false,
         }
     }
 }
@@ -1229,6 +1241,26 @@ impl Config {
             let provider = suffix.to_ascii_lowercase();
             if let Some(cfg) = parse_rate_limit_env(&value) {
                 self.rate_limit_per_provider.insert(provider, cfg);
+            }
+        }
+        // Per-provider `omit_max_tokens` override from env vars of the
+        // form `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true|false`. The provider
+        // name is uppercased and both dots and hyphens are rewritten to
+        // underscores so `gpt-5.6-luna` becomes
+        // `MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS`. Garbage values are
+        // silently ignored so a stale export does not silently flip
+        // the flag.
+        for (name, spec) in self.providers.iter_mut() {
+            let env_key = format!(
+                "MOAGAN_{}_OMIT_MAX_TOKENS",
+                name.to_uppercase().replace(['.', '-'], "_")
+            );
+            if let Ok(v) = std::env::var(&env_key) {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => spec.omit_max_tokens = true,
+                    "false" | "0" | "no" | "off" | "" => spec.omit_max_tokens = false,
+                    _ => {}
+                }
             }
         }
     }
@@ -2351,5 +2383,138 @@ mod tests {
         assert_eq!(rate_limit.capacity, 3);
         assert_eq!(rate_limit.refill_per_sec, 7);
         assert_eq!(rate_limit.initial, None);
+    }
+
+    /// Per-provider `omit_max_tokens` env override:
+    /// `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true` flips the flag for the
+    /// named provider. Dots and hyphens in the provider name are
+    /// rewritten to underscores, so `gpt-5.6-luna` becomes
+    /// `MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS`. Other providers are
+    /// untouched so the env var stays scoped. Locked against the
+    /// `_false_resets` and `_garbage_is_ignored` tests because they
+    /// all touch the same env var.
+    #[test]
+    fn apply_env_overrides_sets_omit_max_tokens_per_provider() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Snapshot any pre-existing env value so the test is
+        // independent of the operator's shell. Restore on the way
+        // out, regardless of panics below.
+        let prior = std::env::var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", "true");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS");
+        }
+        // Restore prior value if there was one.
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", v);
+            }
+        }
+        let gpt = cfg
+            .providers
+            .get("gpt-5.6-luna")
+            .expect("gpt-5.6-luna must be in default providers");
+        assert!(
+            gpt.omit_max_tokens,
+            "MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS=true must opt in"
+        );
+        // Untouched provider must remain `false`.
+        let minimax = cfg
+            .providers
+            .get("minimax")
+            .expect("minimax must be in default providers");
+        assert!(
+            !minimax.omit_max_tokens,
+            "other providers must NOT inherit the env override"
+        );
+    }
+
+    /// `MOAGAN_<NAME>_OMIT_MAX_TOKENS=false` on a TOML-true config
+    /// resets the flag (the env override is the canonical mechanism
+    /// to flip the default in either direction).
+    #[test]
+    fn apply_env_overrides_omit_max_tokens_false_resets() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS").ok();
+        let mut cfg = Config::default();
+        // Pretend the TOML flipped the bit on.
+        if let Some(spec) = cfg.providers.get_mut("gpt-5.6-luna") {
+            spec.omit_max_tokens = true;
+        }
+        unsafe {
+            std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", "false");
+        }
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS");
+        }
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", v);
+            }
+        }
+        let gpt = cfg
+            .providers
+            .get("gpt-5.6-luna")
+            .expect("gpt-5.6-luna must be in default providers");
+        assert!(
+            !gpt.omit_max_tokens,
+            "MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS=false must opt out"
+        );
+    }
+
+    /// Garbage / whitespace env values are ignored so a stale export
+    /// does not silently flip the flag.
+    #[test]
+    fn apply_env_overrides_omit_max_tokens_garbage_is_ignored() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", "   ");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS");
+        }
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", v);
+            }
+        }
+        let gpt = cfg
+            .providers
+            .get("gpt-5.6-luna")
+            .expect("gpt-5.6-luna must be in default providers");
+        assert!(
+            !gpt.omit_max_tokens,
+            "garbage env must not flip the default false, got {}",
+            gpt.omit_max_tokens
+        );
+    }
+
+    /// `ProviderConfig::omit_max_tokens` survives a TOML round-trip so
+    /// operators can pin their choice in `~/.config/moagan/config.toml`
+    /// via `[providers.<name>]\nomit_max_tokens = true`.
+    #[test]
+    fn provider_config_omit_max_tokens_toml_round_trip() {
+        let mut cfg = Config::default();
+        if let Some(spec) = cfg.providers.get_mut("gpt-5.6-luna") {
+            spec.omit_max_tokens = true;
+        }
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        let gpt = back
+            .providers
+            .get("gpt-5.6-luna")
+            .expect("gpt-5.6-luna must survive TOML round-trip");
+        assert!(
+            gpt.omit_max_tokens,
+            "TOML round-trip must preserve omit_max_tokens"
+        );
     }
 }

@@ -48,6 +48,11 @@ pub struct OpenCodeGoResponsesProvider {
     /// provider-specific limit, so the upstream never rejects the
     /// request.
     provider_max_tokens: Option<u32>,
+    /// When `true`, omit the `max_tokens` field from the wire body
+    /// entirely. Required for upstream models that reject the
+    /// *presence* of the field (e.g. `gpt-5.6-luna`). Set from
+    /// `ProviderConfig::omit_max_tokens`.
+    omit_max_tokens: bool,
 }
 
 impl OpenCodeGoResponsesProvider {
@@ -68,6 +73,7 @@ impl OpenCodeGoResponsesProvider {
             client,
             max_retries: 3,
             provider_max_tokens: spec.max_tokens,
+            omit_max_tokens: spec.omit_max_tokens,
         })
     }
 
@@ -113,6 +119,16 @@ impl OpenCodeGoResponsesProvider {
         tokio::time::sleep(chosen).await;
         let _ = attempt;
     }
+
+    /// Returns `None` when `omit_max_tokens` is set (so the field is
+    /// dropped from the wire body), otherwise the request's max_tokens.
+    fn effective_max_tokens(&self, requested: u32) -> Option<u32> {
+        if self.omit_max_tokens {
+            None
+        } else {
+            Some(requested)
+        }
+    }
 }
 
 use serde::{Deserialize, Serialize};
@@ -123,7 +139,11 @@ struct ResponsesRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'a str>,
     input: &'a str,
-    max_tokens: u32,
+    /// Output token ceiling. `None` serializes as field-absent (via
+    /// `skip_serializing_if`), required for providers that reject
+    /// the presence of the field (e.g. `gpt-5.6-luna`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +217,7 @@ impl Provider for OpenCodeGoResponsesProvider {
         if let Some(cap) = self.provider_max_tokens {
             req.max_tokens = req.max_tokens.min(cap);
         }
+        let max_tokens = self.effective_max_tokens(req.max_tokens);
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -204,7 +225,7 @@ impl Provider for OpenCodeGoResponsesProvider {
                 model: &self.model,
                 instructions: Some(&req.system),
                 input: &req.user,
-                max_tokens: req.max_tokens,
+                max_tokens,
                 temperature: req.temperature,
                 top_p: req.top_p,
                 stream: false,
@@ -311,12 +332,17 @@ fn build_responses_body<'a>(
     req: &'a Request,
     model: &'a str,
     stream: bool,
+    omit_max_tokens: bool,
 ) -> ResponsesRequest<'a> {
     ResponsesRequest {
         model,
         instructions: Some(&req.system),
         input: &req.user,
-        max_tokens: req.max_tokens,
+        max_tokens: if omit_max_tokens {
+            None
+        } else {
+            Some(req.max_tokens)
+        },
         temperature: req.temperature,
         top_p: req.top_p,
         stream,
@@ -380,7 +406,7 @@ impl OpenCodeGoResponsesProvider {
         if let Some(cap) = self.provider_max_tokens {
             req.max_tokens = req.max_tokens.min(cap);
         }
-        let body = build_responses_body(&req, &self.model, true);
+        let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
         let request_started = std::time::Instant::now();
         let resp = self
             .client
@@ -454,6 +480,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -472,6 +499,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -492,6 +520,7 @@ mod tests {
             temperature: None,
             top_p: None,
             hard_incompatibilities: vec![],
+            omit_max_tokens: false,
         });
         assert!(matches!(result, Err(Error::InvalidApiKey(_))));
     }
@@ -527,6 +556,7 @@ data: [DONE]\n\n";
                     temperature: None,
                     top_p: None,
                     hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -583,6 +613,7 @@ data: {not json}\n\n";
                     temperature: None,
                     top_p: None,
                     hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -638,6 +669,7 @@ data: {not json}\n\n";
                     temperature: None,
                     top_p: None,
                     hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -711,6 +743,7 @@ data: [DONE]\n\n";
                     temperature: None,
                     top_p: None,
                     hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -764,6 +797,7 @@ data: [DONE]\n\n",
                     temperature: None,
                     top_p: None,
                     hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -781,6 +815,136 @@ data: [DONE]\n\n",
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
+        });
+    }
+
+    #[test]
+    fn send_omits_max_tokens_when_omit_flag_set() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{body_partial_json, method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            // Use a matcher that does NOT constrain max_tokens so the
+            // mock accepts the request regardless of whether the field
+            // is present. The actual assertion is on the recorded
+            // body below.
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .and(body_partial_json(serde_json::json!({
+                    "model": "gpt-5.6-luna",
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: Some(8192),
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                    omit_max_tokens: true,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert!(
+                body.get("max_tokens").is_none(),
+                "max_tokens must be absent when omit_max_tokens=true, got body={body}"
+            );
+        });
+    }
+
+    #[test]
+    fn send_includes_max_tokens_when_omit_flag_unset() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 524_288,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(524_288),
+                "max_tokens must be present with the requested value, got body={body}"
+            );
         });
     }
 }

@@ -320,6 +320,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -356,6 +357,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
@@ -409,6 +411,7 @@ mod tests {
                 temperature: None,
                 top_p: None,
                 hard_incompatibilities: vec![],
+                omit_max_tokens: false,
             },
             SecretString::new("dummy".into()),
         )
