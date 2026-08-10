@@ -12,10 +12,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, AnglePickerReport, Brief, Critique, FinalDisagreementReport, FinalReport,
-    HostilePromptReport, Intake, JsonRepairV2Report, JudgeScore, MergePlan, PersonaPickerReport,
-    Proposal, RationaleExtract, RecoveryReport, Repair, Route, Sketch, SynthesizedProposal,
-    TiefighterCriticReport,
+    AdversaryReport, AnglePickerReport, Brief, ContinuationReport, Critique,
+    FinalDisagreementReport, FinalReport, HostilePromptReport, Intake, JsonRepairV2Report,
+    JudgeScore, MergePlan, PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport, Repair,
+    Route, Sketch, SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -133,6 +133,19 @@ pub enum Role {
     /// because a flaky detector would cause false negatives in the
     /// quarantine path. Opt-in.
     HostilePromptDetector,
+    /// Continuation — PR-C2. Focused re-call issued by
+    /// `phases::phase::call_with_retry_parse` when the original
+    /// response comes back with `Response.truncated = true`. The
+    /// prompt asks the model to keep writing exactly where the
+    /// previous turn left off, never to repeat any earlier text, and
+    /// to wrap the rest of the response in a tiny JSON envelope so
+    /// the dispatcher can extract the `continued` payload. Fully
+    /// deterministic (`T=0.0, top_p=0.5, max_tokens=DEFAULT_MAX_TOKENS
+    /// (1,000,000)`) so two continuations of the same excerpt
+    /// produce the same output. Cap of 2 attempts per original call
+    /// (D.21.6) — after the second failed attempt the dispatcher
+    /// falls back to today's warning-only behaviour.
+    Continuation,
 }
 
 impl Role {
@@ -166,6 +179,7 @@ impl Role {
             Self::FinalDisagreement => "final_disagreement",
             Self::JsonRepairV2 => "json_repair_v2",
             Self::HostilePromptDetector => "hostile_prompt_detector",
+            Self::Continuation => "continuation",
         }
     }
 
@@ -239,6 +253,9 @@ impl Role {
             }
             Self::HostilePromptDetector => {
                 "HostilePromptDetector: {input, verdict, confidence, reasons[], recommended_action} (prompt-injection guard; T=0.0, top_p=0.1, max_tokens=1000000)"
+            }
+            Self::Continuation => {
+                "Continuation: {continued, finished, raw_excerpt, schema_version} (focused re-call after truncated response; T=0.0, top_p=0.5, max_tokens=1000000)"
             }
         }
     }
@@ -322,6 +339,9 @@ impl Role {
             Self::HostilePromptDetector => {
                 serde_json::from_value::<HostilePromptReport>(value.clone()).map(|_| ())
             }
+            Self::Continuation => {
+                serde_json::from_value::<ContinuationReport>(value.clone()).map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -363,6 +383,7 @@ impl Role {
             Self::FinalDisagreement,
             Self::JsonRepairV2,
             Self::HostilePromptDetector,
+            Self::Continuation,
         ]
     }
 }
@@ -405,6 +426,7 @@ impl FromStr for Role {
             "final_disagreement" => Ok(Self::FinalDisagreement),
             "json_repair_v2" => Ok(Self::JsonRepairV2),
             "hostile_prompt_detector" => Ok(Self::HostilePromptDetector),
+            "continuation" => Ok(Self::Continuation),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -430,11 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_seven() {
+    fn all_roles_are_count_twenty_eight() {
         // Track H batch-2 closed: three catalog roles (D.7.1)
         // wired — final_disagreement, json_repair_v2,
         // hostile_prompt_detector. Count moves from 24 to 27.
-        assert_eq!(Role::all().len(), 27);
+        // PR-C2: added `Continuation` so the focused-re-call on a
+        // truncated response has its own typed role. Count moves
+        // from 27 to 28.
+        assert_eq!(Role::all().len(), 28);
     }
 
     #[test]
@@ -632,6 +657,44 @@ mod tests {
         );
     }
 
+    /// PR-C2: `Role::Continuation` exposes the typed identifier
+    /// used by the focused re-call on a truncated response. The
+    /// wire form must round-trip through `FromStr` so any consumer
+    /// that persisted the variant by name (e.g. telemetry rows,
+    /// warnings stream) recovers it byte-for-byte.
+    #[test]
+    fn role_continuation_as_str_returns_lowercase_snake_case() {
+        assert_eq!(Role::Continuation.as_str(), "continuation");
+    }
+
+    /// PR-C2: round-trip the variant through `FromStr` so the
+    /// catalog stays total over the lowercase snake_case wire form.
+    #[test]
+    fn role_continuation_from_str_round_trips() {
+        let s = Role::Continuation.as_str();
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::Continuation, back);
+    }
+
+    /// PR-C2: validate the wire-form envelope the continuation role
+    /// emits. The dispatcher extracts `continued` for concatenation;
+    /// the validator accepts the envelope plus the legacy {}.
+    #[test]
+    fn role_continuation_validate_json_accepts_valid_payload() {
+        let raw = serde_json::json!({
+            "continued": ",\"approach\":\"Sharded ledger\"}",
+            "finished": false,
+            "raw_excerpt": "approach\":\"Sharded ledger",
+            "schema_version": "continuation.v1"
+        });
+        assert!(Role::Continuation.validate_json(&raw).is_ok());
+        assert!(
+            Role::Continuation
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
     #[test]
     fn serde_round_trip() {
         let r = Role::Gate;
@@ -676,6 +739,7 @@ mod tests {
                     || desc.starts_with("FinalDisagreement:")
                     || desc.starts_with("JsonRepairV2:")
                     || desc.starts_with("HostilePromptDetector:")
+                    || desc.starts_with("Continuation:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -763,5 +827,10 @@ mod tests {
         // carries its own domain type with `#[serde(default)]`,
         // so {} parses cleanly.
         assert!(Role::HostilePromptDetector.validate_json(&empty).is_ok());
+        // PR-C2: `Continuation` reuses the same `#[serde(default)]`
+        // domain type so the validator accepts {} as well — this
+        // keeps the role surface parity with every other opt-in
+        // catalog role introduced under Track H.
+        assert!(Role::Continuation.validate_json(&empty).is_ok());
     }
 }

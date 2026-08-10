@@ -867,6 +867,200 @@ impl RunContext {
         serde_json::from_value(value).ok()
     }
 
+    /// PR-C2: focused continuation on a truncated response.
+    ///
+    /// When the original response comes back with
+    /// [`crate::llm::Response::truncated`] set (Anthropic:
+    /// `stop_reason="max_tokens"`, OpenAI-compat:
+    /// `finish_reason="length"`), the dispatcher re-issues the call
+    /// as [`Role::Continuation`] with the last ~500 bytes of the
+    /// truncated payload inlined under `${last_excerpt}` (see
+    /// [`crate::llm::prompts::render_continuation_prompt`]). Each
+    /// continuation returns a small JSON envelope whose `continued`
+    /// payload is appended to the running accumulator; the loop
+    /// terminates when the model signals `finished`, when the
+    /// continuation itself is non-truncated (we stop regardless of
+    /// `finished`), when the continuation response fails to parse
+    /// as JSON, when the continuation call returns a transport /
+    /// HTTP error, or after [`MAX_CONTINUATIONS`] (2) attempts.
+    ///
+    /// Behavioural contract:
+    ///
+    /// - The continuation call is dispatched via
+    ///   [`Self::dispatch_to_provider`] with a hand-built
+    ///   [`crate::llm::Request`]. It deliberately does NOT go
+    ///   through [`Self::call_uncached`] so the stubborn-model
+    ///   JSON prefix from
+    ///   [`crate::llm::response_format_opt_out::render_system_prompt_with_prefix`]
+    ///   is NOT prepended — the continuation prompt IS the JSON
+    ///   contract, and prefixing it would add noise the model has
+    ///   to ignore.
+    /// - Token usage is summed across the original response and
+    ///   every successful continuation so the run's
+    ///   `telemetry/calls.jsonl.gz` reflects the true cost of the
+    ///   call, not just the first round-trip.
+    /// - Each attempt emits a `model.continuation_attempt` warning
+    ///   so the operator can see the re-call in the warnings
+    ///   stream.
+    /// - On the failure path (transport error, parse error, cap
+    ///   reached) the helper preserves `truncated = true` so the
+    ///   rest of the pipeline — `model.response_truncated`, the
+    ///   parse layer — sees the same input it sees today.
+    /// - This helper does NOT log a `model.response_truncated`
+    ///   warning; that is the dispatcher's responsibility and
+    ///   fires from the original response only.
+    async fn continue_truncated_response(
+        &self,
+        role: Role,
+        original: &Response,
+        _started_unix: i64,
+    ) -> Response {
+        use crate::domain::ContinuationReport;
+        use crate::llm::prompts::render_continuation_prompt;
+
+        const MAX_CONTINUATIONS: u8 = 2;
+        const EXCERPT_BYTES: usize = 500;
+
+        let mut accumulated = original.text.clone();
+        let mut truncated = original.truncated;
+        let mut last_finish_reason = original.finish_reason.clone();
+        let mut total_input = original.usage.input_tokens;
+        let mut total_output = original.usage.output_tokens;
+        let mut total_cache_read = original.usage.cache_read;
+        let mut total_cache_creation = original.usage.cache_creation;
+
+        let mut attempt_idx: u8 = 0;
+        while attempt_idx < MAX_CONTINUATIONS && truncated {
+            let last_excerpt: String =
+                crate::phases::util::safe_tail(&accumulated, EXCERPT_BYTES).to_string();
+
+            let _ = self.telemetry.warn(
+                "model.continuation_attempt",
+                "info",
+                "focused continuation re-call after truncated response",
+                serde_json::json!({
+                    "attempt": attempt_idx,
+                    "original_output_tokens": original.usage.output_tokens,
+                    "excerpt_chars": last_excerpt.chars().count(),
+                    "role": role.as_str(),
+                }),
+                WarningContext {
+                    phase: Some(role.as_str().to_owned()),
+                    role: Some(role.as_str().to_owned()),
+                    call_id: None,
+                    attempt: Some(u32::from(attempt_idx)),
+                },
+            );
+
+            let system = render_continuation_prompt(&last_excerpt);
+            let user = "Continue.".to_string();
+            let provider_top_p = self
+                .config
+                .providers
+                .get(&self.default_provider)
+                .and_then(|s| s.top_p);
+            let req = Request {
+                role: Role::Continuation,
+                model: self.default_model.clone(),
+                system,
+                user,
+                max_tokens: max_tokens_for_role(Role::Continuation),
+                temperature: Some(temperature_for_role(Role::Continuation, None)),
+                top_p: Some(provider_top_p.unwrap_or(0.95)),
+                response_schema: None,
+                stream: false,
+            };
+
+            let started = crate::time::now_unix_secs();
+            match self
+                .dispatch_to_provider(req, None, started, u32::from(attempt_idx))
+                .await
+            {
+                Ok(cont_resp) => {
+                    total_input = total_input.saturating_add(cont_resp.usage.input_tokens);
+                    total_output = total_output.saturating_add(cont_resp.usage.output_tokens);
+                    total_cache_read = total_cache_read.saturating_add(cont_resp.usage.cache_read);
+                    total_cache_creation =
+                        total_cache_creation.saturating_add(cont_resp.usage.cache_creation);
+                    if let Some(fr) = cont_resp.finish_reason.clone() {
+                        last_finish_reason = Some(fr);
+                    }
+
+                    match serde_json::from_str::<ContinuationReport>(&cont_resp.text) {
+                        Ok(report) => {
+                            if !report.continued.is_empty() {
+                                accumulated.push_str(&report.continued);
+                            }
+                            attempt_idx = attempt_idx.saturating_add(1);
+                            if report.finished {
+                                truncated = false;
+                            } else {
+                                truncated = cont_resp.truncated;
+                            }
+                            if !truncated {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = self.telemetry.warn(
+                                "model.continuation_failed",
+                                "warn",
+                                "continuation response was not parseable as JSON",
+                                serde_json::json!({
+                                    "attempt": attempt_idx,
+                                    "raw_tail": crate::phases::util::safe_tail(
+                                        &cont_resp.text,
+                                        EXCERPT_BYTES,
+                                    ),
+                                }),
+                                WarningContext {
+                                    phase: Some(role.as_str().to_owned()),
+                                    role: Some(role.as_str().to_owned()),
+                                    call_id: None,
+                                    attempt: Some(u32::from(attempt_idx)),
+                                },
+                            );
+                            // Keep `truncated = true` so the
+                            // existing parse path sees the same
+                            // failure shape it sees today.
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = self.telemetry.warn(
+                        "model.continuation_failed",
+                        "warn",
+                        "continuation call transport/HTTP error",
+                        serde_json::json!({
+                            "attempt": attempt_idx,
+                            "error": e.to_string(),
+                        }),
+                        WarningContext {
+                            phase: Some(role.as_str().to_owned()),
+                            role: Some(role.as_str().to_owned()),
+                            call_id: None,
+                            attempt: Some(u32::from(attempt_idx)),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+
+        Response {
+            text: accumulated,
+            finish_reason: last_finish_reason,
+            truncated,
+            usage: crate::llm::Usage {
+                input_tokens: total_input,
+                output_tokens: total_output,
+                cache_read: total_cache_read,
+                cache_creation: total_cache_creation,
+            },
+        }
+    }
+
     /// Call the model and parse the response, retrying the call up to
     /// `max_retries` additional times if the parse fails. Each attempt
     /// goes through the normal pipeline (provider send + telemetry +
@@ -941,6 +1135,21 @@ impl RunContext {
             } else {
                 self.call_uncached(role, system.clone(), user.clone(), started_unix, attempt)
                     .await
+            };
+            // PR-C2: focused continuation on truncation. When the
+            // original response came back with `truncated = true`
+            // (Anthropic: stop_reason="max_tokens", OpenAI-compat:
+            // finish_reason="length") and is non-empty, swap in the
+            // continuation-augmented response so the parse pipeline
+            // runs on the stitched text. Cap at 2 attempts (D.21.6);
+            // after the cap we keep `truncated = true` so the
+            // existing parse path sees the same input it sees today
+            // (just one-shot, no retry).
+            let response = match response {
+                Ok(resp) if resp.truncated && !resp.text.is_empty() => Ok(self
+                    .continue_truncated_response(role, &resp, started_unix)
+                    .await),
+                other => other,
             };
             let warn_ctx = || WarningContext {
                 phase: Some(phase_name.to_owned()),
@@ -1149,6 +1358,12 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::JsonRepairV2 => DEFAULT_MAX_TOKENS,
         // Track H batch-2 (commit 3): prompt-injection guard. The ceiling matches the role contract (verdict + reasons + recommended_action).
         Role::HostilePromptDetector => DEFAULT_MAX_TOKENS,
+        // PR-C2: focused re-call on a truncated response. The
+        // continuation role emits a tiny JSON envelope whose
+        // payload is appended onto the truncated text — 1M is
+        // the same ceiling as the role it continues so a single
+        // continuation can finish a long-form response.
+        Role::Continuation => DEFAULT_MAX_TOKENS,
     }
 }
 
@@ -1265,6 +1480,12 @@ pub fn temperature_for_role(
         // same input agree — false negatives in the quarantine
         // path are unacceptable.
         Role::HostilePromptDetector => 0.0,
+        // PR-C2: focused re-call on a truncated response. T=0.0
+        // so two continuations of the same excerpt produce the
+        // same output (snapshot diffs stay stable). top_p is
+        // resolved by `role_settings` (0.5) so the call layer
+        // does not have to special-case the role.
+        Role::Continuation => 0.0,
     }
 }
 
@@ -1432,6 +1653,87 @@ mod tests {
             truncated: false,
             usage: Default::default(),
         }
+    }
+
+    fn truncated_response(text: &str) -> Response {
+        Response {
+            text: text.into(),
+            finish_reason: Some("max_tokens".into()),
+            truncated: true,
+            usage: Default::default(),
+        }
+    }
+
+    fn continuation_envelope(continued: &str, finished: bool) -> Response {
+        let payload = serde_json::json!({
+            "continued": continued,
+            "finished": finished,
+            "raw_excerpt": "",
+            "schema_version": "continuation.v1",
+        });
+        Response {
+            text: serde_json::to_string(&payload).expect("envelope serializes"),
+            finish_reason: Some("end_turn".into()),
+            truncated: false,
+            usage: Default::default(),
+        }
+    }
+
+    fn count_warnings_with_code(temp: &tempfile::TempDir, code: &str) -> usize {
+        // The on-disk path is `<MOAGAN_HOME>/.runs/<run_id>/telemetry/warnings.jsonl`.
+        // `retry_context` builds the home at `temp.path()` so we
+        // scan every `.runs/<id>/telemetry/warnings.jsonl` and
+        // count the matching `code` occurrences across all runs.
+        // We do NOT `serde_json::from_str` the line because the
+        // redactor may have rewritten numeric fields into
+        // `[REDACTED:<kind>]` placeholders, which would make a
+        // strict JSON parse fail and silently drop the warning.
+        let runs_dir = temp.path().join(".runs");
+        let entries = match std::fs::read_dir(&runs_dir) {
+            Ok(it) => it,
+            Err(_) => return 0,
+        };
+        let needle = format!("\"code\":\"{code}\"");
+        let mut count = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path().join("telemetry").join("warnings.jsonl");
+            let contents = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            count += contents
+                .lines()
+                .filter(|line| line.contains(&needle))
+                .count();
+        }
+        count
+    }
+
+    fn count_warnings_with_code_for_phase(
+        temp: &tempfile::TempDir,
+        code: &str,
+        phase: &str,
+    ) -> usize {
+        let runs_dir = temp.path().join(".runs");
+        let entries = match std::fs::read_dir(&runs_dir) {
+            Ok(it) => it,
+            Err(_) => return 0,
+        };
+        let needle = format!("\"code\":\"{code}\"");
+        let phase_needle = format!("\"phase\":\"{phase}\"");
+        let mut count = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path().join("telemetry").join("warnings.jsonl");
+            let contents = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            count += contents
+                .lines()
+                .filter(|line| line.contains(&needle) && line.contains(&phase_needle))
+                .count();
+        }
+        count
     }
 
     #[tokio::test]
@@ -1621,6 +1923,151 @@ mod tests {
     #[test]
     fn call_with_retry_parse_handles_error_without_code_as_retriable() {
         assert!(error_code_is_retriable(None));
+    }
+
+    /// PR-C2: focused continuation on a truncated response. The
+    /// original LLM call returns `truncated = true` with the
+    /// payload mid-JSON (`{"a":`). The continuation call returns
+    /// a JSON envelope whose `continued` field holds the rest of
+    /// the value (`1}`); the dispatcher concatenates the two and
+    /// runs the parse pipeline on the joined text. The pipeline
+    /// must succeed and exactly one `model.continuation_attempt`
+    /// warning must be emitted with `attempt = 0`.
+    #[tokio::test]
+    async fn phase_continuation_loop_fires_when_truncated() {
+        let (temp, ctx, script) = retry_context(vec![
+            Ok((200, truncated_response(r#"{"a":"#))),
+            Ok((200, continuation_envelope("1}", true))),
+        ]);
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Value",
+                5,
+            )
+            .await
+            .expect("parse must succeed after continuation");
+        assert_eq!(result["a"], 1, "concatenated text parses as JSON");
+        // 1 original call + 1 continuation call.
+        assert_eq!(script.calls.load(Ordering::SeqCst), 2);
+        let count = count_warnings_with_code(&temp, "model.continuation_attempt");
+        assert_eq!(count, 1, "exactly one continuation_attempt event");
+    }
+
+    /// PR-C2: the continuation loop caps at 2 attempts. When every
+    /// continuation call comes back truncated itself, the
+    /// dispatcher bails out, marks the response `truncated = true`
+    /// (so the existing parse path sees the same input it sees
+    /// today), and emits exactly 2 `model.continuation_attempt`
+    /// events plus a `model.response_truncated` warning for the
+    /// original call.
+    #[tokio::test]
+    async fn phase_continuation_loop_caps_at_two_attempts() {
+        fn continuation_envelope_truncated(continued: &str, finished: bool) -> Response {
+            let payload = serde_json::json!({
+                "continued": continued,
+                "finished": finished,
+                "raw_excerpt": "",
+                "schema_version": "continuation.v1",
+            });
+            Response {
+                text: serde_json::to_string(&payload).expect("envelope serializes"),
+                finish_reason: Some("max_tokens".into()),
+                truncated: true,
+                usage: Default::default(),
+            }
+        }
+        let (temp, ctx, script) = retry_context(vec![
+            Ok((200, truncated_response("abc"))),
+            Ok((200, continuation_envelope_truncated("abc", false))),
+            Ok((200, continuation_envelope_truncated("abc", false))),
+        ]);
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Value",
+                5,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(Error::SchemaViolation(_))),
+            "truncated text is not JSON; parse fails as SchemaViolation"
+        );
+        // 1 original + 2 continuations = 3 calls total.
+        assert_eq!(script.calls.load(Ordering::SeqCst), 3);
+        let cont_count = count_warnings_with_code(&temp, "model.continuation_attempt");
+        assert_eq!(
+            cont_count, 2,
+            "exactly two continuation_attempt events (the cap)"
+        );
+        let truncated_count =
+            count_warnings_with_code_for_phase(&temp, "model.response_truncated", "intake");
+        assert_eq!(
+            truncated_count, 1,
+            "the original model.response_truncated warning fires once for the intake phase"
+        );
+    }
+
+    /// PR-C2: when the response is NOT truncated, the dispatcher
+    /// skips the continuation loop entirely. No
+    /// `model.continuation_attempt` events are emitted and the
+    /// provider sees exactly one call.
+    #[tokio::test]
+    async fn phase_skips_continuation_when_response_not_truncated() {
+        let (temp, ctx, script) = retry_context(vec![Ok((200, response(r#"{"ok":true}"#)))]);
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Value",
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(script.calls.load(Ordering::SeqCst), 1);
+        let cont_count = count_warnings_with_code(&temp, "model.continuation_attempt");
+        assert_eq!(cont_count, 0, "no continuation events on clean path");
+    }
+
+    /// PR-C2: when the continuation call itself returns a
+    /// transport / HTTP error, the loop bails out instead of
+    /// retrying. The dispatcher emits a `model.continuation_failed`
+    /// warning and the parse pipeline sees the original truncated
+    /// text (which fails to parse).
+    #[tokio::test]
+    async fn phase_skips_continuation_on_first_transport_error() {
+        let (temp, ctx, script) = retry_context(vec![
+            Ok((200, truncated_response(r#"{"x":"#))),
+            Err(Error::Provider("transport died".into())),
+        ]);
+        let result = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Value",
+                5,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(Error::SchemaViolation(_))),
+            "transport error in continuation falls back to today's parse-fail behaviour"
+        );
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            2,
+            "1 original + 1 continuation that errored"
+        );
+        let cont_count = count_warnings_with_code(&temp, "model.continuation_attempt");
+        assert_eq!(cont_count, 1, "exactly one continuation_attempt event");
+        let failed_count = count_warnings_with_code(&temp, "model.continuation_failed");
+        assert_eq!(failed_count, 1, "the transport error is reported");
     }
 
     #[test]
