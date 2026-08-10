@@ -324,6 +324,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         }
     }
 
@@ -505,6 +506,7 @@ mod tests {
             top_p: Some(0.9),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let (status, resp) = provider
             .send(&req)
@@ -604,6 +606,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let (status, _resp) = provider
             .send(&req)

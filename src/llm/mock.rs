@@ -259,6 +259,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let (status1, r1) = p.send(&req()).await.unwrap();
         let (status2, r2) = p.send(&req()).await.unwrap();
@@ -282,6 +283,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let _r1 = p.send(&req()).await.unwrap();
         assert!(p.send(&req()).await.is_err());

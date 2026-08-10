@@ -903,6 +903,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         }
     }
 
@@ -982,6 +983,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         }
     }
 
@@ -1373,6 +1375,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let wire = AnthropicWire;
         let body = wire.encode_body(&req).unwrap();
@@ -1409,6 +1412,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let wire = ResponsesWire;
         let body = wire.encode_body(&req).unwrap();

@@ -368,6 +368,7 @@ mod tests {
             top_p: Some(0.95),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         }
     }
 
@@ -383,6 +384,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let wire = AnthropicWire;
         let body = wire.encode_body(&req).unwrap();
@@ -565,6 +567,7 @@ mod tests {
             top_p: None,
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let body = wire.encode_body(&req).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();

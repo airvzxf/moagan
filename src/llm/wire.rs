@@ -31,6 +31,41 @@ pub struct Request {
     /// advertises streaming honour this flag.
     #[serde(default)]
     pub stream: bool,
+    /// Extra messages appended after the user message — used by the
+    /// `PromptPrefill` JSON recovery strategy to inject an
+    /// assistant prefill of `{` so the model continues with valid
+    /// JSON. Empty for every strategy other than
+    /// `PromptPrefill`; ignored by providers that do not honour
+    /// prefill (the Anthropic-compatible wire, the Responses API).
+    ///
+    /// The cross-run cache key
+    /// ([`crate::llm::wire::build_cache_key`]) deliberately
+    /// IGNORES this field — the prefill is a response-side hint
+    /// that does not change the request identity. A cached
+    /// non-prefill response stays valid for the non-prefill call;
+    /// the prefill call goes through the cache-bypass path in
+    /// [`crate::phases::phase::RunContext::call_uncached`] so a
+    /// prefill-induced response never poisons the steady-state
+    /// cache.
+    #[serde(default)]
+    pub extra_messages: Vec<Message>,
+}
+
+/// A single chat message used by the `extra_messages` field on
+/// [`Request`]. Mirrors the OpenAI Chat-Completions message
+/// shape (`{"role": "...", "content": "..."}`) so the OpenAI-compat
+/// body builder can serialise prefill entries without an extra
+/// conversion layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    /// Message role (`"system"`, `"user"`, `"assistant"`). The
+    /// `PromptPrefill` strategy uses `"assistant"` exclusively;
+    /// other strategies leave the field empty.
+    pub role: String,
+    /// Message content. The `PromptPrefill` strategy uses the
+    /// single character `{` so the model continues with a JSON
+    /// object body.
+    pub content: String,
 }
 
 /// Provider-agnostic response.
@@ -203,12 +238,67 @@ mod tests {
             top_p: Some(0.95),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Request = serde_json::from_str(&j).unwrap();
         assert_eq!(back.role, Role::Intake);
         assert_eq!(back.max_tokens, 1024);
         assert!(!back.stream, "default stream flag roundtrips as false");
+        assert!(
+            back.extra_messages.is_empty(),
+            "default extra_messages is empty when the field is absent on the wire"
+        );
+    }
+
+    #[test]
+    fn request_extra_messages_default_to_empty_when_field_absent() {
+        // The `extra_messages` field is `#[serde(default)]` so a
+        // serialised Request written before this field existed
+        // (or by a hand-rolled test fixture) still round-trips
+        // without an explicit empty vector.
+        let json = serde_json::json!({
+            "role": "intake",
+            "model": "minimax-m3",
+            "system": "sys",
+            "user": "user",
+            "max_tokens": 1024,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "stream": false,
+        });
+        let r: Request = serde_json::from_value(json).unwrap();
+        assert!(r.extra_messages.is_empty());
+    }
+
+    #[test]
+    fn request_extra_messages_round_trip() {
+        // A Request with one prefill message round-trips
+        // through serde without losing the field. Pins the
+        // wire shape so the body builder can rely on
+        // `Request.extra_messages` being serialised verbatim.
+        let r = Request {
+            role: Role::Intake,
+            model: "deepseek-v4-flash".into(),
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: 1024,
+            temperature: Some(0.6),
+            top_p: Some(0.95),
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![Message {
+                role: "assistant".into(),
+                content: "{".into(),
+            }],
+        };
+        let j = serde_json::to_value(&r).unwrap();
+        let arr = j.get("extra_messages").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["role"], "assistant");
+        assert_eq!(arr[0]["content"], "{");
+        let back: Request = serde_json::from_value(j).unwrap();
+        assert_eq!(back.extra_messages, r.extra_messages);
     }
 
     #[test]
@@ -228,6 +318,7 @@ mod tests {
             top_p: Some(0.95),
             response_schema: None,
             stream: false,
+            extra_messages: vec![],
         };
         let blake = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Blake3);
         let sha = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Sha256);
@@ -240,6 +331,56 @@ mod tests {
         // Determinism: same input → same key.
         let blake_again = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Blake3);
         assert_eq!(blake, blake_again);
+    }
+
+    /// `Request::extra_messages` is part of the wire shape but NOT
+    /// part of the cache identity. Two requests that differ only
+    /// in their `extra_messages` (e.g. a normal call vs the
+    /// `PromptPrefill` retry) must produce the SAME cache key so
+    /// the steady-state cache stays valid when the prefill retry
+    /// fires.
+    #[test]
+    fn cache_key_ignores_extra_messages() {
+        let base = Request {
+            role: Role::Sketch,
+            model: "MiniMax-M3".into(),
+            system: "system".into(),
+            user: "user".into(),
+            max_tokens: 64,
+            temperature: Some(0.6),
+            top_p: Some(0.95),
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+        };
+        let with_prefill = Request {
+            extra_messages: vec![Message {
+                role: "assistant".into(),
+                content: "{".into(),
+            }],
+            ..base.clone()
+        };
+        assert_eq!(
+            build_cache_key(&base, "minimax", "MiniMax-M3", CacheHashAlgo::Blake3),
+            build_cache_key(
+                &with_prefill,
+                "minimax",
+                "MiniMax-M3",
+                CacheHashAlgo::Blake3
+            ),
+            "extra_messages MUST NOT contribute to the cache key"
+        );
+        // SHA-256 path honours the same invariant.
+        assert_eq!(
+            build_cache_key(&base, "minimax", "MiniMax-M3", CacheHashAlgo::Sha256),
+            build_cache_key(
+                &with_prefill,
+                "minimax",
+                "MiniMax-M3",
+                CacheHashAlgo::Sha256
+            ),
+            "extra_messages MUST NOT contribute to the SHA-256 cache key"
+        );
     }
 
     #[test]
