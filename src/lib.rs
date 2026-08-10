@@ -60,6 +60,13 @@ pub static TEST_MOAGAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 #[cfg(test)]
 pub static TEST_API_KEYS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialises every test that calls `std::env::set_current_dir`.
+/// Without it, parallel `cargo test` runs observe each other's
+/// cwd changes and report flakes. Used by the PR-B2 config-
+/// precedence tests in `config::tests`.
+#[cfg(test)]
+pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;

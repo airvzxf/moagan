@@ -2705,6 +2705,9 @@ model = "mock-{marker}"
     #[test]
     fn cwd_moagan_toml_overrides_user_xdg() {
         let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _env = EnvGuard::new();
         let _cwd = CwdGuard::new();
         unsafe {
@@ -2747,6 +2750,9 @@ model = "mock-user-xdg"
     #[test]
     fn moagan_config_env_var_overrides_cwd_file() {
         let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _env = EnvGuard::new();
         let _cwd = CwdGuard::new();
 
@@ -2794,6 +2800,9 @@ model = "mock-env-var"
     #[test]
     fn user_xdg_used_when_no_cwd_file() {
         let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _env = EnvGuard::new();
         let _cwd = CwdGuard::new();
         unsafe {
@@ -2829,6 +2838,9 @@ model = "mock-user-xdg-only"
     #[test]
     fn hidden_dotfile_alt_name_is_consulted() {
         let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _env = EnvGuard::new();
         let _cwd = CwdGuard::new();
         unsafe {
@@ -2885,6 +2897,9 @@ model = "mock-hidden-dotfile"
         // load identically. We assert that all default providers are
         // present and the user's provider is wired in.
         let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _env = EnvGuard::new();
         let _cwd = CwdGuard::new();
         unsafe {
@@ -2932,6 +2947,9 @@ temperature = 0.42
         // log capture here — that's covered by the existing
         // tracing subscriber test rig).
         let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cwd_lock = crate::TEST_CWD_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _env = EnvGuard::new();
         let _cwd = CwdGuard::new();
         unsafe {
