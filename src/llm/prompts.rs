@@ -101,6 +101,17 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
+        // PR-C2: focused re-call on a truncated response. T=0.0 so
+        // two continuations of the same excerpt produce the same
+        // output (useful for snapshot diffs); top_p=0.5 leaves a
+        // small headroom for tokens the iterative bracket repair
+        // cannot guess.
+        Role::Continuation => Some(RoleSettings {
+            temperature: 0.0,
+            top_p: 0.5,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            json_mode: true,
+        }),
         _ => None,
     }
 }
@@ -133,6 +144,7 @@ const ANGLE_PICKER_PROMPT: &str = include_str!("prompts/angle_picker.md");
 const FINAL_DISAGREEMENT_PROMPT: &str = include_str!("prompts/final_disagreement.md");
 const JSON_REPAIR_V2_PROMPT: &str = include_str!("prompts/json_repair_v2.md");
 const HOSTILE_PROMPT_DETECTOR_PROMPT: &str = include_str!("prompts/hostile_prompt_detector.md");
+const CONTINUATION_PROMPT: &str = include_str!("prompts/continuation.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -170,6 +182,7 @@ pub fn prompt_set_hash() -> String {
                 FINAL_DISAGREEMENT_PROMPT,
                 JSON_REPAIR_V2_PROMPT,
                 HOSTILE_PROMPT_DETECTOR_PROMPT,
+                CONTINUATION_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -207,6 +220,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::FinalDisagreement => FINAL_DISAGREEMENT_PROMPT,
         Role::JsonRepairV2 => JSON_REPAIR_V2_PROMPT,
         Role::HostilePromptDetector => HOSTILE_PROMPT_DETECTOR_PROMPT,
+        Role::Continuation => CONTINUATION_PROMPT,
     }
 }
 
@@ -294,6 +308,34 @@ pub fn inject_known_apis(prompt: &str, snippets: &[crate::research::ResearchSnip
     prompt.replace(KNOWN_APIS_PLACEHOLDER, &block)
 }
 
+/// Placeholder token the [`super::role::Role::Continuation`] prompt
+/// embeds for the last ~500 bytes of the truncated response. The
+/// continuation loop in
+/// `phases::phase::call_with_retry_parse` substitutes this with
+/// the real excerpt via [`render_continuation_prompt`] before the
+/// request leaves the process so the LLM never sees the literal
+/// `${last_excerpt}` token.
+pub const CONTINUATION_LAST_EXCERPT_PLACEHOLDER: &str = "${last_excerpt}";
+
+/// Render the continuation system prompt with `last_excerpt`
+/// substituted into [`CONTINUATION_LAST_EXCERPT_PLACEHOLDER`]. The
+/// helper centralises the substitution so the dispatcher does not
+/// have to know which prompt file is in use — it just calls
+/// `render_continuation_prompt(excerpt)`. Returns the prompt with
+/// the placeholder replaced verbatim by `last_excerpt`. When the
+/// source prompt does not embed the placeholder (which would only
+/// happen on a corrupted prompt registry), the helper still
+/// appends the excerpt on its own line so the model always sees
+/// the input it was asked to continue from.
+pub fn render_continuation_prompt(last_excerpt: &str) -> String {
+    let base = system_prompt(Role::Continuation);
+    if base.contains(CONTINUATION_LAST_EXCERPT_PLACEHOLDER) {
+        base.replace(CONTINUATION_LAST_EXCERPT_PLACEHOLDER, last_excerpt)
+    } else {
+        format!("{base}\n\n{last_excerpt}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +397,67 @@ mod tests {
         // the prompt-injection guard ships with a real placeholder
         // prompt.
         assert!(!HOSTILE_PROMPT_DETECTOR_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn continuation_prompt_file_exists_and_is_non_empty() {
+        // PR-C2: the focused-continuation role ships with a real
+        // placeholder prompt. The dispatcher injects
+        // `${last_excerpt}` at runtime via
+        // [`render_continuation_prompt`].
+        assert!(!CONTINUATION_PROMPT.trim().is_empty());
+    }
+
+    /// PR-C2: the continuation prompt template must contain the
+    /// `${last_excerpt}` placeholder so the dispatcher can
+    /// substitute the truncated payload at runtime. Pin that the
+    /// placeholder is present in the bundled file so a future
+    /// copy-paste mistake cannot silently regress the loop into a
+    /// "no input" call.
+    #[test]
+    fn continuation_prompt_contains_last_excerpt_placeholder() {
+        assert!(
+            CONTINUATION_PROMPT.contains(CONTINUATION_LAST_EXCERPT_PLACEHOLDER),
+            "continuation prompt must embed the {{last_excerpt}} placeholder"
+        );
+    }
+
+    /// PR-C2: `render_continuation_prompt` substitutes the
+    /// `${last_excerpt}` placeholder with the actual excerpt and
+    /// returns the result. The literal placeholder must be gone
+    /// after the call so the LLM never sees it; the excerpt must
+    /// appear verbatim in the rendered prompt so the model picks
+    /// up at the right byte offset.
+    #[test]
+    fn continuation_prompt_contains_last_excerpt() {
+        let excerpt = "{\"a\":1,\"approach\":\"Sharded ledger";
+        let rendered = render_continuation_prompt(excerpt);
+        assert!(
+            !rendered.contains(CONTINUATION_LAST_EXCERPT_PLACEHOLDER),
+            "literal placeholder must be gone after substitution"
+        );
+        assert!(
+            rendered.contains(excerpt),
+            "rendered continuation prompt must contain the supplied excerpt verbatim"
+        );
+    }
+
+    /// PR-C2: `system_prompt(Role::Continuation)` returns the raw
+    /// template (with `${last_excerpt}` unsubstituted). Tests that
+    /// want a renderable prompt must use
+    /// `render_continuation_prompt` instead; this test pins the
+    /// "raw template vs rendered prompt" split.
+    #[test]
+    fn continuation_system_prompt_is_raw_template_with_placeholder() {
+        let raw = system_prompt(Role::Continuation);
+        assert!(
+            raw.contains(CONTINUATION_LAST_EXCERPT_PLACEHOLDER),
+            "raw continuation prompt must still embed the placeholder"
+        );
+        assert_eq!(
+            raw, CONTINUATION_PROMPT,
+            "system_prompt(Role::Continuation) must return the bundled template verbatim"
+        );
     }
 
     #[test]

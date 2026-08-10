@@ -1041,6 +1041,42 @@ pub struct CandidateEntry {
     /// Approach the candidate is taking (mirrors `Proposal::approach`).
     pub approach: String,
 }
+/// Output of the `Role::Continuation` role (PR-C2).
+///
+/// Focused re-call issued by
+/// `phases::phase::call_with_retry_parse` when the original
+/// response comes back with `Response.truncated = true`. The
+/// dispatcher hands the model the last ~500 bytes of the truncated
+/// payload, and the model returns ONLY the bytes that would have
+/// come next (no greetings, no repetition, no fences) wrapped in
+/// this envelope so the dispatcher can stitch them onto the
+/// original text before re-running the JSON parse pipeline.
+///
+/// `finished` is a *hint*: a `true` value stops the continuation
+/// loop early. The real recovery signal is whether the
+/// concatenated text parses; if it does not, the loop will try a
+/// second continuation regardless of the hint.
+///
+/// `#[serde(default)]` keeps the validator accepting empty objects
+/// (parity with every other opt-in catalog role under Track H).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContinuationReport {
+    /// Bytes the model emits to follow the excerpt. The dispatcher
+    /// appends this string to `accumulated` without a separator;
+    /// the iterative bracket repair (`phases::util::repair_m3_brackets`)
+    /// handles the missing-comma case if needed.
+    pub continued: String,
+    /// `true` when the model believes the response is now complete.
+    /// Hint only; the parse pipeline is the source of truth.
+    pub finished: bool,
+    /// Echo of the last 50 chars of the input verbatim. Kept so
+    /// the operator can audit that the model actually picked up at
+    /// the right byte offset when looking at `telemetry/warnings.jsonl`.
+    pub raw_excerpt: String,
+    /// Schema version (`continuation.v1`).
+    pub schema_version: String,
+}
 /// Output of the `Role::JsonRepairV2` role (D.7.1 catalog).
 ///
 /// Optional second-pass LLM call used when the local heuristic
