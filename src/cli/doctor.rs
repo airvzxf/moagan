@@ -50,25 +50,48 @@ fn emit(check: Check, any_fail: &mut bool, any_warn: &mut bool) {
 }
 
 fn check_api_key(cfg: &Config) -> Check {
-    let needs_key = |kind: &str| matches!(kind, "minimax");
-    let mut missing: Vec<&str> = Vec::new();
+    use crate::llm::api_keys::lookup_key;
+    let mut missing: Vec<String> = Vec::new();
+    let mut seen_kinds: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (name, spec) in &cfg.providers {
-        if needs_key(&spec.kind) && std::env::var("MINIMAX_API_KEY").is_err() {
-            missing.push(name);
+        // `mock` does not need an API key. Every other kind goes
+        // through the unified lookup (api_keys.toml > env var).
+        if spec.kind == "mock" {
+            continue;
+        }
+        if !seen_kinds.insert(spec.kind.clone()) {
+            // Skip duplicate kinds; one env var / api_keys.toml entry
+            // services every provider alias of the same kind. The
+            // first iteration reports it; subsequent iterations
+            // (e.g. `minimax` + `minimax-m2.7`) just re-confirm.
+            continue;
+        }
+        match lookup_key(&spec.kind, None) {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => {
+                let kind = spec.kind.clone();
+                missing.push(format!("{name} ({kind}: api_keys.toml spec unresolvable)"));
+            }
+            None => {
+                let kind = spec.kind.clone();
+                missing.push(format!(
+                    "{name} ({kind}: env var unset and no api_keys.toml entry)"
+                ));
+            }
         }
     }
     if missing.is_empty() {
         Check {
             name: "api_key".to_string(),
             status: Status::Ok,
-            detail: "MINIMAX_API_KEY set (or no provider needs it)".into(),
+            detail: "all required provider API keys resolve (api_keys.toml > env var)".into(),
         }
     } else {
         Check {
             name: "api_key".to_string(),
             status: Status::Fail,
             detail: format!(
-                "MINIMAX_API_KEY not set; needed for providers: {}",
+                "missing/unresolvable API keys for: {}; check env vars or <MOAGAN_HOME>/api_keys.toml",
                 missing.join(", ")
             ),
         }
@@ -264,7 +287,6 @@ mod tests {
             ProviderConfig {
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                // Duplicate model; must be deduped.
                 model: "MiniMax-M3".into(),
                 ..ProviderConfig::default()
             },
@@ -293,5 +315,271 @@ mod tests {
         );
         assert_eq!(entries[1].0, "models for provider 'mock'");
         assert_eq!(entries[1].1, vec!["mock-model".to_owned()]);
+    }
+
+    // ----------------------------------------------------------------
+    // PR-B2: `check_api_key` covers every keyed provider kind.
+    //
+    // These tests pin the contract that `moagan doctor` reports the
+    // MINIMAX / DEEPSEEK / OPENCODE_GO env vars through the unified
+    // `api_keys::lookup_key` helper (not just MINIMAX_API_KEY as the
+    // pre-PR-B2 check did).
+    // ----------------------------------------------------------------
+
+    /// Locks every test in this module that mutates process-wide env
+    /// state (provider API keys + `MOAGAN_HOME`). Acquired alongside
+    /// the crate-wide `TEST_API_KEYS_LOCK` (in `src/lib.rs`) so
+    /// parallel-running LLM provider tests cannot poison the env
+    /// vars this module reads.
+    static TEST_DOCTOR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that snapshots every API-key env var on creation
+    /// and restores them on Drop. A test failure cannot leak mutated
+    /// env vars into the next test on the same thread.
+    struct ApiKeyEnvGuard {
+        minimax: Option<String>,
+        deepseek: Option<String>,
+        opencode_go: Option<String>,
+        moagan_home: Option<std::ffi::OsString>,
+    }
+
+    impl ApiKeyEnvGuard {
+        fn new() -> Self {
+            Self {
+                minimax: std::env::var("MINIMAX_API_KEY").ok(),
+                deepseek: std::env::var("DEEPSEEK_API_KEY").ok(),
+                opencode_go: std::env::var("OPENCODE_GO_API_KEY").ok(),
+                moagan_home: std::env::var_os("MOAGAN_HOME"),
+            }
+        }
+    }
+
+    impl Drop for ApiKeyEnvGuard {
+        fn drop(&mut self) {
+            restore_or_remove("MINIMAX_API_KEY", self.minimax.as_deref());
+            restore_or_remove("DEEPSEEK_API_KEY", self.deepseek.as_deref());
+            restore_or_remove("OPENCODE_GO_API_KEY", self.opencode_go.as_deref());
+            if let Some(v) = &self.moagan_home {
+                unsafe {
+                    std::env::set_var("MOAGAN_HOME", v);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("MOAGAN_HOME");
+                }
+            }
+        }
+    }
+
+    fn restore_or_remove(name: &str, snapshot: Option<&str>) {
+        match snapshot {
+            Some(v) => unsafe {
+                std::env::set_var(name, v);
+            },
+            None => unsafe {
+                std::env::remove_var(name);
+            },
+        }
+    }
+
+    /// Build a minimal `Config` that contains every provider kind
+    /// `moagan` registers by default. Used as the substrate for the
+    /// `check_api_key` tests so the helper sees the full set of
+    /// kinds it must iterate over.
+    fn three_kind_config() -> Config {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "minimax".into(),
+            ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: "MiniMax-M3".into(),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                kind: "deepseek".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-v4-flash".into(),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "opencode_go".into(),
+            ProviderConfig {
+                kind: "opencode_go".into(),
+                endpoint: "https://opencode.ai/zen/go/v1".into(),
+                model: "kimi-k2.7-code".into(),
+                ..ProviderConfig::default()
+            },
+        );
+        Config {
+            providers,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn check_api_key_passes_when_all_three_env_vars_set() {
+        let _lock = TEST_DOCTOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _api_lock = crate::TEST_API_KEYS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _home_lock = crate::TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = ApiKeyEnvGuard::new();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
+            std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
+            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::remove_var("MOAGAN_HOME");
+        }
+        let check = check_api_key(&three_kind_config());
+        assert_eq!(
+            check.status,
+            Status::Ok,
+            "doctor api_key check must be OK when all three env vars are set; detail: {}",
+            check.detail
+        );
+        assert!(
+            check
+                .detail
+                .contains("all required provider API keys resolve"),
+            "OK detail must explain the resolution path; got: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn check_api_key_fails_when_deepseek_key_missing() {
+        let _lock = TEST_DOCTOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _api_lock = crate::TEST_API_KEYS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _home_lock = crate::TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = ApiKeyEnvGuard::new();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::remove_var("MOAGAN_HOME");
+        }
+        let check = check_api_key(&three_kind_config());
+        assert_eq!(
+            check.status,
+            Status::Fail,
+            "missing DEEPSEEK_API_KEY must surface as Fail; detail: {}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("deepseek"),
+            "Fail detail must name the missing kind; got: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn check_api_key_fails_when_opencode_go_key_missing() {
+        let _lock = TEST_DOCTOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _api_lock = crate::TEST_API_KEYS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _home_lock = crate::TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = ApiKeyEnvGuard::new();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
+            std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
+            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("MOAGAN_HOME");
+        }
+        let check = check_api_key(&three_kind_config());
+        assert_eq!(check.status, Status::Fail);
+        assert!(
+            check.detail.contains("opencode_go"),
+            "Fail detail must name the missing kind; got: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn check_api_key_passes_for_mock_only_config() {
+        let _lock = TEST_DOCTOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _api_lock = crate::TEST_API_KEYS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _home_lock = crate::TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = ApiKeyEnvGuard::new();
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("MOAGAN_HOME");
+        }
+        // A mock-only config requires no keys; the check must
+        // report OK regardless of the env-var state.
+        let cfg = Config {
+            providers: std::collections::BTreeMap::from([(
+                "mock".to_owned(),
+                ProviderConfig {
+                    kind: "mock".to_owned(),
+                    endpoint: "mock://local".to_owned(),
+                    model: "mock-model".to_owned(),
+                    ..ProviderConfig::default()
+                },
+            )]),
+            ..Config::default()
+        };
+        let check = check_api_key(&cfg);
+        assert_eq!(check.status, Status::Ok);
+    }
+
+    #[test]
+    fn check_api_key_resolves_via_api_keys_toml() {
+        // `api_keys.toml` is the operator's explicit override. When
+        // the file contains the key spec, the doctor check must
+        // accept it without requiring the direct env var fallback.
+        let _lock = TEST_DOCTOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _api_lock = crate::TEST_API_KEYS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _home_lock = crate::TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = ApiKeyEnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("api_keys.toml"),
+            r#"
+[providers]
+deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
+"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_HOME", tmp.path());
+            std::env::set_var("DOCTOR_TEST_DEEPSEEK_KEY_B2", "sk-from-file");
+            std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+        }
+        let check = check_api_key(&three_kind_config());
+        assert_eq!(
+            check.status,
+            Status::Ok,
+            "api_keys.toml entry must satisfy doctor; detail: {}",
+            check.detail
+        );
+        unsafe {
+            std::env::remove_var("DOCTOR_TEST_DEEPSEEK_KEY_B2");
+        }
     }
 }

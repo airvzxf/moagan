@@ -51,6 +51,15 @@ pub use error::{Error, ExitCode, Result, exit_code};
 #[cfg(test)]
 pub static TEST_MOAGAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialises every test that mutates `MINIMAX_API_KEY` /
+/// `DEEPSEEK_API_KEY` / `OPENCODE_GO_API_KEY` process-wide. Shared
+/// across the LLM provider tests (`llm::api_keys::tests`),
+/// `cli::doctor::tests`, and any future caller that touches those
+/// env vars — without it, parallel `cargo test` runs observe
+/// each other's mutations and report flakes.
+#[cfg(test)]
+pub static TEST_API_KEYS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;
