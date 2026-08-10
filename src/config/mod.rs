@@ -236,6 +236,14 @@ pub struct Config {
     /// so existing runs are bit-identical.
     #[serde(default)]
     pub discovery: DiscoveryWiringConfig,
+    /// PR-D1: persistent per-provider temperature-profile
+    /// overrides for the discovery matrix (the CLI
+    /// `--temperature-profile` flag wins on conflict). Lives
+    /// under `[discovery_matrix]` in
+    /// `~/.config/moagan/config.toml`. Default empty so a fresh
+    /// installation matches v0.5's single-shot behaviour.
+    #[serde(default)]
+    pub discovery_matrix: DiscoveryMatrixConfig,
     /// Track J (D.21.3): selection strategy the rank phase
     /// applies after the weighted sort to choose which
     /// `(proposal_id, score, Proposal)` triples make it into the
@@ -285,6 +293,37 @@ impl Default for ExportConfig {
             hash_algo: crate::cli::flags_batch::HashAlgo::Blake3,
         }
     }
+}
+
+/// PR-D1: persistent per-provider temperature-profile overrides
+/// for the discovery matrix. Lives under `[discovery_matrix]` in
+/// `~/.config/moagan/config.toml` so an operator can pre-configure
+/// a run's fan-out without passing `--temperature-profile` flags
+/// every time. CLI flags win on conflict — see
+/// `cli::discover::run` for the merge order.
+///
+/// Re-exported alongside `DiscoveryWiringConfig` (which is a
+/// separate `[discovery]` block dedicated to the persona/angle
+/// picker opt-ins). The two blocks are kept distinct because
+/// `DiscoveryWiringConfig` is about which roles the discovery
+/// pipeline auto-invokes, while this one is about how the matrix
+/// fan-out iterates over temperatures and replicas.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscoveryMatrixConfig {
+    /// Per-provider sampling-temperature profiles keyed by the
+    /// provider's MODEL name (the same string stored on
+    /// `ProviderConfig::model`, e.g. `"MiniMax-M3"`,
+    /// `"deepseek-v4-flash"`, `"mimo-v2.5"`). Empty by default so
+    /// unconfigured installations match v0.5's single-shot
+    /// behaviour.
+    pub temperature_profiles:
+        std::collections::HashMap<String, crate::discovery::matrix::TemperatureProfile>,
+    /// Optional default profile applied to providers absent from
+    /// [`Self::temperature_profiles`]. When `None`, the matrix
+    /// uses [`crate::discovery::matrix::TemperatureProfile::default()`]
+    /// (`[1.0] × 1`) — the v0.5 single-shot contract.
+    pub default_profile: Option<crate::discovery::matrix::TemperatureProfile>,
 }
 
 /// Track E (E8 partial): knobs for the two D.7.1 catalog roles
@@ -682,6 +721,7 @@ impl Default for Config {
             research: ResearchConfig::default(),
             rate_limit_per_provider: std::collections::HashMap::new(),
             discovery: DiscoveryWiringConfig::default(),
+            discovery_matrix: DiscoveryMatrixConfig::default(),
             export: ExportConfig::default(),
             selection_plan: default_selection_plan(),
         }
@@ -3113,5 +3153,54 @@ api_key = "this-belongs-in-api_keys.toml"
             cfg.providers.contains_key("minimax"),
             "minimax entry must survive even though the user only wrote unknown keys"
         );
+    }
+
+    /// PR-D1: the `[discovery_matrix]` block round-trips through
+    /// TOML so an operator's per-provider temperature profiles
+    /// survive a `Config::load()` ↔ `Config::dump()` cycle. The
+    /// test parses a hand-written TOML string (the form the user
+    /// would put in `~/.config/moagan/config.toml`) and asserts
+    /// that the typed `discovery_matrix.temperature_profiles` map
+    /// carries the values through. The CLI flag
+    /// `--temperature-profile` wins on conflict — see
+    /// `cli::discover::run` for the merge order.
+    ///
+    /// Provider model keys with dots (e.g. `mimo-v2.5`) must be
+    /// quoted — TOML treats unquoted `mimo-v2.5` as a dotted
+    /// path, not a single key.
+    #[test]
+    fn config_discovery_block_parses() {
+        let toml = r#"
+[discovery_matrix]
+default_profile = { temperatures = [0.5], replicas_per_temperature = 2 }
+
+[discovery_matrix.temperature_profiles."minimax-m3"]
+temperatures = [0.0, 0.3, 0.7, 1.0]
+replicas_per_temperature = 4
+
+[discovery_matrix.temperature_profiles."mimo-v2.5"]
+temperatures = [0.5]
+replicas_per_temperature = 2
+"#;
+        let cfg: Config = toml::from_str(toml).expect("TOML must parse");
+        let profiles = &cfg.discovery_matrix.temperature_profiles;
+        assert!(
+            profiles.contains_key("minimax-m3"),
+            "minimax-m3 profile must survive the parse; got keys {:?}",
+            profiles.keys().collect::<Vec<_>>()
+        );
+        let m3 = &profiles["minimax-m3"];
+        assert_eq!(m3.temperatures, vec![0.0, 0.3, 0.7, 1.0]);
+        assert_eq!(m3.replicas_per_temperature, 4);
+        let mimo = &profiles["mimo-v2.5"];
+        assert_eq!(mimo.temperatures, vec![0.5]);
+        assert_eq!(mimo.replicas_per_temperature, 2);
+        let default = cfg
+            .discovery_matrix
+            .default_profile
+            .as_ref()
+            .expect("default_profile must be Some when set in TOML");
+        assert_eq!(default.temperatures, vec![0.5]);
+        assert_eq!(default.replicas_per_temperature, 2);
     }
 }

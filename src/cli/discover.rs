@@ -164,6 +164,161 @@ pub struct DiscoverOptions {
     /// is preserved unless the operator opts in via the
     /// `--cache-facets` CLI flag.
     pub cache_facets: bool,
+    /// PR-D1: per-provider sampling-temperature profiles sourced
+    /// from the `--temperature-profile` CLI flag (last-wins per
+    /// provider model) merged with the persisted `[discovery]`
+    /// block from `~/.config/moagan/config.toml`. The CLI specs
+    /// win on conflict — the operator's explicit invocation
+    /// beats the persisted default. When this list is empty AND
+    /// the persisted `[discovery]` block is empty, the matrix
+    /// uses the default `[1.0] × 1` profile (the v0.5 single-shot
+    /// contract).
+    pub temperature_profiles: Vec<TemperatureProfileSpec>,
+}
+
+/// Parsed CLI form of a per-provider temperature profile (PR-D1).
+///
+/// The clap `Vec<String>` for `--temperature-profile` is parsed
+/// into this typed form once at the dispatcher boundary so the
+/// downstream matrix / coordinator code consumes validated,
+/// type-safe values. The spec grammar is
+/// `provider=<model>;temperatures=<csv>;replicas=<n>`:
+///
+/// * `provider=<model>` — REQUIRED. Provider MODEL name (e.g.
+///   `MiniMax-M3`, `mimo-v2.5`). Must be non-empty.
+/// * `temperatures=<csv>` — REQUIRED. Comma-separated floats in
+///   `0.0..=2.0`. At least one value required.
+/// * `replicas=<n>` — REQUIRED. Integer `>= 1`.
+///
+/// Multiple `--temperature-profile` flags for the same provider
+/// are allowed; the LAST spec wins (documented behaviour so the
+/// audit can pin the merge order).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemperatureProfileSpec {
+    /// Provider MODEL name (the lookup key the matrix uses; case
+    /// sensitive).
+    pub provider: String,
+    /// Sampling temperatures the loop iterates per `(cell,
+    /// replica)` pair. Always non-empty (the parser enforces it).
+    pub temperatures: Vec<f32>,
+    /// Replicas per `(cell, temperature)` pair. Always `>= 1`.
+    pub replicas_per_temperature: usize,
+}
+
+impl TemperatureProfileSpec {
+    /// Parse a single CLI spec into the typed form. Returns a
+    /// [`crate::error::Error::InvalidArgs`] error on every malformed
+    /// input (missing `provider=`, out-of-range temperature, etc.)
+    /// so the dispatcher surfaces the message through the same
+    /// channel as the other CLI validators (D.15.5 pattern).
+    pub fn parse(s: &str) -> crate::error::Result<Self> {
+        let mut provider: Option<String> = None;
+        let mut temperatures: Option<Vec<f32>> = None;
+        let mut replicas: Option<usize> = None;
+        for kv in s.split(';') {
+            let kv = kv.trim();
+            if kv.is_empty() {
+                return Err(crate::error::Error::InvalidArgs(format!(
+                    "empty `key=value` segment in temperature-profile spec {s:?}"
+                )));
+            }
+            let (k, v) = kv.split_once('=').ok_or_else(|| {
+                crate::error::Error::InvalidArgs(format!(
+                    "expected `key=value` in temperature-profile spec segment {kv:?} \
+                     (full spec: {s:?}); grammar is \
+                     `provider=<name>;temperatures=<csv>;replicas=<n>`"
+                ))
+            })?;
+            let key = k.trim();
+            let value = v.trim();
+            match key {
+                "provider" => {
+                    if value.is_empty() {
+                        return Err(crate::error::Error::InvalidArgs(format!(
+                            "provider name is empty in temperature-profile spec {s:?}"
+                        )));
+                    }
+                    provider = Some(value.to_owned());
+                }
+                "temperatures" => {
+                    let parsed = value
+                        .split(',')
+                        .map(|t| t.trim())
+                        .filter(|t| !t.is_empty())
+                        .map(|t| {
+                            t.parse::<f32>().map_err(|e| {
+                                crate::error::Error::InvalidArgs(format!(
+                                    "invalid temperature {t:?} in temperature-profile \
+                                     spec {s:?}: {e}"
+                                ))
+                            })
+                        })
+                        .collect::<crate::error::Result<Vec<f32>>>()?;
+                    if parsed.is_empty() {
+                        return Err(crate::error::Error::InvalidArgs(format!(
+                            "temperatures list is empty in temperature-profile spec {s:?}"
+                        )));
+                    }
+                    for t in &parsed {
+                        if !(*t >= 0.0 && *t <= 2.0) {
+                            return Err(crate::error::Error::InvalidArgs(format!(
+                                "temperature {t} out of range 0.0..=2.0 in \
+                                 temperature-profile spec {s:?}"
+                            )));
+                        }
+                    }
+                    temperatures = Some(parsed);
+                }
+                "replicas" => {
+                    let parsed = value.parse::<usize>().map_err(|e| {
+                        crate::error::Error::InvalidArgs(format!(
+                            "invalid replicas {value:?} in temperature-profile spec {s:?}: {e}"
+                        ))
+                    })?;
+                    if parsed == 0 {
+                        return Err(crate::error::Error::InvalidArgs(format!(
+                            "replicas must be >= 1 in temperature-profile spec {s:?}; got 0"
+                        )));
+                    }
+                    replicas = Some(parsed);
+                }
+                other => {
+                    return Err(crate::error::Error::InvalidArgs(format!(
+                        "unknown key {other:?} in temperature-profile spec {s:?}; \
+                         expected `provider`, `temperatures`, or `replicas`"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            provider: provider.ok_or_else(|| {
+                crate::error::Error::InvalidArgs(format!(
+                    "missing `provider=<name>` in temperature-profile spec {s:?}"
+                ))
+            })?,
+            temperatures: temperatures.ok_or_else(|| {
+                crate::error::Error::InvalidArgs(format!(
+                    "missing `temperatures=<csv>` in temperature-profile spec {s:?}"
+                ))
+            })?,
+            replicas_per_temperature: replicas.ok_or_else(|| {
+                crate::error::Error::InvalidArgs(format!(
+                    "missing `replicas=<n>` in temperature-profile spec {s:?}"
+                ))
+            })?,
+        })
+    }
+
+    /// Convert into the matrix's `TemperatureProfile` (the form
+    /// stored on `ExplorationMatrix`). Drops the `provider`
+    /// string because the matrix indexes the profile map by
+    /// provider model name, and the matrix owns that key.
+    pub fn into_matrix_profile(self) -> crate::discovery::matrix::TemperatureProfile {
+        crate::discovery::matrix::TemperatureProfile {
+            temperatures: self.temperatures,
+            replicas_per_temperature: self.replicas_per_temperature,
+        }
+    }
 }
 
 /// Run discovery end-to-end. Returns the run id on success.
@@ -215,7 +370,35 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     let max_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
     let parallelism = Parallelism::new(max_parallelism);
 
-    let ctx = RunContext::new(
+    // PR-D1: merge CLI `--temperature-profile` specs (last-wins per
+    // provider) on top of the persisted `[discovery]` block from
+    // `~/.config/moagan/config.toml`. The CLI flag always wins
+    // because the operator is explicitly overriding the persisted
+    // default for this run; the persisted block is the fall-back
+    // when no CLI flag was supplied. We clone `cfg` (so the
+    // caller's `&Config` stays borrowable downstream), apply the
+    // merge, and feed the resulting `Arc<Config>` into
+    // `RunContext::new_with_config` so the coordinator reads the
+    // merged profiles from `ctx.config.discovery_matrix`.
+    let mut effective_cfg = cfg.clone();
+    for spec in opts.temperature_profiles.iter() {
+        let model = spec.provider.clone();
+        let profile = spec.clone().into_matrix_profile();
+        effective_cfg
+            .discovery_matrix
+            .temperature_profiles
+            .insert(model, profile);
+        // Keep `effective_cfg.discovery_matrix.default_profile`
+        // (sourced from the persisted `[discovery]` block, falling
+        // back to `None` so the matrix uses its built-in
+        // `TemperatureProfile::default()`) as the source of truth.
+        // We deliberately do NOT honour a CLI flag named
+        // `--default-temperature-profile` to keep the surface small
+        // (the audit said "no magic switch") so the persisted
+        // block wins.
+    }
+
+    let ctx = RunContext::new_with_config(
         run_id,
         Arc::clone(&home),
         Arc::clone(&providers),
@@ -225,8 +408,12 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         telemetry.clone(),
         opts.prompt.clone(),
         "discover".to_owned(),
+        Arc::new(effective_cfg.clone()),
     )
-    .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
+    .with_timeouts(
+        effective_cfg.phase_timeout_secs,
+        effective_cfg.total_timeout_secs,
+    )
     .with_interactive(!opts.non_interactive);
 
     let pipeline = build_pre_matrix_pipeline();
@@ -545,6 +732,7 @@ pub async fn run_resume(
         out_dir: None,
         non_interactive,
         cache_facets: false,
+        temperature_profiles: Vec::new(),
     };
     let post_pipeline = build_post_matrix_pipeline(&post_opts);
 
@@ -612,6 +800,7 @@ fn build_canonical_for_resume_pipeline(manifest: &Manifest) -> Pipeline {
         out_dir: None,
         non_interactive: true,
         cache_facets: false,
+        temperature_profiles: Vec::new(),
     };
     build_discovery_pipeline(&opts)
 }
@@ -667,8 +856,8 @@ mod tests {
     }
 
     /// PR-B1 (B1.4): `discover` validates `--max-parallelism`
-    /// against the same hard cap (64) as `run`. Today the flag
-    /// is parsed but the value is forwarded unchecked to
+    /// against the same hard cap (64) as `run`. Today the flag is
+    /// parsed but the value is forwarded unchecked to
     /// `Parallelism::new`; a typo like `--max-parallelism 4096`
     /// silently raises the semaphore. Pin the helper contract
     /// here so the discovery path can never drift from the run
@@ -683,5 +872,87 @@ mod tests {
             err.contains("exceeds maximum 64"),
             "error must mention the cap; got {err:?}"
         );
+    }
+
+    // ---- PR-D1: TemperatureProfileSpec parser tests ----
+
+    /// PR-D1: the minimal spec (`provider=...;temperatures=<one>;
+    /// replicas=<n>`) parses to the typed form. The operator's
+    /// `mimo-v2.5` / `[0.5]` / `2` example from the spec.
+    #[test]
+    fn parse_temperature_profile_spec_minimal() {
+        let spec = TemperatureProfileSpec::parse("provider=foo;temperatures=0.5;replicas=2")
+            .expect("minimal spec must parse");
+        assert_eq!(spec.provider, "foo");
+        assert_eq!(spec.temperatures, vec![0.5]);
+        assert_eq!(spec.replicas_per_temperature, 2);
+    }
+
+    /// PR-D1: a CSV temperature list parses into the typed
+    /// `Vec<f32>`. The audit's canonical `[0.0, 0.3, 0.7, 1.0] ×
+    /// 4` example yields 4 temperatures + 4 replicas.
+    #[test]
+    fn parse_temperature_profile_spec_csv() {
+        let spec =
+            TemperatureProfileSpec::parse("provider=foo;temperatures=0.0,0.3,0.7,1.0;replicas=4")
+                .expect("CSV spec must parse");
+        assert_eq!(spec.provider, "foo");
+        assert_eq!(spec.temperatures, vec![0.0, 0.3, 0.7, 1.0]);
+        assert_eq!(spec.replicas_per_temperature, 4);
+    }
+
+    /// PR-D1: a spec missing `provider=` fails cleanly with a
+    /// message that names the missing key (so an operator
+    /// debugging a typo sees exactly what's wrong).
+    #[test]
+    fn parse_temperature_profile_spec_rejects_missing_provider() {
+        let err = TemperatureProfileSpec::parse("temperatures=0.5;replicas=2")
+            .expect_err("missing provider must fail");
+        assert!(
+            err.to_string().contains("missing `provider=<name>`"),
+            "error must name the missing key; got {err:?}"
+        );
+    }
+
+    /// PR-D1: a temperature outside `0.0..=2.0` fails cleanly.
+    /// Pin the band here so a future spec change doesn't
+    /// accidentally accept a 5.0 by mistake.
+    #[test]
+    fn parse_temperature_profile_spec_rejects_out_of_range_temp() {
+        let err = TemperatureProfileSpec::parse("provider=foo;temperatures=2.5;replicas=1")
+            .expect_err("out-of-range temperature must fail");
+        assert!(
+            err.to_string().contains("out of range 0.0..=2.0"),
+            "error must mention the range; got {err:?}"
+        );
+    }
+
+    /// PR-D1: `replicas=0` fails cleanly. The audit's contract is
+    /// `replicas >= 1`; a zero would silently produce an empty
+    /// matrix, which is a footgun.
+    #[test]
+    fn parse_temperature_profile_spec_rejects_zero_replicas() {
+        let err = TemperatureProfileSpec::parse("provider=foo;temperatures=0.5;replicas=0")
+            .expect_err("replicas=0 must fail");
+        assert!(
+            err.to_string().contains("replicas must be >= 1"),
+            "error must explain the floor; got {err:?}"
+        );
+    }
+
+    /// PR-D1: `into_matrix_profile` drops the `provider` key (the
+    /// matrix stores the profile under the provider's model name
+    /// as the map key, not as a field on the profile itself).
+    /// Pin the conversion shape so a future field added to
+    /// `TemperatureProfile` doesn't silently leak the provider
+    /// string into the matrix.
+    #[test]
+    fn parse_temperature_profile_spec_into_matrix_profile() {
+        let spec =
+            TemperatureProfileSpec::parse("provider=minimax-m3;temperatures=0.0,0.7;replicas=3")
+                .expect("spec must parse");
+        let matrix_profile = spec.into_matrix_profile();
+        assert_eq!(matrix_profile.temperatures, vec![0.0, 0.7]);
+        assert_eq!(matrix_profile.replicas_per_temperature, 3);
     }
 }
