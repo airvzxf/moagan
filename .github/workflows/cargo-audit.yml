@@ -35,10 +35,17 @@ jobs:
 
       - name: Run cargo audit (JSON)
         # `--json` writes a stable report to stdout that we capture for the
-        # artifact; `--no-fetch` would skip the advisory DB refresh but we
-        # want the network call to make sure the daily cron is using the
-        # latest data.
-        run: cargo audit --json --no-dev 2>&1 | tee audit.json
+        # artifact. `--no-dev` was removed in cargo-audit 0.21 (May 2024);
+        # we now drop dev-dependency advisories from the JSON via `jq`
+        # (`package.kind == "dev-dependency"` is the discriminator). The
+        # fetch is kept (no `--no-fetch`) so the nightly cron uses the
+        # latest DB.
+        run: |
+          set -o pipefail
+          cargo audit --json 2>&1 \
+            | tee audit.raw.json \
+            | jq '{ vulnerabilities: { found: (.vulnerabilities.found // [] | map(select(.package.kind != "dev-dependency"))), count: (.vulnerabilities.count // 0) } }' \
+            > audit.json
 
       - name: Upload audit report
         if: always()
