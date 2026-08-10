@@ -24,11 +24,14 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
+      interval: "daily"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 5
+    # `versioning-strategy: increase` is the default for github-actions, but
+    # we set it explicitly so a future maintainer doesn't strip it. With this
+    # in place Dependabot only ever proposes bumps within the same major
+    # version, which matches our manual SHA-pinning cadence.
+    versioning-strategy: increase
     labels:
       - "dependencies"
       - "ci"
@@ -52,6 +55,11 @@ updates:
         patterns:
           - "dtolnay/rust-toolchain"
           - "Swatinem/rust-cache"
+      # Split out so `taiki-e/install-action@v2` (no Node-24 release yet)
+      # does not stall the dtolnay/Swatinem batch when only its upstream
+      # has a fresh bump. Tracked in PR-A2.
+      actions-rust-toolchain-only:
+        patterns:
           - "taiki-e/install-action"
       actions-release:
         patterns:

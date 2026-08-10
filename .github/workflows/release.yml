@@ -33,7 +33,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout at ref
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
@@ -84,7 +84,7 @@ jobs:
         # Anchore's sbom-action builds a CycloneDX JSON in-tree. The
         # default 'docker' build-mode would spin Docker; we use 'auto'
         # which detects cargo and produces a Cargo-aware SBOM.
-        uses: anchore/sbom-action@fc46e51fd3cb168ffb36c6d1915723c47db58abb # v0.17.7
+        uses: anchore/sbom-action@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
         with:
           format: cyclonedx-json
           artifact-name: moagan.sbom.cdx.json
@@ -118,7 +118,7 @@ jobs:
           ls -la "$ART_DIR"
 
       - name: Upload bundle for the publisher job
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: moagan-release-bundle
           path: ${{ runner.temp }}/release-artifacts/
@@ -134,7 +134,7 @@ jobs:
       contents: write
     steps:
       - name: Download bundle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: moagan-release-bundle
           path: release/
