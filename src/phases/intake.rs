@@ -413,7 +413,7 @@ impl Phase for IntakePhase {
 /// E10: invoke the `Role::HostilePromptDetector` against the
 /// normalised prompt and translate the wire form into a
 /// [`HostileVerdict`]. The detector is deterministic
-/// (`T=0.0`, `top_p=0.1`, `max_tokens=512`); we still go through
+/// (`T=0.0`, `top_p=0.1`, `max_tokens=1048576`); we still go through
 /// `call_with_retry_parse` so transient transport errors recover
 /// without a separate retry loop in this module. Empty / unknown
 /// verdicts default to `Safe` so a misbehaving model cannot fail

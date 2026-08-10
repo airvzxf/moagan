@@ -134,7 +134,7 @@ run_test "prompt_synthesize_mentions_id_target" \
 # ---------------------------------------------------------------------
 
 run_test "max_tokens_Synthesizer_is_4000" \
-  "grep -B 1 -A 1 'Role::Synthesizer => 4000' ${ROOT}/src/phases/phase.rs"
+  "grep -B 1 -A 1 'Role::Synthesizer => DEFAULT_MAX_TOKENS' ${ROOT}/src/phases/phase.rs"
 
 run_test "temp_Synthesizer_is_0_4" \
   "grep -B 1 -A 1 'Role::Synthesizer => 0.4' ${ROOT}/src/phases/phase.rs"

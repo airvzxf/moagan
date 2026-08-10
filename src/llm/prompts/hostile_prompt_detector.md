@@ -7,7 +7,7 @@ file excerpt, web result) and expects a structured
 `HostilePromptReport` back so the orchestrator can short-circuit
 or quarantine the request.
 
-Sampling: T=0.0, top_p=0.1, max_tokens=512. Fully deterministic
+Sampling: T=0.0, top_p=0.1, max_tokens=1048576. Fully deterministic
 because two detectors running on the same input must agree —
 a flaky detector would cause false negatives in the quarantine
 path. top_p=0.1 keeps the per-token ranking stable without

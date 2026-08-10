@@ -9,6 +9,16 @@ use crate::ids::blake3_hex;
 
 use super::role::Role;
 
+/// Default `max_tokens` ceiling for every role and provider.
+///
+/// Raised from the previous per-role values (512..=32_768) to a single
+/// `1_048_576` (1 MiB) ceiling so prose-heavy roles no longer truncate
+/// mid-thought. The Anthropic-compatible request path uses this number
+/// verbatim; the OpenAI-compat provider additionally clamps to the
+/// per-provider `ProviderConfig::max_tokens`, which by default is also
+/// this constant.
+pub const DEFAULT_MAX_TOKENS: u32 = 1_048_576;
+
 /// Sampling settings registered for an opt-in role.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RoleSettings {
@@ -28,37 +38,37 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
         Role::MergeSynthesizer => Some(RoleSettings {
             temperature: 0.2,
             top_p: 0.7,
-            max_tokens: 4000,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         Role::RecoveryExplainer => Some(RoleSettings {
             temperature: 0.0,
             top_p: 0.1,
-            max_tokens: 1000,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         Role::RationaleExtractor => Some(RoleSettings {
             temperature: 0.2,
             top_p: 0.7,
-            max_tokens: 1500,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         Role::TiefighterCritic => Some(RoleSettings {
             temperature: 0.0,
             top_p: 0.1,
-            max_tokens: 2048,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         Role::PersonaPicker => Some(RoleSettings {
             temperature: 0.3,
             top_p: 0.9,
-            max_tokens: 512,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         Role::AnglePicker => Some(RoleSettings {
             temperature: 0.7,
             top_p: 0.95,
-            max_tokens: 1024,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         // Track H batch-2: tiebreaker for the 3 base judges. Low
@@ -67,7 +77,7 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
         Role::FinalDisagreement => Some(RoleSettings {
             temperature: 0.2,
             top_p: 0.85,
-            max_tokens: 1536,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         // Track H batch-2 (commit 2): LLM re-call for malformed
@@ -78,7 +88,7 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
         Role::JsonRepairV2 => Some(RoleSettings {
             temperature: 0.0,
             top_p: 0.5,
-            max_tokens: 1024,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         // Track H batch-2 (commit 3): prompt-injection guard.
@@ -88,7 +98,7 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
         Role::HostilePromptDetector => Some(RoleSettings {
             temperature: 0.0,
             top_p: 0.1,
-            max_tokens: 512,
+            max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
         _ => None,

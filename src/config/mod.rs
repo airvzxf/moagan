@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
 
@@ -693,7 +694,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         kind: "minimax".to_owned(),
         endpoint: "https://api.minimax.io/anthropic/v1".to_owned(),
         model: model.to_owned(),
-        max_tokens: Some(131072),
+        max_tokens: Some(DEFAULT_MAX_TOKENS),
         temperature: Some(0.6),
         top_p: Some(0.95),
         hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
@@ -710,7 +711,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         kind: "deepseek".to_owned(),
         endpoint: "https://api.deepseek.com/v1".to_owned(),
         model: model.to_owned(),
-        max_tokens: Some(8192),
+        max_tokens: Some(DEFAULT_MAX_TOKENS),
         temperature: Some(0.6),
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
@@ -729,7 +730,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         kind: "opencode_go".to_owned(),
         endpoint: endpoint.to_owned(),
         model: model.to_owned(),
-        max_tokens: Some(8192),
+        max_tokens: Some(DEFAULT_MAX_TOKENS),
         temperature: Some(1.0),
         top_p: Some(0.95),
         hard_incompatibilities: vec![],

@@ -528,13 +528,13 @@ run_test "temp_integrator_is_0_4" \
   "grep -B0 -A20 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => 0.4'"
 
 run_test "max_tokens_tagger_512" \
-  "grep -B0 -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Tagger => 512'"
+  "grep -B0 -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Tagger => DEFAULT_MAX_TOKENS'"
 
 run_test "max_tokens_extractor_3000" \
-  "grep -B0 -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Extractor => 3000'"
+  "grep -B0 -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Extractor => DEFAULT_MAX_TOKENS'"
 
 run_test "max_tokens_integrator_4000" \
-  "grep -B0 -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => 4000'"
+  "grep -B0 -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => DEFAULT_MAX_TOKENS'"
 
 run_test "role_count_is_20" \
   "grep -B0 -A20 'fn all_roles_are_count_twenty' ${ROOT}/src/llm/role.rs | grep -q '20'"

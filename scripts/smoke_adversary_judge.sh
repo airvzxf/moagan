@@ -118,7 +118,7 @@ run_test "role_Adversary_temperature_is_zero" \
   "grep -B 2 -A 1 'Role::Adversary => 0.0' ${ROOT}/src/phases/phase.rs"
 
 run_test "role_Adversary_max_tokens_is_2048" \
-  "grep -B 2 -A 1 'Role::Adversary => 2048' ${ROOT}/src/phases/phase.rs"
+  "grep -B 2 -A 1 'Role::Adversary => DEFAULT_MAX_TOKENS' ${ROOT}/src/phases/phase.rs"
 
 run_test "prompt_judge_adversary_exists" \
   "[[ -f ${ROOT}/src/llm/prompts/judge_adversary.md ]]"
@@ -275,7 +275,7 @@ run_test "D8_adversary_role_temperature_is_zero" \
   "grep -A 2 'Role::Adversary => 0.0' ${ROOT}/src/phases/phase.rs"
 
 run_test "D9_adversary_role_max_tokens_2048" \
-  "grep -A 2 'Role::Adversary => 2048' ${ROOT}/src/phases/phase.rs"
+  "grep -A 2 'Role::Adversary => DEFAULT_MAX_TOKENS' ${ROOT}/src/phases/phase.rs"
 
 run_test "D10_judge_phase_uses_synthesizer_role_for_judges" \
   "grep -q 'Role::Judge' ${ROOT}/src/phases/judge.rs && grep -q 'judges: scores.len' ${ROOT}/src/phases/judge.rs"

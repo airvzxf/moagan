@@ -262,13 +262,13 @@ run_test "temp_clarify_baseline_kept" \
   "grep -A20 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Clarify => 0.0'"
 
 run_test "max_tokens_tagger_512" \
-  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Tagger => 512'"
+  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Tagger => DEFAULT_MAX_TOKENS'"
 
 run_test "max_tokens_extractor_3000" \
-  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Extractor => 3000'"
+  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Extractor => DEFAULT_MAX_TOKENS'"
 
 run_test "max_tokens_integrator_4000" \
-  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => 4000'"
+  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => DEFAULT_MAX_TOKENS'"
 
 run_test "max_tokens_sketch_baseline_kept" \
   "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Sketch => '"
