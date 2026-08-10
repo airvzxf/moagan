@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::cli::Mode;
+use crate::cli::{Mode, flags_batch};
 use crate::config::Config;
 use crate::context::{
     ContextRef, ContextScope, loader as context_loader, resolver as context_resolver,
@@ -229,6 +229,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         opts.prompt.clone(),
         context_block,
         opts.max_parallelism,
+        opts.no_replace_sources,
     )
     .await?;
 
@@ -274,6 +275,7 @@ pub async fn run_full_pipeline(
     raw_prompt: String,
     context_block: Option<String>,
     max_parallelism: Option<usize>,
+    no_replace_sources: bool,
 ) -> Result<Manifest> {
     let run_id = stub.run_id;
     let run_dir = home.run_dir(run_id);
@@ -308,6 +310,9 @@ pub async fn run_full_pipeline(
         enabled_patterns: None,
     };
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
+    if let Some(n) = max_parallelism {
+        flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
+    }
     let parallelism = Parallelism::new(max_parallelism.unwrap_or(cfg.max_parallelism));
 
     let ctx = RunContext::new_with_config(
@@ -340,8 +345,14 @@ pub async fn run_full_pipeline(
 
     // Phase F: synthesis-replacement predicate is ON by default for
     // every mode that runs SynthesizePhase (`standard`/`deep`/`batch`).
-    // `fast` never runs synthesis so the flag is a no-op there.
-    let replace_sources_enabled = !matches!(mode, Mode::Fast);
+    // `fast` never runs synthesis so the flag is a no-op there. The
+    // CLI flag `--no-replace-sources` overrides the per-mode default
+    // so the operator can pin replacement off in non-fast modes
+    // (V4 §5.13 "no sustituye automáticamente"). The computation
+    // lives in [`resolve_replace_sources_enabled`] so unit tests
+    // can pin the full mode × flag matrix without spinning up the
+    // pipeline (DB, telemetry, registry).
+    let replace_sources_enabled = resolve_replace_sources_enabled(mode, no_replace_sources);
     // D.22.1, D.12.5: the deterministic pattern-based adversary
     // pass is opt-in. The CLI flag `--adversary` overrides the
     // per-mode default; `Mode::Deep` enables the pass by default
@@ -596,6 +607,40 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
 /// not come from a spec helper. See [`pipeline_shape`] for the
 /// concrete derivation rule.
 ///
+/// Phase F (`replace_sources_enabled` flag): the synthesis-replacement
+/// predicate is wired into `RankPhase` for every mode that runs
+/// `SynthesizePhase`. `fast` skips synthesis entirely so the flag is
+/// off there; the rest default to ON. The CLI flag
+/// `--no-replace-sources` overrides the per-mode default.
+///
+/// Phase D follow-up (`adversary_enabled` flag): the deterministic
+/// pattern-based adversary pass (`AdversaryPhase`) is opt-in. The
+/// CLI flag `--adversary` overrides the per-mode default; `deep`
+/// enables it automatically because it is the only mode where the
+/// seven-pattern cost is amortised across a meaningful judge
+/// panel. The phase writes `rankings/adversary_report.json` with
+/// one section per [`AdversaryPattern`].
+///
+/// Compute whether Phase F (synthesis-replacement) should run for
+/// this `mode` given the operator's `--no-replace-sources`
+/// preference. Extracted into a `pub(crate)` helper so the unit
+/// tests in this module can pin the full mode × flag matrix
+/// without spinning up the rest of the pipeline (DB, telemetry,
+/// registry). The semantics are:
+///
+/// - `fast` / `explore`: replacement OFF regardless of the flag
+///   (these modes never run `SynthesizePhase`, so the predicate
+///   has nothing to gate).
+/// - `standard` / `deep` / `batch`: replacement ON by default;
+///   `--no-replace-sources` flips it OFF (V4 §5.13 "no sustituye
+///   automáticamente").
+pub(crate) fn resolve_replace_sources_enabled(mode: Mode, no_replace_sources: bool) -> bool {
+    if matches!(mode, Mode::Fast | Mode::Explore) {
+        return false;
+    }
+    !no_replace_sources
+}
+
 /// Phase F (`replace_sources_enabled` flag): the synthesis-replacement
 /// predicate is wired into `RankPhase` for every mode that runs
 /// `SynthesizePhase`. `fast` skips synthesis entirely so the flag is
@@ -1054,6 +1099,91 @@ mod tests {
         assert_eq!(
             fast_after.proposals, 4,
             "profile quorum override must not touch the cardinality-driven proposal count"
+        );
+    }
+
+    /// PR-B1 (B1.1): the `--no-replace-sources` flag must actually
+    /// disable the synthesis-replacement predicate. Previously the
+    /// flag was parsed but ignored — `run_full_pipeline` computed
+    /// `replace_sources_enabled = !matches!(mode, Mode::Fast)` from
+    /// the mode alone. With the wire-up, the operator-supplied
+    /// `no_replace_sources` value short-circuits the per-mode
+    /// default. Pin the full matrix so a future refactor cannot
+    /// silently drop the flag again.
+    #[test]
+    fn no_replace_sources_disables_replacement_in_non_fast_modes() {
+        assert!(
+            !resolve_replace_sources_enabled(Mode::Standard, true),
+            "--no-replace-sources must disable replacement even in `standard`"
+        );
+        assert!(
+            !resolve_replace_sources_enabled(Mode::Deep, true),
+            "--no-replace-sources must disable replacement even in `deep`"
+        );
+        assert!(
+            !resolve_replace_sources_enabled(Mode::Batch, true),
+            "--no-replace-sources must disable replacement even in `batch`"
+        );
+    }
+
+    /// PR-B1 (B1.1): without the flag the per-mode default
+    /// (`fast/explore → off`, `standard/deep/batch → on`) is
+    /// preserved verbatim. This pins backward-compat for every
+    /// existing invocation that never passed
+    /// `--no-replace-sources`.
+    #[test]
+    fn no_replace_sources_default_preserves_per_mode_wiring() {
+        assert!(
+            !resolve_replace_sources_enabled(Mode::Fast, false),
+            "fast never runs synthesis so replacement stays off"
+        );
+        assert!(
+            !resolve_replace_sources_enabled(Mode::Explore, false),
+            "explore ends at sketches so replacement stays off"
+        );
+        assert!(
+            resolve_replace_sources_enabled(Mode::Standard, false),
+            "standard's default is replacement ON"
+        );
+        assert!(
+            resolve_replace_sources_enabled(Mode::Deep, false),
+            "deep's default is replacement ON"
+        );
+        assert!(
+            resolve_replace_sources_enabled(Mode::Batch, false),
+            "batch's default is replacement ON"
+        );
+    }
+
+    /// PR-B1 (B1.4): `--max-parallelism` is validated up-front
+    /// (D.15.5: hard cap 64 simultaneous LLM calls). The helper
+    /// in `flags_batch.rs` is the source of truth for the
+    /// message — pin its contract here so a future tweak to
+    /// either the helper or the cheatsheet does not silently
+    /// drift the user-facing error string.
+    #[test]
+    fn max_parallelism_helper_accepts_cap_and_below() {
+        assert!(flags_batch::validate_max_parallelism(64).is_ok());
+        assert!(flags_batch::validate_max_parallelism(1).is_ok());
+        assert!(flags_batch::validate_max_parallelism(0).is_ok());
+    }
+
+    /// PR-B1 (B1.4): values above the cap must surface the
+    /// documented `exceeds maximum 64` message so CI scripts can
+    /// grep for it. The dispatcher wraps the helper's `String`
+    /// into `Error::InvalidArgs` (exit 2 per the cheatsheet §1
+    /// error matrix).
+    #[test]
+    fn max_parallelism_helper_rejects_above_cap_with_clear_message() {
+        let err = flags_batch::validate_max_parallelism(65).expect_err("must error");
+        assert!(
+            err.contains("exceeds maximum 64"),
+            "error must mention the cap; got {err:?}"
+        );
+        let err = flags_batch::validate_max_parallelism(4096).expect_err("must error");
+        assert!(
+            err.contains("exceeds maximum 64"),
+            "error must mention the cap; got {err:?}"
         );
     }
 }
