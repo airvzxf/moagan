@@ -26,6 +26,7 @@ use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
+use crate::llm::response_format_opt_out::render_system_prompt_with_prefix;
 use crate::llm::{ProviderRegistry, Request, Response, Role};
 use crate::telemetry::{Telemetry, WarningContext};
 
@@ -425,6 +426,14 @@ impl RunContext {
             .get(&self.default_provider)
             .map(|s| (s.temperature, s.top_p))
             .unwrap_or((None, None));
+        // PR-C6: for the static opt-out models (e.g. `glm-5.1`,
+        // `kimi-k2.6`) the upstream `response_format: json_object`
+        // flag is ignored, so the JSON contract rides entirely on
+        // the prompt. Prepend a strong `CRITICAL OUTPUT CONTRACT`
+        // header to the role's normal system prompt; non-stubborn
+        // models get the role's prompt byte-for-byte (zero
+        // behaviour change for the other ~15 providers).
+        let system = render_system_prompt_with_prefix(&role, &self.default_model, &system);
         let req = Request {
             role,
             model: self.default_model.clone(),
@@ -493,6 +502,12 @@ impl RunContext {
             .get(&self.default_provider)
             .map(|s| (s.temperature, s.top_p))
             .unwrap_or((None, None));
+        // PR-C6: mirror the prefix injection from `call_with_retry`
+        // so the parse-failure retry path (which bypasses the
+        // cache) sends the same prompt as the original call. Without
+        // this, retries against stubborn models would silently
+        // re-emit the model-breaking output.
+        let system = render_system_prompt_with_prefix(&role, &self.default_model, &system);
         let req = Request {
             role,
             model: self.default_model.clone(),
