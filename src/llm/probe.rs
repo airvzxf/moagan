@@ -238,9 +238,16 @@ pub async fn detect_max_tokens(
         hi = MAX_AUTOPROBE_CEILING;
     }
 
-    // Phase 2: tighten with 20-point parallel batches.
+    // Phase 2: tighten with 20-point parallel batches. The user's
+    // algorithm spec is "sum 1 to the successful value, subtract 1
+    // from the failed value" so we search in (lo, hi). The
+    // discovered value is the largest accepted value found by
+    // Phase 2 — if Phase 2 confirms everything above `lo` is
+    // rejected, the discovered value falls back to `lo` itself
+    // (Phase 1's last accepted).
     let mut lo_strict = lo.saturating_add(1);
     let mut hi_strict = hi.saturating_sub(1);
+    let mut phase2_accepted = false;
     for _round in 0..32 {
         if lo_strict >= hi_strict || hi_strict == 0 {
             break;
@@ -255,7 +262,10 @@ pub async fn detect_max_tokens(
         let mut new_hi = hi_strict;
         for (pt, outcome) in points.iter().zip(results.iter()) {
             match outcome {
-                ProbeOutcome::Accepted => new_lo = *pt,
+                ProbeOutcome::Accepted => {
+                    new_lo = *pt;
+                    phase2_accepted = true;
+                }
                 _ => {
                     new_hi = pt.saturating_sub(1);
                     break;
@@ -269,16 +279,13 @@ pub async fn detect_max_tokens(
         hi_strict = new_hi;
     }
 
-    let discovered = lo.max(lo_strict);
-    let clamped = discovered
-        .max(floor.max(MIN_AUTOPROBE_FLOOR))
-        .min(MAX_AUTOPROBE_CEILING);
-    if clamped < MIN_AUTOPROBE_FLOOR {
+    let discovered = if phase2_accepted { lo_strict } else { lo };
+    if discovered < MIN_AUTOPROBE_FLOOR {
         return Err(Error::Provider(format!(
-            "auto-probe failed to discover a usable max_tokens (got {clamped}); provider likely rejected every probe"
+            "auto-probe failed to discover a usable max_tokens (got {discovered}); provider likely rejected every probe"
         )));
     }
-    Ok(clamped)
+    Ok(discovered.max(floor).min(MAX_AUTOPROBE_CEILING))
 }
 
 /// 20-point parallel fan-out. Each point runs its own probe against
