@@ -740,6 +740,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         top_p: Some(0.95),
         hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
         omit_max_tokens: false,
+        plan: None,
     };
     m.insert("minimax".to_owned(), make_minimax("MiniMax-M3"));
     m.insert("minimax-m3".to_owned(), make_minimax("MiniMax-M3"));
@@ -758,6 +759,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
         omit_max_tokens: false,
+        plan: None,
     };
     m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
     // OpenCode Go models per the 2026-08-04 operator roster. The
@@ -788,6 +790,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
         omit_max_tokens: false,
+        plan: None,
     };
     // All 18 OpenCode Go providers share the same base URL. The
     // dispatcher (`OpenCodeGoProvider::new`) appends the model-specific
@@ -870,6 +873,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         },
     );
     m
@@ -966,6 +970,42 @@ pub struct ProviderConfig {
     /// with all providers that DO accept the field.
     #[serde(default)]
     pub omit_max_tokens: bool,
+    /// Optional token-plan declaration read by `moagan telemetry plan`.
+    /// When set, the subcommand can compute a consumed-ratio against
+    /// `limit_tokens` over a rolling `window_days` window derived from
+    /// the `calls` table. Adding this field is purely additive: existing
+    /// TOML files without a `[providers.X].plan` block continue to
+    /// deserialise (the field is `Option<…>` and serde-defaults to
+    /// `None`). The structured form (vs. the bare `plan_id = "weekly"`
+    /// example in `docs/proposal-03-add-ons.md` §D.19.3) keeps the
+    /// window length and the limit on the same struct so a CLI flag
+    /// like `--window-days` can fall back to the per-provider value
+    /// when the operator leaves the global default untouched.
+    #[serde(default)]
+    pub plan: Option<PlanConfig>,
+}
+
+/// Token-plan declaration attached to a [`ProviderConfig`]. Powers the
+/// quota view in `moagan telemetry plan` and is a strict superset of
+/// the `plan_id` snippet in `docs/proposal-03-add-ons.md` §D.19.3.
+/// Every field is optional so a partially-filled TOML block (e.g.
+/// `plan = { plan_id = "weekly" }` with no limit) still deserialises
+/// without forcing the operator to spell out every knob up front.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanConfig {
+    /// Human-readable plan id (e.g. `"weekly"`, `"monthly"`). Echoed
+    /// verbatim in the `moagan telemetry plan` output; not used for
+    /// arithmetic.
+    pub plan_id: Option<String>,
+    /// Hard cap on tokens consumed inside the rolling window. `None`
+    /// means "no quota configured" — the subcommand still prints the
+    /// observed usage but skips the consumed-ratio column.
+    pub limit_tokens: Option<u64>,
+    /// Length of the rolling window in days. The subcommand default
+    /// is `7`; setting this on the provider lets an operator pin a
+    /// monthly plan to `30` without a CLI override.
+    pub window_days: Option<u32>,
 }
 
 impl Default for ProviderConfig {
@@ -979,6 +1019,7 @@ impl Default for ProviderConfig {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         }
     }
 }

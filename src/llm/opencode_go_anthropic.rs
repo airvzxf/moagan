@@ -446,6 +446,7 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -496,6 +497,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -515,6 +517,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -534,6 +537,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         );
@@ -554,6 +558,7 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         });
         assert!(matches!(result, Err(Error::InvalidApiKey(_))));
     }
@@ -594,6 +599,7 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -671,6 +677,7 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )

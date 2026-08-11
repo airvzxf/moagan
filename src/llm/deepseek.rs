@@ -100,6 +100,7 @@ mod tests {
             top_p: Some(0.95),
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         }
     }
 

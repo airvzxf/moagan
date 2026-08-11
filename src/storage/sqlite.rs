@@ -1251,6 +1251,46 @@ pub struct ProviderUsageRow {
     pub last_call_unix: Option<i64>,
 }
 
+/// One row from the rolling-window aggregation in
+/// [`Db::aggregate_window_usage`]. Distinct from
+/// [`ProviderUsageRow`] because the source is the per-call `calls`
+/// table (filtered by `started_unix`), not the per-run `provider_usage`
+/// rollup table — `aggregate_provider_usage` returns the latter.
+/// Powers `moagan telemetry plan`'s quota view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowUsageRow {
+    /// Provider name as recorded on the `calls` row (e.g.
+    /// `"minimax"`, `"opencode_go"`).
+    pub provider: String,
+    /// Model name as recorded on the `calls` row.
+    pub model: String,
+    /// Number of calls in the window for this `(provider, model)`.
+    pub call_count: i64,
+    /// Sum of `input_tokens + output_tokens` for every call in the
+    /// window. Computed in SQL because the `calls` table does not
+    /// carry a `total_tokens` column (see v001_initial.sql).
+    pub total_tokens: i64,
+    /// Count of calls whose `status` is `'error'`. The `status`
+    /// column is populated by v003 (`call_status` derives the value
+    /// from `http_status` + `error`); rows that pre-date v003 carry
+    /// `'unknown'` and are intentionally NOT counted here so the
+    /// ratio matches the post-v003 semantics.
+    pub error_count: i64,
+    /// Tokens served from cache (`cache_hit = 1`), counted as
+    /// `input_tokens + output_tokens` for each cache-hit row. This
+    /// is the "free" slice of the consumed tokens; the
+    /// `moagan telemetry plan` formatter prints it alongside the
+    /// raw total so the operator can see what the cache saved.
+    pub cached_tokens: i64,
+    /// Earliest `started_unix` for this `(provider, model)` in the
+    /// window. `None` only when the row would be empty, which the
+    /// `GROUP BY` filter prevents.
+    pub first_call_unix: Option<i64>,
+    /// Latest `started_unix` for this `(provider, model)` in the
+    /// window.
+    pub last_call_unix: Option<i64>,
+}
+
 /// One row from `phases` for the dashboard's per-phase view. The
 /// dashboard normalises three events per phase (start / end / error)
 /// into a single row carrying the final status and the derived
@@ -1426,6 +1466,70 @@ impl Db {
                     output_tokens: r.get(4)?,
                     cache_read: r.get(5)?,
                     cache_creation: r.get(6)?,
+                    last_call_unix: r.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Rolling-window aggregation over the per-call `calls` table.
+    /// Distinct from [`Self::aggregate_provider_usage`] (which reads
+    /// the per-run `provider_usage` rollup): this one returns the
+    /// live call-by-call truth for the last `window_days` days,
+    /// optionally filtered to a single provider. The output is the
+    /// source of truth for `moagan telemetry plan`'s quota view —
+    /// the `provider_usage` rollup is per-run and would double-count
+    /// across the same operator's sessions.
+    ///
+    /// The query:
+    /// - filters by `started_unix >= now - window_days * 86_400`
+    ///   (cutoff computed in Rust because rusqlite has no portable
+    ///   datetime arithmetic and the column is INTEGER unix seconds,
+    ///   not TEXT);
+    /// - optionally narrows to one provider via the
+    ///   `(?1 IS NULL OR provider = ?2)` predicate (the two slots are
+    ///   bound to the same `Option<&str>` so `None` collapses to a
+    ///   no-op filter via `NULL OR X = NULL`-equivalent short-circuit);
+    /// - groups by `(provider, model)` and orders by the SQL-computed
+    ///   total descending so the biggest consumers come first.
+    ///
+    /// Empty result (zero rows) on a fresh DB is **not** an error —
+    /// the caller decides whether to print "(no calls in the window)"
+    /// or surface exit 1.
+    pub fn aggregate_window_usage(
+        &self,
+        window_days: u32,
+        provider_filter: Option<&str>,
+    ) -> Result<Vec<WindowUsageRow>> {
+        let conn = self.pool.get()?;
+        let now = crate::time::now_unix_secs();
+        let days = i64::from(window_days);
+        let cutoff = now.saturating_sub(days.saturating_mul(86_400));
+        let mut stmt = conn.prepare(
+            "SELECT provider, model, \
+                    COUNT(*), \
+                    COALESCE(SUM(input_tokens + output_tokens), 0), \
+                    COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN cache_hit = 1 THEN (input_tokens + output_tokens) ELSE 0 END), 0), \
+                    MIN(started_unix), \
+                    MAX(started_unix) \
+             FROM calls \
+             WHERE started_unix >= ?1 \
+               AND (?2 IS NULL OR provider = ?2) \
+             GROUP BY provider, model \
+             ORDER BY SUM(input_tokens + output_tokens) DESC, provider ASC, model ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![cutoff, provider_filter], |r| {
+                Ok(WindowUsageRow {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    call_count: r.get(2)?,
+                    total_tokens: r.get(3)?,
+                    error_count: r.get(4)?,
+                    cached_tokens: r.get(5)?,
+                    first_call_unix: r.get(6)?,
                     last_call_unix: r.get(7)?,
                 })
             })?
@@ -3889,5 +3993,218 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    // -----------------------------------------------------------------
+    // `moagan telemetry plan` aggregation (`aggregate_window_usage`)
+    // -----------------------------------------------------------------
+
+    /// Seed helper: insert one `calls` row at `started_unix` with the
+    /// given status. Pass `error` for an HTTP 500-style error row,
+    /// `None` for an OK row. Returns the run id so multiple calls in
+    /// the same run can share state (real `calls` rows always have a
+    /// parent `runs` row, per the FK declared in v001_initial.sql).
+    fn seed_call(
+        db: &Db,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_hit: bool,
+        started_unix: i64,
+        error: Option<&str>,
+    ) -> RunId {
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.6.0", None, None, None)
+            .unwrap();
+        let http_status = if error.is_some() {
+            Some(500)
+        } else {
+            Some(200)
+        };
+        let call_id = format!(
+            "c-{}-{}-{}",
+            provider,
+            started_unix,
+            crate::time::now_unix_secs()
+        );
+        db.record_call(
+            &call_id,
+            run_id,
+            "intake",
+            "intake",
+            provider,
+            model,
+            "cache-key",
+            None,
+            cache_hit,
+            http_status,
+            input_tokens,
+            output_tokens,
+            0,
+            0,
+            started_unix,
+            started_unix + 1,
+            error,
+            0,
+        )
+        .unwrap();
+        run_id
+    }
+
+    /// Fresh DB → empty result. The query must short-circuit to
+    /// zero rows (not error) so the CLI can print "(no calls in the
+    /// last N day(s))" and exit 1.
+    #[test]
+    fn aggregate_window_usage_returns_zero_rows_on_empty_db() {
+        let db = temp_db();
+        let rows = db.aggregate_window_usage(7, None).unwrap();
+        assert!(rows.is_empty(), "fresh DB must return zero rows");
+    }
+
+    /// Three rows on two `(provider, model)` groups → two output rows
+    /// with the right call_count, total_tokens, and error_count. The
+    /// query groups by `(provider, model)` so a provider with two
+    /// models surfaces as two rows (which the `moagan telemetry plan`
+    /// printer relies on).
+    #[test]
+    fn aggregate_window_usage_groups_by_provider_and_model() {
+        let db = temp_db();
+        let now = crate::time::now_unix_secs();
+        // Two calls on (minimax-m3, MiniMax-M3): 100+50 + 200+100 = 450 tokens.
+        seed_call(&db, "minimax", "MiniMax-M3", 100, 50, false, now - 60, None);
+        seed_call(
+            &db,
+            "minimax",
+            "MiniMax-M3",
+            200,
+            100,
+            false,
+            now - 30,
+            None,
+        );
+        // One call on (opencode_go, deepseek-v4-flash): 80+20 = 100 tokens.
+        seed_call(
+            &db,
+            "opencode_go",
+            "deepseek-v4-flash",
+            80,
+            20,
+            false,
+            now - 20,
+            None,
+        );
+
+        let rows = db.aggregate_window_usage(7, None).unwrap();
+        assert_eq!(rows.len(), 2, "two distinct (provider, model) groups");
+
+        // Sorted by `total_tokens DESC` so the heavier consumer
+        // (`minimax / MiniMax-M3` at 450) comes first.
+        let first = &rows[0];
+        assert_eq!(first.provider, "minimax");
+        assert_eq!(first.model, "MiniMax-M3");
+        assert_eq!(first.call_count, 2);
+        assert_eq!(first.total_tokens, 450);
+        assert_eq!(first.error_count, 0);
+
+        let second = &rows[1];
+        assert_eq!(second.provider, "opencode_go");
+        assert_eq!(second.model, "deepseek-v4-flash");
+        assert_eq!(second.call_count, 1);
+        assert_eq!(second.total_tokens, 100);
+    }
+
+    /// The `provider_filter = Some(_)` argument narrows the result to
+    /// one provider. Asserts 1 row even when 3 calls on the matching
+    /// provider exist (they collapse into one GROUP BY row).
+    #[test]
+    fn aggregate_window_usage_filters_by_provider() {
+        let db = temp_db();
+        let now = crate::time::now_unix_secs();
+        for offset in [60, 30, 10] {
+            seed_call(
+                &db,
+                "minimax",
+                "MiniMax-M3",
+                10,
+                5,
+                false,
+                now - offset,
+                None,
+            );
+        }
+        seed_call(&db, "kimi-k3", "kimi-k3", 100, 100, false, now - 15, None);
+
+        let rows = db.aggregate_window_usage(7, Some("minimax")).unwrap();
+        assert_eq!(rows.len(), 1, "filter must drop the kimi row");
+        assert_eq!(rows[0].provider, "minimax");
+        assert_eq!(rows[0].call_count, 3);
+        assert_eq!(rows[0].total_tokens, 45); // (10+5) * 3 = 45
+
+        // And `None` shows everything.
+        let all = db.aggregate_window_usage(7, None).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    /// A call whose `started_unix` lands outside the window must be
+    /// filtered out. This is the load-bearing invariant for the
+    /// "rolling 7-day" semantics the subcommand advertises.
+    #[test]
+    fn aggregate_window_usage_respects_window_days() {
+        let db = temp_db();
+        let now = crate::time::now_unix_secs();
+        let thirty_days_ago = now - (30_i64 * 86_400);
+        seed_call(
+            &db,
+            "minimax",
+            "MiniMax-M3",
+            100,
+            50,
+            false,
+            thirty_days_ago,
+            None,
+        );
+
+        // 7-day window drops the 30-day-old row.
+        let rows = db.aggregate_window_usage(7, None).unwrap();
+        assert!(rows.is_empty(), "30-day-old row must be filtered out");
+
+        // 60-day window keeps it.
+        let rows = db.aggregate_window_usage(60, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].total_tokens, 150);
+    }
+
+    /// `status = 'error'` rows contribute to `error_count`. The
+    /// `call_status` helper derives this from `http_status` (or
+    /// `error` text), so we exercise both paths in the same test
+    /// (`Some(500)` for the first error, `error = Some("schema
+    /// violation")` for the second) to make sure the SQL `status`
+    /// column lands in `'error'` regardless of which input triggered
+    /// it.
+    #[test]
+    fn aggregate_window_usage_counts_errors() {
+        let db = temp_db();
+        let now = crate::time::now_unix_secs();
+        // Two OK calls on the same (provider, model).
+        seed_call(&db, "minimax", "MiniMax-M3", 10, 5, false, now - 60, None);
+        seed_call(&db, "minimax", "MiniMax-M3", 20, 10, false, now - 30, None);
+        // One error call on the same group.
+        seed_call(
+            &db,
+            "minimax",
+            "MiniMax-M3",
+            5,
+            0,
+            false,
+            now - 20,
+            Some("schema violation"),
+        );
+
+        let rows = db.aggregate_window_usage(7, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].call_count, 3);
+        assert_eq!(rows[0].error_count, 1, "exactly one error in the group");
+        assert_eq!(rows[0].total_tokens, 50); // (10+5)+(20+10)+(5+0)
     }
 }

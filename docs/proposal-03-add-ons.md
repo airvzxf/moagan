@@ -2824,6 +2824,22 @@ plan_id = "monthly"
 
 (Inspirado en T08-01 §6.2; T02-07 §2.1; T08-03 §5.8.)
 
+> **Estado (v0.6, ✅ lifted en `moagan telemetry plan`):** el snippet
+> `plan_id = "weekly"` de arriba es solo un marcador textual en este
+> catálogo. La superficie real que `moagan telemetry plan` consume
+> vive en `ProviderConfig::plan: Option<PlanConfig>` (`src/config/mod.rs`)
+> y requiere la forma estructurada
+> `[providers.X.plan] plan_id = "weekly"; limit_tokens = 1_000_000;
+> window_days = 7`. La nueva sub-fase añade el campo como aditivo
+> (`#[serde(default)]`), así que los TOML existentes sin bloque
+> `plan = …` siguen deserializando con `plan: None` y la sub-fase
+> omite la columna de ratio sin tocar el resto de la salida. El
+> agregador vive en `Db::aggregate_window_usage`
+> (`src/storage/sqlite.rs`) y consulta la tabla `calls` (no la
+> rollup `provider_usage`) para evitar el doble conteo entre runs.
+> El plan B (fetch remoto desde `/v1/usage`, §D.19.8) sigue
+> pendiente y se mantiene independiente de esta vista local.
+
 #### D.19.4. `PlanTracker` con `state: parking_lot::Mutex<HashMap<PlanId, PlanState>>`
 
 ```rust
