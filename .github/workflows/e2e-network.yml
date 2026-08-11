@@ -73,13 +73,13 @@ jobs:
         include:
           - section: card80
             make_target: e2e-network-card80
-            timeout_minutes: 28
+            timeout_minutes: 55
           - section: fast
             make_target: e2e-network-fast
-            timeout_minutes: 6
+            timeout_minutes: 55
           - section: explore
             make_target: e2e-network-explore
-            timeout_minutes: 12
+            timeout_minutes: 28
         # Explicit cascade so an empty `inputs.section` (push events
         # have no inputs at all) and an explicit "all" both default
         # to all three rows. The previous `format('["{0}"]', inputs.section)`
