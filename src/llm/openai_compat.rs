@@ -398,6 +398,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -435,6 +436,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -489,6 +491,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -730,6 +733,7 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
                 Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
@@ -782,6 +786,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -806,6 +811,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
             Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),

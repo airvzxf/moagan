@@ -534,6 +534,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -553,6 +554,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -574,6 +576,7 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         });
         assert!(matches!(result, Err(Error::InvalidApiKey(_))));
     }
@@ -610,6 +613,7 @@ data: [DONE]\n\n";
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -668,6 +672,7 @@ data: {not json}\n\n";
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -725,6 +730,7 @@ data: {not json}\n\n";
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -800,6 +806,7 @@ data: [DONE]\n\n";
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -855,6 +862,7 @@ data: [DONE]\n\n",
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -913,6 +921,7 @@ data: [DONE]\n\n",
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: true,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -975,6 +984,7 @@ data: [DONE]\n\n",
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -1050,6 +1060,7 @@ data: [DONE]\n\n",
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )
@@ -1117,6 +1128,7 @@ data: [DONE]\n\n",
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 SecretString::new("dummy".into()),
             )

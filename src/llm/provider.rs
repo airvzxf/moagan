@@ -692,6 +692,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
         );
         cfg.insert(
@@ -705,6 +706,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
         );
         let r = registry_from_config(&cfg, &CircuitBreakerConfig::default()).unwrap();
@@ -732,6 +734,7 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
         );
         let r = registry_from_config(&cfg, &CircuitBreakerConfig::default()).unwrap();
@@ -830,6 +833,7 @@ mod tests {
                 top_p: Some(0.95),
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                plan: None,
             },
         );
         let result = registry_from_config(&cfg, &CircuitBreakerConfig::default());
@@ -959,6 +963,7 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         };
         let minimax = MinimaxProvider::new(&spec, crate::secret::SecretString::new("dummy".into()))
             .unwrap()
@@ -1189,6 +1194,7 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         };
         let minimax =
             MinimaxProvider::new(&cfg, crate::secret::SecretString::new("dummy".into())).unwrap();
@@ -1206,6 +1212,7 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         };
         let deepseek =
             DeepSeekProvider::new(&cfg_d, crate::secret::SecretString::new("dummy".into()))
@@ -1224,6 +1231,7 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            plan: None,
         };
         let oc_a = OpenCodeGoAnthropicProvider::new(
             &cfg_oc,
@@ -1303,6 +1311,7 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
             )
@@ -1325,6 +1334,7 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
             )
@@ -1347,6 +1357,7 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
             )

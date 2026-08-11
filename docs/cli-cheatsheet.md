@@ -844,7 +844,7 @@ If you set the same provider both ways, the CLI flag wins (see `src/cli/discover
 
 ## 15. `moagan telemetry`
 
-**👁 What it is** — Read-only inspection and export of telemetry. **`list`** (improved alias of inspect), **`summary`** (totals + per phase + per model), **`compare`** (diff between two runs), **`provider`** (configured plans + recent usage), **`view`** (local HTTP dashboard), **`export`** (bundle the run as `tar.gz` / `tar` / `zip` / `tar.zst` + SHA256SUMS), **`cleanup`** (apply retention), **`verify`** (re-hash against SHA256SUMS), **`config`** (print effective config without filtering API keys).
+**👁 What it is** — Read-only inspection and export of telemetry. **`list`** (improved alias of inspect), **`summary`** (totals + per phase + per model), **`compare`** (diff between two runs), **`provider`** (configured plans + recent usage), **`view`** (local HTTP dashboard), **`export`** (bundle the run as `tar.gz` / `tar` / `zip` / `tar.zst` + SHA256SUMS), **`cleanup`** (apply retention), **`verify`** (re-hash against SHA256SUMS), **`config`** (print effective config without filtering API keys), **`plan`** (rolling-window quota view aggregated from `calls.total_tokens` per provider × model).
 
 ### 15.1 `moagan telemetry list`
 
@@ -938,7 +938,44 @@ If you set the same provider both ways, the CLI flag wins (see `src/cli/discover
 
 **⚙️ Internal flow** — `Config::load()` → println in blocks (providers, parallelism, timeouts, privacy, stability, export, gate, server, retention, default_provider). **Never** prints API keys (`SecretString` values do not leave the registry).
 
-**❌ Errors `telemetry`** — DB won't open → `Io` (8) / `Provider("sqlite: ...")` (40); `run_id` malformed → `InvalidArgs` (2); run not found → `InvalidState` (80); export verify mismatch → `InvalidState` (80) or `ExportVerificationFailed` (90).
+### 15.10 `moagan telemetry plan [<provider>] [--window-days N]`
+
+**👁 What it is** — Rolling-window quota view aggregated from the per-call `calls` table (T01-06 §2.1). Distinct from `provider --plan` (which drills into one provider's per-run rollup); this subcommand answers "how much of my token plan have I consumed in the last N days?" for every configured provider at once. When a provider declares `[providers.X].plan = { plan_id = "weekly", limit_tokens = 1_000_000, window_days = 7 }` the row also renders a `used / limit (pct%)` ratio so the operator can spot near-exhaustion at a glance.
+
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| `<provider>` (positional) not in config | ignored by the row lookup; the row still prints with `(no plan)` if no entry matches `(kind, model)` |
+| `<provider>` (positional) in config | the row uses that provider's `plan` block; its `window_days` (when set) overrides `--window-days` |
+| `--window-days N` with `N = 0` | `InvalidArgs` |
+| no calls in the window | prints `(no calls in the last N day(s))` and exits `1` |
+| some calls in the window | prints the table + a `(N row(s) over the last M day(s))` footer; exits `0` |
+
+**⚙️ Internal flow** — `Config::load()` (best-effort) → `Db::open` → `db.aggregate_window_usage(window_days, provider_filter)` (SQL: `SELECT provider, model, COUNT(*), SUM(input_tokens+output_tokens), SUM(CASE WHEN status='error' THEN 1 ELSE 0 END), SUM(CASE WHEN cache_hit=1 THEN (input_tokens+output_tokens) ELSE 0 END), MIN/MAX(started_unix) FROM calls WHERE started_unix >= ? GROUP BY provider, model ORDER BY total_tokens DESC`) → `format_row(row, plan, window_days)` per row. The cutoff is `now - window_days * 86_400` (computed in Rust because `started_unix` is INTEGER, not TEXT).
+
+```text
+$ moagan telemetry plan --window-days 7
+provider       model              plan       usage                          calls=N err=N cached=…k window=Nd
+minimax        [MiniMax-M3]       weekly     624,000 / 1,000,000 (62.4%)    200    2    12k          7d
+mock           [mock-model]       (no plan)  1,234                          50     0    0            7d
+(2 row(s) over the last 7 day(s))
+```
+
+TOML shape (additive; existing files without `[providers.X].plan` continue to work):
+
+```toml
+[providers.minimax]
+endpoint = "https://api.minimax.io/anthropic/v1"
+model    = "MiniMax-M3"
+
+[providers.minimax.plan]
+plan_id      = "weekly"
+limit_tokens = 1_000_000
+window_days  = 7
+```
+
+**❌ Errors `telemetry`** — DB won't open → `Io` (8) / `Provider("sqlite: ...")` (40); `run_id` malformed → `InvalidArgs` (2); run not found → `InvalidState` (80); export verify mismatch → `InvalidState` (80) or `ExportVerificationFailed` (90); plan window with `--window-days 0` → `InvalidArgs` (2); plan with no calls in window → exit `1` (no error).
 
 ---
 
@@ -1117,6 +1154,7 @@ cli::dispatch → Cmd::Rate → rate::run(RateArgs { run_id, proposal_id, score 
 | `moagan telemetry summary` | Per-run aggregates (tokens, calls, by-phase, by-model) |
 | `moagan telemetry compare` | Diff two runs (baseline 11 metrics) |
 | `moagan telemetry provider` | Provider plans + recent per-provider usage |
+| `moagan telemetry plan` | Rolling-window quota view (calls + tokens + errors + cache + plan ratio) |
 | `moagan telemetry view` | Read-only HTTP dashboard on `127.0.0.1:<port>` |
 | `moagan telemetry export` | Bundle a run as `tar.gz` / `tar` / `zip` / `tar.zst` + SHA256SUMS |
 | `moagan telemetry cleanup` | Apply retention policy |

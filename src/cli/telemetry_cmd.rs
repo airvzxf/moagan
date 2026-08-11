@@ -132,6 +132,31 @@ pub enum TelemetryCmd {
         #[arg(long)]
         runs_dir: Option<std::path::PathBuf>,
     },
+    /// `moagan telemetry plan [<provider>] [--window-days N]`.
+    ///
+    /// Rolling-window quota view aggregated from the per-call
+    /// `calls` table (T01-06 §2.1). Distinct from `provider --plan`,
+    /// which drills into one provider's per-run rollup; this subcommand
+    /// answers "how much of my token plan have I consumed in the
+    /// last N days?" for every configured provider at once.
+    ///
+    /// Exit semantics: 0 when at least one call lands in the window,
+    /// 1 when the window is empty (mirrors the `moagan validate`
+    /// "no FAIL → 0, anything to report → 1" convention).
+    Plan {
+        /// Optional override for `MOAGAN_HOME`.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Optional provider filter (must match a key in
+        /// `[providers]`). When `None`, every provider is aggregated.
+        #[arg(value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// Length of the rolling window in days. The CLI default is
+        /// `7`; a `[providers.X].plan.window_days` override on the
+        /// (single) filtered provider also wins when set.
+        #[arg(long, default_value_t = 7)]
+        window_days: u32,
+    },
 }
 
 /// Export level. Mirrors T01-06 §10.9 + V4 §9.1.
@@ -219,6 +244,13 @@ impl TelemetryCmd {
             Self::Cleanup { .. } => cleanup::run(&self).map(|_| 0),
             Self::Verify { .. } => verify::run(&self).map(|_| 0),
             Self::Config { .. } => config::run(&self).map(|_| 0),
+            // `plan` is the only subcommand that needs to surface a
+            // non-zero exit code on the happy path (the window is
+            // empty) so the operator's shell `if moagan telemetry
+            // plan; then …` can branch. Its `run` returns
+            // `Result<i32>` directly; every other subcommand
+            // collapses to 0 on `Ok`.
+            Self::Plan { .. } => plan::run(&self),
         }
     }
 
@@ -1053,6 +1085,236 @@ mod config {
     }
 }
 
+mod plan {
+    //! `moagan telemetry plan [<provider>] [--window-days N]`.
+    //!
+    //! Rolling-window quota view aggregated from the per-call
+    //! `calls` table (T01-06 §2.1). Distinct from
+    //! `moagan telemetry provider --plan`, which drills into one
+    //! provider's per-run rollup; this subcommand answers "how much
+    //! of my token plan have I consumed in the last N days?" for
+    //! every configured provider at once.
+    //!
+    //! The row formatter is exposed at `pub(super)` so the test
+    //! module can pin the output without standing up a database.
+
+    use super::{Error, Result, TelemetryCmd};
+    use crate::config::{Config, PlanConfig};
+    use crate::storage::sqlite::{Db, WindowUsageRow};
+
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<i32> {
+        let (runs_dir, provider_filter, mut window_days) = match cmd {
+            TelemetryCmd::Plan {
+                runs_dir,
+                provider,
+                window_days,
+            } => (runs_dir.as_ref(), provider.as_deref(), *window_days),
+            _ => return Err(Error::InvalidState("plan: wrong variant".into())),
+        };
+        if window_days == 0 {
+            return Err(Error::InvalidArgs(
+                "--window-days must be >= 1 (use a positive rolling window)".into(),
+            ));
+        }
+
+        // Per-provider `plan.window_days` wins when a single provider
+        // is being filtered; otherwise the CLI default is the only
+        // source of truth (mixing windows per row would be misleading
+        // in a side-by-side printout). Lookup is best-effort: a
+        // missing config file just falls back to the CLI default so
+        // a fresh `MOAGAN_HOME` still produces a sensible answer.
+        let cfg = Config::load().ok();
+        let mut plan_for_filter: Option<&PlanConfig> = None;
+        if let (Some(cfg), Some(name)) = (cfg.as_ref(), provider_filter)
+            && let Some(spec) = cfg.providers.get(name)
+        {
+            plan_for_filter = spec.plan.as_ref();
+            if let Some(p) = spec.plan.as_ref()
+                && let Some(w) = p.window_days
+            {
+                window_days = w;
+            }
+        }
+
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let db = Db::open(&home.meta_db_path())?;
+        let rows = db.aggregate_window_usage(window_days, provider_filter)?;
+
+        if rows.is_empty() {
+            // Match the "no calls in the window" exit convention
+            // (1, not 0). Operators script this as
+            // `moagan telemetry plan || echo "no recent usage"` so
+            // they get a real signal without having to grep stdout.
+            let scope = match provider_filter {
+                Some(name) => format!(" for provider '{name}'"),
+                None => String::new(),
+            };
+            println!("(no calls in the last {window_days} day(s){scope})");
+            return Ok(1);
+        }
+
+        // Header — kept consistent with the column widths in
+        // `format_row` so the table reads cleanly in any terminal
+        // ≥ 96 columns wide. The last column is a literal label
+        // (no positional data follows) so the `print_literal`
+        // lint fires; allow it locally to mirror the same pattern
+        // in `provider::plan_summary`.
+        #[allow(clippy::print_literal)]
+        {
+            println!(
+                "{:<12}  {:<18}  {:<10}  {:<30}  calls=N err=N cached=…k window=Nd",
+                "provider", "model", "plan", "usage"
+            );
+        }
+
+        // Build a lookup from `(provider, model) -> PlanConfig` so a
+        // single run with no `--provider` filter still annotates
+        // each row with the matching config block. Models outside
+        // the config map render `(no plan)` so the operator can spot
+        // unconfigured providers at a glance.
+        let plan_lookup = |provider: &str, model: &str| -> Option<PlanConfig> {
+            cfg.as_ref()
+                .and_then(|c| {
+                    c.providers
+                        .values()
+                        .find(|spec| spec.kind == provider && spec.model == model)
+                })
+                .and_then(|spec| spec.plan.clone())
+        };
+
+        for row in &rows {
+            // Priority: explicit CLI filter wins (so `moagan telemetry
+            // plan minimax-m3` shows the row's plan even if the
+            // provider name and model don't match the lookup above);
+            // otherwise fall back to the table lookup.
+            let plan_annotation: Option<PlanConfig> = match plan_for_filter {
+                Some(p) => Some(p.clone()),
+                None => plan_lookup(&row.provider, &row.model),
+            };
+            println!("{}", format_row(row, plan_annotation.as_ref(), window_days));
+        }
+
+        println!(
+            "({} row(s) over the last {} day(s))",
+            rows.len(),
+            window_days
+        );
+        Ok(0)
+    }
+
+    /// Format a single `WindowUsageRow` as a left-aligned text line.
+    /// Extracted as a pure function so the formatter can be unit
+    /// tested without standing up a database. Width constants are
+    /// tuned for the column widths in the table header above;
+    /// change both together if you need a wider table.
+    pub(super) fn format_row(
+        row: &WindowUsageRow,
+        plan: Option<&PlanConfig>,
+        window_days: u32,
+    ) -> String {
+        let plan_label = match plan.and_then(|p| p.plan_id.as_ref()) {
+            Some(id) => truncate(id, 10),
+            None => "(no plan)".to_string(),
+        };
+
+        let usage = match plan.and_then(|p| p.limit_tokens) {
+            Some(limit) if limit > 0 => {
+                let pct = (row.total_tokens as f64 / limit as f64) * 100.0;
+                format!(
+                    "{} / {} ({:.1}%)",
+                    human_count(row.total_tokens),
+                    human_count_u64(limit),
+                    pct
+                )
+            }
+            _ => human_count(row.total_tokens),
+        };
+
+        format!(
+            "{:<12}  [{:<16}]  {:<10}  {:<30}  calls={:<5} err={:<3} cached={:<5} window={}d",
+            truncate(&row.provider, 12),
+            truncate(&row.model, 16),
+            plan_label,
+            truncate(&usage, 30),
+            row.call_count,
+            row.error_count,
+            human_count_compact(row.cached_tokens),
+            window_days,
+        )
+    }
+
+    /// Right-truncate `s` to at most `max` chars, appending an
+    /// ellipsis when truncation occurred. Mirrors the `trim` helper
+    /// in `provider::plan_summary` so the column layout stays
+    /// consistent across both subcommands.
+    fn truncate(s: &str, max: usize) -> String {
+        if s.chars().count() <= max {
+            s.to_owned()
+        } else {
+            let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+            out.push('…');
+            out
+        }
+    }
+
+    /// Thousands-separated integer (e.g. `1_234_567`). Used for the
+    /// `usage` column where readability matters more than width.
+    fn human_count(n: i64) -> String {
+        if n == 0 {
+            return "0".to_owned();
+        }
+        let negative = n < 0;
+        let digits: Vec<char> = n.abs().to_string().chars().collect();
+        let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+        for (i, c) in digits.iter().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                out.insert(0, ',');
+            }
+            out.insert(0, *c);
+        }
+        if negative {
+            out.insert(0, '-');
+        }
+        out
+    }
+
+    /// `u64` counterpart to [`human_count`]. The plan limit is
+    /// declared as `u64` (mirroring token-count semantics) so we
+    /// keep both helpers to avoid silently truncating very large
+    /// caps at `i64::MAX`.
+    fn human_count_u64(n: u64) -> String {
+        if n == 0 {
+            return "0".to_owned();
+        }
+        let digits: Vec<char> = n.to_string().chars().collect();
+        let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+        for (i, c) in digits.iter().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                out.insert(0, ',');
+            }
+            out.insert(0, *c);
+        }
+        out
+    }
+
+    /// Compact integer with a single-letter suffix (`12k`, `1.2M`,
+    /// `3.4B`). Used for `cached=` where the column width is fixed
+    /// and a compact form keeps the table line under 96 chars even
+    /// for million-token cache hits.
+    fn human_count_compact(n: i64) -> String {
+        let abs = n.unsigned_abs() as f64;
+        if abs >= 1_000_000_000.0 {
+            format!("{:.1}B", abs / 1_000_000_000.0)
+        } else if abs >= 1_000_000.0 {
+            format!("{:.1}M", abs / 1_000_000.0)
+        } else if abs >= 1_000.0 {
+            format!("{:.0}k", abs / 1_000.0)
+        } else {
+            n.to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1205,5 +1467,262 @@ mod tests {
         };
         let code = pollster::block_on(cmd.dispatch()).unwrap();
         assert_eq!(code, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // `moagan telemetry plan` (additive; PR-365+)
+    //
+    // The formatter is tested as a pure function (no DB, no stdout
+    // capture) so we can pin the output strings exactly. The dispatch
+    // tests use the existing `with_moagan_home` helper for a fresh
+    // SQLite index and exercise the `Result<i32>` exit-code path that
+    // distinguishes an empty window (exit 1) from a populated one
+    // (exit 0).
+    // -----------------------------------------------------------------
+
+    use crate::config::PlanConfig;
+    use crate::storage::sqlite::{Db, WindowUsageRow};
+
+    /// Format a row with a `PlanConfig { plan_id, limit_tokens, … }`
+    /// attached. The output must include:
+    ///   * the plan id verbatim (no transformation),
+    ///   * the consumed ratio formatted as `X / Y (P.P%)`,
+    ///   * the trailing `calls=… err=… cached=… window=…d` block.
+    #[test]
+    fn format_usage_row_with_plan() {
+        let row = WindowUsageRow {
+            provider: "minimax".to_owned(),
+            model: "MiniMax-M3".to_owned(),
+            call_count: 200,
+            total_tokens: 624_000,
+            error_count: 2,
+            cached_tokens: 12_345,
+            first_call_unix: Some(1_700_000_000),
+            last_call_unix: Some(1_700_086_400),
+        };
+        let plan = PlanConfig {
+            plan_id: Some("weekly".to_owned()),
+            limit_tokens: Some(1_000_000),
+            window_days: Some(7),
+        };
+        let line = super::plan::format_row(&row, Some(&plan), 7);
+        assert!(
+            line.contains("weekly"),
+            "plan id must echo verbatim, got: {line}"
+        );
+        assert!(
+            line.contains("624,000 / 1,000,000"),
+            "consumed-ratio column must use thousands separators, got: {line}"
+        );
+        assert!(
+            line.contains("(62.4%)"),
+            "percent must be one decimal, got: {line}"
+        );
+        assert!(
+            line.contains("calls=200"),
+            "calls counter must be present, got: {line}"
+        );
+        assert!(
+            line.contains("err=2"),
+            "err counter must be present, got: {line}"
+        );
+        assert!(
+            line.contains("cached=12k"),
+            "12,345 tokens must compact to 12k, got: {line}"
+        );
+        assert!(
+            line.contains("window=7d"),
+            "window days must appear, got: {line}"
+        );
+        // The provider name appears in the row prefix.
+        assert!(
+            line.contains("minimax"),
+            "provider name must appear, got: {line}"
+        );
+    }
+
+    /// When no `PlanConfig` is attached the row collapses to the
+    /// `(no plan)` annotation and the bare `usage` column (no ratio,
+    /// no percent). The trailing `calls / err / cached / window`
+    /// block stays so a multi-provider printout keeps a uniform
+    /// column structure regardless of which providers have plans
+    /// configured.
+    #[test]
+    fn format_usage_row_without_plan() {
+        let row = WindowUsageRow {
+            provider: "mock".to_owned(),
+            model: "mock-model".to_owned(),
+            call_count: 50,
+            total_tokens: 1_234,
+            error_count: 0,
+            cached_tokens: 0,
+            first_call_unix: Some(1_700_000_000),
+            last_call_unix: Some(1_700_000_500),
+        };
+        let line = super::plan::format_row(&row, None, 7);
+        assert!(
+            line.contains("(no plan)"),
+            "missing-plan annotation must appear, got: {line}"
+        );
+        assert!(
+            line.contains("1,234"),
+            "bare usage must use thousands separators, got: {line}"
+        );
+        assert!(
+            !line.contains('%'),
+            "percent column must be omitted when no plan is set, got: {line}"
+        );
+        assert!(
+            !line.contains('/'),
+            "ratio column must be omitted when no plan is set, got: {line}"
+        );
+    }
+
+    /// Empty DB → `dispatch` returns `Ok(1)` (the documented exit
+    /// convention for "no calls in the window"). The `(no calls in
+    /// the last N day(s))` marker is written to stdout; this test
+    /// asserts the exit code only — content is covered by the
+    /// formatter test above.
+    #[test]
+    fn cli_telemetry_plan_runs_on_empty_db_exits_one() {
+        crate::test_support::with_moagan_home("telemetry_plan_empty_db_exits_one", |home| {
+            let cmd = TelemetryCmd::Plan {
+                runs_dir: Some(home.to_path_buf()),
+                provider: None,
+                window_days: 7,
+            };
+            let code = pollster::block_on(cmd.dispatch()).unwrap();
+            assert_eq!(code, 1, "empty window must surface as exit 1");
+        });
+    }
+
+    /// Realistic seed data (one (provider, model) with several
+    /// calls) → `dispatch` returns `Ok(0)`. The stdout assertions
+    /// confirm the formatter wired through end-to-end: the provider
+    /// name AND a thousands-separated token total both land in the
+    /// output. Using `println!`-equivalent stdout checks would
+    /// require process-level capture; instead we re-exercise the
+    /// `format_row` path with the same seed data and assert it
+    /// independently. This keeps the test side-effect-free (no env
+    /// mutation, no global stdout swap) while still covering both
+    /// the SQL aggregation and the formatter in one go.
+    #[test]
+    fn cli_telemetry_plan_runs_with_realistic_data_exits_zero() {
+        crate::test_support::with_moagan_home("telemetry_plan_realistic_data_exits_zero", |home| {
+            let moagan_home = crate::fs_layout::MoaganHome::at(home.to_path_buf());
+            let db_path = moagan_home.meta_db_path();
+            let db = Db::open(&db_path).unwrap();
+            let now = crate::time::now_unix_secs();
+            let run_id = crate::ids::RunId::new();
+            db.register_run(run_id, "fast", "running", "0.6.0", None, None, None)
+                .unwrap();
+            // Two OK calls + one error on the same
+            // (provider, model): total tokens = 12_345 (matches
+            // the assertion substring below).
+            db.record_call(
+                "c-real-1",
+                run_id,
+                "intake",
+                "intake",
+                "minimax",
+                "MiniMax-M3",
+                "k1",
+                None,
+                false,
+                Some(200),
+                5_000,
+                1_000,
+                0,
+                0,
+                now - 60,
+                now - 59,
+                None,
+                0,
+            )
+            .unwrap();
+            db.record_call(
+                "c-real-2",
+                run_id,
+                "intake",
+                "intake",
+                "minimax",
+                "MiniMax-M3",
+                "k2",
+                None,
+                false,
+                Some(200),
+                4_000,
+                1_345,
+                0,
+                0,
+                now - 30,
+                now - 29,
+                None,
+                0,
+            )
+            .unwrap();
+            db.record_call(
+                "c-real-3",
+                run_id,
+                "intake",
+                "intake",
+                "minimax",
+                "MiniMax-M3",
+                "k3",
+                None,
+                false,
+                Some(500),
+                1_000,
+                0,
+                0,
+                0,
+                now - 20,
+                now - 19,
+                Some("transient 5xx"),
+                0,
+            )
+            .unwrap();
+            drop(db);
+
+            let cmd = TelemetryCmd::Plan {
+                runs_dir: Some(home.to_path_buf()),
+                provider: None,
+                window_days: 7,
+            };
+            let code = pollster::block_on(cmd.dispatch()).unwrap();
+            assert_eq!(code, 0, "populated window must surface as exit 0");
+
+            // Content sanity-check: re-open the DB and run the
+            // aggregation, then format the row independently.
+            // This catches formatter regressions without needing
+            // to swap the global stdout writer.
+            let db = Db::open(&db_path).unwrap();
+            let rows = db.aggregate_window_usage(7, None).unwrap();
+            assert_eq!(rows.len(), 1);
+            let line = super::plan::format_row(&rows[0], None, 7);
+            assert!(
+                line.contains("minimax"),
+                "row prefix must name provider: {line}"
+            );
+            assert!(
+                line.contains("12,345"),
+                "row must show thousands-separated total: {line}"
+            );
+        });
+    }
+
+    /// `--window-days 0` is rejected at the boundary so a shell
+    /// script that defaults from an unset env var never silently
+    /// pulls an empty window.
+    #[test]
+    fn cli_telemetry_plan_rejects_zero_window_days() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Plan {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            provider: None,
+            window_days: 0,
+        };
+        let err = pollster::block_on(cmd.dispatch()).unwrap_err();
+        assert!(matches!(err, Error::InvalidArgs(_)));
     }
 }
