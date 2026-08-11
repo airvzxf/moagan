@@ -1,22 +1,38 @@
 # Dependabot — moagan
 #
-# Weekly updates for both ecosystems that this repo actually depends on:
-#   - `cargo`        → runtime + dev dependencies pinned in Cargo.lock
-#   - `github-actions` → workflows under .github/workflows/ + composite
-#                         actions under .github/actions/
+# Two ecosystems: github-actions (the actions referenced from
+# .github/workflows/*.yml + the .github/actions/rust-setup composite)
+# and cargo (runtime + dev dependencies in Cargo.lock).
 #
-# Conventions match the host-AGENTS.md (GPG-signed, conventional commits)
-# and the repo's existing release flow:
+# The `groups` layout for `github-actions` is per-action-major, so
+# every Dependabot PR touches one action family. This mirrors the
+# structure in airvzxf/ftp-deployment-action's
+# `.github/dependabot.yml`, where each bumping action gets its own
+# PR (and the catch-all `actions-others` group is excluded from each
+# named group to keep the surface of a single review small). The
+# `actions-cache-artifact` group keeps `actions/cache`,
+# `actions/upload-artifact`, and `actions/download-artifact` together
+# because they release as a coordinated triplet (e.g. the Node 24
+# bump landed on all three within ~3 weeks of each other).
+#
+# Conventions match the host AGENTS.md (GPG-signed, conventional
+# commits) and the repo's existing release flow:
 #   - github-actions bumps land as `ci: bump the <group> group with N updates`
 #   - cargo bumps land as `deps: bump the <group> group with N updates`
 #   - every PR lands with labels `dependencies` + the ecosystem tag
 #   - `open-pull-requests-limit` caps concurrent PRs so we never drown
-#   - `groups` collapse related updates into one PR (less review surface)
+#   - `versioning-strategy: increase` keeps Dependabot inside a
+#     single major version, matching our manual SHA-pinning cadence
 #
-# Defense-in-depth: the `ignore` block lists the no-go crates from
-# /AGENTS.md. They are not in Cargo.lock today, but if a transitive advisory
-# ever pulled one in, Dependabot would not be able to upgrade it on its own
-# (forcing a human PR + AGENTS.md review).
+# Defense-in-depth: the cargo `ignore` block lists the no-go crates
+# from /AGENTS.md. They are not in Cargo.lock today, but if a
+# transitive advisory ever pulled one in, Dependabot would not be
+# able to upgrade it on its own (forcing a human PR + AGENTS.md
+# review). The CI guard `make guard-deps` is the authoritative
+# source of truth; this list is a backstop.
+#
+# Reference for the per-action-major grouping + the `exclude-patterns`
+# catch-all style: airvzxf/ftp-deployment-action `.github/dependabot.yml`.
 
 version: 2
 
@@ -43,7 +59,9 @@ updates:
     groups:
       actions-checkout:
         patterns: ["actions/checkout"]
-      actions-cache:
+      actions-cache-artifact:
+        # Keep these three together — they release as a coordinated
+        # triplet (Node 24 bumps land on all three within ~3 weeks).
         patterns:
           - "actions/cache"
           - "actions/upload-artifact"
@@ -55,15 +73,17 @@ updates:
         patterns:
           - "dtolnay/rust-toolchain"
           - "Swatinem/rust-cache"
-      # Split out so `taiki-e/install-action@v2` (no Node-24 release yet)
-      # does not stall the dtolnay/Swatinem batch when only its upstream
-      # has a fresh bump. Tracked in PR-A2.
+      # Split out so `taiki-e/install-action` (composite, bash-only,
+      # no Node runtime) does not stall the dtolnay/Swatinem batch
+      # when only its upstream has a fresh bump.
       actions-rust-toolchain-only:
         patterns:
           - "taiki-e/install-action"
       actions-release:
         patterns:
           - "softprops/action-gh-release"
+      # Both `init` and `analyze` sub-actions live under
+      # `github/codeql-action`; the catch-all below excludes it.
       actions-others:
         patterns: ["*"]
         exclude-patterns:
@@ -76,6 +96,7 @@ updates:
           - "Swatinem/rust-cache"
           - "taiki-e/install-action"
           - "softprops/action-gh-release"
+          - "anchore/sbom-action"
 
   - package-ecosystem: "cargo"
     directory: "/"
