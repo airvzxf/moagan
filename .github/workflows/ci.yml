@@ -24,9 +24,9 @@ permissions:
 #
 #   fmt-check    ─┐
 #   guard-deps   ─┤   T0 (no deps, <2 s each)
-#
+#                 │
 #   clippy       ─┤   T1 (no deps, ~60 s)
-#
+#                 │
 #   test-tests   ─┤
 #   test-lib     ─┤
 #   test-doc     ─┤   T2 (no deps, parallel)
