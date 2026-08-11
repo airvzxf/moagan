@@ -233,6 +233,12 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
     // Phase 2 — if Phase 2 confirms everything above `lo` is
     // rejected, the discovered value falls back to `lo` itself
     // (Phase 1's last accepted).
+    //
+    // Phase 2 keeps stepping down the range until the gap is small
+    // enough that step=1 still hits the boundary (i.e. span <= 20).
+    // When the span drops below 20, we fall through to linear
+    // probes so the discovered value lands exactly on the boundary
+    // rather than at some coarse-grained bucket offset.
     let mut lo_strict = lo.saturating_add(1);
     let mut hi_strict = hi.saturating_sub(1);
     let mut phase2_accepted = false;
@@ -240,11 +246,18 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
         if lo_strict >= hi_strict || hi_strict == 0 {
             break;
         }
-        let step = (hi_strict - lo_strict) / 20;
-        if step == 0 {
-            break;
-        }
-        let points: Vec<u32> = (1..=20).map(|i| lo_strict + i * step).collect();
+        let span = hi_strict.saturating_sub(lo_strict);
+        let points: Vec<u32> = if span <= 20 {
+            // Linear sweep: probe every value in [lo_strict, hi_strict].
+            (lo_strict..=hi_strict).collect()
+        } else {
+            // 20-point parallel batch: step = span / 20.
+            let step = span / 20;
+            if step == 0 {
+                break;
+            }
+            (1..=20).map(|i| lo_strict + i * step).collect()
+        };
         let results = parallel_probe(transport.clone(), &points).await;
         let mut new_lo = lo_strict;
         let mut new_hi = hi_strict;
