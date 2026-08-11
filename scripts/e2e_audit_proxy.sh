@@ -133,6 +133,14 @@ start_proxy() {
   local line
   line="$(head -1 "$portfile" 2>/dev/null || true)"
   if [[ "$line" != *proxy*listening* ]]; then
+    echo "ERROR: proxy did not print 'proxy listening' within 10s. First 5 lines of $portfile:" >&2
+    head -5 "$portfile" >&2 2>/dev/null || true
+    echo "ERROR: proxy process exit status:" >&2
+    if kill -0 "$PROXY_PID" 2>/dev/null; then
+      echo "  still running (pid=$PROXY_PID)" >&2
+    else
+      echo "  exited (pid=$PROXY_PID)" >&2
+    fi
     return 1
   fi
   PROXY_PORT="$(echo "$line" | grep -oE 'http://127.0.0.1:[0-9]+' | sed 's|http://127.0.0.1:||')"
@@ -396,6 +404,9 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
         "MOAGAN_HOME=$WORK_PROXY_2 $BIN audit verify --runs-dir $WORK_PROXY_2 2>&1 | grep -q '^match_count'"
     fi
     stop_proxy
+  else
+    echo "FAIL: proxy_e2e_mode_fast_proxy_start_failed"
+    FAIL=$((FAIL + 1))
   fi
   rm -rf "$WORK_PROXY_2"
   fi # MOAGAN_SMOKE_SECTION fast
@@ -431,6 +442,9 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
         "MOAGAN_HOME=$WORK_PROXY_3 $BIN audit verify --runs-dir $WORK_PROXY_3 2>&1 | grep -q '^match_count'"
     fi
     stop_proxy
+  else
+    echo "FAIL: proxy_e2e_mode_explore_proxy_start_failed"
+    FAIL=$((FAIL + 1))
   fi
   rm -rf "$WORK_PROXY_3"
   fi # MOAGAN_SMOKE_SECTION explore
