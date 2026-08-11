@@ -20,6 +20,13 @@ runs:
       uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
       with:
         cache-on-failure: true
+        # Cache the workspace's target/ so the build can skip
+        # recompiling crates that didn't change. The action's
+        # default is cache-target: false (only the cargo registry
+        # is cached), which made every e2e-network run rebuild
+        # from scratch (~4.75 min). With this on, the cache
+        # hit drops the build to ~1 min on subsequent runs.
+        cache-target: 'true'
         # Single-crate project, so default workspace detection is fine.
         # cache-on-failure: true keeps the cache around even if a job failed
         # mid-build, so the next push doesn't have to re-download the
