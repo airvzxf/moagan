@@ -26,7 +26,7 @@ runs:
         # is cached), which made every e2e-network run rebuild
         # from scratch (~4.75 min). With this on, the cache
         # hit drops the build to ~1 min on subsequent runs.
-        cache-target: 'true'
+        cache-targets: 'true'
         # Single-crate project, so default workspace detection is fine.
         # cache-on-failure: true keeps the cache around even if a job failed
         # mid-build, so the next push doesn't have to re-download the
