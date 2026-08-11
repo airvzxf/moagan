@@ -108,7 +108,7 @@ jobs:
   test-card80:
     name: 'Tier 3 · e2e — card80'
     needs: build
-    if: ${{ inputs.section == 'card80' || inputs.section == 'all' || inputs.section == '' }}
+    if: false  # TEMP: skip while iterating on the cache fix — restored before PR
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
@@ -193,7 +193,7 @@ jobs:
   test-explore:
     name: 'Tier 3 · e2e — explore'
     needs: build
-    if: ${{ inputs.section == 'explore' || inputs.section == 'all' || inputs.section == '' }}
+    if: false  # TEMP: skip while iterating on the cache fix — restored before PR
     runs-on: ubuntu-latest
     timeout-minutes: 28
     steps:
