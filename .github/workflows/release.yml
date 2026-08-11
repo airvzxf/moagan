@@ -92,6 +92,21 @@ jobs:
           # and is the recommended setting per the action README.
           build-mode: auto
 
+      - name: Download SBOM into workspace
+        # anchore/sbom-action@v0.18.0 no longer writes the SBOM to
+        # the workspace; it only uploads it as a separate artifact
+        # (see PR #336 — the Node-24 bump). Pull the SBOM back into
+        # the workspace root so the downstream Bundle step's
+        # `cp ${{ github.workspace }}/moagan.sbom.cdx.json` finds
+        # it. The action's own artifact upload is preserved (so the
+        # SBOM remains downloadable via the run page); we just need
+        # the file on disk too.
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: moagan.sbom.cdx.json
+          path: ${{ github.workspace }}/
+          if-no-files-found: error
+
       - name: Smoke gate (binary sanity)
         # The release artifact must at least load and reach the clap
         # parser before it gets uploaded. This is the "release-smoke"
