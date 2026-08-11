@@ -18,6 +18,8 @@ pub mod json_strategy;
 pub mod minimax;
 pub mod mock;
 pub mod openai_compat;
+pub mod probe;
+pub mod probe_table;
 pub mod opencode_go;
 pub mod opencode_go_anthropic;
 pub mod opencode_go_responses;
