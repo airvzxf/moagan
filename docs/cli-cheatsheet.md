@@ -79,6 +79,63 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 | `MOAGAN_RATE_LIMIT_<provider>` | (empty) | per-provider token bucket |
 | `MOAGAN_RESEARCH_RATE_LIMIT_<host>` | (empty) | per-host token bucket |
 
+## 0.3 What's new in v0.6.0 (since the 2026-08-08 cheatsheet)
+
+The cheatsheet was last touched in PR #319 (commit `1590877`). Since then the v0.6.0 release landed 14 PRs that change the CLI surface; this section is the audit summary and every claim below is verified against the current source. Per-flag details live in the matching sub-section further down.
+
+### New flags (added in v0.6.0)
+
+| Subcommand | Flag | Where |
+|---|---|---|
+| `moagan discover` | `--temperature-profile 'provider=<model>;temperatures=<csv>;replicas=<n>'` | §14.1 + §14 row "temperature profile" |
+| `moagan rerun` | `--same-config=false` (already parsed before; now actually wired through to `continue_cmd::run_rerun`) | §4 |
+| `moagan repair` | `--run <RUN_ID>` (already parsed; now scoped correctly to a single run) | §11 |
+| `moagan run` | `--no-replace-sources` (already parsed; now actually threaded to the synthesis-replacement predicate) | §1 |
+| `moagan run` | `--hash-algo blake3\|sha256` (unchanged surface; default verified) | §1 + §0.2 |
+
+### Default-value changes
+
+| Knob | Before | v0.6.0 | Source |
+|---|---|---|---|
+| `DEFAULT_MAX_TOKENS` (every role, every provider) | varies | `1_000_000` | `src/llm/prompts.rs:20` |
+| OpenCode Go `max_tokens` cap (every wire shape) | propagated from `DEFAULT_MAX_TOKENS` (upstream rejected > 393_216) | hard-capped at `16_384` | `src/llm/capabilities.rs:43` (`OPENCODE_GO_MAX_TOKENS_CAP`) |
+| `moagan discover` cardinality floor | `50` | `80` | `src/cli/mod.rs:1234`, `src/cli/discover.rs:509` |
+| `moagan run --hash-algo` default | `blake3` | `blake3` (unchanged; verified `src/config/mod.rs:294` + `src/cli/flags_batch.rs:13-20`) | — |
+
+### Config-file precedence — strict cwd-overrides-user (PR-B2 / #342)
+
+The env-var cascade in §0.2 is per-variable resolution (CLI > env > config > default). The **file** resolution is a separate, stricter contract — see `src/config/mod.rs::default_config_path`:
+
+```
+1. $MOAGAN_CONFIG                       (verbatim, when set)
+2. ./moagan.toml                        (cwd, primary name)
+3. ./.moagan.toml                       (cwd, hidden alt name)
+4. ${XDG_CONFIG_HOME:-~/.config}/moagan/config.toml   (only when NO cwd file exists)
+5. ./config.toml                        (last-resort)
+```
+
+**There is no merge between the layers.** A present cwd file (steps 2 or 3) short-circuits the user-level XDG lookup, so a per-project `moagan.toml` in your repo gives you "these exact settings for this run" without leaking into `~/.config/moagan/config.toml`. Example:
+
+```bash
+cd ~/code/secret-project
+cat > ./moagan.toml <<'EOF'
+[providers.minimax]
+endpoint = "https://api.example.com/v1"
+model    = "minimax-secret"
+EOF
+
+moagan run --prompt "design my secret project"
+#  ^ loads ./moagan.toml ONLY; ~/.config/moagan/config.toml is ignored.
+```
+
+If you want the user-level XDG file again, `unset MOAGAN_CONFIG` and remove the cwd `moagan.toml` (or pass `--config <path>` style through `MOAGAN_CONFIG=/path/to/xdg-config.toml moagan ...`).
+
+### opencode_go `max_tokens` is hard-capped at 16_384 (PR #364)
+
+Every OpenCode Go provider entry — `opencode_go_anthropic`, `opencode_go_responses` (both `send` and `send_streaming`), and the chat-completions path inside `openai_compat` (via the new `OpenAiCompatProvider::new_with_kind_cap` constructor) — clamps `req.max_tokens = req.max_tokens.min(min(provider_max_tokens, OPENCODE_GO_MAX_TOKENS_CAP))` at request time. The default for every `make_opencode_go(...)` row in `default_providers()` is now `Some(OPENCODE_GO_MAX_TOKENS_CAP)` (down from `Some(DEFAULT_MAX_TOKENS)`); MiniMax-direct and DeepSeek-direct are deliberately untouched.
+
+**Operators no longer need the per-provider `max_tokens` override in `~/.config/moagan/config.toml` to dodge the upstream HTTP 400.** The cap is enforced in code. The constant lives at `src/llm/capabilities.rs:43` (`pub const OPENCODE_GO_MAX_TOKENS_CAP: u32 = 16_384;`) — bump it in one place if a future OpenCode Go model needs more.
+
 ---
 
 # Top-level subcommands
@@ -101,6 +158,8 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 | `--provider mock` + `--mock-dir` | loads JSON fixtures; without `--mock-dir` the mock exhausts immediately |
 | `--profile <name>` | looks up `<name>.toml` under `$MOAGAN_HOME/profiles/` or `~/.config/moagan/profiles/` |
 | `--hash-algo <x>` | only `sha256` or `blake3`; anything else → exit 2 |
+| `--hash-algo` absent | default `blake3` (`Config::export.hash_algo::default()` = `Blake3`, even though the bare `HashAlgo` enum default is `Sha256` — see `src/config/mod.rs:294`) |
+| OpenCode Go provider | `max_tokens` is hard-capped at `16_384` (`OPENCODE_GO_MAX_TOKENS_CAP`) regardless of `--hash-algo` / config / `DEFAULT_MAX_TOKENS`; the cap is enforced inside the wire body, not via user config |
 | `--prompt -` | reads the prompt from stdin |
 | `--max-parallelism > 64` | rejected by `validate_max_parallelism` |
 | `--allow-injection` | disables the sandbox's secret-strip pass |
@@ -178,8 +237,8 @@ Phases executed (via `build_pipeline_for_mode`):
 | Combination | Behaviour |
 |---|---|
 | no `--run-id` | uses the most recent run in the DB |
-| `--from-pause` | ignores `--kind` (always linear); requires `--run-id` |
-| `--from-pause` + `--kind discovery` | clap conflict → exit 2 |
+| `--from-pause` | short-circuits to `pause_cmd::run_continue_from_pause`; `--kind` is **silently ignored** (pause path always uses the linear pipeline because `paused.json` records linear phase names); requires `--run-id` |
+| `--from-pause` + `--kind discovery` | **not** a clap conflict — `--kind` is silently dropped because the pause branch returns before reading it (verified at `src/cli/mod.rs:1016-1024`); not an error |
 | `--kind discovery` + `manifest.mode = "linear"` | `InvalidArgs` ("requires manifest.mode = 'discover'") |
 | `--kind discovery` + `manifest.mode = "discover"` | enters `discover::run_resume` |
 | `--switch-provider <x>` not in config | `InvalidArgs` (validated up-front) |
@@ -256,14 +315,15 @@ cli::dispatch → Cmd::Continue { ... }
 | Combination | Behaviour |
 |---|---|
 | `--override-json` + `--matrix-override` | `--matrix-override` wins (preferred alias) |
-| `--same-config` (default `true`) | keeps the original `execution_policy` + applies the override patches |
+| `--same-config` (default `true`) | keeps the original `execution_policy` + applies the override patches; the value now reaches `continue_cmd::run_rerun` (PR-B1 wired it; pre-v0.6 it was destructured with `_: ` and silently discarded) |
+| `--same-config=false` | treats the cloned manifest as the authoritative config; any `--matrix-override` / `--override-json` JSON is **silently ignored** (the rerun does not apply the patch on top) |
 | JSON malformed in override | `InvalidArgs` ("invalid JSON: …") |
 | Source run missing | `InvalidState` ("manifest.json not found") |
 
 **⚙️ Internal flow**
 
 ```
-cli::dispatch → Cmd::Rerun → continue_cmd::run_rerun(home, parsed, matrix_override.or(override_json))
+cli::dispatch → Cmd::Rerun → continue_cmd::run_rerun(home, parsed, matrix_override.or(override_json), same_config)
   → load_manifest(home, run_id)
   → clone_manifest_for_rerun(old) → new_uuid, parent_run_id=old, status="created"
   → if override: apply_matrix_override(manifest, raw_json) + AtomicWriter::write(overrides_json_path)
@@ -688,6 +748,7 @@ cli::dispatch → Cmd::Audit::Verify → audit::verify_cmd(VerifyArgs)
 | `--dimensions × --facets-per-dimension` | matrix size = `dimensions × facets` |
 | `--cluster-threshold` outside `[0, 1]` | parse error → unexpected behaviour |
 | `--cache-facets` | cross-run cache keyed by `sha256(brief + category_id)`, TTL `MOAGAN_FACET_CACHE_TTL_SECS` |
+| `--temperature-profile <SPEC>` (repeatable) | per-provider sampling-temperature profile (PR-D1); grammar `provider=<model>;temperatures=<csv>;replicas=<n>` (see §14.1). Multiple `--temperature-profile` flags for the same provider are allowed; **last wins**. Providers without a spec fall back to the matrix's `default_profile` (`[1.0] × 1`) so the v0.5 single-shot contract is preserved |
 | `--non-interactive` | intake without TTY → every checkpoint becomes skipped |
 | `--provider mock` + `--mock-dir` | loads JSON fixtures |
 | `--mode`-style flag | n/a; discovery is its own subcommand |
@@ -715,11 +776,64 @@ cli::dispatch → Cmd::Discover → discover::run(DiscoverOptions, &cfg)
   → telemetry.flush() + db.update_run_status("completed")
 ```
 
+### 14.1 Temperature matrix (`--temperature-profile`, PR-D1)
+
+The exploration matrix fan-out is `dimensions × facets × sketches_per_cell × (Σ_per_provider temperatures × replicas)`. The v0.5 single-shot default (`temperatures = vec![1.0]`, `replicas_per_temperature = 1`) is preserved when no profile is configured; `--temperature-profile` lets operators override the **temperature axis** for a single provider without touching the cell count.
+
+**Grammar (clap `value_name = "SPEC"`, repeatable):**
+
+```
+--temperature-profile 'provider=<model>;temperatures=<csv>;replicas=<n>'
+```
+
+| Key | Required | Rule |
+|---|---|---|
+| `provider=<model>` | yes | The provider's MODEL name (e.g. `MiniMax-M3`, `mimo-v2.5`); must match `ProviderConfig::model`. Case-sensitive. |
+| `temperatures=<csv>` | yes | Comma-separated floats, each in `0.0..=2.0`. At least one value required. |
+| `replicas=<n>` | yes | Integer `>= 1`. |
+
+`Vec<String>` from clap is parsed into a typed `TemperatureProfileSpec` at the dispatcher boundary (`src/cli/discover.rs::TemperatureProfileSpec::parse`); every malformed input surfaces as `Error::InvalidArgs` so a typo never silently collapses the matrix to the default profile.
+
+**Merge order:** the CLI `--temperature-profile` specs win on conflict with the persisted `[discovery_matrix.temperature_profiles]` block in `~/.config/moagan/config.toml`. Providers absent from **both** layers fall back to `[discovery_matrix].default_profile`, which itself defaults to `[1.0] × 1` so unconfigured runs stay bit-identical to v0.5. Multiple `--temperature-profile` flags for the **same** provider are allowed; the LAST spec wins.
+
+**Shell example — fan out the `mimo-v2.5` model across four temperatures × two replicas while every other provider keeps the v0.5 default:**
+
+```bash
+moagan discover \
+  --prompt "compare auth strategies for a multi-tenant SaaS" \
+  --non-interactive \
+  --temperature-profile 'provider=mimo-v2.5;temperatures=0.0,0.3,0.7,1.0;replicas=2'
+# Effective fan-out:
+#   * mimo-v2.5  → 4 temperatures × 2 replicas = 8 calls per (cell, replica)
+#   * every other provider → default profile = 1.0 × 1 = 1 call per (cell, replica)
+# Total matrix cardinality expands by (8 / 1) for every (cell) that picked mimo-v2.5.
+```
+
+**Persistent equivalent (no CLI flag) — drop the same profile into `~/.config/moagan/config.toml`:**
+
+```toml
+[discovery_matrix]
+
+[discovery_matrix.temperature_profiles."mimo-v2.5"]
+temperatures               = [0.0, 0.3, 0.7, 1.0]
+replicas_per_temperature   = 2
+
+# Optional: override the default for every OTHER provider (otherwise `[1.0] × 1`).
+# [discovery_matrix.default_profile]
+# temperatures               = [1.0]
+# replicas_per_temperature   = 1
+```
+
+If you set the same provider both ways, the CLI flag wins (see `src/cli/discover.rs::run` merge loop).
+
 **❌ Errors / exit codes**
 
 | Case | Error | Exit |
 |---|---|---|
 | `--cardinality < 80` | `InvalidArgs` | 2 |
+| `--temperature-profile` missing `provider=` / `temperatures=` / `replicas=` | `InvalidArgs` (named key in the message) | 2 |
+| `--temperature-profile` temperature outside `0.0..=2.0` | `InvalidArgs` ("out of range 0.0..=2.0") | 2 |
+| `--temperature-profile replicas=0` | `InvalidArgs` ("replicas must be >= 1") | 2 |
 | DiscoveryQualityTooLow (> 50% failed with min attempts) | `DiscoveryQualityTooLow` | 80 |
 | HostilePrompt detected in intake | `HostilePrompt` | 80 |
 | Provider 5xx sustained | `Provider` + circuit-open | 40 |
