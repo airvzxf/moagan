@@ -36,7 +36,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
@@ -120,23 +119,15 @@ pub enum ProbeOutcome {
 /// against the circuit-breaker window.
 pub struct ProviderProbeTransport {
     provider: Arc<dyn Provider>,
-    client: Client,
 }
 
 impl ProviderProbeTransport {
-    /// Build a transport from a provider. The `client` field is
-    /// kept so the probe's 5s timeout can be configured
-    /// independently of the provider's steady-state client; the
-    /// current implementation reuses `provider.send` so the field
-    /// is reserved for a future split (e.g., one probe per attempt
-    /// against a flat reqwest client).
+    /// Build a transport from a provider. The `client` field used
+    /// to live here for an explicit per-probe timeout, but the
+    /// transport reuses `provider.send` so the timeout is applied
+    /// around the call inside [`Self::probe_send`].
     pub fn new(provider: Arc<dyn Provider>) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(PROBE_TIMEOUT)
-            .connect_timeout(Duration::from_secs(3))
-            .build()
-            .map_err(|e| Error::Provider(format!("probe client: {e}")))?;
-        Ok(Self { provider, client })
+        Ok(Self { provider })
     }
 
     /// Borrow the underlying provider. Useful for tests that want
@@ -215,10 +206,7 @@ pub fn body_carries_max_tokens_rejection(body: &str) -> bool {
 /// `MockProbeTransport` and production code uses the
 /// `ProviderProbeTransport`. The transport is the only place that
 /// talks to the network.
-pub async fn detect_max_tokens(
-    transport: Arc<dyn ProbeTransport>,
-    floor: u32,
-) -> Result<u32> {
+pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -> Result<u32> {
     // Phase 1: exponential search 2^1..2^30.
     let mut lo: u32 = 0;
     let mut hi: u32 = u32::MAX;
@@ -327,8 +315,7 @@ pub struct MaxTokensTableFile {
     /// gives deterministic on-disk ordering so a manual diff after a
     /// probe-run is meaningful.
     #[serde(default)]
-    pub providers:
-        std::collections::BTreeMap<String, std::collections::BTreeMap<String, Entry>>,
+    pub providers: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Entry>>,
 }
 
 fn default_schema_version() -> u32 {
@@ -386,20 +373,16 @@ impl MaxTokensTableFile {
                 ))
             })?;
         }
-        let body = toml::to_string_pretty(self).map_err(|e| {
-            Error::Provider(format!("encode max_tokens_auto.toml: {e}"))
-        })?;
+        let body = toml::to_string_pretty(self)
+            .map_err(|e| Error::Provider(format!("encode max_tokens_auto.toml: {e}")))?;
         let tmp = tempfile::Builder::new()
             .suffix(".toml.tmp")
             .tempfile_in(path.parent().unwrap_or(std::path::Path::new(".")))
             .map_err(|e| Error::Provider(format!("tempfile for max_tokens_auto.toml: {e}")))?;
         std::fs::write(tmp.path(), body)
             .map_err(|e| Error::Provider(format!("write max_tokens_auto.toml: {e}")))?;
-        tmp.persist(path).map_err(|e| {
-            Error::Provider(format!(
-                "rename max_tokens_auto.toml into place: {e}"
-            ))
-        })?;
+        tmp.persist(path)
+            .map_err(|e| Error::Provider(format!("rename max_tokens_auto.toml into place: {e}")))?;
         Ok(())
     }
 }
@@ -524,7 +507,9 @@ mod tests {
         assert!(body_carries_max_tokens_rejection(
             r#"{"type":"error","error":{"message":"max_tokens > 524288"}}"#
         ));
-        assert!(body_carries_max_tokens_rejection("max tokens limit reached"));
+        assert!(body_carries_max_tokens_rejection(
+            "max tokens limit reached"
+        ));
         assert!(body_carries_max_tokens_rejection(
             "maximum context length exceeded"
         ));
@@ -569,11 +554,7 @@ mod tests {
     fn load_rejects_future_schema_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("max_tokens_auto.toml");
-        std::fs::write(
-            &path,
-            "schema_version = 999\n[providers]\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "schema_version = 999\n[providers]\n").unwrap();
         let err = MaxTokensTableFile::load(&path).expect_err("future schema must error");
         match err {
             Error::Provider(msg) => assert!(msg.contains("schema_version")),

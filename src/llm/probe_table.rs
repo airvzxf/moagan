@@ -25,8 +25,8 @@ use crate::error::Result;
 use crate::fs_layout::MoaganHome;
 
 use super::probe::{
-    detect_max_tokens, Entry, MaxTokensTableFile, ProbeTransport, MAX_AUTOPROBE_CEILING,
-    MIN_AUTOPROBE_FLOOR,
+    Entry, MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, MaxTokensTableFile, ProbeTransport,
+    detect_max_tokens,
 };
 
 /// In-memory table of `(provider_name, model_name) -> Entry` plus
@@ -159,14 +159,14 @@ impl MaxTokensTable {
         };
         let _ = attempts;
 
-        if let Some(path) = self.persist_path.as_ref() {
-            if let Err(e) = self.persist_to(path) {
-                tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    "max_tokens_auto.toml persistence failed; in-memory entry is kept"
-                );
-            }
+        if let Some(path) = self.persist_path.as_ref()
+            && let Err(e) = self.persist_to(path)
+        {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "max_tokens_auto.toml persistence failed; in-memory entry is kept"
+            );
         }
         Ok(discovered)
     }
@@ -267,9 +267,7 @@ impl MaxTokensTable {
     }
 
     /// Iterate over `(provider, model, entry)` triples.
-    pub fn iter(
-        &self,
-    ) -> impl Iterator<Item = ((String, String), Entry)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = ((String, String), Entry)> + '_ {
         let inner = self.inner.read();
         inner
             .entries
@@ -292,8 +290,7 @@ pub fn effective_max_tokens(table: &MaxTokensTable, provider: &str, model: &str)
         .unwrap_or(DEFAULT_MAX_TOKENS);
     DEFAULT_MAX_TOKENS
         .min(from_table)
-        .min(MAX_AUTOPROBE_CEILING)
-        .max(MIN_AUTOPROBE_FLOOR)
+        .clamp(MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
 }
 
 /// Probe every `(provider, model)` pair in `entries` and insert the
@@ -318,10 +315,9 @@ pub async fn probe_all(
     }
     let mut out = Vec::with_capacity(handles.len());
     for h in handles {
-        match h.await {
-            Ok(triple) => out.push(triple),
-            Err(_) => {} // task panicked; treat as silent skip
-        }
+        if let Ok(triple) = h.await {
+            out.push(triple);
+        } // task panicked: treat as silent skip
     }
     out
 }
@@ -392,18 +388,15 @@ mod tests {
         t.probe_and_store("minimax", "MiniMax-M3", cap(524_288))
             .await
             .unwrap();
-        let verified_before = t
-            .get("minimax", "MiniMax-M3")
-            .unwrap()
-            .verified_at;
+        let verified_before = t.get("minimax", "MiniMax-M3").unwrap().verified_at;
         // Force a different verified_at by sleeping one ms.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let ok = t.verify("minimax", "MiniMax-M3", cap(524_288)).await.unwrap();
+        let ok = t
+            .verify("minimax", "MiniMax-M3", cap(524_288))
+            .await
+            .unwrap();
         assert!(ok);
-        let verified_after = t
-            .get("minimax", "MiniMax-M3")
-            .unwrap()
-            .verified_at;
+        let verified_after = t.get("minimax", "MiniMax-M3").unwrap().verified_at;
         assert!(verified_after >= verified_before);
     }
 
@@ -459,15 +452,11 @@ mod tests {
             ("minimax".to_owned(), "MiniMax-M3".to_owned()),
             ("deepseek".to_owned(), "deepseek-v4-flash".to_owned()),
         ];
-        let results = probe_all(
-            &t,
-            entries,
-            |provider, _model| match provider {
-                "minimax" => Some(cap(524_288)),
-                "deepseek" => Some(cap(128 * 1024)),
-                _ => None,
-            },
-        )
+        let results = probe_all(&t, entries, |provider, _model| match provider {
+            "minimax" => Some(cap(524_288)),
+            "deepseek" => Some(cap(128 * 1024)),
+            _ => None,
+        })
         .await;
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|(_, _, r)| r.is_ok()));

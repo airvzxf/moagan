@@ -863,6 +863,8 @@ mod tests {
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 plan: None,
+                max_token_auto: None,
+                max_token_auto_save: true,
             },
             SecretString::new("dummy".into()),
         )

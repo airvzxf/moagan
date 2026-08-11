@@ -9,24 +9,21 @@
 //! parallel tightening rounds, with a clamp into
 //! `[MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING]`.
 //!
-//! Off-by-one caveat: the algorithm ends Phase 2 with
-//! `lo_strict = lo + 1` after the first tightening round collapses
-//! `hi_strict`, and `discovered = lo.max(lo_strict)` therefore
-//! reports one token above the wire boundary. The unit tests in
-//! `probe.rs` already pin this behaviour, and the integration
-//! assertions below match what the live algorithm emits — not what
-//! the IDEAL boundary would be. The wider floor / ceiling clamp
-//! then masks the off-by-one in the downstream consumer
-//! (`phase.rs`).
+//! Discovered-value contract: Phase 2 narrows the boundary by
+//! searching above `lo`; if no candidate above `lo` is accepted,
+//! the discovered value falls back to `lo` itself (Phase 1's last
+//! accepted). The unit tests in `probe.rs` already pin this
+//! behaviour, and the integration assertions below match what the
+//! live algorithm emits.
 //!
 //! Wire-clamp caveat: `MinimaxProvider::send` clamps the wire
-//! `max_tokens` to `MINIMAX_MAX_TOKENS_CAP = 524_288` before
-//! sending. That clamp is intentional (the upstream rejects
-//! > 524_288) but it means the algorithm can never observe a
-//! boundary *at* 524_288 from the wire — every probe lands on a
-//! clamped wire value of 524_288 and the algorithm therefore
-//! converges at `MAX_AUTOPROBE_CEILING = 2^30`. The
-//! `probe_finds_524k_boundary` test below documents this.
+//! `max_tokens` to `MINIMAX_MAX_TOKENS_CAP` before sending. That
+//! clamp is intentional (the upstream rejects anything above the
+//! cap) but it means the algorithm can never observe a boundary
+//! `at` the cap from the wire -- every probe lands on a clamped
+//! wire value and the algorithm therefore converges at
+//! `MAX_AUTOPROBE_CEILING` instead. The `probe_finds_524k_boundary`
+//! test below documents this.
 
 use std::sync::Arc;
 
@@ -34,8 +31,8 @@ use moagan::config::ProviderConfig;
 use moagan::fs_layout::MoaganHome;
 use moagan::llm::minimax::MinimaxProvider;
 use moagan::llm::probe::{
-    detect_max_tokens, ProviderProbeTransport, ProbeTransport, MAX_AUTOPROBE_CEILING,
-    MIN_AUTOPROBE_FLOOR,
+    MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, ProbeTransport, ProviderProbeTransport,
+    detect_max_tokens,
 };
 use moagan::llm::probe_table::MaxTokensTable;
 use moagan::secret::SecretString;
@@ -59,6 +56,8 @@ fn build_provider(server_uri: String) -> Arc<MinimaxProvider> {
         hard_incompatibilities: vec![],
         omit_max_tokens: false,
         plan: None,
+        max_token_auto: None,
+        max_token_auto_save: true,
     };
     Arc::new(
         MinimaxProvider::new(&cfg, SecretString::new("sk-test".to_owned()))
@@ -89,10 +88,7 @@ async fn mount_boundary(server: &MockServer, max_accepted: u32) {
         .respond_with(move |req: &Request| {
             let body: serde_json::Value =
                 serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
-            let max_tokens = body
-                .get("max_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
+            let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             if max_tokens <= max_accepted {
                 ResponseTemplate::new(200).set_body_json(json!({
                     "content": [{"type": "text", "text": "1"}],
@@ -105,9 +101,8 @@ async fn mount_boundary(server: &MockServer, max_accepted: u32) {
                     }
                 }))
             } else {
-                ResponseTemplate::new(400).set_body_string(
-                    r#"{"type":"error","error":{"message":"max_tokens > cap"}}"#,
-                )
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"type":"error","error":{"message":"max_tokens > cap"}}"#)
             }
         })
         .mount(server)
@@ -134,18 +129,20 @@ async fn mount_accept_all(server: &MockServer) {
 }
 
 /// Wire boundary at 8192 — Phase 1 succeeds through `2^13 = 8192`,
-/// fails at `2^14 = 16384`, Phase 2 narrows to one token above
-/// `lo = 8192` (the documented off-by-one). The wire-clamp at
-/// 524_288 has no effect here because 8192 < 524_288.
+/// fails at `2^14 = 16384`; Phase 2 confirms every candidate above
+/// `lo = 8192` is rejected, so the discovered value falls back to
+/// `lo` itself. The wire-clamp at 524_288 has no effect here
+/// because 8192 < 524_288.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn probe_finds_8k_boundary() {
     let server = MockServer::start().await;
     mount_boundary(&server, 8192).await;
     let transport = wrap_transport(build_provider(server.uri()));
 
-    let discovered =
-        detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR).await.expect("probe converges");
-    assert_eq!(discovered, 8193, "8K boundary: algorithm returns lo + 1");
+    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR)
+        .await
+        .expect("probe converges");
+    assert_eq!(discovered, 8192, "8K boundary: algorithm returns lo");
 }
 
 /// Wire boundary at 524_288 — but `MinimaxProvider` clamps the
@@ -163,8 +160,9 @@ async fn probe_finds_524k_boundary() {
     mount_boundary(&server, 524_288).await;
     let transport = wrap_transport(build_provider(server.uri()));
 
-    let discovered =
-        detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR).await.expect("probe converges");
+    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR)
+        .await
+        .expect("probe converges");
     assert_eq!(
         discovered, MAX_AUTOPROBE_CEILING,
         "wire clamp masks the 524_288 boundary; algorithm converges at the safety ceiling"
@@ -181,8 +179,9 @@ async fn probe_caps_at_ceiling_when_provider_accepts_everything() {
     mount_accept_all(&server).await;
     let transport = wrap_transport(build_provider(server.uri()));
 
-    let discovered =
-        detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR).await.expect("probe converges");
+    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR)
+        .await
+        .expect("probe converges");
     assert_eq!(discovered, MAX_AUTOPROBE_CEILING);
 }
 
@@ -242,7 +241,10 @@ async fn verify_returns_false_when_cached_value_rejected() {
         .verify("minimax", "MiniMax-M3", verify_transport)
         .await
         .expect("verify should not surface an error");
-    assert!(!ok, "verify must return false when the cached value is rejected");
+    assert!(
+        !ok,
+        "verify must return false when the cached value is rejected"
+    );
     assert!(
         table.get("minimax", "MiniMax-M3").is_none(),
         "verify must drop the cached entry on failure so the caller re-probes"

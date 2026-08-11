@@ -1861,12 +1861,17 @@ mod tests {
             "control case must attach a table"
         );
 
-        let mut cfg = crate::config::Config::default();
-        cfg.providers = probe_cfg(Some(4096));
+        let mut cfg = crate::config::Config {
+            providers: probe_cfg(Some(4096)),
+            ..crate::config::Config::default()
+        };
+        // SAFETY: this test owns the MOAGAN_MAX_TOKEN_AUTO env var;
+        // the `remove_var` immediately after balances the set_var.
         unsafe {
             std::env::set_var("MOAGAN_MAX_TOKEN_AUTO", "0");
         }
         cfg.apply_env_overrides();
+        // SAFETY: see the matching `set_var` above.
         unsafe {
             std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
         }
