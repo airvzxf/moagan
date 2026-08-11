@@ -24,6 +24,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Hard cap on `max_tokens` for every request routed through an
+/// OpenCode Go upstream, regardless of which of the three wire
+/// shapes is selected (`/v1/messages`, `/v1/responses`,
+/// `/v1/chat/completions`).
+///
+/// OpenCode Go proxies calls to heterogeneous backends whose valid
+/// `max_tokens` range is not uniform: the documented ceiling for the
+/// OpenAI-compat chat path is 8192 for kimi-k*, the Anthropic-compat
+/// path on qwen3.x returns HTTP 400 above ~16_384 in practice, and
+/// `gpt-5.6-luna` (Responses) caps at 16_384 as well. 16_384 is the
+/// smallest of these observed caps and works for every model on the
+/// 2026-08-04 operator roster; raising it requires re-verifying each
+/// upstream, hence the constant lives next to the capability matrix
+/// so the per-kind constraints stay co-located. If a future model
+/// requires a higher value, bump this constant in one place rather
+/// than threading a new field through every provider.
+pub const OPENCODE_GO_MAX_TOKENS_CAP: u32 = 16_384;
+
 /// Capability matrix for a single provider. Construct via the
 /// per-provider `for_*` constructors (`for_minimax`,
 /// `for_openai_compat`, etc.) so the call sites do not diverge
@@ -242,5 +260,14 @@ mod tests {
         let json = serde_json::to_string(&cap).unwrap();
         let back: ProviderCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(cap, back);
+    }
+
+    /// Pin the OpenCode Go hard cap to 16_384. Bumping this constant
+    /// requires re-verifying every upstream (kimi-k*, qwen3.x,
+    /// gpt-5.6-luna, etc.) — the test forces a re-think before the
+    /// change can land.
+    #[test]
+    fn opencode_go_max_tokens_cap_is_16_384() {
+        assert_eq!(OPENCODE_GO_MAX_TOKENS_CAP, 16_384);
     }
 }

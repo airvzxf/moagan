@@ -24,7 +24,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
-use super::capabilities::ProviderCapabilities;
+use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
 use super::openai_compat::role_requires_json;
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
@@ -237,11 +237,20 @@ impl Provider for OpenCodeGoResponsesProvider {
         if req.stream {
             return self.send_streaming(req, &url).await;
         }
-        // Apply per-provider max_tokens cap (mirrors OpenAiCompatProvider).
+        // Apply two-layer max_tokens cap (mirrors OpenAiCompatProvider).
+        // Layer 1: per-provider `ProviderConfig::max_tokens` (TOML
+        // override). Layer 2: the OpenCode Go hard ceiling
+        // (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`); the upstream
+        // rejects values above 393216 but kimi-k* / gpt-5.6-luna
+        // accept at most 16_384, so we cap lower than the
+        // documented ceiling to keep every model on the
+        // 2026-08-04 roster working out of the box.
         let mut req = req.clone();
-        if let Some(cap) = self.provider_max_tokens {
-            req.max_tokens = req.max_tokens.min(cap);
-        }
+        let cap = self
+            .provider_max_tokens
+            .unwrap_or(u32::MAX)
+            .min(OPENCODE_GO_MAX_TOKENS_CAP);
+        req.max_tokens = req.max_tokens.min(cap);
         let max_tokens = self.effective_max_tokens(req.max_tokens);
         let mut attempt: u32 = 0;
         loop {
@@ -440,11 +449,16 @@ impl OpenCodeGoResponsesProvider {
     /// response, and returns a single aggregated `Response` with
     /// the joined text and the terminal usage block.
     async fn send_streaming(&self, req: &Request, url: &str) -> Result<(u16, Response)> {
-        // Apply per-provider max_tokens cap (mirrors OpenAiCompatProvider).
+        // Apply two-layer max_tokens cap (same as the non-streaming
+        // path and as `OpenAiCompatProvider`). Clamping here as
+        // well so the SSE wire body carries the same value the
+        // upstream would see on the non-streaming path.
         let mut req = req.clone();
-        if let Some(cap) = self.provider_max_tokens {
-            req.max_tokens = req.max_tokens.min(cap);
-        }
+        let cap = self
+            .provider_max_tokens
+            .unwrap_or(u32::MAX)
+            .min(OPENCODE_GO_MAX_TOKENS_CAP);
+        req.max_tokens = req.max_tokens.min(cap);
         let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
         let request_started = std::time::Instant::now();
         let resp = self
@@ -970,7 +984,11 @@ data: [DONE]\n\n",
                 model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 524_288,
+                // 1024 is well below OPENCODE_GO_MAX_TOKENS_CAP
+                // (16_384) so the cap does not engage and the
+                // assertion about the field surviving the wire
+                // builder stays meaningful.
+                max_tokens: 1024,
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -988,8 +1006,146 @@ data: [DONE]\n\n",
                 .expect("mock server received a JSON body");
             assert_eq!(
                 body.get("max_tokens").and_then(|v| v.as_u64()),
-                Some(524_288),
+                Some(1024),
                 "max_tokens must be present with the requested value, got body={body}"
+            );
+        });
+    }
+
+    /// OpenCode Go hard cap (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`)
+    /// must clamp the wire body BEFORE the upstream sees it. The
+    /// Responses wire exposes a different shape than chat-completions
+    /// (no `omit_max_tokens` flag here — the test disables it
+    /// explicitly so the field stays present after the clamp) so
+    /// this regression guard parallels the chat-completions one.
+    #[test]
+    fn send_clamps_max_tokens_to_opencode_go_hard_cap() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    // None on purpose — exercise the "no TOML
+                    // override, only the hard cap applies" branch.
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1);
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(super::super::capabilities::OPENCODE_GO_MAX_TOKENS_CAP as u64),
+                "opencode_go hard cap must clamp 1_000_000 → 16_384, got body: {body}"
+            );
+        });
+    }
+
+    /// Same regression guard for the streaming Responses path
+    /// (`send_streaming`). The clamp must apply on both paths so
+    /// operators who flip the wire to `stream=true` (e.g. for the
+    /// long-context roles) do not reintroduce the HTTP 400.
+    #[test]
+    fn send_streaming_clamps_max_tokens_to_opencode_go_hard_cap() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            "data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n\
+data: [DONE]\n\n",
+                        ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: true,
+                extra_messages: vec![],
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1);
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(super::super::capabilities::OPENCODE_GO_MAX_TOKENS_CAP as u64),
+                "opencode_go hard cap must clamp 1_000_000 → 16_384 on the SSE path too, got body: {body}"
             );
         });
     }

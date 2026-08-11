@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::llm::capabilities::OPENCODE_GO_MAX_TOKENS_CAP;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
@@ -772,7 +773,17 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         kind: "opencode_go".to_owned(),
         endpoint: endpoint.to_owned(),
         model: model.to_owned(),
-        max_tokens: Some(DEFAULT_MAX_TOKENS),
+        // OpenCode Go upstreams have heterogeneous
+        // `max_tokens` ceilings (kimi-k* at 8192, qwen3.x and
+        // gpt-5.6-luna at 16_384 in practice). `DEFAULT_MAX_TOKENS`
+        // (1,000,000) breaks every OpenCode Go model with HTTP 400,
+        // so we pin the per-provider default to the hard ceiling
+        // defined in `src/llm/capabilities.rs`. The wire body is
+        // also clamped again by each of the three opencode_go
+        // providers (anthropic, responses, chat) so an operator
+        // who raises this in TOML still cannot accidentally
+        // exceed `OPENCODE_GO_MAX_TOKENS_CAP`.
+        max_tokens: Some(OPENCODE_GO_MAX_TOKENS_CAP),
         temperature: Some(1.0),
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
@@ -1934,6 +1945,60 @@ mod tests {
             assert_eq!(
                 spec.model, model,
                 "alias {alias} should carry canonical model {model}"
+            );
+        }
+    }
+
+    /// Pin: every default `ProviderConfig` for an OpenCode Go
+    /// model registered in `default_providers()` carries
+    /// `max_tokens <= OPENCODE_GO_MAX_TOKENS_CAP` (16_384). The
+    /// per-provider TOML knob is the FIRST line of defence; the
+    /// dispatcher (opencode_go.rs) wires a second-layer kind cap
+    /// on top of it. If this assertion ever fails it means the
+    /// default `max_tokens` exceeds the upstream's valid range and
+    /// a fresh `moagan run --provider kimi-k3` would break with
+    /// HTTP 400 before the wire layer can clamp it.
+    #[test]
+    fn default_opencode_go_providers_max_tokens_within_hard_cap() {
+        use crate::llm::capabilities::OPENCODE_GO_MAX_TOKENS_CAP;
+        let cfg = Config::default();
+        let oc_aliases = [
+            "opencode_go", // kimi-k2.7-code
+            "kimi-k3",
+            "kimi-k2.6",
+            "glm-5.1",
+            "glm-5.2",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "mimo-v2.5",
+            "mimo-v2.5-pro",
+            "hy3",
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "gpt-5.6-luna",
+        ];
+        for alias in oc_aliases {
+            let spec = cfg
+                .providers
+                .get(alias)
+                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+            assert_eq!(
+                spec.kind, "opencode_go",
+                "alias {alias} must map to kind=opencode_go"
+            );
+            let max_tokens = spec
+                .max_tokens
+                .unwrap_or_else(|| panic!("opencode_go alias {alias} must carry max_tokens"));
+            assert!(
+                max_tokens <= OPENCODE_GO_MAX_TOKENS_CAP,
+                "opencode_go alias {alias} carries max_tokens={max_tokens} which exceeds \
+                 OPENCODE_GO_MAX_TOKENS_CAP={OPENCODE_GO_MAX_TOKENS_CAP}; the upstream \
+                 will reject with HTTP 400"
             );
         }
     }

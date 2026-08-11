@@ -33,7 +33,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
-use super::capabilities::ProviderCapabilities;
+use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
 use super::openai_compat::OpenAiCompatProvider;
 use super::opencode_go_anthropic::OpenCodeGoAnthropicProvider;
 use super::opencode_go_responses::OpenCodeGoResponsesProvider;
@@ -145,7 +145,15 @@ impl OpenCodeGoProvider {
         } else if path == "responses" {
             Box::new(OpenCodeGoResponsesProvider::new(&routed_spec, api_key)?)
         } else {
-            Box::new(OpenAiCompatProvider::new(&routed_spec, api_key)?)
+            // Chat-completions wire. Pin the kind-level hard cap so
+            // every opencode_go model respects the
+            // `OPENCODE_GO_MAX_TOKENS_CAP` ceiling regardless of
+            // what `ProviderConfig::max_tokens` carries.
+            Box::new(OpenAiCompatProvider::new_with_kind_cap(
+                &routed_spec,
+                api_key,
+                Some(OPENCODE_GO_MAX_TOKENS_CAP),
+            )?)
         };
         Ok(Self { inner: provider })
     }
