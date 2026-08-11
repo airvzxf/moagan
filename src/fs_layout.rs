@@ -166,6 +166,15 @@ impl MoaganHome {
         self.root.join("cache").join("facets")
     }
 
+    /// Path of the auto-discovered `max_tokens` table. Mirrors the
+    /// `<root>/api_keys.toml` convention so config-style files
+    /// stay co-located. The file is read once at startup by
+    /// [`crate::llm::probe_table::MaxTokensTable::from_home`] and
+    /// re-written when the probe discovers a new value.
+    pub fn max_tokens_auto_path(&self) -> PathBuf {
+        self.root.join("max_tokens_auto.toml")
+    }
+
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(self.runs_dir())?;

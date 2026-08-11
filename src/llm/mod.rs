@@ -21,6 +21,8 @@ pub mod openai_compat;
 pub mod opencode_go;
 pub mod opencode_go_anthropic;
 pub mod opencode_go_responses;
+pub mod probe;
+pub mod probe_table;
 pub mod prompt_cache;
 pub mod prompts;
 pub mod provider;

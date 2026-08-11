@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::llm::capabilities::{MINIMAX_MAX_TOKENS_CAP, OPENCODE_GO_MAX_TOKENS_CAP};
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
@@ -735,18 +734,21 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         kind: "minimax".to_owned(),
         endpoint: "https://api.minimax.io/anthropic/v1".to_owned(),
         model: model.to_owned(),
-        // The MiniMax Anthropic-compatible upstream rejects
-        // `max_tokens > 524288` with HTTP 400, so `DEFAULT_MAX_TOKENS`
-        // (1,000,000) breaks every minimax model. Pin the default to
-        // the hard ceiling from `src/llm/capabilities.rs`; the wire
-        // body in `MinimaxProvider::send` clamps again so an operator
-        // who raises this in TOML still cannot exceed the upstream
-        // limit.
-        max_tokens: Some(MINIMAX_MAX_TOKENS_CAP),
+        // Start from `DEFAULT_MAX_TOKENS` (1,000,000) and let the
+        // startup auto-probe discover the real ceiling per
+        // `(provider, model)`. A hardcoded cap is brittle: the real
+        // limit differs per model and per relay (see the module docs
+        // in `src/llm/probe.rs`). Two layers still protect a fresh
+        // run from HTTP 400 before the probe lands: the wire body in
+        // `MinimaxProvider::send` clamps to `MINIMAX_MAX_TOKENS_CAP`,
+        // and `max_token_auto` below enables the probe.
+        max_tokens: Some(DEFAULT_MAX_TOKENS),
         temperature: Some(0.6),
         top_p: Some(0.95),
         hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
         omit_max_tokens: false,
+        max_token_auto: Some(1024),
+        max_token_auto_save: true,
         plan: None,
     };
     m.insert("minimax".to_owned(), make_minimax("MiniMax-M3"));
@@ -766,6 +768,8 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
         omit_max_tokens: false,
+        max_token_auto: Some(1024),
+        max_token_auto_save: true,
         plan: None,
     };
     m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
@@ -782,21 +786,23 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         kind: "opencode_go".to_owned(),
         endpoint: endpoint.to_owned(),
         model: model.to_owned(),
-        // OpenCode Go upstreams have heterogeneous
-        // `max_tokens` ceilings (kimi-k* at 8192, qwen3.x and
-        // gpt-5.6-luna at 16_384 in practice). `DEFAULT_MAX_TOKENS`
-        // (1,000,000) breaks every OpenCode Go model with HTTP 400,
-        // so we pin the per-provider default to the hard ceiling
-        // defined in `src/llm/capabilities.rs`. The wire body is
-        // also clamped again by each of the three opencode_go
-        // providers (anthropic, responses, chat) so an operator
-        // who raises this in TOML still cannot accidentally
-        // exceed `OPENCODE_GO_MAX_TOKENS_CAP`.
-        max_tokens: Some(OPENCODE_GO_MAX_TOKENS_CAP),
+        // OpenCode Go upstreams have heterogeneous `max_tokens`
+        // ceilings (kimi-k* at 8192, qwen3.x and gpt-5.6-luna at
+        // 16_384 in practice) and they drift as the relay roster
+        // changes, so no single hardcoded constant is right. Start
+        // from `DEFAULT_MAX_TOKENS` (1,000,000) and let the startup
+        // auto-probe discover the real ceiling per
+        // `(provider, model)`. Until the probe lands, the wire body
+        // in each of the three opencode_go providers (anthropic,
+        // responses, chat) still clamps to
+        // `OPENCODE_GO_MAX_TOKENS_CAP`.
+        max_tokens: Some(DEFAULT_MAX_TOKENS),
         temperature: Some(1.0),
         top_p: Some(0.95),
         hard_incompatibilities: vec![],
         omit_max_tokens: false,
+        max_token_auto: Some(1024),
+        max_token_auto_save: true,
         plan: None,
     };
     // All 18 OpenCode Go providers share the same base URL. The
@@ -880,6 +886,9 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            // The mock provider has no upstream to probe.
+            max_token_auto: None,
+            max_token_auto_save: true,
             plan: None,
         },
     );
@@ -977,6 +986,19 @@ pub struct ProviderConfig {
     /// with all providers that DO accept the field.
     #[serde(default)]
     pub omit_max_tokens: bool,
+    /// When `Some(_)`, run the auto-probe on this provider at startup to
+    /// discover the real `max_tokens` ceiling. `None` or `Some(0)`
+    /// disables the probe and the config falls back to the explicit
+    /// `max_tokens` knob. `Some(n)` with `n > 0` enables the probe and
+    /// uses `n` as the floor for the discovered value (the probe can
+    /// only raise the floor, never lower it).
+    #[serde(default)]
+    pub max_token_auto: Option<u32>,
+    /// When `true` (default), the auto-probe persists discovered values
+    /// to `<MOAGAN_HOME>/max_tokens_auto.toml` so subsequent runs do not
+    /// re-probe. `false` keeps the table in-memory only.
+    #[serde(default = "default_max_token_auto_save")]
+    pub max_token_auto_save: bool,
     /// Optional token-plan declaration read by `moagan telemetry plan`.
     /// When set, the subcommand can compute a consumed-ratio against
     /// `limit_tokens` over a rolling `window_days` window derived from
@@ -1015,6 +1037,12 @@ pub struct PlanConfig {
     pub window_days: Option<u32>,
 }
 
+/// Default for [`ProviderConfig::max_token_auto_save`]: persist the
+/// discovered table so a subsequent run skips the probe entirely.
+pub fn default_max_token_auto_save() -> bool {
+    true
+}
+
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
@@ -1026,6 +1054,8 @@ impl Default for ProviderConfig {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: default_max_token_auto_save(),
             plan: None,
         }
     }
@@ -1102,6 +1132,8 @@ impl Config {
             "top_p",
             "hard_incompatibilities",
             "omit_max_tokens",
+            "max_token_auto",
+            "max_token_auto_save",
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
             Ok(v) => v,
@@ -1176,7 +1208,11 @@ impl Config {
 
     /// Apply `MOAGAN_*` environment overrides. Any override that fails
     /// to parse is silently ignored; bad config is up to the user.
-    fn apply_env_overrides(&mut self) {
+    ///
+    /// `pub(crate)` so the registry tests in `llm::provider` can pin
+    /// the config -> registry seam without going through the
+    /// filesystem loader.
+    pub(crate) fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("MOAGAN_MAX_PARALLELISM")
             && let Ok(n) = v.parse()
         {
@@ -1413,6 +1449,13 @@ impl Config {
         // `MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS`. Garbage values are
         // silently ignored so a stale export does not silently flip
         // the flag.
+        //
+        // The two auto-probe knobs below are read once and applied to
+        // every provider: they are a global kill-switch / floor rather
+        // than a per-provider name-mangled variable, so an operator can
+        // disable the probe fleet-wide with a single export.
+        let auto_env = std::env::var("MOAGAN_MAX_TOKEN_AUTO").ok();
+        let auto_save_env = std::env::var("MOAGAN_MAX_TOKEN_AUTO_SAVE").ok();
         for (name, spec) in self.providers.iter_mut() {
             let env_key = format!(
                 "MOAGAN_{}_OMIT_MAX_TOKENS",
@@ -1424,6 +1467,19 @@ impl Config {
                     "false" | "0" | "no" | "off" | "" => spec.omit_max_tokens = false,
                     _ => {}
                 }
+            }
+            // `Some(0)` is the "off" sentinel: `probe_table::from_path`
+            // clamps the floor to `MIN_AUTOPROBE_FLOOR`, and the
+            // registry treats `Some(0)` exactly like `None` when
+            // deciding whether to attach the table.
+            if let Some(v) = auto_env.as_deref() {
+                spec.max_token_auto = match v.trim() {
+                    "" | "off" | "false" | "0" => Some(0), // off (alias for None)
+                    s => s.parse::<u32>().ok(),
+                };
+            }
+            if let Some(v) = auto_save_env.as_deref() {
+                spec.max_token_auto_save = matches!(v.trim(), "true" | "1" | "yes" | "on" | "");
             }
         }
     }
@@ -1997,18 +2053,28 @@ mod tests {
         }
     }
 
-    /// Pin: every default `ProviderConfig` for an OpenCode Go
-    /// model registered in `default_providers()` carries
-    /// `max_tokens <= OPENCODE_GO_MAX_TOKENS_CAP` (16_384). The
-    /// per-provider TOML knob is the FIRST line of defence; the
-    /// dispatcher (opencode_go.rs) wires a second-layer kind cap
-    /// on top of it. If this assertion ever fails it means the
-    /// default `max_tokens` exceeds the upstream's valid range and
-    /// a fresh `moagan run --provider kimi-k3` would break with
-    /// HTTP 400 before the wire layer can clamp it.
+    /// Pin: every default `ProviderConfig` for an OpenCode Go model
+    /// registered in `default_providers()` starts at
+    /// `DEFAULT_MAX_TOKENS` and enables the auto-probe.
+    ///
+    /// This test used to assert `max_tokens <= OPENCODE_GO_MAX_TOKENS_CAP`
+    /// (16_384), because the per-provider TOML knob was the first line
+    /// of defence against the upstream's HTTP 400. The auto-probe
+    /// replaces that hardcoded cap: a single constant cannot describe
+    /// a roster whose real ceilings differ per model and drift per
+    /// relay. Two defences remain, and this test pins the second:
+    ///
+    /// 1. The wire body in each of the three opencode_go providers
+    ///    still clamps to `OPENCODE_GO_MAX_TOKENS_CAP` before the
+    ///    request leaves the process.
+    /// 2. `max_token_auto` is enabled here, so the probe discovers the
+    ///    real ceiling and caches it per `(provider, model)`.
+    ///
+    /// If defence 1 is ever removed while the probe is disabled, a
+    /// fresh `moagan run --provider kimi-k3` sends 1M and breaks with
+    /// HTTP 400 — hence the `max_token_auto` assertion below.
     #[test]
-    fn default_opencode_go_providers_max_tokens_within_hard_cap() {
-        use crate::llm::capabilities::OPENCODE_GO_MAX_TOKENS_CAP;
+    fn default_opencode_go_providers_enable_max_tokens_auto_probe() {
         let cfg = Config::default();
         let oc_aliases = [
             "opencode_go", // kimi-k2.7-code
@@ -2039,28 +2105,36 @@ mod tests {
                 spec.kind, "opencode_go",
                 "alias {alias} must map to kind=opencode_go"
             );
-            let max_tokens = spec
-                .max_tokens
-                .unwrap_or_else(|| panic!("opencode_go alias {alias} must carry max_tokens"));
+            assert_eq!(
+                spec.max_tokens,
+                Some(DEFAULT_MAX_TOKENS),
+                "opencode_go alias {alias} must start at DEFAULT_MAX_TOKENS; \
+                 the probe narrows it to the real ceiling"
+            );
+            let floor = spec.max_token_auto.unwrap_or(0);
             assert!(
-                max_tokens <= OPENCODE_GO_MAX_TOKENS_CAP,
-                "opencode_go alias {alias} carries max_tokens={max_tokens} which exceeds \
-                 OPENCODE_GO_MAX_TOKENS_CAP={OPENCODE_GO_MAX_TOKENS_CAP}; the upstream \
-                 will reject with HTTP 400"
+                floor > 0,
+                "opencode_go alias {alias} must enable the max_tokens auto-probe \
+                 (max_token_auto = Some(n), n > 0); with the probe off and \
+                 max_tokens = 1M the upstream rejects with HTTP 400 unless the \
+                 wire-layer clamp catches it"
             );
         }
     }
 
     /// Pin: every default `ProviderConfig` for a minimax model
-    /// registered in `default_providers()` carries
-    /// `max_tokens <= MINIMAX_MAX_TOKENS_CAP` (524_288). The MiniMax
-    /// Anthropic-compatible upstream answers HTTP 400
-    /// ("model[MiniMax-M3] does not support max tokens > 524288") for
-    /// anything above it, so a default of `DEFAULT_MAX_TOKENS`
-    /// (1,000,000) breaks a fresh `moagan run --provider minimax`
-    /// before the wire layer can clamp it.
+    /// registered in `default_providers()` starts at
+    /// `DEFAULT_MAX_TOKENS` and enables the auto-probe.
+    ///
+    /// The MiniMax Anthropic-compatible upstream answers HTTP 400
+    /// ("model[MiniMax-M3] does not support max tokens > 524288"), so
+    /// this test previously pinned `max_tokens <= MINIMAX_MAX_TOKENS_CAP`.
+    /// That cap now lives only in the wire layer
+    /// (`MinimaxProvider::send` clamps unconditionally); the config
+    /// default starts high and the probe discovers the real ceiling.
+    /// See the opencode_go sibling test for the full rationale.
     #[test]
-    fn default_minimax_provider_max_tokens_within_hard_cap() {
+    fn default_minimax_provider_enables_max_tokens_auto_probe() {
         let cfg = Config::default();
         // Derive the alias set from the map rather than hardcoding it:
         // several `minimax-*` aliases are deliberately re-inserted by
@@ -2079,16 +2153,134 @@ mod tests {
         );
         for alias in minimax_aliases {
             let spec = &cfg.providers[alias];
-            let max_tokens = spec
-                .max_tokens
-                .unwrap_or_else(|| panic!("minimax alias {alias} must carry max_tokens"));
+            assert_eq!(
+                spec.max_tokens,
+                Some(DEFAULT_MAX_TOKENS),
+                "minimax alias {alias} must start at DEFAULT_MAX_TOKENS; \
+                 the probe narrows it to the real ceiling"
+            );
+            let floor = spec.max_token_auto.unwrap_or(0);
             assert!(
-                max_tokens <= MINIMAX_MAX_TOKENS_CAP,
-                "minimax alias {alias} carries max_tokens={max_tokens} which exceeds \
-                 MINIMAX_MAX_TOKENS_CAP={MINIMAX_MAX_TOKENS_CAP}; the upstream \
-                 will reject with HTTP 400"
+                floor > 0,
+                "minimax alias {alias} must enable the max_tokens auto-probe \
+                 (max_token_auto = Some(n), n > 0)"
             );
         }
+    }
+
+    /// `MOAGAN_MAX_TOKEN_AUTO=0` is the operator kill-switch: it maps
+    /// to the `Some(0)` sentinel on *every* provider, which the
+    /// registry treats exactly like `None` when deciding whether to
+    /// attach a `MaxTokensTable`. Pin the config half here; the
+    /// registry half is pinned in
+    /// `llm::provider::tests::env_max_token_auto_zero_disables_probe`.
+    #[test]
+    fn env_max_token_auto_zero_disables_probe() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_MAX_TOKEN_AUTO", "0");
+        }
+        let mut cfg = Config::default();
+        // Pre-condition: the real providers ship with the probe on,
+        // so the assertion below cannot pass vacuously.
+        assert!(
+            cfg.providers
+                .values()
+                .any(|s| s.max_token_auto.is_some_and(|n| n > 0)),
+            "default config must enable the probe somewhere"
+        );
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
+        }
+        for (name, spec) in &cfg.providers {
+            assert_eq!(
+                spec.max_token_auto,
+                Some(0),
+                "provider {name} should carry the Some(0) off-sentinel"
+            );
+        }
+    }
+
+    /// The other spellings of "off" collapse to the same sentinel,
+    /// and a numeric value is taken verbatim as the floor.
+    #[test]
+    fn env_max_token_auto_parses_off_aliases_and_numbers() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for off in ["", "off", "false", "0"] {
+            unsafe {
+                std::env::set_var("MOAGAN_MAX_TOKEN_AUTO", off);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert_eq!(
+                cfg.providers["minimax"].max_token_auto,
+                Some(0),
+                "{off:?} should map to the off sentinel"
+            );
+        }
+        unsafe {
+            std::env::set_var("MOAGAN_MAX_TOKEN_AUTO", "8192");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.providers["minimax"].max_token_auto, Some(8192));
+        // Garbage parses to `None`, which is also "off".
+        unsafe {
+            std::env::set_var("MOAGAN_MAX_TOKEN_AUTO", "not-a-number");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.providers["minimax"].max_token_auto, None);
+        unsafe {
+            std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
+        }
+    }
+
+    /// `MOAGAN_MAX_TOKEN_AUTO_SAVE` flips persistence for every
+    /// provider; anything outside the truthy set turns it off.
+    #[test]
+    fn env_max_token_auto_save_override() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_MAX_TOKEN_AUTO_SAVE", "false");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert!(
+            cfg.providers.values().all(|s| !s.max_token_auto_save),
+            "`false` must disable persistence everywhere"
+        );
+        unsafe {
+            std::env::set_var("MOAGAN_MAX_TOKEN_AUTO_SAVE", "yes");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert!(
+            cfg.providers.values().all(|s| s.max_token_auto_save),
+            "`yes` must enable persistence everywhere"
+        );
+        unsafe {
+            std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO_SAVE");
+        }
+    }
+
+    /// The default for `max_token_auto_save` is `true`, and a TOML
+    /// provider table that omits both new keys still deserialises
+    /// (the fields are additive).
+    #[test]
+    fn provider_config_max_token_auto_defaults_are_additive() {
+        assert!(default_max_token_auto_save());
+        let spec: ProviderConfig = toml::from_str(
+            r#"
+            kind = "minimax"
+            endpoint = "https://example.invalid/v1"
+            model = "MiniMax-M3"
+            "#,
+        )
+        .expect("a provider table without the new keys must still parse");
+        assert_eq!(spec.max_token_auto, None);
+        assert!(spec.max_token_auto_save);
     }
 
     /// Catalog §D.19.5 default knobs: 5 errors in 60 s -> open for

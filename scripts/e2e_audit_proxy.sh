@@ -94,6 +94,8 @@ run_test() {
   env BIN="$BIN" ROOT="$ROOT" \
     MOAGAN_SMOKE_TIMEOUT="$MOAGAN_SMOKE_TIMEOUT" \
     MOAGAN_SMOKE_EXPLORE_TIMEOUT="$MOAGAN_SMOKE_EXPLORE_TIMEOUT" \
+    MOAGAN_MAX_TOKEN_AUTO=false \
+    MOAGAN_MAX_TOKEN_AUTO_SAVE=false \
     bash -c "$body" >/tmp/e2e-audit-out 2>&1
   local rc=$?
   if [[ $rc -eq 0 ]]; then

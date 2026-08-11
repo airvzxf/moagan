@@ -22,6 +22,13 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Disable the per-(provider, model) max_tokens auto-probe so the
+# gauntlet never burns the ~30 sequential HTTP probes on every cargo
+# invocation it spawns. Tests that DO want the probe can override
+# locally; the default is opt-out for CI.
+export MOAGAN_MAX_TOKEN_AUTO=false
+export MOAGAN_MAX_TOKEN_AUTO_SAVE=false
+
 # Colour helpers
 if [[ "${NO_COLOR:-}" == "1" ]] || [[ "${1:-}" == "--no-color" ]]; then
   NO_COLOR=1

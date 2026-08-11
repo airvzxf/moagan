@@ -45,9 +45,11 @@ use async_trait::async_trait;
 use crate::config::{CircuitBreakerConfig, ProviderConfig};
 use crate::error::{Error, Result};
 use crate::execution::PerProviderSemaphores;
+use crate::fs_layout::MoaganHome;
 
 use super::capabilities::ProviderCapabilities;
 use super::circuit_breaker::CircuitBreaker;
+use super::probe_table::MaxTokensTable;
 use super::provider_pool::{ProviderPool, ProviderPoolEntry};
 use super::rate_limiter::RateLimiter;
 use super::wire::{Request, Response};
@@ -124,6 +126,10 @@ pub struct ProviderRegistry {
     /// [`Self::pick`] to translate a round-robin index back into a
     /// provider lookup. Empty when no pool is configured.
     pool_names: Vec<String>,
+    /// Optional table of auto-discovered `max_tokens` per
+    /// `(provider, model)`. `None` when auto-probe is disabled
+    /// (`max_token_auto = None`/`Some(0)` for every provider).
+    max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -133,6 +139,17 @@ impl std::fmt::Debug for ProviderRegistry {
             .field("names", &names)
             .field("pool_len", &self.pool.as_ref().map(|p| p.len()))
             .field("pool_names", &self.pool_names)
+            // Print presence only: the table can hold an entry per
+            // (provider, model) pair and dumping it would swamp any
+            // log line that debug-prints the registry.
+            .field(
+                "max_tokens_table",
+                &if self.max_tokens_table.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+            )
             .finish()
     }
 }
@@ -163,7 +180,25 @@ impl ProviderRegistry {
             breakers,
             pool,
             pool_names,
+            max_tokens_table: None,
         }
+    }
+
+    /// Attach an auto-discovered `max_tokens` table to the registry.
+    /// Consuming-builder form so `registry_from_config` can chain it
+    /// onto a freshly built registry and hand-rolled test paths can
+    /// opt in with one call.
+    pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        self.max_tokens_table = Some(table);
+        self
+    }
+
+    /// The auto-discovered `max_tokens` table, when the auto-probe is
+    /// enabled for at least one provider. `None` disables every
+    /// probe-aware code path so callers fall back to the static
+    /// `ProviderConfig::max_tokens` knob.
+    pub fn max_tokens_table(&self) -> Option<&Arc<MaxTokensTable>> {
+        self.max_tokens_table.as_ref()
     }
 
     /// Look up a provider by name.
@@ -594,9 +629,40 @@ fn build_pool_from_entries(
 /// (e.g. two `mock` entries or two `minimax` entries), the registry
 /// also builds a [`ProviderPool`] so [`ProviderRegistry::pick`] does
 /// round-robin selection across those instances (D.19.19/.20).
+///
+/// Resolves `MOAGAN_HOME` to back the auto-discovered `max_tokens`
+/// table. A home that cannot be resolved is not fatal: the registry
+/// is built without the table and every probe-aware path falls back
+/// to the static `ProviderConfig::max_tokens` knob.
 pub fn registry_from_config(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     breaker_cfg: &CircuitBreakerConfig,
+) -> Result<ProviderRegistry> {
+    match MoaganHome::resolve() {
+        Ok(home) => registry_from_config_with_home(cfg, breaker_cfg, Some(&home)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "provider registry: MOAGAN_HOME could not be resolved; \
+                 building without the max_tokens auto-probe table"
+            );
+            registry_from_config_with_home(cfg, breaker_cfg, None)
+        }
+    }
+}
+
+/// [`registry_from_config`] with an explicit home, so tests (and any
+/// caller that already holds a [`MoaganHome`]) can point the
+/// `max_tokens_auto.toml` table at a scratch directory instead of the
+/// operator's real home. `home = None` skips the table entirely.
+///
+/// This constructor never blocks on the probe: it only loads whatever
+/// the previous run persisted. The probe itself runs asynchronously
+/// after construction and writes back into the same table.
+pub fn registry_from_config_with_home(
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
+    breaker_cfg: &CircuitBreakerConfig,
+    home: Option<&MoaganHome>,
 ) -> Result<ProviderRegistry> {
     use super::opencode_go::OpenCodeGoProvider;
     let mut by_name: HashMap<String, Arc<dyn Provider>> = HashMap::new();
@@ -636,12 +702,61 @@ pub fn registry_from_config(
         wrapped_entries.push((name.clone(), wrapped));
     }
     let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
-    Ok(ProviderRegistry {
+    let registry = ProviderRegistry {
         by_name,
         breakers,
         pool,
         pool_names,
-    })
+        max_tokens_table: None,
+    };
+    match (home, probe_settings(cfg)) {
+        (Some(home), Some(settings)) => {
+            let table = MaxTokensTable::from_home(home, settings.floor, settings.save)?;
+            Ok(registry.with_max_tokens_table(Arc::new(table)))
+        }
+        _ => Ok(registry),
+    }
+}
+
+/// Aggregate the per-provider auto-probe knobs into the single
+/// `(floor, save)` pair the shared [`MaxTokensTable`] carries.
+/// Returns `None` when no provider enables the probe, which is the
+/// signal to leave `ProviderRegistry::max_tokens_table` unset.
+///
+/// A provider opts in with `max_token_auto = Some(n)`, `n > 0`;
+/// `None` and the `Some(0)` env sentinel both mean "off".
+fn probe_settings(
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
+) -> Option<ProbeSettings> {
+    let mut settings: Option<ProbeSettings> = None;
+    for spec in cfg.values() {
+        let Some(floor) = spec.max_token_auto.filter(|n| *n > 0) else {
+            continue;
+        };
+        let acc = settings.get_or_insert(ProbeSettings {
+            floor: 0,
+            save: false,
+        });
+        // The table holds one floor for every (provider, model) pair,
+        // so mixed per-provider floors collapse to the highest: the
+        // floor is a guarantee that we ask for at least `n`, and
+        // taking the minimum would silently break that promise for
+        // the provider that asked for more. A floor above a given
+        // upstream's real ceiling makes only that provider's probe
+        // fail, which degrades to the static `max_tokens` knob.
+        acc.floor = acc.floor.max(floor);
+        // Persist when any opted-in provider wants persistence; the
+        // file is shared, and a single provider asking to remember
+        // its ceiling is enough to justify writing it.
+        acc.save |= spec.max_token_auto_save;
+    }
+    settings
+}
+
+/// Aggregated auto-probe knobs for the shared table.
+struct ProbeSettings {
+    floor: u32,
+    save: bool,
 }
 
 #[cfg(test)]
@@ -692,6 +807,8 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
                 plan: None,
             },
         );
@@ -706,6 +823,8 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
                 plan: None,
             },
         );
@@ -734,6 +853,8 @@ mod tests {
                 top_p: None,
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
                 plan: None,
             },
         );
@@ -833,6 +954,8 @@ mod tests {
                 top_p: Some(0.95),
                 hard_incompatibilities: vec![],
                 omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
                 plan: None,
             },
         );
@@ -963,6 +1086,8 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
             plan: None,
         };
         let minimax = MinimaxProvider::new(&spec, crate::secret::SecretString::new("dummy".into()))
@@ -1194,6 +1319,8 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
             plan: None,
         };
         let minimax =
@@ -1212,6 +1339,8 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
             plan: None,
         };
         let deepseek =
@@ -1231,6 +1360,8 @@ mod tests {
             top_p: None,
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
             plan: None,
         };
         let oc_a = OpenCodeGoAnthropicProvider::new(
@@ -1311,6 +1442,8 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
                     plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
@@ -1334,6 +1467,8 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
                     plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
@@ -1357,6 +1492,8 @@ mod tests {
                     top_p: None,
                     hard_incompatibilities: vec![],
                     omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
                     plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
@@ -1567,5 +1704,208 @@ mod tests {
             "no-semaphore path must not introduce extra waits, got {elapsed:?}"
         );
         assert_eq!(mock.calls().len(), 3);
+    }
+
+    // ----------------------------------------------------------------
+    // max_tokens auto-probe table wiring (feat/max-tokens-auto).
+    //
+    // `registry_from_config_with_home` attaches a `MaxTokensTable`
+    // only when at least one provider opts in with
+    // `max_token_auto = Some(n)`, `n > 0`. Construction never blocks
+    // on the probe: it loads whatever the previous run persisted and
+    // returns immediately.
+    // ----------------------------------------------------------------
+
+    /// Build a single-`mock` provider map with the given auto-probe
+    /// floor, so the table tests do not need network-backed kinds.
+    fn probe_cfg(
+        max_token_auto: Option<u32>,
+    ) -> std::collections::BTreeMap<String, ProviderConfig> {
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "mock".into(),
+            ProviderConfig {
+                kind: "mock".into(),
+                endpoint: "mock://local".into(),
+                model: "mock-model".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto,
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
+        cfg
+    }
+
+    /// `max_token_auto = Some(0)` on every provider is the "off"
+    /// sentinel: no table is attached, so every probe-aware path
+    /// falls back to the static `max_tokens` knob.
+    #[test]
+    fn registry_without_probe_has_no_max_tokens_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let cfg = probe_cfg(Some(0));
+        let reg =
+            registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
+                .expect("registry builds");
+        assert!(
+            reg.max_tokens_table().is_none(),
+            "max_token_auto = Some(0) must not attach a table"
+        );
+        // `None` is the other spelling of "off".
+        let cfg = probe_cfg(None);
+        let reg =
+            registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
+                .expect("registry builds");
+        assert!(
+            reg.max_tokens_table().is_none(),
+            "max_token_auto = None must not attach a table"
+        );
+    }
+
+    /// `max_token_auto = Some(4096)` attaches a table carrying that
+    /// floor. The table starts empty (nothing persisted yet) and the
+    /// call returns without probing anything.
+    #[test]
+    fn registry_with_probe_carries_table_and_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let cfg = probe_cfg(Some(4096));
+        let reg =
+            registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
+                .expect("registry builds");
+        let table = reg
+            .max_tokens_table()
+            .expect("max_token_auto = Some(4096) must attach a table");
+        assert_eq!(table.floor(), 4096);
+        assert!(
+            table.is_empty(),
+            "a fresh home has nothing persisted, so the table starts empty"
+        );
+    }
+
+    /// The floor below `MIN_AUTOPROBE_FLOOR` is clamped up by
+    /// `MaxTokensTable`, so the shipped default of `Some(1024)`
+    /// lands exactly on the minimum.
+    #[test]
+    fn registry_table_floor_is_clamped_to_minimum() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let cfg = probe_cfg(Some(1));
+        let reg =
+            registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
+                .expect("registry builds");
+        let table = reg.max_tokens_table().expect("table attached");
+        assert_eq!(
+            table.floor(),
+            super::super::probe::MIN_AUTOPROBE_FLOOR,
+            "a sub-minimum floor is raised to MIN_AUTOPROBE_FLOOR"
+        );
+    }
+
+    /// Mixed per-provider floors collapse to the highest, because the
+    /// shared table carries a single floor and the floor is a
+    /// guarantee to ask for at least `n`.
+    #[test]
+    fn registry_table_floor_takes_the_highest_opted_in_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let mut cfg = probe_cfg(Some(2048));
+        let mut loud = cfg["mock"].clone();
+        loud.max_token_auto = Some(16_384);
+        cfg.insert("mock-loud".into(), loud);
+        // An opted-out provider must not drag the floor back down.
+        let mut off = cfg["mock"].clone();
+        off.max_token_auto = Some(0);
+        cfg.insert("mock-off".into(), off);
+        let reg =
+            registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
+                .expect("registry builds");
+        assert_eq!(
+            reg.max_tokens_table().expect("table attached").floor(),
+            16_384
+        );
+    }
+
+    /// An unresolvable home is not fatal: the registry is built
+    /// without a table and every caller falls back to the static
+    /// `max_tokens` knob.
+    #[test]
+    fn registry_without_home_skips_the_table() {
+        let cfg = probe_cfg(Some(4096));
+        let reg = registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), None)
+            .expect("registry builds without a home");
+        assert!(reg.max_tokens_table().is_none());
+        assert!(reg.get("mock").is_some(), "providers are still wired");
+    }
+
+    /// The env kill-switch reaches the registry: `MOAGAN_MAX_TOKEN_AUTO=0`
+    /// rewrites every provider to the `Some(0)` sentinel, so
+    /// `registry_from_config_with_home` attaches no table. Pins the
+    /// config -> registry seam end-to-end.
+    #[test]
+    fn env_max_token_auto_zero_disables_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        // Sanity: the same config with the probe on does attach one.
+        let on = probe_cfg(Some(4096));
+        assert!(
+            registry_from_config_with_home(&on, &CircuitBreakerConfig::default(), Some(&home))
+                .expect("registry builds")
+                .max_tokens_table()
+                .is_some(),
+            "control case must attach a table"
+        );
+
+        let mut cfg = crate::config::Config {
+            providers: probe_cfg(Some(4096)),
+            ..crate::config::Config::default()
+        };
+        // SAFETY: this test owns the MOAGAN_MAX_TOKEN_AUTO env var;
+        // the `remove_var` immediately after balances the set_var.
+        unsafe {
+            std::env::set_var("MOAGAN_MAX_TOKEN_AUTO", "0");
+        }
+        cfg.apply_env_overrides();
+        // SAFETY: see the matching `set_var` above.
+        unsafe {
+            std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
+        }
+        let reg = registry_from_config_with_home(
+            &cfg.providers,
+            &CircuitBreakerConfig::default(),
+            Some(&home),
+        )
+        .expect("registry builds");
+        assert!(
+            reg.max_tokens_table().is_none(),
+            "MOAGAN_MAX_TOKEN_AUTO=0 must disable the probe end-to-end"
+        );
+    }
+
+    /// The `Debug` impl reports table presence only — never the
+    /// entries, which can be one per (provider, model) pair.
+    #[test]
+    fn debug_impl_reports_table_presence_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let off = registry_from_config_with_home(
+            &probe_cfg(None),
+            &CircuitBreakerConfig::default(),
+            Some(&home),
+        )
+        .expect("registry builds");
+        assert!(format!("{off:?}").contains("max_tokens_table: \"absent\""));
+        let on = registry_from_config_with_home(
+            &probe_cfg(Some(4096)),
+            &CircuitBreakerConfig::default(),
+            Some(&home),
+        )
+        .expect("registry builds");
+        assert!(format!("{on:?}").contains("max_tokens_table: \"present\""));
     }
 }
