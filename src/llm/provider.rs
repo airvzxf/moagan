@@ -885,7 +885,7 @@ fn spawn_pending_probes(
 ///
 /// A provider opts in with `max_token_auto = Some(n)`, `n > 0`;
 /// `None` and the `Some(0)` env sentinel both mean "off".
-
+///
 /// Aggregated auto-probe knobs for the shared table.
 struct ProbeSettings {
     floor: u32,
