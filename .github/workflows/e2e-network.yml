@@ -80,7 +80,22 @@ jobs:
           - section: explore
             make_target: e2e-network-explore
             timeout_minutes: 12
-        section: ${{ fromJSON(inputs.section == 'all' && '["card80","fast","explore"]' || format('["{0}"]', inputs.section)) }}
+        # Explicit cascade so an empty `inputs.section` (push events
+        # have no inputs at all) and an explicit "all" both default
+        # to all three rows. The previous `format('["{0}"]', inputs.section)`
+        # produced `fromJSON('[""]')` on push events, which GitHub
+        # silently expanded with a 4th spurious `{section: ""}` row
+        # (no make_target / no timeout_minutes) — that row failed
+        # template validation at line 109 with "Unexpected value ''".
+        section: >-
+          ${{
+            fromJSON(
+              inputs.section == 'fast'    && '["fast"]'    ||
+              inputs.section == 'explore' && '["explore"]' ||
+              inputs.section == 'card80'  && '["card80"]'  ||
+              '["card80","fast","explore"]'
+            )
+          }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
