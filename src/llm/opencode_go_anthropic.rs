@@ -26,7 +26,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
-use super::capabilities::ProviderCapabilities;
+use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
 use super::http::{body_from_request, build_client, build_headers, classify_status, retry_after};
 use super::opencode_go::OpenCodeGoDispatch;
 use super::provider::Provider;
@@ -142,15 +142,20 @@ impl Provider for OpenCodeGoAnthropicProvider {
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let url = self.messages_url();
-        // Apply per-provider max_tokens cap (mirrors OpenAiCompatProvider).
-        // Clamped before the body is built so the cap is visible regardless
-        // of upstream choice. The default DEFAULT_MAX_TOKENS (1,000,000) does
-        // not clamp any role under normal configuration; the branch only
-        // triggers when a TOML override sets a smaller per-provider limit.
+        // Apply two-layer max_tokens cap (mirrors OpenAiCompatProvider).
+        // Layer 1: per-provider `ProviderConfig::max_tokens` (TOML
+        // override). Layer 2: the OpenCode Go hard ceiling
+        // (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`), which is below the
+        // upstream's documented maximum of 393216 but matches the
+        // smallest cap observed across the 2026-08-04 model roster.
+        // Without this the upstream returns HTTP 400 when a per-role
+        // ceiling (e.g. DEFAULT_MAX_TOKENS = 1_000_000) flows through.
         let mut req = req.clone();
-        if let Some(cap) = self.provider_max_tokens {
-            req.max_tokens = req.max_tokens.min(cap);
-        }
+        let cap = self
+            .provider_max_tokens
+            .unwrap_or(u32::MAX)
+            .min(OPENCODE_GO_MAX_TOKENS_CAP);
+        req.max_tokens = req.max_tokens.min(cap);
         let body = body_from_request(&req);
         let mut attempt: u32 = 0;
         loop {
@@ -622,6 +627,82 @@ mod tests {
                 body["max_tokens"],
                 serde_json::json!(8192),
                 "per-provider cap must clamp 1_000_000 → 8192, got body: {body}"
+            );
+        });
+    }
+
+    /// OpenCode Go hard cap (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`)
+    /// must clamp the wire body BEFORE the upstream sees it. This
+    /// test is the regression guard for the original bug: when the
+    /// per-provider `max_tokens` is unset (or explicitly raised
+    /// above the hard cap) the upstream still receives 16_384 and
+    /// never returns HTTP 400.
+    #[test]
+    fn send_clamps_max_tokens_to_opencode_go_hard_cap() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                    }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenCodeGoAnthropicProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: server.uri(),
+                    model: "minimax-m3".into(),
+                    // Deliberately None to exercise the
+                    // "TOML override unset, only the hard cap
+                    // applies" branch.
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Sketch,
+                model: "minimax-m3".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: Some(0.7),
+                top_p: Some(0.95),
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+            };
+            let (status, _resp) = p
+                .send(&req)
+                .await
+                .expect("send must succeed against the mock");
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body["max_tokens"],
+                serde_json::json!(super::super::capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
+                "opencode_go hard cap must clamp 1_000_000 → 16_384, got body: {body}"
             );
         });
     }
