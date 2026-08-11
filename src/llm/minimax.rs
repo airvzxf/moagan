@@ -146,6 +146,20 @@ impl MinimaxProvider {
     /// carries whatever value the caller approved. Inherent
     /// (non-trait) method so the HTTP loop lives in one place.
     async fn send_http(&self, req: Request) -> Result<(u16, Response)> {
+        self.send_http_with_retries(req, self.max_retries).await
+    }
+
+    /// HTTP body used by both `send` (with `self.max_retries`) and
+    /// `send_probe` (with `probe_max_retries: 0`). The probe path
+    /// passes `0` because a 4xx IS the algorithm's signal — a
+    /// "max tokens rejected" response must not be retried, or the
+    /// 5 s probe timeout blows and the algorithm confuses
+    /// `Indeterminate` with `Rejected`.
+    async fn send_http_with_retries(
+        &self,
+        req: Request,
+        probe_max_retries: u32,
+    ) -> Result<(u16, Response)> {
         let result = async {
             let url = self.messages_url();
             let body = AnthropicWire.encode_body(&req)?;
@@ -205,13 +219,13 @@ impl MinimaxProvider {
                             err,
                             Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
                         );
-                        if !retryable || attempt >= self.max_retries {
+                        if !retryable || attempt >= probe_max_retries {
                             return Err(err);
                         }
                         Self::sleep_with_jitter(attempt, retry_after).await;
                     }
                     Err(e) => {
-                        if attempt >= self.max_retries {
+                        if attempt >= probe_max_retries {
                             return Err(Error::Provider(format!("network: {e}")));
                         }
                         Self::sleep_with_jitter(attempt, None).await;

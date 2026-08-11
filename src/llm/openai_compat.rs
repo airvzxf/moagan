@@ -360,6 +360,12 @@ impl OpenAiCompatProvider {
         safety_clamp: bool,
     ) -> Result<(u16, Response)> {
         let url = self.chat_url();
+        // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
+        // signal (max-tokens rejection), retrying it wastes the 5s
+        // probe timeout and risks masking the boundary if a retry
+        // happens to succeed. Production path keeps the existing
+        // self.max_retries (3) for transient 5xx storms.
+        let max_retries = if safety_clamp { self.max_retries } else { 0 };
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -437,7 +443,7 @@ impl OpenAiCompatProvider {
                         return Ok((code, response));
                     }
                     let body = resp.text().await.unwrap_or_default();
-                    if attempt >= self.max_retries {
+                    if attempt >= max_retries {
                         return Err(Error::Provider(format!(
                             "openai-compat: HTTP {code} after {attempt} attempts: {body}"
                         )));
@@ -445,7 +451,7 @@ impl OpenAiCompatProvider {
                     tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
                 }
                 Err(e) => {
-                    if attempt >= self.max_retries {
+                    if attempt >= max_retries {
                         return Err(Error::Provider(format!("openai-compat: network: {e}")));
                     }
                     tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;

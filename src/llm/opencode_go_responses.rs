@@ -377,6 +377,12 @@ impl OpenCodeGoResponsesProvider {
         if req.stream {
             return self.send_streaming(req, &url).await;
         }
+        // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
+        // signal (max-tokens rejection), retrying it wastes the 5s
+        // probe timeout and risks masking the boundary if a retry
+        // happens to succeed. Production path keeps the existing
+        // self.max_retries (3) for transient 5xx storms.
+        let max_retries = if safety_clamp { self.max_retries } else { 0 };
         let mut req = req.clone();
         if safety_clamp {
             // Three-layer cap. Highest priority (smallest wins) to lowest:
@@ -494,13 +500,13 @@ impl OpenCodeGoResponsesProvider {
                         err,
                         Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
                     );
-                    if !retryable || attempt >= self.max_retries {
+                    if !retryable || attempt >= max_retries {
                         return Err(err);
                     }
                     Self::sleep_with_jitter(attempt, None).await;
                 }
                 Err(e) => {
-                    if attempt >= self.max_retries {
+                    if attempt >= max_retries {
                         return Err(Error::Provider(format!("network: {e}")));
                     }
                     Self::sleep_with_jitter(attempt, None).await;

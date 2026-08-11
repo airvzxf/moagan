@@ -155,10 +155,25 @@ impl ProbeTransport for ProviderProbeTransport {
         let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
         match res {
             Ok(Ok((status, _body))) => {
+                // Classify:
+                //   - 2xx / 3xx         → Accepted (the upstream accepted
+                //                         this max_tokens value).
+                //   - 4xx (any)         → Rejected (a 4xx is the algorithm's
+                //                         signal; the max-tokens rejection
+                //                         lives in 4xx territory per the
+                //                         Anthropic and OpenAI specs).
+                //   - 5xx / network    → Indeterminate (transient; do not
+                //                         treat as a max-tokens boundary).
+                // The 4xx-vs-5xx distinction matters because some 5xx
+                // storm or auth-500 would otherwise be misread as
+                // "the upstream rejected this max_tokens" and collapse
+                // the discovered ceiling to that exact probe value.
                 if (200..400).contains(&status) {
                     ProbeOutcome::Accepted
-                } else {
+                } else if (400..500).contains(&status) {
                     ProbeOutcome::Rejected
+                } else {
+                    ProbeOutcome::Indeterminate
                 }
             }
             Ok(Err(_)) | Err(_) => ProbeOutcome::Indeterminate,

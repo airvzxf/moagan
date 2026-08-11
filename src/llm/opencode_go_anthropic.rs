@@ -203,6 +203,12 @@ impl OpenCodeGoAnthropicProvider {
     ) -> Result<(u16, Response)> {
         let url = self.messages_url();
         let mut req = req.clone();
+        // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
+        // signal (max-tokens rejection), retrying it wastes the 5s
+        // probe timeout and risks masking the boundary if a retry
+        // happens to succeed. Production path keeps the existing
+        // self.max_retries (3) for transient 5xx storms.
+        let max_retries = if safety_clamp { self.max_retries } else { 0 };
         if safety_clamp {
             // Three-layer cap. Highest priority (smallest wins) to lowest:
             //   1. OPENCODE_GO_MAX_TOKENS_CAP — documented hard ceiling
@@ -279,13 +285,13 @@ impl OpenCodeGoAnthropicProvider {
                         err,
                         Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
                     );
-                    if !retryable || attempt >= self.max_retries {
+                    if !retryable || attempt >= max_retries {
                         return Err(err);
                     }
                     Self::sleep_with_jitter(attempt, retry_after).await;
                 }
                 Err(e) => {
-                    if attempt >= self.max_retries {
+                    if attempt >= max_retries {
                         return Err(Error::Provider(format!("network: {e}")));
                     }
                     Self::sleep_with_jitter(attempt, None).await;
