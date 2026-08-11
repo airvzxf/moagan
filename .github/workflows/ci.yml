@@ -163,6 +163,8 @@ jobs:
       - uses: ./.github/actions/rust-setup
       - name: cargo build (debug, for smoke + e2e binaries)
         run: cargo build --locked
+      - name: Where is moagan
+        run: find / -iname moagan -type f 2> /dev/null
       - name: make e2e
         run: make e2e
 
