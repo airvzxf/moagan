@@ -117,7 +117,21 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: moagan-e2e-binary
-          path: .
+          path: downloaded-bin/
+
+      - name: Place binary at expected path
+        # The moagan-e2e-binary artifact stores the binary as a single
+        # file at its root (no parent dir). `actions/download-artifact`
+        # extracts it directly under `path:`, so `path: downloaded-bin/`
+        # lands it at `downloaded-bin/moagan`. We mkdir + mv to put it
+        # at the workspace-relative location that BIN expects. The
+        # `chmod +x` is a defensive no-op (the artifact already has
+        # the executable bit) but guarantees the bit survives any
+        # future cache/upload change.
+        run: |
+          mkdir -p target/release
+          mv downloaded-bin/moagan target/release/moagan
+          chmod +x target/release/moagan
 
       - name: T3 · e2e-network (card80, real LLM)
         env:
@@ -152,7 +166,21 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: moagan-e2e-binary
-          path: .
+          path: downloaded-bin/
+
+      - name: Place binary at expected path
+        # The moagan-e2e-binary artifact stores the binary as a single
+        # file at its root (no parent dir). `actions/download-artifact`
+        # extracts it directly under `path:`, so `path: downloaded-bin/`
+        # lands it at `downloaded-bin/moagan`. We mkdir + mv to put it
+        # at the workspace-relative location that BIN expects. The
+        # `chmod +x` is a defensive no-op (the artifact already has
+        # the executable bit) but guarantees the bit survives any
+        # future cache/upload change.
+        run: |
+          mkdir -p target/release
+          mv downloaded-bin/moagan target/release/moagan
+          chmod +x target/release/moagan
 
       - name: T3 · e2e-network (fast, real LLM)
         env:
@@ -174,7 +202,21 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: moagan-e2e-binary
-          path: .
+          path: downloaded-bin/
+
+      - name: Place binary at expected path
+        # The moagan-e2e-binary artifact stores the binary as a single
+        # file at its root (no parent dir). `actions/download-artifact`
+        # extracts it directly under `path:`, so `path: downloaded-bin/`
+        # lands it at `downloaded-bin/moagan`. We mkdir + mv to put it
+        # at the workspace-relative location that BIN expects. The
+        # `chmod +x` is a defensive no-op (the artifact already has
+        # the executable bit) but guarantees the bit survives any
+        # future cache/upload change.
+        run: |
+          mkdir -p target/release
+          mv downloaded-bin/moagan target/release/moagan
+          chmod +x target/release/moagan
 
       - name: T3 · e2e-network (explore, real LLM)
         env:
