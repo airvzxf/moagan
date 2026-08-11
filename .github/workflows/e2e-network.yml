@@ -84,6 +84,20 @@ jobs:
           rustc --version
 
       - name: Build release binary
+        env:
+          # The Swatinem/rust-cache restore step calls
+          # `exportVariable("CARGO_INCREMENTAL", 0)` at the job level
+          # (see dist/restore.js). That export persists for every
+          # subsequent step in the job, including this one — so the
+          # build runs as if `CARGO_INCREMENTAL=0` was set, which forces
+          # a full recompile every time and is the root cause of the
+          # 270 s e2e-network build even on a warm cache hit.
+          #
+          # Overriding it here on the step that actually runs cargo
+          # lets the workspace's own .rmeta / .o files (now in the
+          # cache thanks to `cache-workspace-crates: true` in
+          # rust-setup/action.yml) drive incremental compilation.
+          CARGO_INCREMENTAL: '1'
         run: cargo build --release
 
       - name: Verify MiniMax API key is present
