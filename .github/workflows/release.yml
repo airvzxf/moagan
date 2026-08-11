@@ -42,7 +42,6 @@ jobs:
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
-          profile: minimal
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
@@ -88,9 +87,6 @@ jobs:
         with:
           format: cyclonedx-json
           artifact-name: moagan.sbom.cdx.json
-          # 'auto' lets the action pick cargo if it sees a Cargo.toml
-          # and is the recommended setting per the action README.
-          build-mode: auto
 
       - name: Download SBOM into workspace
         # anchore/sbom-action@v0.18.0 no longer writes the SBOM to
@@ -105,7 +101,16 @@ jobs:
         with:
           name: moagan.sbom.cdx.json
           path: ${{ github.workspace }}/
-          if-no-files-found: error
+
+      - name: Verify SBOM downloaded
+        # v8 of actions/download-artifact removed `if-no-files-found`,
+        # so we explicitly fail-fast when the SBOM file isn't on disk.
+        # The downstream Bundle step's `cp` would also fail (because
+        # of `set -euo pipefail`), but a clearer error message lands
+        # earlier in the run log.
+        run: |
+          test -f "${{ github.workspace }}/moagan.sbom.cdx.json" \
+            || { echo "ERROR: SBOM file missing after download"; exit 1; }
 
       - name: Smoke gate (binary sanity)
         # The release artifact must at least load and reach the clap
