@@ -100,6 +100,8 @@ mod tests {
             top_p: Some(0.95),
             hard_incompatibilities: vec![],
             omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
             plan: None,
         }
     }
