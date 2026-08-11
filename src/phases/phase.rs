@@ -24,6 +24,7 @@ use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
+use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::llm::response_format_opt_out::render_system_prompt_with_prefix;
@@ -113,6 +114,17 @@ pub struct RunContext {
     /// pipeline share one slot; `Drop` aborts the handle so the
     /// heartbeat cannot outlive the run context.
     heartbeat_handle: Arc<parking_lot::Mutex<Option<JoinHandle<Result<u64>>>>>,
+    /// Shared handle into the auto-probe `max_tokens` table. When
+    /// `Some`, [`Self::dispatch_to_provider`] consults the table
+    /// before clamping `req.max_tokens` to the per-provider TOML
+    /// cap so the wire body's `max_tokens` reflects the discovered
+    /// upstream ceiling (the primary source of truth) and falls
+    /// back to the per-role default (1,000,000) only when the
+    /// table has no entry for `(default_provider, default_model)`.
+    /// `None` when the run was started without auto-probing (legacy
+    /// paths and tests); in that case the clamp reduces to the
+    /// per-provider TOML value alone.
+    pub max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
 /// Default heartbeat interval. Renews the lease well before the
@@ -211,7 +223,20 @@ impl RunContext {
             heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
             heartbeat_holder: "heartbeat".to_owned(),
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
+            max_tokens_table: None,
         }
+    }
+
+    /// Attach the auto-probe `max_tokens` table so
+    /// [`Self::dispatch_to_provider`] can consult it before clamping
+    /// `req.max_tokens`. The CLI boundary (`cli::run`) and the
+    /// integration tests call this once after `registry_from_config`
+    /// has built the table; tests that exercise the per-provider
+    /// TOML cap in isolation leave the field as `None` so the
+    /// pre-table behaviour stays bit-for-bit.
+    pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        self.max_tokens_table = Some(table);
+        self
     }
 
     /// Toggle the human-checkpoint interactivity. `false` makes
@@ -651,19 +676,34 @@ impl RunContext {
         // `send()`, so the body_sha256 matches the body that actually leaves the
         // process. Cloned here because `req` is consumed by `provider.send(&req)`
         // downstream and we don't want to mutate the caller's view.
+        //
+        // The clamp layers in priority order (smallest wins):
+        //   1. `ProviderConfig::max_tokens` (TOML override) — cap_config
+        //   2. `MaxTokensTable::resolve_cached(default_provider, default_model)`
+        //      — cap_table; the auto-probed upstream ceiling, primary
+        //      source of truth when present
+        // When both are absent (legacy / unit tests) `u32::MAX` propagates
+        // through and the role's `DEFAULT_MAX_TOKENS` (1,000,000) flows
+        // unchanged — preserving the v0.6 wire shape.
         let provider = self.provider().await;
-        let hash_input = match self
+        let config_cap = self
             .config
             .providers
             .get(&self.default_provider)
             .and_then(|spec| spec.max_tokens)
-        {
-            Some(cap) if req.max_tokens > cap => {
-                let mut clamped = req.clone();
-                clamped.max_tokens = cap;
-                clamped
-            }
-            _ => req.clone(),
+            .unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(&self.default_provider, &self.default_model))
+            .unwrap_or(u32::MAX);
+        let cap = config_cap.min(table_cap);
+        let hash_input = if req.max_tokens > cap {
+            let mut clamped = req.clone();
+            clamped.max_tokens = cap;
+            clamped
+        } else {
+            req.clone()
         };
         let request_body_sha256 = (self.default_provider == "minimax")
             .then(|| crate::llm::http::request_body_sha256(&hash_input))

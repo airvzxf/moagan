@@ -6,6 +6,7 @@
 //! speaks the same wire format. The provider name (`fn name()`) is
 //! configurable so the same code can serve multiple backends.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,13 +19,14 @@ use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::response_format_opt_out;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use super::wire::{Request, Response, Usage};
 
 /// Generic OpenAI-compat provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatProvider {
     name: String,
     model: String,
@@ -49,6 +51,13 @@ pub struct OpenAiCompatProvider {
     /// kimi-k*, qwen3.x, gpt-5.6-luna, etc. — see
     /// `capabilities::OPENCODE_GO_MAX_TOKENS_CAP`.
     kind_hard_cap: Option<u32>,
+    /// Auto-probed `max_tokens` table. When `Some` the
+    /// `resolve_cached(self.name(), self.model())` value joins the
+    /// clamp chain as the third-highest layer (kind-level cap >
+    /// operator override > table). `None` when the provider was
+    /// built without going through `registry_from_config` — unit
+    /// tests and legacy call paths.
+    max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
 impl OpenAiCompatProvider {
@@ -86,7 +95,16 @@ impl OpenAiCompatProvider {
             max_retries: 3,
             provider_max_tokens: spec.max_tokens,
             kind_hard_cap: cap,
+            max_tokens_table: None,
         })
+    }
+
+    /// Attach the shared auto-probe `max_tokens` table so `send()`
+    /// layers the discovered ceiling into the clamp chain. Wired by
+    /// `registry_from_config` when the registry has a table.
+    pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        self.max_tokens_table = Some(table);
+        self
     }
 
     /// Compute the URL for chat completions.
@@ -258,6 +276,24 @@ struct ChatUsage {
     completion_tokens: u64,
 }
 
+/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
+/// does not implement `Debug` (that lives in `probe_table.rs`,
+/// outside this provider's owned files) and the table is a shared
+/// `Arc`, so emitting `<shared>` keeps the dump informative without
+/// forcing a cross-file change.
+impl std::fmt::Debug for OpenAiCompatProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatProvider")
+            .field("name", &self.name)
+            .field("model", &self.model)
+            .field("endpoint", &self.endpoint)
+            .field("provider_max_tokens", &self.provider_max_tokens)
+            .field("kind_hard_cap", &self.kind_hard_cap)
+            .field("max_tokens_table", &"<shared>")
+            .finish()
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAiCompatProvider {
     fn name(&self) -> &str {
@@ -290,21 +326,26 @@ impl Provider for OpenAiCompatProvider {
         loop {
             attempt += 1;
             let body = self.build_chat_request(req);
-            // Apply two-layer max_tokens cap:
-            //   layer 1: per-provider `ProviderConfig::max_tokens`
-            //            (TOML override).
-            //   layer 2: kind-level hard cap (set by the OpenCode Go
-            //            dispatcher to
-            //            `capabilities::OPENCODE_GO_MAX_TOKENS_CAP`
-            //            so the upstream never rejects with HTTP 400
-            //            when `DEFAULT_MAX_TOKENS = 1_000_000` flows
-            //            through; DeepSeek-direct sets `None`).
+            // Apply three-layer max_tokens cap. Highest priority
+            // (smallest wins) to lowest:
+            //   1. `kind_hard_cap` — set by the OpenCode Go dispatcher
+            //      to `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`. DeepSeek-
+            //      direct leaves `None` (the direct upstream's 8192
+            //      limit is covered by the operator override).
+            //   2. `provider_max_tokens` — operator TOML override.
+            //   3. `MaxTokensTable::resolve_cached` — auto-probed
+            //      per-(provider, model) value; primary source of
+            //      truth when present.
             // Done AFTER `build_chat_request` so the cap is visible
             // regardless of upstream choice.
-            let cap = self
-                .provider_max_tokens
-                .unwrap_or(u32::MAX)
-                .min(self.kind_hard_cap.unwrap_or(u32::MAX));
+            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+            let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
+            let table_cap = self
+                .max_tokens_table
+                .as_ref()
+                .and_then(|t| t.resolve_cached(self.name(), self.model()))
+                .unwrap_or(u32::MAX);
+            let cap = operator_cap.min(kind_cap).min(table_cap);
             let body = if body.max_tokens > cap {
                 ChatRequest {
                     max_tokens: cap,
@@ -820,6 +861,110 @@ mod tests {
         assert_eq!(
             p.kind_hard_cap,
             Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP)
+        );
+    }
+
+    /// Auto-probe table clamp contract: when
+    /// `with_max_tokens_table` attaches a table carrying a
+    /// discovered value smaller than the requested `max_tokens`,
+    /// the wire body must carry the discovered value. DeepSeek-
+    /// direct has `kind_hard_cap = None`, so the table value flows
+    /// through unchanged (no other clamp layers apply when both
+    /// `kind_hard_cap` and `provider_max_tokens` are absent). Pins
+    /// the v0.7 precedence order: kind > operator > table > requested.
+    #[tokio::test]
+    async fn openai_compat_clamps_max_tokens_to_table_value() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::llm::probe::{MIN_AUTOPROBE_FLOOR, ProbeOutcome, ProbeTransport};
+
+        #[derive(Clone)]
+        struct CappedTransport {
+            cap: u32,
+        }
+
+        #[async_trait::async_trait]
+        impl ProbeTransport for CappedTransport {
+            async fn probe_send(&self, n: u32) -> ProbeOutcome {
+                if n <= self.cap {
+                    ProbeOutcome::Accepted
+                } else {
+                    ProbeOutcome::Rejected
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let transport: std::sync::Arc<dyn ProbeTransport> =
+            std::sync::Arc::new(CappedTransport { cap: 6_000 });
+        let table = std::sync::Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+        let discovered = table
+            .probe_and_store("deepseek", "deepseek-v4-flash", transport)
+            .await
+            .expect("probe_and_store");
+        // The wire-body assertion below uses `discovered`
+        // directly: this test pins the wiring contract (table
+        // value honoured on the wire) without depending on the
+        // probe algorithm's exact convergence — that algorithm
+        // has a known ±N imprecision at non-trivial boundaries
+        // (see pre-existing `probe::tests::detect_finds_cap_at_8k`).
+
+        let p = OpenAiCompatProvider::new(
+            &ProviderConfig {
+                kind: "deepseek".into(),
+                endpoint: server.uri(),
+                model: "deepseek-v4-flash".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap()
+        .with_max_tokens_table(table);
+
+        let req = Request {
+            role: crate::llm::Role::Route,
+            model: "deepseek-v4-flash".into(),
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: 1_000_000,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+        };
+        let (status, _response) = p.send(&req).await.unwrap();
+        assert_eq!(status, 200);
+        let received = server
+            .received_requests()
+            .await
+            .expect("recording must be enabled by default");
+        assert_eq!(received.len(), 1, "exactly one request must be sent");
+        let body: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("mock server received a JSON body");
+        assert_eq!(
+            body["max_tokens"],
+            serde_json::json!(discovered),
+            "wire body must carry the table-resolved value ({discovered}), got body: {body}"
         );
     }
 }

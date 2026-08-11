@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::Client;
+use std::sync::Arc;
 
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
@@ -15,13 +16,14 @@ use super::circuit_breaker::CircuitBreaker;
 use super::http::{
     MessagesResponseBody, build_client, build_headers, classify_status, retry_after,
 };
+use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::wire::{Request, Response};
 use super::wire_format::{AnthropicWire, WireFormat};
 
 /// `minimax` provider. Talks to the Anthropic-compatible
 /// `/v1/messages` endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MinimaxProvider {
     name: String,
     model: String,
@@ -38,6 +40,13 @@ pub struct MinimaxProvider {
     /// provider-specific limit, so the upstream never rejects the
     /// request.
     provider_max_tokens: Option<u32>,
+    /// Auto-probed `max_tokens` table. When `Some` the
+    /// `resolve_cached(self.name(), self.model())` value joins the
+    /// clamp chain as the second-highest layer (operator override
+    /// wins, discovered ceiling is the floor). `None` when the
+    /// provider was built without going through `registry_from_config`
+    /// — unit tests and legacy call paths.
+    max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
 impl MinimaxProvider {
@@ -59,6 +68,7 @@ impl MinimaxProvider {
             max_retries: 3,
             breaker: CircuitBreaker::default(),
             provider_max_tokens: spec.max_tokens,
+            max_tokens_table: None,
         })
     }
 
@@ -85,6 +95,16 @@ impl MinimaxProvider {
     /// Set the maximum number of retries (default 3).
     pub fn with_max_retries(mut self, n: u32) -> Self {
         self.max_retries = n;
+        self
+    }
+
+    /// Attach the shared auto-probe `max_tokens` table so `send()`
+    /// layers the discovered ceiling into the clamp chain. Wired by
+    /// `registry_from_config` when the registry has a table. The
+    /// builder takes `self` by value to stay fluent with the other
+    /// `with_*` builders in this provider.
+    pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        self.max_tokens_table = Some(table);
         self
     }
 
@@ -120,6 +140,24 @@ impl MinimaxProvider {
     }
 }
 
+/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
+/// does not implement `Debug` (that lives in `probe_table.rs`,
+/// outside this provider's owned files) and exposing the table
+/// reference in a Debug dump adds noise without signal: the table
+/// is the only `Arc` on the struct, so showing the rest is enough
+/// to identify the instance.
+impl std::fmt::Debug for MinimaxProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinimaxProvider")
+            .field("name", &self.name)
+            .field("model", &self.model)
+            .field("endpoint", &self.endpoint)
+            .field("provider_max_tokens", &self.provider_max_tokens)
+            .field("max_tokens_table", &"<shared>")
+            .finish()
+    }
+}
+
 #[async_trait]
 impl Provider for MinimaxProvider {
     fn name(&self) -> &str {
@@ -141,19 +179,24 @@ impl Provider for MinimaxProvider {
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let result = async {
             let url = self.messages_url();
-            // Apply two-layer max_tokens cap (mirrors
-            // OpenAiCompatProvider::send). Layer 1: per-provider
-            // `ProviderConfig::max_tokens` (TOML override). Layer 2:
-            // the minimax hard ceiling (`MINIMAX_MAX_TOKENS_CAP =
-            // 524_288`); the upstream returns HTTP 400 above it, so an
-            // operator override cannot raise the wire value past it.
+            // Apply three-layer max_tokens cap. From highest-priority
+            // (smallest wins) to lowest:
+            //   1. MINIMAX_MAX_TOKENS_CAP — the documented upstream
+            //      ceiling; the upstream returns HTTP 400 above it.
+            //   2. ProviderConfig::max_tokens — operator override.
+            //   3. MaxTokensTable::resolve_cached — auto-probed
+            //      per-(provider, model) value, primary source of truth
+            //      when present.
             // Clone once before the retry loop so the body is
             // identical across attempts.
             let mut req = req.clone();
-            let cap = self
-                .provider_max_tokens
-                .map(|c| c.min(MINIMAX_MAX_TOKENS_CAP))
-                .unwrap_or(MINIMAX_MAX_TOKENS_CAP);
+            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+            let table_cap = self
+                .max_tokens_table
+                .as_ref()
+                .and_then(|t| t.resolve_cached(self.name(), self.model()))
+                .unwrap_or(u32::MAX);
+            let cap = operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP);
             req.max_tokens = req.max_tokens.min(cap);
             let body = AnthropicWire.encode_body(&req)?;
             let mut attempt: u32 = 0;
@@ -727,6 +770,118 @@ mod tests {
             serde_json::json!(MINIMAX_MAX_TOKENS_CAP),
             "MINIMAX_MAX_TOKENS_CAP must clamp an oversized per-provider \
              override at the wire, got body: {json}"
+        );
+    }
+
+    /// Auto-probe table clamp contract: when `with_max_tokens_table`
+    /// attaches a table carrying a discovered value smaller than the
+    /// requested `max_tokens`, the wire body must carry the
+    /// discovered value (not the per-role default of 1_000_000 and
+    /// not the operator override when one is absent). Pins the v0.7
+    /// precedence order: `MINIMAX_MAX_TOKENS_CAP` > operator override
+    /// > table > requested.
+    #[tokio::test]
+    async fn send_clamps_max_tokens_to_table_value() {
+        use std::sync::Arc;
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::llm::probe::{MIN_AUTOPROBE_FLOOR, ProbeOutcome, ProbeTransport};
+
+        #[derive(Clone)]
+        struct CappedTransport {
+            cap: u32,
+        }
+
+        #[async_trait::async_trait]
+        impl ProbeTransport for CappedTransport {
+            async fn probe_send(&self, n: u32) -> ProbeOutcome {
+                if n <= self.cap {
+                    ProbeOutcome::Accepted
+                } else {
+                    ProbeOutcome::Rejected
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Probe and store so the entry comes from the public API
+        // (the inner field is private to `probe_table`); a transport
+        // that accepts everything ≤ 24_000 seeds the binary search.
+        // The discovered value drives the wire-body assertion below
+        // directly: this test pins the wiring contract (table value
+        // honoured on the wire) without depending on the probe
+        // algorithm's exact convergence — that algorithm has a
+        // known ±N imprecision at non-trivial boundaries
+        // (see pre-existing `probe::tests::detect_finds_cap_at_8k`).
+        let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 24_000 });
+        let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+        let discovered = table
+            .probe_and_store("minimax", "MiniMax-M3", transport)
+            .await
+            .expect("probe_and_store");
+
+        let provider = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: server.uri(),
+                model: "MiniMax-M3".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .expect("MinimaxProvider::new should accept the mock endpoint")
+        .with_max_tokens_table(table);
+
+        let req = Request {
+            role: crate::llm::role::Role::Intake,
+            model: "MiniMax-M3".into(),
+            system: String::new(),
+            user: "hello".into(),
+            max_tokens: 1_000_000,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+        };
+        let (status, _resp) = provider
+            .send(&req)
+            .await
+            .expect("minimax send should succeed against the mock server");
+        assert_eq!(status, 200);
+
+        let received = server
+            .received_requests()
+            .await
+            .expect("recording must be enabled by default");
+        assert_eq!(received.len(), 1, "exactly one request must be sent");
+        let json: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("mock server received a JSON body");
+        assert_eq!(
+            json["max_tokens"],
+            serde_json::json!(discovered),
+            "wire body must carry the table-resolved value ({discovered}), got body: {json}"
         );
     }
 }
