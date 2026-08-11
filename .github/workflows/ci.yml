@@ -24,46 +24,31 @@ permissions:
 #
 #   fmt-check    ─┐
 #   guard-deps   ─┤   T0 (no deps, <2 s each)
-#                   │
+#                 │
 #   clippy       ─┤   T1 (no deps, ~60 s)
-#   build        ─┴─► upload-artifact: moagan-debug
-#                       │
-#   test-tests   ────┐
-#   test-lib     ────┤
-#   test-doc     ────┤  T2 (depend on build, parallel)
-#   smoke        ────┤
-#   e2e          ────┘
+#                 │
+#   test-tests   ─┤
+#   test-lib     ─┤
+#   test-doc     ─┤   T2 (no deps, parallel)
+#   smoke        ─┤
+#   e2e          ─┘
 #
-# All 5 post-build jobs run in parallel and only depend on `build`. The
-# YAML declaration order is: test-tests, test-lib, smoke, e2e, test-doc.
+#
+# The YAML declaration order is: test-tests, test-lib, smoke, e2e, test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
 # the slowest of the 5 jobs (typically e2e at ~3 min).
 #
 # Wall-clock critical path:
-#   round 1 = max(fmt-check, guard-deps, clippy, build)                  ~60 s
-#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e)             ~3 min
+#   round 1 = max(fmt-check, guard-deps, clippy)                  ~60 s
+#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e)    ~3 min
 # Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
-#
-# Note on artifact sharing:
-#   We tried to share the built binary between `build` and the
-#   consumers (smoke, e2e) via actions/upload-artifact + download-artifact.
-#   The v4 actions preserve the file's relative path inside the zip
-#   (the zip contains `target/debug/moagan`), and download-artifact
-#   extracts the zip with that internal structure preserved. Two
-#   attempts to fix the path (`path: target/debug` and `path: workspace`)
-#   placed the file at the wrong location and the consumers' hard-coded
-#   `${ROOT}/target/debug/moagan` did not find it. Removed artifact
-#   sharing; consumers run `cargo build` themselves. Swatinem/rust-cache
-#   shares `target/` across all jobs in the same workflow, so the
-#   consumer rebuild is incremental (just relink) and costs ~5-15 s.
 #
 # Required check names (must match the ruleset `protect-main` rule
 # `required_status_checks.required_status_checks[].context`):
 #   - fmt-check
 #   - guard-deps
 #   - clippy
-#   - build
 #   - test-lib
 #   - test-tests
 #   - test-doc
@@ -104,19 +89,8 @@ jobs:
           components: clippy
       - run: make lint
 
-  build:
-    name: 'T1 · build (populates cargo cache)'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: ./.github/actions/rust-setup
-      - name: cargo build (debug)
-        run: cargo build --locked
-
   test-tests:
     name: 'T2 · cargo test --tests (integration)'
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -129,7 +103,6 @@ jobs:
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -142,7 +115,6 @@ jobs:
 
   smoke:
     name: 'T3 · make smoke'
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -155,7 +127,6 @@ jobs:
 
   e2e:
     name: 'T3 · make e2e (local mock pipeline)'
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -168,7 +139,6 @@ jobs:
 
   test-doc:
     name: 'T2 · cargo test --doc'
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

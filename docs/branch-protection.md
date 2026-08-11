@@ -41,7 +41,7 @@ Existing rules in `protect-main`:
 | `non_fast_forward` | ✓ | Prevents force-pushes to `main`. |
 | `pull_request` | ✓ | Requires a PR before merging. `required_approving_review_count: 0`, `dismiss_stale_reviews_on_push: true`, `require_code_owner_review: true`, `require_last_push_approval: false`, `required_review_thread_resolution: true`, allowed merge methods: `squash`, `rebase`. |
 | `required_linear_history` | ✓ | Enforces linear history. |
-| `required_status_checks` | ✓ | The 9 CI contexts from `ci.yml`. *See [Job IDs vs display names](#job-ids-vs-display-names) below.* |
+| `required_status_checks` | ✓ | The 8 CI contexts from `ci.yml`. *See [Job IDs vs display names](#job-ids-vs-display-names) below.* |
 | `required_signatures` | ✓ | Every commit landing on `main` must be GPG-signed. Last-resort enforcement on top of the local `commit.gpgsign=true` config. |
 | **`block_force_pushes`** | ✗ skipped | Redundant with `non_fast_forward`; keep the latter only. |
 | **`require_last_push_approval`** | ✗ off | Off because the only current maintainer is also the author of every PR. Would need a self-approval that GitHub rejects. Turn on once a second maintainer is added. |
@@ -57,7 +57,7 @@ A single new rule to the existing ruleset:
 
 | Rule | Value | Why |
 |---|---|---|
-| `required_status_checks` | `strict: true`, 9 contexts: `fmt-check`, `guard-deps`, `clippy`, `build`, `test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e` | Each of the 9 parallel jobs in `.github/workflows/ci.yml` must be green before merge. `strict: true` forces the PR to be up to date with `main` first. |
+| `required_status_checks` | `strict: true`, 8 contexts: `fmt-check`, `guard-deps`, `clippy`, `test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e` | Each of the 8 parallel jobs in `.github/workflows/ci.yml` must be green before merge. `strict: true` forces the PR to be up to date with `main` first. The `T1 · build` job that used to be in this list was removed in PR #397: the consumers (`test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e`) do their own incremental `cargo build` via the Swatinem/rust-cache `target/` cache, so the shared-artifact handoff was redundant. |
 
 ## Job IDs vs display names
 
@@ -71,12 +71,17 @@ key. The YAML below shows the two layers for each job from
 | `fmt-check` | `T0 · fmt-check` |
 | `guard-deps` | `T0 · guard-deps` |
 | `clippy` | `T1 · clippy` |
-| `build` | `T1 · build (populates cargo cache)` |
 | `test-tests` | `T2 · cargo test --tests (integration)` |
 | `test-lib` | `T2 · cargo test --lib --bins` |
 | `test-doc` | `T2 · cargo test --doc` |
 | `smoke` | `T3 · make smoke` |
 | `e2e` | `T3 · make e2e (local mock pipeline)` |
+
+Note: the `T1 · build (populates cargo cache)` row is no longer in this
+table. The job was removed in PR #397; the consumers run their own
+incremental `cargo build` against the Swatinem/rust-cache `target/`
+namespace (the workspace's `target/` is shared across all jobs in
+the same workflow via the same cache key).
 
 The `context` strings in the `required_status_checks` JSON block are
 the right-hand column. They are case-sensitive and must match what
@@ -122,14 +127,13 @@ gh api /repos/airvzxf/moagan/rulesets/19743104 > /tmp/ruleset.json
 #   T0 · fmt-check
 #   T0 · guard-deps
 #   T1 · clippy
-#   T1 · build (populates cargo cache)
 #   T2 · cargo test --lib --bins
 #   T2 · cargo test --tests (integration)
 #   T2 · cargo test --doc
 #   T3 · make smoke
 #   T3 · make e2e (local mock pipeline)
 # Renaming any of these requires updating this ruleset too, otherwise
-# the merge will be blocked with "9 of 9 required status checks are
+# the merge will be blocked with "8 of 8 required status checks are
 # expected" (the contexts are tracked by display name).
 jq '.rules += [{
   "type": "required_status_checks",
@@ -139,7 +143,6 @@ jq '.rules += [{
       { "context": "T0 · fmt-check" },
       { "context": "T0 · guard-deps" },
       { "context": "T1 · clippy" },
-      { "context": "T1 · build (populates cargo cache)" },
       { "context": "T2 · cargo test --lib --bins" },
       { "context": "T2 · cargo test --tests (integration)" },
       { "context": "T2 · cargo test --doc" },
@@ -194,7 +197,6 @@ Should print:
     { "context": "T0 · fmt-check" },
     { "context": "T0 · guard-deps" },
     { "context": "T1 · clippy" },
-    { "context": "T1 · build (populates cargo cache)" },
     { "context": "T2 · cargo test --lib --bins" },
     { "context": "T2 · cargo test --tests (integration)" },
     { "context": "T2 · cargo test --doc" },

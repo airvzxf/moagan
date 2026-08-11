@@ -14,7 +14,7 @@ on:
         type: string
 
 # Releases need to write tags and create a GitHub Release page, but only the
-# `publish` job does — the `build` job only reads repo contents. Scoping
+# `publish` job does — the `build-release` job only reads repo contents. Scoping
 # `contents: write` to the `publish` job applies the principle of least
 # privilege at the workflow level.
 
@@ -25,7 +25,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  build-release:
     name: 'Build · release binary'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -147,7 +147,7 @@ jobs:
 
   publish:
     name: 'Publish · GitHub Release'
-    needs: build
+    needs: build-release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

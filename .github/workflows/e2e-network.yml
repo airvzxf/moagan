@@ -39,17 +39,17 @@ permissions:
 # Architecture (build-once + per-job conditions, supersedes the
 # 3-row matrix that built the release binary once per row):
 #
-#   build           — runs once, uploads target/release/moagan as the
-#                     `moagan-e2e-binary` artifact.
-#   test-card80     — needs: build; gated on inputs.section in
-#                     {card80, all, ''}.
-#   test-fast       — needs: build; gated on inputs.section in
-#                     {fast, all, ''}.
-#   test-explore    — needs: build; gated on inputs.section in
-#                     {explore, all, ''}.
+#   build-e2e-network  — runs once, uploads target/release/moagan as the
+#                        `moagan-e2e-binary` artifact.
+#   test-card80        — needs: build-e2e-network; gated on inputs.section in
+#                        {card80, all, ''}.
+#   test-fast          — needs: build-e2e-network; gated on inputs.section in
+#                        {fast, all, ''}.
+#   test-explore       — needs: build-e2e-network; gated on inputs.section in
+#                        {explore, all, ''}.
 #
 # On `push` events `inputs.section` is undefined (= ''), so all three
-# test jobs run in parallel after `build` completes (wall-clock ≈
+# test jobs run in parallel after `build-e2e-network` completes (wall-clock ≈
 # slowest row, ~22 min). On `workflow_dispatch` with `section=<x>`,
 # only the matching `test-<x>` job is materialised — the others
 # don't even appear in the run page. This replaces the previous
@@ -69,7 +69,7 @@ permissions:
 # the whole pipeline.
 
 jobs:
-  build:
+  build-e2e-network:
     name: 'Build · release binary'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -84,6 +84,12 @@ jobs:
           rustc --version
 
       - name: Build release binary
+        env:
+          # Overriding it here on the step that actually runs cargo
+          # lets the workspace's own .rmeta / .o files (now in the
+          # cache thanks to `cache-workspace-crates: true` in
+          # rust-setup/action.yml) drive incremental compilation.
+          CARGO_INCREMENTAL: '1'
         run: cargo build --release
 
       - name: Verify MiniMax API key is present
@@ -107,7 +113,7 @@ jobs:
 
   test-card80:
     name: 'Tier 3 · e2e — card80'
-    needs: build
+    needs: build-e2e-network
     if: ${{ inputs.section == 'card80' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -117,21 +123,10 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: moagan-e2e-binary
-          path: downloaded-bin/
+          path: target/release/
 
-      - name: Place binary at expected path
-        # The moagan-e2e-binary artifact stores the binary as a single
-        # file at its root (no parent dir). `actions/download-artifact`
-        # extracts it directly under `path:`, so `path: downloaded-bin/`
-        # lands it at `downloaded-bin/moagan`. We mkdir + mv to put it
-        # at the workspace-relative location that BIN expects. The
-        # `chmod +x` is a defensive no-op (the artifact already has
-        # the executable bit) but guarantees the bit survives any
-        # future cache/upload change.
-        run: |
-          mkdir -p target/release
-          mv downloaded-bin/moagan target/release/moagan
-          chmod +x target/release/moagan
+      - name: Change to executable binary
+        run: chmod +x target/release/moagan
 
       - name: T3 · e2e-network (card80, real LLM)
         env:
@@ -156,7 +151,7 @@ jobs:
 
   test-fast:
     name: 'Tier 3 · e2e — fast'
-    needs: build
+    needs: build-e2e-network
     if: ${{ inputs.section == 'fast' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -166,21 +161,10 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: moagan-e2e-binary
-          path: downloaded-bin/
+          path: target/release/
 
-      - name: Place binary at expected path
-        # The moagan-e2e-binary artifact stores the binary as a single
-        # file at its root (no parent dir). `actions/download-artifact`
-        # extracts it directly under `path:`, so `path: downloaded-bin/`
-        # lands it at `downloaded-bin/moagan`. We mkdir + mv to put it
-        # at the workspace-relative location that BIN expects. The
-        # `chmod +x` is a defensive no-op (the artifact already has
-        # the executable bit) but guarantees the bit survives any
-        # future cache/upload change.
-        run: |
-          mkdir -p target/release
-          mv downloaded-bin/moagan target/release/moagan
-          chmod +x target/release/moagan
+      - name: Change to executable binary
+        run: chmod +x target/release/moagan
 
       - name: T3 · e2e-network (fast, real LLM)
         env:
@@ -192,7 +176,7 @@ jobs:
 
   test-explore:
     name: 'Tier 3 · e2e — explore'
-    needs: build
+    needs: build-e2e-network
     if: ${{ inputs.section == 'explore' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 28
@@ -202,21 +186,10 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: moagan-e2e-binary
-          path: downloaded-bin/
+          path: target/release/
 
-      - name: Place binary at expected path
-        # The moagan-e2e-binary artifact stores the binary as a single
-        # file at its root (no parent dir). `actions/download-artifact`
-        # extracts it directly under `path:`, so `path: downloaded-bin/`
-        # lands it at `downloaded-bin/moagan`. We mkdir + mv to put it
-        # at the workspace-relative location that BIN expects. The
-        # `chmod +x` is a defensive no-op (the artifact already has
-        # the executable bit) but guarantees the bit survives any
-        # future cache/upload change.
-        run: |
-          mkdir -p target/release
-          mv downloaded-bin/moagan target/release/moagan
-          chmod +x target/release/moagan
+      - name: Change to executable binary
+        run: chmod +x target/release/moagan
 
       - name: T3 · e2e-network (explore, real LLM)
         env:
