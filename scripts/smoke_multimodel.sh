@@ -15,6 +15,13 @@ fi
 : "${MOAGAN_HOME:=/home/wolf/.local/share/moagan}"
 export MOAGAN_HOME
 
+# Skip the per-(provider,model) max_tokens auto-probe. The four
+# minimax-m* models are well known to the developer already, and the
+# probe would add ~30 sequential HTTP calls for every model at first
+# startup. CI is the right place to amortise that cost.
+export MOAGAN_MAX_TOKEN_AUTO=false
+export MOAGAN_MAX_TOKEN_AUTO_SAVE=false
+
 # Wipe so we start clean and inspect shows only this run's results.
 rm -rf "$MOAGAN_HOME"
 mkdir -p "$MOAGAN_HOME"
