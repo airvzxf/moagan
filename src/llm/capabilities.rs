@@ -42,6 +42,16 @@ use serde::{Deserialize, Serialize};
 /// than threading a new field through every provider.
 pub const OPENCODE_GO_MAX_TOKENS_CAP: u32 = 16_384;
 
+/// Hard cap on `max_tokens` for minimax (Anthropic-compatible wire).
+///
+/// Probe at upstream: MiniMax-M3 rejects anything `> 524288` with
+/// HTTP 400 ("model[MiniMax-M3] does not support max tokens > 524288").
+/// 524288 is the boundary value the upstream accepts; we pin to it
+/// exactly. Clamp at the wire body (`minimax.rs::send`) so a `[providers.minimax]`
+/// override that pushes the cap higher cannot leak into a rejected
+/// request.
+pub const MINIMAX_MAX_TOKENS_CAP: u32 = 524_288;
+
 /// Capability matrix for a single provider. Construct via the
 /// per-provider `for_*` constructors (`for_minimax`,
 /// `for_openai_compat`, etc.) so the call sites do not diverge
@@ -269,5 +279,15 @@ mod tests {
     #[test]
     fn opencode_go_max_tokens_cap_is_16_384() {
         assert_eq!(OPENCODE_GO_MAX_TOKENS_CAP, 16_384);
+    }
+
+    /// Pin the minimax hard cap to 524_288 — the exact boundary the
+    /// MiniMax Anthropic-compatible upstream accepts. Anything higher
+    /// is rejected with HTTP 400 ("model[MiniMax-M3] does not support
+    /// max tokens > 524288"); anything lower silently wastes the
+    /// available output budget.
+    #[test]
+    fn minimax_max_tokens_cap_is_524_288() {
+        assert_eq!(MINIMAX_MAX_TOKENS_CAP, 524_288);
     }
 }

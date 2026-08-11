@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::llm::capabilities::OPENCODE_GO_MAX_TOKENS_CAP;
+use crate::llm::capabilities::{MINIMAX_MAX_TOKENS_CAP, OPENCODE_GO_MAX_TOKENS_CAP};
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
@@ -735,7 +735,14 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         kind: "minimax".to_owned(),
         endpoint: "https://api.minimax.io/anthropic/v1".to_owned(),
         model: model.to_owned(),
-        max_tokens: Some(DEFAULT_MAX_TOKENS),
+        // The MiniMax Anthropic-compatible upstream rejects
+        // `max_tokens > 524288` with HTTP 400, so `DEFAULT_MAX_TOKENS`
+        // (1,000,000) breaks every minimax model. Pin the default to
+        // the hard ceiling from `src/llm/capabilities.rs`; the wire
+        // body in `MinimaxProvider::send` clamps again so an operator
+        // who raises this in TOML still cannot exceed the upstream
+        // limit.
+        max_tokens: Some(MINIMAX_MAX_TOKENS_CAP),
         temperature: Some(0.6),
         top_p: Some(0.95),
         hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
@@ -2039,6 +2046,46 @@ mod tests {
                 max_tokens <= OPENCODE_GO_MAX_TOKENS_CAP,
                 "opencode_go alias {alias} carries max_tokens={max_tokens} which exceeds \
                  OPENCODE_GO_MAX_TOKENS_CAP={OPENCODE_GO_MAX_TOKENS_CAP}; the upstream \
+                 will reject with HTTP 400"
+            );
+        }
+    }
+
+    /// Pin: every default `ProviderConfig` for a minimax model
+    /// registered in `default_providers()` carries
+    /// `max_tokens <= MINIMAX_MAX_TOKENS_CAP` (524_288). The MiniMax
+    /// Anthropic-compatible upstream answers HTTP 400
+    /// ("model[MiniMax-M3] does not support max tokens > 524288") for
+    /// anything above it, so a default of `DEFAULT_MAX_TOKENS`
+    /// (1,000,000) breaks a fresh `moagan run --provider minimax`
+    /// before the wire layer can clamp it.
+    #[test]
+    fn default_minimax_provider_max_tokens_within_hard_cap() {
+        let cfg = Config::default();
+        // Derive the alias set from the map rather than hardcoding it:
+        // several `minimax-*` aliases are deliberately re-inserted by
+        // the OpenCode Go block later in `default_providers()` (they
+        // are proxied, not direct), so only the entries that still
+        // carry `kind = "minimax"` hit the MiniMax upstream.
+        let minimax_aliases: Vec<&String> = cfg
+            .providers
+            .iter()
+            .filter(|(_, spec)| spec.kind == "minimax")
+            .map(|(alias, _)| alias)
+            .collect();
+        assert!(
+            minimax_aliases.contains(&&"minimax".to_owned()),
+            "the canonical `minimax` alias must map to kind=minimax"
+        );
+        for alias in minimax_aliases {
+            let spec = &cfg.providers[alias];
+            let max_tokens = spec
+                .max_tokens
+                .unwrap_or_else(|| panic!("minimax alias {alias} must carry max_tokens"));
+            assert!(
+                max_tokens <= MINIMAX_MAX_TOKENS_CAP,
+                "minimax alias {alias} carries max_tokens={max_tokens} which exceeds \
+                 MINIMAX_MAX_TOKENS_CAP={MINIMAX_MAX_TOKENS_CAP}; the upstream \
                  will reject with HTTP 400"
             );
         }

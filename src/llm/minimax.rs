@@ -10,7 +10,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
-use super::capabilities::ProviderCapabilities;
+use super::capabilities::{MINIMAX_MAX_TOKENS_CAP, ProviderCapabilities};
 use super::circuit_breaker::CircuitBreaker;
 use super::http::{
     MessagesResponseBody, build_client, build_headers, classify_status, retry_after,
@@ -141,13 +141,20 @@ impl Provider for MinimaxProvider {
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let result = async {
             let url = self.messages_url();
-            // Apply per-provider max_tokens cap (mirrors
-            // OpenAiCompatProvider::send). Clone once before the
-            // retry loop so the body is identical across attempts.
+            // Apply two-layer max_tokens cap (mirrors
+            // OpenAiCompatProvider::send). Layer 1: per-provider
+            // `ProviderConfig::max_tokens` (TOML override). Layer 2:
+            // the minimax hard ceiling (`MINIMAX_MAX_TOKENS_CAP =
+            // 524_288`); the upstream returns HTTP 400 above it, so an
+            // operator override cannot raise the wire value past it.
+            // Clone once before the retry loop so the body is
+            // identical across attempts.
             let mut req = req.clone();
-            if let Some(cap) = self.provider_max_tokens {
-                req.max_tokens = req.max_tokens.min(cap);
-            }
+            let cap = self
+                .provider_max_tokens
+                .map(|c| c.min(MINIMAX_MAX_TOKENS_CAP))
+                .unwrap_or(MINIMAX_MAX_TOKENS_CAP);
+            req.max_tokens = req.max_tokens.min(cap);
             let body = AnthropicWire.encode_body(&req)?;
             let mut attempt: u32 = 0;
             loop {
@@ -631,6 +638,95 @@ mod tests {
         assert_eq!(
             json["max_tokens"], 8192,
             "provider_max_tokens cap must clamp the wire value, got body: {json}"
+        );
+    }
+
+    /// A `[providers.minimax]` override ABOVE the upstream limit must
+    /// not leak into the request: `MINIMAX_MAX_TOKENS_CAP` (524_288)
+    /// is the hard ceiling enforced at the wire body. With
+    /// `max_tokens: Some(2_000_000)` and a `Request { max_tokens:
+    /// 1_000_000, .. }`, the captured body must carry
+    /// `"max_tokens":524288` — otherwise the upstream answers HTTP 400
+    /// ("model[MiniMax-M3] does not support max tokens > 524288").
+    #[tokio::test]
+    async fn send_clamps_max_tokens_to_minimax_hard_cap() {
+        use std::sync::{Arc, Mutex};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let captured_for_responder = captured.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &wiremock::Request| {
+                captured_for_responder
+                    .lock()
+                    .expect("capture lock")
+                    .replace(req.body.clone());
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: server.uri(),
+                model: "MiniMax-M3".into(),
+                // Deliberately above the upstream ceiling.
+                max_tokens: Some(2_000_000),
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .expect("MinimaxProvider::new should accept the oversized cap");
+
+        let req = Request {
+            role: crate::llm::role::Role::Intake,
+            model: "MiniMax-M3".into(),
+            system: String::new(),
+            user: "hello".into(),
+            max_tokens: 1_000_000,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+        };
+        let (status, _resp) = provider
+            .send(&req)
+            .await
+            .expect("minimax send should succeed against the mock server");
+        assert_eq!(status, 200);
+
+        let bytes = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("mock server captured the request body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("captured body is valid JSON");
+        assert_eq!(
+            json["max_tokens"],
+            serde_json::json!(MINIMAX_MAX_TOKENS_CAP),
+            "MINIMAX_MAX_TOKENS_CAP must clamp an oversized per-provider \
+             override at the wire, got body: {json}"
         );
     }
 }
