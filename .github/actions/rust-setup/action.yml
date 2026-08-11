@@ -16,27 +16,27 @@ runs:
         toolchain: 1.97.1
         components: ${{ inputs.components }}
 
-      - name: Cache cargo registry, git index, and target/
-        uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
-        with:
-          cache-on-failure: true
-          # `cache-targets` (default true) caches the workspace's target/
-          # including DEPENDENCY .rlib files.
-          # `cache-workspace-crates: true` also caches the workspace's
-          # own .rmeta / .o incremental artifacts, which the action's
-          # default omits. Combined with the post-step that re-enables
-          # `CARGO_INCREMENTAL=1`, this drops the e2e-network build
-          # from ~4.75 min (full rebuild every run, the previous
-          # default) to ~30-60s on warm cache.
-          # See Swatinem/rust-cache README "Cache Effectiveness" section.
-          cache-workspace-crates: 'true'
-          # Single-crate project, so default workspace detection is fine.
-          # cache-on-failure: true keeps the cache around even if a job failed
-          # mid-build, so the next push doesn't have to re-download the
-          # registry from scratch.
-        env:
-          # Override the action's automatic CARGO_INCREMENTAL=0 so the
-          # build can use incremental compilation with the cached
-          # workspace crates. Re-enables incremental compilation; pairs
-          # with `cache-workspace-crates: true` above.
-          CARGO_INCREMENTAL: '1'
+    - name: Cache cargo registry, git index, and target/
+      uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+      with:
+        cache-on-failure: true
+        # `cache-targets` (default true) caches the workspace's target/
+        # including DEPENDENCY .rlib files.
+        # `cache-workspace-crates: true` also caches the workspace's
+        # own .rmeta / .o incremental artifacts, which the action's
+        # default omits. Combined with the post-step that re-enables
+        # `CARGO_INCREMENTAL=1`, this drops the e2e-network build
+        # from ~4.75 min (full rebuild every run, the previous
+        # default) to ~30-60s on warm cache.
+        # See Swatinem/rust-cache README "Cache Effectiveness" section.
+        cache-workspace-crates: 'true'
+        # Single-crate project, so default workspace detection is fine.
+        # cache-on-failure: true keeps the cache around even if a job failed
+        # mid-build, so the next push doesn't have to re-download the
+        # registry from scratch.
+      env:
+        # Override the action's automatic CARGO_INCREMENTAL=0 so the
+        # build can use incremental compilation with the cached
+        # workspace crates. Re-enables incremental compilation; pairs
+        # with `cache-workspace-crates: true` above.
+        CARGO_INCREMENTAL: '1'
