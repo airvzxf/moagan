@@ -56,6 +56,15 @@ struct MaxTokensTableInner {
     probes_succeeded: u32,
     /// Total probes that failed (rejection or indeterminate).
     probes_failed: u32,
+    /// [`tokio::task::JoinHandle`]s for every background probe the
+    /// registry fired at startup. The runtime joins them via
+    /// [`Self::await_ready`] so the caller can decide whether to
+    /// gate the first LLM call behind the discovery. Stored as
+    /// `Vec<JoinHandle<()>>` because the typed return value is
+    /// `Result<(), JoinError>` which would force every consumer to
+    /// import `tokio::task::JoinError`; the inner type is unit so
+    /// dropping the handle is safe.
+    pending: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl MaxTokensTable {
@@ -88,6 +97,7 @@ impl MaxTokensTable {
                 probes_attempted: 0,
                 probes_succeeded: 0,
                 probes_failed: 0,
+                pending: Vec::new(),
             })),
             persist_path: save.then(|| path.to_path_buf()),
         })
@@ -102,6 +112,7 @@ impl MaxTokensTable {
                 probes_attempted: 0,
                 probes_succeeded: 0,
                 probes_failed: 0,
+                pending: Vec::new(),
             })),
             persist_path: None,
         }
@@ -115,6 +126,23 @@ impl MaxTokensTable {
             .entries
             .get(&(provider.to_owned(), model.to_owned()))
             .cloned()
+    }
+
+    /// Set the per-`(provider, model)` operator floor for the next
+    /// probe. The floor is honoured during [`Self::probe_and_store`]
+    /// so the discovered value cannot shrink below `floor`. When the
+    /// pair already has a cached entry, the floor is updated in place
+    /// without disturbing the discovered `max_tokens`.
+    ///
+    /// Today the floor is global (the max across every opted-in
+    /// provider) because the algorithm only carries one floor; a
+    /// future refactor can lift it onto [`Entry`] so a provider with
+    /// a smaller floor is not silently bumped to a larger upstream's
+    /// value. The [`Self::set_floor_for`] API stays open so callers
+    /// do not need to change when that lands.
+    pub fn set_floor_for(&self, _provider: &str, _model: &str, floor: u32) {
+        let mut inner = self.inner.write();
+        inner.floor = inner.floor.max(floor.max(MIN_AUTOPROBE_FLOOR));
     }
 
     /// Resolve the effective `max_tokens` for `(provider, model)`:
@@ -224,6 +252,38 @@ impl MaxTokensTable {
                 .insert(model.clone(), entry.clone());
         }
         file.save(path)
+    }
+
+    /// Record the [`tokio::task::JoinHandle`] of a background probe
+    /// the registry fired at startup. The caller can `await` every
+    /// handle via [`Self::await_ready`] when it wants to gate the
+    /// first LLM call behind the discovery (CI, smoke tests).
+    pub fn record_probe_join_handle(
+        &self,
+        provider: String,
+        model: String,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        let _ = (provider, model);
+        let mut inner = self.inner.write();
+        inner.pending.push(handle);
+    }
+
+    /// Wait for every probe the registry fired at startup to
+    /// finish. No-op when no probe was fired (mock-only registry).
+    /// Errors from individual probes are logged via `tracing::warn!`
+    /// and do not propagate — a failing probe degrades to the
+    /// static `max_tokens` knob, never aborts the run.
+    pub async fn await_ready(&self) {
+        let handles: Vec<tokio::task::JoinHandle<()>> = {
+            let mut inner = self.inner.write();
+            std::mem::take(&mut inner.pending)
+        };
+        for h in handles {
+            if let Err(e) = h.await {
+                tracing::warn!(error = %e, "max_tokens_auto: probe task join failed");
+            }
+        }
     }
 
     /// Persist to the path the table was built from. `None` when

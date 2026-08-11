@@ -93,6 +93,17 @@ pub trait Provider: Send + Sync {
     /// context if they support it.
     async fn send(&self, req: &Request) -> Result<(u16, Response)>;
 
+    /// Send a probe request bypassing the safety wire-clamp. Used by
+    /// the auto-probe to discover the upstream's actual
+    /// `max_tokens` boundary. Default impl just calls [`Self::send`];
+    /// providers that carry a wire-side ceiling (the
+    /// `MINIMAX_MAX_TOKENS_CAP` and `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// clamps in `capabilities.rs`) override to skip the clamp so the
+    /// probe can see the real upstream behaviour.
+    async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
+        self.send(req).await
+    }
+
     /// Optional: count tokens for pre-flight estimation. Default returns
     /// `None` and the caller falls back to a heuristic.
     async fn count_tokens(&self, text: &str) -> Option<u64> {
@@ -711,10 +722,21 @@ pub fn registry_from_config_with_home(
     };
     match (home, probe_settings(cfg)) {
         (Some(home), Some(settings)) => {
+            tracing::info!(
+                providers = cfg.len(),
+                floor = settings.floor,
+                save = settings.save,
+                "max_tokens_auto: registry carrying the probe table; firing background probes"
+            );
             let table = MaxTokensTable::from_home(home, settings.floor, settings.save)?;
-            Ok(registry.with_max_tokens_table(Arc::new(table)))
+            let table = Arc::new(table);
+            spawn_pending_probes(&wrapped_entries, cfg, Arc::clone(&table));
+            Ok(registry.with_max_tokens_table(table))
         }
-        _ => Ok(registry),
+        _ => {
+            tracing::info!("max_tokens_auto: no provider enabled the probe");
+            Ok(registry)
+        }
     }
 }
 
@@ -752,6 +774,117 @@ fn probe_settings(
     }
     settings
 }
+
+/// Fire one background probe per opted-in `(provider, model)` pair.
+/// Each probe writes its discovered value into the shared
+/// [`MaxTokensTable`]; the pipeline consults the table on every
+/// LLM call so the probe result takes effect as soon as it lands.
+///
+/// Providers with `max_token_auto = None` or `Some(0)` are skipped;
+/// the `mock` provider is also skipped because it cannot answer a
+/// probe (no real upstream). The `tokio::spawn` calls are recorded
+/// as `JoinHandle`s on the table so the caller can `await_ready()`
+/// if it wants to gate the first LLM call behind the discovery.
+///
+/// The probe deliberately bypasses the [`BreakeredProvider`] wrapper
+/// (a failing probe must not poison the steady-state circuit) and
+/// runs against the inner [`Provider`] via
+/// [`ProviderProbeTransport`]. Per-call work is bounded by
+/// [`super::probe::PROBE_TIMEOUT`] (5 s).
+fn spawn_pending_probes(
+    wrapped_entries: &[(String, Arc<BreakeredProvider>)],
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
+    table: Arc<MaxTokensTable>,
+) {
+    for (name, wrapped) in wrapped_entries {
+        let Some(spec) = cfg.get(name) else {
+            continue;
+        };
+        // Honor the operator's per-provider opt-out: `None` or
+        // `Some(0)` means "no probe".
+        let Some(floor) = spec.max_token_auto.filter(|n| *n > 0) else {
+            tracing::debug!(
+                provider = %name,
+                "max_tokens_auto: provider opted out of the probe"
+            );
+            continue;
+        };
+        // Mock has no upstream; the probe would burn 30 HTTP calls
+        // against a canned-response queue. Skip it.
+        let inner = wrapped.inner();
+        if inner.name() == "mock" {
+            continue;
+        }
+        table.set_floor_for(name, inner.model(), floor);
+        let transport = match super::probe::ProviderProbeTransport::new(Arc::clone(inner)) {
+            Ok(t) => Arc::new(t) as Arc<dyn super::probe::ProbeTransport>,
+            Err(e) => {
+                tracing::warn!(
+                    provider = %name,
+                    model = %inner.model(),
+                    error = %e,
+                    "max_tokens_auto: failed to build probe transport; skipping"
+                );
+                continue;
+            }
+        };
+        let table_for_task = Arc::clone(&table);
+        let provider_name = name.clone();
+        let model_name = inner.model().to_owned();
+        let provider_name_for_handle = provider_name.clone();
+        let model_name_for_handle = model_name.clone();
+        let handle = tokio::spawn(async move {
+            tracing::info!(
+                provider = %provider_name,
+                model = %model_name,
+                "max_tokens_auto: probe task spawned; verifying cached entry"
+            );
+            let verified = table_for_task
+                .verify(&provider_name, &model_name, Arc::clone(&transport))
+                .await
+                .unwrap_or(false);
+            if !verified {
+                tracing::info!(
+                    provider = %provider_name,
+                    model = %model_name,
+                    "max_tokens_auto: no usable cached entry; running full probe"
+                );
+                match table_for_task
+                    .probe_and_store(&provider_name, &model_name, transport)
+                    .await
+                {
+                    Ok(value) => tracing::info!(
+                        provider = %provider_name,
+                        model = %model_name,
+                        discovered = value,
+                        "max_tokens_auto: discovered value"
+                    ),
+                    Err(e) => tracing::warn!(
+                        provider = %provider_name,
+                        model = %model_name,
+                        error = %e,
+                        "max_tokens_auto: probe failed; provider will use the static `max_tokens` knob"
+                    ),
+                }
+            } else {
+                tracing::info!(
+                    provider = %provider_name,
+                    model = %model_name,
+                    "max_tokens_auto: cached entry verified"
+                );
+            }
+        });
+        table.record_probe_join_handle(provider_name_for_handle, model_name_for_handle, handle);
+    }
+}
+
+/// Aggregate the per-provider auto-probe knobs into the single
+/// `(floor, save)` pair the shared [`MaxTokensTable`] carries.
+/// Returns `None` when no provider enables the probe, which is the
+/// signal to leave `ProviderRegistry::max_tokens_table` unset.
+///
+/// A provider opts in with `max_token_auto = Some(n)`, `n > 0`;
+/// `None` and the `Some(0)` env sentinel both mean "off".
 
 /// Aggregated auto-probe knobs for the shared table.
 struct ProbeSettings {

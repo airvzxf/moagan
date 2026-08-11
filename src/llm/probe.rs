@@ -152,7 +152,7 @@ impl ProbeTransport for ProviderProbeTransport {
             stream: false,
             extra_messages: vec![],
         };
-        let res = timeout(PROBE_TIMEOUT, self.provider.send(&req)).await;
+        let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
         match res {
             Ok(Ok((status, _body))) => {
                 if (200..400).contains(&status) {

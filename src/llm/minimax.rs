@@ -138,66 +138,15 @@ impl MinimaxProvider {
         tokio::time::sleep(chosen).await;
         let _ = attempt;
     }
-}
 
-/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
-/// does not implement `Debug` (that lives in `probe_table.rs`,
-/// outside this provider's owned files) and exposing the table
-/// reference in a Debug dump adds noise without signal: the table
-/// is the only `Arc` on the struct, so showing the rest is enough
-/// to identify the instance.
-impl std::fmt::Debug for MinimaxProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MinimaxProvider")
-            .field("name", &self.name)
-            .field("model", &self.model)
-            .field("endpoint", &self.endpoint)
-            .field("provider_max_tokens", &self.provider_max_tokens)
-            .field("max_tokens_table", &"<shared>")
-            .finish()
-    }
-}
-
-#[async_trait]
-impl Provider for MinimaxProvider {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn model(&self) -> &str {
-        &self.model
-    }
-
-    fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::for_minimax()
-    }
-
-    async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+    /// Shared HTTP retry body for [`Provider::send`] and
+    /// [`Provider::send_probe`]. The caller applies the per-call
+    /// `max_tokens` clamp before invoking this so the wire body
+    /// carries whatever value the caller approved. Inherent
+    /// (non-trait) method so the HTTP loop lives in one place.
+    async fn send_http(&self, req: Request) -> Result<(u16, Response)> {
         let result = async {
             let url = self.messages_url();
-            // Apply three-layer max_tokens cap. From highest-priority
-            // (smallest wins) to lowest:
-            //   1. MINIMAX_MAX_TOKENS_CAP — the documented upstream
-            //      ceiling; the upstream returns HTTP 400 above it.
-            //   2. ProviderConfig::max_tokens — operator override.
-            //   3. MaxTokensTable::resolve_cached — auto-probed
-            //      per-(provider, model) value, primary source of truth
-            //      when present.
-            // Clone once before the retry loop so the body is
-            // identical across attempts.
-            let mut req = req.clone();
-            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-            let table_cap = self
-                .max_tokens_table
-                .as_ref()
-                .and_then(|t| t.resolve_cached(self.name(), self.model()))
-                .unwrap_or(u32::MAX);
-            let cap = operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP);
-            req.max_tokens = req.max_tokens.min(cap);
             let body = AnthropicWire.encode_body(&req)?;
             let mut attempt: u32 = 0;
             loop {
@@ -275,6 +224,84 @@ impl Provider for MinimaxProvider {
             Err(err) => self.breaker.record_failure_if_circuit_opening(err),
         }
         result
+    }
+}
+
+/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
+/// does not implement `Debug` (that lives in `probe_table.rs`,
+/// outside this provider's owned files) and exposing the table
+/// reference in a Debug dump adds noise without signal: the table
+/// is the only `Arc` on the struct, so showing the rest is enough
+/// to identify the instance.
+impl std::fmt::Debug for MinimaxProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinimaxProvider")
+            .field("name", &self.name)
+            .field("model", &self.model)
+            .field("endpoint", &self.endpoint)
+            .field("provider_max_tokens", &self.provider_max_tokens)
+            .field("max_tokens_table", &"<shared>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl Provider for MinimaxProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::for_minimax()
+    }
+
+    async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+        let mut req = req.clone();
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        // Three-layer cap (highest priority first, smallest wins):
+        //   1. MINIMAX_MAX_TOKENS_CAP — documented upstream ceiling;
+        //      the upstream returns HTTP 400 above it.
+        //   2. ProviderConfig::max_tokens — operator override.
+        //   3. MaxTokensTable::resolve_cached — auto-probed
+        //      per-(provider, model) value, primary source of truth.
+        let cap = operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP);
+        req.max_tokens = req.max_tokens.min(cap);
+        self.send_http(req).await
+    }
+
+    /// Bypass variant for the auto-probe. Skips the
+    /// `MINIMAX_MAX_TOKENS_CAP` safety clamp so the algorithm can
+    /// observe the upstream's real boundary; the regular `send`
+    /// always keeps the clamp so a stale or empty table cannot
+    /// leak an unbounded value into the wire body.
+    async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
+        let mut req = req.clone();
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        // Probe path: skip the documented ceiling so the algorithm
+        // sees the upstream's actual cap. The operator override and
+        // the cached table still apply (they reflect what we know is
+        // safe to ask for).
+        let cap = operator_cap.min(table_cap);
+        req.max_tokens = req.max_tokens.min(cap);
+        self.send_http(req).await
     }
 }
 
