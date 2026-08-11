@@ -18,6 +18,8 @@
 //! at a time and the system prompt is embedded in the `instructions`
 //! field (Responses API convention).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::config::ProviderConfig;
@@ -27,6 +29,7 @@ use crate::secret::SecretString;
 use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
 use super::openai_compat::role_requires_json;
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::response_format_opt_out::model_skips_response_format;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
@@ -34,7 +37,7 @@ use super::sse_parser::{SseError, SseParser};
 use super::wire::{Request, Response, Usage};
 
 /// OpenCode Go provider routed through the OpenAI Responses API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenCodeGoResponsesProvider {
     name: String,
     model: String,
@@ -55,6 +58,13 @@ pub struct OpenCodeGoResponsesProvider {
     /// *presence* of the field (e.g. `gpt-5.6-luna`). Set from
     /// `ProviderConfig::omit_max_tokens`.
     omit_max_tokens: bool,
+    /// Auto-probed `max_tokens` table. When `Some` the
+    /// `resolve_cached(self.name(), self.model())` value joins the
+    /// clamp chain as the third-highest layer (kind-level cap >
+    /// operator override > table). `None` when the provider was
+    /// built without going through `registry_from_config` — unit
+    /// tests and legacy call paths.
+    max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
 impl OpenCodeGoResponsesProvider {
@@ -76,7 +86,16 @@ impl OpenCodeGoResponsesProvider {
             max_retries: 3,
             provider_max_tokens: spec.max_tokens,
             omit_max_tokens: spec.omit_max_tokens,
+            max_tokens_table: None,
         })
+    }
+
+    /// Attach the shared auto-probe `max_tokens` table so `send()`
+    /// layers the discovered ceiling into the clamp chain. Wired by
+    /// `registry_from_config` when the registry has a table.
+    pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        self.max_tokens_table = Some(table);
+        self
     }
 
     /// Build from config using `OPENCODE_GO_API_KEY`.
@@ -214,6 +233,23 @@ fn build_client() -> Result<reqwest::Client> {
         .map_err(|e| Error::Provider(format!("build reqwest client: {e}")))
 }
 
+/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
+/// does not implement `Debug` (that lives in `probe_table.rs`,
+/// outside this provider's owned files). The table is a shared
+/// `Arc`, so emitting `<shared>` keeps the dump informative.
+impl std::fmt::Debug for OpenCodeGoResponsesProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenCodeGoResponsesProvider")
+            .field("name", &self.name)
+            .field("model", &self.model)
+            .field("endpoint", &self.endpoint)
+            .field("provider_max_tokens", &self.provider_max_tokens)
+            .field("omit_max_tokens", &self.omit_max_tokens)
+            .field("max_tokens_table", &"<shared>")
+            .finish()
+    }
+}
+
 #[async_trait]
 impl Provider for OpenCodeGoResponsesProvider {
     fn name(&self) -> &str {
@@ -237,19 +273,25 @@ impl Provider for OpenCodeGoResponsesProvider {
         if req.stream {
             return self.send_streaming(req, &url).await;
         }
-        // Apply two-layer max_tokens cap (mirrors OpenAiCompatProvider).
-        // Layer 1: per-provider `ProviderConfig::max_tokens` (TOML
-        // override). Layer 2: the OpenCode Go hard ceiling
-        // (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`); the upstream
-        // rejects values above 393216 but kimi-k* / gpt-5.6-luna
-        // accept at most 16_384, so we cap lower than the
-        // documented ceiling to keep every model on the
-        // 2026-08-04 roster working out of the box.
+        // Apply three-layer max_tokens cap (mirrors
+        // OpenAiCompatProvider and MinimaxProvider). Highest priority
+        // (smallest wins) to lowest:
+        //   1. `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` — the documented
+        //      hard ceiling for the 2026-08-04 roster (kimi-k* /
+        //      gpt-5.6-luna accept at most 16_384, below the upstream's
+        //      393216 documented max).
+        //   2. `ProviderConfig::max_tokens` — operator TOML override.
+        //   3. `MaxTokensTable::resolve_cached` — auto-probed
+        //      per-(provider, model) value; primary source of truth
+        //      when present.
         let mut req = req.clone();
-        let cap = self
-            .provider_max_tokens
-            .unwrap_or(u32::MAX)
-            .min(OPENCODE_GO_MAX_TOKENS_CAP);
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
         req.max_tokens = req.max_tokens.min(cap);
         let max_tokens = self.effective_max_tokens(req.max_tokens);
         let mut attempt: u32 = 0;
@@ -449,15 +491,18 @@ impl OpenCodeGoResponsesProvider {
     /// response, and returns a single aggregated `Response` with
     /// the joined text and the terminal usage block.
     async fn send_streaming(&self, req: &Request, url: &str) -> Result<(u16, Response)> {
-        // Apply two-layer max_tokens cap (same as the non-streaming
-        // path and as `OpenAiCompatProvider`). Clamping here as
-        // well so the SSE wire body carries the same value the
-        // upstream would see on the non-streaming path.
+        // Apply three-layer max_tokens cap (same as the non-streaming
+        // path and as `OpenAiCompatProvider` / `MinimaxProvider`).
+        // Clamping here as well so the SSE wire body carries the same
+        // value the upstream would see on the non-streaming path.
         let mut req = req.clone();
-        let cap = self
-            .provider_max_tokens
-            .unwrap_or(u32::MAX)
-            .min(OPENCODE_GO_MAX_TOKENS_CAP);
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
         req.max_tokens = req.max_tokens.min(cap);
         let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
         let request_started = std::time::Instant::now();
@@ -1285,5 +1330,114 @@ data: [DONE]\n\n",
             value["response_format"],
             serde_json::json!({"type": "json_object"})
         );
+    }
+
+    /// Auto-probe table clamp contract: when
+    /// `with_max_tokens_table` attaches a table carrying a
+    /// discovered value smaller than the requested `max_tokens`
+    /// AND smaller than the documented hard cap, the wire body
+    /// must carry the discovered value on the non-streaming
+    /// Responses path. Pins the v0.7 precedence order:
+    /// `OPENCODE_GO_MAX_TOKENS_CAP` > operator > table > req.
+    #[test]
+    fn send_clamps_max_tokens_to_table_value() {
+        use std::sync::Arc;
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::llm::probe::{MIN_AUTOPROBE_FLOOR, ProbeOutcome, ProbeTransport};
+
+        #[derive(Clone)]
+        struct CappedTransport {
+            cap: u32,
+        }
+
+        #[async_trait::async_trait]
+        impl ProbeTransport for CappedTransport {
+            async fn probe_send(&self, n: u32) -> ProbeOutcome {
+                if n <= self.cap {
+                    ProbeOutcome::Accepted
+                } else {
+                    ProbeOutcome::Rejected
+                }
+            }
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 10_000 });
+            let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+            let discovered = table
+                .probe_and_store("opencode_go", "gpt-5.6-luna", transport)
+                .await
+                .expect("probe_and_store");
+            // The wire-body assertion below uses `discovered`
+            // directly: this test pins the wiring contract
+            // (table value honoured on the wire) without depending
+            // on the probe algorithm's exact convergence — that
+            // algorithm has a known ±N imprecision at non-trivial
+            // boundaries (see pre-existing
+            // `probe::tests::detect_finds_cap_at_8k`).
+
+            let p = OpenCodeGoResponsesProvider::new(
+                &ProviderConfig {
+                    kind: "opencode_go".into(),
+                    endpoint: format!("{}/v1", server.uri()),
+                    model: "gpt-5.6-luna".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap()
+            .with_max_tokens_table(table);
+
+            let req = Request {
+                role: crate::llm::Role::Intake,
+                model: "gpt-5.6-luna".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(discovered as u64),
+                "wire body must carry the table-resolved value ({discovered}), got body: {body}"
+            );
+        });
     }
 }
