@@ -39,17 +39,17 @@ permissions:
 # Architecture (build-once + per-job conditions, supersedes the
 # 3-row matrix that built the release binary once per row):
 #
-#   build           — runs once, uploads target/release/moagan as the
-#                     `moagan-e2e-binary` artifact.
-#   test-card80     — needs: build; gated on inputs.section in
-#                     {card80, all, ''}.
-#   test-fast       — needs: build; gated on inputs.section in
-#                     {fast, all, ''}.
-#   test-explore    — needs: build; gated on inputs.section in
-#                     {explore, all, ''}.
+#   build-e2e-network  — runs once, uploads target/release/moagan as the
+#                        `moagan-e2e-binary` artifact.
+#   test-card80        — needs: build-e2e-network; gated on inputs.section in
+#                        {card80, all, ''}.
+#   test-fast          — needs: build-e2e-network; gated on inputs.section in
+#                        {fast, all, ''}.
+#   test-explore       — needs: build-e2e-network; gated on inputs.section in
+#                        {explore, all, ''}.
 #
 # On `push` events `inputs.section` is undefined (= ''), so all three
-# test jobs run in parallel after `build` completes (wall-clock ≈
+# test jobs run in parallel after `build-e2e-network` completes (wall-clock ≈
 # slowest row, ~22 min). On `workflow_dispatch` with `section=<x>`,
 # only the matching `test-<x>` job is materialised — the others
 # don't even appear in the run page. This replaces the previous
@@ -69,7 +69,7 @@ permissions:
 # the whole pipeline.
 
 jobs:
-  build:
+  build-e2e-network:
     name: 'Build · release binary'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -85,14 +85,6 @@ jobs:
 
       - name: Build release binary
         env:
-          # The Swatinem/rust-cache restore step calls
-          # `exportVariable("CARGO_INCREMENTAL", 0)` at the job level
-          # (see dist/restore.js). That export persists for every
-          # subsequent step in the job, including this one — so the
-          # build runs as if `CARGO_INCREMENTAL=0` was set, which forces
-          # a full recompile every time and is the root cause of the
-          # 270 s e2e-network build even on a warm cache hit.
-          #
           # Overriding it here on the step that actually runs cargo
           # lets the workspace's own .rmeta / .o files (now in the
           # cache thanks to `cache-workspace-crates: true` in
@@ -121,7 +113,7 @@ jobs:
 
   test-card80:
     name: 'Tier 3 · e2e — card80'
-    needs: build
+    needs: build-e2e-network
     if: ${{ inputs.section == 'card80' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -170,7 +162,7 @@ jobs:
 
   test-fast:
     name: 'Tier 3 · e2e — fast'
-    needs: build
+    needs: build-e2e-network
     if: ${{ inputs.section == 'fast' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -206,7 +198,7 @@ jobs:
 
   test-explore:
     name: 'Tier 3 · e2e — explore'
-    needs: build
+    needs: build-e2e-network
     if: ${{ inputs.section == 'explore' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 28

@@ -26,27 +26,27 @@ permissions:
 #   guard-deps   ─┤   T0 (no deps, <2 s each)
 #                   │
 #   clippy       ─┤   T1 (no deps, ~60 s)
-#   build        ─┴─► upload-artifact: moagan-debug
+#   build-ci     ─┴─► upload-artifact: moagan-debug
 #                       │
 #   test-tests   ────┐
 #   test-lib     ────┤
-#   test-doc     ────┤  T2 (depend on build, parallel)
+#   test-doc     ────┤  T2 (depend on build-ci, parallel)
 #   smoke        ────┤
 #   e2e          ────┘
 #
-# All 5 post-build jobs run in parallel and only depend on `build`. The
+# All 5 post-build jobs run in parallel and only depend on `build-ci`. The
 # YAML declaration order is: test-tests, test-lib, smoke, e2e, test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
 # the slowest of the 5 jobs (typically e2e at ~3 min).
 #
 # Wall-clock critical path:
-#   round 1 = max(fmt-check, guard-deps, clippy, build)                  ~60 s
+#   round 1 = max(fmt-check, guard-deps, clippy, build-ci)                  ~60 s
 #   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e)             ~3 min
 # Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
 #
 # Note on artifact sharing:
-#   We tried to share the built binary between `build` and the
+#   We tried to share the built binary between `build-ci` and the
 #   consumers (smoke, e2e) via actions/upload-artifact + download-artifact.
 #   The v4 actions preserve the file's relative path inside the zip
 #   (the zip contains `target/debug/moagan`), and download-artifact
@@ -63,7 +63,7 @@ permissions:
 #   - fmt-check
 #   - guard-deps
 #   - clippy
-#   - build
+#   - build-ci
 #   - test-lib
 #   - test-tests
 #   - test-doc
@@ -104,7 +104,7 @@ jobs:
           components: clippy
       - run: make lint
 
-  build:
+  build-ci:
     name: 'T1 · build (populates cargo cache)'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -116,7 +116,7 @@ jobs:
 
   test-tests:
     name: 'T2 · cargo test --tests (integration)'
-    needs: build
+    needs: build-ci
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -129,7 +129,7 @@ jobs:
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'
-    needs: build
+    needs: build-ci
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -142,7 +142,7 @@ jobs:
 
   smoke:
     name: 'T3 · make smoke'
-    needs: build
+    needs: build-ci
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -155,7 +155,7 @@ jobs:
 
   e2e:
     name: 'T3 · make e2e (local mock pipeline)'
-    needs: build
+    needs: build-ci
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -168,7 +168,7 @@ jobs:
 
   test-doc:
     name: 'T2 · cargo test --doc'
-    needs: build
+    needs: build-ci
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
