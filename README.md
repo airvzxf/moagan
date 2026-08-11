@@ -42,6 +42,17 @@ export MINIMAX_API_KEY=sk-cp-...
 
 At startup, Moagan best-effort loads the first `.env` found from the current working directory upward. Existing environment variables are never overwritten, so values explicitly set in the shell take precedence over `.env`. A successful load reports the file path on stderr; set `MOAGAN_QUIET=1` to suppress that notice without disabling loading. A missing `.env` is silently ignored.
 
+### Auto-detected `max_tokens`
+
+Moagan probes each `(provider, model)` once at first startup to
+discover the real `max_tokens` ceiling. The discovered values are
+persisted at `~/.local/share/moagan/max_tokens_auto.toml` and
+verified on every subsequent run. Disable with
+`MOAGAN_MAX_TOKEN_AUTO=0` or set `max_token_auto = None` in
+`~/.config/moagan/config.toml`. See
+[`docs/max-tokens-auto.md`](docs/max-tokens-auto.md) for the full
+algorithm and tuning knobs.
+
 ## Architecture
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module layout, persistence model, and provider/prompt contracts.

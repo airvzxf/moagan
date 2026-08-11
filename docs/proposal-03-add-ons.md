@@ -4108,6 +4108,41 @@ El orden de T01-06 §40 se mantiene. Las siguientes adiciones aclaran pasos adic
 
 ---
 
+### D.X1. Auto-detected `max_tokens` per (provider, model) (v0.7.0)
+
+Replaces the hardcoded `MINIMAX_MAX_TOKENS_CAP` /
+`OPENCODE_GO_MAX_TOKENS_CAP` constants with a runtime probe that
+discovers the actual `max_tokens` ceiling for each `(provider,
+model)` pair. The probe runs once per fresh model on first
+startup, persists the discovered value to
+`<MOAGAN_HOME>/max_tokens_auto.toml`, and verifies the cached
+value with a single probe on every subsequent startup.
+
+Opt-in via `ProviderConfig::max_token_auto: Option<u32>` (None or
+`Some(0)` = disabled; `Some(N>0)` = enabled with floor `N`).
+Default: `Some(1024)` so the probe runs by default but never
+shrinks the discovered value below 1024. Persistence is
+controlled by `ProviderConfig::max_token_auto_save: bool`
+(default `true`).
+
+Algorithm:
+
+1. Phase 1 — exponential search 2^1..2^30 (30 sequential probes,
+   the first failure breaks the loop).
+2. Phase 2 — bisect `[lo+1, hi-1]` in 20-point parallel batches
+   (up to 32 rounds).
+3. Clamp to `[MIN_AUTOPROBE_FLOOR = 1024,
+   MAX_AUTOPROBE_CEILING = 1u32 << MAX_PROBE_SHIFT = 2^30]`.
+
+Env overrides: `MOAGAN_MAX_TOKEN_AUTO=0` (disable), `=4096`
+(enable with floor 4K), `MOAGAN_MAX_TOKEN_AUTO_SAVE=false` (do
+not persist).
+
+Mock provider skips the probe and returns `DEFAULT_MAX_TOKENS =
+1_000_000`.
+
+---
+
 ## E. Resumen ejecutivo de las 278 adiciones
 
 | Tipo | Cantidad | % | Notas |

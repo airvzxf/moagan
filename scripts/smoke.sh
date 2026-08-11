@@ -17,6 +17,13 @@ fi
 : "${MOAGAN_HOME:=/home/wolf/.local/share/moagan}"
 export MOAGAN_HOME
 
+# Disable the per-(provider,model) max_tokens auto-probe in the smoke
+# battery: each invocation already targets a known model and the probe
+# would add ~30 sequential HTTP calls to every run. CI is the perfect
+# place to save that cost.
+export MOAGAN_MAX_TOKEN_AUTO=false
+export MOAGAN_MAX_TOKEN_AUTO_SAVE=false
+
 # Wipe a previous smoke run so inspect starts clean.
 rm -rf "$MOAGAN_HOME"
 mkdir -p "$MOAGAN_HOME"
