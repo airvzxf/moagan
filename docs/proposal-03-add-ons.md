@@ -29,6 +29,24 @@ El método seguido en este barrido fue:
 
 ---
 
+> **v0.6.0 batch (released 2026-08-11)** — los siguientes items del
+> catálogo entraron juntos como parte de v0.6.0 (PR-B1 / PR-B2 / PR-B3).
+> La nota de cada sección enlaza el PR y el commit squash correspondientes:
+>
+> - **D.13.19** — per-provider `TemperatureProfile` resuelve el
+>   spec drift `roles × models × temperatures` (PR-D1 /
+>   [#356](https://github.com/airvzxf/moagan/pull/356), squash `844a137`).
+> - **D.15.1** — `Config::load()` con precedencia strict
+>   cwd-overrides-user + wiring de `api_keys.toml` (PR-B2 /
+>   [#342](https://github.com/airvzxf/moagan/pull/342), squash `17ece00`).
+>   Cubre también §D.12.13 (`api_keys.toml` precedence) en la misma oleada.
+> - **D.19.3** — sub-comando `moagan telemetry plan <NAME>` con vista
+>   local de cuota desde `Db::aggregate_window_usage` (PR-B3 /
+>   [#367](https://github.com/airvzxf/moagan/pull/367),
+>   squash `93acb72`).
+
+---
+
 ## B. Conteo global de fuentes y aporte
 
 | Bloque | Propuestas revisadas | Aportaciones integradas |
@@ -2145,7 +2163,8 @@ pub struct MatrixCell {
 
 (Inspirado en T16-06 §2.1; T01-10 §6.1.)
 
-> **Estado (v0.6 PR-D1, ✅ RESOLVED 2026-08):** V4 §6.4 y T01-06 §9.1 especifican la forma `roles × models × temperatures`. La implementación en `src/discovery/matrix.rs:36` usa deliberadamente `dimensions × facets × per_cell`, y a partir de v0.6 PR-D1 esa forma se complementa con un perfil de temperaturas **por-provider**, no por-celda: `ExplorationMatrix` lleva `temperature_profiles: HashMap<String, TemperatureProfile>` (key = `ProviderConfig::model`, ej. `"MiniMax-M3"`) y `default_profile: TemperatureProfile`; cada `TemperatureProfile` es `{ temperatures: Vec<f32>, replicas_per_temperature: usize }`. Así, la tupla efectiva por celda es `{ dimension_id, facet_id, label, seed, provider_model, temperature, replica }` y el fan-out total es `dimensions × facets × sketches_per_cell × (Σ_per_provider temperatures × replicas)`. El default (`temperatures = vec![1.0]`, `replicas_per_temperature = 1`) reproduce el contrato v0.5 byte-for-byte, por lo que los runs no configurados son bit-identical. La decisión de v0.5 PR-16 (documentar la divergencia sin re-diseñar la matriz) se mantiene; PR-D1 evoluciona la `temperature` axis **fuera** del `MatrixCell` para preservar el struct estable y permitir expansión multi-provider. Operadores configuran perfiles via CLI `--temperature-profile 'provider=<model>;temperatures=<csv>;replicas=<n>'` (formato `key=value;...`, validado) o via el bloque `[discovery_matrix]` en `~/.config/moagan/config.toml` (`temperature_profiles` + `default_profile`). CLI gana en conflicto. Implementación: `src/discovery/matrix.rs` (tipos), `src/phases/phase.rs` (`call_with_retry_at_temp` / `call_uncached_at_temp` — bypassan `resolve_temperature` para estampar la temperatura explícita en `Request.temperature`; cache key en `src/llm/cache/mod.rs:117` ya diferenciaba por temperatura), `src/phases/discover_matrix.rs` y `src/discovery/coordinator.rs` (loop per-provider), `src/cli/mod.rs` + `src/cli/discover.rs` (CLI surface), `src/config/mod.rs` (`DiscoveryMatrixConfig`).
+> **Implementación v0.6.0 (PR #356, squash `844a137`):** el `ExplorationMatrix` ahora lleva `temperature_profiles: HashMap<String, TemperatureProfile>` (key = `ProviderConfig::model`) y `default_profile: TemperatureProfile` con `{ temperatures: Vec<f32>, replicas_per_temperature: usize }`. Esto **resuelve** el spec drift `roles × models × temperatures` de V4 §6.4 / T01-06 §9.1 moviendo el eje `temperature` **fuera** del `MatrixCell` y haciendo el fan-out por-provider. El default (`temperatures = vec![1.0]`, `replicas_per_temperature = 1`) reproduce bit-for-byte el contrato v0.5 PR-16, por lo que los runs no configurados son idénticos. **Supersede** la nota "SPEC-DRIFT resolved in v0.5 PR-16" previa, que solo documentaba la divergencia sin re-diseñar la matriz. Detalles completos abajo:
+> V4 §6.4 y T01-06 §9.1 especifican la forma `roles × models × temperatures`. La implementación en `src/discovery/matrix.rs:36` usa deliberadamente `dimensions × facets × per_cell`, y a partir de v0.6 PR-D1 esa forma se complementa con un perfil de temperaturas **por-provider**, no por-celda: `ExplorationMatrix` lleva `temperature_profiles: HashMap<String, TemperatureProfile>` (key = `ProviderConfig::model`, ej. `"MiniMax-M3"`) y `default_profile: TemperatureProfile`; cada `TemperatureProfile` es `{ temperatures: Vec<f32>, replicas_per_temperature: usize }`. Así, la tupla efectiva por celda es `{ dimension_id, facet_id, label, seed, provider_model, temperature, replica }` y el fan-out total es `dimensions × facets × sketches_per_cell × (Σ_per_provider temperatures × replicas)`. El default (`temperatures = vec![1.0]`, `replicas_per_temperature = 1`) reproduce el contrato v0.5 byte-for-byte, por lo que los runs no configurados son bit-identical. La decisión de v0.5 PR-16 (documentar la divergencia sin re-diseñar la matriz) se mantiene; PR-D1 evoluciona la `temperature` axis **fuera** del `MatrixCell` para preservar el struct estable y permitir expansión multi-provider. Operadores configuran perfiles via CLI `--temperature-profile 'provider=<model>;temperatures=<csv>;replicas=<n>'` (formato `key=value;...`, validado) o via el bloque `[discovery_matrix]` en `~/.config/moagan/config.toml` (`temperature_profiles` + `default_profile`). CLI gana en conflicto. Implementación: `src/discovery/matrix.rs` (tipos), `src/phases/phase.rs` (`call_with_retry_at_temp` / `call_uncached_at_temp` — bypassan `resolve_temperature` para estampar la temperatura explícita en `Request.temperature`; cache key en `src/llm/cache/mod.rs:117` ya diferenciaba por temperatura), `src/phases/discover_matrix.rs` y `src/discovery/coordinator.rs` (loop per-provider), `src/cli/mod.rs` + `src/cli/discover.rs` (CLI surface), `src/config/mod.rs` (`DiscoveryMatrixConfig`).
 
 #### D.13.20. `Cardinality` con `range_usize` per-phase
 
@@ -2432,6 +2451,8 @@ defaults < config.toml < .moagan.toml < env vars < CLI flags
 ```
 
 (Inspirado en T07-08 §1.4; T17-08 §12.5; T08-02 §3.1; T01-09 §1.4.)
+
+> **Implementación v0.6.0 (PR #342, squash `17ece00`):** el cascade de archivos ahora aplica **strict cwd-overrides-user** — `default_config_path` resuelve `$MOAGAN_CONFIG` → `./moagan.toml` o `./.moagan.toml` → `${XDG_CONFIG_HOME}/moagan/config.toml` (solo cuando NO existe cwd file) → `./config.toml`, **sin merge entre capas**. `api_keys.toml` se consulta primero por provider (`src/llm/api_keys.rs::lookup_key`) y la env var es fallback. `ProviderConfig::temperature` se usa como base para `temperature_for_role` (los profile overrides siguen ganando) y `ProviderConfig::top_p` reemplaza el hard-coded `0.95`. `moagan doctor` ahora itera cada provider keyed (skips `mock`) para el chequeo de API key. Cubre también §D.12.13 (`api_keys.toml` precedence) en la misma oleada.
 
 #### D.15.2. Routing declarativo TOML
 
@@ -2824,7 +2845,8 @@ plan_id = "monthly"
 
 (Inspirado en T08-01 §6.2; T02-07 §2.1; T08-03 §5.8.)
 
-> **Estado (v0.6, ✅ lifted en `moagan telemetry plan`):** el snippet
+> **Implementación v0.6.0 (PR #367, squash `93acb72`):** el nuevo sub-comando `moagan telemetry plan <NAME>` agrega una vista local de cuota desde `Db::aggregate_window_usage` (`src/storage/sqlite.rs`) consultando la tabla `calls` (no la rollup `provider_usage`) para evitar el doble conteo entre runs. **Supersede** el marcador `lifted en moagan telemetry plan` previo, normalizando al formato estándar del catálogo v0.6.0. Detalles abajo:
+> El snippet
 > `plan_id = "weekly"` de arriba es solo un marcador textual en este
 > catálogo. La superficie real que `moagan telemetry plan` consume
 > vive en `ProviderConfig::plan: Option<PlanConfig>` (`src/config/mod.rs`)
