@@ -119,6 +119,9 @@ jobs:
           name: moagan-e2e-binary
           path: target/release/
 
+      - name: Restore execute bit on downloaded binary
+        run: chmod +x target/release/moagan
+
       - name: T3 · e2e-network (card80, real LLM)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
@@ -154,6 +157,9 @@ jobs:
           name: moagan-e2e-binary
           path: target/release/
 
+      - name: Restore execute bit on downloaded binary
+        run: chmod +x target/release/moagan
+
       - name: T3 · e2e-network (fast, real LLM)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
@@ -175,6 +181,9 @@ jobs:
         with:
           name: moagan-e2e-binary
           path: target/release/
+
+      - name: Restore execute bit on downloaded binary
+        run: chmod +x target/release/moagan
 
       - name: T3 · e2e-network (explore, real LLM)
         env:
