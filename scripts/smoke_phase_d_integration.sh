@@ -653,8 +653,8 @@ run_test "P5_db_warnings_table_exists" \
 run_test "P6_db_provider_usage_exists" \
   "sqlite3 $P_DB '.tables' | grep -q 'provider_usage' || true"
 
-run_test "P7_db_meta_user_version_13" \
-  "sqlite3 $P_DB 'PRAGMA user_version' | grep -qE '^14$'"
+run_test "P7_db_meta_user_version_15" \
+  "sqlite3 $P_DB 'PRAGMA user_version' | grep -qE '^15$'"
 
 run_test "P8_db_meta_wal_mode" \
   "sqlite3 $P_DB 'PRAGMA journal_mode' | grep -qE 'wal'"

@@ -32,7 +32,6 @@ use super::opencode_go::OpenCodeGoDispatch;
 use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
-use super::reasoning_gate::{apply_to_request as apply_reasoning_gate, gate_for_model};
 use super::response_format_opt_out::model_skips_response_format;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use super::sse_parser::{SseError, SseParser};
@@ -180,20 +179,6 @@ struct ResponsesRequest<'a> {
     /// model must send it.
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponsesResponseFormat>,
-    /// Reasoning-token budget. Populated by
-    /// [`super::reasoning_gate::apply_to_request`] when the active
-    /// model's catalog entry advertises `reasoning: true`. The
-    /// `kimi-*` family and other prose-only models must NOT see
-    /// this field — they return HTTP 400 — so the gate clears it
-    /// before the wire builder runs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_tokens: Option<u32>,
-    /// Reasoning-effort selector (`"low"` / `"medium"` / `"high"`).
-    /// Only emitted when both `reasoning` and an effort option
-    /// (`Toggle` or `Effort`) are catalogued. See
-    /// [`super::reasoning_gate`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<&'a str>,
     stream: bool,
 }
 
@@ -328,13 +313,6 @@ impl Provider for OpenCodeGoResponsesProvider {
 }
 
 /// Build the wire-level request body used by `send`.
-///
-/// `req` must already be gated via
-/// [`super::reasoning_gate::apply_to_request`] so the lifetime of
-/// the returned body is tied to the gated input (the function is
-/// a plain field-by-field projection; the gate is computed by the
-/// caller because the non-streaming path applies it inline next
-/// to the max-tokens clamp chain).
 fn build_responses_body<'a>(
     req: &'a Request,
     model: &'a str,
@@ -359,8 +337,6 @@ fn build_responses_body<'a>(
         } else {
             None
         },
-        reasoning_tokens: req.reasoning_tokens,
-        reasoning_effort: req.reasoning_effort.as_deref(),
         stream,
     }
 }
@@ -454,33 +430,23 @@ impl OpenCodeGoResponsesProvider {
             req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
         }
         let max_tokens = self.effective_max_tokens(req.max_tokens);
-        // Apply the reasoning gate once, outside the retry loop: the
-        // decision is a pure function of `(req, model)`, so every
-        // attempt in a single `send()` produces the same wire shape.
-        // The non-streaming path constructs `ResponsesRequest` inline
-        // (rather than calling `build_responses_body`) so the max-
-        // tokens clamp chain can stay visible next to the gate; the
-        // streaming path delegates to `build_responses_body` below.
-        let gated = apply_reasoning_gate(&req, gate_for_model(&self.model));
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
             let body = ResponsesRequest {
                 model: &self.model,
-                instructions: Some(&gated.system),
-                input: &gated.user,
+                instructions: Some(&req.system),
+                input: &req.user,
                 max_tokens,
-                temperature: gated.temperature,
-                top_p: gated.top_p,
-                response_format: if wants_response_format(gated.role, &self.model) {
+                temperature: req.temperature,
+                top_p: req.top_p,
+                response_format: if wants_response_format(req.role, &self.model) {
                     Some(ResponsesResponseFormat {
                         kind: "json_object",
                     })
                 } else {
                     None
                 },
-                reasoning_tokens: gated.reasoning_tokens,
-                reasoning_effort: gated.reasoning_effort.as_deref(),
                 stream: false,
             };
             let request_started = std::time::Instant::now();
@@ -592,12 +558,7 @@ impl OpenCodeGoResponsesProvider {
             .unwrap_or(u32::MAX);
         let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
         req.max_tokens = req.max_tokens.min(cap);
-        // Apply the reasoning gate once before serialising so the
-        // streaming wire body mirrors the non-streaming path (the
-        // gate is a pure function of `(req, model)` so two calls
-        // produce identical bodies for the same input).
-        let gated = apply_reasoning_gate(&req, gate_for_model(&self.model));
-        let body = build_responses_body(&gated, &self.model, true, self.omit_max_tokens);
+        let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
         let request_started = std::time::Instant::now();
         let resp = self
             .client
@@ -775,8 +736,8 @@ data: [DONE]\n\n";
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -838,8 +799,8 @@ data: {not json}\n\n";
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let err = p.send(&req).await.unwrap_err();
             match err {
@@ -900,8 +861,8 @@ data: {not json}\n\n";
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -980,8 +941,8 @@ data: [DONE]\n\n";
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1040,8 +1001,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                    attachments: vec![],
+                    tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1103,8 +1064,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1174,8 +1135,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1250,8 +1211,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1322,8 +1283,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                    attachments: vec![],
+                    tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1354,8 +1315,8 @@ data: [DONE]\n\n",
             response_schema: None,
             stream: false,
             extra_messages: vec![],
-            reasoning_tokens: None,
-            reasoning_effort: None,
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 
@@ -1419,8 +1380,8 @@ data: [DONE]\n\n",
             response_schema: None,
             stream: false,
             extra_messages: vec![],
-            reasoning_tokens: None,
-            reasoning_effort: None,
+            attachments: vec![],
+            tool_choice: None,
         };
         let body = build_responses_body(&req, &req.model, false, false);
         let value: serde_json::Value = serde_json::to_value(&body).unwrap();
@@ -1540,8 +1501,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1556,152 +1517,6 @@ data: [DONE]\n\n",
                 body.get("max_tokens").and_then(|v| v.as_u64()),
                 Some(discovered as u64),
                 "wire body must carry the table-resolved value ({discovered}), got body: {body}"
-            );
-        });
-    }
-
-    /// PR-4 (catalog reasoning gate, integration): the wire body
-    /// for a model catalogued with `reasoning: false` (`kimi-k3`)
-    /// must NOT carry a `reasoning_tokens` field even when the
-    /// caller set one on the [`Request`]. The kimi family returns
-    /// HTTP 400 when `reasoning_tokens` is present on the wire.
-    #[test]
-    fn integration_kimi_k3_no_reasoning() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            use wiremock::matchers::{method, path};
-            use wiremock::{Mock, MockServer, ResponseTemplate};
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/responses"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "output": [{
-                        "content": [
-                            {"type": "output_text", "text": "ok"}
-                        ]
-                    }],
-                    "usage": {"input_tokens": 1, "output_tokens": 2}
-                })))
-                .expect(1)
-                .mount(&server)
-                .await;
-            // Build a request that DECLARES reasoning on the
-            // upstream-agnostic side; the gate must still drop the
-            // field before it reaches the wire because the catalog
-            // says kimi-k3 has reasoning: false.
-            let req = Request {
-                reasoning_tokens: Some(4096),
-                reasoning_effort: Some("high".into()),
-                ..json_request(crate::llm::Role::Intake, "kimi-k3")
-            };
-            let p = OpenCodeGoResponsesProvider::new(
-                &ProviderConfig {
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "kimi-k3".into(),
-                    max_tokens: None,
-                    temperature: None,
-                    top_p: None,
-                    hard_incompatibilities: vec![],
-                    omit_max_tokens: false,
-                    plan: None,
-                    max_token_auto: None,
-                    max_token_auto_save: true,
-                },
-                SecretString::new("dummy".into()),
-            )
-            .unwrap();
-            let (status, _response) = p.send(&req).await.unwrap();
-            assert_eq!(status, 200);
-            let received = server
-                .received_requests()
-                .await
-                .expect("recording must be enabled by default");
-            assert_eq!(received.len(), 1, "exactly one request must be sent");
-            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
-                .expect("mock server received a JSON body");
-            assert!(
-                body.get("reasoning_tokens").is_none(),
-                "kimi-k3 wire body must NOT carry reasoning_tokens, got body: {body}"
-            );
-            assert!(
-                body.get("reasoning_effort").is_none(),
-                "kimi-k3 wire body must NOT carry reasoning_effort, got body: {body}"
-            );
-        });
-    }
-
-    /// PR-4 (catalog reasoning gate, integration): the wire body
-    /// for a model catalogued with `reasoning: true` +
-    /// `reasoning_options: [Toggle]` (`MiniMax-M3`) MUST keep the
-    /// caller's `reasoning_tokens` value AND emit a default
-    /// `reasoning_effort` of `medium`. Without the toggle the
-    /// effort field would stay absent; the gate backfills it from
-    /// the catalog.
-    #[test]
-    fn integration_minimax_m3_keeps_reasoning() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            use wiremock::matchers::{method, path};
-            use wiremock::{Mock, MockServer, ResponseTemplate};
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/responses"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "output": [{
-                        "content": [
-                            {"type": "output_text", "text": "ok"}
-                        ]
-                    }],
-                    "usage": {"input_tokens": 1, "output_tokens": 2}
-                })))
-                .expect(1)
-                .mount(&server)
-                .await;
-            // Set the request up so reasoning_tokens survives the
-            // gate (the caller picked 4096). reasoning_effort is
-            // left None so the gate can backfill the default
-            // `medium`.
-            let req = Request {
-                reasoning_tokens: Some(4096),
-                reasoning_effort: None,
-                ..json_request(crate::llm::Role::Intake, "MiniMax-M3")
-            };
-            let p = OpenCodeGoResponsesProvider::new(
-                &ProviderConfig {
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "MiniMax-M3".into(),
-                    max_tokens: None,
-                    temperature: None,
-                    top_p: None,
-                    hard_incompatibilities: vec![],
-                    omit_max_tokens: false,
-                    plan: None,
-                    max_token_auto: None,
-                    max_token_auto_save: true,
-                },
-                SecretString::new("dummy".into()),
-            )
-            .unwrap();
-            let (status, _response) = p.send(&req).await.unwrap();
-            assert_eq!(status, 200);
-            let received = server
-                .received_requests()
-                .await
-                .expect("recording must be enabled by default");
-            assert_eq!(received.len(), 1, "exactly one request must be sent");
-            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
-                .expect("mock server received a JSON body");
-            assert_eq!(
-                body.get("reasoning_tokens").and_then(|v| v.as_u64()),
-                Some(4096),
-                "minimax-m3 wire body MUST carry reasoning_tokens=4096, got body: {body}"
-            );
-            assert_eq!(
-                body.get("reasoning_effort").and_then(|v| v.as_str()),
-                Some("medium"),
-                "minimax-m3 wire body MUST carry the gate-default reasoning_effort=medium, got body: {body}"
             );
         });
     }

@@ -151,8 +151,8 @@ impl ProbeTransport for ProviderProbeTransport {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
-            reasoning_tokens: None,
-            reasoning_effort: None,
+            attachments: vec![],
+            tool_choice: None,
         };
         let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
         match res {
@@ -407,6 +407,15 @@ pub struct MaxTokensTableFile {
     /// probe-run is meaningful.
     #[serde(default)]
     pub providers: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Entry>>,
+    /// Operator-pinned per-provider cap written by
+    /// `moagan probe max_tokens --persist-min`. The cap is the
+    /// minimum across every model the operator has probed under
+    /// the same provider and is the value the runtime will use
+    /// as the hard ceiling on the next run. `#[serde(default)]`
+    /// keeps the loader backward-compatible with v1 sidecars
+    /// written before this field existed.
+    #[serde(default)]
+    pub operator_caps: std::collections::BTreeMap<String, OperatorCap>,
 }
 
 fn default_schema_version() -> u32 {
@@ -423,6 +432,7 @@ impl MaxTokensTableFile {
         Self {
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             providers: std::collections::BTreeMap::new(),
+            operator_caps: std::collections::BTreeMap::new(),
         }
     }
 
@@ -501,6 +511,26 @@ pub struct Entry {
     /// probes plus 20 per tightening round.
     #[serde(default)]
     pub attempts: u32,
+}
+
+/// Operator-pinned per-provider cap. Written by
+/// `moagan probe max_tokens --persist-min` to record the minimum
+/// across every model probed under one provider; the runtime
+/// reads the cap on next start so a fresh run never has to
+/// re-probe the same models to land at the same answer. `auto`
+/// is always `false` so a human reading the file can tell the
+/// entry was pinned by an operator (not discovered by the
+/// algorithm).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperatorCap {
+    /// The pinned cap in tokens.
+    pub min: u32,
+    /// Always `false` for an operator-pinned entry. Explicit so a
+    /// grep-friendly TOML diff between auto-discovered and
+    /// operator-pinned entries stays trivial.
+    pub auto: bool,
+    /// ISO-8601 timestamp the cap was written.
+    pub detected_at: String,
 }
 
 #[cfg(test)]

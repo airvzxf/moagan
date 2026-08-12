@@ -239,8 +239,6 @@ pub(crate) fn role_requires_json(role: crate::llm::Role) -> bool {
             | Adversary
             | Decomposer
             | MergeSynthesizer
-            | RecoveryExplainer
-            | RationaleExtractor
     )
 }
 
@@ -624,8 +622,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
-            reasoning_tokens: None,
-            reasoning_effort: None,
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 
@@ -868,8 +866,8 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                reasoning_tokens: None,
-                reasoning_effort: None,
+                    attachments: vec![],
+                    tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1036,8 +1034,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
-            reasoning_tokens: None,
-            reasoning_effort: None,
+            attachments: vec![],
+            tool_choice: None,
         };
         let (status, _response) = p.send(&req).await.unwrap();
         assert_eq!(status, 200);

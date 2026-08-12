@@ -268,8 +268,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
-            reasoning_tokens: None,
-            reasoning_effort: None,
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 

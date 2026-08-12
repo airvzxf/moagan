@@ -881,45 +881,6 @@ pub struct MergePlan {
     pub schema_version: String,
 }
 
-/// Output of the `Role::RecoveryExplainer` role (catalog D.7.1).
-/// Captures the cause, the recovered state, and concrete next
-/// steps. Used by the audit trail when a recovery event is logged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RecoveryReport {
-    /// 1-2 sentence headline.
-    pub summary: String,
-    /// 2-4 sentence root-cause analysis.
-    pub cause: String,
-    /// What the system did to recover (free text; "automatic" for
-    /// auto-recovered events).
-    pub recovered: String,
-    /// Per-key evidence excerpts from the event payload.
-    pub evidence: Vec<String>,
-    /// Concrete next steps, ordered, free of speculation.
-    pub next_steps: Vec<String>,
-    /// Schema version.
-    pub schema_version: String,
-}
-
-/// Output of the `Role::RationaleExtractor` role (catalog D.7.1).
-/// Distils decision rationale + supporting evidence + implicit
-/// assumptions from the supplied material.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RationaleExtract {
-    /// The decision being rationalised (1-2 sentences).
-    pub decision: String,
-    /// Reasons ordered by influence on the decision.
-    pub reasons: Vec<String>,
-    /// Per-key evidence excerpts from the material.
-    pub evidence: Vec<String>,
-    /// Unstated context the decision depends on. Empty list valid
-    /// when the decision is self-evident.
-    pub assumptions: Vec<String>,
-    /// Schema version.
-    pub schema_version: String,
-}
 /// Output of the `Role::TiefighterCritic` role (D.7.1 catalog).
 ///
 /// Carries the proposal the critic is attacking plus the structured
