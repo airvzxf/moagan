@@ -240,6 +240,31 @@ pub fn catalog_path(home_path: &Path) -> PathBuf {
     home_path.join(CATALOG_FILE_NAME)
 }
 
+/// Best-effort load of the on-disk catalog without touching the
+/// network. Returns `Some(catalog)` when the file exists and
+/// parses, `None` otherwise (file missing, unreadable, or
+/// malformed). Used by CLI surfaces that only need the cached
+/// snapshot — `moagan doctor --capabilities`,
+/// `moagan inspect --capabilities` — and do not want to wait on a
+/// network round-trip.
+///
+/// `load_or_fetch` and the explicit refresh command.
+pub fn try_load_from_disk(home_path: &Path) -> Option<ModelsDevCatalog> {
+    let path = catalog_path(home_path);
+    let bytes = std::fs::read(&path).ok()?;
+    match serde_json::from_slice::<ModelsDevCatalog>(&bytes) {
+        Ok(catalog) => Some(catalog),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "models_dev: best-effort disk load failed; treating as missing"
+            );
+            None
+        }
+    }
+}
+
 /// Pure freshness check. A catalog is fresh when strictly less than
 /// `ttl_hours` have elapsed since [`ModelsDevCatalog::fetched_at_unix`].
 /// The boundary is exclusive: `now - fetched == ttl_hours * 3600`
