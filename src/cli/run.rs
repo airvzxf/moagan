@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir, RunPaths};
 use crate::ids::RunId;
+use crate::llm::capability::CapabilityResolver;
 use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
     AdversaryPhase, ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DecomposePhase,
@@ -299,6 +300,45 @@ pub async fn run_full_pipeline(
     let max_tokens_table = providers.max_tokens_table().cloned();
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
+    // Wire-the-gates plan: refresh the on-disk `models.dev` catalog
+    // so the modality gate (`ModalityGate::apply`) and the cost
+    // estimator (`cost_estimate`) can resolve `(provider, model)`
+    // rows on every LLM call. `load_or_fetch` honours the 1-hour
+    // TTL: a fresh cache short-circuits without touching the
+    // network, a stale one fetches + atomically rewrites, and a
+    // network failure degrades to the stale cache (best-effort).
+    // The catalog lives on `RunContext` so every phase reads the
+    // same handle; the failure mode is "no catalog" — the gates
+    // fall through to their no-op defaults and the run proceeds.
+    let models_dev_catalog = match crate::llm::models_dev::load_or_fetch(
+        home.root(),
+        crate::llm::models_dev::DEFAULT_REFRESH_HOURS,
+        false,
+    )
+    .await
+    {
+        Ok(load) => Some(Arc::new(load.catalog)),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                home = %home.root().display(),
+                stage = "models_dev.refresh.failed",
+                "models_dev catalog refresh failed; proceeding without a catalog"
+            );
+            None
+        }
+    };
+    // Wire-the-gates plan, PR-3 follow-up: the resolver is on
+    // `RunContext` and the gate call is already in
+    // `dispatch_to_provider`, but it has been a permanent no-op
+    // because nothing in production populates the field. Build
+    // one over the same catalog handle so the resolver and the
+    // catalog share a single source of truth; a missing catalog
+    // disables both at once.
+    let capability_resolver = models_dev_catalog
+        .as_ref()
+        .map(|catalog| Arc::new(CapabilityResolver::new(Some(Arc::clone(catalog)))));
+
     // W1: the redact policy is built from the loaded Config, NOT
     // RedactPolicy::default(). The default has `telemetry: true`,
     // `storage: true`, `export: true`, which matches the privacy-
@@ -335,6 +375,8 @@ pub async fn run_full_pipeline(
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
     .with_max_tokens_table_opt(max_tokens_table)
+    .with_models_dev_catalog_opt(models_dev_catalog.clone())
+    .with_capability_resolver_opt(capability_resolver.clone())
     // V4 §13.6 promises "no human pauses" for Mode::Batch. The
     // `interactive` flag now reflects that contract: even if the
     // operator forgets `--non-interactive`, batch runs skip every
