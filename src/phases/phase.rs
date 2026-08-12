@@ -1780,8 +1780,6 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // Phase G (v0.3). Decomposer: T01-06 §4.2 originally suggested 3000; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
         Role::Decomposer => DEFAULT_MAX_TOKENS,
         Role::MergeSynthesizer => DEFAULT_MAX_TOKENS,
-        Role::RecoveryExplainer => DEFAULT_MAX_TOKENS,
-        Role::RationaleExtractor => DEFAULT_MAX_TOKENS,
         // Track H batch-1: D.7.1 catalog opt-in roles. Each carries
         // its own sampling contract (see `role_settings` in
         // `src/llm/prompts.rs`); these are the runtime ceilings
@@ -1893,8 +1891,6 @@ pub fn temperature_for_role(
         // doesn't form a valid DAG.
         Role::Decomposer => 0.3,
         Role::MergeSynthesizer => 0.2,
-        Role::RecoveryExplainer => 0.0,
-        Role::RationaleExtractor => 0.2,
         // Track H batch-1: TiefighterCritic is fully deterministic
         // (T=0.0) per D.7.1 so re-runs against the same proposal
         // produce identical critiques (useful for snapshot diffs).

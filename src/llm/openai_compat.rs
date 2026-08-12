@@ -239,8 +239,6 @@ pub(crate) fn role_requires_json(role: crate::llm::Role) -> bool {
             | Adversary
             | Decomposer
             | MergeSynthesizer
-            | RecoveryExplainer
-            | RationaleExtractor
     )
 }
 
