@@ -683,35 +683,29 @@ impl RunContext {
         started_unix: i64,
         retry_count: u32,
     ) -> Result<Response> {
-        // Apply the same per-provider cap that the provider will apply inside
-        // `send()`, so the body_sha256 matches the body that actually leaves the
-        // process. Cloned here because `req` is consumed by `provider.send(&req)`
-        // downstream and we don't want to mutate the caller's view.
+        // Apply the same per-provider cap that the provider will apply
+        // inside `send()`, so the body_sha256 matches the body that
+        // actually leaves the process. Cloned here because `req` is
+        // consumed by `provider.send(&req)` downstream and we don't
+        // want to mutate the caller's view.
         //
-        // The clamp layers in priority order (smallest wins):
-        //   1. `ProviderConfig::max_tokens` (TOML override) — cap_config
-        //   2. `MaxTokensTable::resolve_cached(default_provider, default_model)`
-        //      — cap_table; the auto-probed upstream ceiling, primary
-        //      source of truth when present
-        // When both are absent (legacy / unit tests) `u32::MAX` propagates
-        // through and the role's `DEFAULT_MAX_TOKENS` (1,000,000) flows
-        // unchanged — preserving the v0.6 wire shape.
+        // We delegate the cap chain to `Provider::effective_max_tokens`
+        // — the single source of truth that lives next to the
+        // provider's own `send()` implementation. Re-deriving the chain
+        // here bit us once already: PR #400 raised
+        // `DEFAULT_MAX_TOKENS` to 1M and `minimax.send()` clamps via
+        // `operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP =
+        // 524_288)`, while this function used a 2-layer
+        // `operator_cap.min(table_cap)` chain. Every `minimax` call
+        // landed on the wire with `max_tokens = 524_288` while the
+        // audit hash captured `max_tokens = 1_000_000`, and the proxy
+        // verify step flagged every request as a body mismatch. The
+        // trait method now keeps both ends in lockstep.
         let provider = self.provider().await;
-        let config_cap = self
-            .config
-            .providers
-            .get(&self.default_provider)
-            .and_then(|spec| spec.max_tokens)
-            .unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(&self.default_provider, &self.default_model))
-            .unwrap_or(u32::MAX);
-        let cap = config_cap.min(table_cap);
-        let hash_input = if req.max_tokens > cap {
+        let effective_max = provider.effective_max_tokens(&req);
+        let hash_input = if req.max_tokens != effective_max {
             let mut clamped = req.clone();
-            clamped.max_tokens = cap;
+            clamped.max_tokens = effective_max;
             clamped
         } else {
             req.clone()

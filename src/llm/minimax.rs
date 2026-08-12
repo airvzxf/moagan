@@ -297,6 +297,26 @@ impl Provider for MinimaxProvider {
         self.send_http(req).await
     }
 
+    fn effective_max_tokens(&self, req: &Request) -> u32 {
+        // Mirror of the clamp chain in `send()` so the audit-log hash
+        // is byte-for-byte identical to the wire body. Reordering or
+        // dropping a layer here would let a request leave the
+        // process with `max_tokens = 1_000_000` while the audit
+        // records the sha256 of `max_tokens = 524_288`, and the
+        // proxy verify step would flag every call as a body
+        // mismatch.
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        req.max_tokens
+            .min(operator_cap)
+            .min(table_cap)
+            .min(MINIMAX_MAX_TOKENS_CAP)
+    }
+
     /// Bypass variant for the auto-probe. Skips every cap — operator
     /// override, cached table, and `MINIMAX_MAX_TOKENS_CAP` — so the
     /// algorithm sees the upstream's real boundary. The regular
@@ -941,6 +961,171 @@ mod tests {
             json["max_tokens"],
             serde_json::json!(discovered),
             "wire body must carry the table-resolved value ({discovered}), got body: {json}"
+        );
+    }
+
+    /// `effective_max_tokens` must mirror the same 3-layer clamp chain
+    /// `send()` applies so the audit-log hash matches the wire body
+    /// byte-for-byte. This is the regression pin for the bug where
+    /// `phases::phase::dispatch_to_provider` re-derived a 2-layer
+    /// `operator_cap.min(table_cap)` chain that disagreed with
+    /// `send()`'s 3-layer
+    /// `operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP)` chain
+    /// once PR #400 raised `DEFAULT_MAX_TOKENS` to 1M. Every layer
+    /// below must produce the same value here that `send()` writes
+    /// onto the wire.
+    #[tokio::test]
+    async fn effective_max_tokens_matches_send_clamp_chain() {
+        use crate::llm::probe::{MIN_AUTOPROBE_FLOOR, ProbeOutcome, ProbeTransport};
+
+        // Layer-by-layer equivalence: with no operator cap and no
+        // table, `effective_max_tokens` clamps the requested value
+        // down to `MINIMAX_MAX_TOKENS_CAP` (524_288). This is the
+        // critical case for the audit hash — `DEFAULT_MAX_TOKENS` is
+        // 1_000_000 since PR #400, so without this clamp every call
+        // would record the sha256 of `max_tokens = 1_000_000` while
+        // the proxy sees `max_tokens = 524_288`.
+        let p = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: "MiniMax-M3".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            p.effective_max_tokens(&Request {
+                max_tokens: 1_000_000,
+                ..test_request()
+            }),
+            MINIMAX_MAX_TOKENS_CAP,
+            "with no caps the value must clamp to MINIMAX_MAX_TOKENS_CAP"
+        );
+        // Below the cap: pass-through (request under the ceiling
+        // flows unchanged, no audit-hash mutation needed).
+        assert_eq!(
+            p.effective_max_tokens(&Request {
+                max_tokens: 4096,
+                ..test_request()
+            }),
+            4096,
+            "requests below MINIMAX_MAX_TOKENS_CAP must pass through"
+        );
+
+        // Operator override wins over the requested value.
+        let p_op = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: "MiniMax-M3".into(),
+                max_tokens: Some(8_192),
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            p_op.effective_max_tokens(&Request {
+                max_tokens: 1_000_000,
+                ..test_request()
+            }),
+            8_192,
+            "operator override must clamp below the request value"
+        );
+
+        // Operator override above the upstream ceiling must still
+        // cap at MINIMAX_MAX_TOKENS_CAP (the upstream rejects
+        // `max_tokens > 524_288` with HTTP 400).
+        let p_above = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: "MiniMax-M3".into(),
+                max_tokens: Some(2_000_000),
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            p_above.effective_max_tokens(&Request {
+                max_tokens: 1_000_000,
+                ..test_request()
+            }),
+            MINIMAX_MAX_TOKENS_CAP,
+            "MINIMAX_MAX_TOKENS_CAP must still clamp an oversized operator override"
+        );
+
+        // Table value wins over the requested value but stays below
+        // the operator cap and `MINIMAX_MAX_TOKENS_CAP`. Seed via the
+        // public `probe_and_store` API so we exercise the same path
+        // the runtime uses (the inner entry field is private).
+        #[derive(Clone)]
+        struct CappedTransport {
+            cap: u32,
+        }
+        #[async_trait::async_trait]
+        impl ProbeTransport for CappedTransport {
+            async fn probe_send(&self, n: u32) -> ProbeOutcome {
+                if n <= self.cap {
+                    ProbeOutcome::Accepted
+                } else {
+                    ProbeOutcome::Rejected
+                }
+            }
+        }
+        let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 24_000 });
+        let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+        let discovered = table
+            .probe_and_store("minimax", "MiniMax-M3", transport)
+            .await
+            .expect("probe_and_store");
+        let p_table = MinimaxProvider::new(
+            &ProviderConfig {
+                kind: "minimax".into(),
+                endpoint: "https://api.minimax.io/anthropic/v1".into(),
+                model: "MiniMax-M3".into(),
+                max_tokens: Some(2_000_000),
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap()
+        .with_max_tokens_table(table);
+        assert_eq!(
+            p_table.effective_max_tokens(&Request {
+                max_tokens: 1_000_000,
+                ..test_request()
+            }),
+            discovered,
+            "table value ({discovered}) must win when below operator cap and MINIMAX_MAX_TOKENS_CAP"
         );
     }
 }
