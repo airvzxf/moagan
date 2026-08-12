@@ -5,7 +5,6 @@
 pub mod anthropic_compat;
 pub mod api_keys;
 pub mod api_keys_file;
-pub mod budget;
 pub mod cache;
 pub mod capabilities;
 pub mod circuit_breaker;
