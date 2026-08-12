@@ -1,0 +1,6 @@
+{
+  "text": "{\"sketch_id\":\"sk_000\",\"primary\":\"api-design\",\"secondary\":[\"rest\"],\"subcategory\":\"resource-modelling\",\"difficulty\":\"low\",\"similarity_to_category\":0.6,\"notes\":\"\",\"schema_version\":\"v1\"}",
+  "input_tokens": 100,
+  "output_tokens": 80,
+  "finish_reason": "end_turn"
+}

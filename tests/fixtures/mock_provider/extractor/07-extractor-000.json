@@ -1,0 +1,6 @@
+{
+  "text": "{\"facet_id\":\"resource-model\",\"category_id\":\"cat_00\",\"body\":\"## Resource model\\n\\nThe system models books as a single resource with id, title, author and availability fields.\",\"sources\":[\"sk_000\"],\"schema_version\":\"v1\"}",
+  "input_tokens": 100,
+  "output_tokens": 80,
+  "finish_reason": "end_turn"
+}

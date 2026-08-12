@@ -1,0 +1,6 @@
+{
+  "text": "{\"schema_version\":\"v1\",\"should_decompose\":false,\"nodes\":[],\"integration_rules\":[],\"critical_path\":[],\"brief_blake3\":\"deadbeef\",\"created_unix\":1700000000}",
+  "input_tokens": 100,
+  "output_tokens": 80,
+  "finish_reason": "end_turn"
+}
