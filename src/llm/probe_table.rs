@@ -49,9 +49,11 @@ struct MaxTokensTableInner {
     /// `ProviderConfig::max_token_auto`, with `None` and `Some(0)`
     /// both mapping to `MIN_AUTOPROBE_FLOOR`).
     floor: u32,
-    /// Total probes attempted across all calls since startup. Used
-    /// for telemetry and operator-visible diagnostics.
-    probes_attempted: u32,
+    /// Total probe tasks started across all calls since startup.
+    /// M7: counts tokio tasks spawned (one per `probe_and_store` /
+    /// `verify`), not HTTP round-trips. Used for telemetry and
+    /// operator-visible diagnostics.
+    probe_tasks_started: u32,
     /// Total probes that succeeded.
     probes_succeeded: u32,
     /// Total probes that failed (rejection or indeterminate).
@@ -94,7 +96,7 @@ impl MaxTokensTable {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries,
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
-                probes_attempted: 0,
+                probe_tasks_started: 0,
                 probes_succeeded: 0,
                 probes_failed: 0,
                 pending: Vec::new(),
@@ -109,7 +111,7 @@ impl MaxTokensTable {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries: BTreeMap::new(),
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
-                probes_attempted: 0,
+                probe_tasks_started: 0,
                 probes_succeeded: 0,
                 probes_failed: 0,
                 pending: Vec::new(),
@@ -164,15 +166,15 @@ impl MaxTokensTable {
         transport: Arc<dyn ProbeTransport>,
     ) -> Result<u32> {
         let floor = self.inner.read().floor;
-        let attempts_before = self.inner.read().probes_attempted;
+        let attempts_before = self.inner.read().probe_tasks_started;
         let discovered = detect_max_tokens(transport, floor).await?;
 
         let now = Utc::now().to_rfc3339();
         let attempts = {
             let mut inner = self.inner.write();
-            inner.probes_attempted += 1;
+            inner.probe_tasks_started += 1;
             inner.probes_succeeded += 1;
-            let attempts_total = inner.probes_attempted - attempts_before;
+            let attempts_total = inner.probe_tasks_started - attempts_before;
             inner.entries.insert(
                 (provider.to_owned(), model.to_owned()),
                 Entry {
@@ -217,7 +219,7 @@ impl MaxTokensTable {
         let ok = matches!(outcome, super::probe::ProbeOutcome::Accepted);
         {
             let mut inner = self.inner.write();
-            inner.probes_attempted += 1;
+            inner.probe_tasks_started += 1;
             if ok {
                 inner.probes_succeeded += 1;
                 if let Some(e) = inner
@@ -301,9 +303,13 @@ impl MaxTokensTable {
         self.inner.read().floor
     }
 
-    /// Total probes attempted across the lifetime of this table.
-    pub fn probes_attempted(&self) -> u32 {
-        self.inner.read().probes_attempted
+    /// Total probe tasks started across the lifetime of this table.
+    /// M7: counts tokio tasks spawned, not HTTP round-trips (Phase 1
+    /// can fire 30 sequential probes; Phase 2 fires 20-point
+    /// batches). Renamed from `probes_attempted` so the name
+    /// matches what it actually counts.
+    pub fn probe_tasks_started(&self) -> u32 {
+        self.inner.read().probe_tasks_started
     }
 
     /// Total probes that succeeded.
