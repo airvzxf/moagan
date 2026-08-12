@@ -622,6 +622,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 
@@ -864,6 +866,8 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                    attachments: vec![],
+                    tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1030,6 +1034,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let (status, _response) = p.send(&req).await.unwrap();
         assert_eq!(status, 200);

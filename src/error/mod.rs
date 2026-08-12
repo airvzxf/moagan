@@ -202,6 +202,30 @@ pub enum Error {
     /// mean the provider is unhealthy.
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
+
+    /// PR-5: the request asked for a capability the model
+    /// advertises it does not support. Two triggers, both routed
+    /// here so callers can match a single variant instead of two:
+    ///
+    /// - The models.dev entry has `attachment: false` but the
+    ///   [`crate::llm::wire::Request`] carries one or more
+    ///   attachments (the gate refuses to silently drop the
+    ///   payload — that would change the request identity the
+    ///   cache key is built on).
+    /// - The models.dev entry lists an input modality the
+    ///   attached content uses (`image`, `audio`, `pdf`, …) but
+    ///   the entry's `modalities.input` does not include it.
+    ///
+    /// The inner string is the human-readable reason (e.g.
+    /// `"image attachment refused: model accepts [text] only"`).
+    /// Maps to [`ExitCode::ProviderError`] because the upstream
+    /// is the source of truth for capabilities, and to
+    /// [`ErrorCode::Unsupported`] because the failure mode is
+    /// "this model cannot do that" rather than a transport
+    /// outage. Not circuit-opening: a wrong-capability choice
+    /// reflects a caller bug, not a provider health signal.
+    #[error("modality not supported by model: {0}")]
+    ModalityUnsupported(String),
 }
 
 impl Error {
@@ -230,6 +254,7 @@ impl Error {
             Self::HostilePrompt(_) => ErrorCode::HostilePrompt,
             Self::PathTraversal(_) => ErrorCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ErrorCode::InputTooLarge,
+            Self::ModalityUnsupported(_) => ErrorCode::Unsupported,
         }
     }
 
@@ -250,6 +275,7 @@ impl Error {
             Self::HostilePrompt(_) => ExitCode::ContextError,
             Self::PathTraversal(_) => ExitCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ExitCode::ProviderError,
+            Self::ModalityUnsupported(_) => ExitCode::ProviderError,
         }
     }
 
@@ -633,6 +659,17 @@ mod tests {
         assert_eq!(
             Error::PayloadTooLarge("response: 11000000 > 10485760".into()).code(),
             ErrorCode::InputTooLarge
+        );
+        // PR-5: a request that asked the model for a capability it
+        // does not have (attachment on a non-attachment model, image
+        // to a text-only model) maps to the `Unsupported` bucket so
+        // the post-mortem review can branch on the wire form.
+        assert_eq!(
+            Error::ModalityUnsupported(
+                "image attachment refused: model accepts [text] only".into()
+            )
+            .code(),
+            ErrorCode::Unsupported
         );
     }
 

@@ -49,6 +49,69 @@ pub struct Request {
     /// cache.
     #[serde(default)]
     pub extra_messages: Vec<Message>,
+    /// File attachments carried with the request (images,
+    /// PDFs, audio clips, etc.). Each entry's [`Attachment::modality`]
+    /// must match a modality the target model accepts; the
+    /// [`crate::llm::modal_gate::ModalityGate`] enforces that
+    /// contract before the request reaches the wire builder.
+    ///
+    /// Default-empty so call sites that do not need attachments
+    /// keep their existing literal. `skip_serializing_if =
+    /// "Vec::is_empty"` keeps the wire body byte-identical to
+    /// pre-PR-5 requests when no attachment is present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// Tool / function-call selection. The wire builder
+    /// (`anthropic_compat`, `openai_compat`, `opencode_go_*`)
+    /// translates this into the per-provider field name
+    /// (`tool_choice`, `tools`, `functions`).
+    ///
+    /// `None` means "the model is being called without a tool
+    /// selector"; the wire builder omits the field entirely.
+    /// PR-5: when the model's `tool_call` capability is `false`
+    /// the [`crate::llm::modal_gate::ModalityGate`] drops this
+    /// to `None` so a tool selector does not reach a model that
+    /// cannot honour it. Default-`None` so call sites that do
+    /// not need tools keep their existing literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// One file attachment carried with a [`Request`].
+///
+/// Modality is a free-form string (e.g. `"text"`, `"image"`,
+/// `"pdf"`, `"audio"`) to match the upstream `models.dev`
+/// `modalities.input` vocabulary verbatim. The gate matches by
+/// string equality, so the caller is responsible for picking
+/// the same spelling the catalog uses (lowercase, singular).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Attachment {
+    /// MIME type or short label (e.g. `"image/png"`).
+    pub mime: String,
+    /// Modality tag from the upstream catalog vocabulary
+    /// (e.g. `"image"`, `"pdf"`). Compared verbatim against
+    /// [`crate::llm::models_dev::Modalities::input`].
+    pub modality: String,
+    /// Body of the attachment. Wire builders that need a
+    /// base64-encoded payload convert the bytes themselves
+    /// before serialising the body, so this struct keeps the
+    /// raw form the caller hands over.
+    pub data: Vec<u8>,
+}
+
+/// Tool / function-call selection on a [`Request`]. The
+/// provider-specific wire builder maps this into the
+/// per-protocol field name (`tool_choice`, `tools`,
+/// `functions`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// The model decides whether to call a tool.
+    Auto,
+    /// The model must call exactly one of the supplied tools.
+    Required,
+    /// The model must not call any tool.
+    None,
 }
 
 /// A single chat message used by the `extra_messages` field on
@@ -239,6 +302,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Request = serde_json::from_str(&j).unwrap();
@@ -291,6 +356,8 @@ mod tests {
                 role: "assistant".into(),
                 content: "{".into(),
             }],
+            attachments: vec![],
+            tool_choice: None,
         };
         let j = serde_json::to_value(&r).unwrap();
         let arr = j.get("extra_messages").unwrap().as_array().unwrap();
@@ -319,6 +386,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let blake = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Blake3);
         let sha = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Sha256);
@@ -352,6 +421,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let with_prefill = Request {
             extra_messages: vec![Message {

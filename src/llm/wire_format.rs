@@ -367,6 +367,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 
@@ -383,6 +385,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let wire = AnthropicWire;
         let body = wire.encode_body(&req).unwrap();
@@ -566,6 +570,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let body = wire.encode_body(&req).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();

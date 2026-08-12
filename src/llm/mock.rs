@@ -425,6 +425,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let (status1, r1) = p.send(&req()).await.unwrap();
         let (status2, r2) = p.send(&req()).await.unwrap();
@@ -449,6 +451,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let _r1 = p.send(&req()).await.unwrap();
         assert!(p.send(&req()).await.is_err());
@@ -493,6 +497,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 

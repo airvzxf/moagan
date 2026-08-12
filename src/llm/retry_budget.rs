@@ -150,6 +150,7 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::HostilePrompt(_)
         | Error::PathTraversal(_)
         | Error::PayloadTooLarge(_)
+        | Error::ModalityUnsupported(_)
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
     }
