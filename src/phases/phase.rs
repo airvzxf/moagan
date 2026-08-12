@@ -25,6 +25,7 @@ use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
 use crate::llm::capability::CapabilityResolver;
+use crate::llm::models_dev::ModelsDevCatalog;
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
@@ -135,6 +136,17 @@ pub struct RunContext {
     /// tests populate this field; unit tests that exercise the
     /// pre-capability behaviour leave it as `None`.
     pub capability_resolver: Option<Arc<CapabilityResolver>>,
+    /// Wire-the-gates plan: handle to the on-disk `models.dev`
+    /// catalog refreshed at CLI startup (`cli::run`). `None` means
+    /// no catalog is loaded (fresh home, network failure, tests
+    /// that skip the refresh); every gate that depends on the
+    /// catalog (`ModalityGate::apply`, `cost_estimate`) falls
+    /// through to its no-op default in that case. The CLI
+    /// boundary populates this field by calling
+    /// [`crate::llm::models_dev::load_or_fetch`]; integration tests
+    /// and the legacy `moagan run --provider mock` flow leave it
+    /// as `None`.
+    pub models_dev_catalog: Option<Arc<ModelsDevCatalog>>,
 }
 
 /// Default heartbeat interval. Renews the lease well before the
@@ -235,6 +247,7 @@ impl RunContext {
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
             max_tokens_table: None,
             capability_resolver: None,
+            models_dev_catalog: None,
         }
     }
 
@@ -281,6 +294,31 @@ impl RunContext {
     ) -> Self {
         if let Some(r) = resolver {
             self.capability_resolver = Some(r);
+        }
+        self
+    }
+
+    /// Wire-the-gates plan: attach the on-disk `models.dev` catalog
+    /// so the modality gate and the cost estimator can resolve
+    /// `(provider, model)` rows on every LLM call. Builder form
+    /// mirrors [`Self::with_max_tokens_table`] / [`Self::with_capability_resolver`]
+    /// so the CLI boundary can chain it next to the other
+    /// runtime handles. Tests that exercise the pre-catalog
+    /// behaviour leave the field as `None`.
+    pub fn with_models_dev_catalog(mut self, catalog: Arc<ModelsDevCatalog>) -> Self {
+        self.models_dev_catalog = Some(catalog);
+        self
+    }
+
+    /// Wire-the-gates plan: optional variant of
+    /// [`Self::with_models_dev_catalog`] for callers that already
+    /// hold an `Option<Arc<...>>`. No-op when the catalog is
+    /// `None` (network failure on first call, a test that skipped
+    /// the refresh) so the legacy "no catalog" code path keeps
+    /// working untouched.
+    pub fn with_models_dev_catalog_opt(mut self, catalog: Option<Arc<ModelsDevCatalog>>) -> Self {
+        if let Some(c) = catalog {
+            self.models_dev_catalog = Some(c);
         }
         self
     }
