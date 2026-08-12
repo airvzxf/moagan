@@ -17,6 +17,7 @@ pub mod json_extractor;
 pub mod json_strategy;
 pub mod minimax;
 pub mod mock;
+pub mod models_dev;
 pub mod openai_compat;
 pub mod opencode_go;
 pub mod opencode_go_anthropic;
@@ -38,6 +39,11 @@ pub mod wire;
 pub mod wire_format;
 
 pub use mock::{MockProvider, MockResponse};
+pub use models_dev::{
+    CATALOG_FILE_NAME, CATALOG_SCHEMA_VERSION, CatalogLoad, Cost, DEFAULT_REFRESH_HOURS,
+    InterleavedField, Limits, MODELS_DEV_URL, Modalities, ModelsDevCatalog, ModelsDevEntry,
+    ModelsDevProvider, ReasoningOption,
+};
 pub use provider::{Provider, ProviderRegistry, registry_from_config};
 pub use provider_pool::{ProviderPool, ProviderPoolEntry};
 pub use role::Role;
