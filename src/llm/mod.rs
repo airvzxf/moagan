@@ -17,6 +17,8 @@ pub mod json_extractor;
 pub mod json_strategy;
 pub mod minimax;
 pub mod mock;
+pub mod modal_gate;
+pub mod models_dev;
 pub mod openai_compat;
 pub mod opencode_go;
 pub mod opencode_go_anthropic;

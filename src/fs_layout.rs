@@ -175,6 +175,15 @@ impl MoaganHome {
         self.root.join("max_tokens_auto.toml")
     }
 
+    /// Path of the cached `models.dev` catalog file. Mirrors the
+    /// `max_tokens_auto.toml` layout: a single JSON file in the
+    /// moagan home, refreshed by
+    /// [`crate::llm::models_dev::load_or_fetch`] and consulted by
+    /// PR-2..PR-5 capability gates.
+    pub fn models_dev_path(&self) -> PathBuf {
+        self.root.join("models_dev.json")
+    }
+
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(self.runs_dir())?;
