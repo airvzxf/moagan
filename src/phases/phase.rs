@@ -759,7 +759,7 @@ impl RunContext {
     /// supplied) persist the response in the cross-run cache.
     async fn dispatch_to_provider(
         &self,
-        req: Request,
+        mut req: Request,
         cache_key: Option<String>,
         started_unix: i64,
         retry_count: u32,
@@ -784,6 +784,49 @@ impl RunContext {
         // trait method now keeps both ends in lockstep.
         let provider = self.provider().await;
         let effective_max = provider.effective_max_tokens(&req);
+        // Wire-the-gates plan, PR-5 follow-up: gate the request
+        // through the modality gate so the wire body reflects the
+        // catalog's per-model capabilities (attachments, tool
+        // choice, input modalities). The gate mutates `req` in
+        // place so the body that `provider.send` transmits AND the
+        // hash below both observe the gate's effects. A missing
+        // catalog row falls through to the conservative default
+        // (text-only, no attachments, no tool calls) so a stale
+        // snapshot cannot widen the set of capabilities the gate
+        // allows.
+        if let Some(catalog) = self.models_dev_catalog.as_ref()
+            && let Some(entry) = crate::llm::models_dev::lookup(
+                catalog,
+                self.default_provider.as_str(),
+                self.default_model.as_str(),
+            )
+        {
+            let gate = crate::llm::modal_gate::ModalityGate::from_entry(&entry);
+            if let Err(e) = gate.apply(&mut req) {
+                let ended_unix = crate::time::now_unix_secs();
+                let phase_name = req.role.as_str();
+                let _ = self.telemetry.call(
+                    &uuid::Uuid::now_v7().to_string(),
+                    phase_name,
+                    phase_name,
+                    self.default_provider.as_str(),
+                    self.default_model.as_str(),
+                    cache_key.as_deref().unwrap_or(""),
+                    None,
+                    false,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    started_unix,
+                    ended_unix,
+                    Some(&e.to_string()),
+                    retry_count,
+                );
+                return Err(e);
+            }
+        }
         // PR-3: gate the request through the capability resolver so
         // models whose catalog says `temperature: false` (e.g.
         // `kimi-k3`) do not receive the field on the wire. The gated
