@@ -350,6 +350,24 @@ pub async fn run_full_pipeline(
         stub.lineage_paths.clone(),
     );
 
+    // C.11: `Config::token_budget` was declared but never reached
+    // `Db::set_budget`, so operators who set `MOAGAN_TOKEN_BUDGET` /
+    // `token_budget = N` in `config.toml` saw the value silently
+    // dropped at run start. Wire the planned budget into the SQLite
+    // `budget_state` row so `BudgetObserver::record` has a `planned`
+    // column to read and `should_skip_optional` can trip the cap
+    // during the run. Failure here is non-fatal (a corrupted lock
+    // file or a `user_version < 11` DB without the migration would
+    // otherwise tank a healthy run); follow the same
+    // `eprintln!("warn: ...")` pattern as the manifest-event writes
+    // further down. Pre-v011 databases stay a no-op inside
+    // `set_budget` itself.
+    if let Some(planned) = cfg.token_budget
+        && let Err(e) = db.set_budget(run_id, planned)
+    {
+        eprintln!("warn: failed to record planned token budget: {e}");
+    }
+
     // Phase F: synthesis-replacement predicate is ON by default for
     // every mode that runs SynthesizePhase (`standard`/`deep`/`batch`).
     // `fast` never runs synthesis so the flag is a no-op there. The

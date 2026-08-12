@@ -2340,13 +2340,9 @@ impl Db {
     }
 
     /// Set the planned token budget for `run_id`. Idempotent:
-    /// called once at run start (or zero times, leaving the
-    /// default `planned_tokens = 0` which the observer treats as
-    /// "unlimited"). The helper exists so the
-    /// `moagan run --token-budget` CLI flag (or a future Config
-    /// field) has a single, well-typed entry point. Pre-v011
+    /// called once at run start from `cli::run::run_full_pipeline`
+    /// when `Config::token_budget` is `Some(N)`. Pre-v011
     /// databases are a no-op.
-    #[allow(dead_code)]
     pub fn set_budget(&self, run_id: RunId, planned_tokens: u64) -> Result<()> {
         if self.user_version()? < 11 {
             return Ok(());
