@@ -1,0 +1,26 @@
+-- v015: per-call USD cost estimate from the models.dev catalog.
+--
+-- The catalog (PR-1) carries a `cost: {input, output, cache_read,
+-- cache_write}` block on every model row, priced in USD per million
+-- tokens. PR-6 introduces a pure `cost_estimate(...)` function that
+-- multiplies each token count by the matching rate and the new
+-- `cost_usd` column persists the result on the `calls` row.
+--
+-- `REAL NOT NULL DEFAULT 0` so existing rows (no catalog data,
+-- legacy runs) get a well-defined `0` rather than NULL. Telemetry
+-- aggregations filter on `cost_usd > 0` so legacy rows do not skew
+-- averages when a future SQL view computes mean / p50 / p99
+-- per-call cost.
+--
+-- The default is intentionally `0` and not "estimated" because we
+-- have no pricing signal for a row written before the catalog was
+-- fetched. PR-7 will plumb the catalog into RunContext so live
+-- calls land here with a non-zero estimate when the provider/model
+-- pair is known.
+--
+-- Per the catalog addendum (§D.5.1 budget sub-fase), this column
+-- mirrors the on-disk `calls.jsonl.gz` stream; a follow-up PR
+-- extends `CallEvent` with the same field so the JSONL and SQL stay
+-- in lock-step.
+
+ALTER TABLE calls ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;

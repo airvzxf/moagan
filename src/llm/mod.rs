@@ -10,6 +10,7 @@ pub mod capabilities;
 pub mod capability;
 pub mod circuit_breaker;
 pub mod control_tokens;
+pub mod cost;
 pub mod deepseek;
 pub mod embed;
 pub mod http;
