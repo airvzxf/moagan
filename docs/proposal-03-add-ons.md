@@ -47,6 +47,29 @@ El método seguido en este barrido fue:
 
 ---
 
+> **v0.7.1 batch (released 2026-08-11)** — los siguientes items del
+> catálogo entraron juntos como parte de v0.7.1 (PR-C1 / PR-C2).
+> La nota de cada sección enlaza el PR y el commit squash correspondientes:
+>
+> - **D.13.4** — `tiktoken-rs` pre-flight token estimation
+>   ([#400](https://github.com/airvzxf/moagan/pull/400), squash
+>   `1491d7f`). El pre-flight `cl100k_base` ya está en uso en
+>   `src/llm/budget.rs:6`; la dependencia `tiktoken-rs = "0.5"` está
+>   pin en `Cargo.toml:60`. La inexactitud del pre-flight no rompe
+>   `accounting` (sólo se usa cuando el provider no reporta conteo
+>   exacto). **Resuelve** el `Diferido v0.6+` previo.
+> - **D.X1** — runtime-probe `max_tokens` per `(provider, model)`
+>   ([#400](https://github.com/airvzxf/moagan/pull/400), squash
+>   `1491d7f`; refinado en
+>   [#401](https://github.com/airvzxf/moagan/pull/401), squash
+>   `a9682d9`). Reemplaza los `*_MAX_TOKENS_CAP` hardcoded con
+>   probe en `src/llm/probe.rs` (619 líneas) + cache en
+>   `src/llm/probe_table.rs` (556 líneas). Mock provider skip +
+>   `DEFAULT_MAX_TOKENS = 1_000_000`. Documentación en
+>   `docs/max-tokens-auto.md`.
+
+---
+
 ## B. Conteo global de fuentes y aporte
 
 | Bloque | Propuestas revisadas | Aportaciones integradas |
@@ -1938,6 +1961,16 @@ pub fn validate_cardinality(matrix: &ExplorationMatrix, avg_tokens: u64, max_sto
 ```
 
 (Inspirado en T19-09 D15; T18-04 §4.3; T04-05.)
+
+> **Implementación v0.7.1 (PR #400, squash `1491d7f`):**
+> el pre-flight `tiktoken-rs` está implementado y en uso en
+> `src/llm/budget.rs:6` (encoder `cl100k_base`, dependencia
+> `tiktoken-rs = "0.5"` pin en `Cargo.toml:60`). Se usa como
+> best-effort cuando el provider no reporta conteo exacto; su
+> inexactitud no rompe `accounting`. La superficie pública y la
+> `Error::CardinalityExceedsStorage` siguen exactamente el spec
+> de arriba. **Resuelve** el `Diferido v0.6+` previo. Detalles
+> en `docs/v0.7-final-report.md §4` y `docs/max-tokens-auto.md`.
 
 #### D.13.5. `DiscoveryContext` con `category_id`
 
@@ -4140,6 +4173,24 @@ not persist).
 
 Mock provider skips the probe and returns `DEFAULT_MAX_TOKENS =
 1_000_000`.
+
+> **Implementación v0.7.1 (PR #400, squash `1491d7f`; refinado en
+> PR #401, squash `a9682d9`):**
+> el runtime probe está implementado en `src/llm/probe.rs` (619
+> líneas, dos fases: 30 probes exponenciales secuenciales 2^1..2^30
+> + bisect paralelo de 20 puntos en hasta 32 rondas). El cache
+> in-memory + on-disk vive en `src/llm/probe_table.rs` (556
+> líneas, `MaxTokensTable` + `MaxTokensTableFile`). PR #401
+> introdujo `ProbeOutcome::Indeterminate` (5xx → no retry) y
+> `bypass_all_caps: true` en `send_probe` para que el probe nunca
+> quede atrapado por la cap que está intentando descubrir. La
+> dependencia `tiktoken-rs = "0.5"` (pin en `Cargo.toml:60`) es
+> ortogonal: pre-flight en `src/llm/budget.rs:6` (cl100k_base).
+> Documentación: `docs/max-tokens-auto.md`. Tests: la nueva
+> `tests/integration_max_tokens_auto.rs` (296 líneas, 6 tests) +
+> ~36 nuevos tests en `src/llm/probe.rs` (13) /
+> `src/llm/probe_table.rs` (10) / `src/llm/capabilities.rs::tests`
+> (7). Detalles en `docs/v0.7-final-report.md §4`.
 
 ---
 
