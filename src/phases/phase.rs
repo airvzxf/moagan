@@ -946,6 +946,34 @@ impl RunContext {
                         stage = "telemetry.call.completed",
                         "LLM call stage"
                     );
+                    // Wire-the-gates plan, PR-6 follow-up: write
+                    // the per-call USD estimate to the SQLite
+                    // index so `moagan telemetry cost` returns
+                    // real numbers instead of always zero. The
+                    // catalog is the source of truth for the
+                    // rate; a missing catalog or missing
+                    // `(provider, model)` row returns 0.0 and the
+                    // `record_call_cost` helper itself skips the
+                    // UPDATE for zero/NaN so the column stays
+                    // `NULL` (not "zero dollars billed") on
+                    // unknown models.
+                    if let Some(db) = self.telemetry.db() {
+                        let cost_usd = crate::llm::cost::cost_estimate(
+                            self.models_dev_catalog.as_deref(),
+                            self.default_provider.as_str(),
+                            self.default_model.as_str(),
+                            &response.usage,
+                        );
+                        if let Err(e) = db.record_call_cost(&call_id, cost_usd) {
+                            tracing::warn!(
+                                call_id = %call_id,
+                                phase = phase_name,
+                                stage = "cost.record.error",
+                                error = %e,
+                                "LLM call stage"
+                            );
+                        }
+                    }
                 }
                 if response.truncated {
                     let _ = self.telemetry.warn(
