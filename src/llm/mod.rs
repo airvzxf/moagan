@@ -10,6 +10,7 @@ pub mod cache;
 pub mod capabilities;
 pub mod circuit_breaker;
 pub mod control_tokens;
+pub mod cost;
 pub mod deepseek;
 pub mod embed;
 pub mod http;
