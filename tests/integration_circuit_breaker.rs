@@ -111,6 +111,8 @@ fn dummy_request() -> Request {
         response_schema: None,
         stream: false,
         extra_messages: vec![],
+        reasoning_tokens: None,
+        reasoning_effort: None,
     }
 }
 

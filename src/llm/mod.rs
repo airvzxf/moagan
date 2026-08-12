@@ -28,6 +28,7 @@ pub mod prompts;
 pub mod provider;
 pub mod provider_pool;
 pub mod rate_limiter;
+pub mod reasoning_gate;
 pub mod response_format_opt_out;
 pub mod retry_budget;
 pub mod role;

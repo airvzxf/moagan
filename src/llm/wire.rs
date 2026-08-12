@@ -49,6 +49,22 @@ pub struct Request {
     /// cache.
     #[serde(default)]
     pub extra_messages: Vec<Message>,
+    /// Optional reasoning-token budget for the upstream. Wired
+    /// for the OpenAI Responses API (`/v1/responses`); ignored by
+    /// providers whose wire shape has no equivalent. The
+    /// [`crate::llm::reasoning_gate::apply_to_request`] helper
+    /// clears this field when the catalog says the active model
+    /// does not support reasoning (e.g. the `kimi-*` family
+    /// returns HTTP 400 when the field is present).
+    #[serde(default)]
+    pub reasoning_tokens: Option<u32>,
+    /// Optional reasoning-effort selector (`"low"`, `"medium"`,
+    /// `"high"`). Only meaningful when [`Request::reasoning_tokens`]
+    /// is also set. Wired for the OpenAI Responses API; gated off
+    /// by the same `reasoning_gate` helper when the catalog entry
+    /// does not advertise an effort option.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// A single chat message used by the `extra_messages` field on
@@ -239,6 +255,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Request = serde_json::from_str(&j).unwrap();
@@ -291,6 +309,8 @@ mod tests {
                 role: "assistant".into(),
                 content: "{".into(),
             }],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let j = serde_json::to_value(&r).unwrap();
         let arr = j.get("extra_messages").unwrap().as_array().unwrap();
@@ -319,6 +339,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let blake = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Blake3);
         let sha = build_cache_key(&r, "minimax", "MiniMax-M3", CacheHashAlgo::Sha256);
@@ -352,6 +374,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let with_prefill = Request {
             extra_messages: vec![Message {

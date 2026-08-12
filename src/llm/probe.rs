@@ -151,6 +151,8 @@ impl ProbeTransport for ProviderProbeTransport {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
         match res {

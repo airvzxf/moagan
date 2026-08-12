@@ -485,6 +485,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
@@ -558,6 +560,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
@@ -613,6 +617,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
@@ -668,6 +674,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
@@ -1038,6 +1046,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         let value: serde_json::Value = match strategy {
             // Strict path: direct parse only. No repair telemetry
@@ -1172,6 +1182,8 @@ impl RunContext {
                 role: "assistant".to_owned(),
                 content: "{".to_owned(),
             }],
+            reasoning_tokens: None,
+            reasoning_effort: None,
         };
         // Re-apply the same per-provider cap that the dispatch
         // path applies so the wire body matches what the cache
@@ -1335,6 +1347,8 @@ impl RunContext {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                reasoning_tokens: None,
+                reasoning_effort: None,
             };
 
             let started = crate::time::now_unix_secs();

@@ -552,6 +552,8 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                reasoning_tokens: None,
+                reasoning_effort: None,
             };
             let err = p
                 .send(&req)
@@ -716,6 +718,8 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                reasoning_tokens: None,
+                reasoning_effort: None,
             };
             let (status, _resp) = p
                 .send(&req)
@@ -795,6 +799,8 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                reasoning_tokens: None,
+                reasoning_effort: None,
             };
             let (status, _resp) = p
                 .send(&req)
@@ -908,6 +914,8 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                reasoning_tokens: None,
+                reasoning_effort: None,
             };
             let (status, _resp) = p
                 .send(&req)
