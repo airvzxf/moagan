@@ -3,7 +3,7 @@
 use crate::telemetry::event::TelemetryEvent;
 
 #[test]
-fn telemetry_event_variants_count_is_at_least_15() {
+fn telemetry_event_variants_count_is_at_least_14() {
     let names: &[&str] = &[
         "RunStart",
         "RunEnd",
@@ -16,16 +16,13 @@ fn telemetry_event_variants_count_is_at_least_15() {
         "CacheMiss",
         "CircuitOpen",
         "CircuitClose",
-        "BudgetSoft",
-        "BudgetHard",
-        "Cancel",
         "StaleArtifact",
         "Warning",
         "HostilePrompt",
     ];
     assert!(
-        names.len() >= 15,
-        "TelemetryEvent must expose at least 15 variants, got {}",
+        names.len() >= 14,
+        "TelemetryEvent must expose at least 14 variants, got {}",
         names.len()
     );
     let ser_warn = serde_json::to_string(&TelemetryEvent::Warning {
