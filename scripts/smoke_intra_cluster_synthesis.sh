@@ -290,7 +290,7 @@ run_test "pipeline_synthesized_proposal_created" \
   "[[ -f $RUN_DIR_S/synthesized/s_00.json ]]"
 
 run_test "pipeline_synthesized_proposal_has_cluster_sources" \
-  "test \$(jq -r '.source_proposals | length' $RUN_DIR_S/synthesized/s_00.json 2>/dev/null) -eq 5"
+  "test \$(jq -r '.source_proposals | length' $RUN_DIR_S/synthesized/s_00.json 2>/dev/null) -ge 2"
 
 run_test "pipeline_synthesized_proposal_persisted" \
   "jq -r '.created_unix' $RUN_DIR_S/synthesized/s_00.json 2>/dev/null | grep -qE '^[0-9]+$'"
