@@ -156,24 +156,27 @@ impl ProbeTransport for ProviderProbeTransport {
         };
         let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
         match res {
-            Ok(Ok((status, _body))) => {
+            Ok(Ok((status, body))) => {
                 // Classify:
-                //   - 2xx / 3xx         → Accepted (the upstream accepted
-                //                         this max_tokens value).
-                //   - 4xx (any)         → Rejected (a 4xx is the algorithm's
-                //                         signal; the max-tokens rejection
-                //                         lives in 4xx territory per the
-                //                         Anthropic and OpenAI specs).
-                //   - 5xx / network    → Indeterminate (transient; do not
-                //                         treat as a max-tokens boundary).
-                // The 4xx-vs-5xx distinction matters because some 5xx
-                // storm or auth-500 would otherwise be misread as
-                // "the upstream rejected this max_tokens" and collapse
-                // the discovered ceiling to that exact probe value.
+                //   - 2xx / 3xx                       → Accepted
+                //   - 4xx + body carries max_tokens   → Rejected (boundary)
+                //   - 4xx + body does NOT carry it    → Indeterminate
+                //                                       (e.g. 401/403 auth,
+                //                                       model-not-found —
+                //                                       not a max_tokens signal)
+                //   - 5xx / network                  → Indeterminate
                 if (200..400).contains(&status) {
                     ProbeOutcome::Accepted
                 } else if (400..500).contains(&status) {
-                    ProbeOutcome::Rejected
+                    if body_carries_max_tokens_rejection(&body.text) {
+                        ProbeOutcome::Rejected
+                    } else {
+                        // C2: a generic 4xx (auth, model-not-found) is
+                        // not a max-tokens boundary. Treating it as
+                        // Rejected would collapse the discovered ceiling
+                        // to the probe's exact value, which is wrong.
+                        ProbeOutcome::Indeterminate
+                    }
                 } else {
                     ProbeOutcome::Indeterminate
                 }
@@ -224,13 +227,18 @@ pub fn body_carries_max_tokens_rejection(body: &str) -> bool {
 /// `ProviderProbeTransport`. The transport is the only place that
 /// talks to the network.
 pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -> Result<u32> {
-    // Phase 1: exponential search 2^1..2^30.
+    // Phase 1: exponential search 2^1..2^30. M2: each probe that
+    // comes back as `Indeterminate` (transient 5xx / network blip)
+    // is retried once at the same `n` before we commit the
+    // outcome. A single timeout mid-Phase-1 would otherwise
+    // collapse the discovered ceiling by ~½, which is exactly
+    // the regression M2 was filed against.
     let mut lo: u32 = 0;
     let mut hi: u32 = u32::MAX;
 
     for k in 1..=MAX_PROBE_SHIFT {
         let n = 1u32 << k;
-        match transport.probe_send(n).await {
+        match retry_once_on_indeterminate(transport.as_ref(), n).await {
             ProbeOutcome::Accepted => lo = n,
             _ => {
                 hi = n;
@@ -279,7 +287,17 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
         let mut new_lo = lo_strict;
         let mut new_hi = hi_strict;
         for (pt, outcome) in points.iter().zip(results.iter()) {
-            match outcome {
+            // M3: re-probe the same point once if the fan-out
+            // returned Indeterminate. The Phase-2 boundary is a
+            // single 4xx-carrying-max_tokens response; a transient
+            // blip should not collapse the entire ceiling.
+            let committed = match outcome {
+                ProbeOutcome::Indeterminate => {
+                    retry_once_on_indeterminate(transport.as_ref(), *pt).await
+                }
+                other => other.clone(),
+            };
+            match committed {
                 ProbeOutcome::Accepted => {
                     new_lo = *pt;
                     phase2_accepted = true;
@@ -306,25 +324,68 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
     Ok(discovered.max(floor).min(MAX_AUTOPROBE_CEILING))
 }
 
+/// M2/M3 helper: re-fire the same probe once when the first
+/// attempt comes back `Indeterminate`. The retry is gated on the
+/// outcome, not on a timer, so a clean Accepted or Rejected never
+/// pays the second round-trip.
+async fn retry_once_on_indeterminate(transport: &dyn ProbeTransport, n: u32) -> ProbeOutcome {
+    match transport.probe_send(n).await {
+        ProbeOutcome::Indeterminate => transport.probe_send(n).await,
+        other => other,
+    }
+}
+
 /// 20-point parallel fan-out. Each point runs its own probe against
 /// the transport; we collect every outcome before deciding where the
 /// boundary is. Failure of any single probe degrades to
 /// `Indeterminate` so a transient network blip cannot lock the
 /// algorithm.
+///
+/// M9: each spawned task is wrapped in `tokio::select!` against a
+/// `CancellationToken` so a graceful shutdown aborts the fan-out
+/// instead of leaking orphaned tasks. Tasks that lose the race
+/// report `Indeterminate` so the algorithm can re-probe them.
 pub async fn parallel_probe(
     transport: Arc<dyn ProbeTransport>,
     points: &[u32],
 ) -> Vec<ProbeOutcome> {
+    parallel_probe_with_cancel(transport, points, None).await
+}
+
+/// Same as [`parallel_probe`] but with an explicit cancellation
+/// handle. When `cancel` is `None` the calls run to completion; when
+/// `Some`, a fired token causes every pending probe to return
+/// `Indeterminate` so the caller can short-circuit.
+pub async fn parallel_probe_with_cancel(
+    transport: Arc<dyn ProbeTransport>,
+    points: &[u32],
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> Vec<ProbeOutcome> {
     let mut handles = Vec::with_capacity(points.len());
     for &pt in points {
         let t = transport.clone();
-        handles.push(tokio::spawn(async move { t.probe_send(pt).await }));
+        let cancel_child = cancel.as_ref().map(|c| c.child_token());
+        handles.push(tokio::spawn(async move {
+            if let Some(c) = cancel_child {
+                tokio::select! {
+                    biased;
+                    _ = c.cancelled() => ProbeOutcome::Indeterminate,
+                    outcome = t.probe_send(pt) => outcome,
+                }
+            } else {
+                t.probe_send(pt).await
+            }
+        }));
     }
     let mut out = Vec::with_capacity(handles.len());
     for h in handles {
         match h.await {
             Ok(o) => out.push(o),
-            Err(_) => out.push(ProbeOutcome::Indeterminate),
+            Err(e) => {
+                // M8: log the join error so a panic does not vanish.
+                tracing::warn!(error = %e, "max_tokens_auto: parallel_probe task join failed");
+                out.push(ProbeOutcome::Indeterminate);
+            }
         }
     }
     out
@@ -647,5 +708,132 @@ mod tests {
             usage: crate::llm::wire::Usage::default(),
         };
         assert_eq!(r.text.len(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // M-bug follow-up tests
+    // -----------------------------------------------------------------
+
+    use std::sync::atomic::AtomicUsize;
+
+    /// Transport that returns Indeterminate once for the *first* call
+    /// ever, then behaves like `CappedTransport` thereafter. Models a
+    /// transient 5xx that resolves itself after one retry.
+    struct FlakyTransport {
+        accept_up_to: u32,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProbeTransport for FlakyTransport {
+        async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
+            let call_idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            // The very first call (any value of n) returns
+            // Indeterminate. The retry must therefore succeed and
+            // the algorithm should still discover the cap.
+            if call_idx == 0 {
+                return ProbeOutcome::Indeterminate;
+            }
+            if max_tokens <= self.accept_up_to {
+                ProbeOutcome::Accepted
+            } else {
+                ProbeOutcome::Rejected
+            }
+        }
+    }
+
+    /// M2: a single Indeterminate mid-Phase-1 should NOT collapse the
+    /// discovered ceiling. The retry recovers the boundary.
+    #[tokio::test]
+    async fn m2_indeterminate_in_phase1_is_retried() {
+        // accept_up_to = 524288; the very first call returns
+        // Indeterminate (5xx blip). The retry recovers and the
+        // algorithm should still discover ~524288.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(FlakyTransport {
+            accept_up_to: 524_288,
+            calls: calls.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR).await.unwrap();
+        assert!(
+            (524_000..=524_288).contains(&got),
+            "retry should recover cap, got {got}"
+        );
+    }
+
+    /// C2: a 4xx that does NOT carry the "max_tokens" signature
+    /// (e.g. 401 auth, 404 model-not-found) must classify as
+    /// Indeterminate, not Rejected — otherwise a transient auth
+    /// failure would collapse the discovered ceiling to that
+    /// exact probe value.
+    #[tokio::test]
+    async fn c2_generic_4xx_is_indeterminate_not_rejected() {
+        // We test the body_carries_max_tokens_rejection helper
+        // directly because the classify-by-status path runs inside
+        // the trait method (not the algorithm). The transport
+        // returns a Response whose text we control.
+        let r = crate::llm::wire::Response {
+            text: r#"{"type":"error","error":{"message":"invalid api key"}}"#.into(),
+            finish_reason: None,
+            truncated: false,
+            usage: crate::llm::wire::Usage::default(),
+        };
+        assert!(!body_carries_max_tokens_rejection(&r.text));
+        // Boundary signature still classifies as Rejected-eligible.
+        let r2 = crate::llm::wire::Response {
+            text: r#"{"type":"error","error":{"message":"max_tokens > 524288"}}"#.into(),
+            finish_reason: None,
+            truncated: false,
+            usage: crate::llm::wire::Usage::default(),
+        };
+        assert!(body_carries_max_tokens_rejection(&r2.text));
+    }
+
+    /// M9: parallel_probe_with_cancel must return Indeterminate for
+    /// every point whose task was cancelled before completing.
+    #[tokio::test]
+    async fn m9_parallel_probe_respects_cancellation_token() {
+        use tokio_util::sync::CancellationToken;
+        struct NeverTransport;
+        #[async_trait]
+        impl ProbeTransport for NeverTransport {
+            async fn probe_send(&self, _max_tokens: u32) -> ProbeOutcome {
+                // Sleep long enough that the cancel beats the probe.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                ProbeOutcome::Accepted
+            }
+        }
+        let t: Arc<dyn ProbeTransport> = Arc::new(NeverTransport);
+        let cancel = CancellationToken::new();
+        let cancel_child = cancel.clone();
+        // Cancel from another task after a tiny delay.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_child.cancel();
+        });
+        let pts: Vec<u32> = (1..=10).collect();
+        let outcomes = parallel_probe_with_cancel(t, &pts, Some(cancel)).await;
+        // Every probe should have come back Indeterminate because the
+        // token fired before the sleep finished.
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| matches!(o, ProbeOutcome::Indeterminate)),
+            "expected every probe to be Indeterminate, got {outcomes:?}"
+        );
+    }
+
+    /// M7 smoke: probe_tasks_started increments per task spawn, not
+    /// per HTTP round-trip. Pinned by table test (see probe_table.rs).
+    #[test]
+    fn m7_probe_tasks_started_field_exists() {
+        // Compile-time check: the field name must be `probe_tasks_started`,
+        // not the legacy `probes_attempted`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("max_tokens_auto.toml");
+        let t =
+            crate::llm::probe_table::MaxTokensTable::from_path(&path, MIN_AUTOPROBE_FLOOR, false)
+                .unwrap();
+        assert_eq!(t.probe_tasks_started(), 0);
     }
 }
