@@ -1,0 +1,6 @@
+{
+  "text": "{\"category_id\":\"cat_00\",\"cluster_id\":\"cl_00\",\"facets\":[{\"id\":\"resource-model\",\"description\":\"Shape of the core resources\",\"required\":true},{\"id\":\"endpoints\",\"description\":\"HTTP verb/route table\",\"required\":true}],\"cache_key\":\"deadbeef\",\"created_unix\":1700000000,\"schema_version\":\"v1\"}",
+  "input_tokens": 100,
+  "output_tokens": 80,
+  "finish_reason": "end_turn"
+}

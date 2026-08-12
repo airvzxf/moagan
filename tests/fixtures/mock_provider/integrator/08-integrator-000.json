@@ -1,0 +1,6 @@
+{
+  "text": "{\"category_id\":\"cat_00\",\"cluster_id\":\"cl_00\",\"body\":\"# Resource model\\n\\n## Resource model\\n\\nThe system models books as a single resource with id, title, author and availability fields.\\n\\n## Endpoints\\n\\nThe HTTP surface exposes `GET /books`, `POST /books`, `GET /books/{id}` and `PUT /books/{id}`.\",\"sources\":[\"sk_000\"],\"density\":0.7,\"schema_version\":\"v1\"}",
+  "input_tokens": 100,
+  "output_tokens": 80,
+  "finish_reason": "end_turn"
+}
