@@ -29,9 +29,9 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
-use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::http::{body_from_request, build_client, build_headers, classify_status, retry_after};
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};

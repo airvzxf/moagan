@@ -12,11 +12,11 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::{MINIMAX_MAX_TOKENS_CAP, ProviderCapabilities};
-use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::circuit_breaker::CircuitBreaker;
 use super::http::{
     MessagesResponseBody, build_client, build_headers, classify_status, retry_after,
 };
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::wire::{Request, Response};
@@ -302,16 +302,16 @@ impl Provider for MinimaxProvider {
     /// algorithm sees the upstream's real boundary. The regular
     /// `send` keeps every cap so a stale or empty table cannot leak
     /// an unbounded value into the wire body.
-///
-/// **Why skip ALL caps (not just the safety ceiling)**: if the
-/// operator's TOML pins `max_tokens = 524288` (the historical cap
-/// from PR #379), the operator_cap clamps the wire body to
-/// 524288 for every probe, so the algorithm only ever sees
-/// `max_tokens=524288` and concludes "accepts everything" — even
-/// though the upstream rejects `max_tokens=524289`. To discover
-/// the real boundary, the probe must send whatever value the
-/// algorithm chose, unmodified. The floor still applies so the
-/// probe never asks for `max_tokens < 1024`.
+    ///
+    /// **Why skip ALL caps (not just the safety ceiling)**: if the
+    /// operator's TOML pins `max_tokens = 524288` (the historical cap
+    /// from PR #379), the operator_cap clamps the wire body to
+    /// 524288 for every probe, so the algorithm only ever sees
+    /// `max_tokens=524288` and concludes "accepts everything" — even
+    /// though the upstream rejects `max_tokens=524289`. To discover
+    /// the real boundary, the probe must send whatever value the
+    /// algorithm chose, unmodified. The floor still applies so the
+    /// probe never asks for `max_tokens < 1024`.
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
         let mut req = req.clone();
         req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);

@@ -243,10 +243,7 @@ impl RunContext {
     /// `Option<Arc<MaxTokensTable>>` carried by [`ProviderRegistry`].
     /// No-op when the table is `None` (mock-only registries and
     /// environments where `max_token_auto = None` everywhere).
-    pub fn with_max_tokens_table_opt(
-        mut self,
-        table: Option<Arc<MaxTokensTable>>,
-    ) -> Self {
+    pub fn with_max_tokens_table_opt(mut self, table: Option<Arc<MaxTokensTable>>) -> Self {
         if let Some(t) = table {
             self.max_tokens_table = Some(t);
         }

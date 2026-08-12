@@ -27,9 +27,9 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
-use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::openai_compat::role_requires_json;
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::response_format_opt_out::model_skips_response_format;

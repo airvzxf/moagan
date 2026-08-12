@@ -18,8 +18,8 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
-use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::response_format_opt_out;
@@ -391,7 +391,10 @@ impl OpenAiCompatProvider {
                     .unwrap_or(u32::MAX);
                 let cap = operator_cap.min(kind_cap).min(table_cap);
                 if body.max_tokens > cap {
-                    ChatRequest { max_tokens: cap, ..body }
+                    ChatRequest {
+                        max_tokens: cap,
+                        ..body
+                    }
                 } else {
                     body
                 }
@@ -400,7 +403,10 @@ impl OpenAiCompatProvider {
                 // never ask for `max_tokens < 1024` (some upstreams
                 // reject the request outright below that minimum).
                 if body.max_tokens < MIN_AUTOPROBE_FLOOR {
-                    ChatRequest { max_tokens: MIN_AUTOPROBE_FLOOR, ..body }
+                    ChatRequest {
+                        max_tokens: MIN_AUTOPROBE_FLOOR,
+                        ..body
+                    }
                 } else {
                     body
                 }
