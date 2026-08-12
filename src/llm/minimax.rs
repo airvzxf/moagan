@@ -16,6 +16,7 @@ use super::circuit_breaker::CircuitBreaker;
 use super::http::{
     MessagesResponseBody, build_client, build_headers, classify_status, retry_after,
 };
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::wire::{Request, Response};
@@ -138,66 +139,29 @@ impl MinimaxProvider {
         tokio::time::sleep(chosen).await;
         let _ = attempt;
     }
-}
 
-/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
-/// does not implement `Debug` (that lives in `probe_table.rs`,
-/// outside this provider's owned files) and exposing the table
-/// reference in a Debug dump adds noise without signal: the table
-/// is the only `Arc` on the struct, so showing the rest is enough
-/// to identify the instance.
-impl std::fmt::Debug for MinimaxProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MinimaxProvider")
-            .field("name", &self.name)
-            .field("model", &self.model)
-            .field("endpoint", &self.endpoint)
-            .field("provider_max_tokens", &self.provider_max_tokens)
-            .field("max_tokens_table", &"<shared>")
-            .finish()
-    }
-}
-
-#[async_trait]
-impl Provider for MinimaxProvider {
-    fn name(&self) -> &str {
-        &self.name
+    /// Shared HTTP retry body for [`Provider::send`] and
+    /// [`Provider::send_probe`]. The caller applies the per-call
+    /// `max_tokens` clamp before invoking this so the wire body
+    /// carries whatever value the caller approved. Inherent
+    /// (non-trait) method so the HTTP loop lives in one place.
+    async fn send_http(&self, req: Request) -> Result<(u16, Response)> {
+        self.send_http_with_retries(req, self.max_retries).await
     }
 
-    fn model(&self) -> &str {
-        &self.model
-    }
-
-    fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::for_minimax()
-    }
-
-    async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+    /// HTTP body used by both `send` (with `self.max_retries`) and
+    /// `send_probe` (with `probe_max_retries: 0`). The probe path
+    /// passes `0` because a 4xx IS the algorithm's signal — a
+    /// "max tokens rejected" response must not be retried, or the
+    /// 5 s probe timeout blows and the algorithm confuses
+    /// `Indeterminate` with `Rejected`.
+    async fn send_http_with_retries(
+        &self,
+        req: Request,
+        probe_max_retries: u32,
+    ) -> Result<(u16, Response)> {
         let result = async {
             let url = self.messages_url();
-            // Apply three-layer max_tokens cap. From highest-priority
-            // (smallest wins) to lowest:
-            //   1. MINIMAX_MAX_TOKENS_CAP — the documented upstream
-            //      ceiling; the upstream returns HTTP 400 above it.
-            //   2. ProviderConfig::max_tokens — operator override.
-            //   3. MaxTokensTable::resolve_cached — auto-probed
-            //      per-(provider, model) value, primary source of truth
-            //      when present.
-            // Clone once before the retry loop so the body is
-            // identical across attempts.
-            let mut req = req.clone();
-            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-            let table_cap = self
-                .max_tokens_table
-                .as_ref()
-                .and_then(|t| t.resolve_cached(self.name(), self.model()))
-                .unwrap_or(u32::MAX);
-            let cap = operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP);
-            req.max_tokens = req.max_tokens.min(cap);
             let body = AnthropicWire.encode_body(&req)?;
             let mut attempt: u32 = 0;
             loop {
@@ -255,13 +219,13 @@ impl Provider for MinimaxProvider {
                             err,
                             Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
                         );
-                        if !retryable || attempt >= self.max_retries {
+                        if !retryable || attempt >= probe_max_retries {
                             return Err(err);
                         }
                         Self::sleep_with_jitter(attempt, retry_after).await;
                     }
                     Err(e) => {
-                        if attempt >= self.max_retries {
+                        if attempt >= probe_max_retries {
                             return Err(Error::Provider(format!("network: {e}")));
                         }
                         Self::sleep_with_jitter(attempt, None).await;
@@ -275,6 +239,83 @@ impl Provider for MinimaxProvider {
             Err(err) => self.breaker.record_failure_if_circuit_opening(err),
         }
         result
+    }
+}
+
+/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
+/// does not implement `Debug` (that lives in `probe_table.rs`,
+/// outside this provider's owned files) and exposing the table
+/// reference in a Debug dump adds noise without signal: the table
+/// is the only `Arc` on the struct, so showing the rest is enough
+/// to identify the instance.
+impl std::fmt::Debug for MinimaxProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinimaxProvider")
+            .field("name", &self.name)
+            .field("model", &self.model)
+            .field("endpoint", &self.endpoint)
+            .field("provider_max_tokens", &self.provider_max_tokens)
+            .field("max_tokens_table", &"<shared>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl Provider for MinimaxProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::for_minimax()
+    }
+
+    async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+        let mut req = req.clone();
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        // Three-layer cap (highest priority first, smallest wins):
+        //   1. MINIMAX_MAX_TOKENS_CAP — documented upstream ceiling;
+        //      the upstream returns HTTP 400 above it.
+        //   2. ProviderConfig::max_tokens — operator override.
+        //   3. MaxTokensTable::resolve_cached — auto-probed
+        //      per-(provider, model) value, primary source of truth.
+        let cap = operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP);
+        req.max_tokens = req.max_tokens.min(cap);
+        self.send_http(req).await
+    }
+
+    /// Bypass variant for the auto-probe. Skips every cap — operator
+    /// override, cached table, and `MINIMAX_MAX_TOKENS_CAP` — so the
+    /// algorithm sees the upstream's real boundary. The regular
+    /// `send` keeps every cap so a stale or empty table cannot leak
+    /// an unbounded value into the wire body.
+    ///
+    /// **Why skip ALL caps (not just the safety ceiling)**: if the
+    /// operator's TOML pins `max_tokens = 524288` (the historical cap
+    /// from PR #379), the operator_cap clamps the wire body to
+    /// 524288 for every probe, so the algorithm only ever sees
+    /// `max_tokens=524288` and concludes "accepts everything" — even
+    /// though the upstream rejects `max_tokens=524289`. To discover
+    /// the real boundary, the probe must send whatever value the
+    /// algorithm chose, unmodified. The floor still applies so the
+    /// probe never asks for `max_tokens < 1024`.
+    async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
+        let mut req = req.clone();
+        req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
+        self.send_http(req).await
     }
 }
 

@@ -19,11 +19,14 @@
 //! Wire-clamp caveat: `MinimaxProvider::send` clamps the wire
 //! `max_tokens` to `MINIMAX_MAX_TOKENS_CAP` before sending. That
 //! clamp is intentional (the upstream rejects anything above the
-//! cap) but it means the algorithm can never observe a boundary
-//! `at` the cap from the wire -- every probe lands on a clamped
-//! wire value and the algorithm therefore converges at
-//! `MAX_AUTOPROBE_CEILING` instead. The `probe_finds_524k_boundary`
-//! test below documents this.
+//! cap) and must NOT bleed into the probe path. `send_probe`
+//! bypasses every cap (operator override, cached table, and
+//! `MINIMAX_MAX_TOKENS_CAP`) so the wire body carries the
+//! algorithm's chosen `max_tokens` verbatim. Without that bypass,
+//! every probe lands on a clamped wire value and the algorithm
+//! converges at `MAX_AUTOPROBE_CEILING` instead of the real
+//! boundary. The `probe_finds_524k_boundary` test below pins the
+//! bypass behaviour end-to-end.
 
 use std::sync::Arc;
 
@@ -145,15 +148,17 @@ async fn probe_finds_8k_boundary() {
     assert_eq!(discovered, 8192, "8K boundary: algorithm returns lo");
 }
 
-/// Wire boundary at 524_288 — but `MinimaxProvider` clamps the
-/// wire body to `MINIMAX_MAX_TOKENS_CAP = 524_288`, so every probe
-/// lands on a wire `max_tokens` of 524_288. The wiremock accepts
-/// that value, the algorithm never observes a rejection, and
-/// `lo` walks all the way to `2^30`. The discovered value is the
-/// safety ceiling, not the wire boundary. The downstream
-/// `effective_max_tokens` clamp pulls it back to the
-/// provider-side cap, so the integration test documents the
-/// *ceiling* rather than the boundary.
+/// Wire boundary at 524_288. `MinimaxProvider::send_probe`
+/// bypasses every cap (operator override, cached table, and
+/// `MINIMAX_MAX_TOKENS_CAP`), so the wire body carries the
+/// algorithm's chosen `max_tokens` verbatim. Phase 1 finds
+/// `lo = 524288` (the last accepted value) and `hi = 1048576`
+/// (the first rejection); Phase 2 tightens the gap and confirms
+/// every value strictly above `524_288` is rejected. The
+/// discovered value therefore lands exactly on the wire
+/// boundary, not the safety ceiling. This test documents the
+/// production contract: the bypass is what makes the auto-probe
+/// useful above the safety ceiling.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn probe_finds_524k_boundary() {
     let server = MockServer::start().await;
@@ -164,8 +169,8 @@ async fn probe_finds_524k_boundary() {
         .await
         .expect("probe converges");
     assert_eq!(
-        discovered, MAX_AUTOPROBE_CEILING,
-        "wire clamp masks the 524_288 boundary; algorithm converges at the safety ceiling"
+        discovered, 524_288,
+        "send_probe bypasses every cap; algorithm discovers the real 524_288 boundary"
     );
 }
 

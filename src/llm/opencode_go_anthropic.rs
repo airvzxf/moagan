@@ -31,6 +31,7 @@ use crate::secret::SecretString;
 use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
 use super::http::{body_from_request, build_client, build_headers, classify_status, retry_after};
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
@@ -176,26 +177,58 @@ impl Provider for OpenCodeGoAnthropicProvider {
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+        self.send_with_safety_clamp(req, true).await
+    }
+
+    /// Bypass variant for the auto-probe. Skips every cap
+    /// (operator override, table, OPENCODE_GO_MAX_TOKENS_CAP) so
+    /// the algorithm sees the upstream's real boundary. The
+    /// regular `send` keeps every cap so a stale or empty table
+    /// cannot leak an unbounded value into the wire body.
+    async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
+        self.send_with_safety_clamp(req, false).await
+    }
+}
+
+impl OpenCodeGoAnthropicProvider {
+    /// Shared HTTP body between `send` and `send_probe`. When
+    /// `safety_clamp = true` the wire body is capped by every layer
+    /// (operator override + table + `OPENCODE_GO_MAX_TOKENS_CAP`);
+    /// when `false` the wire body carries `req.max_tokens` verbatim
+    /// subject only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
+    async fn send_with_safety_clamp(
+        &self,
+        req: &Request,
+        safety_clamp: bool,
+    ) -> Result<(u16, Response)> {
         let url = self.messages_url();
-        // Apply three-layer max_tokens cap (mirrors OpenAiCompatProvider
-        // and MinimaxProvider). Highest priority (smallest wins) to lowest:
-        //   1. `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` — the documented
-        //      hard ceiling for the 2026-08-04 model roster (below the
-        //      upstream's documented 393216 cap to keep kimi-k*, qwen3.x,
-        //      etc. working out of the box).
-        //   2. `ProviderConfig::max_tokens` — operator TOML override.
-        //   3. `MaxTokensTable::resolve_cached` — auto-probed
-        //      per-(provider, model) value; primary source of truth when
-        //      present.
         let mut req = req.clone();
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
-        req.max_tokens = req.max_tokens.min(cap);
+        // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
+        // signal (max-tokens rejection), retrying it wastes the 5s
+        // probe timeout and risks masking the boundary if a retry
+        // happens to succeed. Production path keeps the existing
+        // self.max_retries (3) for transient 5xx storms.
+        let max_retries = if safety_clamp { self.max_retries } else { 0 };
+        if safety_clamp {
+            // Three-layer cap. Highest priority (smallest wins) to lowest:
+            //   1. OPENCODE_GO_MAX_TOKENS_CAP — documented hard ceiling
+            //      for the 2026-08-04 model roster.
+            //   2. provider_max_tokens — operator TOML override.
+            //   3. MaxTokensTable::resolve_cached — auto-probed value.
+            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+            let table_cap = self
+                .max_tokens_table
+                .as_ref()
+                .and_then(|t| t.resolve_cached(self.name(), self.model()))
+                .unwrap_or(u32::MAX);
+            let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
+            req.max_tokens = req.max_tokens.min(cap);
+        } else {
+            // Probe path: bypass every cap. Floor ensures we
+            // never ask for `max_tokens < 1024` (some upstreams
+            // reject the request outright below that minimum).
+            req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
+        }
         let body = body_from_request(&req);
         let mut attempt: u32 = 0;
         loop {
@@ -243,12 +276,6 @@ impl Provider for OpenCodeGoAnthropicProvider {
                             "Provider HTTP stage"
                         );
                         let resp = parsed.into_response();
-                        // D.29.2: enforce the centralised response
-                        // cap (10 MiB) on the decoded text. Done
-                        // here (not inside `into_response`) so the
-                        // helper signature stays total and the
-                        // tests for the deserialiser don't need to
-                        // stand up the cap machinery.
                         check_size("response", resp.text.len(), MAX_RESPONSE_BYTES)?;
                         return Ok((status_code, resp));
                     }
@@ -258,13 +285,13 @@ impl Provider for OpenCodeGoAnthropicProvider {
                         err,
                         Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
                     );
-                    if !retryable || attempt >= self.max_retries {
+                    if !retryable || attempt >= max_retries {
                         return Err(err);
                     }
                     Self::sleep_with_jitter(attempt, retry_after).await;
                 }
                 Err(e) => {
-                    if attempt >= self.max_retries {
+                    if attempt >= max_retries {
                         return Err(Error::Provider(format!("network: {e}")));
                     }
                     Self::sleep_with_jitter(attempt, None).await;

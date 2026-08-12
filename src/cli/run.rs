@@ -291,6 +291,12 @@ pub async fn run_full_pipeline(
         &default_provider,
         mock_dir.as_deref(),
     )?);
+    // Pull the auto-probe table off the registry so the pipeline can
+    // consult it on every LLM call. `registry_from_config_with_home`
+    // already fired background probes when the table was built; the
+    // `await_ready()` call below (after the pipeline finishes) blocks
+    // until they have all landed.
+    let max_tokens_table = providers.max_tokens_table().cloned();
     let default_model = cfg.provider(&default_provider)?.model.clone();
 
     // W1: the redact policy is built from the loaded Config, NOT
@@ -328,6 +334,7 @@ pub async fn run_full_pipeline(
         cfg_arc,
     )
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
+    .with_max_tokens_table_opt(max_tokens_table)
     // V4 §13.6 promises "no human pauses" for Mode::Batch. The
     // `interactive` flag now reflects that contract: even if the
     // operator forgets `--non-interactive`, batch runs skip every
@@ -372,6 +379,18 @@ pub async fn run_full_pipeline(
             return Err(ctx.cancel().into_error());
         }
     };
+
+    // Wait for every background `max_tokens_auto` probe to
+    // finish so the discovered values land in the in-memory table
+    // before the pipeline starts reading them, and so the persisted
+    // TOML is current by the time the run exits. Without this the
+    // probe races against the pipeline: the first LLM call may use
+    // `DEFAULT_MAX_TOKENS` (no cached value yet), and a fast run
+    // can exit before the algorithm completes its 30 sequential
+    // probes — leaving the on-disk file empty.
+    if let Some(table) = ctx.max_tokens_table.as_ref() {
+        table.await_ready().await;
+    }
 
     // Flush telemetry before the manifest reads phases/calls.
     // Without this, the gzip stream is incomplete (no CRC/length

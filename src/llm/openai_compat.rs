@@ -19,6 +19,7 @@ use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::response_format_opt_out;
@@ -321,38 +322,94 @@ impl Provider for OpenAiCompatProvider {
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+        self.send_with_safety_clamp(req, true).await
+    }
+
+    /// Bypass variant for the auto-probe. Skips every cap
+    /// (operator override, kind_hard_cap, table) so the algorithm
+    /// sees the upstream's real boundary. The regular `send` keeps
+    /// every cap so a stale or empty table cannot leak an
+    /// unbounded value into the wire body.
+    ///
+    /// Same rationale as `minimax::send_probe`: when the operator's
+    /// TOML pins `max_tokens = 8192` (DeepSeek-direct's historical
+    /// cap) and the upstream actually accepts up to 32K, every
+    /// probe lands on 8192 and the algorithm concludes "accepts
+    /// everything". To discover the real boundary, the probe must
+    /// send `req.max_tokens` verbatim, subject only to the floor.
+    async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
+        self.send_with_safety_clamp(req, false).await
+    }
+}
+
+impl OpenCodeGoDispatch for OpenAiCompatProvider {
+    fn url(&self) -> String {
+        self.chat_url()
+    }
+}
+
+impl OpenAiCompatProvider {
+    /// Shared HTTP body between `send` and `send_probe`. When
+    /// `safety_clamp = true` the wire body is capped by every layer
+    /// (operator override + `kind_hard_cap` + table); when `false`
+    /// the wire body carries `req.max_tokens` verbatim subject only
+    /// to the [`MIN_AUTOPROBE_FLOOR`] minimum.
+    async fn send_with_safety_clamp(
+        &self,
+        req: &Request,
+        safety_clamp: bool,
+    ) -> Result<(u16, Response)> {
         let url = self.chat_url();
+        // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
+        // signal (max-tokens rejection), retrying it wastes the 5s
+        // probe timeout and risks masking the boundary if a retry
+        // happens to succeed. Production path keeps the existing
+        // self.max_retries (3) for transient 5xx storms.
+        let max_retries = if safety_clamp { self.max_retries } else { 0 };
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
             let body = self.build_chat_request(req);
-            // Apply three-layer max_tokens cap. Highest priority
-            // (smallest wins) to lowest:
-            //   1. `kind_hard_cap` — set by the OpenCode Go dispatcher
-            //      to `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`. DeepSeek-
-            //      direct leaves `None` (the direct upstream's 8192
-            //      limit is covered by the operator override).
-            //   2. `provider_max_tokens` — operator TOML override.
-            //   3. `MaxTokensTable::resolve_cached` — auto-probed
-            //      per-(provider, model) value; primary source of
-            //      truth when present.
-            // Done AFTER `build_chat_request` so the cap is visible
-            // regardless of upstream choice.
-            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-            let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
-            let table_cap = self
-                .max_tokens_table
-                .as_ref()
-                .and_then(|t| t.resolve_cached(self.name(), self.model()))
-                .unwrap_or(u32::MAX);
-            let cap = operator_cap.min(kind_cap).min(table_cap);
-            let body = if body.max_tokens > cap {
-                ChatRequest {
-                    max_tokens: cap,
-                    ..body
+            let body = if safety_clamp {
+                // Apply three-layer max_tokens cap. Highest priority
+                // (smallest wins) to lowest:
+                //   1. `kind_hard_cap` — set by the OpenCode Go
+                //      dispatcher to `OPENCODE_GO_MAX_TOKENS_CAP =
+                //      16_384`. DeepSeek-direct leaves `None` (the
+                //      direct upstream's 8192 limit is covered by
+                //      the operator override).
+                //   2. `provider_max_tokens` — operator TOML override.
+                //   3. `MaxTokensTable::resolve_cached` — auto-probed
+                //      per-(provider, model) value; primary source of
+                //      truth when present.
+                let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+                let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
+                let table_cap = self
+                    .max_tokens_table
+                    .as_ref()
+                    .and_then(|t| t.resolve_cached(self.name(), self.model()))
+                    .unwrap_or(u32::MAX);
+                let cap = operator_cap.min(kind_cap).min(table_cap);
+                if body.max_tokens > cap {
+                    ChatRequest {
+                        max_tokens: cap,
+                        ..body
+                    }
+                } else {
+                    body
                 }
             } else {
-                body
+                // Probe path: bypass every cap. Floor ensures we
+                // never ask for `max_tokens < 1024` (some upstreams
+                // reject the request outright below that minimum).
+                if body.max_tokens < MIN_AUTOPROBE_FLOOR {
+                    ChatRequest {
+                        max_tokens: MIN_AUTOPROBE_FLOOR,
+                        ..body
+                    }
+                } else {
+                    body
+                }
             };
             let result = self
                 .client
@@ -377,13 +434,6 @@ impl Provider for OpenAiCompatProvider {
                         let truncated = finish_reason.as_deref() == Some("length");
                         let usage = parsed.usage.unwrap_or_default();
                         let text = choice.message.content;
-                        // D.29.2: enforce the centralised response
-                        // cap (10 MiB) so a runaway provider cannot
-                        // force us to hold a 100 MiB string in
-                        // memory. The check happens AFTER the JSON
-                        // decode so the byte count is the actual
-                        // payload length (not the wire bytes,
-                        // which include JSON-escape overhead).
                         check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
                         let response = Response {
                             text,
@@ -399,7 +449,7 @@ impl Provider for OpenAiCompatProvider {
                         return Ok((code, response));
                     }
                     let body = resp.text().await.unwrap_or_default();
-                    if attempt >= self.max_retries {
+                    if attempt >= max_retries {
                         return Err(Error::Provider(format!(
                             "openai-compat: HTTP {code} after {attempt} attempts: {body}"
                         )));
@@ -407,19 +457,13 @@ impl Provider for OpenAiCompatProvider {
                     tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
                 }
                 Err(e) => {
-                    if attempt >= self.max_retries {
+                    if attempt >= max_retries {
                         return Err(Error::Provider(format!("openai-compat: network: {e}")));
                     }
                     tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
                 }
             }
         }
-    }
-}
-
-impl OpenCodeGoDispatch for OpenAiCompatProvider {
-    fn url(&self) -> String {
-        self.chat_url()
     }
 }
 

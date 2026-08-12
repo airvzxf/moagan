@@ -29,6 +29,7 @@ use crate::secret::SecretString;
 use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
 use super::openai_compat::role_requires_json;
 use super::opencode_go::OpenCodeGoDispatch;
+use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::response_format_opt_out::model_skips_response_format;
@@ -269,144 +270,20 @@ impl Provider for OpenCodeGoResponsesProvider {
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
-        let url = self.responses_url();
-        if req.stream {
-            return self.send_streaming(req, &url).await;
-        }
-        // Apply three-layer max_tokens cap (mirrors
-        // OpenAiCompatProvider and MinimaxProvider). Highest priority
-        // (smallest wins) to lowest:
-        //   1. `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` — the documented
-        //      hard ceiling for the 2026-08-04 roster (kimi-k* /
-        //      gpt-5.6-luna accept at most 16_384, below the upstream's
-        //      393216 documented max).
-        //   2. `ProviderConfig::max_tokens` — operator TOML override.
-        //   3. `MaxTokensTable::resolve_cached` — auto-probed
-        //      per-(provider, model) value; primary source of truth
-        //      when present.
-        let mut req = req.clone();
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
-        req.max_tokens = req.max_tokens.min(cap);
-        let max_tokens = self.effective_max_tokens(req.max_tokens);
-        let mut attempt: u32 = 0;
-        loop {
-            attempt += 1;
-            let body = ResponsesRequest {
-                model: &self.model,
-                instructions: Some(&req.system),
-                input: &req.user,
-                max_tokens,
-                temperature: req.temperature,
-                top_p: req.top_p,
-                response_format: if wants_response_format(req.role, &self.model) {
-                    Some(ResponsesResponseFormat {
-                        kind: "json_object",
-                    })
-                } else {
-                    None
-                },
-                stream: false,
-            };
-            let request_started = std::time::Instant::now();
-            tracing::debug!(
-                provider = self.name,
-                attempt,
-                stage = "http.request.started",
-                "Provider HTTP stage"
-            );
-            let result = self
-                .client
-                .post(&url)
-                .bearer_auth(self.api_key.expose())
-                .json(&body)
-                .send()
-                .await;
-            match result {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let status_code = status.as_u16();
-                    tracing::debug!(
-                        provider = self.name,
-                        attempt,
-                        stage = "http.headers.received",
-                        status = status_code,
-                        elapsed_ms = request_started.elapsed().as_millis(),
-                        "Provider HTTP stage"
-                    );
-                    if status.is_success() {
-                        let decode_started = std::time::Instant::now();
-                        let parsed: ResponsesBody = resp
-                            .json()
-                            .await
-                            .map_err(|e| Error::Provider(format!("decode: {e}")))?;
-                        tracing::debug!(
-                            provider = self.name,
-                            attempt,
-                            stage = "http.body.decoded",
-                            status = status_code,
-                            elapsed_ms = decode_started.elapsed().as_millis(),
-                            "Provider HTTP stage"
-                        );
-                        let mut text = String::new();
-                        for out in parsed.output {
-                            for c in out.content {
-                                if c.kind == "output_text"
-                                    && let Some(t) = c.text
-                                {
-                                    text.push_str(&t);
-                                }
-                            }
-                        }
-                        let usage = parsed.usage.unwrap_or_default();
-                        // D.29.2: enforce the centralised response
-                        // cap (10 MiB) before constructing the
-                        // Response. Done on the accumulated text so
-                        // the byte count is the actual payload
-                        // length the pipeline will see.
-                        check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
-                        let response = Response {
-                            text,
-                            finish_reason: None,
-                            truncated: false,
-                            usage: Usage {
-                                input_tokens: usage.input_tokens,
-                                output_tokens: usage.output_tokens,
-                                cache_read: 0,
-                                cache_creation: 0,
-                            },
-                        };
-                        return Ok((status_code, response));
-                    }
-                    let body = resp.text().await.unwrap_or_default();
-                    let err = match status_code {
-                        401 | 403 => Error::InvalidApiKey(format!("http {status_code}: {body}")),
-                        429 => Error::PlanExhausted(format!("http {status_code}: {body}")),
-                        408 | 504 | 524 => Error::Timeout(format!("http {status_code}: {body}")),
-                        _ => Error::Provider(format!("http {status_code}: {body}")),
-                    };
-                    let retryable = matches!(
-                        err,
-                        Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
-                    );
-                    if !retryable || attempt >= self.max_retries {
-                        return Err(err);
-                    }
-                    Self::sleep_with_jitter(attempt, None).await;
-                }
-                Err(e) => {
-                    if attempt >= self.max_retries {
-                        return Err(Error::Provider(format!("network: {e}")));
-                    }
-                    Self::sleep_with_jitter(attempt, None).await;
-                }
-            }
-        }
+        // The regular `send` keeps every cap (operator override,
+        // table, OPENCODE_GO_MAX_TOKENS_CAP) so a stale or empty
+        // table cannot leak an unbounded value into the wire body.
+        // The probe path uses `send_probe` instead, which skips the
+        // OPENCODE_GO_MAX_TOKENS_CAP so the algorithm sees the
+        // upstream's real boundary.
+        self.send_with_safety_clamp(req, true).await
+    }
+
+    /// Bypass variant for the auto-probe. Skips every cap
+    /// (operator override, table, OPENCODE_GO_MAX_TOKENS_CAP) so
+    /// the algorithm sees the upstream's real boundary.
+    async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
+        self.send_with_safety_clamp(req, false).await
     }
 }
 
@@ -486,6 +363,158 @@ fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
 }
 
 impl OpenCodeGoResponsesProvider {
+    /// Shared HTTP body between `send` and `send_probe`. When
+    /// `safety_clamp = true` the wire body is capped by every layer
+    /// (operator override + table + `OPENCODE_GO_MAX_TOKENS_CAP`);
+    /// when `false` the wire body carries `req.max_tokens` verbatim
+    /// subject only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
+    async fn send_with_safety_clamp(
+        &self,
+        req: &Request,
+        safety_clamp: bool,
+    ) -> Result<(u16, Response)> {
+        let url = self.responses_url();
+        if req.stream {
+            return self.send_streaming(req, &url).await;
+        }
+        // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
+        // signal (max-tokens rejection), retrying it wastes the 5s
+        // probe timeout and risks masking the boundary if a retry
+        // happens to succeed. Production path keeps the existing
+        // self.max_retries (3) for transient 5xx storms.
+        let max_retries = if safety_clamp { self.max_retries } else { 0 };
+        let mut req = req.clone();
+        if safety_clamp {
+            // Three-layer cap. Highest priority (smallest wins) to lowest:
+            //   1. OPENCODE_GO_MAX_TOKENS_CAP — documented hard ceiling
+            //      for the 2026-08-04 roster (kimi-k* / gpt-5.6-luna).
+            //   2. provider_max_tokens — operator TOML override.
+            //   3. MaxTokensTable::resolve_cached — auto-probed value.
+            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+            let table_cap = self
+                .max_tokens_table
+                .as_ref()
+                .and_then(|t| t.resolve_cached(self.name(), self.model()))
+                .unwrap_or(u32::MAX);
+            let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
+            req.max_tokens = req.max_tokens.min(cap);
+        } else {
+            // Probe path: bypass every cap. Floor ensures we
+            // never ask for `max_tokens < 1024` (some upstreams
+            // reject the request outright below that minimum).
+            req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
+        }
+        let max_tokens = self.effective_max_tokens(req.max_tokens);
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let body = ResponsesRequest {
+                model: &self.model,
+                instructions: Some(&req.system),
+                input: &req.user,
+                max_tokens,
+                temperature: req.temperature,
+                top_p: req.top_p,
+                response_format: if wants_response_format(req.role, &self.model) {
+                    Some(ResponsesResponseFormat {
+                        kind: "json_object",
+                    })
+                } else {
+                    None
+                },
+                stream: false,
+            };
+            let request_started = std::time::Instant::now();
+            tracing::debug!(
+                provider = self.name,
+                attempt,
+                stage = "http.request.started",
+                "Provider HTTP stage"
+            );
+            let result = self
+                .client
+                .post(&url)
+                .bearer_auth(self.api_key.expose())
+                .json(&body)
+                .send()
+                .await;
+            match result {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let status_code = status.as_u16();
+                    tracing::debug!(
+                        provider = self.name,
+                        attempt,
+                        stage = "http.headers.received",
+                        status = status_code,
+                        elapsed_ms = request_started.elapsed().as_millis(),
+                        "Provider HTTP stage"
+                    );
+                    if status.is_success() {
+                        let decode_started = std::time::Instant::now();
+                        let parsed: ResponsesBody = resp
+                            .json()
+                            .await
+                            .map_err(|e| Error::Provider(format!("decode: {e}")))?;
+                        tracing::debug!(
+                            provider = self.name,
+                            attempt,
+                            stage = "http.body.decoded",
+                            status = status_code,
+                            elapsed_ms = decode_started.elapsed().as_millis(),
+                            "Provider HTTP stage"
+                        );
+                        let mut text = String::new();
+                        for out in parsed.output {
+                            for c in out.content {
+                                if c.kind == "output_text"
+                                    && let Some(t) = c.text
+                                {
+                                    text.push_str(&t);
+                                }
+                            }
+                        }
+                        let usage = parsed.usage.unwrap_or_default();
+                        check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
+                        let response = Response {
+                            text,
+                            finish_reason: None,
+                            truncated: false,
+                            usage: Usage {
+                                input_tokens: usage.input_tokens,
+                                output_tokens: usage.output_tokens,
+                                cache_read: 0,
+                                cache_creation: 0,
+                            },
+                        };
+                        return Ok((status_code, response));
+                    }
+                    let body = resp.text().await.unwrap_or_default();
+                    let err = match status_code {
+                        401 | 403 => Error::InvalidApiKey(format!("http {status_code}: {body}")),
+                        429 => Error::PlanExhausted(format!("http {status_code}: {body}")),
+                        408 | 504 | 524 => Error::Timeout(format!("http {status_code}: {body}")),
+                        _ => Error::Provider(format!("http {status_code}: {body}")),
+                    };
+                    let retryable = matches!(
+                        err,
+                        Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
+                    );
+                    if !retryable || attempt >= max_retries {
+                        return Err(err);
+                    }
+                    Self::sleep_with_jitter(attempt, None).await;
+                }
+                Err(e) => {
+                    if attempt >= max_retries {
+                        return Err(Error::Provider(format!("network: {e}")));
+                    }
+                    Self::sleep_with_jitter(attempt, None).await;
+                }
+            }
+        }
+    }
+
     /// Streaming variant of [`Provider::send`]: sets
     /// `stream=true` on the wire body, reads the entire SSE
     /// response, and returns a single aggregated `Response` with

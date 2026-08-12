@@ -152,13 +152,28 @@ impl ProbeTransport for ProviderProbeTransport {
             stream: false,
             extra_messages: vec![],
         };
-        let res = timeout(PROBE_TIMEOUT, self.provider.send(&req)).await;
+        let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
         match res {
             Ok(Ok((status, _body))) => {
+                // Classify:
+                //   - 2xx / 3xx         → Accepted (the upstream accepted
+                //                         this max_tokens value).
+                //   - 4xx (any)         → Rejected (a 4xx is the algorithm's
+                //                         signal; the max-tokens rejection
+                //                         lives in 4xx territory per the
+                //                         Anthropic and OpenAI specs).
+                //   - 5xx / network    → Indeterminate (transient; do not
+                //                         treat as a max-tokens boundary).
+                // The 4xx-vs-5xx distinction matters because some 5xx
+                // storm or auth-500 would otherwise be misread as
+                // "the upstream rejected this max_tokens" and collapse
+                // the discovered ceiling to that exact probe value.
                 if (200..400).contains(&status) {
                     ProbeOutcome::Accepted
-                } else {
+                } else if (400..500).contains(&status) {
                     ProbeOutcome::Rejected
+                } else {
+                    ProbeOutcome::Indeterminate
                 }
             }
             Ok(Err(_)) | Err(_) => ProbeOutcome::Indeterminate,
@@ -233,6 +248,12 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
     // Phase 2 — if Phase 2 confirms everything above `lo` is
     // rejected, the discovered value falls back to `lo` itself
     // (Phase 1's last accepted).
+    //
+    // Phase 2 keeps stepping down the range until the gap is small
+    // enough that step=1 still hits the boundary (i.e. span <= 20).
+    // When the span drops below 20, we fall through to linear
+    // probes so the discovered value lands exactly on the boundary
+    // rather than at some coarse-grained bucket offset.
     let mut lo_strict = lo.saturating_add(1);
     let mut hi_strict = hi.saturating_sub(1);
     let mut phase2_accepted = false;
@@ -240,11 +261,18 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
         if lo_strict >= hi_strict || hi_strict == 0 {
             break;
         }
-        let step = (hi_strict - lo_strict) / 20;
-        if step == 0 {
-            break;
-        }
-        let points: Vec<u32> = (1..=20).map(|i| lo_strict + i * step).collect();
+        let span = hi_strict.saturating_sub(lo_strict);
+        let points: Vec<u32> = if span <= 20 {
+            // Linear sweep: probe every value in [lo_strict, hi_strict].
+            (lo_strict..=hi_strict).collect()
+        } else {
+            // 20-point parallel batch: step = span / 20.
+            let step = span / 20;
+            if step == 0 {
+                break;
+            }
+            (1..=20).map(|i| lo_strict + i * step).collect()
+        };
         let results = parallel_probe(transport.clone(), &points).await;
         let mut new_lo = lo_strict;
         let mut new_hi = hi_strict;
