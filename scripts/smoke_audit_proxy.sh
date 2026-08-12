@@ -1030,25 +1030,27 @@ run_test "verify_exit_code_function" \
   "grep -q 'pub fn exit_code' ${ROOT}/src/audit/verify.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 24 — Pipeline mock fixture paths (10 tests)
+# SECTION 24 — Pipeline mock fixture paths (11 tests)
 # ---------------------------------------------------------------------
 
-run_test "fixture_intake" "[[ -f ${ROOT}/tests/fixtures/mock_provider/01-intake.json ]]"
-run_test "fixture_clarify" "[[ -f ${ROOT}/tests/fixtures/mock_provider/02-clarify.json ]]"
-run_test "fixture_route" "[[ -f ${ROOT}/tests/fixtures/mock_provider/03-route.json ]]"
+run_test "fixture_intake" "[[ -f ${ROOT}/tests/fixtures/mock_provider/intake/01-intake.json ]]"
+run_test "fixture_clarify" "[[ -f ${ROOT}/tests/fixtures/mock_provider/clarify/02-clarify.json ]]"
+run_test "fixture_route" "[[ -f ${ROOT}/tests/fixtures/mock_provider/route/03-route.json ]]"
 run_test "fixture_sketch_count_12" \
-  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/04-sketch-*.json 2>/dev/null | wc -l) -ge 8 ]]"
+  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/sketch/04-sketch-*.json 2>/dev/null | wc -l) -ge 8 ]]"
 run_test "fixture_propose_count_3" \
-  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/1?-propose-*.json 2>/dev/null | wc -l) -ge 3 ]]"
+  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/propose/1?-propose-*.json 2>/dev/null | wc -l) -ge 3 ]]"
 run_test "fixture_critique_count_6" \
-  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/19-critique.json ${ROOT}/tests/fixtures/mock_provider/20-critique.json ${ROOT}/tests/fixtures/mock_provider/21-critique.json ${ROOT}/tests/fixtures/mock_provider/22-critique.json ${ROOT}/tests/fixtures/mock_provider/23-critique.json ${ROOT}/tests/fixtures/mock_provider/24-critique.json 2>/dev/null | wc -l) -ge 6 ]]"
+  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/critique/*.json 2>/dev/null | wc -l) -ge 6 ]]"
 run_test "fixture_judge_count_9" \
-  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/[2-3]?-judge.json 2>/dev/null | wc -l) -ge 9 ]]"
-run_test "fixture_deliver" "[[ -f ${ROOT}/tests/fixtures/mock_provider/34-deliver.json ]]"
+  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/judge/*.json 2>/dev/null | wc -l) -ge 9 ]]"
+run_test "fixture_deliver" "[[ -f ${ROOT}/tests/fixtures/mock_provider/deliver/34-deliver.json ]]"
 run_test "fixture_mock_provider_dir_exists" \
   "[[ -d ${ROOT}/tests/fixtures/mock_provider ]]"
+run_test "fixture_subdirs_present" \
+  "for d in intake clarify route sketch propose critique judge deliver; do [[ -d ${ROOT}/tests/fixtures/mock_provider/\$d ]] || exit 1; done"
 run_test "fixture_mock_dir_total_over_30" \
-  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/ | wc -l) -ge 30 ]]"
+  "[[ \$(find ${ROOT}/tests/fixtures/mock_provider -name '*.json' 2>/dev/null | wc -l) -ge 30 ]]"
 
 # ---------------------------------------------------------------------
 # SECTION 25 — Per-artifact inspection via CLI mock (10 tests)
