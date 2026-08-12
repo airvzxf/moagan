@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use crate::error::Result;
+use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 use crate::storage::sqlite::{Db, WarningRow, WarningSummaryRow};
 
@@ -119,4 +120,101 @@ fn truncate(s: &str, max: usize) -> String {
         out.push('…');
         out
     }
+}
+
+/// PR-7 `moagan inspect <run_id> --capabilities` view. Reads
+/// the run's `manifest.json` (the canonical source for
+/// `provider` and `model`) and prints a single capability row
+/// cross-referenced with the `models.dev` catalog when the
+/// on-disk cache is available.
+///
+/// `manifest.json#provider` and `#model` are the fields every
+/// run writes today (T01-06 §33). A manifest without those two
+/// fields is treated as "no info available" — the function
+/// prints a warning and returns `Ok(())` so the operator can
+/// still chain the command into shell scripts.
+pub fn print_run_capabilities(home: &MoaganHome, run_id: RunId) -> Result<()> {
+    let manifest = load_manifest(home, run_id)?;
+    let catalog = crate::llm::models_dev::try_load_from_disk(home.root());
+    if catalog.is_none() {
+        println!("[WARN] models_dev catalog cache is missing; cells marked `-` are best-effort");
+    }
+    let provider = manifest.provider.as_str();
+    let model = manifest.model.as_str();
+    if provider.is_empty() || model.is_empty() {
+        println!(
+            "run {}  no provider/model recorded on the manifest; \
+             the run was likely started before the manifest gained a capability snapshot",
+            run_id.short()
+        );
+        return Ok(());
+    }
+    let caps = capabilities_for_kind_or_default(provider, model);
+    let entry = catalog
+        .as_ref()
+        .and_then(|c| crate::llm::models_dev::lookup(c, provider, model));
+    println!("run {}", run_id.short());
+    println!("  provider           : {provider}");
+    println!("  model              : {model}");
+    println!("  wire_format        : {}", caps.wire_format_id());
+    println!(
+        "  max_input_tokens   : {}",
+        entry
+            .as_ref()
+            .map(|e| e.limit.context.to_string())
+            .or_else(|| caps.max_input_tokens.map(|n| n.to_string()))
+            .unwrap_or_else(|| "-".to_owned())
+    );
+    println!(
+        "  max_output_tokens  : {}",
+        entry
+            .as_ref()
+            .map(|e| e.limit.output.to_string())
+            .unwrap_or_else(|| "-".to_owned())
+    );
+    println!("  supports_tools     : {}", yes_no(caps.supports_tools));
+    println!("  supports_streaming : {}", yes_no(caps.supports_streaming));
+    println!(
+        "  attachment         : {}",
+        entry.as_ref().map(|e| yes_no(e.attachment)).unwrap_or("-")
+    );
+    println!(
+        "  reasoning          : {}",
+        entry.as_ref().map(|e| yes_no(e.reasoning)).unwrap_or("-")
+    );
+    println!(
+        "  temperature        : {}",
+        entry.as_ref().map(|e| yes_no(e.temperature)).unwrap_or("-")
+    );
+    println!(
+        "  cost($/M in/out)   : {}",
+        entry
+            .as_ref()
+            .map(|e| format!("{:.2} / {:.2}", e.cost.input, e.cost.output))
+            .unwrap_or_else(|| "-".to_owned())
+    );
+    Ok(())
+}
+
+fn load_manifest(home: &MoaganHome, run_id: RunId) -> Result<crate::domain::Manifest> {
+    use crate::cli::continue_cmd::load_manifest as load_via_continue;
+    load_via_continue(home, run_id)
+}
+
+fn capabilities_for_kind_or_default(
+    _provider: &str,
+    _model: &str,
+) -> crate::llm::capabilities::ProviderCapabilities {
+    // The manifest does not persist the per-provider `kind`, so
+    // the doctor view here falls back to the OpenAI-compat
+    // baseline. The `wire_format_id` printed below is therefore
+    // a best-effort hint; the authoritative source is the
+    // provider's runtime `capabilities()` call, which the
+    // pipeline consulted when the run was originally
+    // dispatched.
+    crate::llm::capabilities::ProviderCapabilities::default()
+}
+
+fn yes_no(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
 }
