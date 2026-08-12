@@ -8,8 +8,8 @@
 
 | Session | Working on | Worktrees | Branch prefix | Status |
 |---|---|---|---|---|
-| **models-dev** (this) | `models.dev/api.json` catalog integration (10 PRs) | tbd | `feat/models-dev-*`, `fix/probe-*`, `docs/models-dev` | active, ~6h budget |
-| **e2e-network watcher** | monitors `e2e-network.yml` for flakes | none (read-only) | none | active, continuous |
+| **models-dev** | `models.dev/api.json` catalog integration (10 PRs) | tbd | `feat/models-dev-*`, `fix/probe-*`, `docs/models-dev` | active, ~6h budget |
+| **e2e-network loop** | trigger `e2e-network.yml` continuously + triage failures | `.worktrees/fix-<scope>` (only when fixing) | `fix/audit-*`, `fix/e2e-*` | active, **window 06:24 UTC → 12:00 UTC 2026-08-12** |
 
 Each session writes to this file **before pushing to main** so the other
 session knows what landed.
@@ -37,10 +37,24 @@ Every PR runs:
 - T2: `make test-ci`
 - T3: CI (`make smoke` + `make e2e`); `e2e-network` is manual for `main`
 
-If a PR breaks `e2e-network`, the **watcher session** opens an issue with
-the run URL, the test that flaked, and the suspected PR. The **active
-session** (whichever is in flight at that moment) investigates, opens a
-fix PR, and links it in `docs/e2e-loop-2026-08-12.md`.
+If a PR breaks `e2e-network`, the **e2e-network loop session** opens an
+issue with the run URL, the test that flaked, and the suspected PR. The
+**active session** (whichever is in flight at that moment) investigates,
+opens a fix PR, and links it in `docs/e2e-loop-2026-08-12.md`.
+
+### Fix-takeover deadline (e2e-network loop only)
+
+The e2e-network loop session runs continuously. If a `e2e-network` failure
+whose root cause is a commit landed by another session is **not fixed**
+within **3 consecutive loop iterations (~60 min wall-clock)** from the
+moment the issue is filed, the e2e-network loop session **takes over**:
+it creates a `.worktrees/fix-<scope>` from main, branches `fix/<scope>`,
+implements the fix, validates, and squash-merges via the standard 10-step
+PR protocol. The e2e-network loop session then resumes the loop.
+
+This rule exists because the e2e-network loop blocks the rest of the
+window while a regression is open; a 60-min cap keeps the loop moving
+without unfairly pre-empting the other session's good-faith attempts.
 
 ## What NOT to do
 
@@ -55,6 +69,7 @@ fix PR, and links it in `docs/e2e-loop-2026-08-12.md`.
 | Time (UTC) | Event | By |
 |---|---|---|
 | 06:03 | Coordination protocol created | models-dev |
+| 06:24 | e2e-network loop started, window 06:24 → 12:00 UTC | e2e-network loop |
 | _next entry_ | | |
 
 ## Branch inventory (live)
