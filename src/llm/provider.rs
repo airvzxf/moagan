@@ -93,6 +93,27 @@ pub trait Provider: Send + Sync {
     /// context if they support it.
     async fn send(&self, req: &Request) -> Result<(u16, Response)>;
 
+    /// Return the `max_tokens` value that [`Self::send`] will actually
+    /// transmit on the wire for `req`, after every per-provider cap
+    /// (operator override, kind-level ceiling, auto-probe table, …)
+    /// has been applied.
+    ///
+    /// This is the single source of truth for audit-log hashing: the
+    /// caller (`phases::phase`) clones `req`, sets
+    /// `cloned.max_tokens = self.effective_max_tokens(req)`, and feeds
+    /// the clone to `request_body_sha256`. Because the clamp chain
+    /// here is the same one `send` runs against `req.max_tokens`, the
+    /// recorded sha256 matches the proxy's wire capture
+    /// byte-for-byte.
+    ///
+    /// The default returns `req.max_tokens` unchanged — correct for
+    /// providers that do not clamp (mock, anthropic_compat, …).
+    /// Implementations that clamp inside `send` must override this
+    /// so the audit hash stays in sync with the wire body.
+    fn effective_max_tokens(&self, req: &Request) -> u32 {
+        req.max_tokens
+    }
+
     /// Send a probe request bypassing the safety wire-clamp. Used by
     /// the auto-probe to discover the upstream's actual
     /// `max_tokens` boundary. Default impl just calls [`Self::send`];
@@ -555,6 +576,12 @@ impl Provider for BreakeredProvider {
 
     async fn count_tokens(&self, text: &str) -> Option<u64> {
         self.inner.count_tokens(text).await
+    }
+
+    fn effective_max_tokens(&self, req: &Request) -> u32 {
+        // Delegate to the inner provider: the wrapper is transparent
+        // and does not participate in the `max_tokens` clamp chain.
+        self.inner.effective_max_tokens(req)
     }
 }
 

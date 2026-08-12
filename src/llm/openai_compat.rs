@@ -325,6 +325,29 @@ impl Provider for OpenAiCompatProvider {
         self.send_with_safety_clamp(req, true).await
     }
 
+    fn effective_max_tokens(&self, req: &Request) -> u32 {
+        // Mirror of the clamp chain in
+        // `send_with_safety_clamp(_, true)` so the audit-log hash is
+        // byte-for-byte identical to the wire body. Same ordering as
+        // `send`:
+        //   1. `kind_hard_cap` (dispatcher-set, e.g.
+        //      `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` for OpenCode
+        //      Go routes; `None` for DeepSeek-direct).
+        //   2. `provider_max_tokens` (operator TOML override).
+        //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        req.max_tokens
+            .min(operator_cap)
+            .min(kind_cap)
+            .min(table_cap)
+    }
+
     /// Bypass variant for the auto-probe. Skips every cap
     /// (operator override, kind_hard_cap, table) so the algorithm
     /// sees the upstream's real boundary. The regular `send` keeps

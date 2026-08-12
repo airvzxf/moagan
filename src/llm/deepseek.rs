@@ -84,6 +84,15 @@ impl Provider for DeepSeekProvider {
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         self.0.send(req).await
     }
+
+    fn effective_max_tokens(&self, req: &Request) -> u32 {
+        // Delegate to the wrapped OpenAI-compat provider so the
+        // clamp chain (operator override + `kind_hard_cap` + table)
+        // is the same one `send()` applies. DeepSeek-direct leaves
+        // `kind_hard_cap = None`; the dispatcher never wires a kind
+        // cap for this provider.
+        self.0.effective_max_tokens(req)
+    }
 }
 
 #[cfg(test)]

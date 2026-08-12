@@ -180,6 +180,27 @@ impl Provider for OpenCodeGoAnthropicProvider {
         self.send_with_safety_clamp(req, true).await
     }
 
+    fn effective_max_tokens(&self, req: &Request) -> u32 {
+        // Mirror of the clamp chain in
+        // `send_with_safety_clamp(_, true)` so the audit-log hash is
+        // byte-for-byte identical to the wire body. Same ordering as
+        // `send`:
+        //   1. `OPENCODE_GO_MAX_TOKENS_CAP` (16_384 for the
+        //      2026-08-04 model roster).
+        //   2. `provider_max_tokens` (operator TOML override).
+        //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        req.max_tokens
+            .min(operator_cap)
+            .min(table_cap)
+            .min(OPENCODE_GO_MAX_TOKENS_CAP)
+    }
+
     /// Bypass variant for the auto-probe. Skips every cap
     /// (operator override, table, OPENCODE_GO_MAX_TOKENS_CAP) so
     /// the algorithm sees the upstream's real boundary. The

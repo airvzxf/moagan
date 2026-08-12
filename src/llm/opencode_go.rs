@@ -257,6 +257,15 @@ impl Provider for OpenCodeGoProvider {
         }
         first
     }
+
+    fn effective_max_tokens(&self, req: &Request) -> u32 {
+        // The router does NOT clamp on its own — it forwards to the
+        // routed provider (Anthropic, Responses, or chat-completions).
+        // Delegating preserves the routed provider's clamp chain
+        // (e.g. OPENCODE_GO_MAX_TOKENS_CAP for messages and responses,
+        // `kind_hard_cap` for chat-completions).
+        self.inner.effective_max_tokens(req)
+    }
 }
 
 #[cfg(test)]
