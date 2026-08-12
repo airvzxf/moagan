@@ -1938,42 +1938,6 @@ impl Db {
         Ok(())
     }
 
-    /// Acquire a process-wide lock keyed by `holder` with the given TTL.
-    pub fn acquire_process_lock(&self, holder: &str, ttl_secs: u64, fence: &str) -> Result<bool> {
-        if self.user_version()? < 8 {
-            return Ok(true);
-        }
-        let conn = self.pool.get()?;
-        let now = crate::time::now_unix_secs();
-        let expires = now + ttl_secs as i64;
-        conn.execute(
-            "DELETE FROM process_locks WHERE expires_at_unix <= ?",
-            params![now],
-        )?;
-        let current: Option<String> = conn
-            .query_row("SELECT holder FROM process_locks LIMIT 1", [], |r| r.get(0))
-            .ok();
-        match current {
-            None => {
-                conn.execute(
-                    "INSERT INTO process_locks (holder, acquired_at_unix, expires_at_unix, fence) \
-                     VALUES (?, ?, ?, ?)",
-                    params![holder, now, expires, fence],
-                )?;
-                Ok(true)
-            }
-            Some(existing) if existing == holder => {
-                conn.execute(
-                    "UPDATE process_locks SET acquired_at_unix = ?, expires_at_unix = ?, fence = ? \
-                     WHERE holder = ?",
-                    params![now, expires, fence, holder],
-                )?;
-                Ok(true)
-            }
-            Some(_) => Ok(false),
-        }
-    }
-
     /// Acquire or renew a run lease and return its monotonic fence.
     pub fn renew_lease(
         &self,
@@ -2038,19 +2002,6 @@ impl Db {
             params![format!("{prefix}{holder}"), now, expires, next_fence.to_string(), stored_key],
         )?;
         Ok(next_fence)
-    }
-
-    /// Release a process lock owned by `holder`.
-    pub fn release_process_lock(&self, holder: &str) -> Result<bool> {
-        if self.user_version()? < 8 {
-            return Ok(true);
-        }
-        let conn = self.pool.get()?;
-        let deleted = conn.execute(
-            "DELETE FROM process_locks WHERE holder = ?",
-            params![holder],
-        )?;
-        Ok(deleted > 0)
     }
 
     /// Read the current fencing token for a (run_id, holder) lease.

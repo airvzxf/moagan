@@ -149,15 +149,6 @@ fn manifest_event_round_trips_via_public_helper() {
 }
 
 #[test]
-fn process_lock_acquire_release_round_trips_via_public_helper() {
-    let (_tmp, db, _run_id) = fresh_db_with_run();
-    assert!(db.acquire_process_lock("holder-A", 60, "fence-1").unwrap());
-    assert!(!db.acquire_process_lock("holder-B", 60, "fence-2").unwrap());
-    assert!(db.release_process_lock("holder-A").unwrap());
-    assert!(db.acquire_process_lock("holder-B", 60, "fence-3").unwrap());
-}
-
-#[test]
 fn provider_rollup_increments_via_public_helper() {
     let (_tmp, db, _run_id) = fresh_db_with_run();
     db.increment_provider_rollup("minimax", "MiniMax-M3", 100, 50, false)
