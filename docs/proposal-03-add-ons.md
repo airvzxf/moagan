@@ -70,6 +70,25 @@ El método seguido en este barrido fue:
 
 ---
 
+> **v0.7.1 batch (released 2026-08-12)** — the following add-ons
+> entered together as part of v0.7.1:
+>
+> - **D.30.5** — `models.dev/api.json` static catalog with 1 h TTL
+>   cache + capability gating (10 flags: `temperature`, `reasoning`,
+>   `reasoning_options`, `tool_call`, `modalities`, `attachment`,
+>   `interleaved`, `family`, `limit`, `cost`). Probed cap >
+>   catalog limit > config TOML > hardcoded constant. PR-1
+>   through PR-8. Documentation in `docs/models-dev-catalog.md`.
+> - **D.31.5** — `moagan probe max_tokens` sub-command for bulk
+>   probing multiple `(provider, model)` pairs and persisting the
+>   minimum to `max_tokens_auto.toml`. PR-9.
+> - **D.32.6** — `cost_usd` column in `calls` table (SQLite
+>   migration v014). Per-call USD estimate derived from
+>   `cost.{input,output,cache_read,cache_write}` in the catalog.
+>   PR-6. Surfaced through `moagan telemetry cost --run <id>`.
+
+---
+
 ## B. Conteo global de fuentes y aporte
 
 | Bloque | Propuestas revisadas | Aportaciones integradas |
@@ -3814,6 +3833,43 @@ impl Pipeline {
 
 Ver §D.9.3.
 
+#### D.30.5. `models.dev/api.json` catalog + capability gating
+
+Static, read-only index of every LLM provider models.dev tracks
+(183 as of August 2026, 3.6 MB JSON, refreshed hourly upstream).
+The runtime downloads the catalog on first startup, gzip-compresses
+it under `${MOAGAN_HOME}/models_dev.json`, and re-fetches when the
+TTL (default 1 h, override `MOAGAN_MODELS_DEV_REFRESH_HOURS`) elapses.
+Force the offline path with `MOAGAN_MODELS_DEV_OFFLINE=true` (smoke
+tests, air-gapped runners).
+
+Ten flags per `(provider, model)` pair gate runtime decisions:
+
+- `temperature: bool` — skip the `temperature` field when false.
+- `reasoning: bool` — skip `reasoning_tokens` when false.
+- `reasoning_options: [{kind: "toggle"}]` — UI affordance for
+  optional reasoning effort.
+- `tool_call: bool` — skip `tool_choice` when false.
+- `modalities.{input, output}` — filter prompts / parse output.
+- `attachment: bool` — block attachments when false.
+- `interleaved.field: str` — tag carrying reasoning content.
+- `family: str` — logical family for cross-provider routing.
+- `limit.{context, output}: number` — fallback token ceilings.
+- `cost.{input, output, cache_read, cache_write}: number` —
+  per-call USD estimate, surfaced as `cost_usd` in `calls` (§D.32.6).
+
+Merge precedence:
+
+```
+Probed cap    > Catalog limit    > Config TOML     > Hardcoded constant
+Catalog flag  > Config default   (per flag)
+```
+
+Provider-name aliasing: `opencode_go_anthropic` and
+`opencode_go_responses` both map to the catalog id `opencode_go`;
+`mock` and `openai_compat` skip the lookup entirely. Documentation:
+`docs/models-dev-catalog.md`. PR-1 through PR-8.
+
 ---
 
 ### D.31. §31 CLI struct (extensiones)
@@ -3833,6 +3889,29 @@ Ver §D.14.3.
 #### D.31.4. `moagan validate` subcomando
 
 Ver §D.14.4.
+
+#### D.31.5. `moagan probe max_tokens` bulk sub-command
+
+Bulk-probe multiple `(provider, model)` pairs in a single
+invocation and persist the discovered ceiling to
+`max_tokens_auto.toml` (see §D.30.5 + the runtime probe in
+`src/llm/probe.rs`). Useful when adding a new provider or after a
+provider rolls a new model — one CLI call replaces 30 sequential
+probes + 20-point bisect rounds per model.
+
+```bash
+moagan probe max_tokens \
+  --provider minimax:MiniMax-M3 \
+  --provider minimax:MiniMax-M2.7 \
+  --provider opencode_go:qwen3.x \
+  --floor 1024 \
+  --save
+```
+
+The `--floor` flag mirrors `ProviderConfig::max_token_auto`; the
+`--save` flag (default `true`) controls whether the discovered
+value is written to the cache file. Exit `0` on success,
+`InvalidState` if every provider rejected the probe. PR-9.
 
 ---
 
@@ -3899,6 +3978,38 @@ pub struct Budget {
 ```
 
 (Inspirado en T19-01 §0.4.2; T05-07 §2.6; T15-02 §6.1.)
+
+#### D.32.6. `cost_usd` column in `calls` table (SQLite migration v014)
+
+Adds a `cost_usd REAL` column to the `calls` table. SQLite
+migration `v014` runs on first startup after the v0.7.1 release;
+the migration is idempotent (`ALTER TABLE calls ADD COLUMN cost_usd
+REAL`) so re-running it is safe.
+
+```sql
+-- src/storage/migrations/v014__cost_usd.sql
+ALTER TABLE calls ADD COLUMN cost_usd REAL;
+```
+
+Per-call USD estimate derived from the catalog (§D.30.5):
+
+```text
+cost_usd = prompt_tokens  * cost.input
+         + completion_tokens * cost.output
+         + cached_tokens    * cost.cache_read      -- when applicable
+         + uncached_tokens  * cost.cache_write     -- when applicable
+```
+
+When `cost.{input, output, cache_read, cache_write}` is missing for
+the `(provider, model)` pair the column is `NULL` (not `0`) so cost
+aggregates can distinguish "we know it's free" from "we have no
+estimate". Surfaced through:
+
+- `moagan telemetry cost --run <id>` — per-run aggregate (USD total,
+  USD per role, USD per model).
+- `moagan inspect <run> --capabilities` — per-call snapshot.
+
+PR-6.
 
 ---
 
