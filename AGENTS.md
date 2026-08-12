@@ -71,6 +71,23 @@ Two gates must pass before handing to the user:
 - One logical change per commit.
 - No `git commit --amend`. No `git push --force`. No `--no-gpg-sign`.
 
+### Release cache (why there are multiple 270 MB entries)
+
+The release workflow runs 1–2x/week on tag pushes; a cold build per
+tag is acceptable. Each tag creates a new `actions/cache` entry
+because the `Swatinem/rust-cache` save key includes an 8-char
+`lockHash` suffix that changes when the transitive-dep tree drifts —
+this is expected, not a bug. Partial-match restore across tags
+happens **automatically** because the action passes its internal
+`config.restoreKey` (= prefix + job + OS + arch + envHash, no
+`lockHash`) as `restoreKeys` to the underlying
+`actions/cache.restoreCache` (see `Swatinem/rust-cache`
+`src/restore.ts:18`). The new tag's build therefore reuses the
+registry/git/bin layers (~95% of the 270 MB) from the previous tag
+even when the save key is new. Total storage is bounded by GitHub's
+10 GB repo-cache limit (org-wide); old per-tag entries are evicted
+naturally, no manual pruning needed.
+
 ## No-go list
 
 - No Anthropic SDK crates (`anthropic-*`, `claude-*`).

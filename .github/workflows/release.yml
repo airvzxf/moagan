@@ -44,6 +44,18 @@ jobs:
           toolchain: 1.97.1
 
       - name: Cache cargo registry
+        # The Swatinem/rust-cache save key includes an 8-char
+        # `lockHash` suffix that changes per release (transitive-dep
+        # drift between tags), so a fresh 270 MB entry lands in
+        # `actions/caches` after every release — that is correct, not
+        # a bug. Partial-match restore against the previous release
+        # happens automatically because the action's internal
+        # `restoreKey` (= prefix + job + OS + arch + envHash, no
+        # lockHash) is passed as `restoreKeys` to
+        # `actions/cache.restoreCache` (see Swatinem/rust-cache
+        # `src/restore.ts:18`). The new tag's cache reuses the
+        # registry/git/bin layers (~95% of 270 MB) from the previous
+        # tag even when the save key is new.
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
           cache-on-failure: true
