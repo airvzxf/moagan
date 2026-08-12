@@ -24,6 +24,7 @@ use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
+use crate::llm::capability::CapabilityResolver;
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
@@ -125,6 +126,15 @@ pub struct RunContext {
     /// paths and tests); in that case the clamp reduces to the
     /// per-provider TOML value alone.
     pub max_tokens_table: Option<Arc<MaxTokensTable>>,
+    /// PR-3: capability resolver consulted on every LLM call so the
+    /// models.dev catalog can drop fields the upstream would reject
+    /// (e.g. `temperature` on `kimi-k3`). `None` disables every
+    /// capability-aware gate and keeps the legacy "send everything"
+    /// behaviour — the same fallback the `max_tokens_table` field
+    /// uses. The CLI boundary (`cli::run`) and the integration
+    /// tests populate this field; unit tests that exercise the
+    /// pre-capability behaviour leave it as `None`.
+    pub capability_resolver: Option<Arc<CapabilityResolver>>,
 }
 
 /// Default heartbeat interval. Renews the lease well before the
@@ -224,6 +234,7 @@ impl RunContext {
             heartbeat_holder: "heartbeat".to_owned(),
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
             max_tokens_table: None,
+            capability_resolver: None,
         }
     }
 
@@ -246,6 +257,30 @@ impl RunContext {
     pub fn with_max_tokens_table_opt(mut self, table: Option<Arc<MaxTokensTable>>) -> Self {
         if let Some(t) = table {
             self.max_tokens_table = Some(t);
+        }
+        self
+    }
+
+    /// PR-3: attach a [`CapabilityResolver`] so every LLM call goes
+    /// through the capability gate before the wire body is built.
+    /// Builder form mirrors [`Self::with_max_tokens_table`] so the
+    /// CLI boundary (`cli::run`) can chain it next to the auto-probe
+    /// table without changing the rest of the construction order.
+    pub fn with_capability_resolver(mut self, resolver: Arc<CapabilityResolver>) -> Self {
+        self.capability_resolver = Some(resolver);
+        self
+    }
+
+    /// PR-3: optional variant of [`Self::with_capability_resolver`]
+    /// for callers that already hold an `Option<Arc<...>>`. No-op
+    /// when the resolver is `None` so legacy call sites can keep
+    /// passing `None` without branching.
+    pub fn with_capability_resolver_opt(
+        mut self,
+        resolver: Option<Arc<CapabilityResolver>>,
+    ) -> Self {
+        if let Some(r) = resolver {
+            self.capability_resolver = Some(r);
         }
         self
     }
@@ -711,12 +746,29 @@ impl RunContext {
         // trait method now keeps both ends in lockstep.
         let provider = self.provider().await;
         let effective_max = provider.effective_max_tokens(&req);
-        let hash_input = if req.max_tokens != effective_max {
-            let mut clamped = req.clone();
+        // PR-3: gate the request through the capability resolver so
+        // models whose catalog says `temperature: false` (e.g.
+        // `kimi-k3`) do not receive the field on the wire. The gated
+        // request is what `provider.send` actually transmits AND
+        // what feeds into `request_body_sha256` below, so the
+        // recorded audit hash matches the body that leaves the
+        // process — same contract as the `max_tokens` clamp above.
+        // `None` resolver preserves the legacy "send everything"
+        // behaviour for hand-rolled tests and the mock-only path.
+        let gated = match self.capability_resolver.as_ref() {
+            Some(resolver) => resolver.gate_request(
+                self.default_provider.as_str(),
+                self.default_model.as_str(),
+                &req,
+            ),
+            None => req.clone(),
+        };
+        let hash_input = if gated.max_tokens != effective_max {
+            let mut clamped = gated;
             clamped.max_tokens = effective_max;
             clamped
         } else {
-            req.clone()
+            gated
         };
         let request_body_sha256 = (self.default_provider == "minimax")
             .then(|| crate::llm::http::request_body_sha256(&hash_input))
