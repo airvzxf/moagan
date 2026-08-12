@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{
     AdversaryReport, AnglePickerReport, Brief, ContinuationReport, Critique,
     FinalDisagreementReport, FinalReport, HostilePromptReport, Intake, JsonRepairV2Report,
-    JudgeScore, MergePlan, PersonaPickerReport, Proposal, RationaleExtract, RecoveryReport, Repair,
-    Route, Sketch, SynthesizedProposal, TiefighterCriticReport,
+    JudgeScore, MergePlan, PersonaPickerReport, Proposal, Repair, Route, Sketch,
+    SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -87,10 +87,6 @@ pub enum Role {
     Decomposer,
     /// Optional merge synthesis role.
     MergeSynthesizer,
-    /// Optional recovery explanation role.
-    RecoveryExplainer,
-    /// Optional rationale extraction role.
-    RationaleExtractor,
     /// TiefighterCritic — D.7.1 catalog role. Adversarial critic
     /// that targets the weakest spot of a proposal. Deterministic
     /// (`T=0.0, top_p=0.1, max_tokens=DEFAULT_MAX_TOKENS (1,000,000)`)
@@ -171,8 +167,6 @@ impl Role {
             Self::Adversary => "adversary",
             Self::Decomposer => "decomposer",
             Self::MergeSynthesizer => "merge_synthesizer",
-            Self::RecoveryExplainer => "recovery_explainer",
-            Self::RationaleExtractor => "rationale_extractor",
             Self::TiefighterCritic => "tiefighter_critic",
             Self::PersonaPicker => "persona_picker",
             Self::AnglePicker => "angle_picker",
@@ -229,12 +223,6 @@ impl Role {
             }
             Self::MergeSynthesizer => {
                 "MergeSynthesizer: {summary, approach, tradeoffs[], evidence[], sources[]}"
-            }
-            Self::RecoveryExplainer => {
-                "RecoveryExplainer: {explanation, recovered_state, next_steps[]}"
-            }
-            Self::RationaleExtractor => {
-                "RationaleExtractor: {rationale, evidence[], assumptions[]}"
             }
             Self::TiefighterCritic => {
                 "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=1000000)"
@@ -315,12 +303,6 @@ impl Role {
             Self::MergeSynthesizer => {
                 serde_json::from_value::<MergePlan>(value.clone()).map(|_| ())
             }
-            Self::RecoveryExplainer => {
-                serde_json::from_value::<RecoveryReport>(value.clone()).map(|_| ())
-            }
-            Self::RationaleExtractor => {
-                serde_json::from_value::<RationaleExtract>(value.clone()).map(|_| ())
-            }
             Self::TiefighterCritic => {
                 serde_json::from_value::<TiefighterCriticReport>(value.clone()).map(|_| ())
             }
@@ -375,8 +357,6 @@ impl Role {
             Self::Adversary,
             Self::Decomposer,
             Self::MergeSynthesizer,
-            Self::RecoveryExplainer,
-            Self::RationaleExtractor,
             Self::TiefighterCritic,
             Self::PersonaPicker,
             Self::AnglePicker,
@@ -418,8 +398,6 @@ impl FromStr for Role {
             "adversary" => Ok(Self::Adversary),
             "decomposer" => Ok(Self::Decomposer),
             "merge_synthesizer" => Ok(Self::MergeSynthesizer),
-            "recovery_explainer" => Ok(Self::RecoveryExplainer),
-            "rationale_extractor" => Ok(Self::RationaleExtractor),
             "tiefighter_critic" => Ok(Self::TiefighterCritic),
             "persona_picker" => Ok(Self::PersonaPicker),
             "angle_picker" => Ok(Self::AnglePicker),
@@ -452,29 +430,24 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_eight() {
+    fn all_roles_are_count_twenty_six() {
         // Track H batch-2 closed: three catalog roles (D.7.1)
         // wired — final_disagreement, json_repair_v2,
         // hostile_prompt_detector. Count moves from 24 to 27.
         // PR-C2: added `Continuation` so the focused-re-call on a
         // truncated response has its own typed role. Count moves
         // from 27 to 28.
-        assert_eq!(Role::all().len(), 28);
+        // Audit 2026-08-12: dropped the never-invoked
+        // RecoveryExplainer and RationaleExtractor catalog entries
+        // (no phase ever calls them; the prompt files were dead
+        // weight in the binary and the cache key). Count moves
+        // from 28 to 26.
+        assert_eq!(Role::all().len(), 26);
     }
 
     #[test]
     fn merge_synthesizer_role_variant_exists() {
         assert_eq!(Role::MergeSynthesizer.as_str(), "merge_synthesizer");
-    }
-
-    #[test]
-    fn recovery_explainer_role_variant_exists() {
-        assert_eq!(Role::RecoveryExplainer.as_str(), "recovery_explainer");
-    }
-
-    #[test]
-    fn rationale_extractor_role_variant_exists() {
-        assert_eq!(Role::RationaleExtractor.as_str(), "rationale_extractor");
     }
 
     #[test]
@@ -731,8 +704,6 @@ mod tests {
                     || desc.starts_with("Adversary:")
                     || desc.starts_with("Decomposer:")
                     || desc.starts_with("MergeSynthesizer:")
-                    || desc.starts_with("RecoveryExplainer:")
-                    || desc.starts_with("RationaleExtractor:")
                     || desc.starts_with("TiefighterCritic:")
                     || desc.starts_with("PersonaPicker:")
                     || desc.starts_with("AnglePicker:")
@@ -797,13 +768,10 @@ mod tests {
         assert!(Role::Judge.validate_json(&empty).is_ok());
         assert!(Role::Deliver.validate_json(&empty).is_ok());
         assert!(Role::Sketch.validate_json(&empty).is_ok());
-        // V1: the three P roles (MergeSynthesizer, RecoveryExplainer,
-        // RationaleExtractor) now have real domain types with
-        // `#[serde(default)]`. Default-filled instances round-trip
-        // from {} cleanly.
+        // V1: the remaining P role (MergeSynthesizer) has a real
+        // domain type with `#[serde(default)]`. Default-filled
+        // instances round-trip from {} cleanly.
         assert!(Role::MergeSynthesizer.validate_json(&empty).is_ok());
-        assert!(Role::RecoveryExplainer.validate_json(&empty).is_ok());
-        assert!(Role::RationaleExtractor.validate_json(&empty).is_ok());
         // Track H batch-1: tiefighter_critic carries its own domain
         // type with `#[serde(default)]`, so {} parses cleanly.
         assert!(Role::TiefighterCritic.validate_json(&empty).is_ok());
