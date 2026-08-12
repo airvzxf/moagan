@@ -16,7 +16,6 @@ use super::circuit_breaker::CircuitBreaker;
 use super::http::{
     MessagesResponseBody, build_client, build_headers, classify_status, retry_after,
 };
-use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::wire::{Request, Response};
@@ -330,12 +329,12 @@ impl Provider for MinimaxProvider {
     /// `max_tokens=524288` and concludes "accepts everything" — even
     /// though the upstream rejects `max_tokens=524289`. To discover
     /// the real boundary, the probe must send whatever value the
-    /// algorithm chose, unmodified. The floor still applies so the
-    /// probe never asks for `max_tokens < 1024`.
+    /// algorithm chose, unmodified.
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
-        let mut req = req.clone();
-        req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
-        self.send_http(req).await
+        // M1: the floor on the returned value is applied by
+        // `detect_max_tokens` itself; raising the requested value
+        // here would mask boundaries below MIN_AUTOPROBE_FLOOR.
+        self.send_http(req.clone()).await
     }
 }
 
