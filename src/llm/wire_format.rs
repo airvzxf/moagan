@@ -262,8 +262,6 @@ fn role_requires_json(role: Role) -> bool {
             | Adversary
             | Decomposer
             | MergeSynthesizer
-            | RecoveryExplainer
-            | RationaleExtractor
     )
 }
 

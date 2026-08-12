@@ -41,18 +41,6 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
-        Role::RecoveryExplainer => Some(RoleSettings {
-            temperature: 0.0,
-            top_p: 0.1,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            json_mode: true,
-        }),
-        Role::RationaleExtractor => Some(RoleSettings {
-            temperature: 0.2,
-            top_p: 0.7,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            json_mode: true,
-        }),
         Role::TiefighterCritic => Some(RoleSettings {
             temperature: 0.0,
             top_p: 0.1,
@@ -136,8 +124,6 @@ const SYNTHESIZE_PROMPT: &str = include_str!("prompts/synthesize.md");
 const JUDGE_ADVERSARY_PROMPT: &str = include_str!("prompts/judge_adversary.md");
 const DECOMPOSE_PROMPT: &str = include_str!("prompts/decompose.md");
 const MERGE_SYNTHESIZER_PROMPT: &str = include_str!("prompts/merge_synthesizer.md");
-const RECOVERY_EXPLAINER_PROMPT: &str = include_str!("prompts/recovery_explainer.md");
-const RATIONALE_EXTRACTOR_PROMPT: &str = include_str!("prompts/rationale_extractor.md");
 const TIEFIGHTER_CRITIC_PROMPT: &str = include_str!("prompts/tiefighter_critic.md");
 const PERSONA_PICKER_PROMPT: &str = include_str!("prompts/persona_picker.md");
 const ANGLE_PICKER_PROMPT: &str = include_str!("prompts/angle_picker.md");
@@ -174,8 +160,6 @@ pub fn prompt_set_hash() -> String {
                 JUDGE_ADVERSARY_PROMPT,
                 DECOMPOSE_PROMPT,
                 MERGE_SYNTHESIZER_PROMPT,
-                RECOVERY_EXPLAINER_PROMPT,
-                RATIONALE_EXTRACTOR_PROMPT,
                 TIEFIGHTER_CRITIC_PROMPT,
                 PERSONA_PICKER_PROMPT,
                 ANGLE_PICKER_PROMPT,
@@ -212,8 +196,6 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Adversary => JUDGE_ADVERSARY_PROMPT,
         Role::Decomposer => DECOMPOSE_PROMPT,
         Role::MergeSynthesizer => MERGE_SYNTHESIZER_PROMPT,
-        Role::RecoveryExplainer => RECOVERY_EXPLAINER_PROMPT,
-        Role::RationaleExtractor => RATIONALE_EXTRACTOR_PROMPT,
         Role::TiefighterCritic => TIEFIGHTER_CRITIC_PROMPT,
         Role::PersonaPicker => PERSONA_PICKER_PROMPT,
         Role::AnglePicker => ANGLE_PICKER_PROMPT,
@@ -343,16 +325,6 @@ mod tests {
     #[test]
     fn merge_synthesizer_prompt_file_exists_and_is_non_empty() {
         assert!(!MERGE_SYNTHESIZER_PROMPT.trim().is_empty());
-    }
-
-    #[test]
-    fn recovery_explainer_prompt_file_exists_and_is_non_empty() {
-        assert!(!RECOVERY_EXPLAINER_PROMPT.trim().is_empty());
-    }
-
-    #[test]
-    fn rationale_extractor_prompt_file_exists_and_is_non_empty() {
-        assert!(!RATIONALE_EXTRACTOR_PROMPT.trim().is_empty());
     }
 
     #[test]
