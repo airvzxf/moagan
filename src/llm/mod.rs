@@ -7,6 +7,7 @@ pub mod api_keys;
 pub mod api_keys_file;
 pub mod cache;
 pub mod capabilities;
+pub mod capability;
 pub mod circuit_breaker;
 pub mod control_tokens;
 pub mod deepseek;
