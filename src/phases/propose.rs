@@ -178,9 +178,45 @@ impl Phase for ProposePhase {
                         5,
                     )
                     .await?;
-                if proposal.id.is_empty() {
-                    proposal.id = id_for_default;
+                // PR-flake: when the model returns a parseable Proposal
+                // whose `summary` or `approach` are empty (typically
+                // because the upstream mock served the wrong fixture
+                // for this role), surface a structured warning so the
+                // cluster phase can see why the run produced N-1
+                // proposals instead of N. We do NOT short-circuit:
+                // `join_all` must keep all `count` slots, otherwise
+                // the cluster phase would see a different cardinality
+                // and synthesize against an incomplete set.
+                if proposal.summary.trim().is_empty() || proposal.approach.trim().is_empty() {
+                    let _ = ctx.telemetry.warn(
+                        "phase.propose_dropped_empty",
+                        "warn",
+                        "propose parsed but produced empty summary or approach",
+                        serde_json::json!({
+                            "proposal_id_for_default": id_for_default,
+                            "summary_len": proposal.summary.len(),
+                            "approach_len": proposal.approach.len(),
+                        }),
+                        crate::telemetry::WarningContext {
+                            phase: Some("propose".into()),
+                            role: Some("propose".into()),
+                            ..Default::default()
+                        },
+                    );
                 }
+                // Force `id` to the slot id. The on-disk file stem is
+                // `<id>.json` (see below), and the canonical id used
+                // by every downstream phase (`ClusterProposalsPhase`,
+                // `CritiquePhase`, `JudgePhase`, `GatePhase`, …) is
+                // that stem. The model's reported id is informational
+                // only: when per-role mock fixtures cycle (e.g. 3
+                // propose fixtures cycling for 7 propose calls) the
+                // LLM-reported id collides across slots, which then
+                // collapses multiple distinct proposals onto the same
+                // critique / gate / evaluation files. Forcing the
+                // slot id here keeps the on-disk name, the JSON
+                // payload, and the downstream file keys consistent.
+                proposal.id = id_for_default;
                 proposal.source_sketch = source_sketch;
                 // Phase H commit 3: populate Proposal.source_nodes from
                 // the problem graph when it is non-trivial. Done here
