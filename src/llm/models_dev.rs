@@ -270,6 +270,30 @@ pub fn lookup(catalog: &ModelsDevCatalog, provider: &str, model: &str) -> Option
         .cloned()
 }
 
+/// Read the cached catalog from disk **without** consulting the
+/// network. Returns `None` when the cache is missing, unreadable,
+/// or carries a parse error. The TTL is intentionally ignored:
+/// the CLI surface (`moagan doctor --capabilities`,
+/// `moagan inspect --capabilities`) wants the best-effort answer
+/// the operator already has on disk and never blocks a command
+/// on a flaky upstream. The fetch path is reserved for
+/// `load_or_fetch` and the explicit refresh command.
+pub fn try_load_from_disk(home_path: &Path) -> Option<ModelsDevCatalog> {
+    let path = catalog_path(home_path);
+    let bytes = std::fs::read(&path).ok()?;
+    match serde_json::from_slice::<ModelsDevCatalog>(&bytes) {
+        Ok(catalog) => Some(catalog),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "models_dev: best-effort disk load failed; treating as missing"
+            );
+            None
+        }
+    }
+}
+
 /// Load the catalog from disk, falling back to a network fetch when
 /// the cache is missing or stale. `offline=true` disables the
 /// network path and surfaces a descriptive error if no usable cache

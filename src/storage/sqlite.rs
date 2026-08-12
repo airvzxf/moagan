@@ -1329,6 +1329,24 @@ pub struct WindowUsageRow {
     pub last_call_unix: Option<i64>,
 }
 
+/// One row from [`Db::aggregate_cost_by_provider_model`]. The
+/// `cost_usd` column on `calls` is filled in by the per-call
+/// `cost_estimate` helper against the models.dev catalog, so a
+/// zero `cost_usd` here means the catalog had no entry for the
+/// pair at probe time (or no catalog data was available).
+/// Powers `moagan telemetry cost --run <id>`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CostAggregateRow {
+    /// Provider name (e.g. `minimax`).
+    pub provider: String,
+    /// Model name (e.g. `MiniMax-M3`).
+    pub model: String,
+    /// Number of calls in the scope for this `(provider, model)`.
+    pub calls: i64,
+    /// Sum of `cost_usd` over the calls in the scope.
+    pub cost_usd: f64,
+}
+
 /// One row from `phases` for the dashboard's per-phase view. The
 /// dashboard normalises three events per phase (start / end / error)
 /// into a single row carrying the final status and the derived
@@ -1601,6 +1619,58 @@ impl Db {
                     cache_read: r.get(5)?,
                     cache_creation: r.get(6)?,
                     last_call_unix: r.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Aggregate `cost_usd` from the `calls` table, grouped by
+    /// `(provider, model)`. Used by `moagan telemetry cost --run
+    /// <id>` (and `--all`) to answer "how much money did this run
+    /// (or the whole install) spend, per model?".
+    ///
+    /// The optional `run_id` narrows the query to a single run
+    /// (`Some(id)`); passing `None` aggregates every call recorded
+    /// in the index. The DB columns may be missing on a v014
+    /// install (the `calls.cost_usd` column lands in v015); when
+    /// the schema is older, every row reads as `cost_usd = 0.0` and
+    /// the aggregation still returns counts so the CLI can print
+    /// "no cost data" instead of erroring out.
+    pub fn aggregate_cost_by_provider_model(
+        &self,
+        run_id: Option<RunId>,
+    ) -> Result<Vec<CostAggregateRow>> {
+        let conn = self.pool.get()?;
+        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match run_id {
+            Some(rid) => (
+                "SELECT provider, model, COUNT(*), COALESCE(SUM(cost_usd), 0.0) \
+                 FROM calls \
+                 WHERE run_id = ? \
+                 GROUP BY provider, model \
+                 ORDER BY (COALESCE(SUM(cost_usd), 0.0)) DESC, provider ASC, model ASC",
+                vec![Box::new(rid.to_string())],
+            ),
+            None => (
+                "SELECT provider, model, COUNT(*), COALESCE(SUM(cost_usd), 0.0) \
+                 FROM calls \
+                 GROUP BY provider, model \
+                 ORDER BY (COALESCE(SUM(cost_usd), 0.0)) DESC, provider ASC, model ASC",
+                vec![],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let params_iter: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|b| b.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params_iter), |r| {
+                Ok(CostAggregateRow {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    calls: r.get(2)?,
+                    cost_usd: r.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
