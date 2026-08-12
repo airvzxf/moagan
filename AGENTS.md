@@ -71,22 +71,31 @@ Two gates must pass before handing to the user:
 - One logical change per commit.
 - No `git commit --amend`. No `git push --force`. No `--no-gpg-sign`.
 
-### Release cache (why there are multiple 270 MB entries)
+### Release is cold-by-design (no `Swatinem/rust-cache` in `release.yml`)
 
-The release workflow runs 1–2x/week on tag pushes; a cold build per
-tag is acceptable. Each tag creates a new `actions/cache` entry
-because the `Swatinem/rust-cache` save key includes an 8-char
-`lockHash` suffix that changes when the transitive-dep tree drifts —
-this is expected, not a bug. Partial-match restore across tags
-happens **automatically** because the action passes its internal
-`config.restoreKey` (= prefix + job + OS + arch + envHash, no
-`lockHash`) as `restoreKeys` to the underlying
-`actions/cache.restoreCache` (see `Swatinem/rust-cache`
-`src/restore.ts:18`). The new tag's build therefore reuses the
-registry/git/bin layers (~95% of the 270 MB) from the previous tag
-even when the save key is new. Total storage is bounded by GitHub's
-10 GB repo-cache limit (org-wide); old per-tag entries are evicted
-naturally, no manual pruning needed.
+The release workflow runs on tag pushes (`refs/tags/vX.Y.Z`). Each
+tag is its own ref, and `actions/cache` is scoped per-ref: a cache
+created for one tag cannot be restored by another tag, even when
+the cache key is byte-identical. This is a hard restriction of
+GitHub Actions cache — see the "Restrictions for accessing a cache"
+section of the dependency-caching docs:
+
+> "Workflow runs also cannot restore caches created for different
+> tag names."
+
+The previous `Swatinem/rust-cache` step in `release.yml` therefore
+generated a fresh ~270 MB entry per release that was never read
+again. Verified empirically on the v0.7.1 run (id `31558391724`):
+the action printed `No cache found.` and immediately began
+`Downloading crates ...` from crates.io — a full cold build despite
+the v0.6.2 entry existing with the same key.
+
+The cold build cost (~5 min per release, 1–2 releases/week) is
+acceptable, so the cache step is removed entirely. CI runs on `main`
+continue to use `Swatinem/rust-cache` (via `.github/actions/rust-setup`)
+because cross-branch restore works there: tag pushes inherit `main`'s
+cache scope as a fallback, and same-branch restore hits the cache on
+re-runs of the same job.
 
 ## No-go list
 
