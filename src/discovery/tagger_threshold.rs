@@ -1,7 +1,7 @@
 //! D.13.9: configurable threshold for the tagger.
 
 /// Default minimum similarity for the tagger to accept a tag.
-/// Anything below this falls into [`crate::discovery::tag_decision::TagDecision::Uncategorized`].
+/// Anything below this is treated as uncategorized.
 pub const DEFAULT_TAGGER_THRESHOLD: f32 = 0.6;
 
 /// Wraps a tagger threshold so configuration can validate the
