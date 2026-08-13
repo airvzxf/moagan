@@ -94,11 +94,47 @@ without unfairly pre-empting the other session's good-faith attempts.
 | 7 | #425 | feat(cli): doctor --capabilities, telemetry cost, probe max_tokens |
 | 8 | #426 | refactor: round-2 audit fixes (drop 2 dead prompts, 3 dead TelemetryEvent, docs/spec-impl-gaps.md) |
 | 9 | #427 | refactor: round-3 audit fixes (drop ledger, 5 error companion modules, tiktoken-rs) |
+| 10 | #430 | feat(llm): wire models.dev gates into dispatch_to_provider (catalog refresh + ModalityGate + cost_estimate + CapabilityResolver) |
+| 11 | #432 | fix(llm): pass capability-gated request to dispatch_to_provider (Closes #428 — adopted from the e2e-network loop's prepared fix at 75ce6b2) |
+| 12 | #433 | refactor: round-4 audit (drop 5 telemetry modules: manifest_ext, manifest_txt, manifest_version, recover, phase_macro) |
+| 13 | #434 | refactor: round-4 audit (drop invalidate_downstream, matrix_seed) |
+| 14 | #435 | refactor: round-4 audit (drop 4 empty v013 tables via v016 migration) |
+| 15 | #436 | refactor: round-5 audit (drop 5 dead modules + trim BudgetPolicy::Abort) |
+| 16 | #437 | docs(audit): re-create round-1 + round-2 inconsistency audits |
+| 17 | #438 | refactor: round-6 audit (drop unused anthropic_compat + streaming, 666 LoC) |
+| 18 | #439 | refactor: round-6 audit (drop dead manifest_versions via v017 + fix stale docstring) |
+| 19 | #440 | refactor: round-7 audit (drop unique_tempdir + 4 newly-orphaned items + refresh 4 stale docstrings) |
 
-Final test count: 1869 lib + 30 integration, 0 failed.
+PR #421 (reasoning gating) was closed unmerged on 2026-08-12
+— the merge with main required 100+ manual Request-literal
+fixes that were too noisy for the time budget. The
+`reasoning_gate.rs` helper survives on the
+`feat/models-dev-reasoning-gate` branch and can be re-attempted
+in a follow-up.
+
+PR #424 (audit round 1, `fix/audit-findings`) was closed on
+2026-08-13 — the round-1 audit fixes were subsumed by the
+later rounds (#426 and #427).
+
+## Session 2 (2026-08-13) summary
+
+Between 04:40 UTC and 07:33 UTC (~3h), the **models-dev session
+round 2** landed:
+
+- Adopted the e2e-network loop's prepared fix (PR #432)
+- 8 cleanup PRs (rounds 4-7) dropped ~1,100 LoC of dead code
+  + 1 SQLite table (v016) + 1 SQLite table (v017)
+- Re-created the audit reports that were lost on 2026-08-12
+- 1846 → 1826 lib tests (-20 dead tests, 0 regressions)
+- main HEAD: `a7c4655`
+
+Final test count: 1826 lib + 30 integration, 0 failed.
+Final main HEAD: `a7c4655`.
 
 ## Branch inventory (live)
 
 | Branch | Owner | Status |
 |---|---|---|
 | (none — all PRs merged) | | |
+
+_Last updated: 2026-08-13 07:34 UTC_
