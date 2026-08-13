@@ -41,8 +41,6 @@ fn discover_deepseek_writes_four_subdirs() {
             "discover",
             "--provider",
             "deepseek",
-            "--model",
-            "deepseek-chat",
             "--prompt",
             PROMPT,
             "--cardinality",
