@@ -29,7 +29,9 @@
 //! `Command` builder as they did before — this helper only
 //! governs the parent-process env var.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// Process-wide mutex serialising tests that mutate `MOAGAN_HOME`.
 /// Held for the duration of [`with_moagan_home`].
@@ -62,7 +64,13 @@ where
     F: FnOnce(&Path) -> R,
 {
     let _guard = ENV_LOCK.lock();
-    let dir = unique_tempdir(label);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("moagan-{pid}-{nanos}-{label}"));
+    std::fs::create_dir_all(&dir).expect("create unique tempdir");
     let prev = std::env::var_os("MOAGAN_HOME");
     // SAFETY: serialised by ENV_LOCK; no other thread reads or
     // mutates MOAGAN_HOME while the guard is held.
@@ -83,21 +91,6 @@ where
     }
     let _ = std::fs::remove_dir_all(&dir);
     result
-}
-
-/// Build a unique tempdir path under [`std::env::temp_dir`] and
-/// create it. Used by [`with_moagan_home`] and exposed for tests
-/// that want the unique-path generator without the env-var
-/// ceremony.
-pub fn unique_tempdir(label: &str) -> PathBuf {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before unix epoch")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("moagan-{pid}-{nanos}-{label}"));
-    std::fs::create_dir_all(&dir).expect("create unique tempdir");
-    dir
 }
 
 #[cfg(test)]
