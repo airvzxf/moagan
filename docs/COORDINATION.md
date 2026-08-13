@@ -131,64 +131,72 @@ round 2** landed:
 Final test count: 1826 lib + 30 integration, 0 failed.
 Final main HEAD: `a7c4655`.
 
-## Session 3 (2026-08-13) — round-10 + round-11 audit closure
+## Session 3 (2026-08-13) — round-10 + round-11 + round-12 audit closure
 
-Between 09:35 UTC and 11:25 UTC (~2h), the **round-10 + round-11 session**
+Between 09:35 UTC and 13:30 UTC (~4h), the **round-10 + round-11 + round-12 session**
 landed the long-stranded PR #424 re-derivation + the long-stranded
-Spanish identifier rename + 2 cleanup passes + docs closure:
+Spanish identifier rename + 4 cleanup passes + docs closure + **discovery
+e2e validation against `opencode_go`**:
 
-### Round-10 PRs
+### Round-10 PRs (6)
 
 | PR | Subject | LoC | Round-1 / round-8 item closed |
 |---:|---|---:|---|
-| [#444](https://github.com/airvzxf/moagan/pull/444) | `refactor(cli): drop 7 dead env-var helpers + BatchPolicy + ROUTING_TOML_AVAILABLE stub` | -108 | round-1 §A.1 (flags_batch.rs helpers) |
-| [#445](https://github.com/airvzxf/moagan/pull/445) | `refactor(storage): drop dead FullLease wrapper (143 LoC)` | -143 | round-1 §A.5 (lease_full.rs) — the 4 `process_lock acquire/release` helpers kept (live) |
-| [#446](https://github.com/airvzxf/moagan/pull/446) | `refactor(discovery): rename Spanish identifiers to English` | 0 | round-1 §C.1 (Spanish identifier leaks) |
-| [#447](https://github.com/airvzxf/moagan/pull/447) | `feat(cli): wire Config::token_budget into Db::set_budget at run start` | +94 | round-1 §E.1 row 9 (behavioral wire-up of stranded commit `e8b682f`) |
-| [#448](https://github.com/airvzxf/moagan/pull/448) | `docs(audit): mark round-10 closure for PRs #444-#447 + round-1 fully closed` | docs | session 3 docs closure + discovery validation research |
-| [#449](https://github.com/airvzxf/moagan/pull/449) | `refactor: drop 4 trivial pub fn with single test-only caller` | -71 | round-8 §E.4 borderline items (top 4 trivials of the 9 found) |
+| [#444](https://github.com/airvzxf/moagan/pull/444) | `refactor(cli): drop 7 dead env-var helpers + BatchPolicy + ROUTING_TOML_AVAILABLE stub` | -108 | round-1 §A.1 |
+| [#445](https://github.com/airvzxf/moagan/pull/445) | `refactor(storage): drop dead FullLease wrapper (143 LoC)` | -143 | round-1 §A.5 |
+| [#446](https://github.com/airvzxf/moagan/pull/446) | `refactor(discovery): rename Spanish identifiers to English` | 0 | round-1 §C.1 |
+| [#447](https://github.com/airvzxf/moagan/pull/447) | `feat(cli): wire Config::token_budget into Db::set_budget at run start` | +94 | round-1 §E.1 row 9 |
+| [#448](https://github.com/airvzxf/moagan/pull/448) | `docs(audit): mark round-10 closure for PRs #444-#447 + round-1 fully closed` | docs | docs closure |
+| [#449](https://github.com/airvzxf/moagan/pull/449) | `refactor: drop 4 trivial pub fn with single test-only caller` | -71 | round-8 §E.4 borderline |
 
-### Round-11 PRs (fresh audit pass against new main)
+### Round-11 PRs (5)
 
 | PR | Subject | LoC | Item closed |
 |---:|---|---:|---|
-| [#451](https://github.com/airvzxf/moagan/pull/451) | `refactor: drop 2 dead modules (reconcile::per_run + sandbox::tool_versions)` | -288 | fresh audit: 2 dead `pub mod` (D.11.12 + D.28.1) |
-| [#452](https://github.com/airvzxf/moagan/pull/452) | `refactor: drop 6 test-only 1-caller pub fn + 1 inline registry module` | -386 | fresh audit: 6 test-only `pub fn` (accumulate_usage, get_problem_graph, check_cargo_toml, override_pair, insert_with_breaker, with_config) + inline `llm::registry` |
-| [#453](https://github.com/airvzxf/moagan/pull/453) | `refactor: drop 1 dead fn + demote 4 internal pub fn visibility` | -21 | fresh audit: with_cardinality_and_profiles (16 LoC, 0 callers) + 4 internal pub→fn demotions |
+| [#451](https://github.com/airvzxf/moagan/pull/451) | drop 2 dead modules (reconcile::per_run + sandbox::tool_versions) | -288 | 2 dead `pub mod` |
+| [#452](https://github.com/airvzxf/moagan/pull/452) | drop 6 test-only 1-caller `pub fn` + 1 inline `llm::registry` | -386 | test-only fns + inline mod |
+| [#453](https://github.com/airvzxf/moagan/pull/453) | drop 1 dead fn + demote 4 internal `pub fn` | -21 | with_cardinality_and_profiles + cardinality demotes |
+| [#454](https://github.com/airvzxf/moagan/pull/454) | docs(coord) — round-11 closure | docs | docs closure |
+| [#455](https://github.com/airvzxf/moagan/pull/455) | demote 5 internal `pub fn` visibility (judge + cluster + synthesize) | 0 | 5 misclassified "dead" fns |
 
-**Net**:
-- 1819 → 1793 lib tests (-26 dead tests, 0 regressions).
-- 1 wire-up from PR #424 re-derived against current `main@5792888`
-  (the stranded `fix/audit-findings` branch was 13+ commits behind).
-- 2 cosmetic renames (Spanish → English) across `discovery/` module
-  + spec docs pseudocode.
-- Round-1 audit **fully closed** (all 7 originally-open items).
+### Round-12 PRs (3)
+
+| PR | Subject | LoC | Item closed |
+|---:|---|---:|---|
+| [#456](https://github.com/airvzxf/moagan/pull/456) | `phases/` round-12 mass cleanup | -129 | HardIncompat::is_incompatible_with + DiscoverMatrixPhase::from_dimensions_with_profiles + cluster_text/write_skipped_in_dir demotions |
+| [#457](https://github.com/airvzxf/moagan/pull/457) | `llm/` round-12 mass cleanup | -81 | BreakeredProvider::{breaker, rate_limiter, provider_semaphores, inner} + RateLimiter::last_wait + probe_table::{probes_succeeded, probes_failed, persist_to} + LazyApiKey::with_spec + 4 demotions |
+| [#458](https://github.com/airvzxf/moagan/pull/458) | cross-module round-12 (redact+storage+domain+sandbox+cli) | -421 | inline `builtin_patterns` (137 LoC) + delete `is_incompatible_with` (30 LoC) + 6 demotions + 4 dead compression helpers |
+
+### Discovery e2e (P8) — closed (PR #459)
+
+| PR | Subject | Notes |
+|---:|---|---|
+| [#459](https://github.com/airvzxf/moagan/pull/459) | `feat(e2e): validate discovery mode with opencode_go + Token Plan` | Closes the long-blocked P8 gap. The operator's `OPENCODE_GO_API_KEY` in `.env` was valid all along — a `curl` to `https://opencode.ai/zen/go/v1/chat/completions` with `model=kimi-k2.7-code, temperature=1` confirmed the upstream works. Adds 88 LoC to `scripts/e2e_audit_proxy.sh` + 88 LoC new integration test (`#[ignore]`-gated). |
+
+### Docs closure (PRs #448, #450, #454, #460)
+
+5 docs PRs across the session tracking the closures.
+
+**Net session 3**:
+- 1819 → 1784 lib tests (-35 dead tests, 0 regressions).
+- **~1,535 LoC of dead code removed** across 13 refactor PRs.
+- 1 behavior wire-up (`token_budget → Db::set_budget`).
+- 1 spec-compliant rename (Spanish → English across `discovery/`).
+- Round-1 audit **fully closed**.
 - Round-8 actionable list **9 of 10 closed** + 1 partial (persona_angle
-  was misclassified as dead; it has 3 live callers via coordinator.rs).
-- Round-11 fresh audit **3 PRs landed**: 2 dead modules (288 LoC),
-  6 test-only fns + 1 inline module (386 LoC), 1 dead fn + 4 visibility
-  demotions (21 LoC). **Net: 695 LoC of dead code removed.**
-- main HEAD: `771918f`.
+  misclassified — actually alive).
+- **P8 discovery validation closed** with real `OPENCODE_GO_API_KEY` from `.env`.
+- main HEAD: `1f3cc23`.
 
-**Discovery validation research** (P8): produced
-`docs/discovery-validation-research-2026-08-13.md` — the 4 sub-directories
-the operator flagged (`tags/`, `facets/`, `extractions/`, `drafts/`)
-have **no e2e coverage against `opencode_go`** with a Token Plan
-quota. Marked **BLOCKED — needs operator** because:
-1. Requires a real `OPENCODE_GO_API_KEY` (no operator has one in CI).
-2. Requires a product decision on declaring
-   `[providers.opencode_go.plan]` with `limit_tokens`.
-3. Closure cost: ~80 LoC of new e2e harness in `scripts/e2e_audit_proxy.sh`.
+**5 misclassified "dead" fns in `phases/`**: a research subagent correctly
+stopped before deleting them. They have production callers via
+`JudgePhase::run` and `SynthesizePhase::run`. Demoted `pub fn` → `fn`
+in PR #455 instead.
 
-**Phases cleanup STOPPED**: a separate research agent identified 5 functions
-in `phases/judge.rs` + `phases/cluster_proposals.rs` + `phases/synthesize.rs`
-that were marked as "dead" in the audit but turned out to have production
-callers (correctly stopped before making any destructive edits). These
-remain as future work — either inline them at the call site (large refactor)
-or leave them as documented internal helpers.
+Final test count: **1784 lib + 30 integration, 0 failed**.
+Final main HEAD: `1f3cc23`.
 
-Final test count: **1793 lib + 30 integration, 0 failed**.
-Final main HEAD: `771918f`.
+_Last updated: 2026-08-13 13:30 UTC_
 
 ## Branch inventory (live)
 
