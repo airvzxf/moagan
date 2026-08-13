@@ -49,16 +49,16 @@ pub use super::id::SketchId;
 /// (`0.30`). The function does not invert or remap the
 /// threshold — pass a larger value to be more permissive
 /// (fewer outliers), a smaller value to be more strict.
-pub fn detectar_outliers(samples: &[Sketch], clusters: &[Cluster]) -> Vec<SketchId> {
-    detectar_outliers_with_threshold(
+pub fn detect_outliers(samples: &[Sketch], clusters: &[Cluster]) -> Vec<SketchId> {
+    detect_outliers_with_threshold(
         samples,
         clusters,
         crate::discovery::stop_policy::DEFAULT_OUTLIER_DISTANCE,
     )
 }
 
-/// Like [`detectar_outliers`] but with an explicit threshold.
-pub fn detectar_outliers_with_threshold(
+/// Like [`detect_outliers`] but with an explicit threshold.
+pub fn detect_outliers_with_threshold(
     samples: &[Sketch],
     clusters: &[Cluster],
     outlier_distance: f32,
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn detectar_outliers_returns_unclustered() {
+    fn detect_outliers_returns_unclustered() {
         // Two sketches: sk_001 is in a cluster whose label
         // matches the sketch thesis (low Jaccard distance);
         // sk_002 is unclustered. With threshold 0.3 the helper
@@ -211,29 +211,29 @@ mod tests {
             sketch("sk_002", "zeta eta theta iota", "production-grade"),
         ];
         let clusters = vec![cluster("cluster_01", "alpha beta gamma delta", &["sk_001"])];
-        let outliers = detectar_outliers_with_threshold(&samples, &clusters, 0.3);
+        let outliers = detect_outliers_with_threshold(&samples, &clusters, 0.3);
         assert_eq!(outliers, vec![SketchId("sk_002".into())]);
     }
 
     #[test]
-    fn detectar_outliers_dedupes_repeated_ids() {
+    fn detect_outliers_dedupes_repeated_ids() {
         let samples = vec![
             sketch("sk_001", "alpha", "minimalist"),
             sketch("sk_001", "alpha dup", "minimalist"),
         ];
-        let outliers = detectar_outliers_with_threshold(&samples, &[], 0.3);
+        let outliers = detect_outliers_with_threshold(&samples, &[], 0.3);
         assert_eq!(outliers, vec![SketchId("sk_001".into())]);
     }
 
     #[test]
-    fn detectar_outliers_skips_blank_ids() {
+    fn detect_outliers_skips_blank_ids() {
         let samples = vec![sketch("", "alpha", "minimalist")];
-        let outliers = detectar_outliers_with_threshold(&samples, &[], 0.3);
+        let outliers = detect_outliers_with_threshold(&samples, &[], 0.3);
         assert!(outliers.is_empty(), "blank ids must be skipped");
     }
 
     #[test]
-    fn detectar_outliers_threshold_zero_keeps_clustered() {
+    fn detect_outliers_threshold_zero_keeps_clustered() {
         // With a threshold of 0 every sketch is considered an
         // outlier (Jaccard distance >= 0 is always true). The
         // helper preserves input order and dedupes.
@@ -242,7 +242,7 @@ mod tests {
             sketch("sk_002", "beta", "production-grade"),
         ];
         let clusters = vec![cluster("cluster_01", "alpha", &["sk_001", "sk_002"])];
-        let outliers = detectar_outliers_with_threshold(&samples, &clusters, 0.0);
+        let outliers = detect_outliers_with_threshold(&samples, &clusters, 0.0);
         assert_eq!(
             outliers,
             vec![SketchId("sk_001".into()), SketchId("sk_002".into())]
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn detectar_outliers_threshold_one_keeps_none() {
+    fn detect_outliers_threshold_one_keeps_none() {
         // With a threshold of 1 no sketch is considered an
         // outlier (Jaccard distance is at most 1). Only
         // unclustered sketches survive.
@@ -259,7 +259,7 @@ mod tests {
             sketch("sk_002", "beta", "production-grade"),
         ];
         let clusters = vec![cluster("cluster_01", "alpha", &["sk_001"])];
-        let outliers = detectar_outliers_with_threshold(&samples, &clusters, 1.0);
+        let outliers = detect_outliers_with_threshold(&samples, &clusters, 1.0);
         assert_eq!(outliers, vec![SketchId("sk_002".into())]);
     }
 

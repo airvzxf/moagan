@@ -28,7 +28,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::discovery::outlier::detectar_outliers_with_threshold;
+use crate::discovery::outlier::detect_outliers_with_threshold;
 use crate::discovery::state::SketchLoopState;
 use crate::discovery::stop_policy::{StopDecision, StopPolicy, StopReason};
 use crate::domain::{Cluster, Sketch};
@@ -154,7 +154,7 @@ impl SaturationTracker {
     /// 1. `MaxSketchesReached` — `completed >= hard_cap`.
     /// 2. `Saturated` — mean intra-cluster similarity has
     ///    crossed `saturation_threshold` AND the loop has spent
-    ///    the `cola_reserva` margin.
+    ///    the `reserve_ratio` margin.
     /// 3. `MaxSketchesReached` — soft `max_sketches` cap.
     /// 4. `OutliersCollected` — outliers hit their
     ///    `min_sketches / 2` soft cap (one outlier per two
@@ -172,7 +172,7 @@ impl SaturationTracker {
         // caller that tunes the policy gets a coherent signal
         // across the detector and the tracker.
         let outliers =
-            detectar_outliers_with_threshold(batch, clusters, self.policy.outlier_distance);
+            detect_outliers_with_threshold(batch, clusters, self.policy.outlier_distance);
         self.outliers_collected = self.outliers_collected.saturating_add(outliers.len());
 
         // Per-model saturation: every model that appears in the
@@ -204,7 +204,7 @@ impl SaturationTracker {
             };
         }
         if self.mean_intra_cluster_similarity >= self.policy.saturation_threshold
-            && reserve_spent(self.completed, self.target, self.policy.cola_reserva)
+            && reserve_spent(self.completed, self.target, self.policy.reserve_ratio)
         {
             return StopDecision::Stop {
                 reason: StopReason::Saturated,
@@ -242,27 +242,27 @@ fn mean_intra_cluster_similarity(clusters: &[Cluster]) -> f32 {
     sum / clusters.len() as f32
 }
 
-/// True when the loop has spent the `cola_reserva` margin on
+/// True when the loop has spent the `reserve_ratio` margin on
 /// top of the saturation point. The spec (T01-06 §9.3 + the
 /// v0.5 PR-19 verification "con --cardinality 100 y saturación
 /// al 50%, el run termina con ~60 sketches") defines the
 /// saturation point as 50% of the target. The reserve is
-/// `cola_reserva` of that saturation point, not of the full
+/// `reserve_ratio` of that saturation point, not of the full
 /// target: the loop fires the saturation-point sketches plus
 /// the reserve, then stops.
 ///
-/// With `target=100, cola=0.25` the cap is
+/// With `target=100, ratio=0.25` the cap is
 /// `ceil(50 * 1.25) = 63`. With `completed=63` the reserve is
 /// spent and the `Saturated` decision fires. With
 /// `completed=50` the reserve is intact and the loop keeps
 /// going. A `target` of `0` reports `true` to avoid a
 /// divide-by-zero trap.
-fn reserve_spent(completed: usize, target: usize, cola_reserva: f32) -> bool {
+fn reserve_spent(completed: usize, target: usize, reserve_ratio: f32) -> bool {
     if target == 0 {
         return true;
     }
     let saturation_point = target / 2;
-    let cap = (saturation_point as f32 * (1.0 + cola_reserva)).ceil() as usize;
+    let cap = (saturation_point as f32 * (1.0 + reserve_ratio)).ceil() as usize;
     completed >= cap
 }
 
@@ -465,12 +465,12 @@ mod tests {
 
     /// Spec D.13.1: when the mean intra-cluster similarity
     /// crosses the saturation threshold AND the loop has spent
-    /// its cola_reserva margin, the tracker returns
+    /// its reserve_ratio margin, the tracker returns
     /// `Stop(Saturated)`. Below the threshold the decision
     /// stays `Continue`.
     #[test]
     fn update_saturated_after_reserve_spent() {
-        // target=10, cola_reserva=0.25 → saturation_point=5,
+        // target=10, reserve_ratio=0.25 → saturation_point=5,
         // cap=ceil(5*1.25)=7. completed=7 (reserve spent) AND
         // mean_similarity=0.5 (above the 0.05 threshold) →
         // Saturated.
@@ -478,7 +478,7 @@ mod tests {
             10,
             StopPolicy {
                 saturation_threshold: 0.05,
-                cola_reserva: 0.25,
+                reserve_ratio: 0.25,
                 ..StopPolicy::default()
             },
         );
@@ -503,7 +503,7 @@ mod tests {
             10,
             StopPolicy {
                 saturation_threshold: 0.5,
-                cola_reserva: 0.25,
+                reserve_ratio: 0.25,
                 ..StopPolicy::default()
             },
         );
@@ -578,7 +578,7 @@ mod tests {
             100,
             StopPolicy {
                 saturation_threshold: 0.5,
-                cola_reserva: 0.25,
+                reserve_ratio: 0.25,
                 min_sketches: 40,
                 max_sketches: 80,
                 hard_cap: 500,
@@ -593,12 +593,12 @@ mod tests {
             StopDecision::Stop {
                 reason: StopReason::Saturated
             },
-            "50% saturation + cola_reserva must trip Saturated before the hard cap"
+            "50% saturation + reserve_ratio must trip Saturated before the hard cap"
         );
     }
 
     /// Companion to the previous test: 50% saturation but the
-    /// loop has not yet spent the cola_reserva margin → still
+    /// loop has not yet spent the reserve_ratio margin → still
     /// `Continue` (the loop has budget left to fire the
     /// reserve batch).
     #[test]
@@ -607,7 +607,7 @@ mod tests {
             100,
             StopPolicy {
                 saturation_threshold: 0.5,
-                cola_reserva: 0.25,
+                reserve_ratio: 0.25,
                 min_sketches: 40,
                 max_sketches: 80,
                 hard_cap: 500,

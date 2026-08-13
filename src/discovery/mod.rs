@@ -34,9 +34,9 @@ pub mod tagger_threshold;
 pub use context::DiscoveryContext;
 pub use coordinator::{DiscoveryCoordinator, DiscoveryOutcome};
 pub use id::{ContradictionId, FacetId, SketchId};
-pub use outlier::{detectar_outliers, detectar_outliers_with_threshold};
+pub use outlier::{detect_outliers, detect_outliers_with_threshold};
 pub use stop_policy::{
-    BlockReason, DEFAULT_COLA_RESERVA, DEFAULT_DISCOVERY_HARD_CAP, DEFAULT_MAX_SKETCHES,
-    DEFAULT_MIN_SKETCHES, DEFAULT_OUTLIER_DISTANCE, DEFAULT_SATURATION_THRESHOLD, StopDecision,
+    BlockReason, DEFAULT_DISCOVERY_HARD_CAP, DEFAULT_MAX_SKETCHES, DEFAULT_MIN_SKETCHES,
+    DEFAULT_OUTLIER_DISTANCE, DEFAULT_RESERVE_RATIO, DEFAULT_SATURATION_THRESHOLD, StopDecision,
     StopPolicy, StopReason,
 };
