@@ -46,7 +46,7 @@ pub struct HashEntry {
 /// Format a list of `HashEntry` into the canonical SHA256SUMS text
 /// (one `<sha256>  <path>` per line, LF terminated, no trailing
 /// newline). Mirrors `sha256sum -b` output.
-pub fn format_sha256sums(entries: &[HashEntry]) -> String {
+fn format_sha256sums(entries: &[HashEntry]) -> String {
     let mut out = String::new();
     for e in entries {
         // Note the two spaces between digest and path (sha256sum
