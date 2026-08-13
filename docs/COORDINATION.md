@@ -131,11 +131,13 @@ round 2** landed:
 Final test count: 1826 lib + 30 integration, 0 failed.
 Final main HEAD: `a7c4655`.
 
-## Session 3 (2026-08-13) — round-10 audit closure
+## Session 3 (2026-08-13) — round-10 + round-11 audit closure
 
-Between 09:35 UTC and 10:35 UTC (~1h), the **round-10 session**
+Between 09:35 UTC and 11:25 UTC (~2h), the **round-10 + round-11 session**
 landed the long-stranded PR #424 re-derivation + the long-stranded
-Spanish identifier rename + a borderline cleanup pass + docs closure:
+Spanish identifier rename + 2 cleanup passes + docs closure:
+
+### Round-10 PRs
 
 | PR | Subject | LoC | Round-1 / round-8 item closed |
 |---:|---|---:|---|
@@ -146,17 +148,27 @@ Spanish identifier rename + a borderline cleanup pass + docs closure:
 | [#448](https://github.com/airvzxf/moagan/pull/448) | `docs(audit): mark round-10 closure for PRs #444-#447 + round-1 fully closed` | docs | session 3 docs closure + discovery validation research |
 | [#449](https://github.com/airvzxf/moagan/pull/449) | `refactor: drop 4 trivial pub fn with single test-only caller` | -71 | round-8 §E.4 borderline items (top 4 trivials of the 9 found) |
 
+### Round-11 PRs (fresh audit pass against new main)
+
+| PR | Subject | LoC | Item closed |
+|---:|---|---:|---|
+| [#451](https://github.com/airvzxf/moagan/pull/451) | `refactor: drop 2 dead modules (reconcile::per_run + sandbox::tool_versions)` | -288 | fresh audit: 2 dead `pub mod` (D.11.12 + D.28.1) |
+| [#452](https://github.com/airvzxf/moagan/pull/452) | `refactor: drop 6 test-only 1-caller pub fn + 1 inline registry module` | -386 | fresh audit: 6 test-only `pub fn` (accumulate_usage, get_problem_graph, check_cargo_toml, override_pair, insert_with_breaker, with_config) + inline `llm::registry` |
+| [#453](https://github.com/airvzxf/moagan/pull/453) | `refactor: drop 1 dead fn + demote 4 internal pub fn visibility` | -21 | fresh audit: with_cardinality_and_profiles (16 LoC, 0 callers) + 4 internal pub→fn demotions |
+
 **Net**:
-- 1819 → 1809 lib tests (-10 dead tests, 0 regressions).
+- 1819 → 1793 lib tests (-26 dead tests, 0 regressions).
 - 1 wire-up from PR #424 re-derived against current `main@5792888`
   (the stranded `fix/audit-findings` branch was 13+ commits behind).
 - 2 cosmetic renames (Spanish → English) across `discovery/` module
   + spec docs pseudocode.
-- 4 trivial `pub fn` + their tests dropped (round-10 borderline pass).
 - Round-1 audit **fully closed** (all 7 originally-open items).
 - Round-8 actionable list **9 of 10 closed** + 1 partial (persona_angle
   was misclassified as dead; it has 3 live callers via coordinator.rs).
-- main HEAD: `fdb66cf`.
+- Round-11 fresh audit **3 PRs landed**: 2 dead modules (288 LoC),
+  6 test-only fns + 1 inline module (386 LoC), 1 dead fn + 4 visibility
+  demotions (21 LoC). **Net: 695 LoC of dead code removed.**
+- main HEAD: `771918f`.
 
 **Discovery validation research** (P8): produced
 `docs/discovery-validation-research-2026-08-13.md` — the 4 sub-directories
@@ -168,8 +180,15 @@ quota. Marked **BLOCKED — needs operator** because:
    `[providers.opencode_go.plan]` with `limit_tokens`.
 3. Closure cost: ~80 LoC of new e2e harness in `scripts/e2e_audit_proxy.sh`.
 
-Final test count: **1809 lib + 30 integration, 0 failed**.
-Final main HEAD: `fdb66cf`.
+**Phases cleanup STOPPED**: a separate research agent identified 5 functions
+in `phases/judge.rs` + `phases/cluster_proposals.rs` + `phases/synthesize.rs`
+that were marked as "dead" in the audit but turned out to have production
+callers (correctly stopped before making any destructive edits). These
+remain as future work — either inline them at the call site (large refactor)
+or leave them as documented internal helpers.
+
+Final test count: **1793 lib + 30 integration, 0 failed**.
+Final main HEAD: `771918f`.
 
 ## Branch inventory (live)
 
