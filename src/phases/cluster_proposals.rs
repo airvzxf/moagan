@@ -78,7 +78,7 @@ impl Default for ClusterProposalsPhase {
 impl ClusterProposalsPhase {
     /// Compute the text used for clustering: summary + approach +
     /// tradeoffs + evidence. Pure function so tests can pin it.
-    pub fn cluster_text(p: &Proposal) -> String {
+    fn cluster_text(p: &Proposal) -> String {
         let mut s = String::new();
         s.push_str(&p.summary);
         s.push('\n');
