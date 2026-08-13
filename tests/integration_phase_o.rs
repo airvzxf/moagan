@@ -6,9 +6,9 @@
 //! 1. `Rubric::default()` returns the same anchor string for a
 //!    `(Criterion, level)` pair on every call (idempotent — useful
 //!    for the LLM prompt that interpolates the anchors).
-//! 2. `Compression::reader` round-trips a file in each of the three
-//!    modes (None, Gz, Zst) so a downstream tool that picks the
-//!    reader by extension can stream without caring about the
+//! 2. `Compression::multi_reader` round-trips a file in each of the
+//!    three modes (None, Gz, Zst) so a downstream tool that picks
+//!    the reader by extension can stream without caring about the
 //!    on-disk format.
 //!
 //! These tests complement the unit tests in `src/ranking/rubric.rs`
@@ -24,7 +24,7 @@ use flate2::Compression as FlateCompression;
 use flate2::write::GzEncoder;
 
 use moagan::ranking::{Criterion, Rubric};
-use moagan::storage::compression::{Compression, reader};
+use moagan::storage::compression::Compression;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -70,7 +70,7 @@ fn rubric_anchors_are_stable_across_calls() {
     }
 }
 
-/// Round-trip a `.gz` file through `Compression::reader(.., Gz)`.
+/// Round-trip a `.gz` file through `Compression::multi_reader`.
 /// Uses the standard `flate2::GzEncoder` so the test is independent
 /// of the project's own writer (the writer's own round-trip is
 /// covered by `open_gz_append` + `read_to_string`).
@@ -86,14 +86,14 @@ fn compression_reader_handles_gz_file() {
         enc.write_all(original.as_bytes()).unwrap();
         enc.finish().unwrap();
     }
-    let mut r = reader(&path, Compression::Gz).unwrap();
+    let mut r = Compression::multi_reader(&path).unwrap();
     let mut buf = String::new();
     r.read_to_string(&mut buf).unwrap();
     assert_eq!(buf, original);
     assert_eq!(Compression::from_extension(&path), Compression::Gz);
 }
 
-/// Round-trip a `.zst` file through `Compression::reader(.., Zst)`.
+/// Round-trip a `.zst` file through `Compression::multi_reader`.
 /// `zstd` does not have a single-call encoder API in the version
 /// pinned by `Cargo.toml` (`0.13`), so we use the simple
 /// `zstd::stream::encode_all` helper that ships with the crate.
@@ -106,7 +106,7 @@ fn compression_reader_handles_zst_file() {
         "{\"phase\":\"z\",\"i\":1}\n{\"phase\":\"z\",\"i\":2}\n{\"phase\":\"z\",\"i\":3}\n";
     let encoded = zstd::stream::encode_all(original.as_bytes(), 3).unwrap();
     std::fs::write(&path, &encoded).unwrap();
-    let mut r = reader(&path, Compression::Zst).unwrap();
+    let mut r = Compression::multi_reader(&path).unwrap();
     let mut buf = String::new();
     r.read_to_string(&mut buf).unwrap();
     assert_eq!(buf, original);
@@ -114,7 +114,7 @@ fn compression_reader_handles_zst_file() {
 }
 
 /// Round-trip a plain (uncompressed) file through
-/// `Compression::reader(.., None)`. Useful for tools that receive
+/// `Compression::multi_reader`. Useful for tools that receive
 /// mixed-format inputs and must pick the reader by extension.
 #[test]
 fn compression_reader_handles_uncompressed() {
@@ -123,7 +123,7 @@ fn compression_reader_handles_uncompressed() {
     let path = tmp.path().join("manifest.json");
     let original = "{\"schema_version\":\"v1\",\"ok\":true}\n";
     std::fs::write(&path, original).unwrap();
-    let mut r = reader(&path, Compression::None).unwrap();
+    let mut r = Compression::multi_reader(&path).unwrap();
     let mut buf = String::new();
     r.read_to_string(&mut buf).unwrap();
     assert_eq!(buf, original);
