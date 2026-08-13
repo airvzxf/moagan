@@ -183,7 +183,7 @@ impl JudgePhase {
     /// Max-min spread of the judges' overall scores on the 0..=10
     /// scale. `None` for fewer than two scores (the spread is
     /// undefined).
-    pub fn score_spread(scores: &[JudgeScore]) -> Option<f32> {
+    fn score_spread(scores: &[JudgeScore]) -> Option<f32> {
         if scores.len() < 2 {
             return None;
         }
@@ -208,7 +208,7 @@ impl JudgePhase {
     /// stddev check catches "the panel scatters broadly". Returns
     /// `false` for fewer than two scores (the tiebreaker is
     /// meaningless without a panel).
-    pub fn should_invoke_final_disagreement(
+    fn should_invoke_final_disagreement(
         scores: &[JudgeScore],
         spread_threshold: f32,
         stddev_threshold: f32,
@@ -236,7 +236,7 @@ impl JudgePhase {
     /// needs to know about. The rendered payload is fed verbatim
     /// to `ctx.call_with_retry_parse` so the LLM-side schema and
     /// cache keys stay stable.
-    pub fn build_final_disagreement_payload(
+    fn build_final_disagreement_payload(
         proposal_id: &str,
         scores: &[JudgeScore],
         summary: &str,
