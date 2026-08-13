@@ -29,12 +29,16 @@
 #   MOAGAN_SMOKE_SECTION           select which SECTION A sub-block to
 #                                 run. One of `all` (default), `card80`
 #                                 (the ~25 min discover), `fast` (the
-#                                 ~2 min mode-fast run), or `explore`
-#                                 (the ~8 min mode-explore run). The
-#                                 CI workflow uses this to split the
-#                                 suite into a 3-row matrix; locally
-#                                 it lets the operator iterate on a
-#                                 single sub-block without paying the
+#                                 ~2 min mode-fast run), `explore`
+#                                 (the ~8 min mode-explore run), or
+#                                 `discover_opencode_go` (the
+#                                 ~10–20 min `moagan discover` against
+#                                 the opencode_go provider; v0.7 P8
+#                                 e2e validation close). The CI
+#                                 workflow uses this to split the
+#                                 suite into a matrix; locally it lets
+#                                 the operator iterate on a single
+#                                 sub-block without paying the
 #                                 ~25 min card80 cost.
 #
 # Notes on the explore-mode correlation (audit_pairs +
@@ -49,9 +53,11 @@
 # the audit verify output's `unmatched_internal_count` is then
 # driven by retries on parse failure, not by cache hits.
 #
-# When `MINIMAX_API_KEY` is missing the entire block is skipped
-# (printed "SKIP: …" with PASS counters kept consistent). The
-# companion `smoke_audit_proxy.sh` covers the static surface.
+# When `MINIMAX_API_KEY` is missing the card80/fast/explore blocks
+# are skipped (printed "SKIP: …" with PASS counters kept
+# consistent); the opencode_go block below gates on
+# `OPENCODE_GO_API_KEY` instead. The companion
+# `smoke_audit_proxy.sh` covers the static surface.
 #
 # Exit code is non-zero when any check fails.
 
@@ -82,7 +88,7 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 : "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
-: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore
+: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore | discover_opencode_go
 
 # ---------------------------------------------------------------------
 # helpers
@@ -452,6 +458,88 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   fi # MOAGAN_SMOKE_SECTION explore
 else
   echo "SKIP: real proxy e2e tests (MINIMAX_API_KEY not present)"
+fi
+
+# ---------------------------------------------------------------------
+# SECTION A.bis — Discover with opencode_go (v0.7 P8 close)
+#
+# Validates the `moagan discover` pipeline against the opencode_go
+# provider (kimi-k2.7-code) using the operator's
+# `OPENCODE_GO_API_KEY`. The four sub-directories produced by the
+# distinct discover_* LLM roles (V4 §6.5–§6.10) are asserted
+# non-empty: `tags/` (Tagger), `facets/` (FacetDeriver),
+# `extractions/cat_*` (Extractor), `drafts/` (Integrator). Then
+# `moagan telemetry plan --provider opencode_go --window-days 1`
+# must report `used / limit (pct%)` with `used > 0` against the
+# `plan = { plan_id = "weekly", limit_tokens = 1_000_000, ... }`
+# block declared in `~/.config/moagan/config.toml`.
+#
+# Gated on `OPENCODE_GO_API_KEY` (NOT `MINIMAX_API_KEY` like the
+# other sub-blocks); also opt-in via `MOAGAN_SMOKE_SECTION=discover_opencode_go`
+# so the operator can iterate on it without paying the cost of the
+# card80 minimax run. No audit-proxy sidecar is started: opencode_go
+# routes directly to the upstream `https://opencode.ai/zen/go/v1`
+# declared in the config — the provider has its own CRC32 audit
+# surface recorded in the run's `calls.jsonl.gz`, not in the
+# `external_audit.jsonl.gz` produced by the sidecar.
+# ---------------------------------------------------------------------
+
+if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
+  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_opencode_go" ]]; then
+    echo ""
+    echo ">>> Running discover e2e against opencode_go (kimi-k2.7-code)..."
+    WORK_OC=$(mkhome)
+    # Tiny prompt: 3 lines, fits in the intake/clarify window even
+    # with the opencode_go 1M-token context. The 2×2 matrix keeps the
+    # fan-out at ~80 sketches without paying for the full 4×2 card80.
+    OC_PROMPT="Compare three Rust HTTP clients for binary streaming"
+    run_test "proxy_e2e_discover_oc_run_id_present" \
+      "MOAGAN_HOME=$WORK_OC RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider opencode_go --prompt '$OC_PROMPT' --cardinality 80 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_OC/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_OC/discover.out"
+
+    OC_RUN_ID="$(ls "$WORK_OC/.runs/" 2>/dev/null | sort -r | head -1)"
+    if [[ -n "$OC_RUN_ID" ]]; then
+      OC_RUN_DIR="$WORK_OC/.runs/$OC_RUN_ID"
+
+      TAG_COUNT=$(ls "$OC_RUN_DIR/tags/" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_oc_tags_nonempty" \
+        "test $TAG_COUNT -ge 2"
+
+      FACET_COUNT=$(ls "$OC_RUN_DIR/facets/" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_oc_facets_nonempty" \
+        "test $FACET_COUNT -ge 1"
+
+      CAT_SUBDIRS=$(ls -d "$OC_RUN_DIR/extractions/cat_*" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_oc_extractions_subdirs" \
+        "test $CAT_SUBDIRS -ge 1"
+
+      DRAFT_COUNT=$(ls "$OC_RUN_DIR/drafts/" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_oc_drafts_nonempty" \
+        "test $DRAFT_COUNT -ge 1"
+
+      # Telemetry plan must report `used > 0` against the 1M-token
+      # weekly plan declared in `~/.config/moagan/config.toml`.
+      # `format_row` prints `<used> / <limit> (<pct>%)` (see
+      # `src/cli/telemetry_cmd.rs`), so we look for a line starting
+      # with `opencode_go` whose `used / limit` segment has a
+      # positive integer. Write the plan output to a file first so
+      # the run_test body stays inside `bash -c` without escaping
+      # multiline strings.
+      OC_PLAN_FILE="$WORK_OC/plan.out"
+      MOAGAN_HOME=$WORK_OC $BIN telemetry plan --provider opencode_go --window-days 1 > "$OC_PLAN_FILE" 2>&1 || true
+      run_test "proxy_e2e_discover_oc_telemetry_plan_reports_weekly" \
+        "grep -q 'weekly' $OC_PLAN_FILE"
+      run_test "proxy_e2e_discover_oc_telemetry_plan_used_positive" \
+        "awk 'NR>1 && /opencode_go/ { used=\$4; gsub(/[^0-9]/, \"\", used); if (used+0 > 0) { print \"used=\" used; exit 0 } } END { exit 1 }' $OC_PLAN_FILE"
+    else
+      for _ in 1 2 3 4 5 6; do
+        echo "SKIP: proxy_e2e_discover_oc_* (discover did not start)"
+        PASS=$((PASS + 1))
+      done
+    fi
+    rm -rf "$WORK_OC"
+  fi
+else
+  echo "SKIP: opencode_go discovery e2e tests (OPENCODE_GO_API_KEY not present)"
 fi
 
 # ---------------------------------------------------------------------
