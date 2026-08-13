@@ -1919,7 +1919,7 @@ impl RunPaths {
 pub enum StopDecision { Continue, QueueExtra(usize), SwitchModel(String) }
 pub struct StopPolicy {
     pub saturation_threshold: f32,
-    pub cola_reserva: f32,
+    pub reserve_ratio: f32,
     pub outlier_distance: u32,
     pub min_sketches: usize,
     pub max_sketches: usize,
@@ -1955,7 +1955,7 @@ impl SaturationTracker {
 ```rust
 // src/discovery/config.rs
 pub const DEFAULT_SATURATION_THRESHOLD: f32 = 0.05;
-pub const DEFAULT_COLA_RESERVA: f32 = 0.25;
+pub const DEFAULT_RESERVE_RATIO: f32 = 0.25;
 pub const DEFAULT_UNCATEGORIZED_THRESHOLD: f32 = 0.30;
 pub const DEFAULT_MIN_SKETCHES: usize = 40;
 pub const DEFAULT_MAX_CATEGORIES: usize = 12;
@@ -2023,7 +2023,7 @@ pub struct StandardCoordinator { state: StandardState, db: Db }
 ```rust
 // src/discovery/saturation.rs
 pub fn emit_saturation_event(tracker: &SaturationTracker) {
-    if tracker.sketch_count >= tracker.target && tracker.cola_reserva_remaining() == 0 {
+    if tracker.sketch_count >= tracker.target && !tracker.reserve_remaining() {
         telemetry::append_phase(&tracker.events_path, &PhaseEvent::DiscoverySaturated { at: now() }).ok();
     }
 }
@@ -4135,7 +4135,7 @@ Ya en T01-06 §34. Mantener.
 pub struct SketchLoopState {
     pub target: usize,
     pub hard_cap: usize,
-    pub cola_reserva: usize,
+    pub reserve_ratio: usize,
     pub saturated_models: HashSet<ModelId>,
     pub start_time: Instant,
 }

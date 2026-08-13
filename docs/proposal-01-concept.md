@@ -1334,7 +1334,7 @@ loop:
     clusters = clustering(samples)
     aporte = cobertura_nueva(clusters)
 
-    outliers = detectar_outliers(samples, clusters)
+    outliers = detect_outliers(samples, clusters)
 
     if aporte < umbral:
         if todos_los_modelos_saturados:
@@ -2559,7 +2559,7 @@ max_parallelism = 4
 max_categorias_default = 12
 min_ejemplos_por_categoria = 5
 max_categorias_soft = 30
-cola_reserva = 0.25
+reserve_ratio = 0.25
 uncategorized_threshold = 0.3
 
 [context]

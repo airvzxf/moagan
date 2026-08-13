@@ -11,7 +11,7 @@
 //!
 //! The [`StopPolicy`] struct captures the numerical knobs the loop
 //! needs: a `saturation_threshold` below which an iteration is
-//! considered saturated, a `cola_reserva` margin that lets the
+//! considered saturated, a `reserve_ratio` margin that lets the
 //! loop fire a final reserve batch after saturation is detected,
 //! the `outlier_distance` cutoff the outlier tracker uses, and
 //! the `[min_sketches, max_sketches]` hard limits. Spec D.13.3
@@ -99,7 +99,7 @@ pub struct StopPolicy {
     /// Fraction of the run's total sketch count that the loop is
     /// allowed to spend on the post-saturation reserve batch.
     /// Default `0.25` (D.13.3, T01-06 §9.3 calls it `margin_frac`).
-    pub cola_reserva: f32,
+    pub reserve_ratio: f32,
     /// Outlier distance threshold (Jaccard, `0..=1`). A sketch
     /// whose min-Jaccard to any cluster centroid is at least this
     /// value is considered an outlier. Default `0.30`.
@@ -120,7 +120,7 @@ impl Default for StopPolicy {
     fn default() -> Self {
         Self {
             saturation_threshold: DEFAULT_SATURATION_THRESHOLD,
-            cola_reserva: DEFAULT_COLA_RESERVA,
+            reserve_ratio: DEFAULT_RESERVE_RATIO,
             outlier_distance: DEFAULT_OUTLIER_DISTANCE,
             min_sketches: DEFAULT_MIN_SKETCHES,
             max_sketches: DEFAULT_MAX_SKETCHES,
@@ -132,8 +132,8 @@ impl Default for StopPolicy {
 /// Default `saturation_threshold` (D.13.3). Pinned so a refactor
 /// that drifts a value trips a test before it lands.
 pub const DEFAULT_SATURATION_THRESHOLD: f32 = 0.05;
-/// Default `cola_reserva` (D.13.3). Pinned.
-pub const DEFAULT_COLA_RESERVA: f32 = 0.25;
+/// Default `reserve_ratio` (D.13.3). Pinned.
+pub const DEFAULT_RESERVE_RATIO: f32 = 0.25;
 /// Default `outlier_distance` (D.13.3). Pinned. The original
 /// proposal named the field `outlier_distance_bits` (SimHash
 /// bits, default 32); we keep the spec's name but switch the
@@ -221,7 +221,7 @@ mod tests {
     fn stop_policy_defaults_match_d_13_3() {
         let p = StopPolicy::default();
         assert!((p.saturation_threshold - 0.05).abs() < 1e-6);
-        assert!((p.cola_reserva - 0.25).abs() < 1e-6);
+        assert!((p.reserve_ratio - 0.25).abs() < 1e-6);
         assert!((p.outlier_distance - 0.30).abs() < 1e-6);
         assert_eq!(p.min_sketches, 40);
         assert_eq!(p.hard_cap, 500);

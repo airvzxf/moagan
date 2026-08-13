@@ -139,7 +139,7 @@ fn stop_policy_default_invariants_are_documented() {
     assert!(p.min_sketches <= p.max_sketches);
     assert!(p.max_sketches <= p.hard_cap);
     assert!((p.saturation_threshold - 0.05).abs() < 1e-6);
-    assert!((p.cola_reserva - 0.25).abs() < 1e-6);
+    assert!((p.reserve_ratio - 0.25).abs() < 1e-6);
     assert!((p.outlier_distance - 0.30).abs() < 1e-6);
 }
 
@@ -197,7 +197,7 @@ fn detect_outliers_returns_unchanged_when_clusters_match_thesis() {
         },
     );
     let outliers =
-        moagan::discovery::outlier::detectar_outliers_with_threshold(&samples, &clusters, 0.3);
+        moagan::discovery::outlier::detect_outliers_with_threshold(&samples, &clusters, 0.3);
     assert_eq!(
         outliers,
         vec![moagan::discovery::outlier::SketchId("sk_002".into())]
@@ -214,7 +214,7 @@ fn pr19_verification_50_percent_saturation_trips_before_hard_cap() {
         100,
         StopPolicy {
             saturation_threshold: 0.5,
-            cola_reserva: 0.25,
+            reserve_ratio: 0.25,
             min_sketches: 40,
             max_sketches: 80,
             hard_cap: 500,
@@ -252,14 +252,14 @@ fn pr19_verification_50_percent_saturation_trips_before_hard_cap() {
 
 #[test]
 fn pr19_verification_reserve_left_means_continue() {
-    // The loop has not yet spent the cola_reserva margin;
+    // The loop has not yet spent the reserve_ratio margin;
     // even at the 50% saturation point the tracker says
     // `Continue` so the loop can fire the reserve batch.
     let mut tracker = SaturationTracker::with_policy(
         100,
         StopPolicy {
             saturation_threshold: 0.5,
-            cola_reserva: 0.25,
+            reserve_ratio: 0.25,
             min_sketches: 40,
             max_sketches: 80,
             hard_cap: 500,
