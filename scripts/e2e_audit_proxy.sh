@@ -30,16 +30,18 @@
 #                                 run. One of `all` (default), `card80`
 #                                 (the ~25 min discover), `fast` (the
 #                                 ~2 min mode-fast run), `explore`
-#                                 (the ~8 min mode-explore run), or
+#                                 (the ~8 min mode-explore run),
 #                                 `discover_opencode_go` (the
 #                                 ~10–20 min `moagan discover` against
 #                                 the opencode_go provider; v0.7 P8
-#                                 e2e validation close). The CI
-#                                 workflow uses this to split the
-#                                 suite into a matrix; locally it lets
-#                                 the operator iterate on a single
-#                                 sub-block without paying the
-#                                 ~25 min card80 cost.
+#                                 e2e validation close), or
+#                                 `discover_deepseek` (the equivalent
+#                                 for the native `deepseek` provider;
+#                                 PR #462). The CI workflow uses this
+#                                 to split the suite into a matrix;
+#                                 locally it lets the operator iterate
+#                                 on a single sub-block without paying
+#                                 the ~25 min card80 cost.
 #
 # Notes on the explore-mode correlation (audit_pairs +
 # audit_verify): the cross-run LLM cache is consulted first
@@ -56,7 +58,8 @@
 # When `MINIMAX_API_KEY` is missing the card80/fast/explore blocks
 # are skipped (printed "SKIP: …" with PASS counters kept
 # consistent); the opencode_go block below gates on
-# `OPENCODE_GO_API_KEY` instead. The companion
+# `OPENCODE_GO_API_KEY` and the deepseek block further down gates
+# on `DEEPSEEK_API_KEY` instead. The companion
 # `smoke_audit_proxy.sh` covers the static surface.
 #
 # Exit code is non-zero when any check fails.
@@ -88,7 +91,7 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 : "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
-: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore | discover_opencode_go
+: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore | discover_opencode_go | discover_deepseek
 
 # ---------------------------------------------------------------------
 # helpers
@@ -540,6 +543,89 @@ if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
   fi
 else
   echo "SKIP: opencode_go discovery e2e tests (OPENCODE_GO_API_KEY not present)"
+fi
+
+# ---------------------------------------------------------------------
+# SECTION A.ter — Discover with native deepseek (PR #462)
+#
+# Parallel to the opencode_go block above; validates the `moagan
+# discover` pipeline against the native `deepseek` provider (kind
+# `deepseek`, model `deepseek-chat` → `deepseek-v4-flash` resolved
+# upstream) using the operator's `DEEPSEEK_API_KEY`. The four
+# sub-directories produced by the distinct discover_* LLM roles
+# (V4 §6.5–§6.10) are asserted non-empty: `tags/` (Tagger),
+# `facets/` (FacetDeriver), `extractions/cat_*` (Extractor),
+# `drafts/` (Integrator). Then `moagan telemetry plan --provider
+# deepseek --window-days 1` must report `used / limit (pct%)`
+# with `used > 0` against the `plan = { plan_id = "weekly",
+# limit_tokens = 5_000_000, ... }` block declared in
+# `~/.config/moagan/config.toml`.
+#
+# Gated on `DEEPSEEK_API_KEY` (NOT `OPENCODE_GO_API_KEY`); also
+# opt-in via `MOAGAN_SMOKE_SECTION=discover_deepseek`. No audit-
+# proxy sidecar is started: deepseek routes directly to
+# `https://api.deepseek.com/v1` declared in the config — the
+# provider has its own CRC32 audit surface recorded in the run's
+# `calls.jsonl.gz`, not in the `external_audit.jsonl.gz` produced
+# by the sidecar.
+# ---------------------------------------------------------------------
+
+if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_deepseek" ]]; then
+    echo ""
+    echo ">>> Running discover e2e against deepseek (deepseek-chat / deepseek-v4-flash)..."
+    WORK_DS=$(mkhome)
+    # Tiny prompt: 3 lines, fits in the intake/clarify window even
+    # with the deepseek 393k-token context. The 2×2 matrix keeps the
+    # fan-out at ~80 sketches without paying for the full 4×2 card80.
+    DS_PROMPT="Compare three Rust HTTP clients for binary streaming"
+    run_test "proxy_e2e_discover_ds_run_id_present" \
+      "MOAGAN_HOME=$WORK_DS RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider deepseek --prompt '$DS_PROMPT' --cardinality 80 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_DS/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_DS/discover.out"
+
+    DS_RUN_ID="$(ls "$WORK_DS/.runs/" 2>/dev/null | sort -r | head -1)"
+    if [[ -n "$DS_RUN_ID" ]]; then
+      DS_RUN_DIR="$WORK_DS/.runs/$DS_RUN_ID"
+
+      TAG_COUNT=$(ls "$DS_RUN_DIR/tags/" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_ds_tags_nonempty" \
+        "test $TAG_COUNT -ge 2"
+
+      FACET_COUNT=$(ls "$DS_RUN_DIR/facets/" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_ds_facets_nonempty" \
+        "test $FACET_COUNT -ge 1"
+
+      CAT_SUBDIRS=$(ls -d "$DS_RUN_DIR/extractions/cat_*" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_ds_extractions_subdirs" \
+        "test $CAT_SUBDIRS -ge 1"
+
+      DRAFT_COUNT=$(ls "$DS_RUN_DIR/drafts/" 2>/dev/null | wc -l)
+      run_test "proxy_e2e_discover_ds_drafts_nonempty" \
+        "test $DRAFT_COUNT -ge 1"
+
+      # Telemetry plan must report `used > 0` against the 5M-token
+      # weekly plan declared in `~/.config/moagan/config.toml`.
+      # `format_row` prints `<used> / <limit> (<pct>%)` (see
+      # `src/cli/telemetry_cmd.rs`), so we look for a line starting
+      # with `deepseek` whose `used / limit` segment has a
+      # positive integer. Write the plan output to a file first so
+      # the run_test body stays inside `bash -c` without escaping
+      # multiline strings.
+      DS_PLAN_FILE="$WORK_DS/plan.out"
+      MOAGAN_HOME=$WORK_DS $BIN telemetry plan --provider deepseek --window-days 1 > "$DS_PLAN_FILE" 2>&1 || true
+      run_test "proxy_e2e_discover_ds_telemetry_plan_reports_weekly" \
+        "grep -q 'weekly' $DS_PLAN_FILE"
+      run_test "proxy_e2e_discover_ds_telemetry_plan_used_positive" \
+        "awk 'NR>1 && /deepseek/ { used=\$4; gsub(/[^0-9]/, \"\", used); if (used+0 > 0) { print \"used=\" used; exit 0 } } END { exit 1 }' $DS_PLAN_FILE"
+    else
+      for _ in 1 2 3 4 5 6; do
+        echo "SKIP: proxy_e2e_discover_ds_* (discover did not start)"
+        PASS=$((PASS + 1))
+      done
+    fi
+    rm -rf "$WORK_DS"
+  fi
+else
+  echo "SKIP: deepseek discovery e2e tests (DEEPSEEK_API_KEY not present)"
 fi
 
 # ---------------------------------------------------------------------
