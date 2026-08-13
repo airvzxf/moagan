@@ -25,8 +25,7 @@ use crate::error::Result;
 use crate::fs_layout::MoaganHome;
 
 use super::probe::{
-    Entry, MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, MaxTokensTableFile, OperatorCap,
-    ProbeTransport, detect_max_tokens,
+    Entry, MIN_AUTOPROBE_FLOOR, MaxTokensTableFile, OperatorCap, ProbeTransport, detect_max_tokens,
 };
 
 /// In-memory table of `(provider_name, model_name) -> Entry` plus
@@ -382,58 +381,6 @@ impl MaxTokensTable {
     }
 }
 
-/// Effective max_tokens for a single LLM call, given the table and
-/// the per-call role default. The clamp is:
-///   min(role_default, table_cached_or_default, MAX_AUTOPROBE_CEILING)
-/// where `table_cached_or_default` is the discovered value if the
-/// table has it, otherwise `DEFAULT_MAX_TOKENS`.
-pub fn effective_max_tokens(table: &MaxTokensTable, provider: &str, model: &str) -> u32 {
-    use crate::llm::prompts::DEFAULT_MAX_TOKENS;
-    let from_table = table
-        .resolve_cached(provider, model)
-        .unwrap_or(DEFAULT_MAX_TOKENS);
-    DEFAULT_MAX_TOKENS
-        .min(from_table)
-        .clamp(MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
-}
-
-/// Probe every `(provider, model)` pair in `entries` and insert the
-/// results into the table. Returns a vector of `(provider, model,
-/// Result<u32>)` so the caller can log failures and decide which
-/// providers to disable for the run.
-pub async fn probe_all(
-    table: &MaxTokensTable,
-    entries: impl IntoIterator<Item = (String, String)>,
-    transport_for: impl Fn(&str, &str) -> Option<Arc<dyn ProbeTransport>>,
-) -> Vec<(String, String, Result<u32>)> {
-    let mut handles = Vec::new();
-    for (provider, model) in entries {
-        let Some(transport) = transport_for(&provider, &model) else {
-            continue;
-        };
-        let table = table.clone();
-        handles.push(tokio::spawn(async move {
-            let res = table.probe_and_store(&provider, &model, transport).await;
-            (provider, model, res)
-        }));
-    }
-    let mut out = Vec::with_capacity(handles.len());
-    for h in handles {
-        if let Ok(triple) = h.await {
-            out.push(triple);
-        } // task panicked: treat as silent skip
-    }
-    out
-}
-
-/// Build the path of the on-disk `max_tokens_auto.toml` for a given
-/// `MoaganHome`. The file lives at `<root>/max_tokens_auto.toml`,
-/// mirroring the `<root>/api_keys.toml` convention. Public so the
-/// `moagan doctor` subcommand can show the operator where to look.
-pub fn max_tokens_auto_path(home: &MoaganHome) -> PathBuf {
-    home.max_tokens_auto_path()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,10 +413,7 @@ mod tests {
     async fn fresh_table_resolves_to_default() {
         let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
         assert!(t.is_empty());
-        assert_eq!(
-            effective_max_tokens(&t, "minimax", "MiniMax-M3"),
-            crate::llm::prompts::DEFAULT_MAX_TOKENS
-        );
+        assert!(t.get("minimax", "MiniMax-M3").is_none());
     }
 
     #[tokio::test]
@@ -547,54 +491,5 @@ mod tests {
     fn floor_clamped_to_minimum() {
         let t = MaxTokensTable::empty(0);
         assert_eq!(t.floor(), MIN_AUTOPROBE_FLOOR);
-    }
-
-    #[tokio::test]
-    async fn probe_all_runs_pairs_in_parallel() {
-        let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
-        let entries = vec![
-            ("minimax".to_owned(), "MiniMax-M3".to_owned()),
-            ("deepseek".to_owned(), "deepseek-v4-flash".to_owned()),
-        ];
-        let results = probe_all(&t, entries, |provider, _model| match provider {
-            "minimax" => Some(cap(524_288)),
-            "deepseek" => Some(cap(128 * 1024)),
-            _ => None,
-        })
-        .await;
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|(_, _, r)| r.is_ok()));
-        assert_eq!(t.len(), 2);
-    }
-
-    #[test]
-    fn effective_max_tokens_falls_back_to_default_when_missing() {
-        let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
-        // No entry for (minimax, MiniMax-M3).
-        assert_eq!(
-            effective_max_tokens(&t, "minimax", "MiniMax-M3"),
-            crate::llm::prompts::DEFAULT_MAX_TOKENS
-        );
-    }
-
-    #[test]
-    fn effective_max_tokens_uses_cached_when_present() {
-        let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
-        // Insert an entry manually so we can pin the behaviour
-        // without depending on the probe async path.
-        let mut inner = t.inner.write();
-        inner.entries.insert(
-            ("minimax".to_owned(), "MiniMax-M3".to_owned()),
-            Entry {
-                max_tokens: 524_288,
-                detected_at: "2026-08-11T00:00:00Z".to_owned(),
-                verified_at: "2026-08-11T00:00:00Z".to_owned(),
-                auto: true,
-                attempts: 35,
-            },
-        );
-        drop(inner);
-        let got = effective_max_tokens(&t, "minimax", "MiniMax-M3");
-        assert_eq!(got, 524_288);
     }
 }
