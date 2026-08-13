@@ -34,7 +34,6 @@ pub mod heartbeat;
 pub mod hub;
 pub mod level;
 pub mod lineage_graph;
-pub mod manifest_txt;
 pub mod manifest_version;
 pub mod phase_macro;
 pub mod recover;
