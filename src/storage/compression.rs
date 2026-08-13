@@ -341,25 +341,6 @@ impl ZstWriter {
         Ok(Self { encoder })
     }
 
-    /// Borrow the inner `File` so a caller (e.g. a tar builder
-    /// that wants to flush the file before `finish()`) can
-    /// reach the underlying writer. Bytes written through the
-    /// returned reference are NOT compressed by the encoder —
-    /// callers that need compression should route through
-    /// [`Self::as_write_mut`] or [`Self::write`].
-    pub fn inner_mut(&mut self) -> &mut File {
-        self.encoder.get_mut()
-    }
-
-    /// Borrow the encoder as a `dyn Write` so a caller (e.g.
-    /// `tar::Builder`) can stream data through it and have
-    /// every byte compressed by the active zstd frame. The
-    /// returned reference is bound to the encoder's lifetime,
-    /// so it stays valid until `finish()` consumes `self`.
-    pub fn as_write_mut(&mut self) -> &mut dyn Write {
-        &mut self.encoder
-    }
-
     /// Stream `buf` into the underlying zstd frame. The bytes
     /// do not reach disk until `finish()` (or a `flush()`) is
     /// called.

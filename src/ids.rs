@@ -30,11 +30,6 @@ impl RunId {
         Self(uuid)
     }
 
-    /// The underlying UUID.
-    pub fn as_uuid(&self) -> Uuid {
-        self.0
-    }
-
     /// 8-char short hex used for log prefixes. Not unique on its own.
     pub fn short(&self) -> String {
         self.0.simple().to_string()[..8].to_owned()
