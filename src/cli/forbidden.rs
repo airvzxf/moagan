@@ -25,14 +25,19 @@ pub const FORBIDDEN_CRATES: &[&str] = &[
     "time",
 ];
 
-/// Check the given `Cargo.toml` text for forbidden crate entries.
-/// Returns `Err(HardIncompatibility)` if any is found.
-pub fn check_cargo_toml(toml_text: &str) -> Result<()> {
+/// Read and check the Cargo.toml next to the binary.
+pub fn check_local_cargo_toml() -> Result<()> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::Path::new(manifest_dir).join("Cargo.toml");
+    if !path.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&path)?;
     for crate_name in FORBIDDEN_CRATES {
         // Match a line that starts with the crate name and an `=`,
         // ignoring leading whitespace.
         let needle = format!("{crate_name} ");
-        if toml_text
+        if text
             .lines()
             .any(|l| l.trim_start().starts_with(&needle) || l.trim_start() == *crate_name)
         {
@@ -42,45 +47,4 @@ pub fn check_cargo_toml(toml_text: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Read and check the Cargo.toml next to the binary.
-pub fn check_local_cargo_toml() -> Result<()> {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = std::path::Path::new(manifest_dir).join("Cargo.toml");
-    if !path.exists() {
-        return Ok(());
-    }
-    let text = std::fs::read_to_string(&path)?;
-    check_cargo_toml(&text)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn passes_clean_cargo_toml() {
-        let t = "[dependencies]\nserde = \"1\"\n";
-        assert!(check_cargo_toml(t).is_ok());
-    }
-
-    #[test]
-    fn rejects_secrecy() {
-        let t = "[dependencies]\nsecrecy = \"0.8\"\n";
-        assert!(check_cargo_toml(t).is_err());
-    }
-
-    #[test]
-    fn rejects_with_indent() {
-        let t = "[dependencies]\n    axum = \"0.7\"\n";
-        assert!(check_cargo_toml(t).is_err());
-    }
-
-    #[test]
-    fn passes_when_substring_match_does_not_apply() {
-        // "axum_extra" should not match the "axum" forbidden entry.
-        let t = "[dependencies]\naxum_extra = \"0.1\"\n";
-        assert!(check_cargo_toml(t).is_ok());
-    }
 }

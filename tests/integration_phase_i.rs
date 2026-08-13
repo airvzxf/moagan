@@ -130,8 +130,6 @@ fn populate_home() -> MoaganHome {
         0,
     )
     .unwrap();
-    db.accumulate_usage(run_id, "minimax", "MiniMax-M3", 2, 100, 50, 10, 0)
-        .unwrap();
     db.record_phase(run_id, "intake", 0, "start", None).unwrap();
     db.record_phase(run_id, "intake", 0, "end", None).unwrap();
     db.record_warning(

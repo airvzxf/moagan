@@ -238,21 +238,6 @@ impl ProviderRegistry {
         self.by_name.get(name).cloned()
     }
 
-    /// Insert a provider by name, wrapped in the supplied circuit
-    /// breaker. Replaces any existing entry; the breaker is also
-    /// recorded under the same name so [`Self::breaker`] can find
-    /// it.
-    pub fn insert_with_breaker(
-        &mut self,
-        name: String,
-        provider: Arc<dyn Provider>,
-        breaker: Arc<CircuitBreaker>,
-    ) {
-        self.breakers.insert(name.clone(), breaker.clone());
-        self.by_name
-            .insert(name, Arc::new(BreakeredProvider::new(provider, breaker)));
-    }
-
     /// Insert a provider by name, wrapping it in a default
     /// [`CircuitBreaker`]. Replaces any existing entry.
     pub fn insert(&mut self, name: String, provider: Arc<dyn Provider>) {
@@ -289,7 +274,7 @@ impl ProviderRegistry {
     /// hand-rolled registries); callers should fall back to
     /// [`Self::get`] for the non-pool path. The returned `Arc<dyn
     /// Provider>` is the same wrapper registered via
-    /// [`Self::insert`] / [`Self::insert_with_breaker`], so the
+    /// [`Self::insert`], so the
     /// breaker / rate-limiter / semaphore layer stays in front of
     /// the inner call.
     ///

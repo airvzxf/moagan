@@ -165,36 +165,6 @@ pub struct ResolvedConfig {
 }
 
 impl ResolvedConfig {
-    /// Build a new override for `(provider, model)` from a builder
-    /// closure. The closure receives a freshly built
-    /// [`ResolvedCapability`] (already marked `Config`-sourced) and
-    /// returns the same value so callers can override individual
-    /// fields. Use [`ResolvedCapability::conservative_default`] as
-    /// the starting point.
-    ///
-    /// ```
-    /// use moagan::llm::capability::{ResolvedCapability, ResolvedConfig, CapabilitySource};
-    ///
-    /// let mut cfg = ResolvedConfig::default();
-    /// cfg.override_pair("kimi", "kimi-k3", |mut c| {
-    ///     c.temperature = false;
-    ///     c
-    /// });
-    /// let cap = cfg.lookup("kimi", "kimi-k3").unwrap();
-    /// assert_eq!(cap.source, CapabilitySource::Config);
-    /// assert!(!cap.temperature);
-    /// ```
-    pub fn override_pair<F>(&mut self, provider: &str, model: &str, f: F)
-    where
-        F: FnOnce(ResolvedCapability) -> ResolvedCapability,
-    {
-        let key = pair_key(provider, model);
-        let mut cap = ResolvedCapability::conservative_default();
-        cap.source = CapabilitySource::Config;
-        let cap = f(cap);
-        self.overrides.insert(key, cap);
-    }
-
     /// Look up an override for `(provider, model)`. The lookup is
     /// case-sensitive, matching [`crate::llm::models_dev::lookup`].
     pub fn lookup(&self, provider: &str, model: &str) -> Option<&ResolvedCapability> {
@@ -208,11 +178,10 @@ fn pair_key(provider: &str, model: &str) -> String {
 
 /// Single point of truth for "what knobs does this model honour?".
 ///
-/// Construct via [`CapabilityResolver::new`] (catalog-only) and
-/// extend with [`CapabilityResolver::with_config`]. The resolver is
-/// `Send + Sync` once wrapped in `Arc` because every field is
-/// either `None`, `Arc<...>`, or `BTreeMap<...>`; the typical use
-/// site stores it on [`crate::phases::phase::RunContext`].
+/// Construct via [`CapabilityResolver::new`] (catalog-only). The
+/// resolver is `Send + Sync` once wrapped in `Arc` because every
+/// field is either `None`, `Arc<...>`, or `BTreeMap<...>`; the
+/// typical use site stores it on [`crate::phases::phase::RunContext`].
 pub struct CapabilityResolver {
     catalog: Option<Arc<ModelsDevCatalog>>,
     config: ResolvedConfig,
@@ -244,13 +213,6 @@ impl CapabilityResolver {
             catalog,
             config: ResolvedConfig::default(),
         }
-    }
-
-    /// Add (or replace) the operator-supplied overrides. Builder
-    /// form so call sites can chain it next to [`Self::new`].
-    pub fn with_config(mut self, cfg: ResolvedConfig) -> Self {
-        self.config = cfg;
-        self
     }
 
     /// The catalog handle, when one was attached. Exposed for
@@ -404,30 +366,6 @@ mod tests {
         assert_eq!(cap.family.as_deref(), Some("kimi"));
     }
 
-    /// Operator config wins over catalog. The override is built
-    /// from the conservative default, so any field the caller does
-    /// not pin falls back to the baseline — the catalog values do
-    /// NOT leak through.
-    #[test]
-    fn resolver_config_overrides_catalog() {
-        let mut cfg = ResolvedConfig::default();
-        cfg.override_pair("kimi", "kimi-k3", |mut c| {
-            c.temperature = true;
-            c
-        });
-        let resolver = CapabilityResolver::new(Some(catalog_with_kimi())).with_config(cfg);
-        let cap = resolver.resolve("kimi", "kimi-k3");
-        assert!(
-            cap.temperature,
-            "override must flip temperature back to true even when the catalog says false"
-        );
-        assert_eq!(cap.source, CapabilitySource::Config);
-        assert_eq!(
-            cap.max_tokens_input, None,
-            "override must not inherit catalog limit; the conservative default has None"
-        );
-    }
-
     /// Resolver with a catalog that does NOT contain the pair
     /// falls through to the hardcoded default. This is the
     /// "operator never saw the model on models.dev" case.
@@ -473,37 +411,18 @@ mod tests {
         assert_eq!(gated.user, req.user);
     }
 
-    /// Config override that flips `temperature` back to true makes
-    /// `gate_request` keep the field even when the catalog says
-    /// false. This pins the precedence from the doc-comment:
-    /// config > catalog > hardcoded.
-    #[test]
-    fn gate_request_respects_config_override_even_when_catalog_says_drop() {
-        let mut cfg = ResolvedConfig::default();
-        cfg.override_pair("kimi", "kimi-k3", |mut c| {
-            c.temperature = true;
-            c
-        });
-        let resolver = CapabilityResolver::new(Some(catalog_with_kimi())).with_config(cfg);
-        let req = sample_request(Some(0.6));
-        let gated = resolver.gate_request("kimi", "kimi-k3", &req);
-        assert_eq!(
-            gated.temperature,
-            Some(0.6),
-            "config override must keep temperature even though the catalog says drop it"
-        );
-    }
-
     /// `ResolvedConfig::lookup` returns None for an unknown pair and
     /// `Some(cap)` for a known pair. The key format is the
     /// documented `"{provider}/{model}"` join.
     #[test]
     fn resolved_config_lookup_is_case_sensitive_and_keyed_by_pair() {
+        let key = pair_key("kimi", "kimi-k3");
+        let cap = ResolvedCapability {
+            temperature: false,
+            ..ResolvedCapability::conservative_default()
+        };
         let mut cfg = ResolvedConfig::default();
-        cfg.override_pair("kimi", "kimi-k3", |mut c| {
-            c.temperature = false;
-            c
-        });
+        cfg.overrides.insert(key, cap);
         assert!(cfg.lookup("kimi", "kimi-k3").is_some());
         assert!(cfg.lookup("Kimi", "kimi-k3").is_none(), "case-sensitive");
         assert!(cfg.lookup("kimi", "K3").is_none(), "model mismatch");

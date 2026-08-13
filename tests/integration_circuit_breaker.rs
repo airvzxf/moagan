@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use moagan::error::{Error, Result};
 use moagan::llm::Role;
 use moagan::llm::circuit_breaker::CircuitBreaker;
-use moagan::llm::provider::{BreakeredProvider, Provider, ProviderRegistry};
+use moagan::llm::provider::{BreakeredProvider, Provider};
 use moagan::llm::wire::{CallRecord, Request, Response, Usage};
 
 /// A programmable provider for breaker tests. Holds a closure
@@ -184,33 +184,6 @@ async fn breaker_opens_after_threshold_failures() {
         scripted.call_count(),
         5,
         "inner provider must NOT be called while breaker is open"
-    );
-
-    // The registry-level wiring is the production entry point;
-    // round-trip through it so a future refactor that only
-    // touches registry_from_config is caught here.
-    let mut reg = ProviderRegistry::default();
-    let inner2: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(
-        "another",
-        "m",
-        "mock://local",
-        |_| Err(always_open_error()),
-    ));
-    let custom_breaker = Arc::new(CircuitBreaker::new(
-        2,
-        Duration::from_secs(60),
-        Duration::from_secs(60),
-    ));
-    reg.insert_with_breaker("another".into(), inner2.clone(), custom_breaker.clone());
-    let reg_provider = reg.get("another").expect("registry lookup");
-    for _ in 0..2 {
-        let _ = reg_provider.send(&dummy_request()).await;
-    }
-    assert_eq!(custom_breaker.state(), "open");
-    let fast = reg_provider.send(&dummy_request()).await.unwrap_err();
-    assert!(
-        matches!(fast, Error::Provider(ref m) if m.starts_with("circuit open")),
-        "registry-wrapped provider must fail-fast when breaker is open, got {fast:?}"
     );
 }
 
