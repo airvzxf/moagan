@@ -401,6 +401,7 @@ cli::dispatch → Cmd::Import → continue_cmd::run_import(home, source_path, ta
 | `--run-id` malformed | `InvalidArgs` |
 | `--run-id` not in DB | `InvalidState` |
 | `--verbose` with `--run-id` | adds timeline of every warning event |
+| `--run-id` + `--capabilities` | shows the resolved capability snapshot active during the run (see §6.1) |
 
 **⚙️ Internal flow**
 
@@ -420,6 +421,34 @@ cli::dispatch → Cmd::Inspect → Db::open(home.meta_db_path)
 | `run_id` malformed | `InvalidArgs` | 2 |
 | Run not found | `InvalidState` | 80 |
 | DB won't open | `Io` / `Provider("sqlite: ...")` | 8 / 40 |
+
+### 6.1 `moagan inspect <run> --capabilities`
+
+**👁 What it is** — Print the capability snapshot that was active when the run executed: every catalog flag (`temperature`, `reasoning`, `tool_call`, `modalities`, `attachment`, `family`, `limit.*`, `cost.*`), the resolved `max_tokens` cap (probe result > catalog limit > config TOML > hardcoded constant), and the source of each value (catalog / probe / config / default). Lets an operator answer "why did this run use this flag value" without re-reading the catalog.
+
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| `--run-id` absent | `InvalidArgs` |
+| `--capabilities` + `--limit` | `--limit` is ignored (drill-in mode) |
+| `--capabilities` + `--verbose` | adds the raw catalog payload + the resolved value side by side |
+
+**⚙️ Internal flow**
+
+```
+cli::dispatch → Cmd::Inspect → inspect::run_capabilities(&db, run_id, verbose)
+  → db.get_run(run_id)? → None → InvalidState
+  → db.get_capability_snapshot(run_id) → snapshot: CapabilitySnapshot
+  → for each (provider, model) in snapshot:
+       println! source   flag   value
+  → if verbose: println! catalog raw payload
+```
+
+The snapshot is captured at the start of each phase and persisted
+to the `calls` table (migration v014; see §15.11). On a run that
+predates v0.7.1 the snapshot is absent and the command prints
+`no capability snapshot for this run`.
 
 ---
 
@@ -638,13 +667,21 @@ cli::dispatch → Cmd::Repair → repair::run(RepairArgs { cleanup_orphans, rein
 
 **👁 What it is** — Quick environment check before spending an API key: that `MINIMAX_API_KEY` is set, that `MOAGAN_HOME` resolves and is writable, that `meta.sqlite` opens, and a list of providers + models configured. Prints one `[OK]/[WARN]/[FAIL]` line per check for easy grepping. Exit `0` if everything OK, `1` if any FAIL.
 
-**🧩 Flag matrix** — No flags.
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| no flags | run every check (§12 default behaviour) |
+| `--capabilities` | skip the default checks; instead, resolve and print the capability snapshot for every configured `(provider, model)` pair (see §12.1) |
+| `--capabilities` + other flags | `--capabilities` is exclusive — other flags are ignored with a `WARN` line |
 
 **⚙️ Internal flow**
 
 ```
 cli::dispatch → Cmd::Doctor → doctor::run()
   → Config::load()
+  → if --capabilities: doctor::run_capabilities(&cfg, &home)
+       → return
   → emit(check_provider_config)              // {N} provider(s) configured or WARN if empty
   → for each (kind, models) in models_per_provider(cfg):
        emit(Check { label: "models for provider '<kind>'", status, detail: models.join(", ") })
@@ -664,6 +701,29 @@ cli::dispatch → Cmd::Doctor → doctor::run()
 | any `[FAIL]` (api_key, home, sqlite) | 1 |
 | only `[WARN]` (providers empty, home missing → sqlite skipped) | 0 |
 | everything OK | 0 |
+
+### 12.1 `moagan doctor --capabilities`
+
+**👁 What it is** — Print the resolved capability snapshot for every configured `(provider, model)` pair: every catalog flag (`temperature`, `reasoning`, `tool_call`, `modalities`, `attachment`, `family`, `limit.*`, `cost.*`), the resolved `max_tokens` cap, and the source of each value (catalog / probe / config / default). Useful for verifying that the models.dev catalog is being read correctly before spending an API key on a real run.
+
+**🧩 Flag matrix** — No additional flags.
+
+**⚙️ Internal flow**
+
+```
+cli::dispatch → Cmd::Doctor → doctor::run_capabilities(&cfg, &home)
+  → models_dev::Catalog::load(&home)?       // from §D.30.5
+  → for each (kind, model) in models_per_provider(&cfg):
+       caps = Capabilities::resolve(kind, model, &cfg, &catalog)?
+       println! kind:model  source   flag   value
+       // source ∈ { catalog, probe, config, default }
+  → exit: 0 always (read-only)
+```
+
+When the catalog cache is missing and `MOAGAN_MODELS_DEV_OFFLINE` is
+unset the loader fetches the catalog first; the command can take a
+few seconds on a cold cache. The output is line-oriented so
+operators can `grep` for a specific flag or provider.
 
 ---
 
@@ -979,6 +1039,53 @@ window_days  = 7
 
 ---
 
+### 15.11 `moagan telemetry cost --run <run_id>`
+
+**👁 What it is** — Per-run USD aggregate for a finished run. Reads the `cost_usd` column added by SQLite migration v014 (§D.32.6 in `docs/proposal-03-add-ons.md`), groups by role and model, and prints a small table with the total. Lets an operator answer "how much did this run cost me" without joining the catalog and the calls table by hand. When the run predates v0.7.1 (no `cost_usd` column) or the `(provider, model)` pair has no `cost.*` flags in the catalog, the row prints `(no cost data)` instead of `0`.
+
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| `--run <id>` absent | `InvalidArgs` ("missing --run") |
+| `--run <id>` malformed | `InvalidArgs` |
+| `--run <id>` not in DB | `InvalidState` |
+| `--by role` | group rows by `role` (default) |
+| `--by model` | group rows by `(provider, model)` |
+| `--json` | print a single JSON object instead of a table |
+| `--limit N` | show the top-N rows only (default 20) |
+
+**⚙️ Internal flow**
+
+```
+cli::dispatch → Cmd::Telemetry → telemetry::run_cost(CostArgs { run_id, by, json, limit })
+  → RunId::from_str(run_id) → bounds check
+  → Db::open(home.meta_db_path)
+  → db.get_run(run_id)? → None → InvalidState
+  → db.aggregate_cost(run_id, group_by = by)? → rows: Vec<CostRow>
+       // SQL: SELECT role|provider|model, SUM(cost_usd), COUNT(*) FROM calls
+       //       WHERE run_id = ? AND cost_usd IS NOT NULL
+       //       GROUP BY <group_by> ORDER BY total_usd DESC LIMIT ?
+  → format_table(rows) | format_json(rows)
+```
+
+```text
+$ moagan telemetry cost --run 018f3a2b --by model
+provider     model          calls=200    total_usd=$1.42
+minimax      MiniMax-M3     200          $1.42
+(1 row(s); $1.42 total)
+```
+
+**❌ Errors / exit codes**
+
+| Case | Error | Exit |
+|---|---|---|
+| `--run` missing or malformed | `InvalidArgs` | 2 |
+| Run not found | `InvalidState` | 80 |
+| DB won't open | `Io` / `Provider("sqlite: ...")` | 8 / 40 |
+
+---
+
 ## 16. `moagan pause`
 
 **👁 What it is** — Serialises an active run's state to `<run_dir>/paused.json` with a `paused.lock` (TTL 5 min). Built for cross-process hibernation: shut down the machine, run `continue --from-pause` the next day, and the pipeline picks up where it left off. The lockfile prevents two pauses from competing on the same run.
@@ -1073,6 +1180,66 @@ cli::dispatch → Cmd::Rate → rate::run(RateArgs { run_id, proposal_id, score 
 
 ---
 
+## 19. `moagan probe max_tokens`
+
+**👁 What it is** — Bulk-probe the `max_tokens` ceiling for one or more `(provider, model)` pairs in a single invocation and persist the discovered value to `<MOAGAN_HOME>/max_tokens_auto.toml`. Sibling of the runtime auto-probe documented in [`docs/max-tokens-auto.md`](max-tokens-auto.md): the runtime probe runs once per fresh model on first startup, while `moagan probe max_tokens` is the explicit operator-driven equivalent for "I added a new provider, probe it now". Supports up to N providers in one call so a multi-provider rollout needs only one CLI invocation.
+
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| no `--provider` | `InvalidArgs` ("missing --provider") |
+| `--provider <kind>:<model>` repeated | probed in the order given; per-provider failures are reported but do not abort the batch |
+| `--floor <N>` | clamp the discovered value to `>= N` (default `1024`, mirrors `ProviderConfig::max_token_auto`) |
+| `--save` (default `true`) | write the result to `max_tokens_auto.toml` |
+| `--no-save` | run the probe but leave the cache file untouched |
+| `--timeout-secs <N>` | per-provider probe timeout (default 60 s); the probe exits cleanly with the cache value on timeout |
+| `--provider <kind>` not configured | `InvalidArgs` ("provider '<kind>' not in config") |
+
+**⚙️ Internal flow**
+
+```
+cli::dispatch → Cmd::Probe → probe::run_max_tokens(ProbeMaxTokensArgs { providers, floor, save, timeout })
+  → Config::load() → MoaganHome::resolve() + ensure
+  → for each (kind, model) in providers:
+       builder = ProviderBuilder::for_kind(&cfg, kind)?
+       ceiling = probe::probe_ceiling(&builder, model, floor, timeout_secs)?  // exponential + bisect
+       if save: max_tokens_table.upsert(kind, model, ceiling)
+       println! "{kind}:{model}  ceiling={ceiling}  floor={floor}  source=probe"
+  → exit 0 on success; exit 1 if every probe failed
+```
+
+```bash
+$ moagan probe max_tokens \
+    --provider minimax:MiniMax-M3 \
+    --provider minimax:MiniMax-M2.7 \
+    --provider opencode_go:qwen3.x \
+    --floor 1024 --save
+
+minimax:MiniMax-M3          ceiling=524288   floor=1024   source=probe
+minimax:MiniMax-M2.7        ceiling=131072   floor=1024   source=probe
+opencode_go:qwen3.x         ceiling=16384    floor=1024   source=probe
+(3/3 probes succeeded; cache: ~/.local/share/moagan/max_tokens_auto.toml)
+```
+
+The probe is read-only at the provider (no caching of upstream
+responses, no billable tokens). The mock provider is a no-op (returns
+`DEFAULT_MAX_TOKENS = 1_000_000` immediately). See
+[`docs/max-tokens-auto.md`](max-tokens-auto.md) for the full probe
+algorithm and the cache-file format.
+
+**❌ Errors / exit codes**
+
+| Case | Error | Exit |
+|---|---|---|
+| `--provider` absent or `<kind>` unknown | `InvalidArgs` | 2 |
+| every provider rejected the probe | (none — empty result) | 1 |
+| some providers rejected the probe | (none — partial result printed) | 0 |
+| cache write fails | `Io` | 8 |
+| upstream 5xx on every probe | `Provider` | 40 |
+
+---
+
 # Appendix A — Master exit-code table
 
 (T01-06 §12.3 + extended catalog)
@@ -1160,6 +1327,8 @@ cli::dispatch → Cmd::Rate → rate::run(RateArgs { run_id, proposal_id, score 
 | `moagan telemetry cleanup` | Apply retention policy |
 | `moagan telemetry verify` | Re-hash an exported bundle against `SHA256SUMS` |
 | `moagan telemetry config` | Print effective configuration (no API keys) |
+| `moagan telemetry cost` | Per-run USD aggregate (cost_usd column, §15.11) |
 | `moagan pause` | Serialize current run state to `paused.json` |
 | `moagan list` | Enumerate runs with `paused.json` |
 | `moagan rate` | Manually rate a proposal (preference cache) |
+| `moagan probe max_tokens` | Bulk-probe `(provider, model)` ceilings and persist (§19) |
