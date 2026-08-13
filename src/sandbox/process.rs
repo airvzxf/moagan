@@ -326,12 +326,6 @@ impl SandboxConfig {
         self
     }
 
-    /// Replace the denylist with a custom one.
-    pub fn with_denylist(mut self, denylist: Denylist) -> Self {
-        self.denylist = denylist;
-        self
-    }
-
     /// Cap stdout/stderr capture per stream.
     pub fn with_max_capture(mut self, bytes: usize) -> Self {
         self.max_capture_bytes = Some(bytes);
@@ -386,48 +380,6 @@ impl SandboxConfig {
     /// subprocess verbatim. Catalog §D.11.10.
     pub fn with_allow_injection(mut self, allow: bool) -> Self {
         self.allow_injection = allow;
-        self
-    }
-
-    /// Replace the Linux namespaces applied before executing the child.
-    /// The empty set disables namespace isolation.
-    pub fn with_namespaces(mut self, namespaces: NamespaceFlags) -> Self {
-        self.namespaces = namespaces;
-        self
-    }
-
-    /// Replace the seccomp syscall whitelist applied to the
-    /// subprocess. Catalog §D.11.7. Default
-    /// [`SeccompPolicyKind::Permissive`] (no-op). Setting
-    /// [`SeccompPolicyKind::StrictRustBuild`] makes the sandbox load
-    /// a BPF program that allow-lists the syscalls needed to compile
-    /// Rust from scratch.
-    pub fn with_seccomp(mut self, kind: SeccompPolicyKind) -> Self {
-        self.seccomp = kind;
-        self
-    }
-
-    /// Opt in to cgroup v2 resource limits with a custom
-    /// [`CgroupLimits`] profile. Catalog §D.11.1. `None` removes
-    /// the cap (the default). When the kernel does not expose
-    /// cgroup v2, the sandbox falls back to `libc::prlimit`; on
-    /// non-Unix hosts the knob is a no-op. Use [`Self::with_cgroup`]
-    /// to opt in with the default profile; use
-    /// [`Self::with_cgroup_limits`] for a custom one.
-    pub fn with_cgroup(mut self, enable: bool) -> Self {
-        self.cgroup = if enable {
-            Some(CgroupLimits::default())
-        } else {
-            None
-        };
-        self
-    }
-
-    /// Replace the [`CgroupLimits`] profile. Pass `None` to disable
-    /// cgroup enforcement; pass `Some(limits)` to opt in with a
-    /// custom `cpu_max` / `memory_max_bytes` / `pids_max` triple.
-    pub fn with_cgroup_limits(mut self, limits: Option<CgroupLimits>) -> Self {
-        self.cgroup = limits;
         self
     }
 
@@ -846,21 +798,6 @@ impl Sandbox {
         self.run_in(work.path(), cmd, args).await
     }
 
-    /// Execute `cmd` with an explicit output cap inside a fresh
-    /// scratch directory.
-    pub async fn run_with_output_cap(
-        &self,
-        cmd: &str,
-        args: &[&str],
-        max_output_bytes: usize,
-    ) -> std::result::Result<SandboxResult, SandboxError> {
-        let work = self
-            .new_workdir()
-            .map_err(|error| SandboxError::Io(error.to_string()))?;
-        self.run_in_with_output_cap(work.path(), cmd, args, max_output_bytes)
-            .await
-    }
-
     /// Execute `cmd` with `args` inside the supplied `work_dir`. The
     /// directory's contents are visible to the spawned process and
     /// the process's CWD is set to it. The caller retains ownership
@@ -966,8 +903,7 @@ impl Sandbox {
 
     /// Translate the new command-struct core ([`run_in_with_limits`])
     /// into the legacy [`SandboxResult`] shape used by
-    /// [`Sandbox::run`], [`Sandbox::run_in`],
-    /// [`Sandbox::run_with_output_cap`], and
+    /// [`Sandbox::run`], [`Sandbox::run_in`], and
     /// [`Sandbox::run_in_with_output_cap`].
     ///
     /// - `Ok(SandboxOutput)` → `Ok(SandboxResult)` with status

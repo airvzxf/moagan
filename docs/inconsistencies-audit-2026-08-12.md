@@ -291,3 +291,93 @@ A count of `0` = disconnected. Items with re-exports at `X/mod.rs` are flagged "
 - `BudgetPolicy::{Warn,Abort}` removal (round 2 — PR #436).
 - The new findings surfaced by rounds 2-5 (covered by
   `docs/inconsistencies-audit-2026-08-12-round-2.md`).
+
+## §H What was fixed between 2026-08-12 and 2026-08-13
+
+This baseline document was the snapshot at `3c1f23e` (post-`#434`).
+The 24-hour window that followed landed **10 PRs** that closed the
+bulk of the round-1, round-2, and round-5 findings, plus three
+rounds of follow-up cleanup (rounds 6 and 7):
+
+| PR | Subject | LoC dropped | Round-1 items closed |
+|---:|---|---:|---|
+| [#432](https://github.com/anomalyco/opencode-moa/pull/432) | `fix(llm): pass capability-gated request to dispatch_to_provider (Closes #428)` | behaviour | round-2 §C followup — closes #428 |
+| [#433](https://github.com/anomalyco/opencode-moa/pull/433) | `refactor(telemetry): drop 5 dead modules` | ~600 | round-2 §A.6 row 4 (manifest_ext, manifest_txt, manifest_version, recover, phase_macro) |
+| [#434](https://github.com/anomalyco/opencode-moa/pull/434) | `refactor(ranking+discovery): drop unused invalidate_downstream + matrix_seed` | ~115 | round-1 §D.2 + §D.3 |
+| [#435](https://github.com/anomalyco/opencode-moa/pull/435) | `refactor(storage): drop 4 empty v013/v011 tables via v016 migration` | schema | round-1 §D.4 (4 of 5 tables); `run_state`, `discovery_dedup`, `plan_state`, `budget_events` removed |
+| [#436](https://github.com/anomalyco/opencode-moa/pull/436) | `refactor(telemetry+discovery+phases): audit round 5 (drop 5 dead modules + trim BudgetPolicy::Abort)` | ~700 | round-1 §B.2 (telemetry level/tracing_filter/hub); round-1 §C.4 (Abort variant); round-1 §A.5 `format_sha256sums` visibility |
+| [#437](https://github.com/anomalyco/opencode-moa/pull/437) | `docs(audit): re-create round-1 + round-2 inconsistency audits` | docs | this file (re-derived after worktree cleanup) |
+| [#438](https://github.com/anomalyco/opencode-moa/pull/438) | `refactor(llm): drop unused anthropic_compat + streaming (546+120 LoC)` | ~666 | round-1 §B.3 (both modules) |
+| [#439](https://github.com/anomalyco/opencode-moa/pull/439) | `refactor(storage): drop dead manifest_versions table (v017) + fix stale ranking docstring` | schema + 1 LoC | round-1 §D.4 (5th table — manifest_versions); round-1 §C.3 stale `ranking/mod.rs:4` docstring |
+| [#440](https://github.com/anomalyco/opencode-moa/pull/440) | `refactor: audit round 7 (drop unique_tempdir + 4 orphaned items + refresh stale docstrings)` | ~150 | round-1 §A.8 `test_support::unique_tempdir`; round-1 §C.4 `BudgetPolicy::Warn`; round-7 orphaned: `BudgetObserver::policy` field, `probe_table::effective_max_tokens`, `probe_table::probe_all`, `probe_table::max_tokens_auto_path` |
+| [#441](https://github.com/anomalyco/opencode-moa/pull/441) | `docs(coord): close out session 2` | docs | session summary |
+
+**Net**:
+- **~1,100 LoC of dead production code removed** across 7 refactor
+  PRs (#433, #434, #436, #438, #440) + the smaller drops in #432,
+  #435 (schema), #439 (schema).
+- **2 dead SQLite tables dropped** via v016 (4 tables) and v017
+  (`manifest_versions`) migrations.
+- **5 dead SQLite tables from round 1 §D.4 closed** (the 5th was
+  `manifest_versions`, dropped in v017).
+- **3 stale docstrings refreshed** (`ranking/mod.rs:4`, the
+  `proposal-03` §D.2 closure note, and the `phase_macro` references
+  that the deletion of the module obsoleted).
+- **2 spec-vs-impl drift findings closed** (§D.2 `invalidate_downstream`
+  and §D.3 `matrix_seed` — both dropped, no follow-up wiring needed).
+- **2 CapabilityGate followups closed** (PR #430 wireup + PR #432 fix
+  for the un-gated request leak — the latter is `Closes #428`).
+
+### §H.1 Items still open from round 1
+
+A small number of round-1 findings remain open at HEAD `7b962a2`:
+
+| Finding | Where | Status |
+|---|---|---|
+| `src/cli/flags_batch.rs` — 7 dead env-var helpers + `BatchPolicy` + `ROUTING_TOML_AVAILABLE` stub | round-1 §A.1 | **Open** — `HashAlgo` is the only survivor (consulted by `llm/wire.rs`); PR #424 (which would have dropped the rest) is stranded on `fix/audit-findings`. |
+| `src/storage/lease_full.rs` (143 LoC) + 4 dead `process_lock acquire/release` helpers in `sqlite.rs` | round-1 §A | **Open** — same stranded-PR issue as above. |
+| 4 dead discovery sub-modules (`context`, `id`, `persona_angle`, `saturation_event`) | round-1 §B.1 | **Open** — `persona_angle` and `saturation_event` are truly dead (no re-export, no caller); `context` and `id` are dead-but-types-survive-via-re-export. Round-8 follow-up will drop the truly-dead pair. |
+| `BudgetPolicy::Abort` future hook | round-1 §C.4 | **Closed** by PR #436. `Warn` closed by PR #440 (both variants dropped along with the `policy` field that carried them). |
+| 4 dead `phases/{intake,synthesize,replace,util}.rs` helpers | round-1 §A.3 | **Open** — not picked up by any PR in this window. |
+| 4 dead `audit/{format,verify}.rs` helpers | round-1 §A.6 | **Open** — `from_writer` and `from_mutexed` (audit/format.rs:171,177) and `inner_mut`/`as_write_mut` (compression.rs:350,359) all confirmed dead by the round-8 grep. |
+| Spanish identifier leaks (`detectar_outliers`, `cola_reserva`) | round-1 §C.1 | **Open** — separate PR; not picked up. |
+| `manifest_versions` SQLite table | round-1 §D.4 | **Closed** by PR #439 (v017 migration). |
+| `src/ranking/mod.rs:4` "four sub-modules" stale docstring | round-1 §C.3 | **Closed** by PR #439. |
+
+### §H.2 New round-8 scan (top 5 newly-dead items)
+
+A fresh reference-counting grep against HEAD `7b962a2` surfaces
+**34 dead `pub fn`** plus **2 dead `pub mod` sub-trees**. The
+top 5 by signal-to-effort were selected for the round-8 cleanup
+commits on this branch:
+
+1. **6 dead `SandboxConfig` builders + `run_with_output_cap`** in
+   `src/sandbox/process.rs` (~50 LoC) — `with_cgroup`,
+   `with_cgroup_limits`, `with_denylist`, `with_seccomp`,
+   `with_namespaces` builders have zero callers; the parallel
+   `run_with_output_cap` shim is dead (the underlying
+   `run_in_with_output_cap` stays because it's the live
+   dispatch from `run_in`).
+2. **3 dead zombie-recovery helpers** in `src/storage/sqlite.rs`
+   (~55 LoC) — `find_zombie_runs` (reads from `process_locks`,
+   parallel to the live `reconcile::list_zombie_run_ids` which
+   reads from `runs`), `mark_run_interrupted` (parallel to the
+   live `recover_zombies` path that uses `update_run_status`),
+   and `_test_backdate_run_lease` (`#[doc(hidden)]` test helper
+   with no test callers).
+3. **`src/execution/per_provider_semaphores.rs` whole module**
+   (~89 LoC + 3 tests) — type is `pub use`'d at `execution/mod.rs:8`
+   but zero constructors, zero callers; the global
+   `ParallelismPool` is the live path.
+4. **3 dead `MockProvider` / `MockResponse` setters** in
+   `src/llm/mock.rs` (~30 LoC) — `set_name`, `set_model`,
+   `with_usage`. `set_endpoint` survives because it is still
+   called from a handful of tests.
+5. **`RunId::as_uuid`** in `src/ids.rs` (3 LoC) — one-line
+   accessor with zero callers; the underlying `pub Uuid` field
+   is directly accessible.
+
+The remaining 24 dead `pub fn` items + the `phases::budget_cascade`
+whole-module orphan are documented in
+`docs/inconsistencies-audit-2026-08-12-round-2.md` §E (round-8
+followup list).

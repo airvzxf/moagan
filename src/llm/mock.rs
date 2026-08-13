@@ -48,20 +48,6 @@ impl MockResponse {
         }
     }
 
-    /// Build a response with explicit usage.
-    pub fn with_usage(text: impl Into<String>, input: u64, output: u64) -> Self {
-        Self {
-            text: text.into(),
-            usage: Usage {
-                input_tokens: input,
-                output_tokens: output,
-                cache_read: 0,
-                cache_creation: 0,
-            },
-            finish_reason: Some("end_turn".into()),
-        }
-    }
-
     /// Convert to a `Response` for the [`Provider`] trait.
     pub fn into_response(self) -> Response {
         let truncated = matches!(self.finish_reason.as_deref(), Some("max_tokens"));
@@ -158,25 +144,12 @@ impl MockProvider {
         Self::new(Vec::new())
     }
 
-    /// Override the `name()` reported by the trait methods. Useful
-    /// when the same `MockProvider` instance stands in for one of
-    /// several distinct provider kinds in a pool test (D.19.19:
-    /// `ProviderPool` distinguishes entries by `inner.name()`).
-    pub fn set_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
-    }
-
     /// Override the `endpoint()` reported by the trait methods.
     /// Pairs with [`Self::set_name`] so tests that pin
     /// `Provider::endpoint` (telemetry, dashboards) can assert
     /// which entry the pool actually picked.
     pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
         self.endpoint = endpoint.into();
-    }
-
-    /// Override the `model()` reported by the trait methods.
-    pub fn set_model(&mut self, model: impl Into<String>) {
-        self.model = model.into();
     }
 
     /// Push a response onto the queue.

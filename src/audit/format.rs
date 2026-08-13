@@ -159,25 +159,6 @@ impl AuditWriter {
         })
     }
 
-    /// Wrap an existing writer boxed as `Box<dyn Write + Send>`.
-    pub fn from_boxed(inner: Box<dyn Write + Send>) -> Self {
-        Self {
-            inner: BufWriter::new(inner),
-            sync_file: None,
-        }
-    }
-
-    /// Wrap an owned writer.
-    pub fn from_writer<W: Write + Send + 'static>(w: W) -> Self {
-        Self::from_boxed(Box::new(w))
-    }
-
-    /// Wrap a borrowed writer behind `Mutex` so it can be shared
-    /// across threads. Used by tests.
-    pub fn from_mutexed<W: Write + Send + 'static>(w: std::sync::Arc<std::sync::Mutex<W>>) -> Self {
-        Self::from_boxed(Box::new(MutexWriter(w)))
-    }
-
     /// Write one record as a complete gzip member.
     pub fn write_record(&mut self, rec: &mut AuditRecord) -> io::Result<()> {
         rec.crc32 = record_crc(rec)?;
@@ -202,24 +183,6 @@ impl AuditWriter {
             file.sync_data()?;
         }
         Ok(())
-    }
-}
-
-/// Adapter over an `Arc<Mutex<W>>` so the writer can be shared.
-struct MutexWriter<W: Write + Send + 'static>(std::sync::Arc<std::sync::Mutex<W>>);
-
-impl<W: Write + Send + 'static> Write for MutexWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("mutex poisoned"))?
-            .write(buf)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("mutex poisoned"))?
-            .flush()
     }
 }
 

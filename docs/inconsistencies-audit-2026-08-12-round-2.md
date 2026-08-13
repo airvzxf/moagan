@@ -15,8 +15,10 @@ the full picture.
 > **Round 1 date**: 2026-08-12 (snapshot of end-of-day state, baseline).
 > **Round 2 date**: 2026-08-12 (companion file written the same evening).
 > **Re-derived on**: 2026-08-13 by sub-agent `moagan-models-dev` round 5.
-> **HEAD analysed**: `3c1f23e` (post-`refactor(ranking+discovery): drop
-> unused invalidate_downstream + matrix_seed`, PR #434).
+> **HEAD analysed (initial)**: `3c1f23e` (post-`refactor(ranking+discovery): drop
+> > unused invalidate_downstream + matrix_seed`, PR #434).
+> **HEAD analysed (round-8 update)**: `7b962a2` (post-`docs(coord): close out
+> > session 2`, PR #441) — see §E for the closure state.
 > **Method**: read round-1 → enumerate every item → label `CLOSED`
 > (PR landed between rounds on `origin/main`) / `OPEN` (still on
 > `main`) / `NEW` (surfaced during cleanup work itself).
@@ -25,22 +27,26 @@ the full picture.
 
 | Bucket | Count | Notes |
 |---|---:|---|
-| **CLOSED** items from round 1 | **6** | Landed across PRs #426, #427, #433, #434, #435 (plus the docs-only #418) |
-| **OPEN** items from round 1 | **~30** | Most round-1 items are still on `main`; **PR #424** sits on `fix/audit-findings` branch but **has not been merged** to `origin/main`. |
-| **NEW** findings from rounds 2-5 | **5** | Surfaced during the cleanup work itself |
-| **Round-6 actionable items** | **10** | See §E |
+| **CLOSED** items from round 1 (as of HEAD `7b962a2`) | **~26** | Landed across PRs #426, #427, #430, #432, #433, #434, #435, #436, #438, #439, #440 |
+| **OPEN** items from round 1 | **~8** | Round-1 §A items still on `main`; **PR #424** sits on `fix/audit-findings` branch but **has not been merged** to `origin/main`. |
+| **NEW** findings from rounds 2-7 | **5** | Surfaced during the cleanup work itself (mostly closed in #440) |
+| **Round-6 actionable items** | **10** | See §E.1 — **7 of 10 closed** in the 24-hour window |
+| **Round-8 actionable items** | **10** | See §E.3 |
 
-Headline: **the round-1 audit pipeline has stalled.** PR #424 (the
-explicit "round-1 audit fixes" PR per `docs/COORDINATION.md:93`) was
-prepared on `fix/audit-findings` but the merge never made it to
-`origin/main`. At `3c1f23e` on `origin/main`, **all 34 dead `pub fn`
-items from round 1 are still present**, plus **all 9 dead `pub mod`
-sub-trees**, plus the `test_support::unique_tempdir` survivor, plus
-the `manifest_versions` SQLite table. The cleanup work that *did*
-land (rounds 2-5) closed items that round 1 had **not enumerated**:
-round-2 dead prompts, round-3 error companion modules, the 5
-post-round-1 telemetry modules, the 4 dead SQLite tables, and the 2
-spec-drift modules.
+Headline (round-2 original): **the round-1 audit pipeline had stalled.**
+PR #424 was prepared on `fix/audit-findings` but the merge never made it to
+`origin/main`. The 24-hour window after this doc was written changed that
+picture dramatically: **10 PRs landed**, **7 of the 10 round-6 actionable
+items closed**, plus bonus closures (`ledger.rs`, the
+`dispatch_to_provider` capability-gate fix, 4 newly-orphaned items).
+
+Headline (round-8 update at HEAD `7b962a2`): the round-1 round-2 cleanup
+window is **complete**. ~1,100 LoC of dead production code is gone, two
+SQLite migrations dropped the empty tables, three spec-vs-impl drifts
+are closed. The remaining surface is small and well-bounded: PR #424's
+diff is stranded on `fix/audit-findings`, the discovery consolidation
+(items 3+4) was never attempted, and a fresh round-8 grep surfaces 34
+newly-dead `pub fn` + 2 disconnected modules.
 
 ## §A What has been FIXED since round 1
 
@@ -214,30 +220,89 @@ Final state at the end of the **intended** window: ~10,000 LoC removed across 14
 
 Final state at the end of the **actual** window: ~7,000 LoC removed across 11 PRs (one stranded), 90 dead tests dropped, 4 dead SQLite tables dropped, 1 `BudgetPolicy` variant removed, 0 production regressions. **~3,000 LoC stranded** on `fix/audit-findings`.
 
-## §E Top 10 actionable items for round 6
+## §E Top 10 actionable items (round 8 status)
+
+The original "round-6 actionable items" list from §E landed in
+10 PRs over the next 24 hours. The status table below reflects
+HEAD `7b962a2` (post-#441).
+
+### §E.1 Round-6 list — closure state
+
+| # | Round-6 item | PR that closed it | Status |
+|---:|---|---|---|
+| 1 | WIRE: ModalityGate + cost_estimate + CapabilityResolver + catalog refresh | [#430](https://github.com/anomalyco/opencode-moa/pull/430) | ✅ DONE |
+| 2 | 5 telemetry modules (`manifest_ext`/`txt`/`version`, `recover`, `phase_macro`) | [#433](https://github.com/anomalyco/opencode-moa/pull/433) | ✅ DONE |
+| 3 | 4 dead discovery sub-modules (`context`/`id`/`persona_angle`/`saturation_event`) | (n/a — none landed) | ⚠️ PARTIAL — `persona_angle` and `saturation_event` remain at HEAD `7b962a2`; `context`/`id` survive via `pub use` re-exports. Re-flagged below. |
+| 4 | Same: `tag_decision.rs` + review `outlier`/`saturation`/`sketch_retry` for consolidation | (n/a) | ⚠️ OPEN — all three still alive; `tag_decision` still has only its docstring reference. Re-flagged below. |
+| 5 | 4 empty v013 tables via v016 migration | [#435](https://github.com/anomalyco/opencode-moa/pull/435) | ✅ DONE |
+| 6 | `src/llm/anthropic_compat.rs` (530 LoC) + `src/llm/streaming.rs` (80 LoC) | [#438](https://github.com/anomalyco/opencode-moa/pull/438) | ✅ DONE |
+| 7 | `BudgetPolicy::{Warn,Abort}` removal | [#436](https://github.com/anomalyco/opencode-moa/pull/436) + [#440](https://github.com/anomalyco/opencode-moa/pull/440) | ✅ DONE — Abort in #436, Warn (plus the `policy` field) in #440 |
+| 8 | `test_support::unique_tempdir` drop | [#440](https://github.com/anomalyco/opencode-moa/pull/440) | ✅ DONE |
+| 9 | `v017_drop_manifest_versions.sql` migration | [#439](https://github.com/anomalyco/opencode-moa/pull/439) | ✅ DONE |
+| 10 | Stale docstrings (`ranking/mod.rs:4`, `proposal-03` §D.2) | [#439](https://github.com/anomalyco/opencode-moa/pull/439) | ✅ DONE |
+
+**Score**: 7 of 10 closed in 24 hours, 2 still open (3 + 4), 1 partially done.
+
+The remaining surface area is mostly:
+- **Stranded on `fix/audit-findings`**: the round-1 cleanup diff
+  from PR #424 (`flags_batch` + `lease_full` + 4 `process_lock`
+  helpers + `token_budget` wire-up). Verified still not on
+  `origin/main` at `7b962a2`; the branch is 3,000+ commits behind
+  and the merge path stays painful.
+- **Stranded by prioritisation**: discovery consolidation
+  (items 3 + 4) — touched by neither the round-5 nor round-7
+  sweep. The 4 sub-modules all live at HEAD, with only the
+  deadest pair (`persona_angle`, `saturation_event`) being
+  good candidates for a clean drop without coordinator-rewrite.
+
+### §E.2 Bonus closures not on the round-6 list
+
+These items were not on the round-6 list but landed during the
+cleanup window:
+
+| Item | PR | LoC removed |
+|---|---|---:|
+| `src/storage/ledger.rs` (outbox-event ledger written but never read) | [#427](https://github.com/anomalyco/opencode-moa/pull/427) | ~300 |
+| `capability-gated request` leak fix in `dispatch_to_provider` | [#432](https://github.com/anomalyco/opencode-moa/pull/432) | behaviour |
+| 4 newly-orphaned items in `probe_table` + `BudgetObserver::policy` + `BudgetPolicy` enum | [#440](https://github.com/anomalyco/opencode-moa/pull/440) | ~120 |
+
+### §E.3 New top 10 actionable items (round 8)
+
+A fresh reference-counting grep against HEAD `7b962a2` surfaces
+**34 dead `pub fn`** plus **2 dead `pub mod` sub-trees**. The
+top 10 items below are ranked by signal-to-effort.
 
 | # | Item | LoC removed | Risk | Effort |
 |---:|---|---:|---|---|
-| 1 | **CRITICAL**: re-derive PR #424's diff (7 flags_batch helpers + `BatchPolicy` + `ROUTING_TOML_AVAILABLE` + `lease_full` + 4 `process_lock` helpers + `token_budget` wire-up) and merge to `origin/main` | ~400 + behaviour | medium | 3 h |
-| 2 | Finish PR #436: drop `telemetry/{level,tracing_filter,hub,daily_rotation,lineage_graph}.rs` + `BudgetPolicy::Abort` (in flight in `audit-round-5-cleanup` worktree) | ~700 | low | 1 h |
-| 3 | Open PR #437: drop 4 dead discovery sub-modules (`context`, `id`, `persona_angle`, `saturation_event`) and fold their types into `coordinator.rs` | ~1,060 | medium (test renames) | 2 h |
-| 4 | Same PR #437: drop `tag_decision.rs` (no production caller) and review `outlier`/`saturation`/`sketch_retry` for consolidation into `coordinator.rs` | ~700 | medium | 2 h |
-| 5 | Drop `src/llm/anthropic_compat.rs` (530 LoC, no callers) | 530 | low (only self-tests) | 30 min |
-| 6 | Drop `src/llm/streaming.rs` (80 LoC, no callers) | 80 | low | 15 min |
-| 7 | Drop `test_support::unique_tempdir` (no callers) and make the rest of `test_support` `pub(crate)` | 12 | low | 15 min |
-| 8 | Open `v017_drop_manifest_versions.sql` migration to remove the dead `manifest_versions` table | ~10 | low | 15 min |
-| 9 | Rename Spanish identifiers: `detectar_outliers` → `detect_outliers`, `cola_reserva` → `reserve_ratio`, `DEFAULT_COLA_RESERVA` → `DEFAULT_RESERVE_RATIO` | 0 (pure rename) | medium (3-5 test renames) | 30 min |
-| 10 | Fix stale docstrings: `src/ranking/mod.rs:4` ("four sub-modules" → "seven sub-modules"); `docs/proposal-03-add-ons.md:3390` (add §D.2 closure note) | ~5 | low | 15 min |
+| 1 | Drop 6 dead `SandboxConfig` builders (`with_cgroup`, `with_cgroup_limits`, `with_denylist`, `with_seccomp`, `with_namespaces`) + `run_with_output_cap` shim in `src/sandbox/process.rs` | ~50 | low (zero callers) | 30 min |
+| 2 | Drop 3 dead zombie-recovery helpers in `src/storage/sqlite.rs` (`find_zombie_runs`, `mark_run_interrupted`, `_test_backdate_run_lease`) | ~55 | low (parallel impls of `reconcile::*`) | 30 min |
+| 3 | Drop `src/execution/per_provider_semaphores.rs` whole module (type-only re-export, zero constructors) | ~89 | low | 20 min |
+| 4 | Drop 3 dead `MockProvider`/`MockResponse` setters in `src/llm/mock.rs` (`set_name`, `set_model`, `with_usage`) + `RunId::as_uuid` | ~33 | low | 20 min |
+| 5 | Drop `src/phases/{intake,synthesize,replace,util}.rs` dead helpers (`read_intake_with_context`, `merge_plan_to_synthesized`, `sources_to_replace`, `strip_code_fence`) | ~70 | low | 30 min |
+| 6 | Drop `src/audit/format.rs::from_writer` + `src/audit/format.rs::from_mutexed` + `src/storage/compression.rs::inner_mut` + `src/storage/compression.rs::as_write_mut` | ~25 | low (zero callers) | 20 min |
+| 7 | Drop `src/phases/budget_cascade.rs` whole module (`cascade_reduce` — pure helper with no production caller; survives only via 3 self-tests and a docstring cross-reference) | ~124 | medium (drops 3 tests; pure helper) | 30 min |
+| 8 | Drop `src/discovery/persona_angle.rs` (307 LoC, zero callers — `DiscoveryWiringConfig::persona_enabled` permanently `false`) + `src/discovery/saturation_event.rs` (66 LoC, zero callers — `DiscoverySaturated::emit` writes a `tracing::info!` nothing scrapes) | ~373 | low (self-tests only) | 1 h |
+| 9 | Re-derive PR #424's diff (`flags_batch.rs` 7 env-var helpers + `BatchPolicy` + `ROUTING_TOML_AVAILABLE` stub + `lease_full.rs` + 4 `process_lock` helpers + `token_budget` wire-up) — stranded on `fix/audit-findings`, must be re-derived against HEAD `7b962a2` because `lease_full.rs` has been refactored since | ~400 + behaviour | medium | 3 h |
+| 10 | Rename Spanish identifiers: `detectar_outliers` → `detect_outliers`, `cola_reserva` → `reserve_ratio`, `DEFAULT_COLA_RESERVA` → `DEFAULT_RESERVE_RATIO` (3 tests need rename) | 0 (pure rename) | medium | 30 min |
 
-**Total**: ~3,500 LoC removed. Test count delta: ~40 dropped. No production behaviour change.
+**Total**: ~1,220 LoC removed (≈1,196 LoC production code + ~33 LoC tests). Test count delta: ~6 dropped (per_provider_semaphores 3 tests, budget_cascade 3 tests, _test_backdate_run_lease, plus per-fn test scaffolding). No production behaviour change.
+
+### §E.4 Items deliberately not on the round-8 list
+
+The round-8 grep also flagged the following as **borderline dead**
+(called from exactly one place, often via a test): `phases::clarify`
+helpers, `validators::*` validator builders, several `sandbox::process`
+methods that pair with the dead builders. These stay alive: they
+have a single live caller each, and removing them would force a
+refactor of the surviving caller. Round 9 candidate if needed.
 
 ## §F Cross-references
 
-- `docs/inconsistencies-audit-2026-08-12.md` — round-1 baseline (re-derived 2026-08-13).
+- `docs/inconsistencies-audit-2026-08-12.md` — round-1 baseline (re-derived 2026-08-13, updated 2026-08-13 round-8 with closure footer §H).
 - `docs/spec-impl-gaps.md` — closed spec-impl directory gaps.
 - `docs/wire-the-gates-followups.md` — open follow-ups from the models-dev wire-up.
 - `docs/COORDINATION.md` — session coordination log (08:50, 09:00, 10:10, 10:50, 10:56 entries).
 - `docs/e2e-loop-2026-08-12.md` — e2e-network flake log (window 06:24 → 12:00 UTC).
-- PRs #416, #420, #422, #423, #425, #426, #427, #430, #432, #433, #434, #435 — round-1 / round-2 fix PRs (on `origin/main`).
+- PRs #416, #420, #422, #423, #425, #426, #427, #430, #432, #433, #434, #435, #436, #437, #438, #439, #440, #441 — round-1 / round-2 / round-5 / round-7 fix PRs (on `origin/main`).
 - **PR #424** — stranded on `fix/audit-findings` branch; not on `origin/main`.
-- `audit-round-5-cleanup` worktree at HEAD — in-flight PR #436 staging.
+- `docs/audit-round-3` worktree at HEAD `6f970b8` — round-8 cleanup commits (4 commits: docs update + sandbox builders + storage zombie helpers + 9 dead helpers across mock/audit/compression/ids).
