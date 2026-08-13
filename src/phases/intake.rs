@@ -91,7 +91,7 @@ pub const CONFIG_HASH_SIDECAR: &str = "config_hash.txt";
 /// drift. Returns an `InvalidState` error if `toml::to_string`
 /// fails — should not happen for our `#[derive(Serialize)]`
 /// types but we surface the failure rather than swallow it.
-pub fn compute_config_hash(config: &Config) -> Result<String> {
+fn compute_config_hash(config: &Config) -> Result<String> {
     let serialized = toml::to_string(config)
         .map_err(|e| Error::InvalidState(format!("config_hash: toml serialize failed: {e}")))?;
     Ok(blake3::hash(serialized.as_bytes()).to_hex().to_string())

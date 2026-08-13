@@ -27,8 +27,6 @@
 //!    `StatefulInServerless`, `SyncApiWithAsyncCaller`) capture
 //!    the architectural clashes a proposal can exhibit even
 //!    when its tag vector is internally consistent.
-//!    [`HardIncompat::is_incompatible_with`] detects redundant
-//!    or overlapping records of those runtime clashes, and
 //!    [`HardIncompat::from_catalog`] enumerates the canonical
 //!    six-variant set for documentation and test fixtures.
 
@@ -252,60 +250,6 @@ impl HardIncompat {
             Self::SyncApiWithAsyncCaller => {
                 "synchronous API caller waits on an async upstream".to_string()
             }
-        }
-    }
-
-    /// Catalog I.6 §D.13.15 (exhaustive): detect whether two
-    /// `HardIncompat` records describe redundant or overlapping
-    /// incompatibilities. Two records are "incompatible with
-    /// each other" (in the pair-detection sense) when reporting
-    /// both is redundant:
-    ///
-    /// - Same unit variant → the proposal fails the same way twice;
-    ///   a single record already covers it.
-    /// - Two `MutuallyExclusive` records that share at least one
-    ///   option → they describe the same structural clash.
-    /// - A `SingleTenantInMultitenant` clash vs. a
-    ///   `MutuallyExclusive { a: "single_tenant" | "multi_tenant",
-    ///   .. }` → the tag-level pair already names the conflict;
-    ///   the runtime-clash variant is redundant.
-    /// - A `SqlVsNosqlBackend` clash vs. a
-    ///   `MutuallyExclusive { a: "sql" | "nosql", .. }` → the
-    ///   tag-level pair already names the conflict; the
-    ///   runtime-clash variant is redundant.
-    /// - All other pairs are independent: each describes a distinct
-    ///   problem and the gatekeeper should report both.
-    ///
-    /// The function is symmetric:
-    /// `a.is_incompatible_with(b) == b.is_incompatible_with(a)`.
-    pub fn is_incompatible_with(&self, other: &HardIncompat) -> bool {
-        use HardIncompat::*;
-        match (self, other) {
-            // Same unit-variant redundancy (6 exhaustive §D.13.15 cases).
-            (MonolithVsMicroservices, MonolithVsMicroservices) => true,
-            (SqlVsNosqlBackend, SqlVsNosqlBackend) => true,
-            (GcRuntimeWithManualMem, GcRuntimeWithManualMem) => true,
-            (SingleTenantInMultitenant, SingleTenantInMultitenant) => true,
-            (StatefulInServerless, StatefulInServerless) => true,
-            (SyncApiWithAsyncCaller, SyncApiWithAsyncCaller) => true,
-            // Two MutuallyExclusive records overlap when they share
-            // at least one option (regardless of order, so the
-            // checker is symmetric without enumerating 4 permutations).
-            (MutuallyExclusive { a: a1, b: b1 }, MutuallyExclusive { a: a2, b: b2 }) => {
-                a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2
-            }
-            // Tag-level vs. runtime-clash redundancy.
-            (SingleTenantInMultitenant, MutuallyExclusive { a, b })
-            | (MutuallyExclusive { a, b }, SingleTenantInMultitenant) => {
-                matches!(a.as_str(), "single_tenant" | "multi_tenant")
-                    || matches!(b.as_str(), "single_tenant" | "multi_tenant")
-            }
-            (SqlVsNosqlBackend, MutuallyExclusive { a, b })
-            | (MutuallyExclusive { a, b }, SqlVsNosqlBackend) => {
-                matches!(a.as_str(), "sql" | "nosql") || matches!(b.as_str(), "sql" | "nosql")
-            }
-            // Independent pairs.
-            _ => false,
         }
     }
 
@@ -597,52 +541,6 @@ mod tests {
             let back: HardIncompat = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(&back, v, "round-trip must preserve {v:?}");
         }
-    }
-
-    /// `is_incompatible_with` detects redundant pairs involving the
-    /// §D.13.15 (exhaustive) runtime-clash variants. Two identical
-    /// `StatefulInServerless` records are redundant; the same
-    /// variant against `MonolithVsMicroservices` is independent;
-    /// and `SingleTenantInMultitenant` is redundant with the
-    /// `MutuallyExclusive` tag-pair that names the same clash.
-    /// Similarly `SqlVsNosqlBackend` is redundant with the
-    /// `MutuallyExclusive { sql, nosql }` tag-pair.
-    #[test]
-    fn hard_incompat_pair_stateful_serverless_detected() {
-        // Same unit variant → redundant.
-        let a = HardIncompat::StatefulInServerless;
-        let b = HardIncompat::StatefulInServerless;
-        assert!(a.is_incompatible_with(&b));
-        assert!(b.is_incompatible_with(&a));
-        // Different runtime-clash variants → independent.
-        let c = HardIncompat::MonolithVsMicroservices;
-        assert!(!a.is_incompatible_with(&c));
-        assert!(!c.is_incompatible_with(&a));
-        // SyncApiWithAsyncCaller is unrelated to StatefulInServerless.
-        let d = HardIncompat::SyncApiWithAsyncCaller;
-        assert!(!a.is_incompatible_with(&d));
-        assert!(!d.is_incompatible_with(&a));
-        // MutuallyExclusive without the single/multi tenant tag
-        // does NOT collide with SingleTenantInMultitenant.
-        let me = HardIncompat::MutuallyExclusive {
-            a: "sql".into(),
-            b: "nosql".into(),
-        };
-        let stm = HardIncompat::SingleTenantInMultitenant;
-        assert!(!me.is_incompatible_with(&stm));
-        // ... but the MutuallyExclusive tag-pair that names the
-        // single/multi tenant clash DOES collide with the
-        // runtime-clash variant (same conflict, different lens).
-        let me_st = HardIncompat::MutuallyExclusive {
-            a: "single_tenant".into(),
-            b: "multi_tenant".into(),
-        };
-        assert!(stm.is_incompatible_with(&me_st));
-        assert!(me_st.is_incompatible_with(&stm));
-        // SqlVsNosqlBackend collides with the sql/nosql tag-pair.
-        let svn = HardIncompat::SqlVsNosqlBackend;
-        assert!(svn.is_incompatible_with(&me));
-        assert!(me.is_incompatible_with(&svn));
     }
 
     /// Every variant round-trips through serde with the

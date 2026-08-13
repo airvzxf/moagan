@@ -48,7 +48,7 @@ pub fn open_gz_append(path: &Path) -> Result<Box<dyn Write + Send>> {
 /// `MultiGzDecoder`. Multi-decoder is the right choice because the
 /// write path produces a sequence of complete gzip members rather
 /// than a single member spanning the whole file.
-pub fn open_gz_read(path: &Path) -> Result<Box<dyn Read + Send>> {
+fn open_gz_read(path: &Path) -> Result<Box<dyn Read + Send>> {
     let f = File::open(path).map_err(|e| Error::Io(IoError::Raw(e)))?;
     let buf = BufReader::new(f);
     Ok(Box::new(MultiGzDecoder::new(buf)))
@@ -57,7 +57,7 @@ pub fn open_gz_read(path: &Path) -> Result<Box<dyn Read + Send>> {
 /// Open a plain `.jsonl` file for reading. Kept alongside
 /// `open_gz_read` so legacy runs (or runs produced before compression
 /// was wired) remain readable by manifest builders and external tools.
-pub fn open_plain_read(path: &Path) -> Result<Box<dyn Read + Send>> {
+fn open_plain_read(path: &Path) -> Result<Box<dyn Read + Send>> {
     let f = File::open(path).map_err(|e| Error::Io(IoError::Raw(e)))?;
     Ok(Box::new(BufReader::new(f)))
 }
@@ -88,7 +88,7 @@ pub fn read_to_string(path: &Path) -> Result<String> {
 
 /// True when `path` ends in `.gz`. Used by the manifest builder to
 /// decide which opener to use.
-pub fn is_gz_path(path: &Path) -> bool {
+fn is_gz_path(path: &Path) -> bool {
     path.extension().and_then(|s| s.to_str()) == Some("gz")
 }
 
@@ -212,74 +212,6 @@ pub enum CompressionError {
     Codec(String),
 }
 
-/// Compress `src` into `dst` using `c` as the compression format.
-/// Returns the output byte count on success.
-///
-/// `Compression::None` is a straight copy (useful as a no-op when
-/// the caller doesn't know the target format up front).
-pub fn compress_or_report(
-    src: &Path,
-    dst: &Path,
-    c: Compression,
-) -> std::result::Result<u64, CompressionError> {
-    let input = std::fs::read(src).map_err(|source| CompressionError::Io {
-        path: src.to_path_buf(),
-        source,
-    })?;
-    let out = match c {
-        Compression::None => input,
-        Compression::Gz => {
-            let mut encoder = GzEncoder::new(Vec::new(), FlateCompression::default());
-            encoder
-                .write_all(&input)
-                .map_err(|source| CompressionError::Io {
-                    path: dst.to_path_buf(),
-                    source,
-                })?;
-            encoder.finish().map_err(|source| CompressionError::Io {
-                path: dst.to_path_buf(),
-                source,
-            })?
-        }
-        Compression::Zst => {
-            let mut encoder = zstd::Encoder::new(Vec::new(), 0)
-                .map_err(|source| CompressionError::Codec(source.to_string()))?;
-            encoder
-                .write_all(&input)
-                .map_err(|source| CompressionError::Io {
-                    path: dst.to_path_buf(),
-                    source,
-                })?;
-            encoder.finish().map_err(|source| CompressionError::Io {
-                path: dst.to_path_buf(),
-                source,
-            })?
-        }
-    };
-    let count = out.len() as u64;
-    std::fs::write(dst, &out).map_err(|source| CompressionError::Io {
-        path: dst.to_path_buf(),
-        source,
-    })?;
-    Ok(count)
-}
-
-/// Open a file behind a `Box<dyn Read>` that transparently decodes
-/// the selected compression format. Plain files are wrapped in a
-/// `BufReader`; `.gz` is decoded with `flate2::GzDecoder`; `.zst`
-/// is decoded with `zstd::Decoder`.
-///
-/// Refs: D.7.5, T16-06 §5.5, T11-04 §D2.
-pub fn reader(path: &Path, c: Compression) -> io::Result<Box<dyn Read>> {
-    let f = File::open(path)?;
-    let buf = BufReader::new(f);
-    Ok(match c {
-        Compression::None => Box::new(buf),
-        Compression::Gz => Box::new(flate2::read::GzDecoder::new(buf)),
-        Compression::Zst => Box::new(zstd::Decoder::new(buf)?),
-    })
-}
-
 impl Compression {
     /// Open a file behind a `Box<dyn Read>` that transparently
     /// decodes a multi-member compression stream. Mode is detected
@@ -289,13 +221,10 @@ impl Compression {
     /// round-trips byte-for-byte); `.zst` is decoded with
     /// `zstd::Decoder`.
     ///
-    /// The single-stream [`reader`] picks `GzDecoder` for `.gz`,
-    /// which is the right choice for tooling that opens a single
-    /// gzip stream produced elsewhere. This method picks
-    /// `MultiGzDecoder` for `.gz`, which is the right choice for
-    /// sidecars emitted by the project's own writer — each
-    /// `flush()` ends a member, so the on-disk file is a sequence
-    /// of complete members.
+    /// Picks `MultiGzDecoder` for `.gz` because sidecars emitted by
+    /// the project's own writer end one gzip member per `flush()`,
+    /// so the on-disk file is a sequence of complete members; a
+    /// single-stream `GzDecoder` would stop after the first.
     ///
     /// Refs: D.7.5 (PR-26).
     pub fn multi_reader(path: &Path) -> io::Result<Box<dyn Read>> {
@@ -322,7 +251,7 @@ impl Compression {
 // `zstd::Decoder` cannot open.
 
 /// Stream-friendly zstd writer that wraps `File` and finishes a
-/// complete zstd frame on `finish()`. Used by `export_run_tar_zst`
+/// complete zstd frame on `finish()`. Used by `telemetry::export`
 /// (F5) to back the `ExportFormat::TarZst` archive pipeline with a
 /// deterministic per-frame output.
 pub struct ZstWriter {
@@ -369,142 +298,10 @@ impl Write for ZstWriter {
     }
 }
 
-/// Build a single `run_<id>.tar.zst` archive containing every
-/// file under `run_dir`. The on-disk layout mirrors `tar`/`zstd`
-/// defaults: an uncompressed tar stream (no compression between
-/// entries) compressed by a single zstd frame around the whole
-/// archive. Used by F5's `ExportFormat::TarZst` and by the
-/// ad-hoc `moagan telemetry export --format tar.zst` CLI path.
-pub fn export_run_tar_zst(run_dir: &Path, out_path: &Path) -> Result<()> {
-    if !run_dir.exists() {
-        return Err(Error::InvalidState(format!(
-            "run dir not found at {}",
-            run_dir.display()
-        )));
-    }
-    if let Some(parent) = out_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            Error::Io(IoError::CreateDir {
-                path: parent.to_path_buf(),
-                source: e,
-            })
-        })?;
-    }
-    let mut zst = ZstWriter::new(out_path).map_err(|e| Error::Io(IoError::Raw(e)))?;
-    {
-        let mut builder = tar::Builder::new(&mut zst);
-        append_run_dir(&mut builder, run_dir, run_dir)?;
-        builder
-            .into_inner()
-            .map_err(|e| Error::Io(IoError::Raw(e)))?
-            .flush()
-            .map_err(|e| {
-                Error::Io(IoError::Write {
-                    path: out_path.to_path_buf(),
-                    source: e,
-                })
-            })?;
-    }
-    let mut file = zst.finish().map_err(|e| Error::Io(IoError::Raw(e)))?;
-    file.flush().map_err(|e| {
-        Error::Io(IoError::Write {
-            path: out_path.to_path_buf(),
-            source: e,
-        })
-    })?;
-    Ok(())
-}
-
-/// Recursively walk `dir` and append every file to the tar
-/// builder with a path relative to `root`. Mirrors the helper in
-/// `telemetry::export::append_dir` but is kept local so the
-/// compression module does not need to depend on the export
-/// module (and vice-versa).
-fn append_run_dir<W: Write>(builder: &mut tar::Builder<W>, root: &Path, dir: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(dir).map_err(|e| {
-        Error::Io(IoError::Read {
-            path: dir.to_path_buf(),
-            source: e,
-        })
-    })? {
-        let entry = entry.map_err(|e| Error::Io(IoError::Raw(e)))?;
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| path.clone());
-        let meta = std::fs::metadata(&path).map_err(|e| {
-            Error::Io(IoError::Read {
-                path: path.clone(),
-                source: e,
-            })
-        })?;
-        if meta.is_dir() {
-            builder
-                .append_dir(rel.to_string_lossy().replace('\\', "/"), &path)
-                .map_err(|e| Error::Io(IoError::Raw(e)))?;
-            append_run_dir(builder, root, &path)?;
-        } else if meta.is_file() {
-            let mut f = File::open(&path).map_err(|e| {
-                Error::Io(IoError::Read {
-                    path: path.clone(),
-                    source: e,
-                })
-            })?;
-            builder
-                .append_file(rel.to_string_lossy().replace('\\', "/"), &mut f)
-                .map_err(|e| Error::Io(IoError::Raw(e)))?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn compress_or_report_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("source");
-        let dst = tmp.path().join("output");
-        std::fs::write(&src, b"plain").unwrap();
-        assert_eq!(
-            compress_or_report(&src, &dst, Compression::None).unwrap(),
-            5
-        );
-        assert_eq!(std::fs::read(&dst).unwrap(), b"plain");
-    }
-
-    #[test]
-    fn compress_or_report_gz() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("source");
-        let dst = tmp.path().join("output.gz");
-        std::fs::write(&src, b"gzip payload").unwrap();
-        let count = compress_or_report(&src, &dst, Compression::Gz).unwrap();
-        assert_eq!(count, std::fs::metadata(&dst).unwrap().len());
-        // The output must be a valid gzip stream — its first two
-        // bytes are the gzip magic 1f 8b.
-        let head = std::fs::read(&dst).unwrap();
-        assert_eq!(&head[..2], &[0x1f, 0x8b]);
-    }
-
-    #[test]
-    fn compress_or_report_zst() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("source");
-        let dst = tmp.path().join("output.zst");
-        std::fs::write(&src, b"zstd payload").unwrap();
-        let count = compress_or_report(&src, &dst, Compression::Zst).unwrap();
-        assert_eq!(count, std::fs::metadata(&dst).unwrap().len());
-        // zstd frames start with magic 28 b5 2f fd.
-        let head = std::fs::read(&dst).unwrap();
-        assert_eq!(&head[..4], &[0x28, 0xb5, 0x2f, 0xfd]);
-    }
 
     #[test]
     fn round_trip_writes_and_reads() {
@@ -611,35 +408,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reader_returns_none_for_uncompressed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("plain.jsonl");
-        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
-        let mut r = reader(&path, Compression::None).unwrap();
-        let mut buf = String::new();
-        r.read_to_string(&mut buf).unwrap();
-        assert_eq!(buf.lines().count(), 2);
-        assert!(buf.contains("\"a\":2"));
-    }
-
-    #[test]
-    fn reader_returns_gunzip_for_gz() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("plain.jsonl.gz");
-        // Encode the same content using the existing gz append path
-        // so we exercise the same writer callers will use elsewhere.
-        let mut w = open_gz_append(&path).unwrap();
-        writeln!(w, "{{\"phase\":\"gzip\"}}").unwrap();
-        w.flush().ok();
-        drop(w);
-        // The new reader must decode it transparently.
-        let mut r = reader(&path, Compression::Gz).unwrap();
-        let mut buf = String::new();
-        r.read_to_string(&mut buf).unwrap();
-        assert!(buf.contains("\"phase\":\"gzip\""));
-    }
-
     /// D.7.5 (PR-26): `Compression::multi_reader` must walk past
     /// every gzip member in a multi-member stream emitted by
     /// `open_gz_append`. Each `flush()` finishes one member, so a
@@ -676,7 +444,7 @@ mod tests {
 
     /// D.7.5 (PR-26): `multi_reader` on a plain `.jsonl` just
     /// returns a buffered file reader. This is the no-compression
-    /// path of the new helper, symmetric with `reader(.., None)`.
+    /// path of the helper.
     #[test]
     fn multi_reader_handles_uncompressed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -709,7 +477,7 @@ mod tests {
         assert!(buf.contains("\"phase\":\"only\""));
     }
 
-    // -- F5: ZstWriter + tar.zst export ------------------------------
+    // -- F5: ZstWriter coverage -------------------------------------
 
     /// F5: `ZstWriter` produces a single zstd frame that
     /// `zstd::Decoder` can read back. The output bytes start
@@ -754,84 +522,5 @@ mod tests {
         let mut decoded = Vec::new();
         decoder.read_to_end(&mut decoded).unwrap();
         assert_eq!(decoded, b"alpha-beta-gamma");
-    }
-
-    /// F5: `export_run_tar_zst` walks `run_dir`, archives each
-    /// file via `tar::Builder`, compresses the resulting tar
-    /// stream with zstd, and writes the bundle to `out_path`.
-    /// Decompressing the bundle and extracting the tar returns
-    /// the original files with byte-for-byte fidelity.
-    #[test]
-    fn tar_zst_roundtrip_extracts_files() {
-        let src = tempfile::tempdir().unwrap();
-        let src_dir = src.path().to_path_buf();
-        std::fs::write(src_dir.join("manifest.json"), b"{\"run\":1}").unwrap();
-        std::fs::create_dir_all(src_dir.join("final").join("rankings")).unwrap();
-        std::fs::write(src_dir.join("final").join("portfolio.md"), b"# portfolio").unwrap();
-        std::fs::write(
-            src_dir.join("final").join("rankings").join("ranking.json"),
-            b"[]",
-        )
-        .unwrap();
-
-        let bundle = tempfile::tempdir().unwrap();
-        let out_path = bundle.path().join("run.tar.zst");
-        export_run_tar_zst(&src_dir, &out_path).expect("tar.zst export succeeds");
-
-        // Decode the zstd frame and stream the tar.
-        let f = std::fs::File::open(&out_path).unwrap();
-        let zst = zstd::Decoder::new(f).unwrap();
-        let mut tar = tar::Archive::new(zst);
-        let extract = tempfile::tempdir().unwrap();
-        tar.unpack(extract.path()).expect("tar unpacks");
-
-        assert_eq!(
-            std::fs::read(extract.path().join("manifest.json")).unwrap(),
-            b"{\"run\":1}"
-        );
-        assert_eq!(
-            std::fs::read(extract.path().join("final").join("portfolio.md"),).unwrap(),
-            b"# portfolio"
-        );
-        assert_eq!(
-            std::fs::read(
-                extract
-                    .path()
-                    .join("final")
-                    .join("rankings")
-                    .join("ranking.json"),
-            )
-            .unwrap(),
-            b"[]"
-        );
-    }
-
-    /// F5: the bundled tar includes the run's `manifest.json`
-    /// sidecar. This is the operator-facing guarantee: opening
-    /// the archive without re-running the pipeline surfaces the
-    /// canonical run metadata. The test seeds a known manifest
-    /// payload and confirms it survives the round-trip
-    /// verbatim.
-    #[test]
-    fn tar_zst_export_emits_manifest() {
-        let src = tempfile::tempdir().unwrap();
-        let src_dir = src.path().to_path_buf();
-        let manifest_body =
-            b"{\"schema_version\":\"v2\",\"run_id\":\"019f0000-0000-7000-8000-000000000001\"}";
-        std::fs::write(src_dir.join("manifest.json"), manifest_body).unwrap();
-        std::fs::write(src_dir.join("brief.json"), b"{}").unwrap();
-
-        let bundle = tempfile::tempdir().unwrap();
-        let out_path = bundle.path().join("run.tar.zst");
-        export_run_tar_zst(&src_dir, &out_path).expect("export succeeds");
-
-        let f = std::fs::File::open(&out_path).unwrap();
-        let zst = zstd::Decoder::new(f).unwrap();
-        let mut tar = tar::Archive::new(zst);
-        let extract = tempfile::tempdir().unwrap();
-        tar.unpack(extract.path()).unwrap();
-
-        let archived = std::fs::read(extract.path().join("manifest.json")).unwrap();
-        assert_eq!(archived, manifest_body, "manifest.json preserved verbatim");
     }
 }
