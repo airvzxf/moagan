@@ -863,7 +863,7 @@ impl RunContext {
             retry_count,
             "LLM call stage"
         );
-        let result = provider.send(&req).await;
+        let result = provider.send(&hash_input).await;
         tracing::debug!(
             call_id = %call_id,
             phase = req.role.as_str(),
