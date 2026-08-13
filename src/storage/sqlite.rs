@@ -322,7 +322,7 @@ impl Db {
     /// therefore only applied from v002 onward, where the bug it
     /// exists to prevent (a v007 / v009 `ALTER TABLE ADD COLUMN`
     /// re-run on a partially-applied DB) is actually load-bearing.
-    pub fn run_migrations(&self) -> Result<()> {
+    fn run_migrations(&self) -> Result<()> {
         let conn = self.pool.get()?;
 
         // v001 is special: PRAGMA synchronous=NORMAL cannot run

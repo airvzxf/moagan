@@ -269,7 +269,7 @@ impl SelectionPlan {
     /// ties preserve insertion order. `count == 0` or empty input
     /// returns an empty vector; `count >= scored.len()` returns
     /// every id in score-descending order.
-    pub fn apply_top(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
+    fn apply_top(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
         if self.count == 0 || scored.is_empty() {
             return Vec::new();
         }
@@ -289,7 +289,7 @@ impl SelectionPlan {
     /// each subsequent pick maximises the minimum distance to
     /// the already-chosen set. Ties on min-distance break by
     /// score descending so the highest scorer wins.
-    pub fn apply_diverse(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
+    fn apply_diverse(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
         if self.count == 0 || scored.is_empty() {
             return Vec::new();
         }
@@ -340,7 +340,7 @@ impl SelectionPlan {
     /// `count == 0` or empty input returns an empty vector. When
     /// `count >= scored.len()` every id is returned in
     /// outlier-distance descending order.
-    pub fn apply_outlier(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
+    fn apply_outlier(&self, scored: &[(String, f64, Proposal)]) -> Vec<String> {
         if self.count == 0 || scored.is_empty() {
             return Vec::new();
         }
