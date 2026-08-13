@@ -34,7 +34,6 @@ pub mod heartbeat;
 pub mod hub;
 pub mod level;
 pub mod lineage_graph;
-pub mod phase_macro;
 pub mod redact;
 pub mod retention;
 pub mod tracing_filter;
