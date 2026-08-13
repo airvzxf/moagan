@@ -20,7 +20,6 @@ pub mod facet_cache;
 pub mod id;
 pub mod integrator;
 pub mod matrix;
-pub mod matrix_seed;
 pub mod outlier;
 pub mod pause;
 pub mod persona_angle;
