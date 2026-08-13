@@ -77,6 +77,10 @@ mod sql_v016 {
     pub(super) const V016: &str = include_str!("migrations/v016_drop_empty_tables.sql");
 }
 
+mod sql_v017 {
+    pub(super) const V017: &str = include_str!("migrations/v017_drop_manifest_versions.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -435,6 +439,12 @@ impl Db {
         if current < 16 {
             apply_step(&conn, 16, || -> Result<()> {
                 conn.execute_batch(sql_v016::V016)?;
+                Ok(())
+            })?;
+        }
+        if current < 17 {
+            apply_step(&conn, 17, || -> Result<()> {
+                conn.execute_batch(sql_v017::V017)?;
                 Ok(())
             })?;
         }
@@ -3714,25 +3724,40 @@ mod tests {
         );
     }
 
-    /// v016: the four v013/v011 tables flagged by the round-2
-    /// audit (`run_state`, `discovery_dedup`, `plan_state`,
-    /// `budget_events`) are absent after `Db::open` on a freshly
-    /// migrated DB. `user_version` reaches 16.
+    /// v017: the `manifest_versions` table created by v012 is
+    /// absent after `Db::open` on a freshly migrated DB.
+    /// `user_version` reaches 17.
     ///
-    /// The companion index `idx_budget_events_run` must also be
-    /// gone — SQLite drops table-scoped indexes automatically
-    /// when the table is dropped, so this is implicit, but the
-    /// probe pins the contract against future schema drift.
+    /// The table was added by `v012_versioned_manifest.sql` and
+    /// was written by `record_version` only on a code path that
+    /// has since been dropped (PR #433, commit `fdc02d6`); the
+    /// round-2 audit flagged it as dead schema. v017 removes
+    /// the empty table for new runs.
+    ///
+    /// Regression: the v016 drop-empty-tables migration must
+    /// still hold — re-probing those four tables here pins the
+    /// migration's idempotency after another step is appended.
     #[test]
-    fn migration_v016_drops_empty_tables() {
+    fn migration_v017_drops_manifest_versions() {
         let db = temp_db();
         let conn = db.pool.get().unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert!(
-            v >= 16,
-            "user_version must reach v016 after Db::open, got {v}"
+            v >= 17,
+            "user_version must reach v017 after Db::open, got {v}"
+        );
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                params!["manifest_versions"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "v017 table manifest_versions must be dropped, got n={n}"
         );
         for table in [
             "run_state",
@@ -3762,15 +3787,16 @@ mod tests {
         );
     }
 
-    /// Re-opening a DB that already has v016 applied stays at
-    /// v016 without error. The runner's `if current < N` gates
+    /// Re-opening a DB that already has v017 applied stays at
+    /// v017 without error. The runner's `if current < N` gates
     /// make this trivially true, but the test pins the contract:
     /// `CREATE TABLE IF NOT EXISTS` is idempotent at the SQL
     /// level so a third, fourth, ... open of the same DB also
     /// succeeds. (The original v013 wording predates the
     /// `calls.retry_count` migration landed in v014; v015 then
     /// added the `calls.cost_usd` column on top; v016 dropped
-    /// the four empty tables.)
+    /// the four empty tables; v017 dropped the empty
+    /// `manifest_versions` table.)
     #[test]
     fn current_head_migration_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3783,7 +3809,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 16,
+            v, 17,
             "user_version must stay at the current head across consecutive reopens, got {v}"
         );
         // v015 added a single ALTER TABLE so no new tables to
@@ -3851,7 +3877,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert!(v >= 16, "user_version must reach v016, got {v}");
+        assert!(v >= 17, "user_version must reach v017, got {v}");
     }
 
     /// v015: `record_call_cost` writes the column for a known call
