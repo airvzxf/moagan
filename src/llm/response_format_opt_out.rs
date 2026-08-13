@@ -75,15 +75,14 @@ Reply now with the JSON object only.
 /// prepend [`STUBBORN_MODEL_JSON_PREFIX`] to the role's base system
 /// prompt. Mirrors [`model_skips_response_format`] so the same set
 /// of models that ignore `response_format: json_object` also get
-/// the prompt reinforcement. Exposed `pub` so tests can target
-/// every entry on the static list without rebuilding the helper.
-pub fn is_stubborn_model(model: &str) -> bool {
+/// the prompt reinforcement.
+fn is_stubborn_model(model: &str) -> bool {
     model_skips_response_format(model)
 }
 
 /// Render the final system prompt for a role on a given model.
 ///
-/// - When `model` is in the opt-out list (see [`is_stubborn_model`])
+/// - When `model` is in the opt-out list (see `is_stubborn_model`)
 ///   the [`STUBBORN_MODEL_JSON_PREFIX`] is prepended, followed by a
 ///   blank line, followed by the role's `base_prompt`.
 /// - Otherwise the `base_prompt` is returned byte-for-byte. The

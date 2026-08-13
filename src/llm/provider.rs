@@ -455,27 +455,10 @@ impl BreakeredProvider {
         self
     }
 
-    /// Borrow the inner provider (for tests that need to inspect
-    /// call records or bypass the breaker).
-    pub fn inner(&self) -> &Arc<dyn Provider> {
+    /// Borrow the inner provider (used by the probe spawner to reach
+    /// past the wrapper without opening the breaker).
+    fn inner(&self) -> &Arc<dyn Provider> {
         &self.inner
-    }
-
-    /// Clone the breaker handle for telemetry / introspection.
-    pub fn breaker(&self) -> Arc<CircuitBreaker> {
-        self.breaker.clone()
-    }
-
-    /// Clone the rate-limiter handle (when configured) for
-    /// telemetry / introspection.
-    pub fn rate_limiter(&self) -> Option<Arc<RateLimiter>> {
-        self.rate_limiter.clone()
-    }
-
-    /// Clone the per-provider semaphore handle (when configured)
-    /// for telemetry / introspection.
-    pub fn provider_semaphores(&self) -> Option<Arc<PerProviderSemaphores>> {
-        self.provider_semaphores.clone()
     }
 }
 
