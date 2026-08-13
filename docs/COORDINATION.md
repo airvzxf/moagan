@@ -186,7 +186,11 @@ e2e validation against `opencode_go`**:
 - Round-8 actionable list **9 of 10 closed** + 1 partial (persona_angle
   misclassified — actually alive).
 - **P8 discovery validation closed** with real `OPENCODE_GO_API_KEY` from `.env`.
-- main HEAD: `1f3cc23`.
+- **PR #462 follow-up**: added the native `deepseek` provider e2e
+  validation using `DEEPSEEK_API_KEY` directly (NOT routed through
+  opencode.ai). Closes the parallel e2e gap for the second LLM
+  provider kind shipped in v0.6.
+- main HEAD: `7facb6c`.
 
 **5 misclassified "dead" fns in `phases/`**: a research subagent correctly
 stopped before deleting them. They have production callers via
@@ -194,7 +198,7 @@ stopped before deleting them. They have production callers via
 in PR #455 instead.
 
 Final test count: **1784 lib + 30 integration, 0 failed**.
-Final main HEAD: `1f3cc23`.
+Final main HEAD: `7facb6c`.
 
 _Last updated: 2026-08-13 13:30 UTC_
 
