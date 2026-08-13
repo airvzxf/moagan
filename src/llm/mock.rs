@@ -145,9 +145,8 @@ impl MockProvider {
     }
 
     /// Override the `endpoint()` reported by the trait methods.
-    /// Pairs with [`Self::set_name`] so tests that pin
-    /// `Provider::endpoint` (telemetry, dashboards) can assert
-    /// which entry the pool actually picked.
+    /// Tests that pin `Provider::endpoint` (telemetry, dashboards)
+    /// use this to assert which entry the pool actually picked.
     pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
         self.endpoint = endpoint.into();
     }

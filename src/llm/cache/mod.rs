@@ -234,12 +234,6 @@ impl Cache {
         sharded::path_for(&self.config.root, cache_key)
     }
 
-    /// Build directory under `root` for the given key.
-    pub fn ensure_dir(root: &Path) -> Result<()> {
-        std::fs::create_dir_all(root).map_err(|e| Error::Cache(format!("mkdir {root:?}: {e}")))?;
-        Ok(())
-    }
-
     /// Walk every cache file under `self.config.root`, read each as a
     /// `CacheEntry` for its `touched_at_unix`, and remove the
     /// least-recently-touched files until the total on-disk size is

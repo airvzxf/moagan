@@ -224,12 +224,6 @@ impl AtomicWriter {
         Ok((data, meta))
     }
 
-    /// Convenience: write to a file in one call without a pre-built
-    /// `AtomicWriter`. Equivalent to `AtomicWriter::new().write(...)`.
-    pub fn write_path(dest: &Path, data: &[u8]) -> Result<ArtifactMeta> {
-        Self::new().write(dest, data)
-    }
-
     /// Path to the sidecar metadata file for `dest`.
     pub fn meta_path(dest: &Path) -> PathBuf {
         let mut s = dest.as_os_str().to_owned();

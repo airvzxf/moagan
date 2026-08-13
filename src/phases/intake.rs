@@ -72,7 +72,7 @@ use crate::llm::control_tokens;
 use crate::llm::prompts::system_prompt;
 use crate::llm::size_limits::MAX_PROMPT_BYTES;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
-use crate::phases::util::{read_json, write_json};
+use crate::phases::util::write_json;
 
 /// F5: file name (under the run's `final/` directory) that
 /// carries the hex-encoded BLAKE3 hash of the canonical TOML
@@ -606,14 +606,6 @@ pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
     } else {
         no_control
     }
-}
-
-/// Read the intake sidecar, applying the phase's `context_block`
-/// stamp. Exposed for the integration tests so they don't have to
-/// drive the LLM just to assert the round-trip.
-#[doc(hidden)]
-pub fn read_intake_with_context(path: &std::path::Path) -> Result<Intake> {
-    read_json(path)
 }
 
 /// F5: write the config hash to the run's `final/` directory so

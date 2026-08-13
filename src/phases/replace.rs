@@ -61,25 +61,6 @@ pub fn should_replace_synthesis(synthesis_v: &QualityVector, source_vs: &[Qualit
     s_strict_best_dims >= 2 && !any_source_pareto_dominates
 }
 
-/// Apply the replacement decision to a list of source quality vectors.
-/// Returns the indices of the sources that should be removed from the
-/// final ranking because the synthesis dominated them. When the
-/// predicate says "no replace", returns an empty list. When it says
-/// "replace", ALL sources are removed — the synthesis is meant to
-/// supersede the whole cluster, not a subset of it (per D.13.16 the
-/// synthesis must win on every dimension where any source was the
-/// best, and no source can Pareto-dominate it).
-pub fn sources_to_replace(
-    source_count: usize,
-    synthesis_v: &QualityVector,
-    source_vs: &[QualityVector],
-) -> Vec<usize> {
-    if !should_replace_synthesis(synthesis_v, source_vs) {
-        return Vec::new();
-    }
-    (0..source_count).collect()
-}
-
 #[inline]
 fn dim_at(v: &QualityVector, i: usize) -> f32 {
     match i {
@@ -148,22 +129,6 @@ mod tests {
     fn empty_sources_returns_false() {
         let s = qv(9.0, 9.0, 9.0, 9.0, 9.0);
         assert!(!should_replace_synthesis(&s, &[]));
-    }
-
-    #[test]
-    fn sources_to_replace_returns_all_when_winning() {
-        let s = qv(9.0, 9.0, 7.0, 6.0, 5.0);
-        let srcs = vec![qv(8.0, 8.0, 9.0, 8.0, 8.0), qv(7.0, 7.0, 8.0, 7.0, 7.0)];
-        let replaced = sources_to_replace(srcs.len(), &s, &srcs);
-        assert_eq!(replaced, vec![0, 1]);
-    }
-
-    #[test]
-    fn sources_to_replace_returns_empty_when_losing() {
-        let s = qv(5.0, 5.0, 5.0, 5.0, 5.0);
-        let srcs = vec![qv(8.0, 8.0, 9.0, 8.0, 8.0)];
-        let replaced = sources_to_replace(srcs.len(), &s, &srcs);
-        assert!(replaced.is_empty());
     }
 
     #[test]
