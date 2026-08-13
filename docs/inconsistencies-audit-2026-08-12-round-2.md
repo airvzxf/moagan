@@ -296,6 +296,45 @@ methods that pair with the dead builders. These stay alive: they
 have a single live caller each, and removing them would force a
 refactor of the surviving caller. Round 9 candidate if needed.
 
+## §E.5 Round-10 closure status (2026-08-13 10:19 UTC, HEAD `7c16a6f`)
+
+The round-8 actionable items were attacked over the next two cleanup
+windows (round-8 audit PRs #442/#443 + round-10 re-derive PRs
+#444/#445/#446/#447). Closure map:
+
+| # | Round-8 item | Closing PR(s) | LoC | Status |
+|---:|---|---|---:|---|
+| 1 | 6 dead `SandboxConfig` builders + `run_with_output_cap` shim | [#442](https://github.com/airvzxf/moagan/pull/442) | ~65 | ✅ DONE |
+| 2 | 3 dead zombie-recovery helpers (`find_zombie_runs`, `mark_run_interrupted`, `_test_backdate_run_lease`) | [#442](https://github.com/airvzxf/moagan/pull/442) | ~68 | ✅ DONE |
+| 3 | `src/execution/per_provider_semaphores.rs` whole module | [#442](https://github.com/airvzxf/moagan/pull/442) | ~89 | ✅ DONE |
+| 4 | 3 dead `MockProvider`/`MockResponse` setters + `RunId::as_uuid` | [#442](https://github.com/airvzxf/moagan/pull/442) | ~33 | ✅ DONE |
+| 5 | 4 dead `phases/{intake,synthesize,replace,util}.rs` helpers | [#443](https://github.com/airvzxf/moagan/pull/443) + [#442](https://github.com/airvzxf/moagan/pull/442) | ~70 | ✅ DONE |
+| 6 | `audit/format.rs::from_writer`/`from_mutexed` + `compression.rs::inner_mut`/`as_write_mut` | [#442](https://github.com/airvzxf/moagan/pull/442) | ~25 | ✅ DONE |
+| 7 | `src/phases/budget_cascade.rs` whole module | [#443](https://github.com/airvzxf/moagan/pull/443) | ~125 | ✅ DONE |
+| 8 | `persona_angle.rs` (307 LoC) + `saturation_event.rs` (66 LoC) | saturation_event: [#443](https://github.com/airvzxf/moagan/pull/443); persona_angle: still alive (live callers via `coordinator.rs`) | ~66 | ⚠️ PARTIAL — `saturation_event` dropped, `persona_angle` kept (3 live callers) |
+| 9 | **Re-derive PR #424's diff** (flags_batch + lease_full + token_budget wire-up) | [#444](https://github.com/airvzxf/moagan/pull/444) (flags_batch) + [#445](https://github.com/airvzxf/moagan/pull/445) (lease_full) + [#447](https://github.com/airvzxf/moagan/pull/447) (token_budget wire-up) | ~265 + behaviour | ✅ DONE |
+| 10 | **Spanish identifier rename** (`detectar_outliers`/`cola_reserva`/`DEFAULT_COLA_RESERVA`) | [#446](https://github.com/airvzxf/moagan/pull/446) | 0 (pure rename) | ✅ DONE |
+
+**Score**: **9 of 10 fully closed + 1 partial** = effective 9.5/10.
+The only surviving sub-task is `persona_angle.rs`, which has 3 live
+callers (`coordinator.rs:264, 335, 514, 536`) and is now correctly
+flagged as alive (the round-1 audit incorrectly classified it as
+truly dead because it was looking at `main@3c1f23e` before the
+coordinator re-wire in PR #178 was merged).
+
+### §E.6 Bonus closures (round-10)
+
+Not on the round-8 list but landed during the round-8/round-10 cleanup:
+
+| Item | PR | LoC | Note |
+|---|---|---:|---|
+| 5 helpers in `intake+replace+cache+atomic+pipe+mock` | [#443](https://github.com/airvzxf/moagan/pull/443) | ~72 | round-9 follow-up |
+| 5 helpers in `audit+cli+context+telemetry` | [#443](https://github.com/airvzxf/moagan/pull/443) | ~54 | round-9 follow-up |
+
+**Total dead-code removed in round-8 + round-10**: ~1,500 LoC across
+9 PRs (#442, #443, #444, #445, #446, #447, plus the 4 already-merged
+from round-8 audit).
+
 ## §F Cross-references
 
 - `docs/inconsistencies-audit-2026-08-12.md` — round-1 baseline (re-derived 2026-08-13, updated 2026-08-13 round-8 with closure footer §H).
