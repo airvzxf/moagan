@@ -175,15 +175,6 @@ impl MoaganHome {
         self.root.join("max_tokens_auto.toml")
     }
 
-    /// Path of the cached `models.dev` provider/model catalog used by
-    /// the catalog integration plan. The file is refreshed on demand
-    /// by [`crate::llm::models_dev::load_or_fetch`] with a default
-    /// 1-hour TTL; PR-1 only writes the cache, downstream phases
-    /// consume it.
-    pub fn models_dev_path(&self) -> PathBuf {
-        self.root.join("models_dev.json")
-    }
-
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(self.runs_dir())?;

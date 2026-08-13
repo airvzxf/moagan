@@ -888,17 +888,6 @@ mod tests {
         assert_eq!(p.parent(), Some(dir.path()));
     }
 
-    #[test]
-    fn models_dev_path_on_moagan_home() {
-        use crate::fs_layout::MoaganHome;
-        let home = MoaganHome::at(std::path::PathBuf::from("/tmp/moagan-home-test"));
-        let p = home.models_dev_path();
-        assert_eq!(
-            p,
-            std::path::PathBuf::from("/tmp/moagan-home-test/models_dev.json")
-        );
-    }
-
     // Smoke check: ensure the http::build_client helper is reachable
     // from this module so the public `load_or_fetch` keeps its
     // contract. The call site is not exercised here because that
