@@ -31,12 +31,9 @@ pub mod dashboard_static;
 pub mod event;
 pub mod export;
 pub mod heartbeat;
-pub mod hub;
-pub mod level;
 pub mod lineage_graph;
 pub mod redact;
 pub mod retention;
-pub mod tracing_filter;
 pub mod verify;
 
 /// One phase event (start/end/error/cancel).
@@ -1060,24 +1057,12 @@ mod tests {
 mod event_tests;
 
 #[cfg(test)]
-#[path = "hub_tests.rs"]
-mod hub_tests;
-
-#[cfg(test)]
-#[path = "level_tests.rs"]
-mod level_tests;
-
-#[cfg(test)]
 #[path = "csv_summary_tests.rs"]
 mod csv_summary_tests;
 
 #[cfg(test)]
 #[path = "dashboard_static_tests.rs"]
 mod dashboard_static_tests;
-
-#[cfg(test)]
-#[path = "tracing_filter_tests.rs"]
-mod tracing_filter_tests;
 
 #[cfg(test)]
 #[path = "daily_rotation_tests.rs"]
