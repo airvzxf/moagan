@@ -26,8 +26,6 @@ struct Inner {
     refill_per_sec: u32,
     tokens: f64,
     last_refill: Instant,
-    /// Longest queued wait so the caller can `tokio::time::sleep` it.
-    last_wait: Duration,
 }
 
 impl RateLimiter {
@@ -40,7 +38,6 @@ impl RateLimiter {
                 refill_per_sec: cfg.refill_per_sec,
                 tokens: initial,
                 last_refill: Instant::now(),
-                last_wait: Duration::ZERO,
             })),
         }
     }
@@ -72,19 +69,16 @@ impl RateLimiter {
             g.refill();
             if g.tokens >= 1.0 {
                 g.tokens -= 1.0;
-                g.last_wait = Duration::ZERO;
                 Duration::ZERO
             } else {
                 let deficit = 1.0 - g.tokens;
                 let secs = deficit / g.refill_per_sec.max(1) as f64;
                 let wait = Duration::from_secs_f64(secs);
                 if wait > max {
-                    g.last_wait = wait;
                     return Err(Error::Provider(format!(
                         "rate limiter budget exhausted: would wait {wait:?} > max {max:?}"
                     )));
                 }
-                g.last_wait = wait;
                 g.tokens += wait.as_secs_f64() * g.refill_per_sec as f64;
                 g.tokens = g.tokens.min(g.capacity as f64);
                 g.tokens -= 1.0;
@@ -121,11 +115,6 @@ impl RateLimiter {
         let mut g = self.inner.lock();
         g.tokens = (g.tokens + 1.0).min(g.capacity as f64);
     }
-
-    /// Latest recorded wait time. Useful for telemetry.
-    pub fn last_wait(&self) -> Duration {
-        self.inner.lock().last_wait
-    }
 }
 
 impl Inner {
@@ -146,14 +135,11 @@ impl Inner {
         self.refill();
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            self.last_wait = Duration::ZERO;
             Duration::ZERO
         } else {
             let deficit = 1.0 - self.tokens;
             let secs = deficit / self.refill_per_sec.max(1) as f64;
-            let wait = Duration::from_secs_f64(secs);
-            self.last_wait = wait;
-            wait
+            Duration::from_secs_f64(secs)
         }
     }
 }

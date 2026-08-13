@@ -114,7 +114,7 @@ impl OpenCodeGoResponsesProvider {
     }
 
     /// Compute the URL for the responses endpoint.
-    pub fn responses_url(&self) -> String {
+    fn responses_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
         if base.ends_with("/responses") {
             base.to_owned()

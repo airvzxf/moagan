@@ -53,10 +53,6 @@ struct MaxTokensTableInner {
     /// `verify`), not HTTP round-trips. Used for telemetry and
     /// operator-visible diagnostics.
     probe_tasks_started: u32,
-    /// Total probes that succeeded.
-    probes_succeeded: u32,
-    /// Total probes that failed (rejection or indeterminate).
-    probes_failed: u32,
     /// [`tokio::task::JoinHandle`]s for every background probe the
     /// registry fired at startup. The runtime joins them via
     /// [`Self::await_ready`] so the caller can decide whether to
@@ -96,8 +92,6 @@ impl MaxTokensTable {
                 entries,
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
                 probe_tasks_started: 0,
-                probes_succeeded: 0,
-                probes_failed: 0,
                 pending: Vec::new(),
             })),
             persist_path: save.then(|| path.to_path_buf()),
@@ -111,8 +105,6 @@ impl MaxTokensTable {
                 entries: BTreeMap::new(),
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
                 probe_tasks_started: 0,
-                probes_succeeded: 0,
-                probes_failed: 0,
                 pending: Vec::new(),
             })),
             persist_path: None,
@@ -172,7 +164,6 @@ impl MaxTokensTable {
         let attempts = {
             let mut inner = self.inner.write();
             inner.probe_tasks_started += 1;
-            inner.probes_succeeded += 1;
             let attempts_total = inner.probe_tasks_started - attempts_before;
             inner.entries.insert(
                 (provider.to_owned(), model.to_owned()),
@@ -220,7 +211,6 @@ impl MaxTokensTable {
             let mut inner = self.inner.write();
             inner.probe_tasks_started += 1;
             if ok {
-                inner.probes_succeeded += 1;
                 if let Some(e) = inner
                     .entries
                     .get_mut(&(provider.to_owned(), model.to_owned()))
@@ -228,7 +218,6 @@ impl MaxTokensTable {
                     e.verified_at = Utc::now().to_rfc3339();
                 }
             } else {
-                inner.probes_failed += 1;
                 inner
                     .entries
                     .remove(&(provider.to_owned(), model.to_owned()));
@@ -243,7 +232,7 @@ impl MaxTokensTable {
     /// Persist the current in-memory state to disk. Best-effort:
     /// callers wrap in `if let Err(_)` because losing a probe result
     /// is preferable to aborting the run.
-    pub fn persist_to(&self, path: &Path) -> Result<()> {
+    fn persist_to(&self, path: &Path) -> Result<()> {
         let inner = self.inner.read();
         let mut file = MaxTokensTableFile::new_empty();
         for ((provider, model), entry) in &inner.entries {
@@ -347,16 +336,6 @@ impl MaxTokensTable {
     /// matches what it actually counts.
     pub fn probe_tasks_started(&self) -> u32 {
         self.inner.read().probe_tasks_started
-    }
-
-    /// Total probes that succeeded.
-    pub fn probes_succeeded(&self) -> u32 {
-        self.inner.read().probes_succeeded
-    }
-
-    /// Total probes that failed.
-    pub fn probes_failed(&self) -> u32 {
-        self.inner.read().probes_failed
     }
 
     /// Number of cached entries.
