@@ -3,6 +3,5 @@
 
 pub mod compression;
 pub mod lease;
-pub mod lease_full;
 pub mod outbox_tx;
 pub mod sqlite;
