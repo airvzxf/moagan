@@ -298,11 +298,11 @@ refactor of the surviving caller. Round 9 candidate if needed.
 
 ## §F Cross-references
 
-- `docs/inconsistencies-audit-2026-08-12.md` — round-1 baseline (re-derived 2026-08-13).
+- `docs/inconsistencies-audit-2026-08-12.md` — round-1 baseline (re-derived 2026-08-13, updated 2026-08-13 round-8 with closure footer §H).
 - `docs/spec-impl-gaps.md` — closed spec-impl directory gaps.
 - `docs/wire-the-gates-followups.md` — open follow-ups from the models-dev wire-up.
 - `docs/COORDINATION.md` — session coordination log (08:50, 09:00, 10:10, 10:50, 10:56 entries).
 - `docs/e2e-loop-2026-08-12.md` — e2e-network flake log (window 06:24 → 12:00 UTC).
-- PRs #416, #420, #422, #423, #425, #426, #427, #430, #432, #433, #434, #435 — round-1 / round-2 fix PRs (on `origin/main`).
+- PRs #416, #420, #422, #423, #425, #426, #427, #430, #432, #433, #434, #435, #436, #437, #438, #439, #440, #441 — round-1 / round-2 / round-5 / round-7 fix PRs (on `origin/main`).
 - **PR #424** — stranded on `fix/audit-findings` branch; not on `origin/main`.
-- `audit-round-5-cleanup` worktree at HEAD — in-flight PR #436 staging.
+- `docs/audit-round-3` worktree at HEAD `6f970b8` — round-8 cleanup commits (4 commits: docs update + sandbox builders + storage zombie helpers + 9 dead helpers across mock/audit/compression/ids).
