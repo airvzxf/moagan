@@ -70,21 +70,9 @@ impl VerifyReport {
     }
 }
 
-/// Read and decode the external audit stream.
-pub fn read_records(path: &Path) -> Result<Vec<AuditRecord>> {
-    if !path.exists() {
-        return Err(Error::Io(crate::error::IoError::Raw(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("audit file {} not found", path.display()),
-        ))));
-    }
-    let text = read_path(path)?;
-    text.lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_str(line).map_err(Error::from))
-        .collect()
-}
-
+/// Read the text contents of a single audit/calls file, transparently
+/// decompressing gzip when the extension is `.gz`. Used by the
+/// verifier to materialise the stream before parsing.
 fn read_path(path: &Path) -> Result<String> {
     if path.extension().and_then(|value| value.to_str()) == Some("gz") {
         compression::read_to_string(path)

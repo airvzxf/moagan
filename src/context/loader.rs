@@ -19,7 +19,6 @@
 //! uses BLAKE3 for the per-file `shasum` column because BLAKE3 is
 //! the day-to-day internal hash (catalog 10-integrada-v0 §D.6.1).
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -374,15 +373,6 @@ pub fn brief_excerpt(texts: &[String], max_chars: usize) -> String {
         out.push(ch);
     }
     out
-}
-
-/// Group records by `context_type` for the SQLite index helper.
-pub fn group_by_type(records: &[ContextRefRecord]) -> BTreeMap<String, usize> {
-    let mut map: BTreeMap<String, usize> = BTreeMap::new();
-    for r in records {
-        *map.entry(r.context_type.clone()).or_default() += 1;
-    }
-    map
 }
 
 #[cfg(test)]
