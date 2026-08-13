@@ -260,7 +260,7 @@ impl SynthesizePhase {
     /// Persist a `synthesized/skipped_<NN>.json` sidecar in `dir`.
     /// This is the canonical filesystem-first write; the caller is
     /// expected to mirror the row into SQLite afterwards.
-    pub fn write_skipped_in_dir(
+    fn write_skipped_in_dir(
         dir: &std::path::Path,
         cluster_id: &str,
         skipped_seq: usize,
