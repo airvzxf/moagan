@@ -1191,6 +1191,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 
@@ -1274,6 +1276,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 
@@ -1684,6 +1688,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let wire = AnthropicWire;
         let body = wire.encode_body(&req).unwrap();
@@ -1721,6 +1727,8 @@ mod tests {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let wire = ResponsesWire;
         let body = wire.encode_body(&req).unwrap();

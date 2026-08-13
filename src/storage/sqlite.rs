@@ -69,6 +69,10 @@ mod sql_v014 {
     pub(super) const V014: &str = include_str!("migrations/v014_calls_retry_count.sql");
 }
 
+mod sql_v015 {
+    pub(super) const V015: &str = include_str!("migrations/v015_calls_cost_usd.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -418,6 +422,12 @@ impl Db {
                 Ok(())
             })?;
         }
+        if current < 15 {
+            apply_step(&conn, 15, || -> Result<()> {
+                conn.execute_batch(sql_v015::V015)?;
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 
@@ -611,6 +621,33 @@ impl Db {
                 status,
                 retry_count as i64,
             ],
+        )?;
+        Ok(())
+    }
+
+    /// v015: backfill the per-call USD estimate on the freshly
+    /// inserted `calls` row. Best-effort: a pre-v015 database short
+    /// circuits to `Ok(())` and a SQLite failure is logged with
+    /// `tracing::warn!` rather than aborting the call site, because
+    /// the canonical record is the `calls.jsonl.gz` row and the
+    /// SQLite mirror is a queryable index (T01-06 §2.6).
+    ///
+    /// `cost_usd = 0` is also accepted: callers that compute a zero
+    /// estimate (no catalog entry, no tokens billed) leave the
+    /// default in place and skip the UPDATE so the row count stays
+    /// predictable. The `cost_usd > 0` filter downstream is the
+    /// explicit opt-in for "real money was billed".
+    pub fn record_call_cost(&self, call_id: &str, cost_usd: f64) -> Result<()> {
+        if self.user_version()? < 15 {
+            return Ok(());
+        }
+        if !(cost_usd.is_finite() && cost_usd > 0.0) {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE calls SET cost_usd = ? WHERE call_id = ?",
+            params![cost_usd, call_id],
         )?;
         Ok(())
     }
@@ -838,7 +875,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT call_id, phase, role, provider, model, cache_key, body_sha256, cache_hit, http_status, \
                      input_tokens, output_tokens, cache_read, cache_creation, started_unix, \
-                     ended_unix, error, retry_count \
+                     ended_unix, error, retry_count, cost_usd \
              FROM calls WHERE run_id = ? ORDER BY started_unix ASC",
         )?;
         let rows = stmt
@@ -861,6 +898,7 @@ impl Db {
                     ended_unix: r.get::<_, Option<i64>>(14)?,
                     error: r.get(15)?,
                     retry_count: r.get::<_, i64>(16)? as u32,
+                    cost_usd: r.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1291,6 +1329,24 @@ pub struct WindowUsageRow {
     pub last_call_unix: Option<i64>,
 }
 
+/// One row from [`Db::aggregate_cost_by_provider_model`]. The
+/// `cost_usd` column on `calls` is filled in by the per-call
+/// `cost_estimate` helper against the models.dev catalog, so a
+/// zero `cost_usd` here means the catalog had no entry for the
+/// pair at probe time (or no catalog data was available).
+/// Powers `moagan telemetry cost --run <id>`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CostAggregateRow {
+    /// Provider name (e.g. `minimax`).
+    pub provider: String,
+    /// Model name (e.g. `MiniMax-M3`).
+    pub model: String,
+    /// Number of calls in the scope for this `(provider, model)`.
+    pub calls: i64,
+    /// Sum of `cost_usd` over the calls in the scope.
+    pub cost_usd: f64,
+}
+
 /// One row from `phases` for the dashboard's per-phase view. The
 /// dashboard normalises three events per phase (start / end / error)
 /// into a single row carrying the final status and the derived
@@ -1568,6 +1624,58 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Aggregate `cost_usd` from the `calls` table, grouped by
+    /// `(provider, model)`. Used by `moagan telemetry cost --run
+    /// <id>` (and `--all`) to answer "how much money did this run
+    /// (or the whole install) spend, per model?".
+    ///
+    /// The optional `run_id` narrows the query to a single run
+    /// (`Some(id)`); passing `None` aggregates every call recorded
+    /// in the index. The DB columns may be missing on a v014
+    /// install (the `calls.cost_usd` column lands in v015); when
+    /// the schema is older, every row reads as `cost_usd = 0.0` and
+    /// the aggregation still returns counts so the CLI can print
+    /// "no cost data" instead of erroring out.
+    pub fn aggregate_cost_by_provider_model(
+        &self,
+        run_id: Option<RunId>,
+    ) -> Result<Vec<CostAggregateRow>> {
+        let conn = self.pool.get()?;
+        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match run_id {
+            Some(rid) => (
+                "SELECT provider, model, COUNT(*), COALESCE(SUM(cost_usd), 0.0) \
+                 FROM calls \
+                 WHERE run_id = ? \
+                 GROUP BY provider, model \
+                 ORDER BY (COALESCE(SUM(cost_usd), 0.0)) DESC, provider ASC, model ASC",
+                vec![Box::new(rid.to_string())],
+            ),
+            None => (
+                "SELECT provider, model, COUNT(*), COALESCE(SUM(cost_usd), 0.0) \
+                 FROM calls \
+                 GROUP BY provider, model \
+                 ORDER BY (COALESCE(SUM(cost_usd), 0.0)) DESC, provider ASC, model ASC",
+                vec![],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let params_iter: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|b| b.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params_iter), |r| {
+                Ok(CostAggregateRow {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    calls: r.get(2)?,
+                    cost_usd: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 /// One row from the `warnings` summary grouping.
@@ -1681,6 +1789,11 @@ pub struct CallRow {
     /// LLM call take?" by reading a single SQL query instead of
     /// correlating warnings to call records.
     pub retry_count: u32,
+    /// v015: per-call USD estimate derived from the models.dev
+    /// catalog `cost: {input, output, cache_read, cache_write}` block.
+    /// `0.0` when the catalog was missing, the `(provider, model)`
+    /// pair was unknown, or the call billed zero tokens.
+    pub cost_usd: f64,
 }
 
 /// Row read from `runs`.
@@ -3621,15 +3734,16 @@ mod tests {
         }
     }
 
-    /// Re-opening a DB that already has v014 applied stays at
-    /// v014 without error. The runner's `if current < N` gates
+    /// Re-opening a DB that already has v015 applied stays at
+    /// v015 without error. The runner's `if current < N` gates
     /// make this trivially true, but the test pins the contract:
     /// `CREATE TABLE IF NOT EXISTS` is idempotent at the SQL
     /// level so a third, fourth, ... open of the same DB also
     /// succeeds. (The original v013 wording predates the
-    /// `calls.retry_count` migration landed in v014.)
+    /// `calls.retry_count` migration landed in v014; v015 then
+    /// added the `calls.cost_usd` column on top.)
     #[test]
-    fn v014_migration_is_idempotent() {
+    fn current_head_migration_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("meta.sqlite");
         let _db = Db::open(&path).expect("first open");
@@ -3640,19 +3754,200 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 14,
-            "user_version must stay at 14 across consecutive reopens, got {v}"
+            v, 15,
+            "user_version must stay at the current head across consecutive reopens, got {v}"
         );
-        // v014 added a single ALTER TABLE so no new tables to
-        // probe; the column existence check below is enough.
-        let n: i64 = conn
+        // v015 added a single ALTER TABLE so no new tables to
+        // probe; the column existence checks below are enough.
+        let retry_n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('calls') WHERE name = 'retry_count'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "calls.retry_count column missing on reopen");
+        assert_eq!(retry_n, 1, "calls.retry_count column missing on reopen");
+        let cost_n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('calls') WHERE name = 'cost_usd'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost_n, 1, "calls.cost_usd column missing on reopen");
+    }
+
+    /// v015: the migration adds `calls.cost_usd` as `REAL NOT NULL
+    /// DEFAULT 0`. Verify the column exists, defaults to 0 on a
+    /// freshly inserted row, and survives a re-open.
+    #[test]
+    fn migration_v015_adds_cost_usd_column() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.7.1", None, None, None)
+            .unwrap();
+        db.record_call(
+            "c1",
+            run_id,
+            "intake",
+            "intake",
+            "mock",
+            "mock-model",
+            "cache-key-1",
+            Some("sha256"),
+            false,
+            Some(200),
+            100,
+            50,
+            0,
+            0,
+            100,
+            101,
+            None,
+            0,
+        )
+        .unwrap();
+
+        // Column exists and defaults to 0 on a row written before
+        // the cost-USD plumbing runs.
+        let conn = db.pool.get().unwrap();
+        let cost: f64 = conn
+            .query_row("SELECT cost_usd FROM calls WHERE call_id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(cost, 0.0, "freshly inserted row defaults to cost_usd = 0");
+
+        // user_version is at the current head.
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(v >= 15, "user_version must reach v015, got {v}");
+    }
+
+    /// v015: `record_call_cost` writes the column for a known call
+    /// and ignores calls that pre-date the migration (the column
+    /// check returns `Ok(())`).
+    #[test]
+    fn record_call_cost_updates_row() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "running", "0.7.1", None, None, None)
+            .unwrap();
+        db.record_call(
+            "c1",
+            run_id,
+            "intake",
+            "intake",
+            "mock",
+            "mock-model",
+            "cache-key-1",
+            Some("sha256"),
+            false,
+            Some(200),
+            100,
+            50,
+            0,
+            0,
+            100,
+            101,
+            None,
+            0,
+        )
+        .unwrap();
+
+        db.record_call_cost("c1", 0.0123).unwrap();
+        let cost: f64 = {
+            let conn = db.pool.get().unwrap();
+            conn.query_row("SELECT cost_usd FROM calls WHERE call_id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert!((cost - 0.0123).abs() < 1e-9);
+
+        // Zero and non-finite values are skipped (default left in
+        // place) so the row count stays predictable.
+        db.record_call_cost("c1", 0.0).unwrap();
+        let cost: f64 = {
+            let conn = db.pool.get().unwrap();
+            conn.query_row("SELECT cost_usd FROM calls WHERE call_id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            cost, 0.0123,
+            "zero cost must not overwrite an existing value"
+        );
+
+        db.record_call_cost("c1", f64::NAN).unwrap();
+        let cost: f64 = {
+            let conn = db.pool.get().unwrap();
+            conn.query_row("SELECT cost_usd FROM calls WHERE call_id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(cost, 0.0123, "NaN must not overwrite an existing value");
+
+        // list_calls_for_run surfaces the new column.
+        let rows = db.list_calls_for_run(run_id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].cost_usd - 0.0123).abs() < 1e-9);
+    }
+
+    /// v015 + cost.rs: end-to-end check that the models.dev catalog
+    /// row for `minimax / MiniMax-M3` produces the expected USD
+    /// estimate when the call records the real upstream token
+    /// counts (0.30 / 1.20 / 0.03 / 0.375 per million tokens).
+    #[test]
+    fn cost_estimate_minimax_m3_real_pricing() {
+        use crate::llm::cost::cost_estimate;
+        use crate::llm::models_dev::ModelsDevCatalog;
+        use crate::llm::wire::Usage;
+        // Reproduce the upstream JSON for minimax / MiniMax-M3
+        // using the same serde shape so the assertion does not
+        // depend on a network fixture.
+        let body = r#"{
+            "schema_version": 1,
+            "fetched_at_unix": 0,
+            "providers": {
+                "minimax": {
+                    "id": "minimax",
+                    "name": "MiniMax (minimax.io)",
+                    "models": {
+                        "MiniMax-M3": {
+                            "id": "MiniMax-M3",
+                            "name": "MiniMax-M3",
+                            "attachment": false,
+                            "reasoning": true,
+                            "tool_call": true,
+                            "temperature": true,
+                            "modalities": {"input": ["text"], "output": ["text"]},
+                            "limit": {"context": 524288, "output": 128000},
+                            "cost": {"input": 0.3, "output": 1.2, "cache_read": 0.03, "cache_write": 0.375},
+                            "open_weights": true
+                        }
+                    }
+                }
+            }
+        }"#;
+        let catalog: ModelsDevCatalog = serde_json::from_str(body).unwrap();
+        // 1_000_000 input at $0.30/M + 500_000 output at $1.20/M +
+        // 200_000 cache read at $0.03/M + 100_000 cache write at
+        // $0.375/M = $0.30 + $0.60 + $0.006 + $0.0375 = $0.9435.
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_read: 200_000,
+            cache_creation: 100_000,
+        };
+        let cost = cost_estimate(Some(&catalog), "minimax", "MiniMax-M3", &usage);
+        assert!(
+            (cost - 0.9435).abs() < 1e-9,
+            "minimax / MiniMax-M3 cost estimate drifted from upstream rates, got {cost}"
+        );
     }
 
     /// `apply_step` must roll the schema change back when the

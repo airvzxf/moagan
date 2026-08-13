@@ -157,6 +157,24 @@ pub enum TelemetryCmd {
         #[arg(long, default_value_t = 7)]
         window_days: u32,
     },
+    /// `moagan telemetry cost --run <id>` (or `--all`).
+    ///
+    /// PR-7: per-call USD cost aggregation, computed from the
+    /// `cost_usd` column the runtime wrote against the
+    /// `models.dev` catalog rates. With `--run <id>` the
+    /// aggregation is scoped to one run; with `--all` it spans
+    /// every run in the index. Read-only; never mutates state.
+    Cost {
+        /// Optional override for `MOAGAN_HOME`.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Target run id. Mutually exclusive with `--all`.
+        #[arg(long, conflicts_with = "all")]
+        run: Option<String>,
+        /// Aggregate across every run in the index.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+    },
 }
 
 /// Export level. Mirrors T01-06 §10.9 + V4 §9.1.
@@ -251,6 +269,7 @@ impl TelemetryCmd {
             // `Result<i32>` directly; every other subcommand
             // collapses to 0 on `Ok`.
             Self::Plan { .. } => plan::run(&self),
+            Self::Cost { .. } => cost::run(&self).map(|_| 0),
         }
     }
 
@@ -1315,6 +1334,132 @@ mod plan {
     }
 }
 
+mod cost {
+    //! `moagan telemetry cost` — per-call USD cost aggregation.
+    //!
+    //! The runtime writes `calls.cost_usd` on every call (PR-6,
+    //! SQLite v015). This module reads it back and groups by
+    //! `(provider, model)` so an operator can answer "how much
+    //! money did this run spend?" with a single CLI invocation.
+    //!
+    //! The output matches the contract spelled out in PR-7:
+    //!
+    //! ```text
+    //! RUN: 018f3a2b-...
+    //! Total cost: $0.42
+    //!
+    //! By provider/model:
+    //!   minimax / MiniMax-M3         0.4200 USD  (100 calls)
+    //!   minimax / MiniMax-M2.7       0.0000 USD  (12 calls, no cost data)
+    //! ```
+    //!
+    //! `--all` flips the scope from one run to the whole index.
+    //! `--run` is mutually exclusive with `--all`; a conflict
+    //! surfaces as `Error::InvalidArgs` from clap's `conflicts_with`
+    //! attribute, so the dispatcher never sees both at once.
+
+    use super::{Error, Result, TelemetryCmd};
+    use crate::ids::RunId;
+    use crate::storage::sqlite::Db;
+
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, run, all) = match cmd {
+            TelemetryCmd::Cost { runs_dir, run, all } => (runs_dir.as_ref(), run.as_deref(), *all),
+            _ => return Err(Error::InvalidState("cost: wrong variant".into())),
+        };
+        // Exactly one of `--run` or `--all` must be set; clap's
+        // `conflicts_with` is the primary guard, but the test
+        // surface calls `dispatch` directly so we re-check here
+        // to keep the contract tight.
+        match (run, all) {
+            (None, false) => {
+                return Err(Error::InvalidArgs(
+                    "telemetry cost: pass either --run <id> or --all".into(),
+                ));
+            }
+            (Some(_), true) => {
+                return Err(Error::InvalidArgs(
+                    "telemetry cost: --run and --all are mutually exclusive".into(),
+                ));
+            }
+            _ => {}
+        }
+        let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
+        let db = Db::open(&home.meta_db_path())?;
+        let run_id = run
+            .map(|raw| {
+                raw.parse()
+                    .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")))
+            })
+            .transpose()?;
+        if let Some(rid) = run_id {
+            print_for_run(&db, rid)?;
+        } else {
+            print_for_all(&db)?;
+        }
+        Ok(())
+    }
+
+    fn print_for_run(db: &Db, run_id: RunId) -> Result<()> {
+        // The per-run aggregate is the union of every recorded
+        // call. Empty result means the run id is unknown; surface
+        // a clear error so the operator can re-check.
+        if db.get_run(run_id)?.is_none() {
+            return Err(Error::InvalidState(format!(
+                "run {run_id} not found in the index"
+            )));
+        }
+        let rows = db.aggregate_cost_by_provider_model(Some(run_id))?;
+        let total: f64 = rows.iter().map(|r| r.cost_usd).sum();
+        println!("RUN: {}", run_id.short());
+        println!("Total cost: ${:.4}", total);
+        if rows.is_empty() {
+            println!("(no calls recorded for this run)");
+            return Ok(());
+        }
+        println!();
+        println!("By provider/model:");
+        print_rows(&rows);
+        Ok(())
+    }
+
+    fn print_for_all(db: &Db) -> Result<()> {
+        let rows = db.aggregate_cost_by_provider_model(None)?;
+        let total: f64 = rows.iter().map(|r| r.cost_usd).sum();
+        println!("ALL RUNS");
+        println!("Total cost: ${:.4}", total);
+        if rows.is_empty() {
+            println!("(no calls recorded)");
+            return Ok(());
+        }
+        println!();
+        println!("By provider/model:");
+        print_rows(&rows);
+        Ok(())
+    }
+
+    fn print_rows(rows: &[crate::storage::sqlite::CostAggregateRow]) {
+        for r in rows {
+            // Mirror the example in the PR-7 spec: the per-row
+            // dollar amount is fixed to 4 decimal places, and
+            // a zero `cost_usd` carries the "no cost data"
+            // annotation so the operator does not mistake it
+            // for "free".
+            if r.cost_usd > 0.0 {
+                println!(
+                    "  {:<14} / {:<22} {:>8.4} USD  ({} calls)",
+                    r.provider, r.model, r.cost_usd, r.calls
+                );
+            } else {
+                println!(
+                    "  {:<14} / {:<22} {:>8.4} USD  ({} calls, no cost data)",
+                    r.provider, r.model, r.cost_usd, r.calls
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1724,5 +1869,164 @@ mod tests {
         };
         let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidArgs(_)));
+    }
+
+    /// PR-7: `telemetry cost --run <id>` aggregates `cost_usd`
+    /// from the `calls` table by `(provider, model)`. The test
+    /// inserts two calls (one with cost, one without) and asserts
+    /// the aggregate reflects both.
+    #[test]
+    fn telemetry_cost_aggregates_by_provider_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let db = Db::open(&home.join("meta.sqlite")).unwrap();
+        let run_id = RunId::new();
+        db.register_run(run_id, "fast", "ok", "test", None, None, None)
+            .unwrap();
+        // Two calls: one priced at $0.0123, one unpriced.
+        db.record_call(
+            "c1",
+            run_id,
+            "intake",
+            "intake",
+            "minimax",
+            "MiniMax-M3",
+            "",
+            None,
+            false,
+            Some(200),
+            1000,
+            100,
+            0,
+            0,
+            1,
+            2,
+            None,
+            0,
+        )
+        .unwrap();
+        db.record_call(
+            "c2",
+            run_id,
+            "intake",
+            "intake",
+            "minimax",
+            "MiniMax-M3",
+            "",
+            None,
+            false,
+            Some(200),
+            1000,
+            100,
+            0,
+            0,
+            3,
+            4,
+            None,
+            0,
+        )
+        .unwrap();
+        db.record_call_cost("c1", 0.0123).unwrap();
+        let rows = db.aggregate_cost_by_provider_model(Some(run_id)).unwrap();
+        assert_eq!(rows.len(), 1, "single (provider, model) pair");
+        assert_eq!(rows[0].provider, "minimax");
+        assert_eq!(rows[0].model, "MiniMax-M3");
+        assert_eq!(rows[0].calls, 2);
+        assert!(
+            (rows[0].cost_usd - 0.0123).abs() < 1e-9,
+            "got {}",
+            rows[0].cost_usd
+        );
+    }
+
+    /// PR-7: `telemetry cost --all` aggregates across every
+    /// recorded run. The test inserts calls under two different
+    /// run ids and confirms the aggregation ignores the run
+    /// boundary.
+    #[test]
+    fn telemetry_cost_all_aggregates_across_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let db = Db::open(&home.join("meta.sqlite")).unwrap();
+        let r1 = RunId::new();
+        let r2 = RunId::new();
+        db.register_run(r1, "fast", "ok", "test", None, None, None)
+            .unwrap();
+        db.register_run(r2, "fast", "ok", "test", None, None, None)
+            .unwrap();
+        db.record_call(
+            "a",
+            r1,
+            "intake",
+            "intake",
+            "minimax",
+            "M3",
+            "",
+            None,
+            false,
+            Some(200),
+            1000,
+            100,
+            0,
+            0,
+            1,
+            2,
+            None,
+            0,
+        )
+        .unwrap();
+        db.record_call(
+            "b",
+            r2,
+            "intake",
+            "intake",
+            "minimax",
+            "M3",
+            "",
+            None,
+            false,
+            Some(200),
+            1000,
+            100,
+            0,
+            0,
+            3,
+            4,
+            None,
+            0,
+        )
+        .unwrap();
+        db.record_call(
+            "c",
+            r1,
+            "intake",
+            "intake",
+            "opencode_go",
+            "k3",
+            "",
+            None,
+            false,
+            Some(200),
+            1000,
+            100,
+            0,
+            0,
+            5,
+            6,
+            None,
+            0,
+        )
+        .unwrap();
+        db.record_call_cost("a", 0.10).unwrap();
+        db.record_call_cost("b", 0.20).unwrap();
+        let rows = db.aggregate_cost_by_provider_model(None).unwrap();
+        // Two distinct (provider, model) pairs.
+        assert_eq!(rows.len(), 2);
+        let minimax = rows.iter().find(|r| r.provider == "minimax").unwrap();
+        assert_eq!(minimax.calls, 2);
+        assert!((minimax.cost_usd - 0.30).abs() < 1e-9);
+        let oc = rows.iter().find(|r| r.provider == "opencode_go").unwrap();
+        assert_eq!(oc.calls, 1);
+        assert_eq!(oc.cost_usd, 0.0, "no cost recorded => zero");
     }
 }

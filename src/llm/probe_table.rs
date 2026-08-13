@@ -25,8 +25,8 @@ use crate::error::Result;
 use crate::fs_layout::MoaganHome;
 
 use super::probe::{
-    Entry, MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, MaxTokensTableFile, ProbeTransport,
-    detect_max_tokens,
+    Entry, MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, MaxTokensTableFile, OperatorCap,
+    ProbeTransport, detect_max_tokens,
 };
 
 /// In-memory table of `(provider_name, model_name) -> Entry` plus
@@ -295,6 +295,44 @@ impl MaxTokensTable {
             return Ok(());
         };
         self.persist_to(&path)
+    }
+
+    /// Set the operator-pinned cap for a provider. Written by
+    /// `moagan probe max_tokens --persist-min`; the runtime reads
+    /// it on the next startup so a fresh run never re-probes the
+    /// same models to land at the same answer. The cap is kept
+    /// alongside the auto-discovered entries; both files share the
+    /// same on-disk sidecar so a human diff after a probe-run stays
+    /// meaningful. `auto` is hard-coded to `false` because an
+    /// operator-pinned cap is, by construction, not auto-detected.
+    pub fn set_operator_cap(&self, provider: &str, min: u32) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let path = self.persist_path.clone();
+        // Re-load the file so the operator_caps map merges with
+        // whatever the on-disk sidecar already carries — a separate
+        // process (or a previous invocation) may have written its
+        // own cap for a different provider.
+        if let Some(ref path) = path {
+            let file = MaxTokensTableFile::load(path)?;
+            let mut file = file;
+            file.operator_caps.insert(
+                provider.to_owned(),
+                OperatorCap {
+                    min,
+                    auto: false,
+                    detected_at: now,
+                },
+            );
+            return file.save(path);
+        }
+        // Persistence disabled (save=false at construction): log a
+        // warning and silently succeed so the in-memory result is
+        // still useful for the rest of the run.
+        tracing::warn!(
+            provider = %provider,
+            "max_tokens_auto: persistence disabled; operator cap not written to disk"
+        );
+        Ok(())
     }
 
     /// Effective floor after the safety clamp. Useful for tests and

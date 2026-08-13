@@ -736,6 +736,8 @@ data: [DONE]\n\n";
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -797,6 +799,8 @@ data: {not json}\n\n";
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let err = p.send(&req).await.unwrap_err();
             match err {
@@ -857,6 +861,8 @@ data: {not json}\n\n";
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -935,6 +941,8 @@ data: [DONE]\n\n";
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -993,6 +1001,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
+                    attachments: vec![],
+                    tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1054,6 +1064,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1123,6 +1135,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1197,6 +1211,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1267,6 +1283,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
+                    attachments: vec![],
+                    tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1297,6 +1315,8 @@ data: [DONE]\n\n",
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         }
     }
 
@@ -1360,6 +1380,8 @@ data: [DONE]\n\n",
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let body = build_responses_body(&req, &req.model, false, false);
         let value: serde_json::Value = serde_json::to_value(&body).unwrap();
@@ -1479,6 +1501,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);

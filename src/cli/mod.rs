@@ -22,6 +22,7 @@ pub mod flags_batch;
 pub mod forbidden;
 pub mod inspect;
 pub mod pause_cmd;
+pub mod probe;
 pub mod rate;
 pub mod repair;
 pub mod run;
@@ -417,6 +418,15 @@ pub enum Cmd {
         /// the per-code summary).
         #[arg(long, default_value_t = false)]
         verbose: bool,
+        /// PR-7: print the snapshot of which provider / model
+        /// capabilities were in effect during the run (read from
+        /// the manifest's `provider` and `model` fields, plus the
+        /// `models.dev` catalog row if the on-disk cache is
+        /// present). When the manifest is missing the field, the
+        /// command prints a warning and exits 0 so the operator
+        /// can still chain it into shell scripts.
+        #[arg(long, default_value_t = false)]
+        capabilities: bool,
     },
     /// Localised refinement. Two sub-modes, mutually exclusive:
     ///
@@ -539,7 +549,32 @@ pub enum Cmd {
         dry_run: bool,
     },
     /// Check the local environment (API key, writability).
-    Doctor,
+    ///
+    /// PR-7 adds `--capabilities` to print the resolved capability
+    /// matrix per `(provider, model)` the operator has configured,
+    /// cross-referenced with the `models.dev` catalog when the
+    /// on-disk cache is available. The default behaviour (no
+    /// flag) keeps the pre-PR-7 environment check unchanged so
+    /// existing CI scripts do not regress.
+    Doctor {
+        /// Print the per-provider capability table instead of
+        /// (or in addition to) the standard environment checks.
+        #[arg(long, default_value_t = false)]
+        capabilities: bool,
+    },
+    /// `moagan probe <verb>` — operator-driven diagnostics for
+    /// the LLM transport layer. Verb-first naming per the
+    /// operator-facing convention (the `moagan <verb> <noun>`
+    /// order reads naturally in a shell). Today the only
+    /// sub-command is `moagan probe max_tokens`, which is the
+    /// on-demand counterpart to the startup auto-probe and is
+    /// the manual pin the operator can set when the auto-probe
+    /// misfires.
+    Probe {
+        /// Probe sub-command (`max_tokens` today).
+        #[command(subcommand)]
+        sub: probe::ProbeCmd,
+    },
     /// External, transparent HTTP recorder and verifier. The
     /// `proxy` subcommand is a separate process; the `verify`
     /// subcommand cross-checks the recorded JSONL against Moagan's
@@ -774,7 +809,8 @@ impl Cmd {
             Self::Inspect { .. } => "Inspect runs",
             Self::Refine { .. } => "Re-run the deliver phase for one proposal",
             Self::Rerank { .. } => "Re-run the rank phase on existing evaluations",
-            Self::Doctor => "Check the local environment",
+            Self::Doctor { .. } => "Check the local environment",
+            Self::Probe { .. } => "Operator-driven diagnostics (probe max_tokens, ...)",
             Self::Audit { .. } => "External, transparent audit trail",
             Self::Discover { .. } => "Discovery mode (knowledge base by category)",
             Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
@@ -1090,19 +1126,24 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             limit,
             run_id,
             verbose,
+            capabilities,
         } => {
             let home = &global_home;
             let db = Db::open(&home.meta_db_path())?;
             if let Some(id) = run_id {
                 let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
-                match inspect::summarize_run(&db, parsed)? {
-                    Some(summary) => {
-                        inspect::print_run_summary(&summary, verbose);
-                    }
-                    None => {
-                        return Err(Error::InvalidState(format!(
-                            "run {id} not found in the index"
-                        )));
+                if capabilities {
+                    inspect::print_run_capabilities(&global_home, parsed)?;
+                } else {
+                    match inspect::summarize_run(&db, parsed)? {
+                        Some(summary) => {
+                            inspect::print_run_summary(&summary, verbose);
+                        }
+                        None => {
+                            return Err(Error::InvalidState(format!(
+                                "run {id} not found in the index"
+                            )));
+                        }
                     }
                 }
             } else {
@@ -1186,7 +1227,8 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             println!("reranked run {run_id}");
             Ok(0)
         }
-        Cmd::Doctor => doctor::run(),
+        Cmd::Doctor { capabilities } => doctor::run(capabilities),
+        Cmd::Probe { sub } => probe::dispatch(&sub).await,
         Cmd::Audit { sub } => match sub {
             AuditCmd::Proxy {
                 runs_dir,
@@ -1392,7 +1434,9 @@ mod tests {
     /// `moagan doctor` keeps its deterministic exit code.
     #[test]
     fn should_reconcile_at_startup_skips_read_only_commands() {
-        assert!(!should_reconcile_at_startup(&Cmd::Doctor));
+        assert!(!should_reconcile_at_startup(&Cmd::Doctor {
+            capabilities: false
+        }));
     }
 
     /// D.28.3 + D.28.4 wire: when

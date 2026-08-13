@@ -24,6 +24,8 @@ use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir};
 use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
+use crate::llm::capability::CapabilityResolver;
+use crate::llm::models_dev::ModelsDevCatalog;
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
@@ -125,6 +127,26 @@ pub struct RunContext {
     /// paths and tests); in that case the clamp reduces to the
     /// per-provider TOML value alone.
     pub max_tokens_table: Option<Arc<MaxTokensTable>>,
+    /// PR-3: capability resolver consulted on every LLM call so the
+    /// models.dev catalog can drop fields the upstream would reject
+    /// (e.g. `temperature` on `kimi-k3`). `None` disables every
+    /// capability-aware gate and keeps the legacy "send everything"
+    /// behaviour — the same fallback the `max_tokens_table` field
+    /// uses. The CLI boundary (`cli::run`) and the integration
+    /// tests populate this field; unit tests that exercise the
+    /// pre-capability behaviour leave it as `None`.
+    pub capability_resolver: Option<Arc<CapabilityResolver>>,
+    /// Wire-the-gates plan: handle to the on-disk `models.dev`
+    /// catalog refreshed at CLI startup (`cli::run`). `None` means
+    /// no catalog is loaded (fresh home, network failure, tests
+    /// that skip the refresh); every gate that depends on the
+    /// catalog (`ModalityGate::apply`, `cost_estimate`) falls
+    /// through to its no-op default in that case. The CLI
+    /// boundary populates this field by calling
+    /// [`crate::llm::models_dev::load_or_fetch`]; integration tests
+    /// and the legacy `moagan run --provider mock` flow leave it
+    /// as `None`.
+    pub models_dev_catalog: Option<Arc<ModelsDevCatalog>>,
 }
 
 /// Default heartbeat interval. Renews the lease well before the
@@ -224,6 +246,8 @@ impl RunContext {
             heartbeat_holder: "heartbeat".to_owned(),
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
             max_tokens_table: None,
+            capability_resolver: None,
+            models_dev_catalog: None,
         }
     }
 
@@ -246,6 +270,55 @@ impl RunContext {
     pub fn with_max_tokens_table_opt(mut self, table: Option<Arc<MaxTokensTable>>) -> Self {
         if let Some(t) = table {
             self.max_tokens_table = Some(t);
+        }
+        self
+    }
+
+    /// PR-3: attach a [`CapabilityResolver`] so every LLM call goes
+    /// through the capability gate before the wire body is built.
+    /// Builder form mirrors [`Self::with_max_tokens_table`] so the
+    /// CLI boundary (`cli::run`) can chain it next to the auto-probe
+    /// table without changing the rest of the construction order.
+    pub fn with_capability_resolver(mut self, resolver: Arc<CapabilityResolver>) -> Self {
+        self.capability_resolver = Some(resolver);
+        self
+    }
+
+    /// PR-3: optional variant of [`Self::with_capability_resolver`]
+    /// for callers that already hold an `Option<Arc<...>>`. No-op
+    /// when the resolver is `None` so legacy call sites can keep
+    /// passing `None` without branching.
+    pub fn with_capability_resolver_opt(
+        mut self,
+        resolver: Option<Arc<CapabilityResolver>>,
+    ) -> Self {
+        if let Some(r) = resolver {
+            self.capability_resolver = Some(r);
+        }
+        self
+    }
+
+    /// Wire-the-gates plan: attach the on-disk `models.dev` catalog
+    /// so the modality gate and the cost estimator can resolve
+    /// `(provider, model)` rows on every LLM call. Builder form
+    /// mirrors [`Self::with_max_tokens_table`] / [`Self::with_capability_resolver`]
+    /// so the CLI boundary can chain it next to the other
+    /// runtime handles. Tests that exercise the pre-catalog
+    /// behaviour leave the field as `None`.
+    pub fn with_models_dev_catalog(mut self, catalog: Arc<ModelsDevCatalog>) -> Self {
+        self.models_dev_catalog = Some(catalog);
+        self
+    }
+
+    /// Wire-the-gates plan: optional variant of
+    /// [`Self::with_models_dev_catalog`] for callers that already
+    /// hold an `Option<Arc<...>>`. No-op when the catalog is
+    /// `None` (network failure on first call, a test that skipped
+    /// the refresh) so the legacy "no catalog" code path keeps
+    /// working untouched.
+    pub fn with_models_dev_catalog_opt(mut self, catalog: Option<Arc<ModelsDevCatalog>>) -> Self {
+        if let Some(c) = catalog {
+            self.models_dev_catalog = Some(c);
         }
         self
     }
@@ -485,6 +558,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
@@ -558,6 +633,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
         let started_unix = crate::time::now_unix_secs();
@@ -613,6 +690,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
@@ -668,6 +747,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
@@ -678,7 +759,7 @@ impl RunContext {
     /// supplied) persist the response in the cross-run cache.
     async fn dispatch_to_provider(
         &self,
-        req: Request,
+        mut req: Request,
         cache_key: Option<String>,
         started_unix: i64,
         retry_count: u32,
@@ -703,12 +784,72 @@ impl RunContext {
         // trait method now keeps both ends in lockstep.
         let provider = self.provider().await;
         let effective_max = provider.effective_max_tokens(&req);
-        let hash_input = if req.max_tokens != effective_max {
-            let mut clamped = req.clone();
+        // Wire-the-gates plan, PR-5 follow-up: gate the request
+        // through the modality gate so the wire body reflects the
+        // catalog's per-model capabilities (attachments, tool
+        // choice, input modalities). The gate mutates `req` in
+        // place so the body that `provider.send` transmits AND the
+        // hash below both observe the gate's effects. A missing
+        // catalog row falls through to the conservative default
+        // (text-only, no attachments, no tool calls) so a stale
+        // snapshot cannot widen the set of capabilities the gate
+        // allows.
+        if let Some(catalog) = self.models_dev_catalog.as_ref()
+            && let Some(entry) = crate::llm::models_dev::lookup(
+                catalog,
+                self.default_provider.as_str(),
+                self.default_model.as_str(),
+            )
+        {
+            let gate = crate::llm::modal_gate::ModalityGate::from_entry(&entry);
+            if let Err(e) = gate.apply(&mut req) {
+                let ended_unix = crate::time::now_unix_secs();
+                let phase_name = req.role.as_str();
+                let _ = self.telemetry.call(
+                    &uuid::Uuid::now_v7().to_string(),
+                    phase_name,
+                    phase_name,
+                    self.default_provider.as_str(),
+                    self.default_model.as_str(),
+                    cache_key.as_deref().unwrap_or(""),
+                    None,
+                    false,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    started_unix,
+                    ended_unix,
+                    Some(&e.to_string()),
+                    retry_count,
+                );
+                return Err(e);
+            }
+        }
+        // PR-3: gate the request through the capability resolver so
+        // models whose catalog says `temperature: false` (e.g.
+        // `kimi-k3`) do not receive the field on the wire. The gated
+        // request is what `provider.send` actually transmits AND
+        // what feeds into `request_body_sha256` below, so the
+        // recorded audit hash matches the body that leaves the
+        // process — same contract as the `max_tokens` clamp above.
+        // `None` resolver preserves the legacy "send everything"
+        // behaviour for hand-rolled tests and the mock-only path.
+        let gated = match self.capability_resolver.as_ref() {
+            Some(resolver) => resolver.gate_request(
+                self.default_provider.as_str(),
+                self.default_model.as_str(),
+                &req,
+            ),
+            None => req.clone(),
+        };
+        let hash_input = if gated.max_tokens != effective_max {
+            let mut clamped = gated;
             clamped.max_tokens = effective_max;
             clamped
         } else {
-            req.clone()
+            gated
         };
         let request_body_sha256 = (self.default_provider == "minimax")
             .then(|| crate::llm::http::request_body_sha256(&hash_input))
@@ -805,6 +946,34 @@ impl RunContext {
                         stage = "telemetry.call.completed",
                         "LLM call stage"
                     );
+                    // Wire-the-gates plan, PR-6 follow-up: write
+                    // the per-call USD estimate to the SQLite
+                    // index so `moagan telemetry cost` returns
+                    // real numbers instead of always zero. The
+                    // catalog is the source of truth for the
+                    // rate; a missing catalog or missing
+                    // `(provider, model)` row returns 0.0 and the
+                    // `record_call_cost` helper itself skips the
+                    // UPDATE for zero/NaN so the column stays
+                    // `NULL` (not "zero dollars billed") on
+                    // unknown models.
+                    if let Some(db) = self.telemetry.db() {
+                        let cost_usd = crate::llm::cost::cost_estimate(
+                            self.models_dev_catalog.as_deref(),
+                            self.default_provider.as_str(),
+                            self.default_model.as_str(),
+                            &response.usage,
+                        );
+                        if let Err(e) = db.record_call_cost(&call_id, cost_usd) {
+                            tracing::warn!(
+                                call_id = %call_id,
+                                phase = phase_name,
+                                stage = "cost.record.error",
+                                error = %e,
+                                "LLM call stage"
+                            );
+                        }
+                    }
                 }
                 if response.truncated {
                     let _ = self.telemetry.warn(
@@ -1038,6 +1207,8 @@ impl RunContext {
             response_schema: None,
             stream: false,
             extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
         };
         let value: serde_json::Value = match strategy {
             // Strict path: direct parse only. No repair telemetry
@@ -1172,6 +1343,8 @@ impl RunContext {
                 role: "assistant".to_owned(),
                 content: "{".to_owned(),
             }],
+            attachments: vec![],
+            tool_choice: None,
         };
         // Re-apply the same per-provider cap that the dispatch
         // path applies so the wire body matches what the cache
@@ -1335,6 +1508,8 @@ impl RunContext {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
 
             let started = crate::time::now_unix_secs();
@@ -1780,8 +1955,6 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // Phase G (v0.3). Decomposer: T01-06 §4.2 originally suggested 3000; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
         Role::Decomposer => DEFAULT_MAX_TOKENS,
         Role::MergeSynthesizer => DEFAULT_MAX_TOKENS,
-        Role::RecoveryExplainer => DEFAULT_MAX_TOKENS,
-        Role::RationaleExtractor => DEFAULT_MAX_TOKENS,
         // Track H batch-1: D.7.1 catalog opt-in roles. Each carries
         // its own sampling contract (see `role_settings` in
         // `src/llm/prompts.rs`); these are the runtime ceilings
@@ -1893,8 +2066,6 @@ pub fn temperature_for_role(
         // doesn't form a valid DAG.
         Role::Decomposer => 0.3,
         Role::MergeSynthesizer => 0.2,
-        Role::RecoveryExplainer => 0.0,
-        Role::RationaleExtractor => 0.2,
         // Track H batch-1: TiefighterCritic is fully deterministic
         // (T=0.0) per D.7.1 so re-runs against the same proposal
         // produce identical critiques (useful for snapshot diffs).

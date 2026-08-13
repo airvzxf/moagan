@@ -70,10 +70,35 @@ without unfairly pre-empting the other session's good-faith attempts.
 |---|---|---|
 | 06:03 | Coordination protocol created | models-dev |
 | 06:24 | e2e-network loop started, window 06:24 → 12:00 UTC | e2e-network loop |
-| _next entry_ | | |
+| 07:05 | PR #413 (coordination protocol) merged | models-dev |
+| 07:30 | PR #416 (PR-0 probe fixes) merged; PR #417 (PR-1 catalog), PR #418 (PR-8 docs) created | models-dev |
+| 08:50 | PRs #420-#424 created (PR-2 cap, PR-3 reason, PR-4 modal, PR-5 cost, audit-1) | models-dev |
+| 09:00 | Audit #1 (inconsistencies-audit-2026-08-12.md, 580 LoC) | models-dev |
+| 09:25 | PR #423 smoke fix; user_version assertions advanced to v015 | models-dev |
+| 09:30 | PRs #425 (PR-7 CLI), #426 (audit-2) created; PR #427 (audit-3) created | models-dev |
+| 10:10 | PRs #420, #422, #423, #424, #425, #426, #427 merged into main | models-dev |
+| 10:50 | Discovery: ModalityGate / cost_estimate / CapabilityResolver are not yet wired into the call site — planned for round 4 | models-dev |
+| 10:56 | 10-PR plan + 3 audit rounds MERGED. main = 9379a67. 1869 lib tests pass. | models-dev |
+
+## Final state of the 10-PR plan (merged at 10:56 UTC)
+
+| # | PR | What it shipped |
+|---|---|---|
+| 0 | #416 | fix(probe): M1, M2, M3, M7, M8, M9, C2 follow-ups from PR #401 |
+| 1 | #417 | feat(llm): models.dev static catalog fetch + 1h TTL cache |
+| 2 | #420 | feat(llm): capability resolver + temperature gating via models.dev |
+| 3 | #421 | feat(llm): reasoning gating via models.dev catalog |
+| 4 | #422 | feat(llm): modality, attachment, tool_call gating via models.dev |
+| 5 | #423 | feat(llm): cost_usd from models.dev catalog (SQLite v015) |
+| 6 | #424 | refactor: round-1 audit fixes (drop lease_full, flags_batch, wire token_budget) |
+| 7 | #425 | feat(cli): doctor --capabilities, telemetry cost, probe max_tokens |
+| 8 | #426 | refactor: round-2 audit fixes (drop 2 dead prompts, 3 dead TelemetryEvent, docs/spec-impl-gaps.md) |
+| 9 | #427 | refactor: round-3 audit fixes (drop ledger, 5 error companion modules, tiktoken-rs) |
+
+Final test count: 1869 lib + 30 integration, 0 failed.
 
 ## Branch inventory (live)
 
 | Branch | Owner | Status |
 |---|---|---|
-| (none yet) | | |
+| (none — all PRs merged) | | |
