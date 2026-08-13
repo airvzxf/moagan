@@ -7,9 +7,10 @@
 //! - [`PressureLevel::Ok`] — usage below the soft threshold. All
 //!   optional work runs as normal.
 //! - [`PressureLevel::Soft`] — usage between soft and hard. No
-//!   optional work is skipped at this tier; the cascade rule in
-//!   [`crate::phases::budget_cascade::cascade_reduce`] is the
-//!   only thing that reacts to Soft pressure.
+//!   optional work is skipped at this tier (the spec's
+//!   "cascade reduce" helper for Soft pressure was removed in
+// round 9; the threshold itself stays wired so the live
+//!   `should_skip_optional` contract remains testable).
 //! - [`PressureLevel::Hard`] — usage at or above the hard threshold.
 //!   [`BudgetObserver::should_skip_optional`] returns `true` so
 //!   the calling phase can skip its optional work (rank-phase
