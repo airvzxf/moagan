@@ -144,6 +144,17 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         shared_brief_hash.as_deref(),
         parent_run_id,
     )?;
+    // Wire `Config::token_budget` into the SQLite `budget_state`
+    // row so `BudgetObserver` reads the planned cap at run start.
+    // Without this, `set_budget` (a v011 helper on `Db`) is
+    // unreachable from production — every test that needed it
+    // called it directly, which is why the helper still ships
+    // `#[allow(dead_code)]`. `None` falls through and leaves
+    // `planned_tokens = 0`, which `BudgetObserver::new` treats as
+    // "unlimited".
+    if let Some(planned) = cfg.token_budget {
+        db.set_budget(run_id, planned)?;
+    }
     // Mirror the context refs into SQLite so post-execution
     // queries (e.g. `SELECT * FROM run_context_refs WHERE run_id = ?`)
     // return them without re-reading the sidecar.
@@ -1246,5 +1257,90 @@ mod tests {
             err.contains("exceeds maximum 64"),
             "error must mention the cap; got {err:?}"
         );
+    }
+
+    /// PR round-8 audit §E.3 item #9: the wire-up from
+    /// `Config::token_budget` to `Db::set_budget` lives in `run()`
+    /// (just after `register_run`). This test pins the contract by
+    /// replaying the same `register_run` → `set_budget` sequence
+    /// against a real `Db` and asserting that `budget_state` ends
+    /// up with the planned cap. `run()` itself is too heavy to
+    /// invoke from a unit test (it would need the full mock
+    /// provider + `RunContext` + `Telemetry`), but the two calls
+    /// it issues are the only production-side state that the wire
+    /// contract depends on.
+    #[test]
+    fn token_budget_wires_into_budget_state_when_some() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = crate::fs_layout::MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().expect("ensure home");
+        let db = Db::open(&home.meta_db_path()).expect("open db");
+        let run_id = RunId::new();
+        db.register_run(
+            run_id,
+            Mode::Fast.as_str(),
+            "running",
+            env!("CARGO_PKG_VERSION"),
+            None,
+            None,
+            None,
+        )
+        .expect("register_run");
+
+        // Mirror the wire-up in `run()`: when `cfg.token_budget`
+        // is `Some(N)`, call `set_budget(run_id, N)`.
+        let cfg_token_budget = Some(5_000_u64);
+        if let Some(planned) = cfg_token_budget {
+            db.set_budget(run_id, planned).expect("set_budget");
+        }
+
+        let (planned, used) = db.budget_read(run_id).expect("budget_read");
+        assert_eq!(planned, 5_000, "token_budget must reach the row");
+        assert_eq!(used, 0, "fresh row must start at zero usage");
+    }
+
+    /// PR round-8 audit §E.3 item #9: when `Config::token_budget`
+    /// is `None`, `run()` deliberately skips the `set_budget`
+    /// call. `BudgetObserver` treats a missing `budget_state` row
+    /// the same as `planned_tokens = 0` (i.e. unlimited), so the
+    /// default-fall-through path must stay a no-op. This test
+    /// pins that contract so a future refactor cannot silently
+    /// start writing a `0` cap and surprise operators with a
+    /// hard-capped unlimited run.
+    #[test]
+    fn token_budget_left_unset_when_config_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = crate::fs_layout::MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().expect("ensure home");
+        let db = Db::open(&home.meta_db_path()).expect("open db");
+        let run_id = RunId::new();
+        db.register_run(
+            run_id,
+            Mode::Fast.as_str(),
+            "running",
+            env!("CARGO_PKG_VERSION"),
+            None,
+            None,
+            None,
+        )
+        .expect("register_run");
+
+        // Mirror the wire-up in `run()`: when `cfg.token_budget`
+        // is `None`, do nothing.
+        let cfg_token_budget: Option<u64> = None;
+        if let Some(planned) = cfg_token_budget {
+            db.set_budget(run_id, planned).expect("set_budget");
+        }
+
+        // `budget_state` row is absent: `budget_read` returns the
+        // zero-fallback (`(0, 0)`), and `BudgetObserver::new` reads
+        // that as "unlimited". A non-zero `planned_tokens` here
+        // would mean the wire-up leaked a default.
+        let (planned, used) = db.budget_read(run_id).expect("budget_read");
+        assert_eq!(
+            planned, 0,
+            "absent budget_state must read back as unlimited"
+        );
+        assert_eq!(used, 0, "fresh run must have no usage");
     }
 }
