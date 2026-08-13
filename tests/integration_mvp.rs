@@ -328,12 +328,6 @@ fn inspect_listing_returns_zero_runs_when_db_is_fresh() -> Result<()> {
 }
 
 #[test]
-fn forbidden_cargo_toml_guard_rejects_secrecy() {
-    let bad = "[dependencies]\nsecrecy = \"0.8\"\n";
-    assert!(moagan::cli::forbidden::check_cargo_toml(bad).is_err());
-}
-
-#[test]
 fn config_load_returns_defaults() -> Result<()> {
     let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();

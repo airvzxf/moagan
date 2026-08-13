@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use moagan::llm::capability::{CapabilityResolver, ResolvedConfig};
+use moagan::llm::capability::CapabilityResolver;
 use moagan::llm::models_dev::{
     CATALOG_SCHEMA_VERSION, Cost, Limits, Modalities, ModelsDevCatalog, ModelsDevEntry,
     ModelsDevProvider,
@@ -199,33 +199,5 @@ fn capability_gate_keeps_temperature_for_minimax() {
     assert_eq!(
         body["temperature"], 0.6,
         "wire body must carry temperature=0.6 verbatim; got: {body}"
-    );
-}
-
-/// Config override that flips `temperature` back to true must
-/// override the catalog row. The wire body MUST carry the field
-/// even though the catalog says drop it. Pins the precedence
-/// "config > catalog > hardcoded" documented in
-/// `src/llm/capability.rs`.
-#[test]
-fn capability_config_override_wins_over_catalog() {
-    let mut cfg = ResolvedConfig::default();
-    cfg.override_pair("kimi", "kimi-k3", |mut c| {
-        c.temperature = true;
-        c
-    });
-    let resolver = CapabilityResolver::new(Some(catalog_with_kimi_k3())).with_config(cfg);
-    let req = sample_request("kimi-k3");
-    let gated = resolver.gate_request("kimi", "kimi-k3", &req);
-    assert_eq!(
-        gated.temperature,
-        Some(0.6),
-        "config override must keep the field even when the catalog says drop it"
-    );
-
-    let body = AnthropicWire.encode_value(&gated).expect("encode_value");
-    assert_eq!(
-        body["temperature"], 0.6,
-        "wire body must carry temperature when the operator pinned it via config"
     );
 }

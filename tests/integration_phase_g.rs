@@ -34,7 +34,6 @@ use moagan::ids::RunId;
 use moagan::llm::ProviderRegistry;
 use moagan::phases::decompose::DecomposePhase;
 use moagan::phases::phase::{Phase, RunContext};
-use moagan::storage::sqlite::Db;
 use moagan::telemetry::Telemetry;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -170,23 +169,6 @@ fn decompose_persists_path_in_phase_output() -> Result<()> {
     // matches the sidecar we wrote by hand.
     let sidecar_path = DecomposePhase::sidecar_path(&ctx);
     assert!(sidecar_path.ends_with("problem_graph.json"));
-    Ok(())
-}
-
-/// The `Db::record_problem_graph` mirror works for a run that
-/// already exists in the `runs` table.
-#[test]
-fn db_mirror_records_problem_graph_row() -> Result<()> {
-    let _g = env_lock();
-    let (_tmp, home) = fresh_home();
-    let run_id = RunId::new();
-    let db = Db::open(&home.meta_db_path())?;
-    db.register_run(run_id, "deep", "running", "0.3.0", None, None, None)?;
-    db.record_problem_graph(run_id, "deadbeef", true, 4, 1_700_000_000)?;
-    let row = db.get_problem_graph(run_id)?.expect("row should exist");
-    assert_eq!(row.node_count, 4);
-    assert!(row.should_decompose);
-    assert_eq!(row.brief_blake3, "deadbeef");
     Ok(())
 }
 

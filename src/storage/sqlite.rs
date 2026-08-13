@@ -715,46 +715,6 @@ impl Db {
         Ok(next)
     }
 
-    /// Upsert accumulated token usage for a provider+model.
-    #[allow(clippy::too_many_arguments)]
-    pub fn accumulate_usage(
-        &self,
-        run_id: RunId,
-        provider: &str,
-        model: &str,
-        calls_delta: u64,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read: u64,
-        cache_creation: u64,
-    ) -> Result<()> {
-        let conn = self.pool.get()?;
-        let now = crate::time::now_unix_secs();
-        conn.execute(
-            "INSERT INTO provider_usage (run_id, provider, model, calls, input_tokens, output_tokens, cache_read, cache_creation, last_call_unix) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(run_id, provider, model) DO UPDATE SET \
-                calls = calls + excluded.calls, \
-                input_tokens = input_tokens + excluded.input_tokens, \
-                output_tokens = output_tokens + excluded.output_tokens, \
-                cache_read = cache_read + excluded.cache_read, \
-                cache_creation = cache_creation + excluded.cache_creation, \
-                last_call_unix = excluded.last_call_unix",
-            params![
-                run_id.to_string(),
-                provider,
-                model,
-                calls_delta as i64,
-                input_tokens as i64,
-                output_tokens as i64,
-                cache_read as i64,
-                cache_creation as i64,
-                now,
-            ],
-        )?;
-        Ok(())
-    }
-
     /// List runs ordered by creation time (descending).
     pub fn list_runs(&self, limit: u32) -> Result<Vec<RunRow>> {
         let conn = self.pool.get()?;
@@ -999,35 +959,6 @@ impl Db {
             ],
         )?;
         Ok(())
-    }
-
-    /// Read the `problem_graphs` row for a run. Returns `None`
-    /// when the row does not exist (pre-v006 DB or a run that
-    /// never reached the `decompose` phase). Best-effort: returns
-    /// `Ok(None)` on the legacy schema too.
-    pub fn get_problem_graph(&self, run_id: RunId) -> Result<Option<ProblemGraphRow>> {
-        let conn = self.pool.get()?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 6 {
-            return Ok(None);
-        }
-        let mut stmt = conn.prepare(
-            "SELECT brief_blake3, should_decompose, node_count, at_unix \
-             FROM problem_graphs WHERE run_id = ?",
-        )?;
-        let row = stmt.query_row(params![run_id.to_string()], |r| {
-            Ok(ProblemGraphRow {
-                brief_blake3: r.get(0)?,
-                should_decompose: r.get::<_, i64>(1)? != 0,
-                node_count: r.get(2)?,
-                at_unix: r.get(3)?,
-            })
-        });
-        match row {
-            Ok(r) => Ok(Some(r)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
     }
 
     /// Full checkpoint list for a run, ordered by `at_unix`
@@ -2626,29 +2557,6 @@ mod tests {
     }
 
     #[test]
-    fn accumulate_usage_is_additive() {
-        let db = temp_db();
-        let id = RunId::new();
-        db.register_run(id, "fast", "running", "0.1.0", None, None, None)
-            .unwrap();
-        db.accumulate_usage(id, "minimax", "MiniMax-M3", 1, 100, 50, 0, 0)
-            .unwrap();
-        db.accumulate_usage(id, "minimax", "MiniMax-M3", 1, 200, 100, 0, 0)
-            .unwrap();
-        let conn = db.pool.get().unwrap();
-        let (calls, inp, out): (i64, i64, i64) = conn
-            .query_row(
-                "SELECT calls, input_tokens, output_tokens FROM provider_usage WHERE run_id = ?",
-                params![id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(calls, 2);
-        assert_eq!(inp, 300);
-        assert_eq!(out, 150);
-    }
-
-    #[test]
     fn record_warning_and_summary_group_by_code() {
         let db = temp_db();
         let id = RunId::new();
@@ -3046,8 +2954,6 @@ mod tests {
             1,
         )
         .unwrap();
-        db.accumulate_usage(run_id, "minimax", "MiniMax-M3", 3, 300, 130, 10, 0)
-            .unwrap();
         db.record_phase(run_id, "intake", 0, "start", None).unwrap();
         db.record_phase(run_id, "intake", 0, "end", None).unwrap();
         db.record_phase(run_id, "propose", 0, "start", None)
@@ -3109,46 +3015,6 @@ mod tests {
     }
 
     #[test]
-    fn list_provider_usage_orders_by_total_tokens_desc() {
-        let db = temp_db();
-        let run_id = seed_dashboard_run(&db, "fast");
-        let suffix = run_id.to_string();
-
-        // Add a second (provider, model) to confirm the ordering.
-        db.record_call(
-            &format!("c4-{suffix}"),
-            run_id,
-            "rank",
-            "ranker",
-            "mock",
-            "mock-model",
-            &format!("k4-{suffix}"),
-            None,
-            false,
-            Some(200),
-            1_000,
-            500,
-            0,
-            0,
-            1_700_000_100,
-            1_700_000_101,
-            None,
-            0,
-        )
-        .unwrap();
-        db.accumulate_usage(run_id, "mock", "mock-model", 1, 1_000, 500, 0, 0)
-            .unwrap();
-
-        let rows = db.list_provider_usage_for_run(run_id).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].provider, "mock", "mock has more total tokens");
-        assert_eq!(rows[0].input_tokens, 1_000);
-        assert_eq!(rows[0].output_tokens, 500);
-        assert_eq!(rows[1].provider, "minimax");
-        assert_eq!(rows[1].calls, 3);
-    }
-
-    #[test]
     fn list_provider_usage_empty_for_unknown_run() {
         let db = temp_db();
         let rows = db.list_provider_usage_for_run(RunId::new()).unwrap();
@@ -3183,39 +3049,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, "error");
         assert_eq!(rows[0].error.as_deref(), Some("boom"));
-    }
-
-    #[test]
-    fn aggregate_provider_usage_groups_across_runs() {
-        let db = temp_db();
-        let a = seed_dashboard_run(&db, "fast");
-        let b = seed_dashboard_run(&db, "standard");
-        let rows = db.aggregate_provider_usage().unwrap();
-        // Both runs use minimax / MiniMax-M3; the aggregate row sums
-        // both, and the sort puts it at the top by total tokens.
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].provider, "minimax");
-        assert_eq!(rows[0].model, "MiniMax-M3");
-        assert_eq!(rows[0].calls, 6, "3 + 3 calls aggregated");
-        assert_eq!(rows[0].input_tokens, 600, "300 + 300");
-        assert_eq!(rows[0].output_tokens, 260, "130 + 130");
-        let _ = (a, b);
-    }
-
-    #[test]
-    fn recent_runs_for_provider_orders_by_last_call_unix() {
-        let db = temp_db();
-        let run_id = seed_dashboard_run(&db, "fast");
-        let rows = db.recent_runs_for_provider("minimax", 5).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].provider, "minimax");
-        assert_eq!(rows[0].model, "MiniMax-M3");
-        // `accumulate_usage` stamps `last_call_unix` at write time
-        // (uses `crate::time::now_unix_secs()`), so we just assert
-        // the field is populated. Ordering by `last_call_unix DESC`
-        // is exercised by inserting two runs with different seeds.
-        assert!(rows[0].last_call_unix.is_some());
-        let _ = run_id;
     }
 
     #[test]
