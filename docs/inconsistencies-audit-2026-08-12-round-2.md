@@ -335,6 +335,62 @@ Not on the round-8 list but landed during the round-8/round-10 cleanup:
 9 PRs (#442, #443, #444, #445, #446, #447, plus the 4 already-merged
 from round-8 audit).
 
+## §G Round-11 + Round-12 closure (2026-08-13, HEAD `926f1b8`)
+
+Two fresh-audit passes against the post-round-10 main landed an
+additional **5 PRs** dropping ~1,360 LoC of dead code across modules
+that the round-8/9 audits had classified as "borderline" or missed.
+
+### §G.1 Round-11 PRs
+
+| PR | Subject | LoC | Items |
+|---:|---|---:|---|
+| [#451](https://github.com/airvzxf/moagan/pull/451) | drop 2 dead modules (`reconcile::per_run` + `sandbox::tool_versions`) | -288 | D.11.12 + D.28.1 |
+| [#452](https://github.com/airvzxf/moagan/pull/452) | drop 6 test-only 1-caller `pub fn` + 1 inline `llm::registry` module | -386 | test-only fns + inline mod |
+| [#453](https://github.com/airvzxf/moagan/pull/453) | drop 1 dead fn + demote 4 internal `pub fn` visibility | -21 | with_cardinality_and_profiles + cardinality demotes |
+| [#449](https://github.com/airvzxf/moagan/pull/449) | drop 4 trivial `pub fn` with single test-only caller (round-10 borderline) | -71 | legacy_mut, state_mut, models_dev_path, lineage_graph::to_json |
+| [#455](https://github.com/airvzxf/moagan/pull/455) | demote 5 internal `pub fn` visibility (judge + cluster + synthesize) | 0 | should_invoke_final_disagreement, score_spread, build_final_disagreement_payload, cluster_text, write_skipped_in_dir |
+
+### §G.2 Round-12 PRs
+
+| PR | Subject | LoC | Items |
+|---:|---|---:|---|
+| [#456](https://github.com/airvzxf/moagan/pull/456) | `phases/` round-12 mass cleanup (drop + demote) | -129 | HardIncompat::is_incompatible_with + DiscoverMatrixPhase::from_dimensions_with_profiles + cluster_text/write_skipped_in_dir demotions |
+| [#457](https://github.com/airvzxf/moagan/pull/457) | `llm/` round-12 mass cleanup | -81 | BreakeredProvider::{breaker, rate_limiter, provider_semaphores, inner}, RateLimiter::last_wait, probe_table::{probes_succeeded, probes_failed, persist_to}, LazyApiKey::with_spec, capability/conservative_default + openai_compat/chat_url + opencode_go_responses/responses_url + response_format_opt_out/is_stubborn_model demotions |
+| [#458](https://github.com/airvzxf/moagan/pull/458) | cross-module round-12 (redact+storage+domain+sandbox+cli) | -421 | inline `builtin_patterns` (137 LoC saved) + delete `is_incompatible_with` (30 LoC) + demote 6 helpers + delete 4 dead compression helpers |
+
+### §G.3 Discovery validation (P8) — closed
+
+| PR | Subject | Notes |
+|---:|---|---|
+| [#459](https://github.com/airvzxf/moagan/pull/459) | `feat(e2e): validate discovery mode with opencode_go + Token Plan` | Closes the long-blocked P8 gap. Adds `~/.config/moagan/config.toml` block, `scripts/e2e_audit_proxy.sh` `discover_opencode_go` section (~88 LoC), and `tests/integration_discover_opencode_go.rs` (88 LoC, `#[ignore]`-annotated, gated on `OPENCODE_GO_API_KEY`). |
+
+The key was already present in `/home/wolf/workspace/projects/moagan/.env` since
+2026-08-11 13:50 UTC — a single `curl` invocation against
+`https://opencode.ai/zen/go/v1/chat/completions` confirmed the upstream
+works with `model: kimi-k2.7-code` + `temperature: 1` (the model
+rejects other temperatures).
+
+### §G.4 Round-11/12 audit misclassifications
+
+5 functions in `phases/` were misclassified as dead by the round-12
+research agent:
+
+- `should_invoke_final_disagreement` — caller at `JudgePhase::run`
+- `score_spread` — called by both other judge.rs fns
+- `build_final_disagreement_payload` — caller at `JudgePhase::run`
+- `cluster_text` — caller at `ClusterProposalsPhase::run`
+- `write_skipped_in_dir` — caller at `SynthesizePhase::run`
+
+A subagent correctly stopped before deleting them (they would have
+broken `JudgePhase::run`). They were instead demoted `pub fn` → `fn`
+in PR #455 to narrow the public surface without breaking callers.
+
+**Total dead code removed in session 3 (round-10 + round-11 + round-12)**: ~1,750 LoC
+across 16 PRs (#444–#459 excluding docs PRs #448, #450, #454). Plus 1
+behavior wire-up (`token_budget → Db::set_budget`) and 1 spec-compliant
+rename (`detectar_outliers` → `detect_outliers` family).
+
 ## §F Cross-references
 
 - `docs/inconsistencies-audit-2026-08-12.md` — round-1 baseline (re-derived 2026-08-13, updated 2026-08-13 round-8 with closure footer §H).
