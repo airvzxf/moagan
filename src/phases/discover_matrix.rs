@@ -55,27 +55,6 @@ impl DiscoverMatrixPhase {
         }
     }
 
-    /// Build a phase with the default matrix sized for `cardinality`
-    /// AND the supplied per-provider temperature profiles. Mirrors
-    /// [`ExplorationMatrix::default_for_with_profiles`] so the CLI
-    /// can pipe `--temperature-profile` flags straight through.
-    pub fn with_cardinality_and_profiles(
-        cardinality: usize,
-        temperature_profiles: std::collections::HashMap<
-            String,
-            crate::discovery::matrix::TemperatureProfile,
-        >,
-        default_profile: crate::discovery::matrix::TemperatureProfile,
-    ) -> Self {
-        Self {
-            matrix: ExplorationMatrix::default_for_with_profiles(
-                cardinality,
-                temperature_profiles,
-                default_profile,
-            ),
-        }
-    }
-
     /// Build a phase from explicit `(dimensions, facets_per_dim)`,
     /// sizing `sketches_per_cell` so the total reaches the con\\\
     /// figured `cardinality` (default 80).
