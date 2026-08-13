@@ -330,19 +330,25 @@ rounds of follow-up cleanup (rounds 6 and 7):
 
 ### §H.1 Items still open from round 1
 
-A small number of round-1 findings remain open at HEAD `7b962a2`:
+Round-1 findings status at HEAD `7c16a6f` (post round-10 closure):
 
 | Finding | Where | Status |
 |---|---|---|
-| `src/cli/flags_batch.rs` — 7 dead env-var helpers + `BatchPolicy` + `ROUTING_TOML_AVAILABLE` stub | round-1 §A.1 | **Open** — `HashAlgo` is the only survivor (consulted by `llm/wire.rs`); PR #424 (which would have dropped the rest) is stranded on `fix/audit-findings`. |
-| `src/storage/lease_full.rs` (143 LoC) + 4 dead `process_lock acquire/release` helpers in `sqlite.rs` | round-1 §A | **Open** — same stranded-PR issue as above. |
-| 4 dead discovery sub-modules (`context`, `id`, `persona_angle`, `saturation_event`) | round-1 §B.1 | **Open** — `persona_angle` and `saturation_event` are truly dead (no re-export, no caller); `context` and `id` are dead-but-types-survive-via-re-export. Round-8 follow-up will drop the truly-dead pair. |
-| `BudgetPolicy::Abort` future hook | round-1 §C.4 | **Closed** by PR #436. `Warn` closed by PR #440 (both variants dropped along with the `policy` field that carried them). |
-| 4 dead `phases/{intake,synthesize,replace,util}.rs` helpers | round-1 §A.3 | **Open** — not picked up by any PR in this window. |
-| 4 dead `audit/{format,verify}.rs` helpers | round-1 §A.6 | **Open** — `from_writer` and `from_mutexed` (audit/format.rs:171,177) and `inner_mut`/`as_write_mut` (compression.rs:350,359) all confirmed dead by the round-8 grep. |
-| Spanish identifier leaks (`detectar_outliers`, `cola_reserva`) | round-1 §C.1 | **Open** — separate PR; not picked up. |
+| `src/cli/flags_batch.rs` — 7 dead env-var helpers + `BatchPolicy` + `ROUTING_TOML_AVAILABLE` stub | round-1 §A.1 | **Closed** by PR #444 (round-10 re-derive of stranded PR #424). |
+| `src/storage/lease_full.rs` (143 LoC) — `FullLease` wrapper | round-1 §A.5 | **Closed** by PR #445 (round-10 re-derive). The 4 `process_lock acquire/release` helpers in `sqlite.rs` are **still live** (called by `tests/integration_phase_k.rs::process_lock_acquire_release_round_trips_via_public_helper`); they were misclassified in the round-1 audit as dead. |
+| 4 dead discovery sub-modules (`context`, `id`, `persona_angle`, `saturation_event`) | round-1 §B.1 | **Partial** — `saturation_event` dropped by PR #443; `persona_angle` was misclassified (3 live callers via `coordinator.rs`); `context` and `id` survive via `pub use` re-exports and the types are still in active use. Round-10 audit no longer treats them as dead. |
+| `BudgetPolicy::Abort` future hook | round-1 §C.4 | **Closed** by PR #436. `Warn` closed by PR #440. |
+| 4 dead `phases/{intake,synthesize,replace,util}.rs` helpers | round-1 §A.3 | **Closed** by PRs #442 + #443. |
+| 4 dead `audit/{format,verify}.rs` helpers + `compression.rs::inner_mut`/`as_write_mut` | round-1 §A.6 | **Closed** by PR #442. |
+| Spanish identifier leaks (`detectar_outliers`, `cola_reserva`) | round-1 §C.1 | **Closed** by PR #446 (`detect_outliers` / `reserve_ratio` / `DEFAULT_RESERVE_RATIO`). |
 | `manifest_versions` SQLite table | round-1 §D.4 | **Closed** by PR #439 (v017 migration). |
 | `src/ranking/mod.rs:4` "four sub-modules" stale docstring | round-1 §C.3 | **Closed** by PR #439. |
+| `Config::token_budget` wire-up to `Db::set_budget` at run start | round-1 §E.1 row 9 | **Closed** by PR #447 (round-10 re-derive of stranded commit `e8b682f`). |
+
+**Round-1 audit fully closed.** All 7 originally-open items at `7b962a2`
+have closure PRs in the round-10 window (`#444`–`#447`). The two
+items classified as "Open" that turned out to be **live** are
+documented above as audit misclassifications, not as deferred work.
 
 ### §H.2 New round-8 scan (top 5 newly-dead items)
 

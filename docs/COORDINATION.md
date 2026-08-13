@@ -131,10 +131,34 @@ round 2** landed:
 Final test count: 1826 lib + 30 integration, 0 failed.
 Final main HEAD: `a7c4655`.
 
+## Session 3 (2026-08-13) — round-10 audit closure
+
+Between 09:35 UTC and 10:19 UTC (~45 min), the **round-10 session**
+landed the long-stranded PR #424 re-derivation + the long-stranded
+Spanish identifier rename:
+
+| PR | Subject | LoC | Round-1 item closed |
+|---:|---|---:|---|
+| [#444](https://github.com/airvzxf/moagan/pull/444) | `refactor(cli): drop 7 dead env-var helpers + BatchPolicy + ROUTING_TOML_AVAILABLE stub` | -108 | round-1 §A.1 (flags_batch.rs helpers) |
+| [#445](https://github.com/airvzxf/moagan/pull/445) | `refactor(storage): drop dead FullLease wrapper (143 LoC)` | -143 | round-1 §A.5 (lease_full.rs) — the 4 `process_lock acquire/release` helpers kept (live) |
+| [#446](https://github.com/airvzxf/moagan/pull/446) | `refactor(discovery): rename Spanish identifiers to English` | 0 | round-1 §C.1 (Spanish identifier leaks) |
+| [#447](https://github.com/airvzxf/moagan/pull/447) | `feat(cli): wire Config::token_budget into Db::set_budget at run start` | +94 | round-1 §E.1 row 9 (behavioral wire-up of stranded commit `e8b682f`) |
+
+**Net**:
+- 1819 → 1813 lib tests (-6 dead tests, 0 regressions).
+- 1 wire-up from PR #424 re-derived against current `main@5792888`
+  (the stranded `fix/audit-findings` branch was 13+ commits behind).
+- 2 cosmetic renames (Spanish → English) across `discovery/` module
+  + spec docs pseudocode.
+- main HEAD: `7c16a6f`.
+
+Final test count: **1813 lib + 30 integration, 0 failed**.
+Final main HEAD: `7c16a6f`.
+
 ## Branch inventory (live)
 
 | Branch | Owner | Status |
 |---|---|---|
 | (none — all PRs merged) | | |
 
-_Last updated: 2026-08-13 07:34 UTC_
+_Last updated: 2026-08-13 10:19 UTC_
