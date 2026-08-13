@@ -223,14 +223,6 @@ pub fn count_invalid_crcs(jsonl: &str) -> (usize, Vec<String>) {
     (invalid, bad)
 }
 
-/// Recompute a record's CRC and return the new hex string. Used by
-/// tests and the verifier when it needs to re-validate a record.
-pub fn recompute_crc(rec: &mut AuditRecord) -> String {
-    let crc = record_crc(rec).unwrap_or_default();
-    rec.crc32 = crc.clone();
-    crc
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

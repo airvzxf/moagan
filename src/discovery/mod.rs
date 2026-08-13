@@ -25,7 +25,6 @@ pub mod pause;
 pub mod persona_angle;
 pub mod resume;
 pub mod saturation;
-pub mod saturation_event;
 pub mod sketch_retry;
 pub mod state;
 pub mod stop_policy;

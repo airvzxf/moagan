@@ -250,14 +250,6 @@ fn zip_err(err: &zip::result::ZipError) -> std::io::Error {
     }
 }
 
-/// Re-hash a single file and return its hex SHA-256. Convenience
-/// helper exposed to the rest of the crate and to tests; the
-/// implementation lives in [`crate::telemetry::export`] so both
-/// modules share one definition.
-pub fn sha256_hex_of(path: &Path) -> Result<String> {
-    sha256_file(path)
-}
-
 /// Re-hash a byte slice. Useful for tests.
 #[allow(dead_code)]
 pub fn sha256_hex(bytes: &[u8]) -> String {

@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::domain::Manifest;
 use crate::error::{Error, Result};
 
 use super::phase::{Phase, PhaseOutput, RunContext};
@@ -351,21 +350,6 @@ impl Pipeline {
             resume_from: Some(last_phase.to_owned()),
         })
         .map(|p| p.with_resume_from(last_phase))
-    }
-
-    /// `Pipeline::resume` with a manifest convenience wrapper. The
-    /// caller passes the canonical pipeline it built for the
-    /// manifest's mode; this function filters it. The signature
-    /// matches the T01-06 §10.2 pseudocode's intent ("resume from
-    /// last completed phase") without forcing the pipeline layer
-    /// to rebuild the canonical list from a `Config`.
-    pub fn resume_from_manifest(
-        manifest: &Manifest,
-        canonical: Pipeline,
-        last_phase: &str,
-    ) -> Result<Self> {
-        let _ = manifest; // signature parity with the spec pseudocode
-        Self::resume(canonical, last_phase)
     }
 }
 

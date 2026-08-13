@@ -156,22 +156,6 @@ pub async fn run_resume(home: &MoaganHome, run_id: RunId, non_interactive: bool)
     run_continue(home, run_id, opts).await
 }
 
-/// `moagan continue --kind discovery <run_id>` — convenience
-/// wrapper that forces the kind to [`PipelineKind::Discovery`]
-/// without re-typing every [`ContinueOptions`] field. Used by the
-/// CLI dispatcher when the operator passes `--kind discovery`.
-pub async fn run_continue_discovery(
-    home: &MoaganHome,
-    run_id: RunId,
-    opts: ContinueOptions,
-) -> Result<()> {
-    let opts = ContinueOptions {
-        kind: PipelineKind::Discovery,
-        ..opts
-    };
-    run_continue(home, run_id, opts).await
-}
-
 /// `moagan rerun <run_id> [--matrix-override <json>] [--same-config]` —
 /// clone the manifest, mint a new run id, set `parent_run_id`, and
 /// run the full pipeline end-to-end (NOT a resume — the new run
