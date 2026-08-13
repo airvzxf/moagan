@@ -124,8 +124,8 @@ NIR_RID="${NIR_OUT%%|*}"
 NIR_DIR="${NIR_OUT##*|}"
 NIR_HOME=$(dirname $(dirname "$NIR_DIR"))
 
-run_test "s6_non_int_meta_user_version_15" \
-  "sqlite3 $NIR_HOME/meta.sqlite 'PRAGMA user_version' | grep -qE '^15$'"
+run_test "s6_non_int_meta_user_version_16" \
+  "sqlite3 $NIR_HOME/meta.sqlite 'PRAGMA user_version' | grep -qE '^16$'"
 
 run_test "s6_non_int_intake_checkpoint_written" \
   "test \$(sqlite3 $NIR_HOME/meta.sqlite \"SELECT COUNT(*) FROM checkpoints WHERE kind='intake' AND run_id='$NIR_RID'\") -ge 1"
@@ -271,8 +271,8 @@ HOME_STD=$(dirname $(dirname "$RUN_DIR_STD"))
 HOME_DEEP=$(dirname $(dirname "$RUN_DIR_DEEP"))
 HOME_BATCH=$(dirname $(dirname "$RUN_DIR_BATCH"))
 
-run_test "s6_mode_fast_user_version_15" \
-  "sqlite3 $HOME_FAST/meta.sqlite 'PRAGMA user_version' | grep -qE '^15$'"
+run_test "s6_mode_fast_user_version_16" \
+  "sqlite3 $HOME_FAST/meta.sqlite 'PRAGMA user_version' | grep -qE '^16$'"
 run_test "s6_mode_fast_checkpoints_table_present" \
   "sqlite3 $HOME_FAST/meta.sqlite '.tables' | grep -q 'checkpoints'"
 run_test "s6_mode_fast_at_least_one_intake_row" \
@@ -284,8 +284,8 @@ run_test "s6_mode_fast_intake_skip_marker" \
 run_test "s6_mode_fast_no_deliver_in_non_interactive" \
   "test \$(sqlite3 $HOME_FAST/meta.sqlite \"SELECT COUNT(*) FROM checkpoints WHERE kind='final'\") -eq 0"
 
-run_test "s6_mode_standard_user_version_5" \
-  "sqlite3 $HOME_STD/meta.sqlite 'PRAGMA user_version' | grep -qE '^15$'"
+run_test "s6_mode_standard_user_version_16" \
+  "sqlite3 $HOME_STD/meta.sqlite 'PRAGMA user_version' | grep -qE '^16$'"
 run_test "s6_mode_standard_checkpoints_table_present" \
   "sqlite3 $HOME_STD/meta.sqlite '.tables' | grep -q 'checkpoints'"
 run_test "s6_mode_standard_at_least_one_intake_row" \
@@ -297,8 +297,8 @@ run_test "s6_mode_standard_intake_skip_marker" \
 run_test "s6_mode_standard_no_deliver_in_non_interactive" \
   "test \$(sqlite3 $HOME_STD/meta.sqlite \"SELECT COUNT(*) FROM checkpoints WHERE kind='final'\") -eq 0"
 
-run_test "s6_mode_deep_user_version_5" \
-  "sqlite3 $HOME_DEEP/meta.sqlite 'PRAGMA user_version' | grep -qE '^15$'"
+run_test "s6_mode_deep_user_version_16" \
+  "sqlite3 $HOME_DEEP/meta.sqlite 'PRAGMA user_version' | grep -qE '^16$'"
 run_test "s6_mode_deep_checkpoints_table_present" \
   "sqlite3 $HOME_DEEP/meta.sqlite '.tables' | grep -q 'checkpoints'"
 run_test "s6_mode_deep_at_least_one_intake_row" \
@@ -310,8 +310,8 @@ run_test "s6_mode_deep_intake_skip_marker" \
 run_test "s6_mode_deep_no_deliver_in_non_interactive" \
   "test \$(sqlite3 $HOME_DEEP/meta.sqlite \"SELECT COUNT(*) FROM checkpoints WHERE kind='final'\") -eq 0"
 
-run_test "s6_mode_batch_user_version_5" \
-  "sqlite3 $HOME_BATCH/meta.sqlite 'PRAGMA user_version' | grep -qE '^15$'"
+run_test "s6_mode_batch_user_version_16" \
+  "sqlite3 $HOME_BATCH/meta.sqlite 'PRAGMA user_version' | grep -qE '^16$'"
 run_test "s6_mode_batch_checkpoints_table_present" \
   "sqlite3 $HOME_BATCH/meta.sqlite '.tables' | grep -q 'checkpoints'"
 run_test "s6_mode_batch_at_least_one_intake_row" \
