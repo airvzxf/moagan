@@ -61,14 +61,17 @@ de 14 modelos), y **sólo después** abrir features.
 
 ### 1.4 — Tally final
 
-> **19 items OPEN** (3 spec gaps T01-06 + 8 deferred de v0.7 §7 + 4
+> **18 items OPEN** (3 spec gaps T01-06 + 8 deferred de v0.7 §7 + 4
 > sub-gaps K.4 ampliado + 2 de cobertura CI + 1 PR #421 stranded + 1
-> comment stale en script). **8 correcciones pendientes en OTROS
-> documentos** (3 en `docs/test-skips.md`, 1 en `docs/spec-impl-gaps.md`
-> §5, 3 stale claims heredados del borrador previo, 1 comment en
-> `scripts/e2e_audit_proxy.sh:553`). **Siguiente paso recomendado:
-> ejecutar el bloque Tier S completo de §11 (7 items, ~1 h) en una sola
-> PR `docs+ci`, antes de tocar cualquier feature.**
+> comment stale en script; **−1** vs el cierre inicial: el borrado de
+> `origin/fix/audit-findings` ya está hecho). **7 correcciones pendientes
+> en OTROS documentos** (3 en `docs/test-skips.md`, 1 en
+> `docs/spec-impl-gaps.md` §5, 3 stale claims heredados del borrador
+> previo, 1 comment en `scripts/e2e_audit_proxy.sh:553`; **−1** vs el
+> cierre inicial: el borrado de la rama cubre el ítem Tier S #2 que
+> también aparecía en `docs/test-skips.md`). **Siguiente paso
+> recomendado: ejecutar los 6 items restantes del Tier S de §11 (~1 h)
+> en una sola PR `docs+ci`, antes de tocar cualquier feature.**
 
 ---
 
@@ -466,9 +469,16 @@ están mergeadas).
 - `git diff --stat origin/main origin/fix/audit-findings` → 138
   ficheros, +4602 / −7295; todo ese contenido ya está en `main`.
 
-**Acción recomendada**: borrar.
-`git push origin --delete fix/audit-findings` (requiere confirmación
-del operador, es una mutación remota).
+**Estado (2026-08-13 19:58 UTC)**: **BORRADO**. Comando ejecutado:
+`git push origin --delete fix/audit-findings` →
+`[deleted] fix/audit-findings`. La rama era histórica:
+- PR #424 ya estaba CLOSED-not-MERGED (no absorbed por merge).
+- Contenido (`lease_full` + `flags_batch` + `token_budget` wire-up)
+  re-derivado y mergeado en session 3 vía #444 / #445 / #447.
+- Diff vs `main`: 5 ahead / 45 behind, todos absorbed.
+
+Esta sección queda cerrada; el ítem pasó a Tier S #2 ✅ (ver §11).
+`git remote prune origin` ejecutado para limpiar refs locales.
 
 ### 8.3 — PRs abiertos y worktrees
 
@@ -701,14 +711,15 @@ esta revisión respecto al borrador previo.
 | # | Item | Coste | Impacto |
 |---:|---|---|---|
 | 1 | 🆕 **Corregir los 3 claims stale de este informe antes de mergear** — §5.1 contradiction PARTIAL, §5.2 `call_with_retry_parse` CLOSED, §9.3 roster 18/15/14. Edición de 1 línea cada uno si se reintroducen | 5 min | Evita propagar desinformación |
-| 2 | **Borrar `origin/fix/audit-findings`** — 100 % del contenido ya está en `main` vía #444/#445/#447. `git push origin --delete fix/audit-findings` (pedir confirmación: mutación remota) | 1 min | Higiene |
+| 2 | ✅ **DONE (2026-08-13 19:58 UTC)** — `origin/fix/audit-findings` borrada vía `git push origin --delete`. Era histórica, PR #424 CLOSED, contenido absorbido por #444/#445/#447. Ver §8.2. | — | Higiene cerrada |
 | 3 | **Nota de cierre D.22.3 en `docs/proposal-03-add-ons.md`** — 1 párrafo, per round-2 §B.7 | 10 min | Higiene de spec |
 | 4 | **Documentar los 3 `#[ignore]` que faltan en `docs/test-skips.md` Layer 3** (2 → 5) | 10 min | Exactitud documental |
 | 5 | 🆕 **Documentar los +16 skips condicionales en Layer 6** (`OPENCODE_GO_API_KEY` 8, `DEEPSEEK_API_KEY` 8, `gauntlet.sh:143` 1) | 15 min | Exactitud documental |
 | 6 | 🆕 **Corregir `docs/spec-impl-gaps.md` §5** (línea 182): contradiction no es "no production code"; es stub ligero shipped | 5 min | Exactitud documental |
 | 7 | 🆕 **Limpiar el comment stale de `scripts/e2e_audit_proxy.sh:553`** sobre `deepseek-chat` (post-#464) | 5 min | Exactitud documental |
 
-**Los 7 caben en una sola PR `docs+ci` de ~1 h.**
+**Quedan 6 items en Tier S (#1 + #3–#7) tras el cierre del #2. Caben en
+una sola PR `docs+ci` de ~1 h.**
 
 ### Tier A — vale la pena en v0.7.2 / v0.8.0
 
@@ -862,5 +873,54 @@ sesión, aunque la ejecución vaya después.
 
 ---
 
-_Última actualización: 2026-08-13 — verificado contra `main@39647a1`
-(post-#464) mediante 4 auditorías read-only independientes._
+## §14 — Log post-merge (session 4, 2026-08-13)
+
+Cronología desde el merge inicial (`main@7567c1b`, PR #466) hasta
+el cierre de esta revisión, en UTC:
+
+| Hora | Evento |
+|---:|---|
+| 18:56:06 | PR #466 squash-mergeado en `main@7567c1b` por `airvzxf` (vía `--admin` por política de base no documentada en `/branches/main/protection` API) |
+| 18:56:28 | `cargo-audit` en `main` ✓ |
+| 18:58:29 | `ci` (gauntlet principal) en `main` ✓ |
+| 18:58:38 | `codeql` en `main` ✓ |
+| 19:01:31 | `e2e-network` (fast) en `main` — **FAIL** (`models_dev: parse response from https://models.dev/api.json: error decoding response body` + LLM devolvió JSON malformado) |
+| 19:11:31 | Re-trigger `e2e-network fast` — **FAIL** (mismo error upstream) |
+| 19:13:52 | 3er re-trigger `e2e-network fast` — ✓ **success** (recuperación de `models.dev` API + LLM provider) |
+| 19:18:12 | `e2e-network card80` disparado |
+| 19:46:30 | `e2e-network card80` ✓ **success** (~28 min) |
+| 19:46:40 | `e2e-network explore` disparado |
+| 19:56:48 | `e2e-network explore` ✓ **success** (~10 min) |
+| 19:58:?? | `origin/fix/audit-findings` borrado (`git push origin --delete`) — Tier S #2 ✅ |
+
+**Diagnóstico de los 2 fallos iniciales de `e2e-network fast`**:
+
+- **Causa raíz**: servicio upstream (`https://models.dev/api.json`)
+  devolvió cuerpo que el parser local no pudo decodificar; la caché en
+  `~/.local/share/moagan/models_dev.json` tampoco existía en el runner
+  fresco (`os error 2`). Sin catálogo de capacidades, el provider
+  LLM (MiniMax) devolvió un JSON de verdict casi-válido pero con un
+  `:` faltante entre la clave y el valor (`"suggestions"[...]`),
+  disparando el `schema violation` y haciendo que `moagan run`
+  saliera con código no-cero (40 la 1ª vez, 7 la 2ª).
+- **No es regresión**: el diff entre `39647a1` (pre-merge) y `7567c1b`
+  (post-merge) es exclusivamente `docs/pending-items-2026-08-13.md`
+  (866 inserciones, 0 borrados de código). El binario `moagan` es
+  idéntico.
+- **Resolución**: el 3er intento, ~7 minutos después, encontró el
+  API en estado saludable. Patrón consistente con flake transitorio
+  de upstream, no con bug nuestro.
+
+**Estado actual de `main` (2026-08-13 20:00 UTC)**: `7567c1b` +
+revisión v2 (este documento), worktrees de session-4 limpios,
+working tree del MAIN limpio, 0 PRs abiertos, 1 rama huérfana
+(`origin/pr/421`, CLOSED-not-MERGED, decisión pendiente en §8.1).
+
+---
+
+_Última actualización: 2026-08-13 20:00 UTC — verificado contra
+`main@7567c1b` (post-#466) + revisión v2 (este commit) mediante 4
+auditorías read-only independientes (Phase A), 1 subagente de
+síntesis (Phase B), 3 subagentes de validación cruzada (Phase C), 1
+subagente de correcciones (Phase D), workflow PR completo (Phase E) y
+borrado de rama huérfana (cierre de Tier S #2)._
