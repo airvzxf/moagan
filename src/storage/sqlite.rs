@@ -73,6 +73,10 @@ mod sql_v015 {
     pub(super) const V015: &str = include_str!("migrations/v015_calls_cost_usd.sql");
 }
 
+mod sql_v016 {
+    pub(super) const V016: &str = include_str!("migrations/v016_drop_empty_tables.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -425,6 +429,12 @@ impl Db {
         if current < 15 {
             apply_step(&conn, 15, || -> Result<()> {
                 conn.execute_batch(sql_v015::V015)?;
+                Ok(())
+            })?;
+        }
+        if current < 16 {
+            apply_step(&conn, 16, || -> Result<()> {
+                conn.execute_batch(sql_v016::V016)?;
                 Ok(())
             })?;
         }
@@ -2462,15 +2472,14 @@ impl Db {
     }
 
     /// Record `tokens` consumed by `phase` for `run_id`. Inserts
-    /// the budget row on first call, increments `used_tokens` on
-    /// every call, and appends a row to `budget_events` so
-    /// operators can later answer "which phase burned the
-    /// budget?" without re-aggregating the `calls` table.
+    /// the budget row on first call and increments `used_tokens`
+    /// on every call.
     ///
     /// `phase` is part of the contract (forward-compatible with
-    /// future per-phase caps); the parameter is recorded
-    /// verbatim in `budget_events.phase` even when the aggregate
-    /// is the only thing the observer reads.
+    /// future per-phase caps); the parameter is currently used
+    /// only as a label passed by the caller — no per-phase audit
+    /// row is persisted (the `budget_events` table that used to
+    /// carry that trail was dropped by v016 as dead schema).
     ///
     /// Pre-v011 databases are a no-op so legacy operators
     /// upgrading the binary mid-run do not see a synthetic write.
@@ -2479,7 +2488,6 @@ impl Db {
             return Ok(());
         }
         let conn = self.pool.get()?;
-        let now = crate::time::now_unix_secs();
         // Upsert the aggregate. `planned_tokens` is preserved on
         // the ON CONFLICT branch (we only ever set it via
         // `set_budget`); `used_tokens` is the running total.
@@ -2490,14 +2498,12 @@ impl Db {
                 used_tokens = used_tokens + excluded.used_tokens",
             params![run_id.to_string(), tokens as i64],
         )?;
-        // Append the per-phase event. The `id` column is
-        // AUTOINCREMENT so a `NULL` placeholder is the canonical
-        // SQLite idiom for "let SQLite assign the rowid".
-        conn.execute(
-            "INSERT INTO budget_events (id, run_id, phase, tokens, at_unix) \
-             VALUES (NULL, ?, ?, ?, ?)",
-            params![run_id.to_string(), phase, tokens as i64, now],
-        )?;
+        // `phase` is intentionally ignored at the SQL level — it
+        // stays in the signature so callers continue to label
+        // their consumption and a future per-phase cap can
+        // re-introduce the audit trail without touching call
+        // sites.
+        let _ = phase;
         Ok(())
     }
 
@@ -3708,21 +3714,32 @@ mod tests {
         );
     }
 
-    /// Catalog D.5.1 partial closure (v013): the three v013
-    /// tables (`run_state`, `discovery_dedup`, `plan_state`) exist
-    /// after `Db::open`. `user_version` reaches 13.
+    /// v016: the four v013/v011 tables flagged by the round-2
+    /// audit (`run_state`, `discovery_dedup`, `plan_state`,
+    /// `budget_events`) are absent after `Db::open` on a freshly
+    /// migrated DB. `user_version` reaches 16.
+    ///
+    /// The companion index `idx_budget_events_run` must also be
+    /// gone — SQLite drops table-scoped indexes automatically
+    /// when the table is dropped, so this is implicit, but the
+    /// probe pins the contract against future schema drift.
     #[test]
-    fn v013_creates_closing_tables() {
+    fn migration_v016_drops_empty_tables() {
         let db = temp_db();
         let conn = db.pool.get().unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert!(
-            v >= 13,
-            "user_version must reach v013 after Db::open, got {v}"
+            v >= 16,
+            "user_version must reach v016 after Db::open, got {v}"
         );
-        for table in ["run_state", "discovery_dedup", "plan_state"] {
+        for table in [
+            "run_state",
+            "discovery_dedup",
+            "plan_state",
+            "budget_events",
+        ] {
             let n: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
@@ -3730,18 +3747,30 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 1, "missing v013 table {table}");
+            assert_eq!(n, 0, "v016 table {table} must be dropped, got n={n}");
         }
+        let idx_n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?",
+                params!["idx_budget_events_run"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_n, 0,
+            "idx_budget_events_run must be dropped alongside budget_events, got n={idx_n}"
+        );
     }
 
-    /// Re-opening a DB that already has v015 applied stays at
-    /// v015 without error. The runner's `if current < N` gates
+    /// Re-opening a DB that already has v016 applied stays at
+    /// v016 without error. The runner's `if current < N` gates
     /// make this trivially true, but the test pins the contract:
     /// `CREATE TABLE IF NOT EXISTS` is idempotent at the SQL
     /// level so a third, fourth, ... open of the same DB also
     /// succeeds. (The original v013 wording predates the
     /// `calls.retry_count` migration landed in v014; v015 then
-    /// added the `calls.cost_usd` column on top.)
+    /// added the `calls.cost_usd` column on top; v016 dropped
+    /// the four empty tables.)
     #[test]
     fn current_head_migration_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3754,7 +3783,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 15,
+            v, 16,
             "user_version must stay at the current head across consecutive reopens, got {v}"
         );
         // v015 added a single ALTER TABLE so no new tables to
@@ -3822,7 +3851,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert!(v >= 15, "user_version must reach v015, got {v}");
+        assert!(v >= 16, "user_version must reach v016, got {v}");
     }
 
     /// v015: `record_call_cost` writes the column for a known call
