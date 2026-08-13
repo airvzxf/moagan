@@ -29,9 +29,10 @@ macro_rules! pat {
     };
 }
 
-/// Built-in pattern library. Order matters: more specific patterns first
-/// to avoid the generic "bearer" masking an "anthropic-key".
-pub fn builtin_patterns() -> Vec<Pattern> {
+/// All built-in patterns, lazily compiled once. Order matters: more
+/// specific patterns first to avoid the generic "bearer" masking an
+/// "anthropic-key".
+pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
     vec![
         pat!(
             "minimax_sk_cp",
@@ -167,10 +168,7 @@ pub fn builtin_patterns() -> Vec<Pattern> {
             "[REDACTED:moagan_endpoint]"
         ),
     ]
-}
-
-/// All built-in patterns, lazily compiled once.
-pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(builtin_patterns);
+});
 
 // -----------------------------------------------------------------
 // Categorised redaction (proposal-03 §D.8.2)

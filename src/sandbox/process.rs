@@ -222,8 +222,9 @@ fn namespace_result_or_warn(flags: NamespaceFlags, result: std::io::Result<()>) 
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     /// Wall-clock cap per `run` call. `Duration::ZERO` means "no
-    /// timeout" and is **not** allowed — the caller must opt out
-    /// explicitly via [`SandboxConfig::no_timeout`] for clarity.
+    /// timeout" and is **not** allowed — pick a positive duration
+    /// (e.g. `Duration::from_secs(3600)`) for almost-no-timeout
+    /// runs.
     pub timeout: Duration,
     /// Allowed command basenames.
     pub allowlist: Allowlist,
@@ -313,13 +314,6 @@ impl SandboxConfig {
         self
     }
 
-    /// Explicitly disable the timeout. Use sparingly — the caller is
-    /// promising it has another deadline layered on top.
-    pub fn no_timeout(mut self) -> Self {
-        self.timeout = Duration::from_secs(3600);
-        self
-    }
-
     /// Replace the allowlist with a custom one.
     pub fn with_allowlist(mut self, allowlist: Allowlist) -> Self {
         self.allowlist = allowlist;
@@ -386,7 +380,7 @@ impl SandboxConfig {
     /// Strip any environment variable whose name hints at a secret.
     /// Run this on the inherited env before merging in the sandbox's
     /// overrides.
-    pub fn strip_secrets_env(&self, env: &mut std::collections::HashMap<String, String>) {
+    fn strip_secrets_env(&self, env: &mut std::collections::HashMap<String, String>) {
         let mut to_remove: Vec<String> = Vec::new();
         for key in env.keys() {
             let lower = key.to_lowercase();
@@ -588,7 +582,7 @@ impl<'a> Command<'a> {
 
     /// Feed `bytes` to the child's stdin. When unset, stdin is
     /// closed (`Stdio::null()`) so the child gets `EOF` immediately.
-    pub fn stdin_bytes(mut self, b: Vec<u8>) -> Self {
+    fn stdin_bytes(mut self, b: Vec<u8>) -> Self {
         self.stdin = Some(b);
         self
     }
@@ -601,14 +595,14 @@ impl<'a> Command<'a> {
 
     /// Cap stdout capture per call. The default is
     /// [`MAX_STDOUT_BYTES`].
-    pub fn max_stdout(mut self, n: usize) -> Self {
+    fn max_stdout(mut self, n: usize) -> Self {
         self.max_stdout_bytes = n;
         self
     }
 
     /// Cap stderr capture per call. The default is
     /// [`MAX_STDERR_BYTES`].
-    pub fn max_stderr(mut self, n: usize) -> Self {
+    fn max_stderr(mut self, n: usize) -> Self {
         self.max_stderr_bytes = n;
         self
     }
@@ -733,7 +727,7 @@ impl Sandbox {
     pub fn new(config: SandboxConfig) -> Result<Self> {
         if config.timeout.is_zero() {
             return Err(Error::InvalidState(
-                "sandbox timeout must be > 0; use no_timeout() to opt out explicitly".into(),
+                "sandbox timeout must be > 0; use with_timeout() with a positive duration".into(),
             ));
         }
         Ok(Self {
@@ -1287,7 +1281,7 @@ impl Sandbox {
         let effective_timeout = cmd.timeout.unwrap_or(self.config.timeout);
         if effective_timeout.is_zero() {
             return Err(SandboxError::Io(
-                "sandbox timeout must be > 0; use SandboxConfig::no_timeout to opt out".into(),
+                "sandbox timeout must be > 0; use a positive Duration".into(),
             ));
         }
         let remaining = effective_timeout.saturating_sub(started.elapsed());
