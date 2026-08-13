@@ -46,10 +46,6 @@ impl LineageGraph {
         }
         Self { nodes, edges }
     }
-    /// Serialize to JSON.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
-    }
     /// Total node count.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -77,14 +73,6 @@ mod tests {
         ]);
         assert_eq!(g.nodes, vec!["a", "b", "c"]);
         assert_eq!(g.edges.len(), 3);
-    }
-
-    #[test]
-    fn lineage_graph_to_json_round_trip() {
-        let g = LineageGraph::from_pairs(&[("x".into(), "y".into())]);
-        let json = g.to_json();
-        assert!(json.contains("\"x\""));
-        assert!(json.contains("\"y\""));
     }
 
     #[test]

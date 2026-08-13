@@ -126,19 +126,9 @@ impl DiscoveryCoordinator {
         &self.legacy
     }
 
-    /// Returns mutable access to the loaded epistemic legacy.
-    pub fn legacy_mut(&mut self) -> &mut EpistemicLegacy {
-        &mut self.legacy
-    }
-
     /// Returns the sketch-loop state.
     pub fn state(&self) -> &SketchLoopState {
         &self.state
-    }
-
-    /// Returns mutable access to the sketch-loop state.
-    pub fn state_mut(&mut self) -> &mut SketchLoopState {
-        &mut self.state
     }
 
     /// Returns the run mode that sizes the sketch-loop target.
@@ -850,7 +840,6 @@ fn count_existing_sketches(run_dir: &Path) -> usize {
 mod tests {
     use super::*;
     use crate::discovery::epistemic_legacy::SCHEMA_VERSION;
-    use crate::discovery::state::Phase;
     use crate::test_support::with_moagan_home;
 
     /// Filename of the persisted sketch-loop state file. Duplicates
@@ -947,34 +936,6 @@ mod tests {
         assert!(coordinator.legacy().preferred_strategies.is_empty());
         assert!(coordinator.legacy().domain_assumptions.is_empty());
         assert!(coordinator.legacy().confidence_overrides.is_empty());
-    }
-
-    #[test]
-    fn coordinator_legacy_mut_appends_known_failures() {
-        let (mut coordinator, _, _) = new_coordinator(Brief::default());
-
-        coordinator
-            .legacy_mut()
-            .known_failures
-            .push("repeated parse failure".to_owned());
-
-        assert_eq!(
-            coordinator.legacy().known_failures,
-            vec!["repeated parse failure".to_owned()]
-        );
-    }
-
-    #[test]
-    fn coordinator_state_default_is_sketch_loop_phase() {
-        let (mut coordinator, _, _) = new_coordinator(Brief::default());
-
-        assert_eq!(coordinator.state().phase, Phase::SketchLoop);
-        assert_eq!(
-            coordinator.state().current_strategy,
-            "deployment-model:serverless"
-        );
-        coordinator.state_mut().record_failure();
-        assert_eq!(coordinator.state().failed_attempts, 1);
     }
 
     /// D.3: `run` is now an `async fn`. We verify the async-ness
