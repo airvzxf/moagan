@@ -31,7 +31,6 @@ pub mod dashboard_static;
 pub mod event;
 pub mod export;
 pub mod heartbeat;
-pub mod hub;
 pub mod lineage_graph;
 pub mod redact;
 pub mod retention;
@@ -1056,10 +1055,6 @@ mod tests {
 #[cfg(test)]
 #[path = "event_tests.rs"]
 mod event_tests;
-
-#[cfg(test)]
-#[path = "hub_tests.rs"]
-mod hub_tests;
 
 #[cfg(test)]
 #[path = "csv_summary_tests.rs"]
