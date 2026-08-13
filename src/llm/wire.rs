@@ -62,7 +62,7 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
     /// Tool / function-call selection. The wire builder
-    /// (`anthropic_compat`, `openai_compat`, `opencode_go_*`)
+    /// (`openai_compat`, `opencode_go_*`)
     /// translates this into the per-provider field name
     /// (`tool_choice`, `tools`, `functions`).
     ///

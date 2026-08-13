@@ -2,7 +2,6 @@
 //! implementations, cache, rate limiter, circuit breaker, and the
 //! versioned prompt registry.
 
-pub mod anthropic_compat;
 pub mod api_keys;
 pub mod api_keys_file;
 pub mod cache;
@@ -36,7 +35,6 @@ pub mod retry_budget;
 pub mod role;
 pub mod size_limits;
 pub mod sse_parser;
-pub mod streaming;
 pub mod wire;
 pub mod wire_format;
 

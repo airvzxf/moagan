@@ -107,7 +107,7 @@ pub trait Provider: Send + Sync {
     /// byte-for-byte.
     ///
     /// The default returns `req.max_tokens` unchanged — correct for
-    /// providers that do not clamp (mock, anthropic_compat, …).
+    /// providers that do not clamp (mock, …).
     /// Implementations that clamp inside `send` must override this
     /// so the audit hash stays in sync with the wire body.
     fn effective_max_tokens(&self, req: &Request) -> u32 {
