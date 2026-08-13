@@ -30,11 +30,6 @@
 //! the current implementation is a no-op for Warn.
 //! [`BudgetPolicy::Reduce`] (the default) flips
 //! `should_skip_optional` to `true` under Hard pressure.
-//! [`BudgetPolicy::Abort`] is a deliberate future hook: a future
-//! commit can wire it into a top-level guard that aborts the run
-//! with `Error::BudgetExceeded` once Hard is reached. The
-//! observer itself never aborts; that contract belongs to the
-//! pipeline driver, not the observer.
 //!
 //! ## No-DB safety
 //!
@@ -63,18 +58,14 @@ pub enum PressureLevel {
 }
 
 /// What the observer should do when the pressure reaches a
-/// particular tier. `Warn` and `Abort` are deliberate future
-/// hooks; the only policy the calling phases consult today is
-/// `Reduce`.
+/// particular tier. `Warn` is a deliberate future hook; the only
+/// policy the calling phases consult today is `Reduce`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetPolicy {
     /// Surface a warning (telemetry-only). No phase skips.
     Warn,
     /// Skip optional work when pressure reaches `Hard`.
     Reduce,
-    /// Abort the run on `Hard`. The observer itself does not
-    /// abort; the pipeline driver is the source of truth.
-    Abort,
 }
 
 /// Read-only observer over the per-run budget table.
