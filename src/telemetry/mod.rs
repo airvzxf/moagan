@@ -35,7 +35,6 @@ pub mod hub;
 pub mod lineage_graph;
 pub mod redact;
 pub mod retention;
-pub mod tracing_filter;
 pub mod verify;
 
 /// One phase event (start/end/error/cancel).
@@ -1069,10 +1068,6 @@ mod csv_summary_tests;
 #[cfg(test)]
 #[path = "dashboard_static_tests.rs"]
 mod dashboard_static_tests;
-
-#[cfg(test)]
-#[path = "tracing_filter_tests.rs"]
-mod tracing_filter_tests;
 
 #[cfg(test)]
 #[path = "daily_rotation_tests.rs"]
