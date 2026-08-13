@@ -69,32 +69,6 @@ impl DiscoverMatrixPhase {
         Self { matrix: m }
     }
 
-    /// Build a phase from explicit `(dimensions, facets_per_dim)`
-    /// AND per-provider temperature profiles. Same shape as
-    /// [`Self::from_dimensions`] but carries the profile map through
-    /// to the matrix so the iteration loop can fan out across
-    /// `(cell, temperature, replica)` triples.
-    pub fn from_dimensions_with_profiles(
-        num_dimensions: usize,
-        facets_per_dim: usize,
-        cardinality: usize,
-        temperature_profiles: std::collections::HashMap<
-            String,
-            crate::discovery::matrix::TemperatureProfile,
-        >,
-        default_profile: crate::discovery::matrix::TemperatureProfile,
-    ) -> Self {
-        let mut m = ExplorationMatrix::from_dimensions_with_profiles(
-            num_dimensions,
-            facets_per_dim,
-            temperature_profiles,
-            default_profile,
-        );
-        let cells = m.cells().max(1);
-        m.sketches_per_cell = (cardinality / cells).max(1);
-        Self { matrix: m }
-    }
-
     /// Persist the matrix alongside the sketches so the run can be
     /// reproduced.
     fn persist_matrix(&self, ctx: &RunContext) -> Result<PathBuf> {

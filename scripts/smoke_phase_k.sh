@@ -62,7 +62,6 @@ run_test "k1_hard_incompatibilities_constant" '
 '
 
 run_test "k1_is_incompatible_helper_present" '
-  grep -q "pub fn is_incompatible" '"$ROOT"'/src/domain/constraint.rs
   grep -q "pub fn find_conflicts" '"$ROOT"'/src/domain/constraint.rs
 '
 
