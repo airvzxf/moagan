@@ -14,12 +14,12 @@
 //! - **Soft** → trim the upper bound. The new `hard` is the
 //!   midpoint between `current.soft` and `current.hard`, so
 //!   the soft target is preserved and the safety margin
-//!   shrinks. Pairs with `BudgetPolicy::Warn` so a future
-//!   telemetry hook can log the cascade.
+//!   shrinks.
 //! - **Hard** → halve both bounds. The new `soft` and `hard`
 //!   are `current.soft / 2` and `current.hard / 2`. Pairs with
-//!   `BudgetPolicy::Reduce` so the calling phase can skip its
-//!   optional work *and* shrink the next round's proposal pool.
+//!   `BudgetObserver::should_skip_optional` so the calling phase
+//!   skips its optional work *and* shrinks the next round's
+//!   proposal pool.
 //!
 //! The function is pure: it does not mutate the observer and
 //! does not write to the DB. The pipeline records the cascade

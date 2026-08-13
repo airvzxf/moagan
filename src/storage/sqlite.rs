@@ -4055,9 +4055,9 @@ mod tests {
     /// DB is left with v006 schema but user_version = 5. The next
     /// `Db::open` must re-run v006 idempotently (CREATE TABLE IF
     /// NOT EXISTS / CREATE INDEX IF NOT EXISTS) and then apply
-    /// v007-v010, advancing the version to current. This is the
-    /// recovery path the atomicity fix makes safe — even if a
-    /// crash DID leave the DB in this state, the migrations are
+    /// v007..v017, advancing the version to the current head. This
+    /// is the recovery path the atomicity fix makes safe — even if
+    /// a crash DID leave the DB in this state, the migrations are
     /// idempotent enough to repair it.
     #[test]
     fn migrations_recovery_after_partial_failure() {
@@ -4095,9 +4095,9 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert!(
-            v >= 10,
-            "user_version must advance to current after recovery, got {v}"
+        assert_eq!(
+            v, 17,
+            "user_version must advance to v017 (the current head) after recovery, got {v}"
         );
     }
 
@@ -4141,11 +4141,11 @@ mod tests {
     }
 
     /// `user_version` is stable across consecutive `Db::open`
-    /// calls on the same DB and reaches the current head (v010).
+    /// calls on the same DB and reaches the current head (v017).
     /// Pins the "each step runs at most once" invariant: if the
     /// runner ever re-applied a step, the second open would still
     /// see the same version (idempotency) but would also need to
-    /// re-run the entire v002…v010 ladder to land at 10, which
+    /// re-run the entire v002..v017 ladder to land at 17, which
     /// would surface here as a wrong `user_version` or, more
     /// likely, a `duplicate column name` panic from v003/v007/v009.
     #[test]
@@ -4156,9 +4156,9 @@ mod tests {
         let _ = Db::open(&path).unwrap();
         let v2 = read_user_version(&path);
         assert_eq!(v1, v2, "user_version must be stable across opens");
-        assert!(
-            v1 >= 10,
-            "user_version must reach the current head, got {v1}"
+        assert_eq!(
+            v1, 17,
+            "user_version must reach the current head (v017), got {v1}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -4171,7 +4171,7 @@ mod tests {
     /// the current head even though v001 was re-run from a
     /// "partially applied" state (the SQL is idempotent so the
     /// re-run is a no-op at the schema level; the per-step probe
-    /// then carries the runner from v1 → v2 → … → v10 on the
+    /// then carries the runner from v1 → v2 → … → v17 on the
     /// fresh bumps).
     #[test]
     fn migrations_recover_from_v001_partial_state() {
@@ -4185,9 +4185,9 @@ mod tests {
         }
         Db::open(&path).expect("Db::open must recover from v001 partial state");
         let v = read_user_version(&path);
-        assert!(
-            v >= 10,
-            "user_version must reach the current head after recovery, got {v}"
+        assert_eq!(
+            v, 17,
+            "user_version must reach the current head (v017) after recovery, got {v}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -4240,9 +4240,9 @@ mod tests {
             Db::open(&path).unwrap_or_else(|e| panic!("open #{i} must succeed: {e}"));
         }
         let v = read_user_version(&path);
-        assert!(
-            v >= 10,
-            "user_version must reach the current head after 10 reopens, got {v}"
+        assert_eq!(
+            v, 17,
+            "user_version must reach the current head (v017) after 10 reopens, got {v}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

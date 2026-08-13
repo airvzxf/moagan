@@ -6,16 +6,15 @@
 //!
 //! - [`PressureLevel::Ok`] — usage below the soft threshold. All
 //!   optional work runs as normal.
-//! - [`PressureLevel::Soft`] — usage between soft and hard. A future
-//!   observer policy could surface a warning or a telemetry event
-//!   here; the current implementation is a no-op for Soft.
+//! - [`PressureLevel::Soft`] — usage between soft and hard. No
+//!   optional work is skipped at this tier; the cascade rule in
+//!   [`crate::phases::budget_cascade::cascade_reduce`] is the
+//!   only thing that reacts to Soft pressure.
 //! - [`PressureLevel::Hard`] — usage at or above the hard threshold.
-//!   Combined with [`BudgetPolicy::Reduce`], the
-//!   [`BudgetObserver::should_skip_optional`] predicate returns
-//!   `true` so the calling phase can skip its optional work
-//!   (rank-phase stability check, synthesize merge, judge-phase
-//!   adversary pass) and conserve remaining tokens for the core
-//!   pipeline.
+//!   [`BudgetObserver::should_skip_optional`] returns `true` so
+//!   the calling phase can skip its optional work (rank-phase
+//!   stability check, synthesize merge, judge-phase adversary
+//!   pass) and conserve remaining tokens for the core pipeline.
 //!
 //! ## Soft / hard thresholds
 //!
@@ -23,13 +22,6 @@
 //! fields so tests can exercise each pressure tier without
 //! manipulating the run's actual token accounting — the observer
 //! is just a thin predicate over `(planned, used)`.
-//!
-//! ## Policy
-//!
-//! [`BudgetPolicy::Warn`] is reserved for a future telemetry hook;
-//! the current implementation is a no-op for Warn.
-//! [`BudgetPolicy::Reduce`] (the default) flips
-//! `should_skip_optional` to `true` under Hard pressure.
 //!
 //! ## No-DB safety
 //!
@@ -50,22 +42,11 @@ use crate::storage::sqlite::Db;
 pub enum PressureLevel {
     /// Below the soft threshold. Run everything.
     Ok,
-    /// Between soft and hard. Reserved for a future Warn policy.
+    /// Between soft and hard. No optional work is skipped at
+    /// this tier; only the cardinality cascade reacts.
     Soft,
-    /// At or above the hard threshold. Optional work is skipped
-    /// when the policy is `Reduce`.
+    /// At or above the hard threshold. Optional work is skipped.
     Hard,
-}
-
-/// What the observer should do when the pressure reaches a
-/// particular tier. `Warn` is a deliberate future hook; the only
-/// policy the calling phases consult today is `Reduce`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BudgetPolicy {
-    /// Surface a warning (telemetry-only). No phase skips.
-    Warn,
-    /// Skip optional work when pressure reaches `Hard`.
-    Reduce,
 }
 
 /// Read-only observer over the per-run budget table.
@@ -80,20 +61,16 @@ pub struct BudgetObserver {
     /// Hard pressure threshold in percent of `planned_tokens`.
     /// Defaults to 90.
     pub hard_pct: u8,
-    /// What the observer should do at each tier.
-    pub policy: BudgetPolicy,
 }
 
 impl BudgetObserver {
-    /// Build an observer with the soft/hard defaults (50 / 90) and
-    /// the `Reduce` policy.
+    /// Build an observer with the soft/hard defaults (50 / 90).
     pub fn new(db: Db, run_id: RunId) -> Self {
         Self {
             db,
             run_id,
             soft_pct: 50,
             hard_pct: 90,
-            policy: BudgetPolicy::Reduce,
         }
     }
 
@@ -119,10 +96,9 @@ impl BudgetObserver {
 
     /// `true` when the calling phase should skip its optional
     /// work. The predicate is `true` only when the pressure is
-    /// `Hard` AND the policy is `Reduce` — any other
-    /// combination keeps the optional work on.
+    /// `Hard`; any other tier keeps the optional work on.
     pub fn should_skip_optional(&self) -> Result<bool> {
-        Ok(matches!(self.pressure()?, PressureLevel::Hard) && self.policy == BudgetPolicy::Reduce)
+        Ok(matches!(self.pressure()?, PressureLevel::Hard))
     }
 
     /// Append `tokens` to the run's `used_tokens` counter, tagged
@@ -197,36 +173,10 @@ mod tests {
         seed_budget(&db, run_id, 1000, 950);
         let obs = BudgetObserver::new(db, run_id);
         assert_eq!(obs.pressure().unwrap(), PressureLevel::Hard);
-        // Hard pressure alone is not enough — the policy must
-        // also be `Reduce` (the default).
+        // Hard pressure is enough on its own — the observer
+        // flips should_skip_optional to true so the calling
+        // phase conserves remaining tokens.
         assert!(obs.should_skip_optional().unwrap());
-    }
-
-    #[test]
-    fn budget_observer_should_skip_optional_when_hard_and_reduce_policy() {
-        let db = fresh_db();
-        let run_id = RunId::new();
-        seed_budget(&db, run_id, 1000, 950);
-        let obs = BudgetObserver {
-            policy: BudgetPolicy::Reduce,
-            ..BudgetObserver::new(db, run_id)
-        };
-        assert!(obs.should_skip_optional().unwrap());
-    }
-
-    #[test]
-    fn budget_observer_warn_policy_does_not_skip_under_hard() {
-        let db = fresh_db();
-        let run_id = RunId::new();
-        seed_budget(&db, run_id, 1000, 999);
-        let obs = BudgetObserver {
-            policy: BudgetPolicy::Warn,
-            ..BudgetObserver::new(db, run_id)
-        };
-        // Hard pressure is real, but the Warn policy keeps the
-        // optional work on so a future telemetry hook is the
-        // only signal.
-        assert!(!obs.should_skip_optional().unwrap());
     }
 
     #[test]

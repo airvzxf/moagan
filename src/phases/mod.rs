@@ -43,7 +43,7 @@ pub use adversary::{
     AdversaryPhase, PATTERN_ADVERSARY_SCHEMA_VERSION, PatternAdversaryReport,
     PatternAdversarySection, ProposalPatternVerdict,
 };
-pub use budget::{BudgetObserver, BudgetPolicy, PressureLevel};
+pub use budget::{BudgetObserver, PressureLevel};
 pub use budget_cascade::cascade_reduce;
 pub use clarify::ClarifyPhase;
 pub use cluster_proposals::ClusterProposalsPhase;
