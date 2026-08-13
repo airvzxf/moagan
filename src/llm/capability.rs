@@ -108,7 +108,7 @@ impl ResolvedCapability {
     /// it; reasoning / tool / attachment are OFF because they are
     /// upstream-specific and silently enabling them would mask
     /// schema-drift bugs.
-    pub fn conservative_default() -> Self {
+    fn conservative_default() -> Self {
         Self {
             temperature: true,
             reasoning: false,

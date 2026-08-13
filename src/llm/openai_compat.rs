@@ -109,7 +109,7 @@ impl OpenAiCompatProvider {
     }
 
     /// Compute the URL for chat completions.
-    pub fn chat_url(&self) -> String {
+    fn chat_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
         if base.ends_with("/chat/completions") {
             base.to_owned()

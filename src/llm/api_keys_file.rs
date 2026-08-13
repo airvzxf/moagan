@@ -83,10 +83,10 @@ pub fn literal_allowed() -> bool {
         .unwrap_or(false)
 }
 
-/// D.35.5: first-use lazy resolution. The spec is captured at
-/// construction time; the actual lookup happens once, on the first
-/// call to [`resolve`], and the result is cached in a
-/// [`std::sync::OnceLock`] so subsequent calls are branch-free.
+/// D.35.5: first-use lazy resolution. The lookup happens once, on
+/// the first call to [`LazyApiKey::resolve`], and the result is
+/// cached in a [`std::sync::OnceLock`] so subsequent calls are
+/// branch-free.
 pub struct LazyApiKey {
     spec: String,
     env_var: String,
@@ -99,17 +99,6 @@ impl LazyApiKey {
     pub fn new(env_var: &str) -> Self {
         Self {
             spec: String::new(),
-            env_var: env_var.to_string(),
-            cached: std::sync::OnceLock::new(),
-        }
-    }
-
-    /// Build a lazy key with a captured spec (e.g. loaded from
-    /// `api_keys.toml`). The spec is fully resolved on the first
-    /// call to [`resolve`].
-    pub fn with_spec(spec: String, env_var: &str) -> Self {
-        Self {
-            spec,
             env_var: env_var.to_string(),
             cached: std::sync::OnceLock::new(),
         }
@@ -264,23 +253,6 @@ minimax = "sk-cp-literal"
         );
         unsafe {
             std::env::remove_var("LAZY_TEST_ENV_KEY_35_5");
-        }
-    }
-
-    #[test]
-    fn lazy_api_key_spec_overrides_env() {
-        let tmp = tempfile::tempdir().unwrap();
-        let keyfile = tmp.path().join("lazy.txt");
-        std::fs::write(&keyfile, "sk-from-spec").unwrap();
-        let spec = format!("file:{}", keyfile.display());
-        let key = LazyApiKey::with_spec(spec, "LAZY_TEST_ENV_KEY_35_5B");
-        // SAFETY: distinct key name; this test owns LAZY_TEST_*.
-        unsafe {
-            std::env::set_var("LAZY_TEST_ENV_KEY_35_5B", "should-be-ignored");
-        }
-        assert_eq!(key.resolve().unwrap(), "sk-from-spec");
-        unsafe {
-            std::env::remove_var("LAZY_TEST_ENV_KEY_35_5B");
         }
     }
 }
