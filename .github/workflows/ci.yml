@@ -237,7 +237,7 @@ jobs:
 
       - name: upload test-ignored artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: moagan-test-ignored-deepseek-logs
           path: target/test-runs/deepseek/
@@ -291,7 +291,7 @@ jobs:
 
       - name: upload test-ignored artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: moagan-test-ignored-opencode_go-logs
           path: target/test-runs/opencode_go/
