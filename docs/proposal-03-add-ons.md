@@ -3406,6 +3406,13 @@ fn invalidate_downstream(p: &Proposal, action: &RefineAction, graph: &ArtifactGr
 
 (Inspirado en T18-06 §8.2; T06-08 §8.2.)
 
+> **Closure note (2026-08-13):** the `invalidate_downstream` implementation
+> was intentionally removed in PR #434 (per
+> `docs/inconsistencies-audit-2026-08-12-round-2.md` §B.7). No
+> production code is wired for this entry, and the `RefineAction::Focus`
+> case effectively no-ops. The spec block is retained as a design
+> reference for any future re-introduction.
+
 #### D.22.4. `SynthesisRequest` con `prohibited_decisions`
 
 ```rust
