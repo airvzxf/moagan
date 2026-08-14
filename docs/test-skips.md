@@ -74,8 +74,11 @@ when invoked with `cargo test -- --ignored` or `cargo test <name> -- --ignored`.
 |---|---|---|
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:396` | Mutates process-wide RLIMIT_NPROC (side-effects other tests) |
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:441` | Mutates process-wide RLIMIT_AS (side-effects other tests) |
+| `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); exercised by `make e2e-network` |
+| `discover_opencode_go_writes_four_subdirs` | `tests/integration_discover_opencode_go.rs:32` | Requires `OPENCODE_GO_API_KEY`; only runs locally / in `e2e-network` |
+| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:32` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
 
-Total: **2 tests marked `#[ignore]`**.
+Total: **5 tests marked `#[ignore]`**.
 
 Note: these are NOT included in `cargo test --skip`. To run them:
 
@@ -181,6 +184,76 @@ PASS to keep totals consistent:
 
 Total: 14 of the 37 card80 tests have a partial-skip path.
 
+### 6d. `OPENCODE_GO_API_KEY` → 8 discover_oc tests (PR #460)
+
+```bash
+if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
+  # 8 run_test calls inside the opencode_go discover block
+else
+  echo "SKIP: opencode_go discovery e2e tests (OPENCODE_GO_API_KEY not present)"
+fi
+```
+
+- **Location:** `scripts/e2e_audit_proxy.sh:490–546` (the
+  `discover_opencode_go` block, conditional on `OPENCODE_GO_API_KEY`).
+- **Tests:** 8 `run_test` invocations
+  (`proxy_e2e_discover_oc_run_id_present`,
+  `proxy_e2e_discover_oc_tags_nonempty`,
+  `proxy_e2e_discover_oc_facets_nonempty`,
+  `proxy_e2e_discover_oc_extractions_subdirs`,
+  `proxy_e2e_discover_oc_drafts_nonempty`,
+  `proxy_e2e_discover_oc_telemetry_plan_reports_weekly`,
+  `proxy_e2e_discover_oc_telemetry_plan_used_positive`,
+  plus the `OC_RUN_ID` skip fallback that counts each missing subdir as
+  one PASS).
+- **CI behaviour:** the key is currently NOT registered in any
+  workflow secret, so all 8 tests print a single `SKIP` line on
+  `make e2e-network` runs. Pair this block with `Layer 3`'s
+  `discover_opencode_go_writes_four_subdirs` `#[ignore]` integration
+  test which is also gated on the same secret.
+
+### 6e. `DEEPSEEK_API_KEY` → 8 discover_ds tests (PR #462)
+
+```bash
+if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+  # 8 run_test calls inside the deepseek discover block
+else
+  echo "SKIP: deepseek discovery e2e tests (DEEPSEEK_API_KEY not present)"
+fi
+```
+
+- **Location:** `scripts/e2e_audit_proxy.sh:573–629` (the
+  `discover_deepseek` block, conditional on `DEEPSEEK_API_KEY`).
+- **Tests:** 8 `run_test` invocations — parallel structure to 6d
+  (`proxy_e2e_discover_ds_{run_id_present,tags_nonempty,facets_nonempty,extractions_subdirs,drafts_nonempty,telemetry_plan_reports_weekly,telemetry_plan_used_positive}`
+  plus the `DS_RUN_ID` skip fallback).
+- **CI behaviour:** the key is currently NOT registered in any
+  workflow secret, so all 8 tests print a single `SKIP` line on
+  `make e2e-network` runs. Pair with `Layer 3`'s
+  `discover_deepseek_writes_four_subdirs` `#[ignore]` integration
+  test.
+
+### 6f. `MINIMAX_API_KEY` re-check inside `scripts/gauntlet.sh` (1 test)
+
+```bash
+if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
+  run_gate "moagan run --mode fast --provider minimax" \
+    bash -c "$BIN run --mode fast --provider minimax ..."
+else
+  skip_gate "moagan run --mode fast --provider minimax" "MINIMAX_API_KEY not set"
+fi
+```
+
+- **Location:** `scripts/gauntlet.sh:143` (one `run_gate` invocation
+  wrapped in an `MINIMAX_API_KEY` check; the same `if/else` at
+  line 149 prints a `skip_gate` line with that label).
+- **Tests:** 1 (`moagan run --mode fast --provider minimax`).
+- **CI behaviour:** the key is registered as `secrets.MINIMAX_API_KEY`
+  on the runner, so this branch normally fires; the `else` only
+  triggers for local developer runs without a key. Distinct from
+  Layer 6a (which guards the e2e proxy block in
+  `e2e_audit_proxy.sh`) — both gates exist independently.
+
 ## Layer 7 — Lefthook escape hatches (developer-side)
 
 `lefthook.yml` doesn't skip any test by default. It offers three
@@ -202,16 +275,22 @@ check from a clean state.
 |---|---|---|---|
 | 1 | Ruleset required_status_checks | 9 jobs required, 1 not | n/a |
 | 2 | `cargo test --skip` CLI flag | 0 tests | n/a (closed) |
-| 3 | `#[ignore]` Rust attribute | 2 tests | ❌ no (run via `--ignored`) |
+| 3 | `#[ignore]` Rust attribute | 5 tests | ❌ no (run via `--ignored`) |
 | 4 | Source silent-skip (binary on PATH) | 13 tests | ✅ partially (binaries present) |
 | 5 | `ValidationEvidence::skipped()` runtime | 11 sites | n/a (per-artifact) |
 | 6a | `MINIMAX_API_KEY` missing → 46 tests | 46 tests | ❌ no (key present in CI) |
 | 6b | `MOAGAN_SMOKE_LONG_DISCOVER=1` | 37 tests | ❌ no (env var unset) |
 | 6c | card80 partial-skips on timeout | 14 conditional | conditional |
+| 6d | `OPENCODE_GO_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
+| 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
+| 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.
-**Total tests in conditional skip code paths:** 60 (card80 subgroups + API-key block).
+**Total tests in conditional skip code paths:** 78
+(46 `MINIMAX_API_KEY` + 37 card80 + 8 OPENCODE_GO + 8 DEEPSEEK
++ 1 gauntlet `MINIMAX_API_KEY` re-check; the 14 card80 partial-skips
+in 6c are counted inside the 37 card80 figure, not on top of it).
 
 ## How to add a new skip
 

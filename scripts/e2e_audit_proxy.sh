@@ -550,8 +550,10 @@ fi
 #
 # Parallel to the opencode_go block above; validates the `moagan
 # discover` pipeline against the native `deepseek` provider (kind
-# `deepseek`, model `deepseek-chat` → `deepseek-v4-flash` resolved
-# upstream) using the operator's `DEEPSEEK_API_KEY`. The four
+# `deepseek`, default model `deepseek-v4-flash`; post-#464 the
+# invocation no longer passes `--model deepseek-chat` — that flag
+# was dropped because the config default is literally
+# `deepseek-v4-flash`) using the operator's `DEEPSEEK_API_KEY`. The four
 # sub-directories produced by the distinct discover_* LLM roles
 # (V4 §6.5–§6.10) are asserted non-empty: `tags/` (Tagger),
 # `facets/` (FacetDeriver), `extractions/cat_*` (Extractor),
