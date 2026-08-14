@@ -105,8 +105,8 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
-  # Pre-flight provider API validator. Probes deepseek and opencode_go
-  # upstream /v1/models with a 30 s timeout. If the secret is absent the
+  # Pre-flight provider API validator. Probes deepseek, opencode_go, and
+  # minimax upstream /v1/models with a 30 s timeout. If the secret is absent the
   # probe is skipped (exit 0); if the secret is set but the HTTP status
   # is non-2xx (401, 403, 5xx, timeout, network error) the validator
   # fails and the two `test-ignored-*` jobs that `needs:` it are skipped
@@ -156,6 +156,31 @@ jobs:
           HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
             'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
+          echo "  http_status: $HTTP"
+          if [[ "$HTTP" =~ ^2 ]]; then
+            echo "  result: ok"
+            exit 0
+          else
+            echo "  result: FAIL (expected 2xx, got $HTTP)"
+            exit 1
+          fi
+
+      - name: probe minimax
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          if [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+            echo "SKIP: MINIMAX_API_KEY not set; minimax not probed"
+            exit 0
+          fi
+          echo "MINIMAX probe:"
+          echo "  set: yes"
+          echo "  length: ${#MINIMAX_API_KEY} chars"
+          echo "  prefix: ${MINIMAX_API_KEY:0:8}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "x-api-key: $MINIMAX_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            'https://api.minimax.io/anthropic/v1/models' || echo "TIMEOUT")
           echo "  http_status: $HTTP"
           if [[ "$HTTP" =~ ^2 ]]; then
             echo "  result: ok"
