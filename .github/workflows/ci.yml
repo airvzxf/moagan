@@ -20,30 +20,33 @@ permissions:
   contents: read
 
 # Tiered validation as documented in docs/validation-tiers.md, but split into
-# 9 parallel jobs to maximise wall-clock parallelism. The dependency graph:
+# 10 parallel jobs to maximise wall-clock parallelism. The dependency graph:
 #
-#   fmt-check    ─┐
-#   guard-deps   ─┤   T0 (no deps, <2 s each)
-#                 │
-#   clippy       ─┤   T1 (no deps, ~60 s)
-#                 │
-#   test-tests   ─┤
-#   test-lib     ─┤
-#   test-doc     ─┤   T2 (no deps, parallel)
-#   test-ignored ─┤
-#   smoke        ─┤
-#   e2e          ─┘
+#   fmt-check                ─┐
+#   guard-deps               ─┤   T0 (no deps, <2 s each)
+#                             │
+#   clippy                   ─┤   T1 (no deps, ~60 s)
+#                             │
+#   test-tests               ─┤
+#   test-lib                 ─┤
+#   test-doc                 ─┤   T2 (no deps, parallel)
+#   test-ignored-deepseek    ─┤
+#   test-ignored-opencode-go ─┤
+#   smoke                    ─┤
+#   e2e                      ─┘
 #
 #
-# The YAML declaration order is: test-tests, test-ignored, test-lib, smoke, e2e, test-doc.
+# The YAML declaration order is: test-tests, test-ignored-deepseek,
+# test-ignored-opencode-go, test-lib, smoke, e2e, test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
-# the slowest of the 6 round-2 jobs (typically e2e at ~3 min).
+# the slowest of the 7 round-2 jobs (the --ignored discovery tests at ~16 min).
 #
 # Wall-clock critical path:
 #   round 1 = max(fmt-check, guard-deps, clippy)                                     ~60 s
-#   round 2 = max(test-lib, test-tests, test-doc, test-ignored, smoke, e2e)          ~3 min
-# Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
+#   round 2 = max(test-lib, test-tests, test-doc, test-ignored-deepseek,
+#                 test-ignored-opencode-go, smoke, e2e)                              ~16 min
+# Total: ~17 min cold / ~16 min warm (vs. ~5-8 min before this refactor).
 #
 # Required check names (must match the ruleset `protect-main` rule
 # `required_status_checks.required_status_checks[].context`):
@@ -102,8 +105,8 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
-  test-ignored:
-    name: 'T2 · cargo test -- --ignored (gated on secrets)'
+  test-ignored-deepseek:
+    name: 'T2 · cargo test -- --ignored (deepseek)'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -111,27 +114,34 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
-      - name: cargo test -- --ignored (gated on secrets)
+      - name: cargo test integration_discover_deepseek -- --ignored (gated on DEEPSEEK_API_KEY)
         env:
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          set +e  # don't fail the whole CI if a gate is missing
-          ARGS=""
-          if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
-            ARGS="$ARGS --test integration_discover_opencode_go"
-          fi
-          if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
-            ARGS="$ARGS --test integration_discover_deepseek"
-          fi
-          if [[ -z "$ARGS" ]]; then
-            echo "SKIP: no API-key secrets present on runner, --ignored tests not run"
+          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+            echo "SKIP: DEEPSEEK_API_KEY not set; deepseek --ignored test not run"
             exit 0
           fi
-          # Run with --ignored; --test <name> restricts which test binaries
-          # are compiled and run.
-          cargo test $ARGS -- --ignored
+          cargo test --test integration_discover_deepseek -- --ignored
+
+  test-ignored-opencode-go:
+    name: 'T2 · cargo test -- --ignored (opencode_go)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+      - name: cargo test integration_discover_opencode_go -- --ignored (gated on OPENCODE_GO_API_KEY)
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
+            echo "SKIP: OPENCODE_GO_API_KEY not set; opencode_go --ignored test not run"
+            exit 0
+          fi
+          cargo test --test integration_discover_opencode_go -- --ignored
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'
