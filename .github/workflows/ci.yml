@@ -118,11 +118,36 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
+          set -xv
+          echo "============================================================"
+          echo "DIAGNOSTIC HEADER"
+          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+          echo "  Runner:             $(uname -a)"
+          echo "  Working directory:  $(pwd)"
+          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "  Provider under test: deepseek"
+          echo "============================================================"
+          echo "API key presence:"
+          echo "  DEEPSEEK_API_KEY set: $([[ -n "${DEEPSEEK_API_KEY:-}" ]] && echo yes || echo no)"
+          echo "  DEEPSEEK_API_KEY length: ${#DEEPSEEK_API_KEY} chars"
+          echo "  DEEPSEEK_API_KEY prefix (first 8 chars, safe to echo): ${DEEPSEEK_API_KEY:0:8}"
+          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
+          echo "============================================================"
           if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-            echo "SKIP: DEEPSEEK_API_KEY not set; deepseek --ignored test not run"
+            echo "SKIP: DEEPSEEK_API_KEY not set on runner; deepseek --ignored test not run"
             exit 0
           fi
-          cargo test --test integration_discover_deepseek -- --ignored
+          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
+          START_TS=$(date +%s)
+          set +xv   # turn off trace for the actual cargo run; it spews too much
+          cargo test --test integration_discover_deepseek -- --ignored --nocapture
+          CARGO_RC=$?
+          set -xv
+          END_TS=$(date +%s)
+          echo "============================================================"
+          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
+          echo "============================================================"
+          exit $CARGO_RC
 
   test-ignored-opencode-go:
     name: 'T2 · cargo test -- --ignored (opencode_go)'
@@ -137,11 +162,36 @@ jobs:
         env:
           OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
+          set -xv
+          echo "============================================================"
+          echo "DIAGNOSTIC HEADER"
+          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+          echo "  Runner:             $(uname -a)"
+          echo "  Working directory:  $(pwd)"
+          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "  Provider under test: opencode_go"
+          echo "============================================================"
+          echo "API key presence:"
+          echo "  OPENCODE_GO_API_KEY set: $([[ -n "${OPENCODE_GO_API_KEY:-}" ]] && echo yes || echo no)"
+          echo "  OPENCODE_GO_API_KEY length: ${#OPENCODE_GO_API_KEY} chars"
+          echo "  OPENCODE_GO_API_KEY prefix (first 8 chars, safe to echo): ${OPENCODE_GO_API_KEY:0:8}"
+          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
+          echo "============================================================"
           if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
-            echo "SKIP: OPENCODE_GO_API_KEY not set; opencode_go --ignored test not run"
+            echo "SKIP: OPENCODE_GO_API_KEY not set on runner; opencode_go --ignored test not run"
             exit 0
           fi
-          cargo test --test integration_discover_opencode_go -- --ignored
+          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
+          START_TS=$(date +%s)
+          set +xv   # turn off trace for the actual cargo run; it spews too much
+          cargo test --test integration_discover_opencode_go -- --ignored --nocapture
+          CARGO_RC=$?
+          set -xv
+          END_TS=$(date +%s)
+          echo "============================================================"
+          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
+          echo "============================================================"
+          exit $CARGO_RC
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'
