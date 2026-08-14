@@ -235,6 +235,15 @@ jobs:
           echo "============================================================"
           exit $CARGO_RC
 
+      - name: upload test-ignored artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moagan-test-ignored-deepseek-logs
+          path: target/test-runs/deepseek/
+          retention-days: 1
+          if-no-files-found: warn
+
   test-ignored-opencode-go:
     name: 'T2 · cargo test -- --ignored (opencode_go)'
     needs: validate-providers
@@ -279,6 +288,15 @@ jobs:
           echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
           echo "============================================================"
           exit $CARGO_RC
+
+      - name: upload test-ignored artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moagan-test-ignored-opencode_go-logs
+          path: target/test-runs/opencode_go/
+          retention-days: 1
+          if-no-files-found: warn
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'
