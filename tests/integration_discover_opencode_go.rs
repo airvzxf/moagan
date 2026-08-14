@@ -37,6 +37,20 @@ fn discover_opencode_go_writes_four_subdirs() {
     }
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = Command::new(binary())
+        // Disable the per-provider `max_tokens_auto` probe so the
+        // 14-step exponential search (up to 2^14 = 16_384 against
+        // OPENCODE_GO_MAX_TOKENS_CAP = 16_384) does not race the
+        // 80-sketch matrix fan-out. Same rationale as
+        // `tests/integration_discover_deepseek.rs`: the probe is
+        // background-only by design, but the upstream probe
+        // timeouts (5 s × ~14 steps) compound with the matrix +
+        // post-matrix LLM calls and push the run past the 15-min
+        // `test-ignored` job ceiling (PR #473 §14). The wire body
+        // still clamps to `OPENCODE_GO_MAX_TOKENS_CAP` via the
+        // routed provider's `effective_max_tokens`, so skipping the
+        // probe does not regress the HTTP-400 fix from commit
+        // `c3dd03e`.
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
         .args([
             "discover",
             "--provider",

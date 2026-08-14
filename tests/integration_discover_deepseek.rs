@@ -37,6 +37,21 @@ fn discover_deepseek_writes_four_subdirs() {
     }
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = Command::new(binary())
+        // Disable the per-provider `max_tokens_auto` probe so the
+        // 19-step exponential search (up to 2^19 = 524_288 against
+        // DEEPSEEK_MAX_TOKENS_CAP = 393_216) does not race the
+        // 80-sketch matrix fan-out. The probe is background-only by
+        // design, but on a fresh CI runner with no cached
+        // `max_tokens_auto.toml` the upstream probe timeouts
+        // (5 s × ~19 steps) compound with the matrix + post-matrix
+        // LLM calls (Tagger + Cluster + FacetDeriver + Extractor +
+        // Integrator) and push the run past the 15-min
+        // `test-ignored` job ceiling (PR #473 §14). The wire body
+        // still clamps to `DEEPSEEK_MAX_TOKENS_CAP` via
+        // `DeepSeekProvider::effective_max_tokens`, so skipping the
+        // probe does not regress the HTTP-400 fix from commit
+        // `c3dd03e`.
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
         .args([
             "discover",
             "--provider",
