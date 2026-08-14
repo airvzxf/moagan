@@ -30,18 +30,19 @@ permissions:
 #   test-tests   ─┤
 #   test-lib     ─┤
 #   test-doc     ─┤   T2 (no deps, parallel)
+#   test-ignored ─┤
 #   smoke        ─┤
 #   e2e          ─┘
 #
 #
-# The YAML declaration order is: test-tests, test-lib, smoke, e2e, test-doc.
+# The YAML declaration order is: test-tests, test-ignored, test-lib, smoke, e2e, test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
-# the slowest of the 5 jobs (typically e2e at ~3 min).
+# the slowest of the 6 round-2 jobs (typically e2e at ~3 min).
 #
 # Wall-clock critical path:
-#   round 1 = max(fmt-check, guard-deps, clippy)                  ~60 s
-#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e)    ~3 min
+#   round 1 = max(fmt-check, guard-deps, clippy)                                     ~60 s
+#   round 2 = max(test-lib, test-tests, test-doc, test-ignored, smoke, e2e)          ~3 min
 # Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
 #
 # Required check names (must match the ruleset `protect-main` rule
@@ -101,39 +102,36 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
-      # Tier A #10 (docs/pending-items-2026-08-13.md §11). The two
-      # discovery integration tests are `#[ignore]`d because they need
-      # a real API key, so the plain `cargo test` above never touches
-      # them. Run each one only when its secret is configured;
-      # otherwise print SKIP and leave the job green. Secrets are not
-      # exposed to `pull_request` runs from forks, so that path lands
-      # on the SKIP branch by design.
-      #
-      # The third `#[ignore]`d integration test
-      # (`tests/integration_audit_e2e.rs:259`) is deliberately NOT run
-      # here: it is documented as flaky under parallel execution, not
-      # as key-gated.
-      - name: 'T2 · cargo test -- --ignored (gated on secrets)'
+  test-ignored:
+    name: 'T2 · cargo test -- --ignored (gated on secrets)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+      - name: cargo test -- --ignored (gated on secrets)
         env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          ran=0
+          set +e  # don't fail the whole CI if a gate is missing
+          ARGS=""
           if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
-            cargo test --test integration_discover_opencode_go -- --ignored
-            ran=1
-          else
-            echo "SKIP: OPENCODE_GO_API_KEY absent; discover_opencode_go_writes_four_subdirs not run"
+            ARGS="$ARGS --test integration_discover_opencode_go"
           fi
           if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
-            cargo test --test integration_discover_deepseek -- --ignored
-            ran=1
-          else
-            echo "SKIP: DEEPSEEK_API_KEY absent; discover_deepseek_writes_four_subdirs not run"
+            ARGS="$ARGS --test integration_discover_deepseek"
           fi
-          if [[ "$ran" -eq 0 ]]; then
-            echo "SKIP: no API-key secrets present, --ignored tests not run"
+          if [[ -z "$ARGS" ]]; then
+            echo "SKIP: no API-key secrets present on runner, --ignored tests not run"
+            exit 0
           fi
+          # Run with --ignored; --test <name> restricts which test binaries
+          # are compiled and run.
+          cargo test $ARGS -- --ignored
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'
