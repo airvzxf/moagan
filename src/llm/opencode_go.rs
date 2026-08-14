@@ -266,6 +266,18 @@ impl Provider for OpenCodeGoProvider {
         // `kind_hard_cap` for chat-completions).
         self.inner.effective_max_tokens(req)
     }
+
+    /// Delegate to the routed provider so each OpenCode Go wire
+    /// path observes its own per-kind ceiling. The Anthropic and
+    /// Responses providers carry `OPENCODE_GO_MAX_TOKENS_CAP =
+    /// 16_384` directly; the chat-completions path goes through
+    /// `OpenAiCompatProvider::kind_hard_cap`. Without this
+    /// delegation the dispatcher would inherit the trait default
+    /// (≈ 1.07G) and the probe would probe values the upstream
+    /// rejects on every model routed through OpenCode Go.
+    fn max_tokens_probe_ceiling(&self) -> u32 {
+        self.inner.max_tokens_probe_ceiling()
+    }
 }
 
 #[cfg(test)]

@@ -150,15 +150,25 @@ impl MaxTokensTable {
     /// Probe the upstream and insert the discovered value. Idempotent
     /// for a given `(provider, model)` when called twice: the second
     /// call re-probes and overwrites with the fresh value.
+    ///
+    /// `ceiling` is the per-provider upper bound for the exponential
+    /// phase. `detect_max_tokens` short-circuits at the first
+    /// `2^k > ceiling` so the algorithm does not probe values the
+    /// upstream will reject (e.g. DeepSeek at 393_216, MiniMax at
+    /// 524_288, OpenCode Go at 16_384). Production callers query
+    /// `Provider::max_tokens_probe_ceiling()` and pass the value
+    /// here; tests typically pass [`MAX_AUTOPROBE_CEILING`] to
+    /// exercise the unbounded algorithm.
     pub async fn probe_and_store(
         &self,
         provider: &str,
         model: &str,
         transport: Arc<dyn ProbeTransport>,
+        ceiling: u32,
     ) -> Result<u32> {
         let floor = self.inner.read().floor;
         let attempts_before = self.inner.read().probe_tasks_started;
-        let discovered = detect_max_tokens(transport, floor).await?;
+        let discovered = detect_max_tokens(transport, floor, ceiling).await?;
 
         let now = Utc::now().to_rfc3339();
         let attempts = {
@@ -399,7 +409,12 @@ mod tests {
     async fn probe_and_store_inserts_entry() {
         let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
         let v = t
-            .probe_and_store("minimax", "MiniMax-M3", cap(524_288))
+            .probe_and_store(
+                "minimax",
+                "MiniMax-M3",
+                cap(524_288),
+                crate::llm::probe::MAX_AUTOPROBE_CEILING,
+            )
             .await
             .unwrap();
         assert_eq!(v, 524_288);
@@ -412,9 +427,14 @@ mod tests {
     #[tokio::test]
     async fn verify_updates_verified_at_on_success() {
         let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
-        t.probe_and_store("minimax", "MiniMax-M3", cap(524_288))
-            .await
-            .unwrap();
+        t.probe_and_store(
+            "minimax",
+            "MiniMax-M3",
+            cap(524_288),
+            crate::llm::probe::MAX_AUTOPROBE_CEILING,
+        )
+        .await
+        .unwrap();
         let verified_before = t.get("minimax", "MiniMax-M3").unwrap().verified_at;
         // Force a different verified_at by sleeping one ms.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -430,9 +450,14 @@ mod tests {
     #[tokio::test]
     async fn verify_drops_entry_on_failure() {
         let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
-        t.probe_and_store("minimax", "MiniMax-M3", cap(524_288))
-            .await
-            .unwrap();
+        t.probe_and_store(
+            "minimax",
+            "MiniMax-M3",
+            cap(524_288),
+            crate::llm::probe::MAX_AUTOPROBE_CEILING,
+        )
+        .await
+        .unwrap();
         // Provider now rejects the previously-accepted value.
         let ok = t.verify("minimax", "MiniMax-M3", cap(1024)).await.unwrap();
         assert!(!ok);
@@ -444,9 +469,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = MoaganHome::at(dir.path().to_path_buf());
         let t = MaxTokensTable::from_home(&home, MIN_AUTOPROBE_FLOOR, true).unwrap();
-        t.probe_and_store("minimax", "MiniMax-M3", cap(524_288))
-            .await
-            .unwrap();
+        t.probe_and_store(
+            "minimax",
+            "MiniMax-M3",
+            cap(524_288),
+            crate::llm::probe::MAX_AUTOPROBE_CEILING,
+        )
+        .await
+        .unwrap();
         // The path the table uses is the on-disk file. Verify it
         // exists and round-trips.
         let path = home.max_tokens_auto_path();

@@ -125,6 +125,27 @@ pub trait Provider: Send + Sync {
         self.send(req).await
     }
 
+    /// Upper bound the auto-probe should search up to for this
+    /// provider. The exponential phase in
+    /// [`super::probe::detect_max_tokens`] walks `2^1..2^30`; if the
+    /// upstream rejects every value above a smaller bound (e.g.
+    /// DeepSeek at 393_216), the probe must stop at that bound
+    /// rather than waste 30 sequential HTTP round-trips probing
+    /// values the upstream will never accept.
+    ///
+    /// Returns the per-provider safety ceiling when one exists
+    /// (the smallest `2^k > ceiling` is the first probe value the
+    /// algorithm short-circuits on). The default is
+    /// [`super::probe::MAX_AUTOPROBE_CEILING`] (≈ 1.07G) which is
+    /// correct for providers without a documented ceiling (mock,
+    /// third-party relays with permissive limits). Providers that
+    /// clamp inside `send` (`minimax`, `deepseek`, `opencode_go`
+    /// and its routed variants) override this so the probe does
+    /// not have to discover what the clamp already pins.
+    fn max_tokens_probe_ceiling(&self) -> u32 {
+        super::probe::MAX_AUTOPROBE_CEILING
+    }
+
     /// Optional: count tokens for pre-flight estimation. Default returns
     /// `None` and the caller falls back to a heuristic.
     async fn count_tokens(&self, text: &str) -> Option<u64> {
@@ -551,6 +572,19 @@ impl Provider for BreakeredProvider {
         // and does not participate in the `max_tokens` clamp chain.
         self.inner.effective_max_tokens(req)
     }
+
+    /// Delegate to the inner provider so the wrapper is transparent
+    /// and the probe observes the inner provider's per-kind ceiling
+    /// (e.g. `DEEPSEEK_MAX_TOKENS_CAP` on the direct DeepSeek
+    /// provider, `OPENCODE_GO_MAX_TOKENS_CAP` on OpenCode Go
+    /// chat-completions, `MINIMAX_MAX_TOKENS_CAP` on minimax).
+    /// Without this delegation the wrapper would inherit the trait
+    /// default (`MAX_AUTOPROBE_CEILING` ≈ 1.07G) and the probe
+    /// would waste round-trips on values the inner provider will
+    /// never accept.
+    fn max_tokens_probe_ceiling(&self) -> u32 {
+        self.inner.max_tokens_probe_ceiling()
+    }
 }
 
 /// D.19.19/.20: `BreakeredProvider` reports its breaker state to the
@@ -811,6 +845,19 @@ fn spawn_pending_probes(
             continue;
         }
         table.set_floor_for(name, inner.model(), floor);
+        // Query the per-provider probe ceiling so the exponential
+        // phase short-circuits at the first `2^k` past the
+        // upstream's hard cap. DeepSeek-direct caps at 393_216
+        // (DEEPSEEK_MAX_TOKENS_CAP), MiniMax at 524_288
+        // (MINIMAX_MAX_TOKENS_CAP), OpenCode Go at 16_384
+        // (OPENCODE_GO_MAX_TOKENS_CAP); providers without a
+        // documented ceiling inherit the trait default
+        // (≈ 1.07G). Without this query the algorithm would burn
+        // 30 sequential HTTP round-trips probing values the
+        // upstream will reject — and the rejections would classify
+        // as `Indeterminate` per the v0.7.1 contract, collapsing
+        // the discovered ceiling to the last accepted probe.
+        let ceiling = inner.max_tokens_probe_ceiling();
         let transport = match super::probe::ProviderProbeTransport::new(Arc::clone(inner)) {
             Ok(t) => Arc::new(t) as Arc<dyn super::probe::ProbeTransport>,
             Err(e) => {
@@ -845,7 +892,7 @@ fn spawn_pending_probes(
                     "max_tokens_auto: no usable cached entry; running full probe"
                 );
                 match table_for_task
-                    .probe_and_store(&provider_name, &model_name, transport)
+                    .probe_and_store(&provider_name, &model_name, transport, ceiling)
                     .await
                 {
                     Ok(value) => tracing::info!(

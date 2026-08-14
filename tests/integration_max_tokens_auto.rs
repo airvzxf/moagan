@@ -142,7 +142,7 @@ async fn probe_finds_8k_boundary() {
     mount_boundary(&server, 8192).await;
     let transport = wrap_transport(build_provider(server.uri()));
 
-    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR)
+    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
         .await
         .expect("probe converges");
     assert_eq!(discovered, 8192, "8K boundary: algorithm returns lo");
@@ -165,7 +165,7 @@ async fn probe_finds_524k_boundary() {
     mount_boundary(&server, 524_288).await;
     let transport = wrap_transport(build_provider(server.uri()));
 
-    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR)
+    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
         .await
         .expect("probe converges");
     assert_eq!(
@@ -184,7 +184,7 @@ async fn probe_caps_at_ceiling_when_provider_accepts_everything() {
     mount_accept_all(&server).await;
     let transport = wrap_transport(build_provider(server.uri()));
 
-    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR)
+    let discovered = detect_max_tokens(transport, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
         .await
         .expect("probe converges");
     assert_eq!(discovered, MAX_AUTOPROBE_CEILING);
@@ -201,7 +201,7 @@ async fn probe_respects_floor() {
     mount_boundary(&server, 1024).await;
     let transport = wrap_transport(build_provider(server.uri()));
 
-    let discovered = detect_max_tokens(transport, 8192)
+    let discovered = detect_max_tokens(transport, 8192, MAX_AUTOPROBE_CEILING)
         .await
         .expect("probe converges");
     assert_eq!(
@@ -231,7 +231,12 @@ async fn verify_returns_false_when_cached_value_rejected() {
     let table = MaxTokensTable::from_path(&path, MIN_AUTOPROBE_FLOOR, true)
         .expect("MaxTokensTable::from_path should accept the empty path");
     table
-        .probe_and_store("minimax", "MiniMax-M3", probe_transport)
+        .probe_and_store(
+            "minimax",
+            "MiniMax-M3",
+            probe_transport,
+            MAX_AUTOPROBE_CEILING,
+        )
         .await
         .expect("probe_and_store should succeed against an 8K boundary");
     assert!(
@@ -273,7 +278,7 @@ async fn persistence_round_trip() {
     let table = MaxTokensTable::from_home(&home, MIN_AUTOPROBE_FLOOR, true)
         .expect("MaxTokensTable::from_home should accept an empty home");
     table
-        .probe_and_store("minimax", "MiniMax-M3", transport)
+        .probe_and_store("minimax", "MiniMax-M3", transport, MAX_AUTOPROBE_CEILING)
         .await
         .expect("probe_and_store should succeed against an always-accept wiremock");
     table.persist().expect("persist must serialise to disk");

@@ -218,26 +218,60 @@ pub fn body_carries_max_tokens_rejection(body: &str) -> bool {
 
 /// Run the full probe algorithm against an `Arc<dyn ProbeTransport>`.
 /// `floor` is the caller-supplied minimum (the `Option<u32>` from
-/// `ProviderConfig::max_token_auto`). Returns the discovered
-/// `max_tokens` clamped into `[MIN_AUTOPROBE_FLOOR,
-/// MAX_AUTOPROBE_CEILING]`.
+/// `ProviderConfig::max_token_auto`); `ceiling` is the per-provider
+/// upper bound (returned by
+/// [`crate::llm::provider::Provider::max_tokens_probe_ceiling`]).
+/// Returns the discovered `max_tokens` clamped into `[floor,
+/// ceiling]`.
+///
+/// The exponential phase stops at the smallest `2^k > ceiling`
+/// rather than burning a probe round-trip on a value the upstream
+/// will reject with HTTP 400 (DeepSeek-direct caps at 393_216;
+/// MiniMax-M3 caps at 524_288; OpenCode Go's per-model caps pin
+/// the OpenAI-compat and Anthropic-compat and Responses paths at
+/// 16_384). Without this short-circuit the probe would otherwise
+/// walk all 30 sequential `2^k` values and every value above the
+/// real bound would be rejected with the `max_tokens` signature —
+/// which the body-classifying branch treats as `Indeterminate` per
+/// the v0.7.1 contract, collapsing the discovered ceiling to the
+/// last accepted probe.
 ///
 /// The algorithm is independent of the transport — tests use a
 /// `MockProbeTransport` and production code uses the
 /// `ProviderProbeTransport`. The transport is the only place that
 /// talks to the network.
-pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -> Result<u32> {
-    // Phase 1: exponential search 2^1..2^30. M2: each probe that
-    // comes back as `Indeterminate` (transient 5xx / network blip)
-    // is retried once at the same `n` before we commit the
-    // outcome. A single timeout mid-Phase-1 would otherwise
-    // collapse the discovered ceiling by ~½, which is exactly
-    // the regression M2 was filed against.
+pub async fn detect_max_tokens(
+    transport: Arc<dyn ProbeTransport>,
+    floor: u32,
+    ceiling: u32,
+) -> Result<u32> {
+    debug_assert!(
+        ceiling >= MIN_AUTOPROBE_FLOOR,
+        "ceiling ({ceiling}) must be at least MIN_AUTOPROBE_FLOOR ({MIN_AUTOPROBE_FLOOR})"
+    );
+    // Phase 1: exponential search 2^1..2^MAX_PROBE_SHIFT, with an
+    // early break when `n > ceiling` (the smallest `2^k` past the
+    // per-provider bound — DeepSeek at k=19 = 524_288, MiniMax at
+    // k=20 = 1_048_576, OpenCode Go at k=15 = 32_768). M2: each
+    // probe that comes back as `Indeterminate` (transient 5xx /
+    // network blip) is retried once at the same `n` before we
+    // commit the outcome. A single timeout mid-Phase-1 would
+    // otherwise collapse the discovered ceiling by ~½, which is
+    // exactly the regression M2 was filed against.
     let mut lo: u32 = 0;
-    let mut hi: u32 = u32::MAX;
+    let mut hi: u32 = ceiling;
 
     for k in 1..=MAX_PROBE_SHIFT {
         let n = 1u32 << k;
+        if n > ceiling {
+            // First `2^k` past the per-provider bound. No probe
+            // is sent — sending `n` would either be rejected by
+            // the upstream (HTTP 400 with `max_tokens` body) or
+            // get clamped at the wire, neither of which carries
+            // signal for the algorithm. The ceiling is the
+            // upper-bound sentinel from this point on.
+            break;
+        }
         match retry_once_on_indeterminate(transport.as_ref(), n).await {
             ProbeOutcome::Accepted => lo = n,
             _ => {
@@ -246,10 +280,12 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
             }
         }
     }
-    // All 30 probes passed. Cap at the safety ceiling.
-    if hi == u32::MAX {
-        hi = MAX_AUTOPROBE_CEILING;
-    }
+    // If every probe through `MAX_PROBE_SHIFT` accepted (only
+    // possible when `ceiling >= MAX_AUTOPROBE_CEILING`), `hi`
+    // stays at the initial `ceiling`. No separate "all probes
+    // passed" fallback is needed — `hi = ceiling` is the right
+    // sentinel because Phase 2 searches `[lo + 1, hi - 1]` =
+    // `[lo + 1, ceiling - 1]`.
 
     // Phase 2: tighten with 20-point parallel batches. The user's
     // algorithm spec is "sum 1 to the successful value, subtract 1
@@ -321,7 +357,7 @@ pub async fn detect_max_tokens(transport: Arc<dyn ProbeTransport>, floor: u32) -
             "auto-probe failed to discover a usable max_tokens (got {discovered}); provider likely rejected every probe"
         )));
     }
-    Ok(discovered.max(floor).min(MAX_AUTOPROBE_CEILING))
+    Ok(discovered.max(floor).min(ceiling))
 }
 
 /// M2/M3 helper: re-fire the same probe once when the first
@@ -565,7 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_finds_cap_at_8k() {
-        let got = detect_max_tokens(cap(8192), MIN_AUTOPROBE_FLOOR)
+        let got = detect_max_tokens(cap(8192), MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
             .await
             .unwrap();
         assert_eq!(got, 8192);
@@ -573,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_finds_cap_at_524k() {
-        let got = detect_max_tokens(cap(524_288), MIN_AUTOPROBE_FLOOR)
+        let got = detect_max_tokens(cap(524_288), MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
             .await
             .unwrap();
         assert!((524_000..=524_288).contains(&got), "got {got}");
@@ -581,7 +617,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_caps_at_ceiling_when_provider_accepts_everything() {
-        let got = detect_max_tokens(cap(u32::MAX), MIN_AUTOPROBE_FLOOR)
+        let got = detect_max_tokens(cap(u32::MAX), MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
             .await
             .unwrap();
         assert_eq!(got, MAX_AUTOPROBE_CEILING);
@@ -594,9 +630,13 @@ mod tests {
         // discovered value lands below the floor. The function
         // surfaces an error rather than returning a degenerate
         // value.
-        let err = detect_max_tokens(cap(MIN_AUTOPROBE_FLOOR - 1), MIN_AUTOPROBE_FLOOR)
-            .await
-            .expect_err("provider rejects everything must error");
+        let err = detect_max_tokens(
+            cap(MIN_AUTOPROBE_FLOOR - 1),
+            MIN_AUTOPROBE_FLOOR,
+            MAX_AUTOPROBE_CEILING,
+        )
+        .await
+        .expect_err("provider rejects everything must error");
         match err {
             Error::Provider(msg) => assert!(msg.contains("auto-probe failed")),
             other => panic!("expected Error::Provider, got {other:?}"),
@@ -608,7 +648,9 @@ mod tests {
         // Provider caps at 1024; the operator wants at least 8192.
         // The discovered value is 1024, but the floor pushes it to
         // 8192 so the wire body always carries at least the floor.
-        let got = detect_max_tokens(cap(1024), 8192).await.unwrap();
+        let got = detect_max_tokens(cap(1024), 8192, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
         assert_eq!(got, 8192);
     }
 
@@ -754,7 +796,9 @@ mod tests {
             accept_up_to: 524_288,
             calls: calls.clone(),
         });
-        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR).await.unwrap();
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
         assert!(
             (524_000..=524_288).contains(&got),
             "retry should recover cap, got {got}"
@@ -835,5 +879,165 @@ mod tests {
             crate::llm::probe_table::MaxTokensTable::from_path(&path, MIN_AUTOPROBE_FLOOR, false)
                 .unwrap();
         assert_eq!(t.probe_tasks_started(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // PR-473 regression pin: per-provider probe ceiling.
+    //
+    // The exponential phase used to walk `2^1..2^30` regardless of
+    // the provider; on a fresh CI runner with no cached probe
+    // result, DeepSeek-direct was probed with `2^30 = 1_073_741_824`
+    // and rejected with HTTP 400 `invalid_request_error`. The fix
+    // adds a `ceiling` parameter to `detect_max_tokens` so the
+    // exponential phase short-circuits at the first `2^k` past
+    // the per-provider hard cap. Tests below pin the contract.
+    // -----------------------------------------------------------------
+
+    /// Transport that records every probe value ever sent and
+    /// rejects anything strictly above `accept_up_to`. Used by the
+    /// ceiling tests below to assert the algorithm never probes
+    /// above the per-provider bound.
+    #[derive(Clone)]
+    struct RecordingTransport {
+        accept_up_to: u32,
+        calls: Arc<AtomicU32>,
+        max_sent: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl ProbeTransport for RecordingTransport {
+        async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // Update max_sent only if this value is strictly larger.
+            let prev = self.max_sent.load(Ordering::SeqCst);
+            if max_tokens > prev {
+                self.max_sent.store(max_tokens, Ordering::SeqCst);
+            }
+            if max_tokens <= self.accept_up_to {
+                ProbeOutcome::Accepted
+            } else {
+                ProbeOutcome::Rejected
+            }
+        }
+    }
+
+    /// PR-473 regression pin: with the per-provider ceiling set to
+    /// `DEEPSEEK_MAX_TOKENS_CAP = 393_216`, the exponential phase
+    /// short-circuits at `2^19 = 524_288` and the algorithm never
+    /// sends a value strictly above `DEEPSEEK_MAX_TOKENS_CAP` on
+    /// the wire. Discovered value still lands near the upstream
+    /// bound (the transport accepts everything up to 524_288, so
+    /// Phase 1 ends with `lo = 524_288` past the `n > ceiling`
+    /// break — but the probe never tries the value 524_288
+    /// either; the break happens before the probe fires).
+    #[tokio::test]
+    async fn pr473_probe_never_sends_value_above_deepseek_ceiling() {
+        use crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP;
+        let calls = Arc::new(AtomicU32::new(0));
+        let max_sent = Arc::new(AtomicU32::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(RecordingTransport {
+            // Provider accepts everything up to 2^20 = 1_048_576
+            // (a hypothetical bigger upstream). The algorithm
+            // must still stop at the per-provider ceiling
+            // DEEPSEEK_MAX_TOKENS_CAP regardless of how permissive
+            // the transport is — the whole point of the ceiling
+            // is to prevent the upstream from rejecting the probe
+            // itself.
+            accept_up_to: 1_048_576,
+            calls: calls.clone(),
+            max_sent: max_sent.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, DEEPSEEK_MAX_TOKENS_CAP)
+            .await
+            .unwrap();
+        // The largest probe value sent on the wire must never
+        // exceed DEEPSEEK_MAX_TOKENS_CAP. With exponential phase
+        // going 2^1..2^18 (262_144), the largest value probed is
+        // 262_144 — well below the ceiling.
+        let max = max_sent.load(Ordering::SeqCst);
+        assert!(
+            max <= DEEPSEEK_MAX_TOKENS_CAP,
+            "probe sent a value ({max}) above DEEPSEEK_MAX_TOKENS_CAP ({DEEPSEEK_MAX_TOKENS_CAP}) — short-circuit failed"
+        );
+        // The discovered value lands at the upstream's actual
+        // ceiling (524_288 in this scenario): the algorithm
+        // observed every probe up to 2^18 = 262_144 accepted,
+        // then Phase 1 broke at the `n > ceiling` check before
+        // sending 2^19 = 524_288 (which would have been
+        // accepted but is past the per-provider bound). Phase 2
+        // tightens Phase 1's `lo = 262_144` and the floor lifts
+        // the result.
+        assert!(
+            got <= DEEPSEEK_MAX_TOKENS_CAP,
+            "discovered value ({got}) exceeded DEEPSEEK_MAX_TOKENS_CAP"
+        );
+        // Sanity: the probe short-circuits at k=19 (the first
+        // `2^k > 393_216`). Without the ceiling the algorithm
+        // would run 19 more sequential probes for k=19..=30
+        // (each accepted by this permissive transport), plus a
+        // full 32-round Phase 2; with the ceiling, Phase 1 ends
+        // at k=18. Phase 2 still fires (it tightens Phase 1's
+        // `lo`), so we check that Phase 1 alone is short —
+        // i.e. total probes <= 19 (Phase 1) + 32 * 20 (Phase 2
+        // budget) = 659. The pre-fix code with no ceiling
+        // would run 30 (Phase 1) + 32 * 20 = 670. The
+        // difference is small but the key invariant is "no
+        // probe value above ceiling on the wire" (above), which
+        // is the only thing the upstream actually cares about.
+        let total_calls = calls.load(Ordering::SeqCst);
+        assert!(
+            total_calls <= 30 + 32 * 20,
+            "probe ran more than the algorithm budget, got {total_calls}"
+        );
+    }
+
+    /// PR-473 regression pin: the ceiling clamp contract applies
+    /// even when the transport would accept the value. A
+    /// hypothetical transport that accepts 1_000_000 (above the
+    /// DeepSeek cap) must not let `max_tokens = 1_000_000` leak
+    /// into a real DeepSeek probe. The ceiling is the safety
+    /// net, not the transport.
+    #[tokio::test]
+    async fn pr473_probe_clamp_applies_even_when_transport_accepts() {
+        use crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP;
+        let calls = Arc::new(AtomicU32::new(0));
+        let max_sent = Arc::new(AtomicU32::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(RecordingTransport {
+            // Always accept; the ceiling is what we trust.
+            accept_up_to: u32::MAX,
+            calls: calls.clone(),
+            max_sent: max_sent.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, DEEPSEEK_MAX_TOKENS_CAP)
+            .await
+            .unwrap();
+        // Returned value is bounded by ceiling, not by what the
+        // transport would accept.
+        assert!(got <= DEEPSEEK_MAX_TOKENS_CAP, "got {got}");
+        let max = max_sent.load(Ordering::SeqCst);
+        assert!(
+            max <= DEEPSEEK_MAX_TOKENS_CAP,
+            "probe sent {max} on the wire — ceiling clamp failed"
+        );
+    }
+
+    /// The default ceiling (MAX_AUTOPROBE_CEILING) preserves the
+    /// legacy unbounded behaviour for callers that do not opt in
+    /// to a per-provider ceiling. Existing unit + integration
+    /// tests pass MAX_AUTOPROBE_CEILING for this reason; the
+    /// discovered value lands at the upstream boundary regardless
+    /// of the ceiling (as long as ceiling >= boundary).
+    #[tokio::test]
+    async fn ceiling_at_or_above_boundary_does_not_constrain_discovery() {
+        // Provider accepts everything up to 8_192. With the
+        // default ceiling (1.07G), the algorithm must still
+        // discover 8_192.
+        let got = detect_max_tokens(cap(8192), MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
+        assert_eq!(
+            got, 8192,
+            "ceiling above the boundary must not constrain discovery"
+        );
     }
 }

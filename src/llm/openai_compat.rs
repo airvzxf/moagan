@@ -361,6 +361,23 @@ impl Provider for OpenAiCompatProvider {
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
         self.send_with_safety_clamp(req, false).await
     }
+
+    /// Cap the exponential probe at the `kind_hard_cap` so the
+    /// algorithm does not burn 30 sequential HTTP round-trips
+    /// probing values the upstream will never accept. DeepSeek-direct
+    /// (`DEEPSEEK_MAX_TOKENS_CAP = 393_216`) and OpenCode Go's
+    /// chat-completions path (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`)
+    /// both reach this method via `new_with_kind_cap`, so the probe
+    /// observes the upstream's real bound without first tripping
+    /// the upstream's HTTP 400 `max_tokens` rejection (which would
+    /// yield `Indeterminate` per the v0.7.1 contract and collapse
+    /// the discovered ceiling). Other OpenAI-compat backends (with
+    /// no `kind_hard_cap`) keep the default
+    /// [`super::probe::MAX_AUTOPROBE_CEILING`].
+    fn max_tokens_probe_ceiling(&self) -> u32 {
+        self.kind_hard_cap
+            .unwrap_or(super::probe::MAX_AUTOPROBE_CEILING)
+    }
 }
 
 impl OpenCodeGoDispatch for OpenAiCompatProvider {
@@ -886,6 +903,150 @@ mod tests {
         });
     }
 
+    /// DEEPSEEK_MAX_TOKENS_CAP clamp contract (PR-473 --ignored CI
+    /// regression): the direct DeepSeek OpenAI-compat upstream
+    /// rejects any `max_tokens > 393_216` with HTTP 400
+    /// `invalid_request_error`. The dispatcher wires
+    /// `DeepSeekProvider::new` to call
+    /// `OpenAiCompatProvider::new_with_kind_cap(_, _,
+    /// Some(DEEPSEEK_MAX_TOKENS_CAP))`, so the wire body must
+    /// carry `max_tokens = 393_216` even when the operator's TOML
+    /// leaves `max_tokens = None` (per-role default 1_000_000).
+    /// Without the cap the upstream returns HTTP 400 — exactly the
+    /// failure mode the --ignored CI job surfaced.
+    #[test]
+    fn deepseek_direct_provider_clamps_to_deepseek_max_tokens_cap() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            // Mirror the `DeepSeekProvider::new` wiring at the
+            // inner-provider level so the test exercises the same
+            // `kind_hard_cap` the production constructor installs.
+            let p = OpenAiCompatProvider::new_with_kind_cap(
+                &ProviderConfig {
+                    kind: "deepseek".into(),
+                    endpoint: server.uri(),
+                    model: "deepseek-v4-flash".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    hard_incompatibilities: vec![],
+                    omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+                Some(capabilities::DEEPSEEK_MAX_TOKENS_CAP),
+            )
+            .unwrap();
+            let req = Request {
+                role: crate::llm::Role::Route,
+                model: "deepseek-v4-flash".into(),
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1);
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body["max_tokens"],
+                serde_json::json!(capabilities::DEEPSEEK_MAX_TOKENS_CAP),
+                "deepseek direct hard cap must clamp 1_000_000 → {}, got body: {body}",
+                capabilities::DEEPSEEK_MAX_TOKENS_CAP
+            );
+        });
+    }
+
+    /// `max_tokens_probe_ceiling` propagates the per-provider
+    /// `kind_hard_cap` so the auto-probe short-circuits at the
+    /// first `2^k > DEEPSEEK_MAX_TOKENS_CAP` (k=19 → 524_288)
+    /// instead of walking the full `2^1..2^30` exponential phase
+    /// against a bound that DeepSeek rejects with HTTP 400.
+    /// Without this override the probe would burn 30 sequential
+    /// HTTP round-trips on values the upstream will never accept
+    /// — and the rejections would classify as `Indeterminate`
+    /// per the v0.7.1 contract, collapsing the discovered
+    /// ceiling to the last accepted probe.
+    #[test]
+    fn deepseek_direct_provider_probe_ceiling_is_deepseek_max_tokens_cap() {
+        let p = OpenAiCompatProvider::new_with_kind_cap(
+            &ProviderConfig {
+                kind: "deepseek".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-v4-flash".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+            Some(capabilities::DEEPSEEK_MAX_TOKENS_CAP),
+        )
+        .unwrap();
+        assert_eq!(
+            p.max_tokens_probe_ceiling(),
+            capabilities::DEEPSEEK_MAX_TOKENS_CAP
+        );
+        // The default (no `kind_hard_cap`) keeps the trait
+        // default of MAX_AUTOPROBE_CEILING so providers without a
+        // documented ceiling (mock, third-party relays with
+        // permissive limits) keep working unchanged.
+        let p_no_cap = OpenAiCompatProvider::new(
+            &ProviderConfig {
+                kind: "deepseek".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-v4-flash".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            p_no_cap.max_tokens_probe_ceiling(),
+            crate::llm::probe::MAX_AUTOPROBE_CEILING
+        );
+    }
+
     /// `new` (no kind cap) preserves the existing DeepSeek-direct
     /// behaviour: when the operator sets `max_tokens = None` in
     /// TOML the wire body carries whatever `request.max_tokens`
@@ -994,7 +1155,12 @@ mod tests {
             std::sync::Arc::new(CappedTransport { cap: 6_000 });
         let table = std::sync::Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
         let discovered = table
-            .probe_and_store("deepseek", "deepseek-v4-flash", transport)
+            .probe_and_store(
+                "deepseek",
+                "deepseek-v4-flash",
+                transport,
+                crate::llm::probe::MAX_AUTOPROBE_CEILING,
+            )
             .await
             .expect("probe_and_store");
         // The wire-body assertion below uses `discovered`
