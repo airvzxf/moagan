@@ -209,6 +209,18 @@ impl Provider for OpenCodeGoAnthropicProvider {
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
         self.send_with_safety_clamp(req, false).await
     }
+
+    /// Cap the exponential probe at `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// (16_384 for the 2026-08-04 model roster). Several upstreams
+    /// (qwen3.x, gpt-5.6-luna, etc.) reject values above this
+    /// with HTTP 400, so the probe must short-circuit at the
+    /// smallest `2^k > 16_384` (k=15 → 32_768) rather than spend a
+    /// round-trip on a value the upstream will never accept.
+    /// Mirrors the wiring on `OpenAiCompatProvider` /
+    /// `MinimaxProvider`.
+    fn max_tokens_probe_ceiling(&self) -> u32 {
+        OPENCODE_GO_MAX_TOKENS_CAP
+    }
 }
 
 impl OpenCodeGoAnthropicProvider {
@@ -873,7 +885,12 @@ mod tests {
             let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 5_000 });
             let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
             let discovered = table
-                .probe_and_store("opencode_go", "minimax-m3", transport)
+                .probe_and_store(
+                    "opencode_go",
+                    "minimax-m3",
+                    transport,
+                    crate::llm::probe::MAX_AUTOPROBE_CEILING,
+                )
                 .await
                 .expect("probe_and_store");
             // The wire-body assertion below uses `discovered`

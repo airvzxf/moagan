@@ -336,6 +336,18 @@ impl Provider for MinimaxProvider {
         // here would mask boundaries below MIN_AUTOPROBE_FLOOR.
         self.send_http(req.clone()).await
     }
+
+    /// Cap the exponential probe at `MINIMAX_MAX_TOKENS_CAP`. The
+    /// upstream rejects `max_tokens > 524_288` with HTTP 400, so the
+    /// exponential phase must stop at the first `2^k` past the cap
+    /// (k=20 → 1_048_576) rather than waste a probe round-trip on a
+    /// value the upstream will never accept. Mirrors the wiring on
+    /// `OpenAiCompatProvider` (which uses `kind_hard_cap`); minimax
+    /// has no `kind_hard_cap` and clamps inline instead, so the
+    /// ceiling lives directly on this provider.
+    fn max_tokens_probe_ceiling(&self) -> u32 {
+        MINIMAX_MAX_TOKENS_CAP
+    }
 }
 
 #[cfg(test)]
@@ -916,7 +928,12 @@ mod tests {
         let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 24_000 });
         let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
         let discovered = table
-            .probe_and_store("minimax", "MiniMax-M3", transport)
+            .probe_and_store(
+                "minimax",
+                "MiniMax-M3",
+                transport,
+                crate::llm::probe::MAX_AUTOPROBE_CEILING,
+            )
             .await
             .expect("probe_and_store");
 
@@ -1107,7 +1124,12 @@ mod tests {
         let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 24_000 });
         let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
         let discovered = table
-            .probe_and_store("minimax", "MiniMax-M3", transport)
+            .probe_and_store(
+                "minimax",
+                "MiniMax-M3",
+                transport,
+                crate::llm::probe::MAX_AUTOPROBE_CEILING,
+            )
             .await
             .expect("probe_and_store");
         let p_table = MinimaxProvider::new(

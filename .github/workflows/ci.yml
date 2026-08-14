@@ -20,29 +20,33 @@ permissions:
   contents: read
 
 # Tiered validation as documented in docs/validation-tiers.md, but split into
-# 9 parallel jobs to maximise wall-clock parallelism. The dependency graph:
+# 10 parallel jobs to maximise wall-clock parallelism. The dependency graph:
 #
-#   fmt-check    ─┐
-#   guard-deps   ─┤   T0 (no deps, <2 s each)
-#                 │
-#   clippy       ─┤   T1 (no deps, ~60 s)
-#                 │
-#   test-tests   ─┤
-#   test-lib     ─┤
-#   test-doc     ─┤   T2 (no deps, parallel)
-#   smoke        ─┤
-#   e2e          ─┘
+#   fmt-check                ─┐
+#   guard-deps               ─┤   T0 (no deps, <2 s each)
+#                             │
+#   clippy                   ─┤   T1 (no deps, ~60 s)
+#                             │
+#   test-tests               ─┤
+#   test-lib                 ─┤
+#   test-doc                 ─┤   T2 (no deps, parallel)
+#   test-ignored-deepseek    ─┤
+#   test-ignored-opencode-go ─┤
+#   smoke                    ─┤
+#   e2e                      ─┘
 #
 #
-# The YAML declaration order is: test-tests, test-lib, smoke, e2e, test-doc.
+# The YAML declaration order is: test-tests, validate-providers,
+# test-ignored-deepseek, test-ignored-opencode-go, test-lib, smoke, e2e, test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
-# the slowest of the 5 jobs (typically e2e at ~3 min).
+# the slowest of the 7 round-2 jobs (the --ignored discovery tests at ~16 min).
 #
 # Wall-clock critical path:
-#   round 1 = max(fmt-check, guard-deps, clippy)                  ~60 s
-#   round 2 = max(test-lib, test-tests, test-doc, smoke, e2e)    ~3 min
-# Total: ~4 min cold / ~2 min warm (vs. ~5-8 min before this refactor).
+#   round 1 = max(fmt-check, guard-deps, clippy)                                     ~60 s
+#   round 2 = max(test-lib, test-tests, test-doc, test-ignored-deepseek,
+#                 test-ignored-opencode-go, smoke, e2e)                              ~16 min
+# Total: ~17 min cold / ~16 min warm (vs. ~5-8 min before this refactor).
 #
 # Required check names (must match the ruleset `protect-main` rule
 # `required_status_checks.required_status_checks[].context`):
@@ -100,6 +104,199 @@ jobs:
           components: rustfmt,clippy
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
+
+  # Pre-flight provider API validator. Probes deepseek, opencode_go, and
+  # minimax upstream /v1/models with a 30 s timeout. If the secret is absent the
+  # probe is skipped (exit 0); if the secret is set but the HTTP status
+  # is non-2xx (401, 403, 5xx, timeout, network error) the validator
+  # fails and the two `test-ignored-*` jobs that `needs:` it are skipped
+  # — that is the desired GitHub Actions signal for a dead upstream.
+  # Prevents 25-min wasted runner time on a provider outage (PR #473).
+  validate-providers:
+    name: 'T3 · preflight — validate provider APIs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: probe deepseek
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+            echo "SKIP: DEEPSEEK_API_KEY not set; deepseek not probed"
+            exit 0
+          fi
+          echo "DEEPSEEK probe:"
+          echo "  set: yes"
+          echo "  length: ${#DEEPSEEK_API_KEY} chars"
+          echo "  prefix: ${DEEPSEEK_API_KEY:0:8}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
+          echo "  http_status: $HTTP"
+          if [[ "$HTTP" =~ ^2 ]]; then
+            echo "  result: ok"
+            exit 0
+          else
+            echo "  result: FAIL (expected 2xx, got $HTTP)"
+            exit 1
+          fi
+
+      - name: probe opencode_go
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
+            echo "SKIP: OPENCODE_GO_API_KEY not set; opencode_go not probed"
+            exit 0
+          fi
+          echo "OPENCODE_GO probe:"
+          echo "  set: yes"
+          echo "  length: ${#OPENCODE_GO_API_KEY} chars"
+          echo "  prefix: ${OPENCODE_GO_API_KEY:0:8}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
+            'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
+          echo "  http_status: $HTTP"
+          if [[ "$HTTP" =~ ^2 ]]; then
+            echo "  result: ok"
+            exit 0
+          else
+            echo "  result: FAIL (expected 2xx, got $HTTP)"
+            exit 1
+          fi
+
+      - name: probe minimax
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          if [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+            echo "SKIP: MINIMAX_API_KEY not set; minimax not probed"
+            exit 0
+          fi
+          echo "MINIMAX probe:"
+          echo "  set: yes"
+          echo "  length: ${#MINIMAX_API_KEY} chars"
+          echo "  prefix: ${MINIMAX_API_KEY:0:8}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "x-api-key: $MINIMAX_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            'https://api.minimax.io/anthropic/v1/models' || echo "TIMEOUT")
+          echo "  http_status: $HTTP"
+          if [[ "$HTTP" =~ ^2 ]]; then
+            echo "  result: ok"
+            exit 0
+          else
+            echo "  result: FAIL (expected 2xx, got $HTTP)"
+            exit 1
+          fi
+
+  test-ignored-deepseek:
+    name: 'T2 · cargo test -- --ignored (deepseek)'
+    needs: validate-providers
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+      - name: cargo test integration_discover_deepseek -- --ignored (gated on DEEPSEEK_API_KEY)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -xv
+          echo "============================================================"
+          echo "DIAGNOSTIC HEADER"
+          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+          echo "  Runner:             $(uname -a)"
+          echo "  Working directory:  $(pwd)"
+          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "  Provider under test: deepseek"
+          echo "============================================================"
+          echo "API key presence:"
+          echo "  DEEPSEEK_API_KEY set: $([[ -n "${DEEPSEEK_API_KEY:-}" ]] && echo yes || echo no)"
+          echo "  DEEPSEEK_API_KEY length: ${#DEEPSEEK_API_KEY} chars"
+          echo "  DEEPSEEK_API_KEY prefix (first 8 chars, safe to echo): ${DEEPSEEK_API_KEY:0:8}"
+          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
+          echo "============================================================"
+          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+            echo "SKIP: DEEPSEEK_API_KEY not set on runner; deepseek --ignored test not run"
+            exit 0
+          fi
+          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
+          START_TS=$(date +%s)
+          set +xv   # turn off trace for the actual cargo run; it spews too much
+          cargo test --test integration_discover_deepseek -- --ignored --nocapture
+          CARGO_RC=$?
+          set -xv
+          END_TS=$(date +%s)
+          echo "============================================================"
+          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
+          echo "============================================================"
+          exit $CARGO_RC
+
+      - name: upload test-ignored artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: moagan-test-ignored-deepseek-logs
+          path: target/test-runs/deepseek/
+          retention-days: 1
+          if-no-files-found: warn
+
+  test-ignored-opencode-go:
+    name: 'T2 · cargo test -- --ignored (opencode_go)'
+    needs: validate-providers
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+      - name: cargo test integration_discover_opencode_go -- --ignored (gated on OPENCODE_GO_API_KEY)
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          set -xv
+          echo "============================================================"
+          echo "DIAGNOSTIC HEADER"
+          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+          echo "  Runner:             $(uname -a)"
+          echo "  Working directory:  $(pwd)"
+          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "  Provider under test: opencode_go"
+          echo "============================================================"
+          echo "API key presence:"
+          echo "  OPENCODE_GO_API_KEY set: $([[ -n "${OPENCODE_GO_API_KEY:-}" ]] && echo yes || echo no)"
+          echo "  OPENCODE_GO_API_KEY length: ${#OPENCODE_GO_API_KEY} chars"
+          echo "  OPENCODE_GO_API_KEY prefix (first 8 chars, safe to echo): ${OPENCODE_GO_API_KEY:0:8}"
+          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
+          echo "============================================================"
+          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
+            echo "SKIP: OPENCODE_GO_API_KEY not set on runner; opencode_go --ignored test not run"
+            exit 0
+          fi
+          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
+          START_TS=$(date +%s)
+          set +xv   # turn off trace for the actual cargo run; it spews too much
+          cargo test --test integration_discover_opencode_go -- --ignored --nocapture
+          CARGO_RC=$?
+          set -xv
+          END_TS=$(date +%s)
+          echo "============================================================"
+          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
+          echo "============================================================"
+          exit $CARGO_RC
+
+      - name: upload test-ignored artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: moagan-test-ignored-opencode_go-logs
+          path: target/test-runs/opencode_go/
+          retention-days: 1
+          if-no-files-found: warn
 
   test-lib:
     name: 'T2 · cargo test --lib --bins'

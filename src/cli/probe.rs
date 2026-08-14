@@ -148,6 +148,11 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         // probe observes the same wire behaviour a real run would
         // see (auth header, endpoint, rate-limit knobs).
         let provider_arc = build_provider_for_probe(&spec)?;
+        // Query the per-provider probe ceiling so the exponential
+        // phase short-circuits at the upstream's hard cap rather
+        // than walking `2^1..2^30` against values the upstream
+        // will reject (e.g. DeepSeek-direct caps at 393_216).
+        let ceiling = provider_arc.max_tokens_probe_ceiling();
         let transport = ProviderProbeTransport::new(provider_arc)
             .map_err(|e| Error::Provider(format!("probe: build transport: {e}")))?;
         let transport: Arc<dyn crate::llm::probe::ProbeTransport> = Arc::new(transport);
@@ -158,7 +163,10 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         // without re-running the algorithm.
         let floor = crate::llm::probe::MIN_AUTOPROBE_FLOOR;
         let table = MaxTokensTable::from_home(&home, floor, true)?;
-        let discovered = match table.probe_and_store(provider, model, transport).await {
+        let discovered = match table
+            .probe_and_store(provider, model, transport, ceiling)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 println!("  Probing {provider}:{model} ... FAILED: {e}");
@@ -486,7 +494,9 @@ mod tests {
     /// its own).
     #[test]
     fn probe_max_tokens_persists_to_table() {
-        use crate::llm::probe::{MIN_AUTOPROBE_FLOOR, ProbeOutcome, ProbeTransport};
+        use crate::llm::probe::{
+            MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, ProbeOutcome, ProbeTransport,
+        };
         use crate::llm::probe_table::MaxTokensTable;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -515,8 +525,16 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        // Pass `MAX_AUTOPROBE_CEILING` as the ceiling: this test
+        // exercises the table-persistence path on its own (the
+        // per-provider ceiling is irrelevant here).
         let v = runtime
-            .block_on(table.probe_and_store("minimax", "MiniMax-M3", transport))
+            .block_on(table.probe_and_store(
+                "minimax",
+                "MiniMax-M3",
+                transport,
+                MAX_AUTOPROBE_CEILING,
+            ))
             .unwrap();
         assert_eq!(v, 65_536);
         // The on-disk sidecar must now carry the entry.
