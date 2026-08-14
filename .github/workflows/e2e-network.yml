@@ -287,6 +287,15 @@ jobs:
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: make e2e-network-card80
 
+      - name: upload card80 artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-card80-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
+
   test-fast:
     name: 'Tier 3 · e2e — fast'
     needs: [build-e2e-network, preflight-minimax]
@@ -312,6 +321,15 @@ jobs:
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: make e2e-network-fast
 
+      - name: upload fast artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-fast-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
+
   test-explore:
     name: 'Tier 3 · e2e — explore'
     needs: [build-e2e-network, preflight-minimax]
@@ -336,6 +354,15 @@ jobs:
           MOAGAN_SMOKE_SECTION: explore
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: make e2e-network-explore
+
+      - name: upload explore artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-explore-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
 
   # Tier A #8 (docs/pending-items-2026-08-13.md §11): the A.bis
   # discovery block of scripts/e2e_audit_proxy.sh had no CI job, so
@@ -369,6 +396,15 @@ jobs:
           MOAGAN_SMOKE_SECTION: discover_opencode_go
         run: make e2e-network-discover-opencode-go
 
+      - name: upload discover-opencode-go artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-discover-opencode-go-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
+
   # Tier A #8, deepseek half: same shape as the job above but gated on
   # DEEPSEEK_API_KEY and pointed at the native `deepseek` provider
   # (api.deepseek.com), not the opencode_go relay.
@@ -395,6 +431,15 @@ jobs:
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: discover_deepseek
         run: make e2e-network-discover-deepseek
+
+      - name: upload discover-deepseek artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-discover-deepseek-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
 
   # Tier A #9: the per-model coverage loop. 14 opencode_go aliases run
   # sequentially at ~5 min each, so the ceiling is deliberately ~90 min
