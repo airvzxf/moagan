@@ -39,7 +39,7 @@
 #                                 for the native `deepseek` provider;
 #                                 PR #462), or
 #                                 `discover_opencode_go_models` (the
-#                                 ~65 min per-model coverage loop of
+#                                 ~70 min per-model coverage loop of
 #                                 SECTION A.quad). The CI workflow uses
 #                                 this to split the suite into a matrix;
 #                                 locally it lets the operator iterate
@@ -98,8 +98,8 @@ fi
 
 # OpenCode Go models to exercise in the per-model coverage loop
 # (SECTION A.quad). Excludes `kimi-k2.7-code` (already exercised via
-# the `opencode_go` default alias in A.bis), the 3 BLOCKED minimax-*
-# aliases (`src/llm/opencode_go.rs:186-187`) and `deepseek-v4-flash`.
+# the `opencode_go` default alias in A.bis) and the 3 BLOCKED minimax-*
+# aliases (`src/llm/opencode_go.rs:186-187`).
 # Every entry is a first-class provider alias registered in
 # `default_providers` (`src/config/mod.rs:806-845`), so
 # `--provider <alias>` resolves without a companion `--model` flag.
@@ -114,16 +114,21 @@ OPENCODE_GO_COVERAGE_MODELS=(
   kimi-k3
   kimi-k2.6
   deepseek-v4-pro
+  deepseek-v4-flash         # /v1/chat/completions — opencode_go alias (distinct from native `deepseek` provider in A.ter; same model name, different endpoint)
   mimo-v2.5
   mimo-v2.5-pro
   hy3
 )
-# Total: 13 models. Combined with the A.bis kimi-k2.7-code round-trip
-# this exercises 14 of the 15 usable opencode_go aliases; the 15th
-# (`deepseek-v4-flash` routed through the opencode_go relay) is still
-# uncovered — the A.ter block below tests the same model name but via
-# the NATIVE deepseek provider at api.deepseek.com, which is a
-# different endpoint and a different wire path.
+# Total: 14 models. Combined with the A.bis kimi-k2.7-code round-trip
+# this exercises **all 15 of the 15 usable opencode_go aliases**.
+#
+# `deepseek-v4-flash` appears twice in this suite on purpose: here it is
+# the opencode_go alias (`src/config/mod.rs:832-833`) relayed to
+# `opencode.ai/zen/go/v1/chat/completions`, while the A.ter block below
+# drives the same model name through the NATIVE `deepseek` provider
+# (`src/config/mod.rs:775`) at `api.deepseek.com`. Same model, two
+# distinct endpoints and two distinct wire paths — covering one does
+# not cover the other.
 
 # ---------------------------------------------------------------------
 # helpers
@@ -683,7 +688,7 @@ fi
 #
 # Gated on `OPENCODE_GO_API_KEY` and opt-in via
 # `MOAGAN_SMOKE_SECTION=discover_opencode_go_models`. Budget ~5 min per
-# model → ~65 min for the 13-model set, hence the dedicated 90-minute
+# model → ~70 min for the 14-model set, hence the dedicated 90-minute
 # CI job rather than folding it into the A.bis job.
 # ---------------------------------------------------------------------
 
@@ -722,7 +727,7 @@ if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
       else
         # Same convention as A.bis: a discover that never produced a
         # run dir counts as a SKIP, not a FAIL, so an upstream outage
-        # on one model does not red the whole 13-model job. The
+        # on one model does not red the whole 14-model job. The
         # `_run_id_present` assertion above still records the real
         # failure.
         for _ in 1 2 3 4; do
