@@ -155,10 +155,19 @@ run_test() {
   fi
 }
 
+# Per-job scratch directory. In CI, anchor under ${GITHUB_WORKSPACE}
+# so the e2e-network.yml `actions/upload-artifact` steps (which
+# watch ${GITHUB_WORKSPACE}/.runs/) actually capture the runs.
+# Outside CI, fall back to the historical /tmp/ location so local
+# dev behavior is unchanged.
 mkhome() {
-  local d
-  d="$(mktemp -d /tmp/moagan-e2e-audit.XXXXXX)"
-  echo "$d"
+  if [[ -n "${CI:-}" && -n "${GITHUB_WORKSPACE:-}" ]]; then
+    local d="${GITHUB_WORKSPACE}/.runs/e2e-audit-$$-${RANDOM}"
+    mkdir -p "$d"
+    echo "$d"
+  else
+    mktemp -d /tmp/moagan-e2e-audit.XXXXXX
+  fi
 }
 
 # Start the audit proxy in the background; writes the assigned port to
