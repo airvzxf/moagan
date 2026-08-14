@@ -35,7 +35,20 @@ fn discover_deepseek_writes_four_subdirs() {
         eprintln!("skipping: DEEPSEEK_API_KEY not set");
         return;
     }
-    let tmp = tempfile::tempdir().expect("tempdir");
+    // Use a stable path inside `target/` so the run artifacts persist
+    // past the test's exit. The CI workflow uploads this directory via
+    // `actions/upload-artifact@v4` so a failing or slow run can be
+    // inspected post-mortem. `CARGO_TARGET_TMPDIR` is the conventional
+    // cargo-test scratch dir, and `tests/` ensures the path is unique
+    // to this test binary (so parallel test runs do not clobber).
+    let artifact_root: std::path::PathBuf = std::path::PathBuf::from(
+        std::env::var("CARGO_TARGET_TMPDIR").unwrap_or_else(|_| "target".into()),
+    )
+    .join("test-runs")
+    .join("deepseek");
+    let _ = std::fs::remove_dir_all(&artifact_root); // clean from prior runs
+    std::fs::create_dir_all(&artifact_root).expect("create artifact root");
+    let tmp: &std::path::Path = artifact_root.as_path(); // type-coerce for call sites
     let out = Command::new(binary())
         // Disable the per-provider `max_tokens_auto` probe so the
         // 19-step exponential search (up to 2^19 = 524_288 against
@@ -69,7 +82,7 @@ fn discover_deepseek_writes_four_subdirs() {
             "--non-interactive",
             "--runs-dir",
         ])
-        .arg(tmp.path())
+        .arg(tmp)
         .output()
         .expect("spawn moagan discover");
     assert!(
@@ -77,7 +90,7 @@ fn discover_deepseek_writes_four_subdirs() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run_id = fs::read_dir(tmp.path().join(".runs"))
+    let run_id = fs::read_dir(tmp.join(".runs"))
         .expect("runs dir")
         .filter_map(|e| e.ok())
         .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
