@@ -36,8 +36,8 @@ permissions:
 #   e2e                      ─┘
 #
 #
-# The YAML declaration order is: test-tests, test-ignored-deepseek,
-# test-ignored-opencode-go, test-lib, smoke, e2e, test-doc.
+# The YAML declaration order is: test-tests, validate-providers,
+# test-ignored-deepseek, test-ignored-opencode-go, test-lib, smoke, e2e, test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
 # the slowest of the 7 round-2 jobs (the --ignored discovery tests at ~16 min).
@@ -105,8 +105,69 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
+  # Pre-flight provider API validator. Probes deepseek and opencode_go
+  # upstream /v1/models with a 30 s timeout. If the secret is absent the
+  # probe is skipped (exit 0); if the secret is set but the HTTP status
+  # is non-2xx (401, 403, 5xx, timeout, network error) the validator
+  # fails and the two `test-ignored-*` jobs that `needs:` it are skipped
+  # — that is the desired GitHub Actions signal for a dead upstream.
+  # Prevents 25-min wasted runner time on a provider outage (PR #473).
+  validate-providers:
+    name: 'T3 · preflight — validate provider APIs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: probe deepseek
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+            echo "SKIP: DEEPSEEK_API_KEY not set; deepseek not probed"
+            exit 0
+          fi
+          echo "DEEPSEEK probe:"
+          echo "  set: yes"
+          echo "  length: ${#DEEPSEEK_API_KEY} chars"
+          echo "  prefix: ${DEEPSEEK_API_KEY:0:8}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
+          echo "  http_status: $HTTP"
+          if [[ "$HTTP" =~ ^2 ]]; then
+            echo "  result: ok"
+            exit 0
+          else
+            echo "  result: FAIL (expected 2xx, got $HTTP)"
+            exit 1
+          fi
+
+      - name: probe opencode_go
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
+            echo "SKIP: OPENCODE_GO_API_KEY not set; opencode_go not probed"
+            exit 0
+          fi
+          echo "OPENCODE_GO probe:"
+          echo "  set: yes"
+          echo "  length: ${#OPENCODE_GO_API_KEY} chars"
+          echo "  prefix: ${OPENCODE_GO_API_KEY:0:8}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
+            'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
+          echo "  http_status: $HTTP"
+          if [[ "$HTTP" =~ ^2 ]]; then
+            echo "  result: ok"
+            exit 0
+          else
+            echo "  result: FAIL (expected 2xx, got $HTTP)"
+            exit 1
+          fi
+
   test-ignored-deepseek:
     name: 'T2 · cargo test -- --ignored (deepseek)'
+    needs: validate-providers
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -151,6 +212,7 @@ jobs:
 
   test-ignored-opencode-go:
     name: 'T2 · cargo test -- --ignored (opencode_go)'
+    needs: validate-providers
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
