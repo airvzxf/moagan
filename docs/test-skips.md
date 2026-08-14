@@ -74,8 +74,11 @@ when invoked with `cargo test -- --ignored` or `cargo test <name> -- --ignored`.
 |---|---|---|
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:396` | Mutates process-wide RLIMIT_NPROC (side-effects other tests) |
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:441` | Mutates process-wide RLIMIT_AS (side-effects other tests) |
+| `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); exercised by `make e2e-network` |
+| `discover_opencode_go_writes_four_subdirs` | `tests/integration_discover_opencode_go.rs:32` | Requires `OPENCODE_GO_API_KEY`; only runs locally / in `e2e-network` |
+| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:32` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
 
-Total: **2 tests marked `#[ignore]`**.
+Total: **5 tests marked `#[ignore]`**.
 
 Note: these are NOT included in `cargo test --skip`. To run them:
 
@@ -202,7 +205,7 @@ check from a clean state.
 |---|---|---|---|
 | 1 | Ruleset required_status_checks | 9 jobs required, 1 not | n/a |
 | 2 | `cargo test --skip` CLI flag | 0 tests | n/a (closed) |
-| 3 | `#[ignore]` Rust attribute | 2 tests | ❌ no (run via `--ignored`) |
+| 3 | `#[ignore]` Rust attribute | 5 tests | ❌ no (run via `--ignored`) |
 | 4 | Source silent-skip (binary on PATH) | 13 tests | ✅ partially (binaries present) |
 | 5 | `ValidationEvidence::skipped()` runtime | 11 sites | n/a (per-artifact) |
 | 6a | `MINIMAX_API_KEY` missing → 46 tests | 46 tests | ❌ no (key present in CI) |
