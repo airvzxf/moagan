@@ -61,18 +61,29 @@ permissions:
 #                        DEEPSEEK_API_KEY.
 #   test-discover-opencode-go-models
 #                      — needs: build-e2e-network; gated on inputs.section in
-#                        {discover_opencode_go_models, all, ''}. The
+#                        {discover_opencode_go_models, all}. NOT gated on
+#                        '' — this job is dispatch-only, see below. The
 #                        per-model coverage loop: 14 opencode_go aliases
 #                        × ~5 min each ≈ 70 min. Consumes
 #                        OPENCODE_GO_API_KEY.
 #
-# On `push` events `inputs.section` is undefined (= ''), so all six
-# test jobs run in parallel after `build-e2e-network` completes (wall-clock ≈
-# slowest row, ~65 min once the per-model loop is in play). On
+# On `push` events `inputs.section` is undefined (= ''), so the five
+# test jobs whose condition includes '' run in parallel after
+# `build-e2e-network` completes (wall-clock ≈ slowest row, ~25 min). On
 # `workflow_dispatch` with `section=<x>`, only the matching `test-<x>`
 # job is materialised — the others don't even appear in the run page.
 # This replaces the previous matrix-filter cascade that always
 # materialised all three rows and then pruned two of them.
+#
+# `test-discover-opencode-go-models` is the one exception: it is
+# deliberately dispatch-only (no `|| inputs.section == ''`). At ~70 min
+# of runner time and 14 real discovery runs of API spend, paying it on
+# every push to main is not sustainable. The cheaper single-provider
+# jobs `test-discover-opencode-go` and `test-discover-deepseek` stay
+# push-on and are what catch opencode_go / deepseek regressions; the
+# full per-model sweep is opt-in via `workflow_dispatch` with
+# `section: discover_opencode_go_models` (just the loop) or
+# `section: all` (the loop plus everything else).
 #
 # The three discovery jobs (added for Tier A #8/#9/#10 of
 # `docs/pending-items-2026-08-13.md` §11) are what turn the
@@ -290,10 +301,16 @@ jobs:
   # exercises the /v1/responses (gpt-5.6-luna) and /v1/messages
   # (qwen3.*) wire formats against a real upstream; before it, only
   # /v1/chat/completions had ever made a real request (§9.3).
+  #
+  # Dispatch-only on purpose: the `if` below omits the
+  # `|| inputs.section == ''` arm the other jobs carry, so a `push` to
+  # main does NOT pay ~70 min of runner time and 14 real discovery runs
+  # of API spend. Opt in with `workflow_dispatch` +
+  # `section: discover_opencode_go_models`, or `section: all`.
   test-discover-opencode-go-models:
     name: 'Tier 3 · e2e — discover_opencode_go_models (14 models, ~70 min)'
     needs: build-e2e-network
-    if: ${{ inputs.section == 'discover_opencode_go_models' || inputs.section == 'all' || inputs.section == '' }}
+    if: ${{ inputs.section == 'discover_opencode_go_models' || inputs.section == 'all' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
