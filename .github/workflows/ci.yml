@@ -36,8 +36,9 @@ permissions:
 #   e2e                      ─┘
 #
 #
-# The YAML declaration order is: test-tests, validate-providers,
-# test-ignored-deepseek, test-ignored-opencode-go, test-lib, smoke, e2e, test-doc.
+# The YAML declaration order is: test-tests, preflight-deepseek,
+# preflight-opencode_go, preflight-minimax, test-ignored-deepseek,
+# test-ignored-opencode-go, test-lib, smoke, e2e, test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
 # the slowest of the 7 round-2 jobs (the --ignored discovery tests at ~16 min).
@@ -105,15 +106,19 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
-  # Pre-flight provider API validator. Probes deepseek, opencode_go, and
-  # minimax upstream /v1/models with a 30 s timeout. If the secret is absent the
-  # probe is skipped (exit 0); if the secret is set but the HTTP status
-  # is non-2xx (401, 403, 5xx, timeout, network error) the validator
-  # fails and the two `test-ignored-*` jobs that `needs:` it are skipped
-  # — that is the desired GitHub Actions signal for a dead upstream.
-  # Prevents 25-min wasted runner time on a provider outage (PR #473).
-  validate-providers:
-    name: 'T3 · preflight — validate provider APIs'
+  # Pre-flight provider API probes. Each provider has its own per-provider
+  # preflight job so a single-provider outage does not block the others'
+  # downstream tests: test-ignored-deepseek gates only on preflight-deepseek,
+  # test-ignored-opencode-go gates only on preflight-opencode_go. Each probe
+  # is a 30 s HTTP GET to the provider's /v1/models endpoint. If the secret
+  # is absent the probe is skipped (exit 0); if the secret is set but the
+  # HTTP status is non-2xx (401, 403, 5xx, timeout, network error) the
+  # validator fails and only the `test-ignored-<provider>` job that
+  # `needs:` it is skipped — that is the desired GitHub Actions signal
+  # for a dead upstream. Prevents 25-min wasted runner time on a
+  # per-provider outage (PR #473).
+  preflight-deepseek:
+    name: 'T3 · preflight — deepseek'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -128,7 +133,7 @@ jobs:
           echo "DEEPSEEK probe:"
           echo "  set: yes"
           echo "  length: ${#DEEPSEEK_API_KEY} chars"
-          echo "  prefix: ${DEEPSEEK_API_KEY:0:8}"
+          echo "  prefix: ${DEEPSEEK_API_KEY:0:8}...${DEEPSEEK_API_KEY: -4}"
           HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
             'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
@@ -141,6 +146,11 @@ jobs:
             exit 1
           fi
 
+  preflight-opencode_go:
+    name: 'T3 · preflight — opencode_go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
       - name: probe opencode_go
         env:
           OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
@@ -152,7 +162,7 @@ jobs:
           echo "OPENCODE_GO probe:"
           echo "  set: yes"
           echo "  length: ${#OPENCODE_GO_API_KEY} chars"
-          echo "  prefix: ${OPENCODE_GO_API_KEY:0:8}"
+          echo "  prefix: ${OPENCODE_GO_API_KEY:0:8}...${OPENCODE_GO_API_KEY: -4}"
           HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
             'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
@@ -165,6 +175,11 @@ jobs:
             exit 1
           fi
 
+  preflight-minimax:
+    name: 'T3 · preflight — minimax'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
       - name: probe minimax
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
@@ -176,7 +191,7 @@ jobs:
           echo "MINIMAX probe:"
           echo "  set: yes"
           echo "  length: ${#MINIMAX_API_KEY} chars"
-          echo "  prefix: ${MINIMAX_API_KEY:0:8}"
+          echo "  prefix: ${MINIMAX_API_KEY:0:8}...${MINIMAX_API_KEY: -4}"
           HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
             -H "x-api-key: $MINIMAX_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
@@ -192,7 +207,7 @@ jobs:
 
   test-ignored-deepseek:
     name: 'T2 · cargo test -- --ignored (deepseek)'
-    needs: validate-providers
+    needs: preflight-deepseek
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -204,7 +219,6 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          set -xv
           echo "============================================================"
           echo "DIAGNOSTIC HEADER"
           echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
@@ -225,10 +239,8 @@ jobs:
           fi
           echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
           START_TS=$(date +%s)
-          set +xv   # turn off trace for the actual cargo run; it spews too much
           cargo test --test integration_discover_deepseek -- --ignored --nocapture
           CARGO_RC=$?
-          set -xv
           END_TS=$(date +%s)
           echo "============================================================"
           echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
@@ -246,7 +258,7 @@ jobs:
 
   test-ignored-opencode-go:
     name: 'T2 · cargo test -- --ignored (opencode_go)'
-    needs: validate-providers
+    needs: preflight-opencode_go
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -258,7 +270,6 @@ jobs:
         env:
           OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
-          set -xv
           echo "============================================================"
           echo "DIAGNOSTIC HEADER"
           echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
@@ -279,10 +290,8 @@ jobs:
           fi
           echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
           START_TS=$(date +%s)
-          set +xv   # turn off trace for the actual cargo run; it spews too much
           cargo test --test integration_discover_opencode_go -- --ignored --nocapture
           CARGO_RC=$?
-          set -xv
           END_TS=$(date +%s)
           echo "============================================================"
           echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
@@ -341,5 +350,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
       - name: cargo test --doc
         run: cargo test --doc

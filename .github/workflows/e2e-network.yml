@@ -43,38 +43,54 @@ permissions:
 # Architecture (build-once + per-job conditions, supersedes the
 # 3-row matrix that built the release binary once per row):
 #
-#   build-e2e-network  — runs once, uploads target/release/moagan as the
-#                        `moagan-e2e-binary` artifact.
-#   validate-providers — needs: build-e2e-network; preflight HTTP
-#                        probe (deepseek, opencode_go, minimax) that
-#                        gates the five push-on test jobs below. ~30 s.
-#   test-card80        — needs: build-e2e-network, validate-providers;
-#                        gated on inputs.section in {card80, all, ''}.
-#   test-fast          — needs: build-e2e-network, validate-providers;
-#                        gated on inputs.section in {fast, all, ''}.
-#   test-explore       — needs: build-e2e-network, validate-providers;
-#                        gated on inputs.section in {explore, all, ''}.
-#   test-discover-opencode-go
-#                      — needs: build-e2e-network, validate-providers;
-#                        gated on inputs.section in {discover_opencode_go,
-#                        all, ''}. Consumes OPENCODE_GO_API_KEY, not
-#                        MINIMAX_API_KEY.
-#   test-discover-deepseek
-#                      — needs: build-e2e-network, validate-providers;
-#                        gated on inputs.section in {discover_deepseek,
-#                        all, ''}. Consumes DEEPSEEK_API_KEY.
+#   build-e2e-network            — runs once, uploads target/release/moagan
+#                                  as the `moagan-e2e-binary` artifact.
+#   preflight-deepseek           — needs: build-e2e-network; deepseek
+#                                  /v1/models HTTP probe that gates
+#                                  test-discover-deepseek. ~30 s.
+#   preflight-opencode_go        — needs: build-e2e-network; opencode_go
+#                                  /v1/models HTTP probe that gates
+#                                  test-discover-opencode-go and
+#                                  test-discover-opencode-go-models. ~30 s.
+#   preflight-minimax            — needs: build-e2e-network; minimax
+#                                  /v1/models HTTP probe that gates
+#                                  test-card80, test-fast, test-explore. ~30 s.
+#   test-card80                  — needs: [build-e2e-network,
+#                                  preflight-minimax]; gated on
+#                                  inputs.section in {card80, all, ''}.
+#   test-fast                    — needs: [build-e2e-network,
+#                                  preflight-minimax]; gated on
+#                                  inputs.section in {fast, all, ''}.
+#   test-explore                 — needs: [build-e2e-network,
+#                                  preflight-minimax]; gated on
+#                                  inputs.section in {explore, all, ''}.
+#   test-discover-opencode-go    — needs: [build-e2e-network,
+#                                  preflight-opencode_go]; gated on
+#                                  inputs.section in
+#                                  {discover_opencode_go, all, ''}.
+#                                  Consumes OPENCODE_GO_API_KEY, not
+#                                  MINIMAX_API_KEY.
+#   test-discover-deepseek       — needs: [build-e2e-network,
+#                                  preflight-deepseek]; gated on
+#                                  inputs.section in
+#                                  {discover_deepseek, all, ''}.
+#                                  Consumes DEEPSEEK_API_KEY.
 #   test-discover-opencode-go-models
-#                      — needs: build-e2e-network (NOT gated on the
-#                        validator — this job is dispatch-only and the
-#                        14-model × ~5 min loop pays for the validator
-#                        itself). Gated on inputs.section in
-#                        {discover_opencode_go_models, all}. NOT gated
-#                        on '' — this job is dispatch-only, see below.
-#                        The per-model coverage loop: 14 opencode_go
-#                        aliases × ~5 min each ≈ 70 min. Consumes
-#                        OPENCODE_GO_API_KEY.
+#                                — needs: [build-e2e-network,
+#                                  preflight-opencode_go] (gated on the
+#                                  preflight even though dispatch-only —
+#                                  dispatch iterations still benefit from
+#                                  the same gate). Gated on
+#                                  inputs.section in
+#                                  {discover_opencode_go_models, all}.
+#                                  NOT gated on '' — this job is
+#                                  dispatch-only, see below. The
+#                                  per-model coverage loop: 14
+#                                  opencode_go aliases × ~5 min each
+#                                  ≈ 70 min. Consumes
+#                                  OPENCODE_GO_API_KEY.
 #
-# On `push` events `inputs.section` is undefined (= ''), so the five
+# On `push` events `inputs.section` is undefined (= ''), so the four
 # test jobs whose condition includes '' run in parallel after
 # `build-e2e-network` completes (wall-clock ≈ slowest row, ~25 min). On
 # `workflow_dispatch` with `section=<x>`, only the matching `test-<x>`
@@ -155,20 +171,22 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Pre-flight provider API validator for the e2e-network suite. Probes
-  # deepseek, opencode_go and minimax upstream /v1/models with a 30 s
-  # timeout; if any probe returns non-2xx (401, 403, 5xx, timeout,
-  # network error) the validator fails and the five `test-*` jobs that
-  # `needs:` it are SKIPPED — that is the desired GitHub Actions
-  # signal for a dead upstream. Prevents ~25 min of wasted runner time
-  # on a provider outage (PR #473). Secret-absent → SKIP (exit 0) so
-  # fork PRs without secrets stay green. Only echoes presence, length,
-  # prefix (first 8 chars), and the HTTP status code; never the secret
-  # value. The validator needs the release binary build because the
-  # test jobs that depend on it also need it, and adding the
-  # dependency keeps the gate serial rather than racy.
-  validate-providers:
-    name: 'T3 · preflight — validate provider APIs'
+  # Pre-flight provider API probes for the e2e-network suite. Each
+  # provider has its own per-provider preflight job so a single-provider
+  # outage does not block the others' downstream tests. Each probe is a
+  # 30 s HTTP GET to the provider's /v1/models endpoint; if a probe
+  # returns non-2xx (401, 403, 5xx, timeout, network error) the
+  # preflight fails and only the `test-*` jobs that `needs:` it are
+  # SKIPPED — that is the desired GitHub Actions signal for a dead
+  # upstream. Prevents ~25 min of wasted runner time on a per-provider
+  # outage (PR #473). Secret-absent → SKIP (exit 0) so fork PRs
+  # without secrets stay green. Only echoes presence, length, prefix
+  # (first 8 + literal `...` + last 4 chars), and the HTTP status code;
+  # never the secret value. The preflights need the release binary
+  # build because the test jobs that depend on them also need it, and
+  # adding the dependency keeps the gate serial rather than racy.
+  preflight-deepseek:
+    name: 'T3 · preflight — deepseek'
     needs: build-e2e-network
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -181,13 +199,19 @@ jobs:
             echo "SKIP: DEEPSEEK_API_KEY not set"
             exit 0
           fi
-          echo "DEEPSEEK: set, length=${#DEEPSEEK_API_KEY}, prefix=${DEEPSEEK_API_KEY:0:8}"
+          echo "DEEPSEEK: set, length=${#DEEPSEEK_API_KEY}, prefix=${DEEPSEEK_API_KEY:0:8}...${DEEPSEEK_API_KEY: -4}"
           HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
             'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
           echo "DEEPSEEK http_status: $HTTP"
           [[ "$HTTP" =~ ^2 ]] || exit 1
 
+  preflight-opencode_go:
+    name: 'T3 · preflight — opencode_go'
+    needs: build-e2e-network
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
       - name: probe opencode_go
         env:
           OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
@@ -196,13 +220,19 @@ jobs:
             echo "SKIP: OPENCODE_GO_API_KEY not set"
             exit 0
           fi
-          echo "OPENCODE_GO: set, length=${#OPENCODE_GO_API_KEY}, prefix=${OPENCODE_GO_API_KEY:0:8}"
+          echo "OPENCODE_GO: set, length=${#OPENCODE_GO_API_KEY}, prefix=${OPENCODE_GO_API_KEY:0:8}...${OPENCODE_GO_API_KEY: -4}"
           HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
             'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
           echo "OPENCODE_GO http_status: $HTTP"
           [[ "$HTTP" =~ ^2 ]] || exit 1
 
+  preflight-minimax:
+    name: 'T3 · preflight — minimax'
+    needs: build-e2e-network
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
       - name: probe minimax
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
@@ -211,7 +241,7 @@ jobs:
             echo "SKIP: MINIMAX_API_KEY not set"
             exit 0
           fi
-          echo "MINIMAX: set, length=${#MINIMAX_API_KEY}, prefix=${MINIMAX_API_KEY:0:8}"
+          echo "MINIMAX: set, length=${#MINIMAX_API_KEY}, prefix=${MINIMAX_API_KEY:0:8}...${MINIMAX_API_KEY: -4}"
           HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
             -H "x-api-key: $MINIMAX_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
@@ -221,7 +251,7 @@ jobs:
 
   test-card80:
     name: 'Tier 3 · e2e — card80'
-    needs: [build-e2e-network, validate-providers]
+    needs: [build-e2e-network, preflight-minimax]
     if: ${{ inputs.section == 'card80' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -259,7 +289,7 @@ jobs:
 
   test-fast:
     name: 'Tier 3 · e2e — fast'
-    needs: [build-e2e-network, validate-providers]
+    needs: [build-e2e-network, preflight-minimax]
     if: ${{ inputs.section == 'fast' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
@@ -284,7 +314,7 @@ jobs:
 
   test-explore:
     name: 'Tier 3 · e2e — explore'
-    needs: [build-e2e-network, validate-providers]
+    needs: [build-e2e-network, preflight-minimax]
     if: ${{ inputs.section == 'explore' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 28
@@ -314,7 +344,7 @@ jobs:
   # the secret is absent.
   test-discover-opencode-go:
     name: 'Tier 3 · e2e — discover_opencode_go'
-    needs: [build-e2e-network, validate-providers]
+    needs: [build-e2e-network, preflight-opencode_go]
     if: ${{ inputs.section == 'discover_opencode_go' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     # One discovery round (~5 min of wire time) plus generous headroom
@@ -344,7 +374,7 @@ jobs:
   # (api.deepseek.com), not the opencode_go relay.
   test-discover-deepseek:
     name: 'Tier 3 · e2e — discover_deepseek'
-    needs: [build-e2e-network, validate-providers]
+    needs: [build-e2e-network, preflight-deepseek]
     if: ${{ inputs.section == 'discover_deepseek' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -380,7 +410,7 @@ jobs:
   # `section: discover_opencode_go_models`, or `section: all`.
   test-discover-opencode-go-models:
     name: 'Tier 3 · e2e — discover_opencode_go_models (14 models, ~70 min)'
-    needs: build-e2e-network
+    needs: [build-e2e-network, preflight-opencode_go]
     if: ${{ inputs.section == 'discover_opencode_go_models' || inputs.section == 'all' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
