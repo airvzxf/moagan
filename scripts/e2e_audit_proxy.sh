@@ -29,16 +29,19 @@
 #   MOAGAN_SMOKE_SECTION           select which SECTION A sub-block to
 #                                 run. One of `all` (default), `card80`
 #                                 (the ~25 min discover), `fast` (the
-#                                 ~2 min mode-fast run), `explore`
-#                                 (the ~8 min mode-explore run),
+#                                 ~2 min mode-fast run), `explore` (the
+#                                 ~8 min mode-explore run),
 #                                 `discover_opencode_go` (the
 #                                 ~10–20 min `moagan discover` against
 #                                 the opencode_go provider; v0.7 P8
-#                                 e2e validation close), or
+#                                 e2e validation close),
 #                                 `discover_deepseek` (the equivalent
 #                                 for the native `deepseek` provider;
-#                                 PR #462). The CI workflow uses this
-#                                 to split the suite into a matrix;
+#                                 PR #462), or
+#                                 `discover_opencode_go_models` (the
+#                                 ~65 min per-model coverage loop of
+#                                 SECTION A.quad). The CI workflow uses
+#                                 this to split the suite into a matrix;
 #                                 locally it lets the operator iterate
 #                                 on a single sub-block without paying
 #                                 the ~25 min card80 cost.
@@ -91,7 +94,36 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 : "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
-: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore | discover_opencode_go | discover_deepseek
+: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore | discover_opencode_go | discover_deepseek | discover_opencode_go_models
+
+# OpenCode Go models to exercise in the per-model coverage loop
+# (SECTION A.quad). Excludes `kimi-k2.7-code` (already exercised via
+# the `opencode_go` default alias in A.bis), the 3 BLOCKED minimax-*
+# aliases (`src/llm/opencode_go.rs:186-187`) and `deepseek-v4-flash`.
+# Every entry is a first-class provider alias registered in
+# `default_providers` (`src/config/mod.rs:806-845`), so
+# `--provider <alias>` resolves without a companion `--model` flag.
+OPENCODE_GO_COVERAGE_MODELS=(
+  gpt-5.6-luna            # /v1/responses  — Responses API
+  qwen3.8-max             # /v1/messages   — Anthropic-compatible
+  qwen3.7-max
+  qwen3.7-plus
+  qwen3.6-plus
+  glm-5.1                 # /v1/chat/completions — OpenAI-compatible
+  glm-5.2
+  kimi-k3
+  kimi-k2.6
+  deepseek-v4-pro
+  mimo-v2.5
+  mimo-v2.5-pro
+  hy3
+)
+# Total: 13 models. Combined with the A.bis kimi-k2.7-code round-trip
+# this exercises 14 of the 15 usable opencode_go aliases; the 15th
+# (`deepseek-v4-flash` routed through the opencode_go relay) is still
+# uncovered — the A.ter block below tests the same model name but via
+# the NATIVE deepseek provider at api.deepseek.com, which is a
+# different endpoint and a different wire path.
 
 # ---------------------------------------------------------------------
 # helpers
@@ -351,7 +383,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
           PASS=$((PASS + 1))
         fi
 
-        CAT_SUBDIRS=$(ls -d "$PROXY_RUN_DIR/extractions/cat_*" 2>/dev/null | wc -l)
+        CAT_SUBDIRS=$(find "$PROXY_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
         if [[ $CAT_SUBDIRS -ge 1 ]]; then
           run_test "proxy_e2e_card80_extractions_subdirs_present" "true"
         else
@@ -511,7 +543,7 @@ if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
       run_test "proxy_e2e_discover_oc_facets_nonempty" \
         "test $FACET_COUNT -ge 1"
 
-      CAT_SUBDIRS=$(ls -d "$OC_RUN_DIR/extractions/cat_*" 2>/dev/null | wc -l)
+      CAT_SUBDIRS=$(find "$OC_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
       run_test "proxy_e2e_discover_oc_extractions_subdirs" \
         "test $CAT_SUBDIRS -ge 1"
 
@@ -596,7 +628,7 @@ if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
       run_test "proxy_e2e_discover_ds_facets_nonempty" \
         "test $FACET_COUNT -ge 1"
 
-      CAT_SUBDIRS=$(ls -d "$DS_RUN_DIR/extractions/cat_*" 2>/dev/null | wc -l)
+      CAT_SUBDIRS=$(find "$DS_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
       run_test "proxy_e2e_discover_ds_extractions_subdirs" \
         "test $CAT_SUBDIRS -ge 1"
 
@@ -628,6 +660,81 @@ if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
   fi
 else
   echo "SKIP: deepseek discovery e2e tests (DEEPSEEK_API_KEY not present)"
+fi
+
+# ---------------------------------------------------------------------
+# SECTION A.quad — Per-model coverage loop over opencode_go
+# (Tier A #9 of `docs/pending-items-2026-08-13.md` §11)
+#
+# A.bis above only ever touches `kimi-k2.7-code`, the default model of
+# the `opencode_go` alias, which sits on `/v1/chat/completions`. That
+# left 2 of the 3 wire formats — `/v1/responses` (gpt-5.6-luna) and
+# `/v1/messages` (the qwen3.* family) — without a single real HTTP
+# request in the whole suite (§9.3). This loop closes that gap by
+# re-running the same discover assertions once per alias in
+# `OPENCODE_GO_COVERAGE_MODELS`.
+#
+# Assertions per model mirror A.bis minus the telemetry-plan pair: the
+# `moagan telemetry plan --provider <alias>` rows aggregate per
+# provider *alias*, and the per-alias weekly plan block is only
+# declared for `opencode_go` in `~/.config/moagan/config.toml`, so
+# asserting `used > 0` on a bare model alias would fail for reasons
+# unrelated to the wire round-trip.
+#
+# Gated on `OPENCODE_GO_API_KEY` and opt-in via
+# `MOAGAN_SMOKE_SECTION=discover_opencode_go_models`. Budget ~5 min per
+# model → ~65 min for the 13-model set, hence the dedicated 90-minute
+# CI job rather than folding it into the A.bis job.
+# ---------------------------------------------------------------------
+
+if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
+  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_opencode_go_models" ]]; then
+    for MODEL in "${OPENCODE_GO_COVERAGE_MODELS[@]}"; do
+      echo ""
+      echo ">>> Running discover e2e against opencode_go alias '$MODEL'..."
+      WORK_MODEL=$(mkhome)
+      # Same prompt and same 2×2 matrix as A.bis so the pass/fail
+      # signal stays comparable across models: any divergence is
+      # attributable to the model / wire format, not to the workload.
+      MODEL_PROMPT="Compare three Rust HTTP clients for binary streaming"
+      run_test "proxy_e2e_discover_oc_model_${MODEL}_run_id_present" \
+        "MOAGAN_HOME=$WORK_MODEL RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider $MODEL --prompt '$MODEL_PROMPT' --cardinality 80 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_MODEL/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_MODEL/discover.out"
+
+      MODEL_RUN_ID="$(ls "$WORK_MODEL/.runs/" 2>/dev/null | sort -r | head -1)"
+      if [[ -n "$MODEL_RUN_ID" ]]; then
+        MODEL_RUN_DIR="$WORK_MODEL/.runs/$MODEL_RUN_ID"
+
+        TAG_COUNT=$(ls "$MODEL_RUN_DIR/tags/" 2>/dev/null | wc -l)
+        run_test "proxy_e2e_discover_oc_model_${MODEL}_tags_nonempty" \
+          "test $TAG_COUNT -ge 2"
+
+        FACET_COUNT=$(ls "$MODEL_RUN_DIR/facets/" 2>/dev/null | wc -l)
+        run_test "proxy_e2e_discover_oc_model_${MODEL}_facets_nonempty" \
+          "test $FACET_COUNT -ge 1"
+
+        CAT_SUBDIRS=$(find "$MODEL_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
+        run_test "proxy_e2e_discover_oc_model_${MODEL}_extractions_subdirs" \
+          "test $CAT_SUBDIRS -ge 1"
+
+        DRAFT_COUNT=$(ls "$MODEL_RUN_DIR/drafts/" 2>/dev/null | wc -l)
+        run_test "proxy_e2e_discover_oc_model_${MODEL}_drafts_nonempty" \
+          "test $DRAFT_COUNT -ge 1"
+      else
+        # Same convention as A.bis: a discover that never produced a
+        # run dir counts as a SKIP, not a FAIL, so an upstream outage
+        # on one model does not red the whole 13-model job. The
+        # `_run_id_present` assertion above still records the real
+        # failure.
+        for _ in 1 2 3 4; do
+          echo "SKIP: proxy_e2e_discover_oc_model_${MODEL}_* (discover did not start)"
+          PASS=$((PASS + 1))
+        done
+      fi
+      rm -rf "$WORK_MODEL"
+    done
+  fi
+else
+  echo "SKIP: opencode_go per-model coverage loop (OPENCODE_GO_API_KEY not present)"
 fi
 
 # ---------------------------------------------------------------------

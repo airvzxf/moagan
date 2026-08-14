@@ -101,6 +101,40 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
+      # Tier A #10 (docs/pending-items-2026-08-13.md §11). The two
+      # discovery integration tests are `#[ignore]`d because they need
+      # a real API key, so the plain `cargo test` above never touches
+      # them. Run each one only when its secret is configured;
+      # otherwise print SKIP and leave the job green. Secrets are not
+      # exposed to `pull_request` runs from forks, so that path lands
+      # on the SKIP branch by design.
+      #
+      # The third `#[ignore]`d integration test
+      # (`tests/integration_audit_e2e.rs:259`) is deliberately NOT run
+      # here: it is documented as flaky under parallel execution, not
+      # as key-gated.
+      - name: 'T2 · cargo test -- --ignored (gated on secrets)'
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          ran=0
+          if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
+            cargo test --test integration_discover_opencode_go -- --ignored
+            ran=1
+          else
+            echo "SKIP: OPENCODE_GO_API_KEY absent; discover_opencode_go_writes_four_subdirs not run"
+          fi
+          if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+            cargo test --test integration_discover_deepseek -- --ignored
+            ran=1
+          else
+            echo "SKIP: DEEPSEEK_API_KEY absent; discover_deepseek_writes_four_subdirs not run"
+          fi
+          if [[ "$ran" -eq 0 ]]; then
+            echo "SKIP: no API-key secrets present, --ignored tests not run"
+          fi
+
   test-lib:
     name: 'T2 · cargo test --lib --bins'
     runs-on: ubuntu-latest

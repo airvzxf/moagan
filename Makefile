@@ -26,7 +26,7 @@ E2E_SCRIPTS_LOCAL := \
 E2E_SCRIPTS_NETWORK := \
 	scripts/e2e_audit_proxy.sh
 
-.PHONY: help validate fmt fmt-check lint test test-doc build build-release doc clean check-deps guard-deps smoke e2e e2e-fast e2e-network e2e-network-card80 e2e-network-fast e2e-network-explore smoke-audit
+.PHONY: help validate fmt fmt-check lint test test-doc build build-release doc clean check-deps guard-deps smoke e2e e2e-fast e2e-network e2e-network-card80 e2e-network-fast e2e-network-explore e2e-network-discover-opencode-go e2e-network-discover-deepseek e2e-network-discover-opencode-go-models smoke-audit
 
 help:
 	@echo "Targets:"
@@ -47,6 +47,9 @@ help:
 	@echo "  e2e-network-card80 - Run only the card80 sub-block (real LLM, ~25 min)"
 	@echo "  e2e-network-fast   - Run only the mode-fast sub-block (real LLM, ~2 min)"
 	@echo "  e2e-network-explore - Run only the mode-explore sub-block (real LLM, ~8 min)"
+	@echo "  e2e-network-discover-opencode-go - Run only the opencode_go discovery sub-block (real LLM, ~20 min)"
+	@echo "  e2e-network-discover-deepseek    - Run only the deepseek discovery sub-block (real LLM, ~20 min)"
+	@echo "  e2e-network-discover-opencode-go-models - Run the 13-model opencode_go coverage loop (real LLM, ~65 min)"
 	@echo "  smoke-audit     - Run smoke_audit_proxy.sh standalone (~1 min)"
 	@echo "  clean           - Remove target/"
 
@@ -117,6 +120,18 @@ e2e-network-fast:
 e2e-network-explore:
 	@echo ">>> Running e2e_audit_proxy.sh (REAL LLM, mode explore only, ~8 min)…"
 	@MOAGAN_SMOKE_SECTION=explore bash scripts/e2e_audit_proxy.sh || exit 1
+
+e2e-network-discover-opencode-go:
+	@echo ">>> Running e2e_audit_proxy.sh (REAL LLM, discover_opencode_go block only)…"
+	@MOAGAN_SMOKE_SECTION=discover_opencode_go bash scripts/e2e_audit_proxy.sh || exit 1
+
+e2e-network-discover-deepseek:
+	@echo ">>> Running e2e_audit_proxy.sh (REAL LLM, discover_deepseek block only)…"
+	@MOAGAN_SMOKE_SECTION=discover_deepseek bash scripts/e2e_audit_proxy.sh || exit 1
+
+e2e-network-discover-opencode-go-models:
+	@echo ">>> Running e2e_audit_proxy.sh (REAL LLM, opencode_go per-model coverage loop)…"
+	@MOAGAN_SMOKE_SECTION=discover_opencode_go_models bash scripts/e2e_audit_proxy.sh || exit 1
 
 clean:
 	cargo clean
