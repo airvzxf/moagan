@@ -83,11 +83,62 @@ fn discover_deepseek_writes_four_subdirs() {
         .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
         .expect("at least one run dir");
     let run_dir = run_id.path();
+
+    // Diagnostic snapshot — printed on assertion failure so CI logs show
+    // the actual run-dir state, not just the empty dir name.
+    let run_dir_top: Vec<String> = fs::read_dir(&run_dir)
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let count = e
+                        .path()
+                        .metadata()
+                        .ok()
+                        .filter(|m| m.is_dir())
+                        .map(|_| fs::read_dir(e.path()).map(|d| d.count()).unwrap_or(0))
+                        .unwrap_or(0);
+                    format!("{name}/ ({count} entries)")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Pull a tail of the most recent moagan log file (if any) so
+    // the CI panic message includes the actual error.
+    let latest_log_tail: String = fs::read_dir(run_dir.join("logs"))
+        .ok()
+        .and_then(|d| {
+            d.filter_map(|e| e.ok())
+                .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        })
+        .and_then(|latest| {
+            let content = fs::read_to_string(latest.path()).ok()?;
+            let tail: String = content
+                .lines()
+                .rev()
+                .take(50)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(tail)
+        })
+        .unwrap_or_default();
+
+    if !latest_log_tail.is_empty() {
+        eprintln!("---- latest moagan log tail ----\n{latest_log_tail}\n----");
+    }
+
     for sub in ["tags", "facets", "extractions"] {
         let count = fs::read_dir(run_dir.join(sub))
             .map(|d| d.count())
             .unwrap_or(0);
-        assert!(count >= 1, "{sub}/ should have ≥1 entry, got {count}");
+        assert!(
+            count >= 1,
+            "{sub}/ should have ≥1 entry, got {count}\nrun_dir contents: {run_dir_top:?}"
+        );
     }
 
     // V4 §6.10 promises `drafts/<sketch_id>.md` sidecars, one per
@@ -116,6 +167,6 @@ fn discover_deepseek_writes_four_subdirs() {
         .unwrap_or(0);
     assert!(
         cats >= 1,
-        "extractions/cat_* should have ≥1 entry, got {cats}"
+        "extractions/cat_* should have ≥1 entry, got {cats}\nrun_dir contents: {run_dir_top:?}"
     );
 }
