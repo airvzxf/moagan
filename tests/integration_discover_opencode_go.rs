@@ -64,6 +64,10 @@ fn discover_opencode_go_writes_four_subdirs() {
         // probe does not regress the HTTP-400 fix from commit
         // `c3dd03e`.
         .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        // `--max-parallelism 8` (was 2): same reasoning as the
+        // deepseek sibling test. The 80-sketch + 7-phase post-
+        // matrix workload is identical and at parallelism=2 each
+        // sequential round-trip sums past 15 min on a CI runner.
         .args([
             "discover",
             "--provider",
@@ -77,7 +81,7 @@ fn discover_opencode_go_writes_four_subdirs() {
             "--facets-per-dimension",
             "2",
             "--max-parallelism",
-            "2",
+            "8",
             "--non-interactive",
             "--runs-dir",
         ])

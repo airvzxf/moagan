@@ -65,6 +65,15 @@ fn discover_deepseek_writes_four_subdirs() {
         // probe does not regress the HTTP-400 fix from commit
         // `c3dd03e`.
         .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        // `--max-parallelism 8` (was 2): the 80-sketch matrix +
+        // 7-phase post-matrix pipeline issues ~240 LLM calls
+        // total; at parallelism=2 each sequential round-trip is
+        // ~5-7 s wall, which sums past 15 min even with the probe
+        // disabled. Bumping to 8 cuts wall-clock ~4x and keeps
+        // the test inside the `test-ignored` job ceiling without
+        // touching the CLI's `cardinality >= 80` guard. The smoke
+        // assertion is that every sub-directory is non-empty; the
+        // exact parallelism does not change the assertion surface.
         .args([
             "discover",
             "--provider",
@@ -78,7 +87,7 @@ fn discover_deepseek_writes_four_subdirs() {
             "--facets-per-dimension",
             "2",
             "--max-parallelism",
-            "2",
+            "8",
             "--non-interactive",
             "--runs-dir",
         ])
