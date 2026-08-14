@@ -1938,6 +1938,12 @@ mod tests {
     /// different default).
     #[test]
     fn env_overrides_minimax_model() {
+        // Serialised against `env_overrides_minimax_model_ignores_blank`
+        // and every other test in this module that mutates process-wide
+        // env vars. Without the lock, parallel test threads race on the
+        // shared `MOAGAN_MINIMAX_MODEL` value.
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
         let mut cfg = Config::default();
         // Baseline: every direct-minimax provider carries its canonical model.
         assert_eq!(cfg.providers.get("minimax").unwrap().model, "MiniMax-M3");
@@ -1981,6 +1987,11 @@ mod tests {
     /// `MOAGAN_MINIMAX_ENDPOINT` handling.
     #[test]
     fn env_overrides_minimax_model_ignores_blank() {
+        // Serialised against `env_overrides_minimax_model`; both tests
+        // mutate the shared `MOAGAN_MINIMAX_MODEL` env var, so they
+        // must not run in parallel.
+        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
         let mut cfg = Config::default();
         unsafe {
             std::env::set_var("MOAGAN_MINIMAX_MODEL", "   ");
