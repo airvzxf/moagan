@@ -179,7 +179,7 @@ between `src/discovery/` (orchestration + types) and
 |---|---|
 | Tagger | `src/phases/discover_tag.rs` + `src/domain/mod.rs::SketchTags` |
 | Clusterer | `src/discovery/clusterer.rs` + `src/phases/discover_summary.rs` |
-| Contradiction | (no production code — deferred per `v0.7-final-report.md` §7) |
+| Contradiction | **PARTIAL** — stub shipped in `src/discovery/contradiction.rs` (86 LoC, pure helpers — `ContradictionRecord`, `top_pairs`, `severity_rank`) and `src/phases/discover_contradict.rs:17` (LLM-as-judge phase that uses them); the full **LLM-as-judge detection** per V4 §6.5–§6.10 is still deferred per `v0.7-final-report.md` §7 |
 | Facet | `src/phases/discover_facet.rs` + `src/domain/mod.rs::FacetList` |
 | Extractor | `src/phases/discover_extract.rs` + `src/domain/mod.rs::FacetExtraction` |
 | Integrator | `src/phases/discover_integrate.rs` + `src/domain/mod.rs::CategoryDoc` |
@@ -190,8 +190,9 @@ between `src/discovery/` (orchestration + types) and
 **Verdict:** intentional partial collapse. The phase shell stays in
 `phases/` (consistent with every other phase); the per-helper data
 shapes live next to the orchestrator that owns them. Contradiction
-detection is the one helper that never materialised — the `v0.7-final-report`
-defers it.
+detection shipped as a stub (pure helpers + the discover_contradict
+phase shell); the full **LLM-as-judge** inference per V4 §6.5–§6.10
+is what the `v0.7-final-report` defers.
 
 ## Cross-references
 
