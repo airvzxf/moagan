@@ -119,6 +119,7 @@ jobs:
   # per-provider outage (PR #473).
   preflight-deepseek:
     name: 'T3 · preflight — deepseek'
+    if: false   # DISABLED 2026-08-15: native deepseek pay-as-you-go budget exhausted ($1 of $5 left); re-enable by removing this line when budget is restored
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -207,6 +208,7 @@ jobs:
 
   test-ignored-deepseek:
     name: 'T2 · cargo test -- --ignored (deepseek)'
+    if: false   # DISABLED 2026-08-15: native deepseek pay-as-you-go budget exhausted ($1 of $5 left); re-enable by removing this line when budget is restored
     needs: preflight-deepseek
     runs-on: ubuntu-latest
     timeout-minutes: 25
