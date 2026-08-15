@@ -295,6 +295,7 @@ jobs:
           path: ${{ github.workspace }}/.runs/
           retention-days: 1
           if-no-files-found: warn
+          include-hidden-files: true
 
   test-fast:
     name: 'Tier 3 · e2e — fast'
@@ -329,6 +330,7 @@ jobs:
           path: ${{ github.workspace }}/.runs/
           retention-days: 1
           if-no-files-found: warn
+          include-hidden-files: true
 
   test-explore:
     name: 'Tier 3 · e2e — explore'
@@ -363,6 +365,7 @@ jobs:
           path: ${{ github.workspace }}/.runs/
           retention-days: 1
           if-no-files-found: warn
+          include-hidden-files: true
 
   # Tier A #8 (docs/pending-items-2026-08-13.md §11): the A.bis
   # discovery block of scripts/e2e_audit_proxy.sh had no CI job, so
@@ -404,6 +407,7 @@ jobs:
           path: ${{ github.workspace }}/.runs/
           retention-days: 1
           if-no-files-found: warn
+          include-hidden-files: true
 
   # Tier A #8, deepseek half: same shape as the job above but gated on
   # DEEPSEEK_API_KEY and pointed at the native `deepseek` provider
@@ -440,6 +444,7 @@ jobs:
           path: ${{ github.workspace }}/.runs/
           retention-days: 1
           if-no-files-found: warn
+          include-hidden-files: true
 
   # Tier A #9: the per-model coverage loop. 14 opencode_go aliases run
   # sequentially at ~5 min each, so the ceiling is deliberately ~90 min
