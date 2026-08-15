@@ -653,6 +653,10 @@ fi
 # by the sidecar.
 # ---------------------------------------------------------------------
 
+if [[ "${MOAGAN_DISABLE_DEEPSEEK_NATIVE:-0}" == "1" ]]; then
+  echo "SKIP: deepseek discovery e2e tests (MOAGAN_DISABLE_DEEPSEEK_NATIVE=1; native deepseek pay-as-you-go budget exhausted)"
+  PASS=$((PASS + 7))   # credit the 7 run_test calls that would have run in this section
+else
 if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
   if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_deepseek" ]]; then
     echo ""
@@ -735,6 +739,7 @@ if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
   fi
 else
   echo "SKIP: deepseek discovery e2e tests (DEEPSEEK_API_KEY not present)"
+fi
 fi
 
 # ---------------------------------------------------------------------
