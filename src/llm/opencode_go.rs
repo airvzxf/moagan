@@ -497,11 +497,11 @@ mod tests {
         let oc_base = "https://opencode.ai/zen/go/v1";
         // One representative model from each wire-format group.
         let representatives = [
-            ("opencode_go", "kimi-k2.7-code"), // /v1/chat/completions
-            ("minimax-m3", "minimax-m3"),      // /v1/messages
-            ("qwen3.7-max", "qwen3.7-max"),    // /v1/messages
-            ("qwen3.7-plus", "qwen3.7-plus"),  // /v1/messages
-            ("gpt-5.6-luna", "gpt-5.6-luna"),  // /v1/responses
+            ("opencode_go", "deepseek-v4-flash"), // /v1/chat/completions
+            ("minimax-m3", "minimax-m3"),         // /v1/messages
+            ("qwen3.7-max", "qwen3.7-max"),       // /v1/messages
+            ("qwen3.7-plus", "qwen3.7-plus"),     // /v1/messages
+            ("gpt-5.6-luna", "gpt-5.6-luna"),     // /v1/responses
         ];
         for (alias, expected_model) in representatives {
             let spec = cfg

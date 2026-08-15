@@ -815,7 +815,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // `/v1/chat/completions` (OpenAI-compatible) — 10 models.
     m.insert(
         "opencode_go".to_owned(),
-        make_opencode_go("kimi-k2.7-code", oc_base),
+        make_opencode_go("deepseek-v4-flash", oc_base),
     );
     m.insert("kimi-k3".to_owned(), make_opencode_go("kimi-k3", oc_base));
     m.insert(
@@ -2017,7 +2017,7 @@ mod tests {
     }
 
     /// Q7 pin: OpenCode Go is exposed with the operator-default
-    /// non-MiniMax / non-Direct-DeepSeek model (kimi-k2.7-code).
+    /// non-MiniMax / non-Direct-DeepSeek model (deepseek-v4-flash).
     #[test]
     fn default_providers_lists_opencode_go() {
         let cfg = Config::default();
@@ -2026,7 +2026,7 @@ mod tests {
             .get("opencode_go")
             .expect("opencode_go missing from default providers");
         assert_eq!(spec.kind, "opencode_go");
-        assert_eq!(spec.model, "kimi-k2.7-code");
+        assert_eq!(spec.model, "deepseek-v4-flash");
         assert_eq!(spec.endpoint, "https://opencode.ai/zen/go/v1");
     }
 
@@ -2088,7 +2088,7 @@ mod tests {
     fn default_opencode_go_providers_enable_max_tokens_auto_probe() {
         let cfg = Config::default();
         let oc_aliases = [
-            "opencode_go", // kimi-k2.7-code
+            "opencode_go", // deepseek-v4-flash
             "kimi-k3",
             "kimi-k2.6",
             "glm-5.1",

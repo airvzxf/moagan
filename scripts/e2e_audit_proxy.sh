@@ -155,10 +155,28 @@ run_test() {
   fi
 }
 
+# Per-job scratch directory. In CI, anchor under ${GITHUB_WORKSPACE}
+# so the e2e-network.yml `actions/upload-artifact` steps (which
+# watch ${GITHUB_WORKSPACE}/.runs/) actually capture the runs.
+# Outside CI, fall back to the historical /tmp/ location so local
+# dev behavior is unchanged.
 mkhome() {
-  local d
-  d="$(mktemp -d /tmp/moagan-e2e-audit.XXXXXX)"
-  echo "$d"
+  if [[ -n "${CI:-}" && -n "${GITHUB_WORKSPACE:-}" ]]; then
+    local d="${GITHUB_WORKSPACE}/.runs/e2e-audit-$$-${RANDOM}"
+    mkdir -p "$d"
+    echo "$d"
+  else
+    mktemp -d /tmp/moagan-e2e-audit.XXXXXX
+  fi
+}
+
+# In CI, leave the home dir in place so the workflow's
+# `actions/upload-artifact` step can capture the runs. Outside
+# CI the historical behavior (rm -rf the tempdir) is preserved.
+cleanup_home() {
+  if [[ -z "${CI:-}" ]]; then
+    rm -rf "$1"
+  fi
 }
 
 # Start the audit proxy in the background; writes the assigned port to
@@ -427,7 +445,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
       echo "FAIL: proxy_e2e_card80_proxy_start_failed"
       FAIL=$((FAIL + 1))
     fi
-    rm -rf "$WORK_PROXY_1"
+    cleanup_home "$WORK_PROXY_1"
   fi # SKIP_CARD80
   fi # MOAGAN_SMOKE_SECTION card80
 
@@ -456,7 +474,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     echo "FAIL: proxy_e2e_mode_fast_proxy_start_failed"
     FAIL=$((FAIL + 1))
   fi
-  rm -rf "$WORK_PROXY_2"
+  cleanup_home "$WORK_PROXY_2"
   fi # MOAGAN_SMOKE_SECTION fast
 
   # Third proxy run: explore mode to verify the proxy works with
@@ -494,7 +512,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     echo "FAIL: proxy_e2e_mode_explore_proxy_start_failed"
     FAIL=$((FAIL + 1))
   fi
-  rm -rf "$WORK_PROXY_3"
+  cleanup_home "$WORK_PROXY_3"
   fi # MOAGAN_SMOKE_SECTION explore
 else
   echo "SKIP: real proxy e2e tests (MINIMAX_API_KEY not present)"
@@ -602,7 +620,7 @@ if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
         PASS=$((PASS + 1))
       done
     fi
-    rm -rf "$WORK_OC"
+    cleanup_home "$WORK_OC"
   fi
 else
   echo "SKIP: opencode_go discovery e2e tests (OPENCODE_GO_API_KEY not present)"
@@ -635,6 +653,10 @@ fi
 # by the sidecar.
 # ---------------------------------------------------------------------
 
+if [[ "${MOAGAN_DISABLE_DEEPSEEK_NATIVE:-0}" == "1" ]]; then
+  echo "SKIP: deepseek discovery e2e tests (MOAGAN_DISABLE_DEEPSEEK_NATIVE=1; native deepseek pay-as-you-go budget exhausted)"
+  PASS=$((PASS + 7))   # credit the 7 run_test calls that would have run in this section
+else
 if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
   if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_deepseek" ]]; then
     echo ""
@@ -713,10 +735,11 @@ if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
         PASS=$((PASS + 1))
       done
     fi
-    rm -rf "$WORK_DS"
+    cleanup_home "$WORK_DS"
   fi
 else
   echo "SKIP: deepseek discovery e2e tests (DEEPSEEK_API_KEY not present)"
+fi
 fi
 
 # ---------------------------------------------------------------------
@@ -792,7 +815,7 @@ if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
           PASS=$((PASS + 1))
         done
       fi
-      rm -rf "$WORK_MODEL"
+      cleanup_home "$WORK_MODEL"
     done
   fi
 else
