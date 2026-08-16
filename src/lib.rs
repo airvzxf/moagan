@@ -60,6 +60,17 @@ pub static TEST_MOAGAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 #[cfg(test)]
 pub static TEST_API_KEYS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialises every test that mutates the process-wide `PATH`
+/// env var. Used by the K.4 sub-1 PDF parser tests in
+/// `research::pdf::tests` to mock "binary not found" without
+/// leaking a half-mutated `PATH` to a parallel test that
+/// shells out via `Command::new`. The lock is intentionally
+/// process-wide (matching the existing `TEST_API_KEYS_LOCK`
+/// pattern) because `PATH` resolution is a process-level
+/// concern and any concurrent mutation would race.
+#[cfg(test)]
+pub static TEST_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Serialises every test that calls `std::env::set_current_dir`.
 /// Without it, parallel `cargo test` runs observe each other's
 /// cwd changes and report flakes. Used by the PR-B2 config-
