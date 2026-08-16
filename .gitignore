@@ -39,3 +39,9 @@ calls.jsonl.gz
 # Claude / opencode scratch
 .claude/
 .opencode/
+
+# proptest regression seeds (re-saved on every failed property test
+# so the next run replays the failing case before generating new
+# random inputs). Keep these out of version control: they are
+# machine-local debugging aids, not part of the source tree.
+proptest-regressions/

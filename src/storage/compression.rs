@@ -301,6 +301,7 @@ impl Write for ZstWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::io::Write;
 
     #[test]
@@ -522,5 +523,169 @@ mod tests {
         let mut decoded = Vec::new();
         decoder.read_to_end(&mut decoded).unwrap();
         assert_eq!(decoded, b"alpha-beta-gamma");
+    }
+
+    // -----------------------------------------------------------------
+    // Property-based tests (proptest 1.4, dev-only per ADR-0001).
+    //
+    // The round-trip properties below pin the core contract of
+    // the gzip + zstd writers and `Compression::multi_reader`:
+    // for any byte sequence, write -> read must produce the
+    // exact same bytes back. This is what makes the on-disk
+    // telemetry files (`calls.jsonl.gz`, `manifest.json.zst`)
+    // auditable: an operator can re-decode a sidecar with stock
+    // tooling and recover the original payload.
+    //
+    // CRC32 is not separately tested here because the gzip /
+    // zstd codecs each carry their own checksum internally; a
+    // mismatch would surface as a decoder error, which the
+    // round-trip properties below already detect.
+    // -----------------------------------------------------------------
+
+    proptest::proptest! {
+        /// `MemberGzWriter` (via `open_gz_append`) followed by
+        /// `Compression::multi_reader` is a byte-exact round-trip
+        /// for any non-empty payload. The writer finishes one
+        /// gzip member per `flush()`, so `MultiGzDecoder` must
+        /// walk past every member and recover the original
+        /// bytes. We use `multi_reader` + `read_to_end` (not
+        /// `read_to_string`) so the property holds for arbitrary
+        /// binary payloads, not just valid UTF-8 — the round-trip
+        /// contract is byte-exact regardless of payload encoding.
+        ///
+        /// Empty payloads are excluded because `write_all(&[])`
+        /// is a no-op: the gzip encoder is never materialised and
+        /// the resulting flush produces no member on disk, which
+        /// would make `multi_reader` return `UnexpectedEof`. The
+        /// non-empty path exercises the same codec.
+        #[test]
+        fn prop_gzip_round_trip(
+            payload in proptest::collection::vec(any::<u8>(), 1..512),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("stream.jsonl.gz");
+            {
+                let mut w = open_gz_append(&path).unwrap();
+                // Write the payload as a single byte sequence
+                // followed by a flush so the gzip member
+                // boundary lands on a deterministic spot.
+                // `write_all` then `flush` makes the round-trip
+                // identical regardless of how proptest chose to
+                // chunk the bytes.
+                w.write_all(&payload).unwrap();
+                w.flush().ok();
+            }
+            let mut reader = Compression::multi_reader(&path).unwrap();
+            let mut recovered = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut recovered).unwrap();
+            prop_assert_eq!(
+                recovered,
+                payload,
+                "gzip round-trip must be byte-exact"
+            );
+        }
+
+        /// `ZstWriter` + `zstd::Decoder` is a byte-exact
+        /// round-trip. Pins the F5 contract that the export
+        /// surface can ship a run as `.tar.zst` and an
+        /// external operator can decode it with the standard
+        /// `zstd` CLI. Excludes empty payloads because
+        /// `write_all(&[])` is a no-op and the resulting
+        /// frame may be omitted by the encoder.
+        #[test]
+        fn prop_zstd_round_trip(
+            payload in proptest::collection::vec(any::<u8>(), 1..512),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("frame.zst");
+            {
+                let mut w = ZstWriter::new(&path).unwrap();
+                w.write_all(&payload).unwrap();
+                w.finish().unwrap();
+            }
+            // The zstd frame starts with the canonical magic
+            // (28 b5 2f fd); if proptest picked a payload that
+            // happens to start with those bytes the round-trip
+            // is still valid because we feed the recovered bytes
+            // through the decoder.
+            let raw = std::fs::read(&path).unwrap();
+            prop_assert!(raw.len() >= 4, "zstd frame must include magic header");
+            prop_assert_eq!(
+                &raw[..4],
+                &[0x28, 0xb5, 0x2f, 0xfd],
+                "zstd frame must start with the canonical magic"
+            );
+            let mut decoder =
+                zstd::Decoder::new(File::open(&path).unwrap()).unwrap();
+            let mut decoded = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+            prop_assert_eq!(
+                decoded,
+                payload,
+                "zstd round-trip must be byte-exact"
+            );
+        }
+
+        /// `Compression::multi_reader` walks past every gzip
+        /// member produced by `open_gz_append`. Property: N
+        /// flushes produce N recoverable payloads (concatenated
+        /// into the read buffer). The strategy requires each
+        /// chunk to be non-empty so the gzip member boundary
+        /// is real: an empty `write_all` is a no-op and the
+        /// resulting flush produces no member on disk, which
+        /// would invalidate the round-trip count.
+        #[test]
+        fn prop_multi_member_stream_round_trip(
+            chunks in proptest::collection::vec(
+                proptest::collection::vec(any::<u8>(), 1..64),
+                1..8,
+            ),
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("multi.jsonl.gz");
+            {
+                let mut w = open_gz_append(&path).unwrap();
+                for chunk in &chunks {
+                    w.write_all(chunk).unwrap();
+                    w.flush().ok();
+                }
+            }
+            let mut reader = Compression::multi_reader(&path).unwrap();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut buf).unwrap();
+            // Concatenation of the chunks must match what the
+            // reader decoded. We concatenate in the same order
+            // we wrote them.
+            let expected: Vec<u8> =
+                chunks.iter().flat_map(|c| c.iter().copied()).collect();
+            prop_assert_eq!(
+                buf, expected,
+                "multi_reader must recover every chunk in order"
+            );
+        }
+
+        /// `Compression::from_extension` is a deterministic
+        /// classifier: the same extension always maps to the
+        /// same `Compression` variant, and the unknown case
+        /// always falls back to `None`. Pins the dispatcher
+        /// routing used by `multi_reader` and other tooling.
+        #[test]
+        fn prop_compression_from_extension_is_deterministic(
+            ext in "[a-z]{0,6}",
+        ) {
+            let p = std::path::PathBuf::from(format!("file.{ext}"));
+            let a = Compression::from_extension(&p);
+            let b = Compression::from_extension(&p);
+            prop_assert_eq!(a, b);
+            prop_assert_eq!(
+                a,
+                match ext.as_str() {
+                    "gz" => Compression::Gz,
+                    "zst" => Compression::Zst,
+                    _ => Compression::None,
+                },
+                "from_extension must match the expected classifier"
+            );
+        }
     }
 }

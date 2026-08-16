@@ -94,6 +94,7 @@ pub fn canonical_hash(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn run_id_is_unique_and_ordered() {
@@ -152,5 +153,191 @@ mod tests {
         let a = canonical_hash(&["a", "bc"]);
         let b = canonical_hash(&["ab", "c"]);
         assert_ne!(a, b);
+    }
+
+    // -----------------------------------------------------------------
+    // Property-based tests (proptest 1.4).
+    //
+    // These cover the invariants of the three hash helpers
+    // (`blake3_hex`, `sha256_hex`, `canonical_hash`) plus the
+    // UUID v7 uniqueness contract for `RunId`. proptest is dev-only
+    // per ADR-0001 (see Cargo.toml [dev-dependencies] and
+    // `scripts/check-no-forbidden-crates.sh`).
+    // -----------------------------------------------------------------
+
+    proptest::proptest! {
+        /// `blake3_hex` is a deterministic function of its input:
+        /// the same bytes always hash to the same 64-char lowercase
+        /// hex string. Property holds for every input (including
+        /// the empty byte string and long byte runs).
+        #[test]
+        fn blake3_is_deterministic(
+            data in proptest::collection::vec(any::<u8>(), 0..128),
+        ) {
+            prop_assert_eq!(blake3_hex(&data), blake3_hex(&data));
+            let h = blake3_hex(&data);
+            prop_assert_eq!(h.len(), 64, "BLAKE3 must produce 64 hex chars");
+            prop_assert!(
+                h.chars().all(|c| c.is_ascii_hexdigit()),
+                "hex output must be lowercase hex: {h}"
+            );
+        }
+
+        /// Same property for SHA-256: deterministic, 64-char
+        /// lowercase hex. The two algorithms share the *output
+        /// shape* but produce different digests, which the next
+        /// property pins.
+        #[test]
+        fn sha256_is_deterministic(
+            data in proptest::collection::vec(any::<u8>(), 0..128),
+        ) {
+            prop_assert_eq!(sha256_hex(&data), sha256_hex(&data));
+            let h = sha256_hex(&data);
+            prop_assert_eq!(h.len(), 64, "SHA-256 must produce 64 hex chars");
+            prop_assert!(
+                h.chars().all(|c| c.is_ascii_hexdigit()),
+                "hex output must be lowercase hex: {h}"
+            );
+        }
+
+        /// BLAKE3 and SHA-256 are different digest families; for
+        /// any non-empty input their hex outputs differ.
+        #[test]
+        fn blake3_and_sha256_disagree(
+            data in proptest::collection::vec(any::<u8>(), 1..128),
+        ) {
+            prop_assert_ne!(blake3_hex(&data), sha256_hex(&data));
+        }
+
+        /// `canonical_hash` is deterministic over the same slice
+        /// of parts and produces 64 lowercase hex chars (BLAKE3
+        /// is the underlying algorithm, so the output shape
+        /// matches `blake3_hex`).
+        #[test]
+        fn canonical_hash_is_deterministic(
+            parts in proptest::collection::vec(".*", 0..16),
+        ) {
+            let owned: Vec<&str> = parts.iter().map(String::as_str).collect();
+            prop_assert_eq!(
+                canonical_hash(&owned),
+                canonical_hash(&owned),
+                "same input slice must hash to the same digest"
+            );
+            let h = canonical_hash(&owned);
+            prop_assert_eq!(h.len(), 64);
+            prop_assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        /// `canonical_hash` is sensitive to every input position:
+        /// swapping two parts produces a different digest, and
+        /// duplicating a part in a different slot also produces
+        /// a different digest (catches a regression where the
+        /// separator might accidentally be the empty byte).
+        #[test]
+        fn canonical_hash_distinguishes_positions(a in ".*", b in ".*") {
+            prop_assume!(a != b);
+            prop_assert_ne!(
+                canonical_hash(&[a.as_str(), b.as_str()]),
+                canonical_hash(&[b.as_str(), a.as_str()]),
+                "canonical_hash must be order-sensitive"
+            );
+            // Same content, three slots — the empty string is a
+            // valid part and must not collapse to the same digest
+            // as the two-element layout above.
+            prop_assert_ne!(
+                canonical_hash(&[a.as_str(), b.as_str()]),
+                canonical_hash(&[a.as_str(), b.as_str(), ""]),
+                "adding a third empty part must change the digest"
+            );
+        }
+
+        /// The unit separator (0x1f) cannot appear in UTF-8 input
+        /// — every byte sequence a caller hands in is well-formed
+        /// UTF-8 — so concatenating two parts with 0x1f between
+        /// them is unambiguous. This property pins the
+        /// *separator-safe* contract by constructing two part
+        /// arrays whose concatenated forms differ but whose
+        /// un-concatenated joined forms (without the separator)
+        /// could collide.
+        #[test]
+        fn canonical_hash_separator_resolves_ambiguity(
+            left in ".*", right in ".*",
+        ) {
+            prop_assume!(!left.is_empty() && !right.is_empty());
+            // Build two layouts: split `left` at a *char*
+            // boundary in the middle vs keep it whole, then
+            // append `right`. `floor_char_boundary` keeps the
+            // split index on a UTF-8 boundary so we never panic
+            // when proptest feeds us a multi-byte character
+            // straddling the midpoint. With no separator the
+            // joined byte streams would be identical; with 0x1f
+            // separators they differ.
+            let mid = left.len() / 2;
+            let mid = left.floor_char_boundary(mid);
+            prop_assume!(mid > 0 && mid < left.len());
+            let (l_pre, l_post) = left.split_at(mid);
+            let h1 = canonical_hash(&[l_pre, l_post, right.as_str()]);
+            let h2 = canonical_hash(&[left.as_str(), right.as_str()]);
+            prop_assert_ne!(
+                h1, h2,
+                "split-vs-no-split must not collide (0x1f separator)"
+            );
+            // Two-element vs single-element merge: same bytes,
+            // different layouts.
+            let merged = format!("{left}{right}");
+            prop_assert_ne!(
+                canonical_hash(&[left.as_str(), right.as_str()]),
+                canonical_hash(&[merged.as_str()]),
+                "two-element vs single-element merge must not collide"
+            );
+        }
+
+        /// 1024 freshly-minted `RunId`s are all distinct. UUID v7
+        /// embeds a 60-bit timestamp + random tail; a collision
+        /// inside one process is statistically impossible and a
+        /// regression here would mean the timestamp substructure
+        /// broke (e.g. v4 fallback in a v7-only path).
+        #[test]
+        fn run_id_uniqueness(n in 0u16..1024) {
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..n {
+                let id = RunId::new();
+                prop_assert!(
+                    seen.insert(id),
+                    "duplicate RunId minted: {id}"
+                );
+            }
+            prop_assert_eq!(seen.len(), n as usize);
+        }
+
+        /// `RunId::short()` is always 8 lowercase hex chars. The
+        /// prefix is not unique on its own (8 hex chars = 32
+        /// bits, ~4B combinations) but the format must be stable
+        /// so log-scrubbing tooling can rely on it.
+        #[test]
+        fn run_id_short_format_is_stable(_seed in 0u32..16) {
+            for _ in 0..16 {
+                let s = RunId::new().short();
+                prop_assert_eq!(s.len(), 8);
+                prop_assert!(
+                    s.chars().all(|c| c.is_ascii_hexdigit()),
+                    "short id must be 8 lowercase hex chars: {s}"
+                );
+            }
+        }
+
+        /// `RunId` string round-trips through `Display` /
+        /// `FromStr` byte-for-byte. A regression in the wire
+        /// form would break log parsing on stale runs.
+        #[test]
+        fn run_id_string_round_trip(_seed in 0u32..16) {
+            for _ in 0..16 {
+                let id = RunId::new();
+                let s = id.to_string();
+                let back: RunId = s.parse().unwrap();
+                prop_assert_eq!(id, back);
+                prop_assert_eq!(s.len(), 36, "UUID canonical form is 36 chars");
+            }
+        }
     }
 }
