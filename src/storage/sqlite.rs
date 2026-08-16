@@ -85,6 +85,10 @@ mod sql_v018 {
     pub(super) const V018: &str = include_str!("migrations/v018_saturation_events.sql");
 }
 
+mod sql_v019 {
+    pub(super) const V019: &str = include_str!("migrations/v019_process_lease_last_heartbeat.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -455,6 +459,20 @@ impl Db {
         if current < 18 {
             apply_step(&conn, 18, || -> Result<()> {
                 conn.execute_batch(sql_v018::V018)?;
+                Ok(())
+            })?;
+        }
+        if current < 19 {
+            // v019 adds a single column via `ALTER TABLE ... ADD
+            // COLUMN`. The statement is not idempotent on SQLite
+            // < 3.35 (no `ADD COLUMN IF NOT EXISTS`), so probe the
+            // column first and skip the ALTER when the migration has
+            // already run. Mirrors the pattern used by v009.
+            apply_step(&conn, 19, || -> Result<()> {
+                if column_exists(&conn, "process_locks", "last_heartbeat_unix")? {
+                    return Ok(());
+                }
+                conn.execute_batch(sql_v019::V019)?;
                 Ok(())
             })?;
         }
@@ -3669,8 +3687,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert!(
-            v >= 18,
-            "user_version must reach v018 after Db::open, got {v}"
+            v >= 19,
+            "user_version must reach v019 after Db::open, got {v}"
         );
         let n: i64 = conn
             .query_row(
@@ -3735,7 +3753,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 18,
+            v, 19,
             "user_version must stay at the current head across consecutive reopens, got {v}"
         );
         // v015 added a single ALTER TABLE so no new tables to
@@ -3803,7 +3821,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert!(v >= 18, "user_version must reach v018, got {v}");
+        assert!(v >= 19, "user_version must reach v019, got {v}");
     }
 
     /// v015: `record_call_cost` writes the column for a known call
@@ -4022,8 +4040,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 18,
-            "user_version must advance to v018 (the current head) after recovery, got {v}"
+            v, 19,
+            "user_version must advance to v019 (the current head) after recovery, got {v}"
         );
     }
 
@@ -4083,8 +4101,8 @@ mod tests {
         let v2 = read_user_version(&path);
         assert_eq!(v1, v2, "user_version must be stable across opens");
         assert_eq!(
-            v1, 18,
-            "user_version must reach the current head (v018), got {v1}"
+            v1, 19,
+            "user_version must reach the current head (v019), got {v1}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -4112,8 +4130,8 @@ mod tests {
         Db::open(&path).expect("Db::open must recover from v001 partial state");
         let v = read_user_version(&path);
         assert_eq!(
-            v, 18,
-            "user_version must reach the current head (v018) after recovery, got {v}"
+            v, 19,
+            "user_version must reach the current head (v019) after recovery, got {v}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -4167,8 +4185,8 @@ mod tests {
         }
         let v = read_user_version(&path);
         assert_eq!(
-            v, 18,
-            "user_version must reach the current head (v018) after 10 reopens, got {v}"
+            v, 19,
+            "user_version must reach the current head (v019) after 10 reopens, got {v}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
