@@ -5045,7 +5045,7 @@ mod tests {
     /// `run_id`. Returns the row id so the test can then bypass
     /// the runtime and delete the parent row.
     fn seed_orphans_for(db: &Db, run_id: RunId) {
-        db.register_run(run_id, "fast", "running", "0.8.0", None, None, None)
+        db.register_run(run_id, "fast", "running", "0.9.0", None, None, None)
             .unwrap();
         db.record_call(
             "sweep-call-1",
@@ -5404,9 +5404,9 @@ mod tests {
         let db = temp_db();
         let a = RunId::new();
         let b = RunId::new();
-        db.register_run(a, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(a, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
-        db.register_run(b, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(b, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         set_run_timestamps(&db, a, 1_000, 1_100); // 100s
         set_run_timestamps(&db, b, 2_000, 2_250); // 250s
@@ -5558,7 +5558,7 @@ mod tests {
         let b = RunId::new();
         let c = RunId::new();
         for id in [a, b, c] {
-            db.register_run(id, "fast", "completed", "0.8.0", None, None, None)
+            db.register_run(id, "fast", "completed", "0.9.0", None, None, None)
                 .unwrap();
             seed_cross_call(
                 &db,
@@ -5610,7 +5610,7 @@ mod tests {
     fn aggregates_window_sums_counts_and_percentiles() {
         let db = temp_db();
         let run = RunId::new();
-        db.register_run(run, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(run, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         set_run_timestamps(&db, run, 1_000, 1_100); // 100s duration
         // Call 1: minimax, ok, 1000ms latency, 100 input + 50 output.
@@ -5668,7 +5668,7 @@ mod tests {
         // `created_unix` below the `since` cutoff so the
         // filter excludes it.
         let old_run = RunId::new();
-        db.register_run(old_run, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(old_run, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         set_run_timestamps(&db, old_run, 100, 110);
         seed_cross_call(
@@ -5737,9 +5737,9 @@ mod tests {
         let db = temp_db();
         let minimax_run = RunId::new();
         let opencode_run = RunId::new();
-        db.register_run(minimax_run, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(minimax_run, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
-        db.register_run(opencode_run, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(opencode_run, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         set_run_timestamps(&db, minimax_run, 1_000, 1_050);
         set_run_timestamps(&db, opencode_run, 1_000, 1_050);

@@ -1238,9 +1238,9 @@ mod tests {
         let db = open_db(&cfg).unwrap();
         let a = RunId::new();
         let b = RunId::new();
-        db.register_run(a, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(a, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
-        db.register_run(b, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(b, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         backdate_run(&db, a, 1_000, 1_100);
         backdate_run(&db, b, 2_000, 2_250);
@@ -1361,7 +1361,7 @@ mod tests {
         let cfg = stub_cfg(&tmp);
         let db = open_db(&cfg).unwrap();
         let a = RunId::new();
-        db.register_run(a, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(a, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         let missing = RunId::new(); // not registered
         let resp = dispatch("/api/compare-runs", &format!("ids={a},{missing}"), &cfg)
@@ -1415,7 +1415,7 @@ mod tests {
         let cfg = stub_cfg(&tmp);
         let db = open_db(&cfg).unwrap();
         let run = RunId::new();
-        db.register_run(run, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(run, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         // Backdate to 2026-01-15 (unix 1_768_483_200).
         let created = 1_768_483_200_i64;
@@ -1459,7 +1459,7 @@ mod tests {
         let cfg = stub_cfg(&tmp);
         let db = open_db(&cfg).unwrap();
         let run = RunId::new();
-        db.register_run(run, "fast", "completed", "0.8.0", None, None, None)
+        db.register_run(run, "fast", "completed", "0.9.0", None, None, None)
             .unwrap();
         backdate_run(&db, run, 1_000, 1_050);
         seed_dashboard_call(
