@@ -29,6 +29,7 @@
 //! 8. `non_json_4xx_surfaces_as_status_error` — a 4xx that returns
 //!    non-JSON HTML is still typed correctly (no JSON-decode error).
 
+use moagan::llm::embed::AsyncEmbedder;
 use moagan::llm::embed::remote::{RemoteEmbedder, RemoteEmbedderProvider};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
