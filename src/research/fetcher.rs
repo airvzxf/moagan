@@ -409,6 +409,13 @@ fn canonical_host(host: &str) -> String {
         .replace('_', ".")
 }
 
+/// Public re-export of [`canonical_host`] for sibling modules
+/// (e.g. [`crate::research::allowlist`]) that need to canonicalise
+/// a hostname before looking it up in a keyed map.
+pub(crate) fn canonical_host_pub(host: &str) -> String {
+    canonical_host(host)
+}
+
 /// Bounded external research fetcher (K.4 / proposal-04 §4).
 ///
 /// Allowlist-only; max [`MAX_URLS_PER_CALL`] URLs per call; max
@@ -417,12 +424,25 @@ fn canonical_host(host: &str) -> String {
 /// containing per-URL [`FetchError`] variants as "research
 /// unavailable, continue without it".
 ///
-/// `api_key` carries the optional bearer token applied to hosts
-/// whose [`allowlist::HostPolicy::auth_bearer`] flag is `true`.
-/// `None` / empty disables the header entirely (the canonical
-/// case — `api_key` is configured via
+/// `api_key` carries the legacy single-token fallback applied to
+/// `auth_bearer`-flagged hosts that have no
+/// [`allowlist::HostPolicy::bearer_token_env`] configured (or
+/// whose env var is unset). `None` / empty disables the header
+/// entirely (the canonical case — `api_key` is configured via
 /// [`crate::config::Config::research.api_key`] and env
 /// `MOAGAN_RESEARCH_API_KEY`).
+///
+/// K.4 sub-3 (per-host bearer): when the host declares a
+/// `bearer_token_env` in its [`allowlist::HostPolicy`], the
+/// fetcher reads that env var at request time and attaches the
+/// `Authorization: Bearer <token>` header. The optional
+/// `auth_overrides` map (keyed by canonical hostname) lets the
+/// operator override the env var name via `[research.auth]` in
+/// `~/.config/moagan/config.toml`. Resolution order:
+/// 1. `auth_overrides[canonical_host]` (operator override).
+/// 2. `HostPolicy::bearer_token_env` (static default).
+/// 3. `api_key` (legacy single-token fallback — only consulted
+///    when the host has no per-host token resolved above).
 ///
 /// K.4 advanced retry (opt-in via [`Self::with_per_host_retry`]):
 /// when a host carries a [`HostRetryConfig`] the fetcher honors
@@ -440,10 +460,18 @@ fn canonical_host(host: &str) -> String {
 /// Sketch phase, not direct telemetry emission.
 #[derive(Debug, Clone)]
 pub struct ResearchFetcher {
-    /// Optional bearer token for `auth_bearer`-flagged hosts.
-    /// `None` (or `Some("")`) suppresses the Authorization header
-    /// so an unset config still produces clean anonymous requests.
+    /// Legacy single-token fallback for `auth_bearer`-flagged
+    /// hosts. `None` (or `Some("")`) suppresses the Authorization
+    /// header so an unset config still produces clean anonymous
+    /// requests.
     pub api_key: Option<String>,
+    /// Per-host env var name overrides. Keyed by canonical
+    /// hostname (lowercase, no trailing dot, `.` instead of `_`).
+    /// `None` falls back to the static
+    /// [`allowlist::HostPolicy::bearer_token_env`] default and,
+    /// when neither source resolves, the [`Self::api_key`]
+    /// legacy fallback.
+    pub auth_overrides: HashMap<String, String>,
     per_host_rate_limit: HashMap<String, Arc<HostRateLimiter>>,
 }
 
@@ -452,9 +480,27 @@ impl ResearchFetcher {
     /// string) keeps the Authorization header off for all requests —
     /// the canonical case when the operator has not configured
     /// `MOAGAN_RESEARCH_API_KEY`.
+    ///
+    /// Equivalent to [`Self::with_auth`] with an empty overrides
+    /// map so existing call-sites keep their no-`[research.auth]`
+    /// contract.
     pub fn new(api_key: Option<String>) -> Self {
         Self {
             api_key,
+            auth_overrides: HashMap::new(),
+            per_host_rate_limit: HashMap::new(),
+        }
+    }
+
+    /// Build a fetcher with the legacy single-token fallback AND
+    /// the per-host env-var overrides from `[research.auth]`. The
+    /// overrides win on a per-host basis; missing entries fall
+    /// through to the static
+    /// [`allowlist::HostPolicy::bearer_token_env`] default.
+    pub fn with_auth(api_key: Option<String>, auth_overrides: HashMap<String, String>) -> Self {
+        Self {
+            api_key,
+            auth_overrides,
             per_host_rate_limit: HashMap::new(),
         }
     }
@@ -589,19 +635,35 @@ impl ResearchFetcher {
         let mut attempt: u32 = 0;
         loop {
             let mut request = client.get(url);
-            // K.4: bearer-token wire-up. Attach the header only when the
-            // allowlist entry opts in via `auth_bearer = true` AND the
-            // operator provided a non-empty API key. Empty / whitespace
-            // keys are dropped silently so a stale empty export in the
-            // shell does not forge an Authorization header with an
-            // obviously-bad value.
+            // K.4: bearer-token wire-up. Three-layer resolution:
+            //   1. `auth_overrides[host]` env var name (operator
+            //      override via `[research.auth]`).
+            //   2. `HostPolicy::bearer_token_env` static default.
+            //   3. `Config::research.api_key` legacy single-token
+            //      fallback (only consulted when neither layer
+            //      above produced a non-empty value, AND the host
+            //      has `auth_bearer = true`).
+            // Empty / whitespace values are dropped silently so a
+            // stale empty export in the shell does not forge an
+            // Authorization header with an obviously-bad value.
             if let Some(policy_entry) = allowlist::find_policy(host)
                 && policy_entry.auth_bearer
-                && let Some(key) = self.api_key.as_ref()
             {
-                let trimmed = key.trim();
-                if !trimmed.is_empty() {
-                    request = request.header("Authorization", format!("Bearer {trimmed}"));
+                let env_name = allowlist::bearer_token_env_for(host, &self.auth_overrides);
+                let resolved_token = env_name.and_then(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .map(|v| v.trim().to_owned())
+                        .filter(|v| !v.is_empty())
+                });
+                let token = resolved_token.or_else(|| {
+                    self.api_key
+                        .as_ref()
+                        .map(|k| k.trim().to_owned())
+                        .filter(|k| !k.is_empty())
+                });
+                if let Some(value) = token {
+                    request = request.header("Authorization", format!("Bearer {value}"));
                 }
             }
             let resp = request
@@ -789,9 +851,27 @@ mod tests {
     /// the rebuilt `reqwest::Request`. The reqwest client only
     /// mutates URL/timeout, not headers, so round-tripping via
     /// `RequestBuilder::build` preserves the header.
+    ///
+    /// Test isolation: the operator-supplied override map
+    /// points at a unique env var name so parallel test
+    /// execution does not race on a single shared env var
+    /// slot. The legacy `api_key` fallback is left empty so
+    /// the assertion probes the per-host path.
     #[tokio::test]
     async fn fetcher_adds_bearer_auth_for_configured_hosts() {
-        let fetcher = ResearchFetcher::new(Some("gh_test_key".to_owned()));
+        // K.4 sub-3: pin a unique env var via the override
+        // map so the static default `MOAGAN_RESEARCH_GITHUB_TOKEN`
+        // (which other tests touch) does not leak into this
+        // assertion.
+        let env_name = "MOAGAN_TEST_BEARER_AUTH_OK_X9Q";
+        unsafe {
+            std::env::set_var(env_name, "gh_test_key");
+        }
+        let mut overrides = HashMap::new();
+        overrides.insert("api.github.com".to_owned(), env_name.to_owned());
+        // Legacy `api_key` is left empty so the assertion
+        // probes the per-host path, not the fallback.
+        let fetcher = ResearchFetcher::with_auth(None, overrides);
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -809,11 +889,23 @@ mod tests {
         // stand-in.
         if let Some(policy_entry) = allowlist::find_policy(&host)
             && policy_entry.auth_bearer
-            && let Some(k) = fetcher.api_key.as_ref()
         {
-            let trimmed = k.trim();
-            if !trimmed.is_empty() {
-                request = request.header("Authorization", format!("Bearer {trimmed}"));
+            let resolved_name = allowlist::bearer_token_env_for(&host, &fetcher.auth_overrides);
+            let resolved = resolved_name.and_then(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            });
+            let token = resolved.or_else(|| {
+                fetcher
+                    .api_key
+                    .as_ref()
+                    .map(|k| k.trim().to_owned())
+                    .filter(|k| !k.is_empty())
+            });
+            if let Some(value) = token {
+                request = request.header("Authorization", format!("Bearer {value}"));
             }
         }
         let built = request.build().expect("build must succeed");
@@ -826,6 +918,9 @@ mod tests {
             Some("Bearer gh_test_key"),
             "Authorization header must carry the configured bearer token"
         );
+        unsafe {
+            std::env::remove_var(env_name);
+        }
     }
 
     /// K.4: hosts whose allowlist entry does NOT set
@@ -851,11 +946,23 @@ mod tests {
             let mut request = client.get(url);
             if let Some(policy_entry) = allowlist::find_policy(&host)
                 && policy_entry.auth_bearer
-                && let Some(k) = fetcher.api_key.as_ref()
             {
-                let trimmed = k.trim();
-                if !trimmed.is_empty() {
-                    request = request.header("Authorization", format!("Bearer {trimmed}"));
+                let env_name = allowlist::bearer_token_env_for(&host, &fetcher.auth_overrides);
+                let resolved = env_name.and_then(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .map(|v| v.trim().to_owned())
+                        .filter(|v| !v.is_empty())
+                });
+                let token = resolved.or_else(|| {
+                    fetcher
+                        .api_key
+                        .as_ref()
+                        .map(|k| k.trim().to_owned())
+                        .filter(|k| !k.is_empty())
+                });
+                if let Some(value) = token {
+                    request = request.header("Authorization", format!("Bearer {value}"));
                 }
             }
             let built = request.build().expect("build must succeed");
@@ -1056,5 +1163,299 @@ mod tests {
             matches!(action, RateLimitAction::Fail(_)),
             "without advanced retry, 429 must be Fail, got {action:?}"
         );
+    }
+
+    // --------------------------------------------------------------
+    // K.4 sub-3: per-host bearer token resolution.
+    //
+    // The fetcher resolves the bearer token at request time in
+    // this order:
+    //   1. `[research.auth]` operator override (env var name).
+    //   2. `HostPolicy::bearer_token_env` static default.
+    //   3. `Config::research.api_key` legacy fallback.
+    // Each layer falls through silently when the value is unset /
+    // empty so a stale env var cannot forge an Authorization
+    // header.
+    // --------------------------------------------------------------
+
+    /// K.4 sub-3: when the host declares a `bearer_token_env`
+    /// (e.g. `api.github.com` →
+    /// `MOAGAN_RESEARCH_GITHUB_TOKEN`) AND the env var is set
+    /// to a non-empty value, the outbound request must carry
+    /// `Authorization: Bearer <env_value>`. The fetcher's
+    /// `api_key` field is left `None` so the assertion probes
+    /// the per-host path, not the legacy fallback.
+    ///
+    /// Test isolation: the operator-supplied override map
+    /// wins on a per-test basis, so each test gets its own
+    /// env var name and parallel test execution cannot race
+    /// on a single shared env var slot.
+    #[tokio::test]
+    async fn fetcher_uses_per_host_env_var_when_set() {
+        let env_name = "MOAGAN_TEST_PER_HOST_TOKEN_SET";
+        unsafe {
+            std::env::set_var(env_name, "ghp_per_host_token");
+        }
+        let mut overrides = HashMap::new();
+        overrides.insert("api.github.com".to_owned(), env_name.to_owned());
+        let fetcher = ResearchFetcher::with_auth(None, overrides);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let url = "https://api.github.com/repos/airvzxf/moagan";
+        let parsed = reqwest::Url::parse(url).expect("api.github.com parses");
+        let host = parsed.host_str().expect("host").to_owned();
+        let mut request = client.get(url);
+        // Mirror the production branch.
+        if let Some(policy_entry) = allowlist::find_policy(&host)
+            && policy_entry.auth_bearer
+        {
+            let resolved_name = allowlist::bearer_token_env_for(&host, &fetcher.auth_overrides);
+            let resolved = resolved_name.and_then(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            });
+            let token = resolved.or_else(|| {
+                fetcher
+                    .api_key
+                    .as_ref()
+                    .map(|k| k.trim().to_owned())
+                    .filter(|k| !k.is_empty())
+            });
+            if let Some(value) = token {
+                request = request.header("Authorization", format!("Bearer {value}"));
+            }
+        }
+        let built = request.build().expect("build must succeed");
+        let auth_header = built
+            .headers()
+            .get("Authorization")
+            .map(|h| h.to_str().unwrap_or("").to_owned());
+        assert_eq!(
+            auth_header.as_deref(),
+            Some("Bearer ghp_per_host_token"),
+            "per-host env var must drive the Authorization header"
+        );
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+    }
+
+    /// K.4 sub-3: when the host declares a `bearer_token_env`
+    /// AND the env var is **unset**, the Authorization header
+    /// must be omitted entirely (graceful fallback to no-auth).
+    /// Backward-compat: an operator that has not configured
+    /// `MOAGAN_RESEARCH_GITHUB_TOKEN` still gets clean
+    /// anonymous requests rather than a hard error.
+    #[tokio::test]
+    async fn fetcher_omits_auth_when_per_host_env_var_unset() {
+        // Per-test isolated env var.
+        let env_name = "MOAGAN_TEST_PER_HOST_TOKEN_UNSET_X9Q";
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+        let mut overrides = HashMap::new();
+        overrides.insert("api.github.com".to_owned(), env_name.to_owned());
+        let fetcher = ResearchFetcher::with_auth(None, overrides);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let url = "https://api.github.com/repos/airvzxf/moagan";
+        let parsed = reqwest::Url::parse(url).expect("api.github.com parses");
+        let host = parsed.host_str().expect("host").to_owned();
+        let mut request = client.get(url);
+        if let Some(policy_entry) = allowlist::find_policy(&host)
+            && policy_entry.auth_bearer
+        {
+            let resolved_name = allowlist::bearer_token_env_for(&host, &fetcher.auth_overrides);
+            let resolved = resolved_name.and_then(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            });
+            let token = resolved.or_else(|| {
+                fetcher
+                    .api_key
+                    .as_ref()
+                    .map(|k| k.trim().to_owned())
+                    .filter(|k| !k.is_empty())
+            });
+            if let Some(value) = token {
+                request = request.header("Authorization", format!("Bearer {value}"));
+            }
+        }
+        let built = request.build().expect("build must succeed");
+        assert!(
+            built.headers().get("Authorization").is_none(),
+            "unset per-host env var must NOT produce an Authorization header"
+        );
+    }
+
+    /// K.4 sub-3: backward-compat — when the host has no
+    /// `bearer_token_env` declared (e.g. `docs.rs`,
+    /// `crates.io`, `github.com`) the Authorization header must
+    /// be omitted even when the fetcher carries an `api_key`.
+    /// The legacy single-token channel must not leak onto the
+    /// public CDNs.
+    #[tokio::test]
+    async fn fetcher_omits_auth_for_hosts_without_bearer_token_env() {
+        let fetcher = ResearchFetcher::new(Some("legacy_token".to_owned()));
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        for url in [
+            "https://docs.rs/serde",
+            "https://crates.io/serde",
+            "https://github.com/airvzxf/moagan",
+        ] {
+            let parsed = reqwest::Url::parse(url).expect("parses");
+            let host = parsed.host_str().expect("host").to_owned();
+            let mut request = client.get(url);
+            if let Some(policy_entry) = allowlist::find_policy(&host)
+                && policy_entry.auth_bearer
+            {
+                let resolved_name = allowlist::bearer_token_env_for(&host, &fetcher.auth_overrides);
+                let resolved = resolved_name.and_then(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .map(|v| v.trim().to_owned())
+                        .filter(|v| !v.is_empty())
+                });
+                let token = resolved.or_else(|| {
+                    fetcher
+                        .api_key
+                        .as_ref()
+                        .map(|k| k.trim().to_owned())
+                        .filter(|k| !k.is_empty())
+                });
+                if let Some(value) = token {
+                    request = request.header("Authorization", format!("Bearer {value}"));
+                }
+            }
+            let built = request.build().expect("build must succeed");
+            assert!(
+                built.headers().get("Authorization").is_none(),
+                "host {host} must NOT carry Authorization, got {:?}",
+                built.headers().get("Authorization")
+            );
+        }
+    }
+
+    /// K.4 sub-3: backward-compat — the legacy single-token
+    /// fallback (`Config::research.api_key`) still works for
+    /// `api.github.com` when the per-host env var is unset.
+    /// The legacy contract: `api_key` applied to
+    /// `auth_bearer = true` hosts. The per-host channel is
+    /// additive, not a breaking change.
+    #[tokio::test]
+    async fn fetcher_legacy_api_key_still_works_when_per_host_env_var_unset() {
+        // Per-test isolated env var. The override map
+        // points at a unique name and we remove it so the
+        // fetcher falls through to the legacy `api_key`.
+        let env_name = "MOAGAN_TEST_LEGACY_FALLBACK_X9Q";
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+        let mut overrides = HashMap::new();
+        overrides.insert("api.github.com".to_owned(), env_name.to_owned());
+        let fetcher = ResearchFetcher::with_auth(Some("legacy_gh_token".to_owned()), overrides);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let url = "https://api.github.com/repos/airvzxf/moagan";
+        let parsed = reqwest::Url::parse(url).expect("api.github.com parses");
+        let host = parsed.host_str().expect("host").to_owned();
+        let mut request = client.get(url);
+        if let Some(policy_entry) = allowlist::find_policy(&host)
+            && policy_entry.auth_bearer
+        {
+            let resolved_name = allowlist::bearer_token_env_for(&host, &fetcher.auth_overrides);
+            let resolved = resolved_name.and_then(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            });
+            let token = resolved.or_else(|| {
+                fetcher
+                    .api_key
+                    .as_ref()
+                    .map(|k| k.trim().to_owned())
+                    .filter(|k| !k.is_empty())
+            });
+            if let Some(value) = token {
+                request = request.header("Authorization", format!("Bearer {value}"));
+            }
+        }
+        let built = request.build().expect("build must succeed");
+        let auth_header = built
+            .headers()
+            .get("Authorization")
+            .map(|h| h.to_str().unwrap_or("").to_owned());
+        assert_eq!(
+            auth_header.as_deref(),
+            Some("Bearer legacy_gh_token"),
+            "legacy api_key fallback must still drive the Authorization header"
+        );
+    }
+
+    /// K.4 sub-3: an empty / whitespace per-host env var is
+    /// treated as "unset" so a stale `export FOO=` does not
+    /// forge an Authorization header with an obviously-bad
+    /// value. The per-test env var isolates this case from
+    /// parallel runs.
+    #[tokio::test]
+    async fn fetcher_treats_empty_per_host_env_var_as_unset() {
+        let env_name = "MOAGAN_TEST_PER_HOST_EMPTY_X9Q";
+        unsafe {
+            std::env::set_var(env_name, "   ");
+        }
+        let mut overrides = HashMap::new();
+        overrides.insert("api.github.com".to_owned(), env_name.to_owned());
+        let fetcher = ResearchFetcher::with_auth(None, overrides);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let url = "https://api.github.com/repos/airvzxf/moagan";
+        let parsed = reqwest::Url::parse(url).expect("api.github.com parses");
+        let host = parsed.host_str().expect("host").to_owned();
+        let mut request = client.get(url);
+        if let Some(policy_entry) = allowlist::find_policy(&host)
+            && policy_entry.auth_bearer
+        {
+            let resolved_name = allowlist::bearer_token_env_for(&host, &fetcher.auth_overrides);
+            let resolved = resolved_name.and_then(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            });
+            let token = resolved.or_else(|| {
+                fetcher
+                    .api_key
+                    .as_ref()
+                    .map(|k| k.trim().to_owned())
+                    .filter(|k| !k.is_empty())
+            });
+            if let Some(value) = token {
+                request = request.header("Authorization", format!("Bearer {value}"));
+            }
+        }
+        let built = request.build().expect("build must succeed");
+        assert!(
+            built.headers().get("Authorization").is_none(),
+            "whitespace per-host env var must NOT produce an Authorization header"
+        );
+        unsafe {
+            std::env::remove_var(env_name);
+        }
     }
 }

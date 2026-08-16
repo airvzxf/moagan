@@ -450,6 +450,70 @@ pub struct ResearchConfig {
     pub api_key: Option<String>,
     #[allow(missing_docs)]
     pub per_host_rate_limit: HashMap<String, RateLimitConfig>,
+    /// K.4 sub-3: per-host env var name overrides for the bearer
+    /// token. Keyed by canonical hostname (`docs.rs`, `crates.io`,
+    /// `api.github.com`, `github.com`). Operators opt in via
+    /// `[research.auth]` in `~/.config/moagan/config.toml`:
+    ///
+    /// ```toml
+    /// [research.auth]
+    /// "api.github.com" = "MY_GITHUB_TOKEN"
+    /// "docs.rs" = "DOCS_RS_TOKEN"   # opt docs.rs into auth
+    /// ```
+    ///
+    /// An empty / whitespace value falls through to the static
+    /// default in
+    /// [`crate::research::allowlist::HostPolicy::bearer_token_env`]
+    /// so an operator can clear an entry without disabling the
+    /// host's auth entirely.
+    #[serde(default)]
+    pub auth: ResearchAuthConfig,
+}
+
+/// K.4 sub-3: per-host env var overrides for the research
+/// fetcher's bearer token. Wrapped in a newtype so the
+/// `Config::research` serialisation stays flat — the inner
+/// `HashMap` is the actual lookup table. Operators can also
+/// override individual entries via the
+/// `MOAGAN_RESEARCH_AUTH_<HOST>` env var (see
+/// [`Config::apply_env_overrides`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ResearchAuthConfig(
+    /// Host → env var name. Keyed by canonical hostname.
+    pub HashMap<String, String>,
+);
+
+impl std::ops::Deref for ResearchAuthConfig {
+    type Target = HashMap<String, String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ResearchAuthConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl ResearchAuthConfig {
+    /// Build an empty map.
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// Canonicalise a hostname the same way
+    /// [`crate::research::fetcher::canonical_host`] does so a
+    /// TOML key of `Docs.RS` and an override lookup of `docs.rs`
+    /// resolve to the same entry. The env-var helper applies
+    /// the same canonicalisation so the override surface is
+    /// uniform.
+    pub fn insert_canonical(&mut self, host: &str, env_var: &str) -> Option<String> {
+        let canonical = crate::research::fetcher::canonical_host_pub(host);
+        self.0.insert(canonical, env_var.to_owned())
+    }
 }
 
 fn default_startup_reconcile() -> bool {
@@ -1427,6 +1491,46 @@ impl Config {
             && !v.trim().is_empty()
         {
             self.research.api_key = Some(v);
+        }
+        // K.4 sub-3: per-host env var overrides. Operators can
+        // set `MOAGAN_RESEARCH_AUTH_<HOST>=<env_var_name>` to
+        // redirect the bearer-token lookup for a specific host
+        // without editing `~/.config/moagan/config.toml`. The
+        // suffix is uppercased and the host characters (`.`,
+        // `-`) are rewritten to `_` so `api.github.com` maps to
+        // `MOAGAN_RESEARCH_AUTH_API_GITHUB_COM`. Garbage
+        // suffixes (no recognisable host fragment) are silently
+        // dropped so a stale export does not corrupt the
+        // override map.
+        for (key, value) in std::env::vars() {
+            let Some(suffix) = key.strip_prefix("MOAGAN_RESEARCH_AUTH_") else {
+                continue;
+            };
+            let trimmed_value = value.trim();
+            if trimmed_value.is_empty() {
+                continue;
+            }
+            // Decode the env-var suffix back to a hostname.
+            // The mapping is bijective: every `_` in the
+            // suffix becomes `.` and the case is lowercased.
+            // The `.` ↔ `_` rewrite matches the operator's
+            // mental model and is the inverse of what we do
+            // when canonicalising a hostname for the lookup.
+            let host = suffix.to_ascii_lowercase().replace('_', ".");
+            if host.is_empty() {
+                continue;
+            }
+            // Re-canonicalise through the fetcher helper so
+            // the lookup keys line up with what
+            // `bearer_token_env_for` resolves at fetch time.
+            let canonical = crate::research::fetcher::canonical_host_pub(&host);
+            if canonical.is_empty() {
+                continue;
+            }
+            self.research
+                .auth
+                .0
+                .insert(canonical, trimmed_value.to_owned());
         }
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_RESEARCH_RATE_LIMIT_") else {
