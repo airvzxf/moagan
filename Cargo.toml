@@ -70,3 +70,8 @@ assert_cmd = "2"
 pollster = "0.4"
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "io-util", "time"] }
 rustls = "0.23"
+# proptest is dev-only per ADR-0001 (docs/adr/0001-no-go-list-policy.md):
+# the crate MUST stay out of [dependencies] so the release binary does
+# not link it. The `scripts/check-no-forbidden-crates.sh` guard
+# rejects a [dependencies] row and is enforced by lefthook pre-commit.
+proptest = "1.4"

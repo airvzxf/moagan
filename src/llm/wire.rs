@@ -277,6 +277,7 @@ pub fn build_cache_key(req: &Request, provider: &str, model: &str, algo: CacheHa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn usage_total_is_input_plus_output() {
@@ -460,5 +461,168 @@ mod tests {
         // via `canonical_hash`; this constant documents the same
         // choice here so the wire-layer helper doesn't drift.
         assert_eq!(CacheHashAlgo::default(), CacheHashAlgo::Blake3);
+    }
+
+    // -----------------------------------------------------------------
+    // Property-based tests (proptest 1.4, dev-only per ADR-0001).
+    // These pin the invariants of `build_cache_key` for both
+    // hash algorithms. The function must:
+    // 1. produce a deterministic 64-char lowercase hex output,
+    // 2. distinguish every identity field (system / user /
+    //    max_tokens / temperature / top_p / provider / model),
+    // 3. honour the existing `extra_messages` invariant (the
+    //    prefill retry MUST NOT collide with the steady-state
+    //    cache key), and
+    // 4. produce different digests for the two algorithms even
+    //    on the same input (they share the canonical join but
+    //    the digests are different families).
+    // -----------------------------------------------------------------
+
+    /// Build a `Request` whose fields proptest controls. Same
+    /// shape as the `req()` helper in `cache/mod.rs` but local
+    /// to keep the property tests self-contained.
+    fn req_with_all(
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+    ) -> Request {
+        Request {
+            role: Role::Intake,
+            model: "m".into(),
+            system: system.into(),
+            user: user.into(),
+            max_tokens,
+            temperature,
+            top_p,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        }
+    }
+
+    proptest::proptest! {
+        /// Both algorithms are deterministic on the same
+        /// request: re-hashing the same tuple returns the same
+        /// key. This is what makes `build_cache_key` usable as
+        /// a cache key in the first place.
+        #[test]
+        fn prop_build_cache_key_is_deterministic_blake3(
+            system in ".*", user in ".*", max_tokens in 1u32..4096,
+            temperature in proptest::option::of(0.0f32..2.0),
+            top_p in proptest::option::of(0.0f32..1.0),
+        ) {
+            let r = req_with_all(&system, &user, max_tokens, temperature, top_p);
+            let k1 = build_cache_key(&r, "mock", "m", CacheHashAlgo::Blake3);
+            let k2 = build_cache_key(&r, "mock", "m", CacheHashAlgo::Blake3);
+            prop_assert_eq!(&k1, &k2);
+            prop_assert_eq!(k1.len(), 64);
+            prop_assert!(k1.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        #[test]
+        fn prop_build_cache_key_is_deterministic_sha256(
+            system in ".*", user in ".*", max_tokens in 1u32..4096,
+            temperature in proptest::option::of(0.0f32..2.0),
+            top_p in proptest::option::of(0.0f32..1.0),
+        ) {
+            let r = req_with_all(&system, &user, max_tokens, temperature, top_p);
+            let k1 = build_cache_key(&r, "mock", "m", CacheHashAlgo::Sha256);
+            let k2 = build_cache_key(&r, "mock", "m", CacheHashAlgo::Sha256);
+            prop_assert_eq!(&k1, &k2);
+            prop_assert_eq!(k1.len(), 64);
+            prop_assert!(k1.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        /// BLAKE3 and SHA-256 paths share the canonical join
+        /// but use different digests. Property: the two keys
+        /// are never equal for any non-empty user prompt (the
+        /// chance of a coincidental 64-hex-char collision is
+        /// astronomically small — 16^-64).
+        #[test]
+        fn prop_build_cache_key_algorithms_disagree(
+            user in ".+",
+        ) {
+            let r = req_with_all("s", &user, 16, None, None);
+            let blake = build_cache_key(&r, "mock", "m", CacheHashAlgo::Blake3);
+            let sha = build_cache_key(&r, "mock", "m", CacheHashAlgo::Sha256);
+            prop_assert_ne!(blake, sha);
+        }
+
+        /// The `user` field is part of the cache identity in
+        /// both algorithms. Pins that the wire-layer helper
+        /// honours the same discrimination contract as
+        /// `Cache::cache_key`.
+        #[test]
+        fn prop_build_cache_key_distinguishes_user_blake3(
+            user_a in ".+", user_b in ".+",
+        ) {
+            prop_assume!(user_a != user_b);
+            let ra = req_with_all("s", &user_a, 16, None, None);
+            let rb = req_with_all("s", &user_b, 16, None, None);
+            prop_assert_ne!(
+                build_cache_key(&ra, "mock", "m", CacheHashAlgo::Blake3),
+                build_cache_key(&rb, "mock", "m", CacheHashAlgo::Blake3),
+            );
+        }
+
+        #[test]
+        fn prop_build_cache_key_distinguishes_user_sha256(
+            user_a in ".+", user_b in ".+",
+        ) {
+            prop_assume!(user_a != user_b);
+            let ra = req_with_all("s", &user_a, 16, None, None);
+            let rb = req_with_all("s", &user_b, 16, None, None);
+            prop_assert_ne!(
+                build_cache_key(&ra, "mock", "m", CacheHashAlgo::Sha256),
+                build_cache_key(&rb, "mock", "m", CacheHashAlgo::Sha256),
+            );
+        }
+
+        /// `extra_messages` is a wire-only field and MUST NOT
+        /// contribute to the cache key. The `PromptPrefill`
+        /// retry path adds one assistant prefill entry; if that
+        /// flipped the key, the steady-state cache would be
+        /// invalidated every time the prefill retry fired.
+        #[test]
+        fn prop_build_cache_key_ignores_extra_messages_blake3(
+            user in ".*", max_tokens in 1u32..4096,
+        ) {
+            let base = req_with_all("s", &user, max_tokens, None, None);
+            let with_prefill = Request {
+                extra_messages: vec![Message {
+                    role: "assistant".into(),
+                    content: "{".into(),
+                }],
+                ..base.clone()
+            };
+            prop_assert_eq!(
+                build_cache_key(&base, "mock", "m", CacheHashAlgo::Blake3),
+                build_cache_key(&with_prefill, "mock", "m", CacheHashAlgo::Blake3),
+                "extra_messages MUST NOT contribute to the BLAKE3 cache key"
+            );
+        }
+
+        #[test]
+        fn prop_build_cache_key_ignores_extra_messages_sha256(
+            user in ".*", max_tokens in 1u32..4096,
+        ) {
+            let base = req_with_all("s", &user, max_tokens, None, None);
+            let with_prefill = Request {
+                extra_messages: vec![Message {
+                    role: "assistant".into(),
+                    content: "{".into(),
+                }],
+                ..base.clone()
+            };
+            prop_assert_eq!(
+                build_cache_key(&base, "mock", "m", CacheHashAlgo::Sha256),
+                build_cache_key(&with_prefill, "mock", "m", CacheHashAlgo::Sha256),
+                "extra_messages MUST NOT contribute to the SHA-256 cache key"
+            );
+        }
     }
 }

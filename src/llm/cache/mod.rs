@@ -350,6 +350,7 @@ fn enumerate_cache_entries(root: &Path) -> Result<Vec<CacheFileStat>> {
 mod tests {
     use super::*;
     use crate::llm::role::Role;
+    use proptest::prelude::*;
 
     fn req(system: &str, user: &str) -> Request {
         Request {
@@ -842,5 +843,185 @@ mod tests {
             cache.lookup("fresh").unwrap().is_some(),
             "freshest entry must survive"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Property-based tests (proptest 1.4, dev-only per ADR-0001).
+    // These pin the invariants of `Cache::cache_key`, which is the
+    // core identity contract for cross-run cache lookups: same
+    // request identity → same key, distinct request identity →
+    // distinct key. The implementation hashes
+    // (role, provider, model, system, user, max_tokens,
+    // temperature, top_p, prompt_set_hash) with BLAKE3; the
+    // properties below verify the discrimination contract by
+    // mutating one field at a time.
+    // -----------------------------------------------------------------
+
+    proptest::proptest! {
+        /// Same request → same cache key, regardless of how many
+        /// times we recompute it. Determinism is what makes
+        /// lookups stable across process restarts.
+        #[test]
+        fn prop_cache_key_is_deterministic(
+            system in ".*", user in ".*", max_tokens in 1u32..4096,
+            temperature in proptest::option::of(0.0f32..2.0),
+            top_p in proptest::option::of(0.0f32..1.0),
+        ) {
+            let req_a = req_with(&system, &user, max_tokens, temperature, top_p);
+            let req_b = req_with(&system, &user, max_tokens, temperature, top_p);
+            prop_assert_eq!(
+                Cache::cache_key(&req_a, "mock", "m"),
+                Cache::cache_key(&req_b, "mock", "m"),
+                "identical request must produce identical cache key"
+            );
+            // Provider and model are also part of the identity.
+            prop_assert_eq!(
+                Cache::cache_key(&req_a, "mock", "m"),
+                Cache::cache_key(&req_a, "mock", "m"),
+                "same provider+model must produce same key"
+            );
+            prop_assert_eq!(
+                Cache::cache_key(&req_a, "p1", "m1"),
+                Cache::cache_key(&req_a, "p1", "m1"),
+                "same provider+model strings must produce same key"
+            );
+        }
+
+        /// Changing the user prompt flips the key. Pins that the
+        /// `user` field is part of the identity (otherwise cache
+        /// would happily return stale answers across prompts).
+        #[test]
+        fn prop_cache_key_distinguishes_user(
+            user_a in ".+", user_b in ".+",
+        ) {
+            prop_assume!(user_a != user_b);
+            let req_a = req("s", &user_a);
+            let req_b = req("s", &user_b);
+            prop_assert_ne!(
+                Cache::cache_key(&req_a, "mock", "m"),
+                Cache::cache_key(&req_b, "mock", "m"),
+                "different user prompt must produce different cache key"
+            );
+        }
+
+        /// Changing the system prompt flips the key. Two requests
+        /// with the same user message but different system
+        /// prompts must not collide.
+        #[test]
+        fn prop_cache_key_distinguishes_system(
+            sys_a in ".+", sys_b in ".+",
+        ) {
+            prop_assume!(sys_a != sys_b);
+            let req_a = req_with(&sys_a, "u", 16, None, None);
+            let req_b = req_with(&sys_b, "u", 16, None, None);
+            prop_assert_ne!(
+                Cache::cache_key(&req_a, "mock", "m"),
+                Cache::cache_key(&req_b, "mock", "m"),
+                "different system prompt must produce different cache key"
+            );
+        }
+
+        /// Provider is part of the identity: switching from
+        /// `mock` to anything else flips the key, even with all
+        /// other fields identical. (Same for the model.)
+        #[test]
+        fn prop_cache_key_distinguishes_provider_and_model(
+            provider in "[a-z]{1,8}", model in "[a-z0-9-]{1,16}",
+            other_provider in "[a-z]{1,8}", other_model in "[a-z0-9-]{1,16}",
+        ) {
+            prop_assume!(provider != other_provider);
+            let r = req("s", "u");
+            let key_p1 = Cache::cache_key(&r, &provider, &model);
+            let key_p2 = Cache::cache_key(&r, &other_provider, &model);
+            prop_assert_ne!(key_p1, key_p2, "different provider must flip key");
+            let key_m1 = Cache::cache_key(&r, &provider, &model);
+            let key_m2 = Cache::cache_key(&r, &provider, &other_model);
+            prop_assert_ne!(key_m1, key_m2, "different model must flip key");
+        }
+
+        /// `max_tokens` is part of the identity: a different
+        /// token budget is a structurally different request
+        /// (the model's stop behaviour changes), so the cache
+        /// key must differ.
+        #[test]
+        fn prop_cache_key_distinguishes_max_tokens(
+            a in 1u32..4096, b in 1u32..4096,
+        ) {
+            prop_assume!(a != b);
+            let req_a = req_with("s", "u", a, None, None);
+            let req_b = req_with("s", "u", b, None, None);
+            prop_assert_ne!(
+                Cache::cache_key(&req_a, "mock", "m"),
+                Cache::cache_key(&req_b, "mock", "m"),
+                "different max_tokens must flip key"
+            );
+        }
+
+        /// `temperature = None` (provider default) and
+        /// `temperature = Some(0.0)` (explicit zero) are
+        /// semantically different requests and must not
+        /// collide. The cache key serialises the `Option` via
+        /// `to_string()` so the empty string and "0" produce
+        /// distinct inputs to the BLAKE3 join.
+        #[test]
+        fn prop_cache_key_distinguishes_none_and_some_temperature(
+            temp in 0.0f32..2.0,
+        ) {
+            let req_none = req_with("s", "u", 16, None, None);
+            let req_some = req_with("s", "u", 16, Some(temp), None);
+            prop_assert_ne!(
+                Cache::cache_key(&req_none, "mock", "m"),
+                Cache::cache_key(&req_some, "mock", "m"),
+                "None vs Some(temperature) must produce different keys"
+            );
+        }
+
+        /// The cache key is always a 64-char lowercase hex
+        /// string (BLAKE3 → 32 bytes → 64 hex chars). A
+        /// regression that drops the hex encoding would break
+        /// every cache lookup on disk.
+        #[test]
+        fn prop_cache_key_has_hex_shape(
+            user in ".*",
+        ) {
+            let r = req("s", &user);
+            let k = Cache::cache_key(&r, "mock", "m");
+            prop_assert_eq!(k.len(), 64, "cache_key must be 64 hex chars");
+            prop_assert!(
+                k.chars().all(|c| c.is_ascii_hexdigit()),
+                "cache_key must be lowercase hex: {k}"
+            );
+            prop_assert!(
+                k.chars().all(|c| !c.is_ascii_uppercase()),
+                "cache_key must be lowercase, not uppercase: {k}"
+            );
+        }
+    }
+
+    /// Helper builder: a request with every field free to set.
+    /// Lives outside the `proptest!` block so proptest's
+    /// generated functions can call it; the simple `req(...)`
+    /// helper is kept for the unit tests above.
+    fn req_with(
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+    ) -> crate::llm::wire::Request {
+        crate::llm::wire::Request {
+            role: Role::Intake,
+            model: "m".into(),
+            system: system.into(),
+            user: user.into(),
+            max_tokens,
+            temperature,
+            top_p,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        }
     }
 }

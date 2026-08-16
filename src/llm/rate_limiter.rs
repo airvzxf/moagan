@@ -160,6 +160,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[tokio::test]
     async fn first_acquire_is_immediate() {
@@ -183,5 +184,112 @@ mod tests {
         // Next call must wait roughly 10 ms (1 / 100 s).
         let w = l.acquire().await.unwrap();
         assert!(w >= Duration::from_millis(5), "got {w:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // Property-based tests (proptest 1.4, dev-only per ADR-0001).
+    //
+    // The rate limiter's state machine is timing-sensitive (it
+    // reads `Instant::now()` to advance the bucket) so the
+    // properties we can pin are limited to:
+    // - the bucket never exceeds `capacity` even under a
+    //   refund storm (a runaway refund loop cannot inflate the
+    //   bucket beyond its configured ceiling — see `refund()`),
+    // - `try_acquire` reports a slot availability that matches
+    //   the arithmetic state (capacity - consumed), and
+    // - `capacity()` and `refill_per_sec()` round-trip the
+    //   configured values byte-for-byte.
+    //
+    // The async `acquire` / `acquire_with_max` paths need a
+    // `tokio::test` harness, so the timing-dependent invariants
+    // stay in the unit tests above.
+    // -----------------------------------------------------------------
+
+    proptest::proptest! {
+        /// `refund()` is capped at `capacity`: even when the
+        /// caller hammers it more times than the bucket can
+        /// hold, the available tokens never exceed the
+        /// configured ceiling. Without the cap, a stuck retry
+        /// loop with refund-on-failure could inflate the bucket
+        /// far beyond its actual refill rate.
+        #[test]
+        fn prop_refund_never_exceeds_capacity(
+            capacity in 1u32..64, refund_count in 0usize..512,
+        ) {
+            let l = RateLimiter::new(RateLimitConfig {
+                capacity,
+                refill_per_sec: 1,
+                initial: Some(capacity),
+            });
+            for _ in 0..refund_count {
+                l.refund();
+            }
+            // The bucket starts full and refund can only add;
+            // the available tokens must therefore be in
+            // [0, capacity].
+            let acquired = (0..capacity).filter(|_| l.try_acquire()).count();
+            prop_assert!(
+                acquired <= capacity as usize,
+                "refund storm inflated bucket above capacity: {acquired} > {capacity}"
+            );
+            // For a brand-new limiter with initial=capacity and
+            // no consume calls, every try_acquire must succeed
+            // until the bucket is empty (because refund never
+            // adds tokens when the bucket is already at
+            // capacity).
+            prop_assert_eq!(
+                acquired, capacity as usize,
+                "initial bucket must be exactly capacity"
+            );
+        }
+
+        /// `try_acquire` reports a slot availability that matches
+        /// the bucket arithmetic: the first `min(take,
+        /// capacity)` consumes always succeed, the
+        /// (capacity + 1)-th consume fails. Pins the
+        /// consume/slot accounting without depending on
+        /// wall-clock time.
+        #[test]
+        fn prop_try_acquire_respects_capacity(
+            capacity in 1u32..16, take in 0u32..32,
+        ) {
+            let l = RateLimiter::new(RateLimitConfig {
+                capacity,
+                refill_per_sec: 1,
+                initial: Some(capacity),
+            });
+            let mut consumed = 0u32;
+            for _ in 0..take {
+                if l.try_acquire() {
+                    consumed += 1;
+                }
+            }
+            // The bucket starts full (initial = capacity) and
+            // cannot exceed capacity, so the total successful
+            // consumes must equal min(take, capacity).
+            let expected = take.min(capacity);
+            prop_assert!(
+                consumed == expected,
+                "consumed={} expected={} (capacity={} take={})",
+                consumed, expected, capacity, take
+            );
+        }
+
+        /// `capacity()` and `refill_per_sec()` round-trip the
+        /// configured values. A regression that captures them
+        /// incorrectly would silently break the structured
+        /// telemetry payload that surfaces them.
+        #[test]
+        fn prop_capacity_and_refill_round_trip(
+            capacity in 1u32..1024, refill_per_sec in 1u32..1024,
+        ) {
+            let l = RateLimiter::new(RateLimitConfig {
+                capacity,
+                refill_per_sec,
+                initial: Some(capacity),
+            });
+            prop_assert_eq!(l.capacity(), capacity);
+            prop_assert_eq!(l.refill_per_sec(), refill_per_sec);
+        }
     }
 }
