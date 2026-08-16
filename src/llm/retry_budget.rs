@@ -151,6 +151,7 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::PathTraversal(_)
         | Error::PayloadTooLarge(_)
         | Error::ModalityUnsupported(_)
+        | Error::ResearchUnavailable(_)
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
     }

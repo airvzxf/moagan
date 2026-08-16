@@ -226,6 +226,23 @@ pub enum Error {
     /// reflects a caller bug, not a provider health signal.
     #[error("modality not supported by model: {0}")]
     ModalityUnsupported(String),
+
+    /// K.4 sub-1: a research backend dependency is missing or the
+    /// upstream pipeline returned no usable signal. The current
+    /// trigger is `pdftotext` not being on `PATH` (the binary
+    /// ships with the `poppler-utils` system package — see
+    /// [`docs/proposal-04-cuarta-etapa.md`](../docs/proposal-04-cuarta-etapa.md)
+    /// §4 for the install hint), but the variant stays open for
+    /// future "research pipeline unavailable" signals (PDF host
+    /// not allowlisted, allowlist blocked, …).
+    ///
+    /// Maps to [`ErrorCode::Research`] so dashboards can branch
+    /// on the wire form, and to [`ExitCode::Research`] (94)
+    /// because the failure is on the research surface, not the
+    /// provider surface. Not circuit-opening: a missing local
+    /// tool is operator configuration, not a remote outage.
+    #[error("research unavailable: {0}")]
+    ResearchUnavailable(String),
 }
 
 impl Error {
@@ -255,6 +272,7 @@ impl Error {
             Self::PathTraversal(_) => ErrorCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ErrorCode::InputTooLarge,
             Self::ModalityUnsupported(_) => ErrorCode::Unsupported,
+            Self::ResearchUnavailable(_) => ErrorCode::Research,
         }
     }
 
@@ -276,6 +294,7 @@ impl Error {
             Self::PathTraversal(_) => ExitCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ExitCode::ProviderError,
             Self::ModalityUnsupported(_) => ExitCode::ProviderError,
+            Self::ResearchUnavailable(_) => ExitCode::Research,
         }
     }
 
@@ -670,6 +689,14 @@ mod tests {
             )
             .code(),
             ErrorCode::Unsupported
+        );
+        // K.4 sub-1: a research backend dependency (e.g.
+        // `pdftotext` missing) maps to the dedicated `Research`
+        // bucket so dashboards can branch on the wire form.
+        assert_eq!(
+            Error::ResearchUnavailable("pdftotext binary not found; install poppler-utils".into())
+                .code(),
+            ErrorCode::Research
         );
     }
 

@@ -13,6 +13,7 @@
 
 pub mod allowlist;
 pub mod fetcher;
+pub mod pdf;
 
 pub use allowlist::ALLOWED_HOSTS;
 pub use fetcher::{

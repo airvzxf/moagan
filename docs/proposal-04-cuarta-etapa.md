@@ -169,8 +169,47 @@ in v0.6+ if at all.
 - **K.4 External research** ✅ implemented narrower in PRs
   #137 (bounded fetcher: 4-host allowlist, 3 URLs/call, 4 KB/response,
   5s timeout) + #150 (wire K.4 into Sketch + typed-only validators
-  refactor). PDFs, JS rendering, auth, advanced rate-limiting remain
-  deferred to v0.6+.
+  refactor) + **K.4 sub-1 (PDF parser, v0.9 round 4)**: the
+  `research::pdf::fetch_pdf_text` module shells out to the
+  `pdftotext` binary from the `poppler-utils` system package so a
+  link to a PDF in the allowlisted host list returns extracted
+  UTF-8 text the Sketch phase can ingest. JS rendering, auth,
+  advanced rate-limiting remain deferred to v0.9+.
+
+### K.4 sub-1 — PDF parser (`research::pdf`)
+
+**Capability**: parse allowlisted PDF URLs and return the extracted
+text so the Sketch phase can ingest documentation that lives in PDF
+form (whitepapers, RFCs, release notes that haven't been ported to
+HTML).
+
+**External dependency**: `poppler-utils` (provides the `pdftotext`
+binary). Linux-only per `docs/deferred-v0.9-2026-08-16.md §1.2`.
+
+Install:
+
+```bash
+# Arch / Manjaro
+pacman -S poppler
+# Debian / Ubuntu
+apt install poppler-utils
+```
+
+When the binary is missing the parser returns
+`Error::ResearchUnavailable("pdftotext binary not found; install
+poppler-utils")` so the operator sees the install hint directly
+in the run log without having to grep stack traces.
+
+**Why shell out instead of pulling in `lopdf`**: zero new
+dependencies (the no-go list per
+[`docs/adr/0001-no-go-list-policy.md`](adr/0001-no-go-list-policy.md)
+treats every new crate as overhead), battle-tested poppler
+extraction, and a tight error surface when the binary is
+missing. The trade-off is a hard requirement on `poppler-utils`
+being installed — accepted because the operator targets Linux
+exclusively (Arch is always available) and the alternative
+(`lopdf 0.34`) would add ~3-5 MB to the release binary for
+strictly worse text-layout heuristics.
 
 ## Closing
 
