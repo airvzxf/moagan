@@ -32,21 +32,23 @@ permissions:
 #   test-doc                 ─┤   T2 (no deps, parallel)
 #   test-ignored-deepseek    ─┤
 #   test-ignored-opencode-go ─┤
+#   test-ignored-minimax     ─┤
 #   smoke                    ─┤
 #   e2e                      ─┘
 #
 #
 # The YAML declaration order is: test-tests, preflight-deepseek,
 # preflight-opencode_go, preflight-minimax, test-ignored-deepseek,
-# test-ignored-opencode-go, test-lib, smoke, e2e, test-doc.
+# test-ignored-opencode-go, test-ignored-minimax, test-lib, smoke, e2e,
+# test-doc.
 # This is purely a visual ordering in the GitHub Actions UI; the actual
 # execution is parallel and the wall-clock critical path is dominated by
-# the slowest of the 7 round-2 jobs (the --ignored discovery tests at ~16 min).
+# the slowest of the 8 round-2 jobs (the --ignored discovery tests at ~16 min).
 #
 # Wall-clock critical path:
 #   round 1 = max(fmt-check, guard-deps, clippy)                                     ~60 s
 #   round 2 = max(test-lib, test-tests, test-doc, test-ignored-deepseek,
-#                 test-ignored-opencode-go, smoke, e2e)                              ~16 min
+#                 test-ignored-opencode-go, test-ignored-minimax, smoke, e2e)                              ~16 min
 # Total: ~17 min cold / ~16 min warm (vs. ~5-8 min before this refactor).
 #
 # Required check names (must match the ruleset `protect-main` rule
@@ -306,6 +308,57 @@ jobs:
         with:
           name: moagan-test-ignored-opencode_go-logs
           path: target/test-runs/opencode_go/
+          retention-days: 1
+          if-no-files-found: warn
+
+  test-ignored-minimax:
+    name: 'T2 · cargo test -- --ignored (minimax)'
+    needs: preflight-minimax
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+      - name: cargo test integration_discover_minimax -- --ignored (gated on MINIMAX_API_KEY)
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          echo "============================================================"
+          echo "DIAGNOSTIC HEADER"
+          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+          echo "  Runner:             $(uname -a)"
+          echo "  Working directory:  $(pwd)"
+          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "  Provider under test: minimax"
+          echo "============================================================"
+          echo "API key presence:"
+          echo "  MINIMAX_API_KEY set: $([[ -n "${MINIMAX_API_KEY:-}" ]] && echo yes || echo no)"
+          echo "  MINIMAX_API_KEY length: ${#MINIMAX_API_KEY} chars"
+          echo "  MINIMAX_API_KEY prefix (first 8 chars, safe to echo): ${MINIMAX_API_KEY:0:8}"
+          echo "  (prefix is a non-secret identifier like 'eyJhbGciOi'; safe to log)"
+          echo "============================================================"
+          if [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+            echo "SKIP: MINIMAX_API_KEY not set on runner; minimax --ignored test not run"
+            exit 0
+          fi
+          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
+          START_TS=$(date +%s)
+          cargo test --test integration_discover_minimax -- --ignored --nocapture
+          CARGO_RC=$?
+          END_TS=$(date +%s)
+          echo "============================================================"
+          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
+          echo "============================================================"
+          exit $CARGO_RC
+
+      - name: upload test-ignored artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: moagan-test-ignored-minimax-logs
+          path: target/test-runs/minimax/
           retention-days: 1
           if-no-files-found: warn
 
