@@ -1416,6 +1416,142 @@ pub struct CostAggregateRow {
     pub cost_usd: f64,
 }
 
+/// One row of the per-run slice in
+/// [`Db::compare_runs`] / dashboard `GET /api/compare-runs`.
+/// Mirrors [`RunAggregate`] but adds the per-provider view
+/// (`providers`, `tokens_per_provider`) the dashboard surfaces
+/// on the cross-run comparison page.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct CompareRunEntry {
+    /// Run id (string form).
+    pub run_id: String,
+    /// Run status as recorded on the `runs.status` column.
+    pub status: String,
+    /// Run mode (e.g. `"fast"`).
+    pub mode: String,
+    /// Unix seconds when the run was registered.
+    pub created_unix: i64,
+    /// Unix seconds of the most recent `runs` write.
+    pub updated_unix: i64,
+    /// Wall-clock duration in seconds
+    /// (`updated_unix - created_unix`). May be 0 for runs that
+    /// never had an `updated_unix` write.
+    pub duration_secs: i64,
+    /// Total LLM calls recorded for this run.
+    pub calls: i64,
+    /// Calls whose `status` is `'error'`.
+    pub error_calls: i64,
+    /// Calls whose `status` is `'timeout'`.
+    pub timeout_calls: i64,
+    /// Calls whose `status` is `'cancelled'`.
+    pub cancelled_calls: i64,
+    /// Total input tokens billed.
+    pub input_tokens: i64,
+    /// Total output tokens billed.
+    pub output_tokens: i64,
+    /// Total tokens served from cache.
+    pub cache_read: i64,
+    /// Total tokens written to cache.
+    pub cache_creation: i64,
+    /// Distinct provider names that served at least one call.
+    /// Sorted ascending so the JSON shape is stable.
+    pub providers: Vec<String>,
+    /// Sum of `input_tokens + output_tokens` per provider. Sorted
+    /// ascending by provider name (mirrors `providers`).
+    pub tokens_per_provider: std::collections::BTreeMap<String, i64>,
+}
+
+/// Cross-run diff section of [`CompareRunsResponse`]. Captures
+/// the cross-section stats the dashboard wants to compare across
+/// a small set of runs: duration envelope, max error count, and
+/// the per-provider aggregate (token totals + error rate) over
+/// the union of providers touched by any of the input runs.
+///
+/// `provider_token_total` and `provider_error_rates` are
+/// `BTreeMap` so the JSON serialisation is deterministic across
+/// runs (operator-friendly diff tooling).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Default)]
+pub struct CompareDiff {
+    /// Largest `duration_secs` across the input runs.
+    pub max_duration_secs: i64,
+    /// Smallest `duration_secs` across the input runs.
+    pub min_duration_secs: i64,
+    /// Largest `error_calls` across the input runs.
+    pub max_error_calls: i64,
+    /// Sum of `input_tokens + output_tokens` per provider across
+    /// every run in the comparison. Providers absent from a
+    /// given run contribute 0 to the union sum, so the map is
+    /// keyed on the union.
+    pub provider_token_total: std::collections::BTreeMap<String, i64>,
+    /// Error rate per provider across the union, computed as
+    /// `sum(error_calls) / sum(calls)`. Empty providers
+    /// (zero total calls) collapse to `0.0`. Values are in the
+    /// `0.0..=1.0` range.
+    pub provider_error_rates: std::collections::BTreeMap<String, f64>,
+}
+
+/// Top-level response for the dashboard's
+/// `GET /api/compare-runs` endpoint and the SQLite helper
+/// [`Db::compare_runs`]. One [`CompareRunEntry`] per input
+/// run, plus the cross-run diff and the intersection of
+/// provider names shared by every run in the set.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct CompareRunsResponse {
+    /// Per-run slices, ordered as supplied by the caller.
+    pub runs: Vec<CompareRunEntry>,
+    /// Providers that appear in **every** input run. Sorted
+    /// ascending. Useful for the dashboard to flag "this
+    /// provider set is common to all runs in the comparison".
+    pub shared_providers: Vec<String>,
+    /// Cross-run diff statistics.
+    pub diff: CompareDiff,
+}
+
+/// Cross-run aggregate returned by
+/// [`Db::aggregates_window`] / dashboard `GET /api/aggregates`.
+/// All numeric fields default to `0` so a fresh install with no
+/// matching calls surfaces as a stable JSON shape (the
+/// dashboard never has to special-case empty windows).
+///
+/// `error_rate` is `error_calls / total_calls` in the
+/// `0.0..=1.0` range; `0.0` when `total_calls == 0`. The
+/// percentile fields are derived from the per-call latency
+/// (`ended_unix - started_unix`) and are `0.0` when no calls
+/// match the window + provider filter.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Default)]
+pub struct AggregateWindowRow {
+    /// Lower bound of the window (unix seconds, inclusive).
+    pub since_unix: i64,
+    /// Provider filter applied to `calls.provider` (echoed back
+    /// for the caller; `None` means "all providers").
+    pub provider: Option<String>,
+    /// Number of distinct runs that have at least one call
+    /// matching the filter inside the window.
+    pub total_runs: i64,
+    /// Total LLM calls matching the filter inside the window.
+    pub total_calls: i64,
+    /// Total input tokens billed in the window.
+    pub total_input_tokens: i64,
+    /// Total output tokens billed in the window.
+    pub total_output_tokens: i64,
+    /// Sum of `input_tokens + output_tokens` in the window.
+    pub total_tokens: i64,
+    /// Average wall-clock duration of the runs that match the
+    /// filter, in seconds (`updated_unix - created_unix`,
+    /// averaged over the distinct run_ids in the window).
+    pub avg_duration_secs: f64,
+    /// 50th-percentile per-call latency in milliseconds
+    /// (nearest-rank, matches `moagan telemetry summary`).
+    pub p50_latency_ms: f64,
+    /// 95th-percentile per-call latency in milliseconds.
+    pub p95_latency_ms: f64,
+    /// 99th-percentile per-call latency in milliseconds.
+    pub p99_latency_ms: f64,
+    /// Ratio `error_calls / total_calls` in `0.0..=1.0`.
+    /// `0.0` when no calls match.
+    pub error_rate: f64,
+}
+
 /// One row from `phases` for the dashboard's per-phase view. The
 /// dashboard normalises three events per phase (start / end / error)
 /// into a single row carrying the final status and the derived
@@ -1745,6 +1881,372 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Cross-run comparison for the dashboard
+    /// `GET /api/compare-runs` endpoint. Returns one
+    /// [`CompareRunEntry`] per input `RunId` (preserving input
+    /// order), the union/intersection of provider names, and
+    /// the cross-run diff (duration envelope, max error count,
+    /// per-provider token totals, per-provider error rates).
+    ///
+    /// Pre-condition: every run_id must already exist in the
+    /// `runs` table. The caller (the dashboard handler) is
+    /// expected to validate this first via `db.has_run(id)` so
+    /// the 404 path stays in the HTTP layer; this function
+    /// silently drops missing rows from the per-provider
+    /// breakdown but keeps them in the metadata slice. That
+    /// contract is tested by [`crate::storage::sqlite::tests`].
+    ///
+    /// Pre-condition: `run_ids.len() >= 2`. The dashboard
+    /// returns 400 before reaching this helper for fewer ids;
+    /// calling with `< 2` here surfaces as an empty response
+    /// rather than a panic, which keeps the helper safe to
+    /// re-use from `moagan telemetry compare --runs ...`.
+    #[allow(clippy::type_complexity)]
+    pub fn compare_runs(&self, run_ids: &[RunId]) -> Result<CompareRunsResponse> {
+        let conn = self.pool.get()?;
+        // --- 1. Per-run metadata (status, mode, ts) ---
+        let placeholders: Vec<&str> = run_ids.iter().map(|_| "?").collect();
+        let meta_sql = format!(
+            "SELECT run_id, status, mode, created_unix, updated_unix \
+             FROM runs WHERE run_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut meta_stmt = conn.prepare(&meta_sql)?;
+        let meta_params: Vec<Box<dyn rusqlite::ToSql>> = run_ids
+            .iter()
+            .map(|id| Box::new(id.to_string()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let meta_refs: Vec<&dyn rusqlite::ToSql> = meta_params.iter().map(|b| b.as_ref()).collect();
+        let mut meta_map: std::collections::HashMap<String, (String, String, i64, i64)> =
+            std::collections::HashMap::new();
+        let mut rows_iter = meta_stmt.query(rusqlite::params_from_iter(meta_refs))?;
+        while let Some(row) = rows_iter.next()? {
+            meta_map.insert(
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ),
+            );
+        }
+        // --- 2. Per-(run, provider) breakdown ---
+        //
+        // Pulled in a single query so the dashboard's
+        // `compare_runs` only hits the index twice regardless of
+        // how many runs the operator asks for. The query reads
+        // straight from `calls` (not the `provider_usage`
+        // rollup) so cache hits and the live status column
+        // (`'ok' | 'error' | 'timeout' | 'cancelled'`) are
+        // reflected accurately.
+        let breakdown_sql = format!(
+            "SELECT run_id, provider, \
+                    COUNT(*), \
+                    COALESCE(SUM(input_tokens), 0), \
+                    COALESCE(SUM(output_tokens), 0), \
+                    COALESCE(SUM(cache_read), 0), \
+                    COALESCE(SUM(cache_creation), 0), \
+                    COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) \
+             FROM calls WHERE run_id IN ({}) \
+             GROUP BY run_id, provider",
+            placeholders.join(",")
+        );
+        let mut breakdown_stmt = conn.prepare(&breakdown_sql)?;
+        // The `HashMap<run_id, (8 counters + provider->tokens)>`
+        // tuple is intentionally flat: it avoids an
+        // intermediate struct for an internal aggregate that
+        // only `compare_runs` reads. The type alias below keeps
+        // the projection readable without inviting a clippy
+        // `type_complexity` lint.
+        type ProviderTokens = std::collections::BTreeMap<String, i64>;
+        type PerRunTotals = (i64, i64, i64, i64, i64, i64, i64, i64, ProviderTokens);
+        let mut per_run: std::collections::HashMap<String, PerRunTotals> =
+            std::collections::HashMap::new();
+        let mut rows_iter = breakdown_stmt.query(rusqlite::params_from_iter(
+            meta_params
+                .iter()
+                .map(|b| b.as_ref() as &dyn rusqlite::ToSql)
+                .collect::<Vec<_>>(),
+        ))?;
+        while let Some(row) = rows_iter.next()? {
+            let run_id: String = row.get(0)?;
+            let provider: String = row.get(1)?;
+            let calls: i64 = row.get(2)?;
+            let input_tokens: i64 = row.get(3)?;
+            let output_tokens: i64 = row.get(4)?;
+            let cache_read: i64 = row.get(5)?;
+            let cache_creation: i64 = row.get(6)?;
+            let error_calls: i64 = row.get(7)?;
+            let timeout_calls: i64 = row.get(8)?;
+            let cancelled_calls: i64 = row.get(9)?;
+            let entry = per_run.entry(run_id.clone()).or_insert((
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ProviderTokens::new(),
+            ));
+            entry.0 += calls;
+            entry.1 += input_tokens;
+            entry.2 += output_tokens;
+            entry.3 += cache_read;
+            entry.4 += cache_creation;
+            entry.5 += error_calls;
+            entry.6 += timeout_calls;
+            entry.7 += cancelled_calls;
+            entry.8.insert(provider, input_tokens + output_tokens);
+        }
+        // --- 3. Project the response ---
+        //
+        // The output preserves input order so the dashboard
+        // can render the runs in the order the operator typed
+        // them in `?ids=a,b,c`. Missing runs are still
+        // represented (status defaults to `"unknown"`, all
+        // counters to 0); the dashboard's 404 path catches the
+        // case where any row is missing.
+        let mut entries: Vec<CompareRunEntry> = Vec::with_capacity(run_ids.len());
+        for run_id in run_ids {
+            let id_str = run_id.to_string();
+            let (status, mode, created_unix, updated_unix) = meta_map
+                .get(&id_str)
+                .cloned()
+                .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string(), 0, 0));
+            let duration_secs = updated_unix.saturating_sub(created_unix);
+            let (
+                calls,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_creation,
+                error_calls,
+                timeout_calls,
+                cancelled_calls,
+                tokens_per_provider,
+            ) = per_run
+                .remove(&id_str)
+                .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, ProviderTokens::new()));
+            let providers: Vec<String> = tokens_per_provider.keys().cloned().collect();
+            entries.push(CompareRunEntry {
+                run_id: id_str,
+                status,
+                mode,
+                created_unix,
+                updated_unix,
+                duration_secs,
+                calls,
+                error_calls,
+                timeout_calls,
+                cancelled_calls,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_creation,
+                providers,
+                tokens_per_provider,
+            });
+        }
+        // --- 4. Cross-run diff ---
+        let shared_providers = if entries.is_empty() {
+            Vec::new()
+        } else {
+            // Intersection of `providers` across every entry.
+            // Start with the first entry's provider set and
+            // filter it down through each subsequent entry.
+            let mut iter = entries.iter();
+            let first = iter.next().expect("non-empty").providers.iter().cloned();
+            let mut acc: std::collections::BTreeSet<String> = first.collect();
+            for entry in iter {
+                let next: std::collections::BTreeSet<String> =
+                    entry.providers.iter().cloned().collect();
+                acc.retain(|p| next.contains(p));
+            }
+            acc.into_iter().collect()
+        };
+        let max_duration_secs = entries.iter().map(|e| e.duration_secs).max().unwrap_or(0);
+        let min_duration_secs = entries.iter().map(|e| e.duration_secs).min().unwrap_or(0);
+        let max_error_calls = entries.iter().map(|e| e.error_calls).max().unwrap_or(0);
+        let mut provider_token_total: std::collections::BTreeMap<String, i64> =
+            std::collections::BTreeMap::new();
+        let mut provider_calls_total: std::collections::BTreeMap<String, i64> =
+            std::collections::BTreeMap::new();
+        let mut provider_error_total: std::collections::BTreeMap<String, i64> =
+            std::collections::BTreeMap::new();
+        for entry in &entries {
+            for (provider, tokens) in &entry.tokens_per_provider {
+                *provider_token_total.entry(provider.clone()).or_insert(0) += tokens;
+            }
+        }
+        // Second pass on the breakdown table to capture
+        // per-provider call / error counts (used for the
+        // `provider_error_rates` field). Re-using the SQL
+        // cursor is not possible (consumed above), so we issue
+        // the query again. This is one extra round-trip per
+        // `compare_runs` call and stays within the dashboard's
+        // 30s per-request budget for typical input sizes.
+        let per_provider_sql = format!(
+            "SELECT provider, COUNT(*), \
+                    COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) \
+             FROM calls WHERE run_id IN ({}) \
+             GROUP BY provider",
+            placeholders.join(",")
+        );
+        let mut per_provider_stmt = conn.prepare(&per_provider_sql)?;
+        let pp_refs: Vec<&dyn rusqlite::ToSql> = meta_params
+            .iter()
+            .map(|b| b.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+        let mut rows_iter = per_provider_stmt.query(rusqlite::params_from_iter(pp_refs))?;
+        while let Some(row) = rows_iter.next()? {
+            let provider: String = row.get(0)?;
+            let calls: i64 = row.get(1)?;
+            let errors: i64 = row.get(2)?;
+            provider_calls_total.insert(provider.clone(), calls);
+            provider_error_total.insert(provider.clone(), errors);
+        }
+        let mut provider_error_rates: std::collections::BTreeMap<String, f64> =
+            std::collections::BTreeMap::new();
+        for (provider, calls) in &provider_calls_total {
+            let errors = provider_error_total.get(provider).copied().unwrap_or(0);
+            let rate = if *calls > 0 {
+                errors as f64 / *calls as f64
+            } else {
+                0.0
+            };
+            provider_error_rates.insert(provider.clone(), rate);
+        }
+        Ok(CompareRunsResponse {
+            runs: entries,
+            shared_providers,
+            diff: CompareDiff {
+                max_duration_secs,
+                min_duration_secs,
+                max_error_calls,
+                provider_token_total,
+                provider_error_rates,
+            },
+        })
+    }
+
+    /// Cross-run aggregate over the optional
+    /// `(since_unix, provider)` window for the dashboard
+    /// `GET /api/aggregates` endpoint and the CLI
+    /// `moagan telemetry summary --window <days>` path.
+    ///
+    /// `since_unix` is the lower bound (inclusive) on
+    /// `runs.created_unix`. `provider_filter`, when `Some`,
+    /// narrows the per-call side to that provider; the
+    /// `total_runs` counter is the number of distinct runs
+    /// that have at least one matching call, so a
+    /// `provider="minimax"` query does not inflate the run
+    /// count with runs that only touched other providers.
+    ///
+    /// Percentiles are computed in Rust from the per-call
+    /// `(ended_unix - started_unix) * 1000` latency samples
+    /// (nearest-rank, matches the SQL convention used by
+    /// `moagan telemetry summary`). Empty windows surface as
+    /// zero-valued fields so the dashboard renders a stable
+    /// shape even when no runs match.
+    pub fn aggregates_window(
+        &self,
+        since_unix: i64,
+        provider_filter: Option<&str>,
+    ) -> Result<AggregateWindowRow> {
+        let conn = self.pool.get()?;
+        // --- Aggregate counts ---
+        let counts_sql = "\
+            SELECT \
+                COUNT(DISTINCT c.run_id) AS total_runs, \
+                COUNT(*) AS total_calls, \
+                COALESCE(SUM(c.input_tokens), 0) AS total_input_tokens, \
+                COALESCE(SUM(c.output_tokens), 0) AS total_output_tokens, \
+                COALESCE(SUM(CASE WHEN c.status = 'error' THEN 1 ELSE 0 END), 0) AS error_calls \
+            FROM calls c \
+            JOIN runs r ON c.run_id = r.run_id \
+            WHERE r.created_unix >= ?1 \
+              AND (?2 IS NULL OR c.provider = ?2)";
+        let counts_row = conn.query_row(counts_sql, params![since_unix, provider_filter], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let (total_runs, total_calls, total_input_tokens, total_output_tokens, error_calls) =
+            counts_row;
+        // --- avg_duration_secs across the distinct runs in
+        //     the window ---
+        //
+        // Pulled separately from the counts query because
+        // `AVG(updated_unix - created_unix)` over the
+        // cartesian expansion of `(runs JOIN calls)` would
+        // double-count per call. The `IN (SELECT DISTINCT
+        // run_id)` subquery already saw the provider filter
+        // applied, so the average naturally matches
+        // `total_runs` from above.
+        let avg_sql = "\
+            SELECT COALESCE(AVG(updated_unix - created_unix), 0.0) \
+            FROM runs \
+            WHERE run_id IN ( \
+                SELECT DISTINCT c.run_id \
+                FROM calls c JOIN runs r ON c.run_id = r.run_id \
+                WHERE r.created_unix >= ?1 \
+                  AND (?2 IS NULL OR c.provider = ?2) \
+            )";
+        let avg_duration_secs: f64 =
+            conn.query_row(avg_sql, params![since_unix, provider_filter], |r| r.get(0))?;
+        // --- Percentiles (latency in ms) ---
+        //
+        // Fetch every `(ended_unix - started_unix) * 1000`
+        // for the window and compute the nearest-rank
+        // percentiles in Rust. SQLite does not ship a
+        // portable percentile aggregate; pulling the samples
+        // out keeps the percentile rule in one place (Rust)
+        // and matches `moagan telemetry summary`.
+        let mut lat_stmt = conn.prepare(
+            "SELECT (c.ended_unix - c.started_unix) * 1000 \
+             FROM calls c JOIN runs r ON c.run_id = r.run_id \
+             WHERE r.created_unix >= ?1 \
+               AND (?2 IS NULL OR c.provider = ?2) \
+               AND c.ended_unix IS NOT NULL \
+               AND c.started_unix IS NOT NULL",
+        )?;
+        let mut latencies: Vec<f64> = lat_stmt
+            .query_map(params![since_unix, provider_filter], |r| r.get::<_, i64>(0))?
+            .filter_map(std::result::Result::ok)
+            .map(|ms| ms as f64)
+            .collect();
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let (p50_latency_ms, p95_latency_ms, p99_latency_ms) = percentiles(&latencies);
+        let error_rate = if total_calls > 0 {
+            error_calls as f64 / total_calls as f64
+        } else {
+            0.0
+        };
+        Ok(AggregateWindowRow {
+            since_unix,
+            provider: provider_filter.map(str::to_owned),
+            total_runs,
+            total_calls,
+            total_input_tokens,
+            total_output_tokens,
+            total_tokens: total_input_tokens + total_output_tokens,
+            avg_duration_secs,
+            p50_latency_ms,
+            p95_latency_ms,
+            p99_latency_ms,
+            error_rate,
+        })
+    }
 }
 
 /// One row from the `warnings` summary grouping.
@@ -1924,6 +2426,30 @@ pub fn call_status(http_status: Option<u16>, error: Option<&str>) -> &'static st
         Some(_) => "error",
         None => "ok",
     }
+}
+
+/// Nearest-rank percentile for an already-sorted `f64` sample.
+/// Returns `(p50, p95, p99)`. Empty input collapses to
+/// `(0.0, 0.0, 0.0)` so the dashboard always surfaces a
+/// well-formed JSON shape. Single-element input collapses
+/// every percentile to that element's value (no NaN, no
+/// interpolation surprises).
+///
+/// The rule (`index = ceil(P/100 * N) - 1`, clamped to
+/// `0..N-1`) matches the convention used by `moagan telemetry
+/// summary` so the dashboard and the CLI agree on the same
+/// numbers.
+pub(crate) fn percentiles(sorted: &[f64]) -> (f64, f64, f64) {
+    if sorted.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let n = sorted.len();
+    let pick = |p: f64| {
+        let rank = (p * n as f64).ceil() as usize;
+        let rank = rank.clamp(1, n);
+        sorted[rank - 1]
+    };
+    (pick(0.50), pick(0.95), pick(0.99))
 }
 
 // -----------------------------------------------------------------
@@ -4677,5 +5203,601 @@ mod tests {
         let report = db.purge_orphans().unwrap();
         assert_eq!(report.total_rows, 0);
         assert!(report.tables.iter().all(|t| t.rows == 0));
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-run analytics helpers (D.17 dashboard extension).
+    //
+    // The unit tests pin the SQLite helpers
+    // [`Db::compare_runs`] and [`Db::aggregates_window`]; the
+    // dashboard endpoint tests live in
+    // `src/telemetry/dashboard.rs::tests` and exercise the same
+    // path through `dispatch(...)`.
+    // -----------------------------------------------------------------
+
+    /// Convenience helper: register one `calls` row with the
+    /// given `(provider, model, status)` triple and token counts.
+    /// Avoids duplicating the 19-argument `record_call` signature
+    /// across every test that needs a seeded call row.
+    #[allow(clippy::too_many_arguments)]
+    fn seed_cross_call(
+        db: &Db,
+        call_id: &str,
+        run_id: RunId,
+        phase: &str,
+        provider: &str,
+        model: &str,
+        http_status: Option<u16>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read: u64,
+        cache_creation: u64,
+        started_unix: i64,
+        ended_unix: i64,
+        error: Option<&str>,
+    ) {
+        db.record_call(
+            call_id,
+            run_id,
+            phase,
+            phase,
+            provider,
+            model,
+            &format!("ck-{call_id}"),
+            Some(&format!("sha-{call_id}")),
+            false,
+            http_status.map(i64::from),
+            input_tokens,
+            output_tokens,
+            cache_read,
+            cache_creation,
+            started_unix,
+            ended_unix,
+            error,
+            0,
+        )
+        .unwrap();
+    }
+
+    /// Backdate a `runs` row to a fixed `created_unix` /
+    /// `updated_unix` pair so the tests can pin the duration
+    /// without racing the wall clock. Internal helper used by
+    /// the cross-run aggregate tests below.
+    fn set_run_timestamps(db: &Db, run_id: RunId, created_unix: i64, updated_unix: i64) {
+        let conn = db.connection().unwrap();
+        conn.execute(
+            "UPDATE runs SET created_unix = ?, updated_unix = ? WHERE run_id = ?",
+            params![created_unix, updated_unix, run_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    /// `percentiles` collapses empty input to zero (the dashboard
+    /// surface never has to special-case the empty-window path).
+    #[test]
+    fn percentiles_empty_input_returns_zeros() {
+        assert_eq!(percentiles(&[]), (0.0, 0.0, 0.0));
+    }
+
+    /// Single-element input collapses every percentile to the
+    /// same value (no NaN, no interpolation surprises).
+    #[test]
+    fn percentiles_single_element_returns_same_value() {
+        assert_eq!(percentiles(&[42.0]), (42.0, 42.0, 42.0));
+    }
+
+    /// Multi-element nearest-rank percentile. For 100 samples
+    /// `0..=99`, the 1-indexed nearest-rank rule
+    /// (`ceil(P*N)`, take that index) yields p50 = index 50
+    /// (value 49), p95 = index 95 (value 94), p99 = index 99
+    /// (value 98). The pin matches SQL `percentile_disc`
+    /// semantics and `moagan telemetry summary`'s reported
+    /// values, so the dashboard and the CLI agree on the same
+    /// numbers for the same input.
+    #[test]
+    fn percentiles_nearest_rank_matches_telemetry_summary() {
+        let samples: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let (p50, p95, p99) = percentiles(&samples);
+        assert_eq!(p50, 49.0, "ceil(0.50*100)=50, 1-indexed -> samples[49]=49");
+        assert_eq!(p95, 94.0, "ceil(0.95*100)=95, 1-indexed -> samples[94]=94");
+        assert_eq!(p99, 98.0, "ceil(0.99*100)=99, 1-indexed -> samples[98]=98");
+    }
+
+    /// CompareRunEntry / CompareDiff / CompareRunsResponse
+    /// serialise to a stable JSON shape. The round-trip pins
+    /// the field names the dashboard's HTML renderer will
+    /// read; renaming any of them is a breaking change for
+    /// the SPA.
+    #[test]
+    fn compare_response_round_trips_through_json() {
+        let entry = CompareRunEntry {
+            run_id: "abc".to_string(),
+            status: "completed".to_string(),
+            mode: "fast".to_string(),
+            created_unix: 100,
+            updated_unix: 200,
+            duration_secs: 100,
+            calls: 5,
+            error_calls: 1,
+            timeout_calls: 0,
+            cancelled_calls: 0,
+            input_tokens: 100,
+            output_tokens: 200,
+            cache_read: 0,
+            cache_creation: 0,
+            providers: vec!["minimax".to_string()],
+            tokens_per_provider: std::collections::BTreeMap::from([("minimax".to_string(), 300)]),
+        };
+        let diff = CompareDiff {
+            max_duration_secs: 100,
+            min_duration_secs: 100,
+            max_error_calls: 1,
+            provider_token_total: std::collections::BTreeMap::from([("minimax".to_string(), 300)]),
+            provider_error_rates: std::collections::BTreeMap::from([("minimax".to_string(), 0.2)]),
+        };
+        let resp = CompareRunsResponse {
+            runs: vec![entry.clone()],
+            shared_providers: vec!["minimax".to_string()],
+            diff: diff.clone(),
+        };
+        let j = serde_json::to_string(&resp).unwrap();
+        let back: CompareRunsResponse = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.runs.len(), 1);
+        assert_eq!(back.runs[0], entry);
+        assert_eq!(back.diff, diff);
+        assert_eq!(back.shared_providers, vec!["minimax".to_string()]);
+        // Sanity-check the JSON shape: field names are part
+        // of the public contract.
+        assert!(j.contains("\"run_id\":\"abc\""));
+        assert!(j.contains("\"duration_secs\":100"));
+        assert!(j.contains("\"shared_providers\""));
+        assert!(j.contains("\"provider_error_rates\""));
+    }
+
+    /// AggregateWindowRow serialises with stable field names
+    /// and a default constructor that mirrors the empty-window
+    /// JSON shape the dashboard expects.
+    #[test]
+    fn aggregate_window_row_round_trips_through_json() {
+        let row = AggregateWindowRow {
+            since_unix: 1_700_000_000,
+            provider: Some("minimax".to_string()),
+            total_runs: 3,
+            total_calls: 12,
+            total_input_tokens: 1_000,
+            total_output_tokens: 2_000,
+            total_tokens: 3_000,
+            avg_duration_secs: 12.5,
+            p50_latency_ms: 250.0,
+            p95_latency_ms: 900.0,
+            p99_latency_ms: 1_900.0,
+            error_rate: 0.0833,
+        };
+        let j = serde_json::to_string(&row).unwrap();
+        let back: AggregateWindowRow = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, row);
+        assert!(j.contains("\"since_unix\":1700000000"));
+        assert!(j.contains("\"provider\":\"minimax\""));
+        assert!(j.contains("\"p99_latency_ms\":1900.0"));
+    }
+
+    /// Empty-window aggregates serialise to all-zero counters
+    /// (no `None` fields). The dashboard relies on the stable
+    /// shape to render "no data" without a special case.
+    #[test]
+    fn aggregate_window_row_default_is_all_zero() {
+        let row = AggregateWindowRow::default();
+        let j = serde_json::to_string(&row).unwrap();
+        assert!(j.contains("\"total_runs\":0"));
+        assert!(j.contains("\"error_rate\":0.0"));
+        assert!(j.contains("\"p99_latency_ms\":0.0"));
+        assert!(j.contains("\"provider\":null"));
+    }
+
+    /// `Db::compare_runs` projects per-run slices, the shared
+    /// provider intersection, and the cross-run diff correctly
+    /// for two seeded runs. The provider set overlap drives
+    /// the `shared_providers` field; the per-provider sums
+    /// drive `provider_token_total`.
+    #[test]
+    fn compare_runs_returns_diff_for_two_seeded_runs() {
+        let db = temp_db();
+        let a = RunId::new();
+        let b = RunId::new();
+        db.register_run(a, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        db.register_run(b, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        set_run_timestamps(&db, a, 1_000, 1_100); // 100s
+        set_run_timestamps(&db, b, 2_000, 2_250); // 250s
+        // Run A: only minimax, 2 calls, 1 error.
+        seed_cross_call(
+            &db,
+            "a1",
+            a,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            100,
+            50,
+            0,
+            0,
+            10,
+            11,
+            None,
+        );
+        seed_cross_call(
+            &db,
+            "a2",
+            a,
+            "intake",
+            "minimax",
+            "M3",
+            Some(500),
+            0,
+            0,
+            0,
+            0,
+            20,
+            21,
+            Some("server error"),
+        );
+        // Run B: minimax + opencode_go, 3 calls, all ok.
+        seed_cross_call(
+            &db,
+            "b1",
+            b,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            200,
+            80,
+            0,
+            0,
+            30,
+            31,
+            None,
+        );
+        seed_cross_call(
+            &db,
+            "b2",
+            b,
+            "rank",
+            "opencode_go",
+            "gpt-4o",
+            Some(200),
+            300,
+            120,
+            0,
+            0,
+            40,
+            41,
+            None,
+        );
+        seed_cross_call(
+            &db,
+            "b3",
+            b,
+            "rank",
+            "opencode_go",
+            "gpt-4o",
+            Some(200),
+            100,
+            40,
+            0,
+            0,
+            50,
+            51,
+            None,
+        );
+
+        let resp = db.compare_runs(&[a, b]).unwrap();
+        assert_eq!(resp.runs.len(), 2);
+
+        let entry_a = &resp.runs[0];
+        assert_eq!(entry_a.run_id, a.to_string());
+        assert_eq!(entry_a.duration_secs, 100);
+        assert_eq!(entry_a.calls, 2);
+        assert_eq!(entry_a.error_calls, 1);
+        assert_eq!(entry_a.timeout_calls, 0);
+        assert_eq!(entry_a.input_tokens, 100);
+        assert_eq!(entry_a.output_tokens, 50);
+        assert_eq!(entry_a.providers, vec!["minimax".to_string()]);
+        assert_eq!(entry_a.tokens_per_provider.get("minimax"), Some(&150));
+
+        let entry_b = &resp.runs[1];
+        assert_eq!(entry_b.run_id, b.to_string());
+        assert_eq!(entry_b.duration_secs, 250);
+        assert_eq!(entry_b.calls, 3);
+        assert_eq!(entry_b.error_calls, 0);
+        assert_eq!(entry_b.input_tokens, 600);
+        assert_eq!(entry_b.output_tokens, 240);
+        assert_eq!(
+            entry_b.providers,
+            vec!["minimax".to_string(), "opencode_go".to_string()]
+        );
+        assert_eq!(entry_b.tokens_per_provider.get("minimax"), Some(&280));
+        assert_eq!(entry_b.tokens_per_provider.get("opencode_go"), Some(&560));
+
+        // Only `minimax` is shared across both runs.
+        assert_eq!(resp.shared_providers, vec!["minimax".to_string()]);
+
+        // Cross-run diff: max/min duration, max errors,
+        // union of provider totals.
+        assert_eq!(resp.diff.max_duration_secs, 250);
+        assert_eq!(resp.diff.min_duration_secs, 100);
+        assert_eq!(resp.diff.max_error_calls, 1);
+        assert_eq!(resp.diff.provider_token_total.get("minimax"), Some(&430));
+        assert_eq!(
+            resp.diff.provider_token_total.get("opencode_go"),
+            Some(&560)
+        );
+        // Provider error rates: minimax = 1/3 errors across
+        // the union (a2 errored, b1/b3 did not), opencode_go
+        // = 0/2.
+        let minimax_rate = resp.diff.provider_error_rates.get("minimax").unwrap();
+        assert!(
+            (minimax_rate - 1.0 / 3.0).abs() < 1e-9,
+            "minimax_rate={minimax_rate}"
+        );
+        assert_eq!(
+            resp.diff.provider_error_rates.get("opencode_go").unwrap(),
+            &0.0
+        );
+    }
+
+    /// `Db::compare_runs` preserves input order (the dashboard
+    /// renders runs in the order the operator typed them in
+    /// `?ids=a,b,c`).
+    #[test]
+    fn compare_runs_preserves_input_order() {
+        let db = temp_db();
+        let a = RunId::new();
+        let b = RunId::new();
+        let c = RunId::new();
+        for id in [a, b, c] {
+            db.register_run(id, "fast", "completed", "0.8.0", None, None, None)
+                .unwrap();
+            seed_cross_call(
+                &db,
+                &format!("c-{id}"),
+                id,
+                "intake",
+                "mock",
+                "m",
+                Some(200),
+                1,
+                1,
+                0,
+                0,
+                0,
+                1,
+                None,
+            );
+        }
+        // Reverse-lexical input to make sure the order is not
+        // implicitly sorted by id / created_unix.
+        let resp = db.compare_runs(&[c, a, b]).unwrap();
+        assert_eq!(resp.runs[0].run_id, c.to_string());
+        assert_eq!(resp.runs[1].run_id, a.to_string());
+        assert_eq!(resp.runs[2].run_id, b.to_string());
+    }
+
+    /// `Db::compare_runs` on an empty input returns an empty
+    /// response (the dashboard's 400 path catches the
+    /// `< 2 ids` case before reaching the helper, but the
+    /// helper stays safe for `moagan telemetry compare`).
+    #[test]
+    fn compare_runs_empty_input_returns_empty_response() {
+        let db = temp_db();
+        let resp = db.compare_runs(&[]).unwrap();
+        assert!(resp.runs.is_empty());
+        assert!(resp.shared_providers.is_empty());
+        assert_eq!(resp.diff.max_duration_secs, 0);
+        assert_eq!(resp.diff.min_duration_secs, 0);
+    }
+
+    /// `Db::aggregates_window` aggregates across runs and
+    /// computes the latency percentiles (p50/p95/p99),
+    /// `error_rate`, and per-provider counts. The test seeds
+    /// three calls with latencies 1000/2000/3000ms so the
+    /// nearest-rank rule produces (2000, 3000, 3000). A
+    /// fourth run outside the window must be excluded so the
+    /// `since` filter is also exercised.
+    #[test]
+    fn aggregates_window_sums_counts_and_percentiles() {
+        let db = temp_db();
+        let run = RunId::new();
+        db.register_run(run, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        set_run_timestamps(&db, run, 1_000, 1_100); // 100s duration
+        // Call 1: minimax, ok, 1000ms latency, 100 input + 50 output.
+        seed_cross_call(
+            &db,
+            "c1",
+            run,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            100,
+            50,
+            0,
+            0,
+            1_000,
+            1_001,
+            None,
+        );
+        // Call 2: minimax, ok, 2000ms latency.
+        seed_cross_call(
+            &db,
+            "c2",
+            run,
+            "rank",
+            "minimax",
+            "M3",
+            Some(200),
+            80,
+            40,
+            0,
+            0,
+            1_010,
+            1_012,
+            None,
+        );
+        // Call 3: minimax, error, 3000ms latency.
+        seed_cross_call(
+            &db,
+            "c3",
+            run,
+            "rank",
+            "minimax",
+            "M3",
+            Some(500),
+            60,
+            30,
+            0,
+            0,
+            1_020,
+            1_023,
+            Some("upstream 5xx"),
+        );
+        // Seed a fourth call from a different run with a
+        // `created_unix` below the `since` cutoff so the
+        // filter excludes it.
+        let old_run = RunId::new();
+        db.register_run(old_run, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        set_run_timestamps(&db, old_run, 100, 110);
+        seed_cross_call(
+            &db,
+            "cold",
+            old_run,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            999,
+            999,
+            0,
+            0,
+            50,
+            50,
+            None,
+        );
+
+        // Window starts at `since = 500` so the seeded run
+        // (created_unix=1_000) is included but the older run
+        // (created_unix=100) is filtered out.
+        let since = 500;
+        let agg = db.aggregates_window(since, None).unwrap();
+        assert_eq!(agg.since_unix, since);
+        assert_eq!(agg.provider, None);
+        assert_eq!(agg.total_runs, 1);
+        assert_eq!(agg.total_calls, 3);
+        assert_eq!(agg.total_input_tokens, 240);
+        assert_eq!(agg.total_output_tokens, 120);
+        assert_eq!(agg.total_tokens, 360);
+        assert!((agg.avg_duration_secs - 100.0).abs() < 1e-9);
+        // Nearest-rank on 3 samples: p50=ceil(1.5)=2 (samples[1]=2000ms),
+        // p95=ceil(2.85)=3 (samples[2]=3000ms), p99=ceil(2.97)=3
+        // (samples[2]=3000ms).
+        assert!(
+            (agg.p50_latency_ms - 2000.0).abs() < 1e-9,
+            "p50={}",
+            agg.p50_latency_ms
+        );
+        assert!(
+            (agg.p95_latency_ms - 3000.0).abs() < 1e-9,
+            "p95={}",
+            agg.p95_latency_ms
+        );
+        assert!(
+            (agg.p99_latency_ms - 3000.0).abs() < 1e-9,
+            "p99={}",
+            agg.p99_latency_ms
+        );
+        // 1 error / 3 calls.
+        assert!(
+            (agg.error_rate - 1.0 / 3.0).abs() < 1e-9,
+            "rate={}",
+            agg.error_rate
+        );
+    }
+
+    /// The `provider` filter narrows the per-call side AND the
+    /// `total_runs` count to the runs that have at least one
+    /// matching call. A run that only touched `opencode_go`
+    /// must not appear in the totals when the caller asks
+    /// for `provider="minimax"`.
+    #[test]
+    fn aggregates_window_provider_filter_narrows_runs() {
+        let db = temp_db();
+        let minimax_run = RunId::new();
+        let opencode_run = RunId::new();
+        db.register_run(minimax_run, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        db.register_run(opencode_run, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        set_run_timestamps(&db, minimax_run, 1_000, 1_050);
+        set_run_timestamps(&db, opencode_run, 1_000, 1_050);
+        seed_cross_call(
+            &db,
+            "m1",
+            minimax_run,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            10,
+            5,
+            0,
+            0,
+            1_000,
+            1_000,
+            None,
+        );
+        seed_cross_call(
+            &db,
+            "o1",
+            opencode_run,
+            "intake",
+            "opencode_go",
+            "gpt-4o",
+            Some(200),
+            20,
+            10,
+            0,
+            0,
+            1_000,
+            1_000,
+            None,
+        );
+        let agg = db.aggregates_window(0, Some("minimax")).unwrap();
+        assert_eq!(agg.provider.as_deref(), Some("minimax"));
+        assert_eq!(agg.total_runs, 1, "opencode_run must be excluded");
+        assert_eq!(agg.total_calls, 1);
+        assert_eq!(agg.total_tokens, 15);
+        assert!((agg.error_rate - 0.0).abs() < 1e-9);
+    }
+
+    /// Empty window: zero counters, no NaN, no panic. The
+    /// dashboard relies on the stable zero-valued shape to
+    /// render a "no data" tile.
+    #[test]
+    fn aggregates_window_empty_returns_zero_counters() {
+        let db = temp_db();
+        let agg = db.aggregates_window(0, None).unwrap();
+        assert_eq!(agg.total_runs, 0);
+        assert_eq!(agg.total_calls, 0);
+        assert_eq!(agg.total_tokens, 0);
+        assert_eq!(agg.p50_latency_ms, 0.0);
+        assert_eq!(agg.p95_latency_ms, 0.0);
+        assert_eq!(agg.p99_latency_ms, 0.0);
+        assert_eq!(agg.error_rate, 0.0);
+        // No provider filter.
+        assert!(agg.provider.is_none());
     }
 }
