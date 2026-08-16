@@ -96,13 +96,24 @@ pub enum TelemetryCmd {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    /// `moagan telemetry cleanup [--dry-run] [--archive]`.
+    /// `moagan telemetry cleanup [--dry-run] [--archive] [--cross-run] [--yes]`.
+    ///
+    /// Two modes:
+    /// * The default per-run retention pass (D.5.1) — driven by
+    ///   `Config::retention` and the `--archive` flag.
+    /// * The cross-run sweep (D.29-D.32) — selected by
+    ///   `--cross-run`. Reports orphan rows per table by default
+    ///   (dry-run). Pass `--yes` to actually purge the rows;
+    ///   `--dry-run` is honoured either way for symmetry.
+    ///   `--cross-run` is mutually exclusive with `--archive`.
     Cleanup {
         /// Optional override for `MOAGAN_HOME`.
         #[arg(long)]
         runs_dir: Option<std::path::PathBuf>,
         /// When true, print what would be deleted without touching
-        /// the filesystem.
+        /// the filesystem. The default for the per-run retention
+        /// pass is `false`; the cross-run sweep inverts the default
+        /// so a missing `--yes` always lands in dry-run.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
         /// Override the retention policy for this invocation:
@@ -112,6 +123,21 @@ pub enum TelemetryCmd {
         /// wins.
         #[arg(long, default_value_t = false)]
         archive: bool,
+        /// Switch from the per-run retention pass to the cross-run
+        /// sweep (D.29-D.32). The sweep lists — and with `--yes`
+        /// purges — every SQLite row whose `run_id` no longer
+        /// exists in the `runs` table. The per-table row count is
+        /// the only output.
+        #[arg(long, default_value_t = false)]
+        cross_run: bool,
+        /// Confirm a destructive cross-run purge. When `--cross-run`
+        /// is set and `--yes` is missing, the sweep runs in
+        /// dry-run mode regardless of `--dry-run`. This two-flag
+        /// shape mirrors the `cargo install --force` / `git push
+        /// --force` convention so a missing confirmation never
+        /// silently drops rows.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
     /// `moagan telemetry verify --path <export-path>`.
     Verify {
@@ -920,17 +946,48 @@ mod cleanup {
     use crate::config::Config;
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
+    use crate::telemetry::cross_run_sweep::{OrphanReport, OrphanTableStat};
     use crate::telemetry::retention::{RetentionConfig, RetentionPolicy, apply};
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
-        let (runs_dir, dry_run, archive_flag) = match cmd {
+        let (runs_dir, dry_run, archive_flag, cross_run, yes) = match cmd {
             TelemetryCmd::Cleanup {
                 runs_dir,
                 dry_run,
                 archive,
-            } => (runs_dir.as_ref(), *dry_run, *archive),
+                cross_run,
+                yes,
+            } => (runs_dir.as_ref(), *dry_run, *archive, *cross_run, *yes),
             _ => return Err(Error::InvalidState("cleanup: wrong variant".into())),
         };
+        // The two modes are mutually exclusive: the per-run
+        // retention pass moves the run directory, while the
+        // cross-run sweep touches only the SQLite index. Combining
+        // them would change the operator's mental model of which
+        // side of the database is being mutated, so the CLI
+        // rejects the combination at the boundary.
+        if cross_run && archive_flag {
+            return Err(Error::InvalidArgs(
+                "--cross-run and --archive are mutually exclusive \
+                 (the sweep touches SQLite only; the archive moves .runs/<id>/)"
+                    .into(),
+            ));
+        }
+        if cross_run {
+            return run_cross_run(runs_dir.map(|p| p.as_path()), dry_run, yes);
+        }
+        run_per_run_retention(runs_dir, dry_run, archive_flag)
+    }
+
+    /// Per-run retention pass. Drives the existing
+    /// `src/telemetry/retention.rs` policy with the same knobs as
+    /// before; the dispatch is split into a dedicated function so
+    /// the cross-run path stays a sibling rather than a branch.
+    fn run_per_run_retention(
+        runs_dir: Option<&std::path::PathBuf>,
+        dry_run: bool,
+        archive_flag: bool,
+    ) -> Result<()> {
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let runs_dir = home.runs_dir();
         let db = Db::open(&home.meta_db_path()).ok();
@@ -983,6 +1040,92 @@ mod cleanup {
         }
         Ok(())
     }
+
+    /// Cross-run sweep. `dry_run` is forced to `true` unless `yes`
+    /// is passed, mirroring the `cargo install --force` convention
+    /// so a missing confirmation never silently drops rows.
+    /// Either way the report is printed to stdout; the only
+    /// difference is whether the underlying DELETEs run.
+    fn run_cross_run(runs_dir: Option<&std::path::Path>, dry_run: bool, yes: bool) -> Result<()> {
+        let home = super::resolve_home(runs_dir)?;
+        let db = Db::open(&home.meta_db_path())?;
+        let effective_dry_run = dry_run || !yes;
+        let report = if effective_dry_run {
+            db.list_orphans()?
+        } else {
+            db.purge_orphans()?
+        };
+        let header = if effective_dry_run {
+            "dry-run"
+        } else {
+            "purge"
+        };
+        if report.is_empty() {
+            println!(
+                "cross-run sweep ({header}): no orphan rows found across {} tables",
+                report.tables.len()
+            );
+            return Ok(());
+        }
+        println!(
+            "cross-run sweep ({header}): {} orphan row(s) across {} tables",
+            report.total_rows,
+            report.tables.iter().filter(|t| t.rows > 0).count(),
+        );
+        print_report(&report);
+        if effective_dry_run {
+            println!(
+                "tip: re-run with --yes to purge the rows (the dry-run summary above will not be repeated)."
+            );
+        }
+        Ok(())
+    }
+
+    /// Format the per-table orphan report. The table name is
+    /// left-padded to 18 chars so the columns line up; the count
+    /// column is right-padded to 6 so a thousand-row sweep stays
+    /// readable in a wide terminal.
+    fn print_report(report: &OrphanReport) {
+        for stat in report.tables.iter().filter(|t| t.rows > 0) {
+            println!(
+                "  {:<18}  {:<13}  {:>6}",
+                stat.table, stat.run_id_column, stat.rows
+            );
+        }
+        // The `redact_audit` table has a nullable `run_id`; the
+        // trait distinguishes it implicitly via the per-table
+        // entry. We surface the annotation only when the table
+        // appears zero-rowed AND has a nullable FK, so the operator
+        // does not see a misleading "0" for a column that is
+        // allowed to be NULL.
+        if report.tables.iter().all(|t| t.rows == 0) {
+            return;
+        }
+        let nullable_with_zero: Vec<&OrphanTableStat> = report
+            .tables
+            .iter()
+            .filter(|t| t.run_id_is_nullable && t.rows == 0)
+            .collect();
+        if !nullable_with_zero.is_empty() {
+            println!(
+                "  (zero orphan rows on nullable FK: {})",
+                nullable_with_zero
+                    .iter()
+                    .map(|t| t.table)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
+    /// Suppress the unused-import warning when the cross-run
+    /// tables list is empty during a no-op compilation. The
+    /// `OrphanTableStat` type is exposed via the public re-export
+    /// in `src/telemetry/cross_run_sweep.rs`; the helper just
+    /// keeps the import live so clippy does not flag a phantom
+    /// dep when this module is the only consumer.
+    #[allow(dead_code)]
+    fn _types_are_used(_: OrphanTableStat) {}
 }
 
 mod verify {

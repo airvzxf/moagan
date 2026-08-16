@@ -463,6 +463,8 @@ fn cleanup_cli_accepts_archive_flag_and_overrides_config() {
         runs_dir: Some(home.root().to_path_buf()),
         dry_run: true,
         archive: true,
+        cross_run: false,
+        yes: false,
     };
     let code = pollster::block_on(cmd.dispatch()).unwrap();
     assert_eq!(code, 0);
@@ -476,6 +478,8 @@ fn cleanup_cli_default_policy_is_delete() {
         runs_dir: Some(home.root().to_path_buf()),
         dry_run: true,
         archive: false,
+        cross_run: false,
+        yes: false,
     };
     let code = pollster::block_on(cmd.dispatch()).unwrap();
     assert_eq!(code, 0);
@@ -600,3 +604,190 @@ use std::io::{Read, Write as _};
 // that compose a run id from a `RunRow`.
 #[allow(unused_imports)]
 use std::str::FromStr;
+
+// -----------------------------------------------------------------
+// D.29-D.32 — cross-run retention sweep via the CLI dispatcher.
+//
+// The sweep is a maintenance tool, so the tests below stand up
+// a real MoaganHome with a real SQLite index, seed one run and
+// its child rows, then bypass the runtime by issuing a raw
+// `DELETE FROM runs` (FKs temporarily off) to manufacture an
+// orphan. The CLI is then invoked through `TelemetryCmd::dispatch`
+// so the test exercises the same surface the operator sees.
+// -----------------------------------------------------------------
+
+/// Insert one run + a small set of child rows so the dispatch
+/// has something to count. The call / phase / warning triple is
+/// the minimal fixture that exercises the `calls`, `phases` and
+/// `warnings` branches of the curated sweep table list.
+fn seed_orphan_fixture(home: &MoaganHome) -> RunId {
+    let db = Db::open(&home.meta_db_path()).unwrap();
+    let run_id = RunId::new();
+    db.register_run(run_id, "fast", "running", "0.7.2", None, None, None)
+        .unwrap();
+    db.record_call(
+        "sweep-cli-call-1",
+        run_id,
+        "intake",
+        "intake",
+        "minimax",
+        "MiniMax-M3",
+        "k",
+        None,
+        false,
+        Some(200),
+        10,
+        5,
+        0,
+        0,
+        1,
+        2,
+        None,
+        0,
+    )
+    .unwrap();
+    db.record_phase(run_id, "intake", 0, "end", None).unwrap();
+    db.record_warning(
+        run_id,
+        1_700_000_000_000,
+        "sweep.test",
+        "warn",
+        Some("intake"),
+        None,
+        None,
+        None,
+        "msg",
+        "{}",
+    )
+    .unwrap();
+    run_id
+}
+
+/// `--cross-run` without `--yes` is a dry-run that reports the
+/// orphan counts and writes nothing back to SQLite. The dispatch
+/// path is exercised end-to-end through `TelemetryCmd::dispatch`.
+#[test]
+fn cleanup_cross_run_dry_run_reports_orphans_without_purging() {
+    let _guard = env_lock();
+    let home = populate_home();
+    let run_id = seed_orphan_fixture(&home);
+    // Bypass the runtime INSERT path with a raw DELETE that
+    // disables FKs for the duration of the statement.
+    let conn_path = home.meta_db_path();
+    let conn = rusqlite::Connection::open(&conn_path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+    conn.execute(
+        "DELETE FROM runs WHERE run_id = ?1",
+        rusqlite::params![run_id.to_string()],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    drop(conn);
+
+    let cmd = TelemetryCmd::Cleanup {
+        runs_dir: Some(home.root().to_path_buf()),
+        dry_run: true,
+        archive: false,
+        cross_run: true,
+        yes: false,
+    };
+    let code = pollster::block_on(cmd.dispatch()).unwrap();
+    assert_eq!(code, 0);
+
+    // The DB must still carry the orphan rows (we did not confirm
+    // the purge): re-opening the index and counting the per-table
+    // orphans re-confirms the dry-run contract.
+    let conn = rusqlite::Connection::open(&conn_path).unwrap();
+    let calls_orphans: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM calls WHERE run_id NOT IN (SELECT run_id FROM runs)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let phases_orphans: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM phases WHERE run_id NOT IN (SELECT run_id FROM runs)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let warnings_orphans: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM warnings WHERE run_id NOT IN (SELECT run_id FROM runs)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls_orphans, 1, "dry-run must leave the calls row");
+    assert_eq!(phases_orphans, 1, "dry-run must leave the phases row");
+    assert_eq!(warnings_orphans, 1, "dry-run must leave the warnings row");
+}
+
+/// `--cross-run --yes` actually purges the orphan rows. The
+/// post-condition is that the curated tables no longer carry any
+/// row that references the deleted `run_id`. The sweep's
+/// dry-run/default behaviour is exercised in the sibling test.
+#[test]
+fn cleanup_cross_run_with_yes_purges_orphan_rows() {
+    let _guard = env_lock();
+    let home = populate_home();
+    let run_id = seed_orphan_fixture(&home);
+    let conn_path = home.meta_db_path();
+    let conn = rusqlite::Connection::open(&conn_path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+    conn.execute(
+        "DELETE FROM runs WHERE run_id = ?1",
+        rusqlite::params![run_id.to_string()],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    drop(conn);
+
+    let cmd = TelemetryCmd::Cleanup {
+        runs_dir: Some(home.root().to_path_buf()),
+        dry_run: false,
+        archive: false,
+        cross_run: true,
+        yes: true,
+    };
+    let code = pollster::block_on(cmd.dispatch()).unwrap();
+    assert_eq!(code, 0);
+
+    let conn = rusqlite::Connection::open(&conn_path).unwrap();
+    let total: i64 = conn
+        .query_row(
+            "SELECT \
+                (SELECT COUNT(*) FROM calls WHERE run_id NOT IN (SELECT run_id FROM runs)) + \
+                (SELECT COUNT(*) FROM phases WHERE run_id NOT IN (SELECT run_id FROM runs)) + \
+                (SELECT COUNT(*) FROM warnings WHERE run_id NOT IN (SELECT run_id FROM runs))",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        total, 0,
+        "purge must remove every orphan row across calls/phases/warnings"
+    );
+}
+
+/// `--cross-run --archive` is rejected at the boundary. The two
+/// modes mutate different sides of the database (the per-run
+/// archive moves the .runs/<id>/ directory; the cross-run
+/// sweep only touches SQLite) so combining them would surprise
+/// the operator. The error surfaces as `InvalidArgs` so the
+/// caller can branch on the conventional CLI exit code.
+#[test]
+fn cleanup_cross_run_and_archive_are_mutually_exclusive() {
+    let _guard = env_lock();
+    let home = populate_home();
+    let cmd = TelemetryCmd::Cleanup {
+        runs_dir: Some(home.root().to_path_buf()),
+        dry_run: true,
+        archive: true,
+        cross_run: true,
+        yes: false,
+    };
+    let err = pollster::block_on(cmd.dispatch()).unwrap_err();
+    assert!(matches!(err, moagan::error::Error::InvalidArgs(_)));
+}

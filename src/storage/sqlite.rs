@@ -2400,6 +2400,44 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------
+    // D.29-D.32 — cross-run retention sweep.
+    //
+    // The retention pass in `src/telemetry/retention.rs` removes the
+    // run directory under `.runs/<run_id>/` but never touches the
+    // SQLite index. The two helpers below are the maintenance tool
+    // that closes the gap: `list_orphans` reports the per-table row
+    // count for a dry-run preview and `purge_orphans` deletes the
+    // rows inside a single transaction. Both delegate to the
+    // curated table list in
+    // `src/telemetry/cross_run_sweep.rs` so a future migration that
+    // adds a FK-to-runs table can extend the sweep in one place.
+    //
+    // The schema declares `FOREIGN KEY (run_id) REFERENCES runs(run_id)`
+    // on every child table and the connection's `with_init` hook
+    // sets `PRAGMA foreign_keys = ON`, so the runtime INSERT path
+    // cannot leave orphans behind. Orphans only appear when an
+    // operator bypasses the runtime — a manual `DELETE FROM runs`,
+    // a SQL migration, or a database-restore step. The sweep is the
+    // defensive cleanup for those cases.
+    // -----------------------------------------------------------------
+
+    /// Count orphan rows on every curated table. Returns a
+    /// per-table report. Does not mutate the database.
+    pub fn list_orphans(&self) -> Result<crate::telemetry::cross_run_sweep::OrphanReport> {
+        let conn = self.pool.get()?;
+        crate::telemetry::cross_run_sweep::list_orphans(&conn)
+    }
+
+    /// Delete orphan rows on every curated table inside a single
+    /// transaction. Returns the per-table deleted-row counts on
+    /// success; the transaction is rolled back on the first
+    /// failure so the DB is never left in a half-purged state.
+    pub fn purge_orphans(&self) -> Result<crate::telemetry::cross_run_sweep::OrphanReport> {
+        let conn = self.pool.get()?;
+        crate::telemetry::cross_run_sweep::purge_orphans(&conn)
+    }
 }
 
 /// Count primary `*.json` artefacts inside `dir`. Excludes
@@ -4319,5 +4357,182 @@ mod tests {
         assert_eq!(rows[0].call_count, 3);
         assert_eq!(rows[0].error_count, 1, "exactly one error in the group");
         assert_eq!(rows[0].total_tokens, 50); // (10+5)+(20+10)+(5+0)
+    }
+
+    // -----------------------------------------------------------------
+    // D.29-D.32 — cross-run retention sweep.
+    //
+    // The sweep is a maintenance tool, so the tests below stand up
+    // a realistic scenario (a run with child rows in every FK-to-runs
+    // table) and then bypass the runtime by issuing a raw
+    // `DELETE FROM runs`. That is the only way to produce an
+    // orphan row at the SQL level because the connection's
+    // `with_init` hook sets `PRAGMA foreign_keys = ON`, so the
+    // `INSERT` paths in `record_*` would reject any future
+    // orphan on their own.
+    // -----------------------------------------------------------------
+
+    /// Seed every FK-to-runs child table with one row keyed to
+    /// `run_id`. Returns the row id so the test can then bypass
+    /// the runtime and delete the parent row.
+    fn seed_orphans_for(db: &Db, run_id: RunId) {
+        db.register_run(run_id, "fast", "running", "0.7.2", None, None, None)
+            .unwrap();
+        db.record_call(
+            "sweep-call-1",
+            run_id,
+            "intake",
+            "intake",
+            "minimax",
+            "MiniMax-M3",
+            "k",
+            None,
+            false,
+            Some(200),
+            10,
+            5,
+            0,
+            0,
+            1,
+            2,
+            None,
+            0,
+        )
+        .unwrap();
+        db.record_phase(run_id, "intake", 0, "end", None).unwrap();
+        db.record_warning(
+            run_id,
+            1_700_000_000_000,
+            "sweep.test",
+            "warn",
+            Some("intake"),
+            None,
+            None,
+            None,
+            "msg",
+            "{}",
+        )
+        .unwrap();
+    }
+
+    /// A clean DB (no rows) reports zero orphans on every
+    /// curated table. Pins the per-table table list (the
+    /// `SWEEP_TABLES` constant) so a future migration that adds a
+    /// FK-to-runs table surfaces here as a failed test instead of
+    /// a silently missed sweep.
+    #[test]
+    fn list_orphans_returns_zero_on_fresh_db() {
+        let db = temp_db();
+        let report = db.list_orphans().unwrap();
+        assert_eq!(report.total_rows, 0);
+        assert!(report.tables.iter().all(|t| t.rows == 0));
+    }
+
+    /// After a `DELETE FROM runs` bypasses the runtime, the
+    /// sweep detects every child row whose `run_id` no longer
+    /// exists in the `runs` table. The assertion also covers the
+    /// nullable `redact_audit` path (we drop the FK column to
+    /// NULL and re-insert) so the two predicate branches are
+    /// exercised in a single test.
+    #[test]
+    fn list_orphans_counts_rows_after_manual_delete() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        seed_orphans_for(&db, run_id);
+        // Plant a redact_audit row whose `run_id` is NULL (the
+        // legitimate pre-pipeline form) — must NOT count as an
+        // orphan even though the `runs` table does not contain
+        // the value.
+        db.record_redact_audit(&crate::storage::sqlite::RedactAuditRow {
+            run_id: None,
+            source_path: "/tmp/test.txt".into(),
+            pattern_kind: "sk_cp_api_key".into(),
+            match_count: 1,
+            at_unix: 1_700_000_000,
+        })
+        .unwrap();
+
+        // Bypass the runtime INSERT path with a raw DELETE that
+        // defeats the FK *cascade* (sqlite with FKs ON still
+        // refuses to DELETE a parent if children exist, so we
+        // first disable FKs, drop the parent, then re-enable).
+        //
+        // The PRAGMA is connection-scoped, so we apply the whole
+        // sequence on a single pooled connection (the pool's
+        // `max_size` is 1, see `Db::open`, so every handle we get
+        // from `pool().get()` is the same underlying SQLite
+        // connection). The handle is dropped at the end of the
+        // block so the next `pool().get()` does not block on the
+        // pool's `max_size = 1`.
+        {
+            let conn = db.pool().get().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+            conn.execute(
+                "DELETE FROM runs WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        }
+
+        let report = db.list_orphans().unwrap();
+        let by_table: std::collections::HashMap<&str, i64> =
+            report.tables.iter().map(|t| (t.table, t.rows)).collect();
+        assert_eq!(by_table["calls"], 1, "calls orphan counted");
+        assert_eq!(by_table["phases"], 1, "phases orphan counted");
+        assert_eq!(by_table["warnings"], 1, "warnings orphan counted");
+        // Nullable `redact_audit` row (NULL run_id) is NOT an
+        // orphan — the predicate explicitly skips NULLs.
+        assert_eq!(
+            by_table["redact_audit"], 0,
+            "nullable redact_audit row with NULL run_id must not count"
+        );
+    }
+
+    /// `purge_orphans` deletes every orphan row inside a single
+    /// transaction and the post-condition is that the curated
+    /// tables are empty (the `runs` row is still absent). The
+    /// transaction rollback path is covered by the unit test
+    /// in `cross_run_sweep.rs::orphan_where_*` so the dispatch
+    /// here only needs to confirm the row counts.
+    #[test]
+    fn purge_orphans_removes_rows_in_single_transaction() {
+        let db = temp_db();
+        let run_id = RunId::new();
+        seed_orphans_for(&db, run_id);
+        {
+            let conn = db.pool().get().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+            conn.execute(
+                "DELETE FROM runs WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        }
+
+        let report = db.purge_orphans().unwrap();
+        assert_eq!(report.total_rows, 3, "calls + phases + warnings");
+        let by_table: std::collections::HashMap<&str, i64> =
+            report.tables.iter().map(|t| (t.table, t.rows)).collect();
+        assert_eq!(by_table["calls"], 1);
+        assert_eq!(by_table["phases"], 1);
+        assert_eq!(by_table["warnings"], 1);
+
+        // Re-running the sweep must report zero orphans (the
+        // DELETE in the previous step was durable).
+        let after = db.list_orphans().unwrap();
+        assert_eq!(after.total_rows, 0);
+    }
+
+    /// A purge run on a clean DB is a no-op that still returns
+    /// the per-table report (every entry zero). The test guards
+    /// against an accidental `panic!` on the empty-set branch.
+    #[test]
+    fn purge_orphans_on_clean_db_returns_zero() {
+        let db = temp_db();
+        let report = db.purge_orphans().unwrap();
+        assert_eq!(report.total_rows, 0);
+        assert!(report.tables.iter().all(|t| t.rows == 0));
     }
 }

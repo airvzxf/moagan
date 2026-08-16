@@ -24,6 +24,7 @@ use crate::storage::outbox_tx::{OutboxEvent, record_with};
 use crate::storage::sqlite::Db;
 use crate::time::{now_unix_millis, now_unix_secs};
 
+pub mod cross_run_sweep;
 pub mod csv_summary;
 pub mod daily_rotation;
 pub mod dashboard;
