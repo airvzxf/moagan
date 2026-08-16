@@ -26,9 +26,16 @@
 //!    `GcRuntimeWithManualMem`, `SingleTenantInMultitenant`,
 //!    `StatefulInServerless`, `SyncApiWithAsyncCaller`) capture
 //!    the architectural clashes a proposal can exhibit even
-//!    when its tag vector is internally consistent.
+//!    when its tag vector is internally consistent. The three
+//!    opt-in unit variants (`ClusterLocalInGlobal`,
+//!    `PullInPushOnly`, `StatelessInStateful`) are additional
+//!    catalog entries reserved for sub-fases that want a
+//!    runtime-clash surface without expanding the tag-pair
+//!    matrix: see [`HardIncompat::from_opt_in_catalog`].
 //!    [`HardIncompat::from_catalog`] enumerates the canonical
-//!    six-variant set for documentation and test fixtures.
+//!    six-variant §D.13.15 set; [`HardIncompat::from_opt_in_catalog`]
+//!    enumerates the three opt-in variants for documentation and
+//!    test fixtures.
 
 /// Pairs of tag values that are mutually exclusive. Order within each
 /// pair is irrelevant — `is_incompatible("a", "b")` and
@@ -193,6 +200,29 @@ pub enum HardIncompat {
     /// the latency budget is consumed by the upstream's scheduling,
     /// not the caller's work.
     SyncApiWithAsyncCaller,
+    /// Catalog I.6 (opt-in): an architectural component relies on
+    /// cluster-local state (in-memory caches, sticky sessions,
+    /// ephemeral locks) but is deployed into a globally-shared
+    /// runtime where every replica is a distinct node. The
+    /// cluster-local state evaporates the moment a request is
+    /// routed to a different replica; consistency is violated
+    /// silently because no single node sees the full picture.
+    ClusterLocalInGlobal,
+    /// Catalog I.6 (opt-in): a pull-based consumer (polling
+    /// endpoint, scheduler-driven worker) is wired to a push-only
+    /// producer (webhook emitter, server-sent stream) that does
+    /// not expose a pollable interface. The pull consumer starves
+    /// silently because the push producer has no inbound buffer
+    /// to drain.
+    PullInPushOnly,
+    /// Catalog I.6 (opt-in): a stateless component (request-scoped
+    /// handler, serverless function, load-balanced frontend) is
+    /// placed where the contract requires stateful behaviour
+    /// (sticky session affinity, in-process aggregate, file handle
+    /// retention). The stateless routing evicts the state on every
+    /// hop; the dependent session reconstructs the aggregate from
+    /// scratch on every request.
+    StatelessInStateful,
 }
 
 impl HardIncompat {
@@ -250,6 +280,18 @@ impl HardIncompat {
             Self::SyncApiWithAsyncCaller => {
                 "synchronous API caller waits on an async upstream".to_string()
             }
+            Self::ClusterLocalInGlobal => {
+                "cluster-local state (in-memory caches, sticky sessions, ephemeral locks) is used inside a globally-shared runtime where every replica is a distinct node"
+                    .to_string()
+            }
+            Self::PullInPushOnly => {
+                "pull-based consumer (polling endpoint, scheduler-driven worker) is wired to a push-only producer (webhook emitter, server-sent stream) with no pollable interface"
+                    .to_string()
+            }
+            Self::StatelessInStateful => {
+                "stateless component (request-scoped handler, serverless function, load-balanced frontend) is placed where the contract requires stateful behaviour (sticky session affinity, in-process aggregate, file handle retention)"
+                    .to_string()
+            }
         }
     }
 
@@ -267,6 +309,26 @@ impl HardIncompat {
             HardIncompat::SingleTenantInMultitenant,
             HardIncompat::StatefulInServerless,
             HardIncompat::SyncApiWithAsyncCaller,
+        ]
+    }
+
+    /// Catalog I.6 (opt-in): return the three additional unit
+    /// variants reserved for sub-fases that want a runtime-clash
+    /// surface without expanding the tag-pair matrix. Same
+    /// stability contract as [`from_catalog`](Self::from_catalog):
+    /// insertion order matches the enum declaration order so
+    /// documentation and test fixtures can pin the list without
+    /// enumerating each variant by name. The opt-in variants are
+    /// `ClusterLocalInGlobal` (in-memory cluster-local state in a
+    /// globally-shared runtime), `PullInPushOnly` (pull consumer
+    /// on a push-only producer), `StatelessInStateful` (stateless
+    /// component placed where the contract requires stateful
+    /// behaviour).
+    pub fn from_opt_in_catalog() -> Vec<HardIncompat> {
+        vec![
+            HardIncompat::ClusterLocalInGlobal,
+            HardIncompat::PullInPushOnly,
+            HardIncompat::StatelessInStateful,
         ]
     }
 }
@@ -473,6 +535,15 @@ mod tests {
                 required: "rust 1.80".into(),
                 found: "rust 1.70".into(),
             },
+            HardIncompat::MonolithVsMicroservices,
+            HardIncompat::SqlVsNosqlBackend,
+            HardIncompat::GcRuntimeWithManualMem,
+            HardIncompat::SingleTenantInMultitenant,
+            HardIncompat::StatefulInServerless,
+            HardIncompat::SyncApiWithAsyncCaller,
+            HardIncompat::ClusterLocalInGlobal,
+            HardIncompat::PullInPushOnly,
+            HardIncompat::StatelessInStateful,
         ];
         for h in cases {
             assert_eq!(
@@ -487,11 +558,13 @@ mod tests {
 
     /// Pin the variant count of `HardIncompat` so a future catalog
     /// addition trips this test before it lands in production. The
-    /// catalog ships thirteen variants: the seven from §I.6 plus
-    /// the six exhaustive runtime-clash unit variants from §D.13.15
+    /// catalog ships sixteen variants: the seven from §I.6 plus the
+    /// six exhaustive runtime-clash unit variants from §D.13.15
     /// (MonolithVsMicroservices, SqlVsNosqlBackend,
     /// GcRuntimeWithManualMem, SingleTenantInMultitenant,
-    /// StatefulInServerless, SyncApiWithAsyncCaller).
+    /// StatefulInServerless, SyncApiWithAsyncCaller) plus the
+    /// three opt-in catalog variants (ClusterLocalInGlobal,
+    /// PullInPushOnly, StatelessInStateful).
     #[test]
     fn hard_incompat_extended_variants_count() {
         let cases: Vec<HardIncompat> = vec![
@@ -528,11 +601,14 @@ mod tests {
             HardIncompat::SingleTenantInMultitenant,
             HardIncompat::StatefulInServerless,
             HardIncompat::SyncApiWithAsyncCaller,
+            HardIncompat::ClusterLocalInGlobal,
+            HardIncompat::PullInPushOnly,
+            HardIncompat::StatelessInStateful,
         ];
         assert_eq!(
             cases.len(),
-            13,
-            "HardIncompat must have 13 variants (7 base + 6 §D.13.15 exhaustive)"
+            16,
+            "HardIncompat must have 16 variants (7 base + 6 §D.13.15 exhaustive + 3 opt-in catalog)"
         );
         // Every variant serialises with the snake_case kind tag and
         // round-trips back to the same value: pins the wire format.
@@ -620,6 +696,12 @@ mod tests {
                 HardIncompat::SyncApiWithAsyncCaller,
                 "sync_api_with_async_caller",
             ),
+            (
+                HardIncompat::ClusterLocalInGlobal,
+                "cluster_local_in_global",
+            ),
+            (HardIncompat::PullInPushOnly, "pull_in_push_only"),
+            (HardIncompat::StatelessInStateful, "stateless_in_stateful"),
         ];
         for (variant, expected_kind) in cases {
             let json = serde_json::to_value(&variant).expect("serialize");
@@ -634,19 +716,30 @@ mod tests {
     // -- Catalog I.6 §D.13.15 (exhaustive): new tests -----------------
 
     /// Pin the variant count of `HardIncompat` to the canonical
-    /// 13 (7 base + 6 exhaustive §D.13.15). The 6 new variants are
-    /// architectural clashes widened from the partial initial set;
-    /// the catalog wraps them into a single test so a future
-    /// addition trips this test before it lands in production.
+    /// 16 (7 base + 6 exhaustive §D.13.15 + 3 opt-in catalog).
+    /// The 6 §D.13.15 variants are architectural clashes widened
+    /// from the partial initial set; the 3 opt-in catalog variants
+    /// (`ClusterLocalInGlobal`, `PullInPushOnly`,
+    /// `StatelessInStateful`) are runtime-clash records reserved
+    /// for sub-fases that want the surface without expanding the
+    /// tag-pair matrix. The catalog wraps them into a single test
+    /// so a future addition trips this test before it lands in
+    /// production.
     #[test]
-    fn hard_incompat_exhaustive_variants_count_is_13() {
+    fn hard_incompat_exhaustive_variants_count_is_16() {
         let catalog = HardIncompat::from_catalog();
         assert_eq!(
             catalog.len(),
             6,
             "from_catalog must return the 6 exhaustive §D.13.15 variants"
         );
-        // Build the full set: 7 base + 6 exhaustive = 13.
+        let opt_in = HardIncompat::from_opt_in_catalog();
+        assert_eq!(
+            opt_in.len(),
+            3,
+            "from_opt_in_catalog must return the 3 opt-in catalog variants"
+        );
+        // Build the full set: 7 base + 6 exhaustive + 3 opt-in = 16.
         let mut all: Vec<HardIncompat> = vec![
             HardIncompat::LanguageToolchainMismatch {
                 lang: "rust".into(),
@@ -677,10 +770,11 @@ mod tests {
             },
         ];
         all.extend(catalog);
+        all.extend(opt_in);
         assert_eq!(
             all.len(),
-            13,
-            "HardIncompat must have 13 variants (7 base + 6 §D.13.15 exhaustive)"
+            16,
+            "HardIncompat must have 16 variants (7 base + 6 §D.13.15 exhaustive + 3 opt-in catalog)"
         );
     }
 
@@ -702,5 +796,152 @@ mod tests {
                 HardIncompat::SyncApiWithAsyncCaller,
             ]
         );
+    }
+
+    // -- Catalog I.6 (opt-in): new variants ----------------------------
+
+    /// `from_opt_in_catalog` returns the three opt-in variants
+    /// (`ClusterLocalInGlobal`, `PullInPushOnly`,
+    /// `StatelessInStateful`) in stable insertion order. Pin the
+    /// contents so documentation and test fixtures can rely on
+    /// the order without enumerating each variant by name.
+    #[test]
+    fn hard_incompat_from_opt_in_catalog_returns_canonical_list() {
+        let opt_in = HardIncompat::from_opt_in_catalog();
+        assert_eq!(
+            opt_in,
+            vec![
+                HardIncompat::ClusterLocalInGlobal,
+                HardIncompat::PullInPushOnly,
+                HardIncompat::StatelessInStateful,
+            ]
+        );
+    }
+
+    /// `ClusterLocalInGlobal` is a unit variant; the message
+    /// must mention both "cluster-local" and "global" so an
+    /// operator reading the sidecar can spot the asymmetry
+    /// without consulting the catalog. Stable wording pinned
+    /// for telemetry correlation.
+    #[test]
+    fn hard_incompat_explain_cluster_local_in_global() {
+        let h = HardIncompat::ClusterLocalInGlobal;
+        let msg = h.explain();
+        let lower = msg.to_lowercase();
+        assert!(
+            lower.contains("cluster") && lower.contains("local"),
+            "message must say 'cluster-local', got: {msg}"
+        );
+        assert!(
+            lower.contains("global"),
+            "message must say 'global', got: {msg}"
+        );
+    }
+
+    /// `PullInPushOnly` is a unit variant; the message must
+    /// mention "pull" and "push" so the disagreement is obvious
+    /// from the log line alone.
+    #[test]
+    fn hard_incompat_explain_pull_in_push_only() {
+        let h = HardIncompat::PullInPushOnly;
+        let msg = h.explain();
+        let lower = msg.to_lowercase();
+        assert!(lower.contains("pull"), "message must say 'pull': {msg}");
+        assert!(lower.contains("push"), "message must say 'push': {msg}");
+    }
+
+    /// `StatelessInStateful` is a unit variant; the message must
+    /// mention "stateless" and "stateful" so the mismatch is
+    /// visible to operators reading the sidecar.
+    #[test]
+    fn hard_incompat_explain_stateless_in_stateful() {
+        let h = HardIncompat::StatelessInStateful;
+        let msg = h.explain();
+        let lower = msg.to_lowercase();
+        assert!(
+            lower.contains("stateless"),
+            "message must say 'stateless': {msg}"
+        );
+        assert!(
+            lower.contains("stateful"),
+            "message must say 'stateful': {msg}"
+        );
+    }
+
+    /// Verify that valid proposal tag vectors do NOT trigger any of
+    /// the new opt-in catalog variants when scanned against the
+    /// tag-pair detector. The detector (`find_conflicts`) is
+    /// wired to the `HARD_INCOMPATIBILITIES` matrix
+    /// (proposal-03 §D.13.15), which does not reference the
+    /// three opt-in variants — those are unit records with no
+    /// tag-pair hook, so the detector can never surface them
+    /// today. A non-conflicting tag set must therefore report
+    /// `None` from `find_conflicts`, and the opt-in catalog
+    /// iterators must be disjoint from the §D.13.15 set so a
+    /// future sub-fase can adopt them without overlap. This
+    /// pins the opt-in contract: the variants exist as typed
+    /// records but are not surfaced by the default detector
+    /// until a sub-fase explicitly adds the rule.
+    #[test]
+    fn hard_incompat_opt_in_variants_do_not_trigger_on_valid_tags() {
+        // Valid cluster: monolith / sql / self_hosted / rust /
+        // pull_based / standard_protocol — no pair is in the
+        // §D.13.15 matrix.
+        let tags = [
+            "monolith",
+            "sql",
+            "self_hosted",
+            "rust",
+            "pull_based",
+            "standard_protocol",
+        ];
+        let borrowed: Vec<&str> = tags.to_vec();
+        assert!(
+            find_conflicts(&borrowed).is_empty(),
+            "valid tags must yield no conflict, got {:?}",
+            find_conflicts(&borrowed)
+        );
+        // Step 2: the opt-in catalog is disjoint from the §D.13.15
+        // catalog so a future sub-fase adopting the opt-in
+        // variants cannot accidentally double-fire a §D.13.15
+        // detection already in place.
+        let opt_in = HardIncompat::from_opt_in_catalog();
+        let canonical = HardIncompat::from_catalog();
+        for v in &opt_in {
+            assert!(
+                !canonical.contains(v),
+                "opt-in variant {v:?} must not appear in `from_catalog` output"
+            );
+        }
+        // Step 3: even a tag set chosen from `HARD_INCOMPATIBILITIES`
+        // triggers exactly one conflict (the pair from the matrix),
+        // never an opt-in variant: pin the no-surfacing contract.
+        assert!(
+            is_incompatible("monolith", "microservices"),
+            "matrix pair must still trigger"
+        );
+        let borrowed_conflicting: Vec<&str> = vec!["monolith", "microservices"];
+        let conflicts = find_conflicts(&borrowed_conflicting);
+        assert_eq!(conflicts.len(), 1, "exactly one conflict expected");
+        // The opt-in variants are unit records, so there is no
+        // direct way to "look them up" against a (a, b) pair;
+        // instead we assert that the conflict detector does not
+        // alias either side of the matrix pair to the new
+        // opt-in names.
+        let pair = conflicts[0];
+        for v in &opt_in {
+            assert!(
+                !matches!(v, HardIncompat::ClusterLocalInGlobal) || !pair.0.contains("cluster"),
+                "ClusterLocalInGlobal must not be triggered by matrix pair {pair:?}"
+            );
+            assert!(
+                !matches!(v, HardIncompat::PullInPushOnly) || !pair.0.contains("pull"),
+                "PullInPushOnly must not be triggered by matrix pair {pair:?}"
+            );
+            assert!(
+                !matches!(v, HardIncompat::StatelessInStateful) || !pair.0.contains("stateless"),
+                "StatelessInStateful must not be triggered by matrix pair {pair:?}"
+            );
+        }
     }
 }
