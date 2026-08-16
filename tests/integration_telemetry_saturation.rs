@@ -198,7 +198,7 @@ fn telemetry_mirrors_saturation_event_into_sqlite_and_jsonl() {
         let run_dir = home.run_dir(run_id);
         run_dir.ensure().unwrap();
         let db = moagan::storage::sqlite::Db::open(&home.meta_db_path()).unwrap();
-        db.register_run(run_id, "fast", "running", "0.7.2", None, None, None)
+        db.register_run(run_id, "fast", "running", "0.8.0", None, None, None)
             .unwrap();
         let t = Telemetry::open(
             run_id,

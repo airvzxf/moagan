@@ -623,7 +623,7 @@ use std::str::FromStr;
 fn seed_orphan_fixture(home: &MoaganHome) -> RunId {
     let db = Db::open(&home.meta_db_path()).unwrap();
     let run_id = RunId::new();
-    db.register_run(run_id, "fast", "running", "0.7.2", None, None, None)
+    db.register_run(run_id, "fast", "running", "0.8.0", None, None, None)
         .unwrap();
     db.record_call(
         "sweep-cli-call-1",
