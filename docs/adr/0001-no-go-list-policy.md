@@ -30,7 +30,7 @@ and a normative reference:
 
 | Crate        | Pinned version   | Target use                                            | Catalogue ref                                 |
 |--------------|------------------|-------------------------------------------------------|-----------------------------------------------|
-| `petgraph`   | `0.6` + `serde`  | DAG of phases (optional, only `deep` mode)            | §D.7.0 (T18-06 §0; T16-09 §7.2; T07-10 §1217) |
+| `petgraph`   | `0.6` + `serde`  | DAG of phases (optional, only `deep` mode)            | §D.2 (T18-06 §0; T16-09 §7.2; T07-10 §1217) |
 | `comfy-table`| `7.1`            | Pretty-printed CLI tables (`inspect`, `telemetry …`) | §D.14.23 (T12-09 §6.2; T20-06 §6.3)          |
 | `proptest`   | `1.4`            | Property-based testing for hashes and serialization   | §D.18.2 (T00-05 D20)                          |
 
@@ -73,12 +73,12 @@ guard-rails. Each verdict is enforceable by a CI guard in
   `--mode deep` is selected at runtime.
 - **Default build** (`cargo build` with no features) does **not**
   pull `petgraph`; the linear `phases/` vector from T01-06 stays the
-  default path (D.7.0 in `proposal-03-add-ons.md`).
+  default path (§D.2 in `proposal-03-add-ons.md`).
 - **Rationale**: T01-06 §3.6.2 + §3.5.2 already sketches the
   `DagNode` trait that wraps `petgraph`. Default-off keeps the
   release binary footprint unchanged and the no-go rule
   retro-compatible (no crate is added unless the operator opts in).
-- **Cost**: ~3 days (D.7.0 catalogue estimate). Value: real DAG
+- **Cost**: ~3 days (§D.2 catalogue estimate). Value: real DAG
   semantics, parallel-eligible phases, easier visualisation.
 
 ### D-2 — `comfy-table 7.1` → **DEFER to v0.9**
@@ -133,7 +133,7 @@ guard-rails. Each verdict is enforceable by a CI guard in
 - **`docs/adr/` exists** as a directory; future ADRs will follow
   the same template (Status / Date / Deciders / Context / Decision /
   Consequences / Re-evaluation).
-- The catalogue patches (§D.7.0, §D.14.23, §D.18.2) can be opened as
+- The catalogue patches (§D.2, §D.14.23, §D.18.2) can be opened as
   feature work in the order this ADR recommends: `proptest` first
   (dev-deps, lowest risk), `petgraph` second (gated, default-off),
   `comfy-table` last (post-v0.9).
@@ -210,7 +210,7 @@ A blanket prohibition would have foreclosed legitimate uses:
 
 ## Appendix B — Cross-references back to the catalogue
 
-- `petgraph`: `proposal-03-add-ons.md §D.7.0` (T18-06 §0,
+- `petgraph`: `proposal-03-add-ons.md §D.2` (T18-06 §0,
   T16-09 §7.2, T07-10 §1217). Note §D.3 specifies *"petgraph se
   usa como opcional; por defecto T01-06 mantiene su phases/
   vector (DAG solo en deep)"*.
