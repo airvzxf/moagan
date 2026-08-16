@@ -12,6 +12,8 @@ pub mod cardinality;
 pub mod clarify;
 pub mod cluster_proposals;
 pub mod critique;
+#[cfg(feature = "dag")]
+pub mod dag;
 pub mod decompose;
 pub mod deliver;
 pub mod discover_cluster;
@@ -46,6 +48,11 @@ pub use budget::{BudgetObserver, PressureLevel};
 pub use clarify::ClarifyPhase;
 pub use cluster_proposals::ClusterProposalsPhase;
 pub use critique::CritiquePhase;
+#[cfg(feature = "dag")]
+pub use dag::{
+    EdgeKind, PhaseGraph, PhaseId, build_dag_for_deep_mode, execute_dag, phase_node,
+    topological_layers,
+};
 pub use decompose::DecomposePhase;
 pub use deliver::DeliverPhase;
 pub use discover_cluster::DiscoverClusterPhase;
