@@ -261,6 +261,60 @@ async fn dispatch(
             &serde_json::to_vec(&graph).map_err(internal)?,
         ));
     }
+    // Cross-run diff view (D.17 dashboard extension). Accepts
+    // `?ids=uuid1,uuid2[,uuid3,...]` and returns per-run slices
+    // plus the cross-run diff (max/min duration, max error
+    // count, per-provider token totals, per-provider error
+    // rates). Reuses [`Db::compare_runs`]; the 400/404 paths are
+    // pinned here so the SQLite helper stays purely
+    // aggregation-focused.
+    if path == "/api/compare-runs" {
+        let ids = parse_query_csv(query, "ids");
+        if ids.len() < 2 {
+            return Err((
+                400,
+                format!("compare-runs requires at least 2 ids (got {})", ids.len()),
+            ));
+        }
+        let mut run_ids: Vec<RunId> = Vec::with_capacity(ids.len());
+        for raw in &ids {
+            let parsed: RunId = raw
+                .parse()
+                .map_err(|e| (400, format!("invalid run id '{raw}': {e}")))?;
+            run_ids.push(parsed);
+        }
+        // 404 path: the SQLite helper silently skips missing
+        // runs from the per-provider breakdown, so we have to
+        // validate existence here before delegating.
+        for run_id in &run_ids {
+            if !db.has_run(*run_id).map_err(internal)? {
+                return Err((404, format!("run {run_id} not found")));
+            }
+        }
+        let response = db.compare_runs(&run_ids).map_err(internal)?;
+        return Ok(json_response(
+            200,
+            &serde_json::to_vec(&response).map_err(internal)?,
+        ));
+    }
+    // Cross-run rolling-window aggregate. Accepts an optional
+    // `since=YYYY-MM-DD` (calendar date, midnight UTC) and an
+    // optional `provider=NAME` filter. `since` defaults to
+    // seven days before the request; `provider` defaults to
+    // `None` (every provider in the window).
+    if path == "/api/aggregates" {
+        let now = crate::time::now_unix_secs();
+        let since_unix =
+            parse_query_since(query, "since").unwrap_or_else(|| now.saturating_sub(7 * 86_400));
+        let provider = parse_query_string(query, "provider");
+        let aggregate = db
+            .aggregates_window(since_unix, provider.as_deref())
+            .map_err(internal)?;
+        return Ok(json_response(
+            200,
+            &serde_json::to_vec(&aggregate).map_err(internal)?,
+        ));
+    }
     if let Some(rest) = path.strip_prefix("/api/runs/") {
         // /api/runs/<id>[/suffix]
         let (run_id_str, suffix) = match rest.split_once('/') {
@@ -448,6 +502,8 @@ moagan dashboard
 JSON endpoints:
   GET /api/runs
   GET /api/lineage
+  GET /api/compare-runs?ids=<uuid1>,<uuid2>[,<uuid3>,...]
+  GET /api/aggregates?since=YYYY-MM-DD&provider=<name>
   GET /api/runs/<id>
   GET /api/runs/<id>/phases
   GET /api/runs/<id>/calls
@@ -514,6 +570,53 @@ fn parse_query_u64(query: &str, key: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Pull a comma-separated string list from the query (e.g.
+/// `ids=a,b,c`). Empty / absent fields collapse to an empty
+/// `Vec`; empty segments (`ids=a,,b`) are skipped silently so a
+/// trailing comma doesn't 400 a benign request. Used by
+/// `/api/compare-runs` to parse the `ids` parameter.
+fn parse_query_csv(query: &str, key: &str) -> Vec<String> {
+    let raw = parse_query_string(query, key).unwrap_or_default();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Pull a single string field from the query. Returns `None`
+/// when the field is absent. Used by `/api/aggregates` for the
+/// `provider` filter and by `/api/compare-runs` for the `ids`
+/// raw value (before CSV splitting).
+fn parse_query_string(query: &str, key: &str) -> Option<String> {
+    for part in query.split('&') {
+        let (k, v) = match part.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => continue,
+        };
+        if k == key {
+            return Some(v.to_owned());
+        }
+    }
+    None
+}
+
+/// Parse a `since` query field as either a unix timestamp
+/// (`1700000000`) or an ISO calendar date (`YYYY-MM-DD`,
+/// midnight UTC). Returns `None` when the field is absent or
+/// malformed; the dashboard's `/api/aggregates` endpoint falls
+/// back to "7 days ago" in that case. Mirrors the
+/// `parse_since` helper used by `moagan telemetry cleanup`.
+fn parse_query_since(query: &str, key: &str) -> Option<i64> {
+    let raw = parse_query_string(query, key)?;
+    if let Ok(secs) = raw.parse::<i64>() {
+        return Some(secs);
+    }
+    let date = chrono::NaiveDate::parse_from_str(&raw, "%Y-%m-%d").ok()?;
+    let datetime = date.and_hms_opt(0, 0, 0)?;
+    Some(datetime.and_utc().timestamp())
 }
 
 fn parse_query_export_level(query: &str) -> Result<ExportLevel> {
@@ -1051,5 +1154,398 @@ mod tests {
         expected_nodes.sort();
         actual_nodes.sort();
         assert_eq!(actual_nodes, expected_nodes);
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-run analytics endpoints (D.17 dashboard extension).
+    //
+    // Each test seeds 2–3 runs through the SQLite index, hits
+    // `dispatch(...)` directly, and asserts on the JSON body the
+    // dashboard SPA would consume. The unit tests for the
+    // `compare_runs` / `aggregates_window` helpers live next to
+    // the implementations in `src/storage/sqlite.rs`.
+    // -----------------------------------------------------------------
+
+    /// Seed one call row for `run_id`. Mirrors the
+    /// `src/storage/sqlite.rs::tests::seed_call` helper but
+    /// keeps the dashboard tests self-contained so a
+    /// future refactor of the test helper does not cascade
+    /// through the dashboard module.
+    #[allow(clippy::too_many_arguments)]
+    fn seed_dashboard_call(
+        db: &crate::storage::sqlite::Db,
+        call_id: &str,
+        run_id: RunId,
+        phase: &str,
+        provider: &str,
+        model: &str,
+        http_status: Option<u16>,
+        input_tokens: u64,
+        output_tokens: u64,
+        started_unix: i64,
+        ended_unix: i64,
+        error: Option<&str>,
+    ) {
+        db.record_call(
+            call_id,
+            run_id,
+            phase,
+            phase,
+            provider,
+            model,
+            &format!("ck-{call_id}"),
+            Some(&format!("sha-{call_id}")),
+            false,
+            http_status.map(i64::from),
+            input_tokens,
+            output_tokens,
+            0,
+            0,
+            started_unix,
+            ended_unix,
+            error,
+            0,
+        )
+        .unwrap();
+    }
+
+    /// Backdate `runs.created_unix` / `runs.updated_unix` so a
+    /// test can pin `avg_duration_secs` without racing the
+    /// wall clock. Internal helper used only by the
+    /// cross-run aggregate tests below.
+    fn backdate_run(
+        db: &crate::storage::sqlite::Db,
+        run_id: RunId,
+        created_unix: i64,
+        updated_unix: i64,
+    ) {
+        let conn = db.connection().unwrap();
+        conn.execute(
+            "UPDATE runs SET created_unix = ?, updated_unix = ? WHERE run_id = ?",
+            rusqlite::params![created_unix, updated_unix, run_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    /// /api/compare-runs returns the diff for two seeded runs:
+    /// the response carries one entry per requested id (in the
+    /// input order), the shared provider intersection, and the
+    /// cross-run diff.
+    #[tokio::test]
+    async fn dashboard_compare_runs_returns_diff_for_two_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let db = open_db(&cfg).unwrap();
+        let a = RunId::new();
+        let b = RunId::new();
+        db.register_run(a, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        db.register_run(b, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        backdate_run(&db, a, 1_000, 1_100);
+        backdate_run(&db, b, 2_000, 2_250);
+        seed_dashboard_call(
+            &db,
+            "a1",
+            a,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            100,
+            50,
+            10,
+            11,
+            None,
+        );
+        seed_dashboard_call(
+            &db,
+            "a2",
+            a,
+            "intake",
+            "minimax",
+            "M3",
+            Some(500),
+            0,
+            0,
+            20,
+            21,
+            Some("server error"),
+        );
+        seed_dashboard_call(
+            &db,
+            "b1",
+            b,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            200,
+            80,
+            30,
+            31,
+            None,
+        );
+        seed_dashboard_call(
+            &db,
+            "b2",
+            b,
+            "rank",
+            "opencode_go",
+            "gpt-4o",
+            Some(200),
+            300,
+            120,
+            40,
+            41,
+            None,
+        );
+
+        let query = format!("ids={},{}", a, b);
+        let resp = dispatch("/api/compare-runs", &query, &cfg).await.unwrap();
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(v["runs"].as_array().unwrap().len(), 2);
+        assert_eq!(v["shared_providers"], serde_json::json!(["minimax"]));
+        assert_eq!(v["diff"]["max_duration_secs"], 250);
+        assert_eq!(v["diff"]["min_duration_secs"], 100);
+        assert_eq!(v["diff"]["max_error_calls"], 1);
+        // Run A: 100+50=150 (minimax). Run B: 200+80=280
+        // (minimax) + 300+120=420 (opencode_go). minimax union
+        // = 150 + 280 = 430.
+        assert_eq!(v["diff"]["provider_token_total"]["minimax"], 430);
+        assert_eq!(v["diff"]["provider_token_total"]["opencode_go"], 420);
+    }
+
+    /// /api/compare-runs returns 400 when fewer than two ids
+    /// are supplied (the SQLite helper stays safe with `< 2`
+    /// but the dashboard surfaces the early 400).
+    #[tokio::test]
+    async fn dashboard_compare_runs_too_few_ids_returns_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let only = RunId::new();
+        let resp = dispatch("/api/compare-runs", &format!("ids={only}"), &cfg)
+            .await
+            .unwrap_err();
+        assert_eq!(resp.0, 400);
+        assert!(resp.1.contains("at least 2"));
+    }
+
+    /// /api/compare-runs returns 400 when one of the ids is
+    /// not a valid UUID.
+    #[tokio::test]
+    async fn dashboard_compare_runs_invalid_uuid_returns_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let valid = RunId::new();
+        let resp = dispatch(
+            "/api/compare-runs",
+            &format!("ids={valid},not-a-uuid"),
+            &cfg,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(resp.0, 400);
+        assert!(resp.1.contains("invalid run id"));
+    }
+
+    /// /api/compare-runs returns 404 when any of the ids does
+    /// not exist in the `runs` table. The dashboard catches
+    /// the missing id BEFORE delegating to the SQLite helper
+    /// so the operator gets a precise 404 with the missing
+    /// run id in the message.
+    #[tokio::test]
+    async fn dashboard_compare_runs_missing_id_returns_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let db = open_db(&cfg).unwrap();
+        let a = RunId::new();
+        db.register_run(a, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        let missing = RunId::new(); // not registered
+        let resp = dispatch("/api/compare-runs", &format!("ids={a},{missing}"), &cfg)
+            .await
+            .unwrap_err();
+        assert_eq!(resp.0, 404);
+        assert!(resp.1.contains(&missing.to_string()));
+    }
+
+    /// /api/aggregates (no filters) defaults to a 7-day window
+    /// starting from `now - 7 * 86_400`. With no seeded
+    /// calls the response carries zero counters and a
+    /// `provider: null` field.
+    #[tokio::test]
+    async fn dashboard_aggregates_default_window_returns_zero_counters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let before = crate::time::now_unix_secs();
+        let resp = dispatch("/api/aggregates", "", &cfg).await.unwrap();
+        let after = crate::time::now_unix_secs();
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(v["total_runs"], 0);
+        assert_eq!(v["total_calls"], 0);
+        assert_eq!(v["total_tokens"], 0);
+        assert_eq!(v["p50_latency_ms"], 0.0);
+        assert_eq!(v["p95_latency_ms"], 0.0);
+        assert_eq!(v["p99_latency_ms"], 0.0);
+        assert_eq!(v["error_rate"], 0.0);
+        assert!(v["provider"].is_null());
+        // The default `since_unix` is `now - 7 days`. The
+        // handler snapshots `now` once when it processes the
+        // request; pin the lower bound at `before - 7*86400`
+        // and the upper bound at `after - 7*86400` so a tiny
+        // wall-clock drift between the snapshot and the test
+        // does not flake.
+        let since = v["since_unix"].as_i64().unwrap();
+        let seven_days = 7_i64 * 86_400;
+        assert!(
+            since >= before - seven_days - 1 && since <= after - seven_days + 1,
+            "since_unix should land within 1s of now-7d; got before={before} after={after} since={since}"
+        );
+    }
+
+    /// /api/aggregates with `since=YYYY-MM-DD` parses the date
+    /// at midnight UTC and counts every run whose
+    /// `created_unix >= since`.
+    #[tokio::test]
+    async fn dashboard_aggregates_since_date_picks_up_seeded_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let db = open_db(&cfg).unwrap();
+        let run = RunId::new();
+        db.register_run(run, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        // Backdate to 2026-01-15 (unix 1_768_483_200).
+        let created = 1_768_483_200_i64;
+        backdate_run(&db, run, created, created + 100);
+        seed_dashboard_call(
+            &db,
+            "c1",
+            run,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            50,
+            25,
+            created + 1,
+            created + 2,
+            None,
+        );
+
+        let resp = dispatch("/api/aggregates", "since=2026-01-01", &cfg)
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(v["total_runs"], 1);
+        assert_eq!(v["total_calls"], 1);
+        assert_eq!(v["total_tokens"], 75);
+        assert_eq!(
+            v["since_unix"],
+            chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .timestamp()
+        );
+    }
+
+    /// /api/aggregates with `provider=NAME` narrows the
+    /// `total_calls` and `total_runs` to the matching slice.
+    #[tokio::test]
+    async fn dashboard_aggregates_provider_filter_narrows_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = stub_cfg(&tmp);
+        let db = open_db(&cfg).unwrap();
+        let run = RunId::new();
+        db.register_run(run, "fast", "completed", "0.8.0", None, None, None)
+            .unwrap();
+        backdate_run(&db, run, 1_000, 1_050);
+        seed_dashboard_call(
+            &db,
+            "m1",
+            run,
+            "intake",
+            "minimax",
+            "M3",
+            Some(200),
+            10,
+            5,
+            1_000,
+            1_001,
+            None,
+        );
+        seed_dashboard_call(
+            &db,
+            "o1",
+            run,
+            "intake",
+            "opencode_go",
+            "gpt-4o",
+            Some(200),
+            20,
+            10,
+            1_002,
+            1_003,
+            None,
+        );
+        let resp = dispatch("/api/aggregates", "since=1970-01-01&provider=minimax", &cfg)
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(v["provider"], "minimax");
+        assert_eq!(v["total_calls"], 1);
+        assert_eq!(v["total_tokens"], 15);
+    }
+
+    /// `parse_query_csv` is the parser the dashboard uses for
+    /// `?ids=a,b,c`; pinning its behaviour guards against an
+    /// off-by-one in the trimming / empty-segment filter.
+    #[test]
+    fn dashboard_parse_query_csv_handles_edge_cases() {
+        // Two ids, normal case.
+        assert_eq!(
+            parse_query_csv("ids=a,b", "ids"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // Trailing comma must not produce an empty segment
+        // (operators frequently leave a trailing comma when
+        // scripting).
+        assert_eq!(
+            parse_query_csv("ids=a,b,", "ids"),
+            vec!["a".to_string(), "b".to_string()],
+            "trailing comma must collapse to a single segment"
+        );
+        // Whitespace around each id is trimmed (operators
+        // sometimes paste with surrounding spaces).
+        assert_eq!(
+            parse_query_csv("ids= a , b ", "ids"),
+            vec!["a".to_string(), "b".to_string()],
+            "leading/trailing whitespace must be trimmed"
+        );
+        // Absent key returns empty vec.
+        assert!(parse_query_csv("limit=10", "ids").is_empty());
+    }
+
+    /// `parse_query_since` accepts both unix timestamps and
+    /// ISO calendar dates. The dashboard relies on the
+    /// calendar branch for human-readable URLs.
+    #[test]
+    fn dashboard_parse_query_since_accepts_unix_and_iso() {
+        assert_eq!(parse_query_since("", "since"), None);
+        assert_eq!(
+            parse_query_since("since=1700000000", "since"),
+            Some(1_700_000_000)
+        );
+        let iso = parse_query_since("since=2026-01-15", "since").unwrap();
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-01-15T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(iso, expected);
+        // Garbage returns None so the dashboard falls back
+        // to the 7-day default.
+        assert_eq!(parse_query_since("since=not-a-date", "since"), None);
     }
 }
