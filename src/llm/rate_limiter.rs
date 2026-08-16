@@ -115,6 +115,19 @@ impl RateLimiter {
         let mut g = self.inner.lock();
         g.tokens = (g.tokens + 1.0).min(g.capacity as f64);
     }
+
+    /// Configured bucket capacity. Used by the push-side saturation
+    /// hook to populate the structured `details` payload that the
+    /// `moagan telemetry alerts list` consumer renders.
+    pub fn capacity(&self) -> u32 {
+        self.inner.lock().capacity
+    }
+
+    /// Configured refill rate (tokens per second). Companion to
+    /// [`Self::capacity`]; same wire purpose (catalog §D.23).
+    pub fn refill_per_sec(&self) -> u32 {
+        self.inner.lock().refill_per_sec
+    }
 }
 
 impl Inner {

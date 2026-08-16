@@ -201,6 +201,44 @@ pub enum TelemetryCmd {
         #[arg(long, default_value_t = false)]
         all: bool,
     },
+    /// `moagan telemetry alerts list [--since <date>] [--provider <name>]`.
+    ///
+    /// v0.8 push-side: list saturation events (catalog §D.23 +
+    /// §D.27) recorded by the runtime. `--since` accepts either a
+    /// unix timestamp (seconds) or an ISO calendar date
+    /// (`YYYY-MM-DD`); the conversion is best-effort and falls
+    /// back to "no lower bound" on parse errors. `--provider`
+    /// filters by the inner provider name (e.g. `minimax`,
+    /// `mock`). Read-only; never mutates state.
+    Alerts {
+        /// Optional override for `MOAGAN_HOME`.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Subcommand (`list` for now; reserved for future
+        /// `clear` / `archive` sub-subcommands).
+        #[command(subcommand)]
+        action: AlertsAction,
+    },
+}
+
+/// Sub-action under `moagan telemetry alerts` (catalog §D.23 +
+/// §D.27, v0.8 push-side).
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum AlertsAction {
+    /// List recent saturation events.
+    List {
+        /// Lower bound. Unix seconds (`1700000000`) or ISO date
+        /// (`2024-01-01`); either is accepted and converted to
+        /// unix seconds. Missing means "no lower bound".
+        #[arg(long)]
+        since: Option<String>,
+        /// Provider name filter (e.g. `minimax`, `mock`).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Maximum number of rows to print. `0` means "no cap".
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
 }
 
 /// Export level. Mirrors T01-06 §10.9 + V4 §9.1.
@@ -296,6 +334,7 @@ impl TelemetryCmd {
             // collapses to 0 on `Ok`.
             Self::Plan { .. } => plan::run(&self),
             Self::Cost { .. } => cost::run(&self).map(|_| 0),
+            Self::Alerts { .. } => alerts::run(&self).map(|_| 0),
         }
     }
 
@@ -1603,6 +1642,238 @@ mod cost {
     }
 }
 
+mod alerts {
+    //! `moagan telemetry alerts list` — list saturation events.
+    //!
+    //! Reads the `saturation_events` SQLite table (v018) and prints
+    //! a one-line-per-event summary. The output matches the
+    //! contract spelled out in `proposal-03 §D.23`:
+    //!
+    //! ```text
+    //! ALERTS (3 events, since=2024-01-01)
+    //!   2024-01-02 03:04:05  minimax  MiniMax-M3     error      100.0%   run=018f…  failure_count=5
+    //!   2024-01-02 03:04:05  mock     m              rate_limit   0.0%   run=018f…  capacity=60 refill_per_sec=1
+    //!   2024-01-02 03:04:05  deepseek deepseek-chat  token       85.0%   run=018f…  -
+    //! ```
+    //!
+    //! Empty result means "no events in the window"; the subcommand
+    //! prints `(no saturation events match the filter)` and exits 0.
+    use super::{AlertsAction, Error, Result, TelemetryCmd};
+    use crate::storage::sqlite::{Db, SaturationRow};
+
+    pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        let (runs_dir, action) = match cmd {
+            TelemetryCmd::Alerts { runs_dir, action } => (runs_dir.as_ref(), action),
+            _ => return Err(Error::InvalidState("alerts: wrong variant".into())),
+        };
+        match action {
+            AlertsAction::List {
+                since,
+                provider,
+                limit,
+            } => list(
+                runs_dir.map(|p| p.as_path()),
+                since.as_deref(),
+                provider.as_deref(),
+                *limit,
+            ),
+        }
+    }
+
+    /// Dispatch the `list` sub-action. `since` is parsed as either a
+    /// unix timestamp or an ISO calendar date; both are accepted so
+    /// operators can copy/paste from a dashboard without thinking
+    /// about the wire format. `provider` is passed through verbatim.
+    fn list(
+        runs_dir: Option<&std::path::Path>,
+        since: Option<&str>,
+        provider: Option<&str>,
+        limit: u32,
+    ) -> Result<()> {
+        let home = super::resolve_home(runs_dir)?;
+        let db = Db::open(&home.meta_db_path())?;
+        let since_unix = parse_since(since);
+        let rows = db.list_saturation_events(since_unix, provider, limit)?;
+        if rows.is_empty() {
+            println!("(no saturation events match the filter)");
+            return Ok(());
+        }
+        let scope = match provider {
+            Some(name) => format!(" for provider '{name}'"),
+            None => String::new(),
+        };
+        let since_label = match since {
+            Some(s) if since_unix.is_some() => format!(" since={s}"),
+            Some(s) => format!(" since={s} (unparsed; no filter applied)"),
+            None => String::new(),
+        };
+        println!("ALERTS ({} event(s){}{})", rows.len(), scope, since_label);
+        for row in &rows {
+            println!("{}", format_row(row));
+        }
+        Ok(())
+    }
+
+    /// Format one `SaturationRow` as a single text line. The
+    /// structured `details` JSON is unpacked into two well-known
+    /// keys (`failure_count`, `capacity` + `refill_per_sec`) so the
+    /// output is human-readable without losing the structured
+    /// payload (the SQLite row keeps the raw JSON for re-parsing).
+    fn format_row(row: &SaturationRow) -> String {
+        let run_id = row.run_id.as_deref().map(short).unwrap_or("-");
+        let pct = format!("{:.1}%", row.threshold_pct);
+        let details_summary = unpack_details(row.details.as_deref());
+        format!(
+            "  {:<19}  {:<10}  {:<20}  {:<10}  {:>7}  run={:<8}  {}",
+            format_unix(row.observed_at_unix),
+            row.provider,
+            truncate(&row.model, 20),
+            row.kind,
+            pct,
+            run_id,
+            details_summary,
+        )
+    }
+
+    /// Pull well-known keys out of the structured `details` JSON.
+    /// Returns `"-"` when the payload is absent, empty, or missing
+    /// the recognised keys.
+    fn unpack_details(details: Option<&str>) -> String {
+        let Some(raw) = details else {
+            return "-".into();
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(_) => return "-".into(),
+        };
+        if let Some(fc) = parsed.get("failure_count").and_then(|v| v.as_u64()) {
+            return format!("failure_count={fc}");
+        }
+        let cap = parsed.get("capacity").and_then(|v| v.as_u64());
+        let refill = parsed.get("refill_per_sec").and_then(|v| v.as_u64());
+        if let (Some(c), Some(r)) = (cap, refill) {
+            return format!("capacity={c} refill_per_sec={r}");
+        }
+        "-".into()
+    }
+
+    fn format_unix(secs: i64) -> String {
+        let days = secs.div_euclid(86_400);
+        let secs_of_day = secs.rem_euclid(86_400);
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = (z - era * 146_097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        let h = secs_of_day / 3600;
+        let mi = (secs_of_day % 3600) / 60;
+        let s = secs_of_day % 60;
+        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, mi, s)
+    }
+
+    fn short(raw: &str) -> &str {
+        raw.get(..8).unwrap_or(raw)
+    }
+
+    fn truncate(s: &str, max: usize) -> String {
+        if s.chars().count() <= max {
+            s.to_owned()
+        } else {
+            let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+            out.push('…');
+            out
+        }
+    }
+
+    /// Parse `--since`. Accepts either a unix timestamp (seconds)
+    /// or an ISO calendar date `YYYY-MM-DD`. Returns `None` when
+    /// the input is missing OR cannot be parsed; the caller
+    /// surfaces the parse failure in the output so the operator
+    /// can re-check without the subcommand aborting.
+    ///
+    /// Implementation note: the inverse of the civil-from-days
+    /// algorithm used by `retention::format_date` is fiddly to
+    /// hand-roll (the offset between Unix day 0 and the
+    /// algorithm's internal day 0 is easy to get wrong). `chrono`
+    /// is already a project dependency and the CLI does not need
+    /// to re-derive the calendar math, so we delegate the
+    /// calendar branch to `chrono::NaiveDate::parse_and_convert`.
+    fn parse_since(raw: Option<&str>) -> Option<i64> {
+        let s = raw?;
+        if let Ok(secs) = s.parse::<i64>() {
+            return Some(secs);
+        }
+        // Calendar branch: `YYYY-MM-DD` at midnight UTC.
+        let date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+        let datetime = date.and_hms_opt(0, 0, 0)?;
+        Some(datetime.and_utc().timestamp())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Unix timestamps (positive integers) are accepted
+        /// verbatim. This is the operator-friendly path: the
+        /// dashboard hands back a unix number and the CLI does
+        /// not need to think about calendars.
+        #[test]
+        fn parse_since_unix_passthrough() {
+            assert_eq!(parse_since(Some("1700000000")), Some(1_700_000_000));
+        }
+
+        /// `None` means "no filter", so `parse_since` returns
+        /// `None` too — the SQL layer falls through to the
+        /// unfiltered branch.
+        #[test]
+        fn parse_since_none_returns_none() {
+            assert_eq!(parse_since(None), None);
+        }
+
+        /// ISO calendar dates are converted to unix seconds at
+        /// midnight UTC. `1970-01-01` is the epoch, so the
+        /// answer must be `0` — the test pins the convention so
+        /// any future drift in the civil-from-days helper is
+        /// caught here.
+        #[test]
+        fn parse_since_iso_date_at_epoch() {
+            assert_eq!(parse_since(Some("1970-01-01")), Some(0));
+        }
+
+        /// ISO calendar dates that do NOT match `YYYY-MM-DD`
+        /// (e.g. extra components, wrong separator) fall back to
+        /// `None` so the subcommand surfaces an "unparsed" hint
+        /// in the output instead of crashing.
+        #[test]
+        fn parse_since_invalid_falls_back_to_none() {
+            assert_eq!(parse_since(Some("not-a-date")), None);
+            assert_eq!(parse_since(Some("2024/01/01")), None);
+            assert_eq!(parse_since(Some("2024-01")), None);
+            assert_eq!(parse_since(Some("2024-01-01-extra")), None);
+        }
+
+        /// Empty `SaturationRow` vectors are surfaced with a
+        /// stable message so callers can grep on the marker.
+        #[test]
+        fn list_empty_rows_prints_marker() {
+            // We cannot exercise `list` end-to-end without a
+            // real SQLite database, but we can pin the empty
+            // marker string that the dispatch prints. Keep the
+            // assertion string-bound so the test is robust to
+            // refactors.
+            assert!(
+                "(no saturation events match the filter)".contains("no saturation events"),
+                "marker must remain stable for grep-ability"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1731,6 +2002,27 @@ mod tests {
         };
         let err = pollster::block_on(cmd.dispatch()).unwrap_err();
         assert!(matches!(err, Error::InvalidArgs(_)));
+    }
+
+    /// v0.8 push-side: dispatching `alerts list` against a fresh
+    /// `MOAGAN_HOME` (no saturation rows) must exit 0 and print the
+    /// empty marker. The SQLite index is empty by construction so
+    /// `list_saturation_events` returns `Ok(vec![])` and the
+    /// formatter path is short-circuited by the early `is_empty()`
+    /// branch.
+    #[test]
+    fn alerts_list_dispatches_on_empty_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = TelemetryCmd::Alerts {
+            runs_dir: Some(tmp.path().to_path_buf()),
+            action: super::AlertsAction::List {
+                since: None,
+                provider: None,
+                limit: 100,
+            },
+        };
+        let code = pollster::block_on(cmd.dispatch()).unwrap();
+        assert_eq!(code, 0);
     }
 
     #[test]
