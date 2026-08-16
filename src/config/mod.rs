@@ -272,6 +272,38 @@ pub struct Config {
     /// asking for SHA-256 in the export sidecar.
     #[serde(default)]
     pub export: ExportConfig,
+    /// B#18 / D.1.3 follow-up: embedder wiring. Default empty —
+    /// `cluster_by_embedder` keeps using the dependency-free
+    /// `HashingEmbedder`. Operators opt into the network-backed
+    /// adapter by populating `[embedder.remote]` in
+    /// `~/.config/moagan/config.toml` (or via the matching
+    /// `MOAGAN_EMBEDDER_REMOTE_*` env vars applied at
+    /// construction time). The section is `Option`-shaped so a
+    /// missing `[embedder]` block keeps every existing run
+    /// bit-identical.
+    #[serde(default)]
+    pub embedder: EmbedderConfig,
+}
+
+/// B#18 / D.1.3 follow-up: knobs for the optional remote embedding
+/// adapter. Default empty (`None`) so the `cluster_by_embedder`
+/// phase keeps using [`crate::llm::embed::HashingEmbedder`] and the
+/// wire format stays dependency-free. Operators opt into the network
+/// path by populating `embedder.remote` in
+/// `~/.config/moagan/config.toml`.
+///
+/// Compliance: catalog 10-integrada-v0 §D.1.3.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmbedderConfig {
+    /// Network-backed embedding adapter config. `None` means the
+    /// hashing embedder stays in charge (the v0.7 default). The
+    /// keys are NOT serialized to `manifest.json` or any audit
+    /// sidecar — only the env-var *name* lives in the config;
+    /// the actual key is read from `std::env::var(...)` at
+    /// adapter construction time and wrapped in
+    /// [`crate::secret::SecretString`].
+    pub remote: Option<crate::llm::embed::RemoteEmbedderConfig>,
 }
 
 /// Export-side knobs. Mirrors `crate::cli::flags_batch::HashAlgo`
@@ -724,6 +756,7 @@ impl Default for Config {
             discovery_matrix: DiscoveryMatrixConfig::default(),
             export: ExportConfig::default(),
             selection_plan: default_selection_plan(),
+            embedder: EmbedderConfig::default(),
         }
     }
 }
