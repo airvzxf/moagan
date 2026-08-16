@@ -102,6 +102,25 @@ re-runs of the same job.
 - No Anthropic SDK crates (`anthropic-*`, `claude-*`).
 - No `secrecy` crate (use `moagan::secret::SecretString` with `zeroize`).
 - No `axum`, `hyper`, `sqlx`, `governor`, `figment`, `refinery`, `askama`, `handlebars`, `lettre`, `inquire`, `time` crate.
+- No `comfy-table` crate (deferred to v0.9; see
+  [`docs/adr/0001-no-go-list-policy.md`](docs/adr/0001-no-go-list-policy.md)).
 - No mutable globals, no `lazy_static`, no `Mutex<Option<T>>` for state.
 - No `tokio::spawn` without a `JoinHandle` recorded or a `CancellationToken` parent.
 - No secret literals in code, CLI flags, or committed config files.
+
+## Differentiated allow-list (supersedes the blanket prohibition)
+
+Two crates that were historically on the no-go list have explicit
+allow-list entries, each guarded by a CI check
+([`scripts/check-no-forbidden-crates.sh`](scripts/check-no-forbidden-crates.sh)).
+See [`docs/adr/0001-no-go-list-policy.md`](docs/adr/0001-no-go-list-policy.md)
+for the full rationale.
+
+- **`petgraph 0.6` + `serde`**: allowed **only** under
+  `[dependencies]` with `optional = true` (Cargo feature `dag`).
+  Default build (`cargo build` with no features) does **not** pull
+  the crate; the linear `phases/` vector stays the default path.
+  Bare `petgraph = "0.6"` (non-optional) is rejected.
+- **`proptest 1.4`**: allowed **only** under `[dev-dependencies]`.
+  A `[dependencies]` row for `proptest` is rejected. The crate does
+  not enter the release binary.
