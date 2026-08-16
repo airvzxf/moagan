@@ -100,6 +100,20 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
+        // A#11: discovery-mode LLM-as-judge used by
+        // `discover_contradict`. Deterministic (T=0.0) so two
+        // runs over the same `(focal, candidates)` set produce
+        // identical findings — the cluster-snapshot diffability
+        // the rest of the discovery pipeline relies on.
+        // top_p=0.2 leaves a minimal headroom for tokens the
+        // JSON-mode prompt cannot pin down (e.g. the wording of
+        // `evidence`).
+        Role::ContradictionJudge => Some(RoleSettings {
+            temperature: 0.0,
+            top_p: 0.2,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            json_mode: true,
+        }),
         _ => None,
     }
 }
@@ -131,6 +145,7 @@ const FINAL_DISAGREEMENT_PROMPT: &str = include_str!("prompts/final_disagreement
 const JSON_REPAIR_V2_PROMPT: &str = include_str!("prompts/json_repair_v2.md");
 const HOSTILE_PROMPT_DETECTOR_PROMPT: &str = include_str!("prompts/hostile_prompt_detector.md");
 const CONTINUATION_PROMPT: &str = include_str!("prompts/continuation.md");
+const CONTRADICTION_JUDGE_PROMPT: &str = include_str!("prompts/contradiction_judge.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -167,6 +182,7 @@ pub fn prompt_set_hash() -> String {
                 JSON_REPAIR_V2_PROMPT,
                 HOSTILE_PROMPT_DETECTOR_PROMPT,
                 CONTINUATION_PROMPT,
+                CONTRADICTION_JUDGE_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -203,6 +219,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::JsonRepairV2 => JSON_REPAIR_V2_PROMPT,
         Role::HostilePromptDetector => HOSTILE_PROMPT_DETECTOR_PROMPT,
         Role::Continuation => CONTINUATION_PROMPT,
+        Role::ContradictionJudge => CONTRADICTION_JUDGE_PROMPT,
     }
 }
 
@@ -378,6 +395,28 @@ mod tests {
         // `${last_excerpt}` at runtime via
         // [`render_continuation_prompt`].
         assert!(!CONTINUATION_PROMPT.trim().is_empty());
+    }
+
+    /// A#11: the contradiction-judge prompt file ships
+    /// non-empty so the LLM-as-judge call lands on a real
+    /// prompt (not a `""` fallback that would confuse every
+    /// provider). The system prompt feeds
+    /// `discover_contradict::find_contradictions_against`.
+    #[test]
+    fn contradiction_judge_prompt_file_exists_and_is_non_empty() {
+        assert!(!CONTRADICTION_JUDGE_PROMPT.trim().is_empty());
+    }
+
+    /// A#11: the wire-form contract for the role is the JSON
+    /// `findings` array. Pin the prompt advertises that contract
+    /// so a future template copy-paste cannot regress it back
+    /// to prose.
+    #[test]
+    fn contradiction_judge_prompt_advertises_findings_contract() {
+        assert!(CONTRADICTION_JUDGE_PROMPT.contains("\"findings\""));
+        assert!(CONTRADICTION_JUDGE_PROMPT.contains("\"pair\""));
+        assert!(CONTRADICTION_JUDGE_PROMPT.contains("\"severity\""));
+        assert!(CONTRADICTION_JUDGE_PROMPT.contains("contradiction_judge.v1"));
     }
 
     /// PR-C2: the continuation prompt template must contain the
