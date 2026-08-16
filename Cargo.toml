@@ -16,7 +16,22 @@ path = "src/lib.rs"
 name = "moagan"
 path = "src/main.rs"
 
+[features]
+# ADR-0001 §D-1: `petgraph` is admitted only behind the `dag` Cargo feature
+# flag. Default build (`cargo build` with no features) does NOT pull
+# `petgraph`; the linear `phases/` vector from T01-06 stays the default
+# path. Only `--features dag` activates the optional DAG backend.
+# `scripts/check-no-forbidden-crates.sh` enforces the `optional = true`
+# form in `[dependencies]` and rejects a bare `petgraph = "0.6"` row.
+default = []
+dag = ["dep:petgraph"]
+
 [dependencies]
+# ADR-0001 §D-1: petgraph 0.6 with `serde` only; default features are
+# disabled so the default build does not pull `rayon`/`serde_derive`/etc.
+# transitively. `optional = true` keeps the crate out of the release
+# binary unless the operator opts into `--features dag`.
+petgraph = { version = "0.6", optional = true, default-features = false, features = ["serde"] }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

@@ -373,6 +373,43 @@ fn canonical_index_for(pipeline: &Pipeline, kind: PipelineKind) -> Result<BTreeM
     Ok(map)
 }
 
+/// Optional DAG-backed execution path. Activated only when the
+/// binary is compiled with `--features dag` AND the run is in
+/// [`crate::cli::Mode::Deep`].
+///
+/// ADR 0001 §D-1 admits `petgraph 0.6` behind a Cargo feature flag
+/// so the default build keeps the linear `phases/` vector as the
+/// canonical executor. When the operator opts in, this helper is
+/// the entry point the CLI dispatcher reaches for: it builds the
+/// deep-mode DAG via
+/// [`crate::phases::dag::build_dag_for_deep_mode`] and routes the
+/// phase set through [`crate::phases::dag::execute_dag`]. The
+/// linear `Pipeline::run` path is untouched on every other code
+/// path, which is what the regression guard in
+/// `tests/integration_petgraph_dag.rs` pins down.
+///
+/// Returns `None` when the feature is off OR the mode is not
+/// `deep` so the dispatcher falls through to the linear executor.
+/// The `Some` branch is a future that resolves to the same
+/// `Result<Vec<PhaseOutput>>` shape as the linear path.
+#[cfg(feature = "dag")]
+#[allow(clippy::type_complexity)]
+pub fn maybe_run_via_dag<'a>(
+    pipeline: &'a Pipeline,
+    ctx: &'a RunContext,
+) -> Option<
+    core::pin::Pin<Box<dyn core::future::Future<Output = Result<Vec<PhaseOutput>>> + Send + 'a>>,
+> {
+    if ctx.mode != "deep" {
+        return None;
+    }
+    let graph = crate::phases::dag::build_dag_for_deep_mode();
+    let phases = &pipeline.phases;
+    Some(Box::pin(async move {
+        crate::phases::dag::execute_dag(&graph, phases, ctx).await
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
