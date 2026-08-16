@@ -472,12 +472,13 @@ impl ResearchFetcher {
     }
 
     /// K.4 advanced: attach per-host retry / circuit-breaker
-    /// policies on top of the basic token bucket. Hosts that
-    /// appear only in `retry_map` inherit a default
-    /// [`HostRateLimiter`] without advanced features; hosts that
-    /// appear only in the rate-limit map (via
-    /// [`Self::with_per_host_rate_limit`]) keep their existing
-    /// advanced-free behaviour.
+    /// policies on top of the basic token bucket. The rate-limit
+    /// map is the source of truth — every host in it gets a
+    /// [`HostRateLimiter`], and any matching entry in `retry_map`
+    /// attaches the advanced state. Hosts that appear only in
+    /// `retry_map` (no matching rate-limit entry) are silently
+    /// dropped: there is no bucket to gate the retry / circuit
+    /// breaker against.
     #[allow(missing_docs)]
     pub fn with_per_host_retry(
         mut self,
