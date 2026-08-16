@@ -2,6 +2,10 @@
 //! an [`AdversaryPattern`] verdict it picks one of the seven
 //! [`RefineAction`] variants and routes the proposal through the
 //! matching refinement step. This module owns that routing.
+//! (The seven-variant action enum is unrelated to the
+//! twelve-variant adversary-pattern count; the two grew up on
+//! different timeline slices and the public contract pins each
+//! independently.)
 //!
 //! Spec contract:
 //!
