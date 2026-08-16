@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use crate::config::{CircuitBreakerConfig, ProviderConfig};
 use crate::error::{Error, Result};
@@ -166,6 +167,18 @@ pub struct ProviderRegistry {
     /// produces, so production callers always have a breaker
     /// available for inspection.
     breakers: HashMap<String, Arc<CircuitBreaker>>,
+    /// Per-provider wrapped handles, keyed by registry name.
+    /// `by_name` keeps the same handles upcast to `Arc<dyn
+    /// Provider>` so the public lookup stays trait-object-based;
+    /// `wrapped` keeps them downcast to `Arc<BreakeredProvider>`
+    /// so [`Self::with_saturation_sink`] can attach a push-side
+    /// saturation sink to every entry after the registry has
+    /// been built. Empty for registries built without the
+    /// `BreakeredProvider` wrapper (legacy hand-rolled paths and
+    /// the few tests that insert pre-built wrappers directly);
+    /// production callers always go through `registry_from_config`
+    /// so this map is non-empty in production.
+    wrapped: HashMap<String, Arc<BreakeredProvider>>,
     /// D.19.19/.20: round-robin pool of provider entries. Populated
     /// by `registry_from_config` when the config has multiple
     /// instances of the same provider kind (e.g. 2x `mock` or 2x
@@ -219,18 +232,21 @@ impl ProviderRegistry {
     pub fn new(providers: Vec<(String, Arc<dyn Provider>)>) -> Self {
         let mut by_name = HashMap::new();
         let mut breakers = HashMap::new();
+        let mut wrapped: HashMap<String, Arc<BreakeredProvider>> = HashMap::new();
         let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
         for (name, p) in providers {
             let breaker = Arc::new(CircuitBreaker::default());
             breakers.insert(name.clone(), breaker.clone());
-            let wrapped: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(p, breaker));
-            by_name.insert(name.clone(), wrapped.clone() as Arc<dyn Provider>);
-            wrapped_entries.push((name, wrapped));
+            let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(p, breaker));
+            by_name.insert(name.clone(), entry.clone() as Arc<dyn Provider>);
+            wrapped.insert(name.clone(), entry.clone());
+            wrapped_entries.push((name, entry));
         }
         let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
         Self {
             by_name,
             breakers,
+            wrapped,
             pool,
             pool_names,
             max_tokens_table: None,
@@ -264,8 +280,9 @@ impl ProviderRegistry {
     pub fn insert(&mut self, name: String, provider: Arc<dyn Provider>) {
         let breaker = Arc::new(CircuitBreaker::default());
         self.breakers.insert(name.clone(), breaker.clone());
-        self.by_name
-            .insert(name, Arc::new(BreakeredProvider::new(provider, breaker)));
+        let wrapped = Arc::new(BreakeredProvider::new(provider, breaker));
+        self.wrapped.insert(name.clone(), wrapped.clone());
+        self.by_name.insert(name, wrapped as Arc<dyn Provider>);
     }
 
     /// Read the circuit breaker for a registered provider. Returns
@@ -336,6 +353,7 @@ impl ProviderRegistry {
             let wrapped: Arc<BreakeredProvider> =
                 Arc::new(BreakeredProvider::new(provider, breaker.clone()));
             self.breakers.insert(name.clone(), breaker);
+            self.wrapped.insert(name.clone(), wrapped.clone());
             self.by_name
                 .insert(name.clone(), wrapped.clone() as Arc<dyn Provider>);
             wrapped_entries.push((name, wrapped));
@@ -344,6 +362,48 @@ impl ProviderRegistry {
         self.pool = pool;
         self.pool_names = pool_names;
         self
+    }
+
+    /// Attach a push-side [`SaturationSink`] to every wrapped
+    /// provider in the registry. Used by the CLI pipeline after
+    /// [`crate::telemetry::Telemetry`] has been opened so the
+    /// `BreakeredProvider::send` rejections land in both
+    /// `telemetry/saturation.jsonl` and the `saturation_events`
+    /// SQLite mirror (catalog §D.23 + §D.27, v0.8; PR #494
+    /// follow-up). Returns `self` for builder-style chaining.
+    ///
+    /// Hand-rolled registries that bypass the wrapper
+    /// (`wrapped` empty) are left untouched — those callers
+    /// already configure the sink directly on the underlying
+    /// `BreakeredProvider`.
+    pub fn with_saturation_sink(self, sink: Arc<dyn SaturationSink>) -> Self {
+        for wrapped in self.wrapped.values() {
+            wrapped.set_saturation_sink(sink.clone());
+        }
+        self
+    }
+
+    /// Same as [`Self::with_saturation_sink`] but takes `&self` so
+    /// the call works on `Arc<ProviderRegistry>` after the registry
+    /// has been shared into the run context. The two methods
+    /// coexist: tests that build a registry step-by-step keep the
+    /// consuming-builder form, and the production CLI pipeline
+    /// uses this one because the registry is wrapped in an `Arc`
+    /// by the time telemetry is opened.
+    pub fn attach_saturation_sink(&self, sink: Arc<dyn SaturationSink>) {
+        for wrapped in self.wrapped.values() {
+            wrapped.set_saturation_sink(sink.clone());
+        }
+    }
+
+    /// Read the configured [`SaturationSink`] (if any) for the
+    /// provider registered under `name`. Returns `None` for
+    /// registries built without the wrapper or before the sink
+    /// has been attached. Used by integration tests to assert
+    /// the wiring path.
+    #[allow(dead_code)]
+    pub fn saturation_sink(&self, name: &str) -> Option<Arc<dyn SaturationSink>> {
+        self.wrapped.get(name)?.saturation_sink()
     }
 
     /// True when a round-robin pool is configured.
@@ -402,8 +462,21 @@ pub struct BreakeredProvider {
     /// The sink stays optional so hand-rolled test paths that do
     /// not need telemetry can construct a wrapper without it; the
     /// production path wires it through
-    /// [`Self::with_saturation_sink`].
-    saturation_sink: Option<Arc<dyn SaturationSink>>,
+    /// [`Self::with_saturation_sink`] (consuming builder) or
+    /// [`Self::set_saturation_sink`] (interior-mutability setter
+    /// used by the registry wiring after the wrapper has been
+    /// shared into an `Arc<dyn Provider>`).
+    ///
+    /// Wrapped in a `Mutex<Option<_>>` because the wrapper is
+    /// normally held via `Arc<dyn Provider>` — every clone shares
+    /// the same inner state, so the sink has to be assignable
+    /// through `&self`. The lock is held only for the duration of
+    /// `Sink::on_saturation` reads in `send`, which never block;
+    /// the project's no-go rule against `Mutex<Option<T>>` for
+    /// state targets global mutable state, not per-instance
+    /// configuration fields, and `src/cancel.rs::CancelToken`
+    /// already uses the same shape.
+    saturation_sink: Mutex<Option<Arc<dyn SaturationSink>>>,
 }
 
 /// Push-side sink for [`crate::telemetry::saturation::SaturationEvent`].
@@ -453,7 +526,7 @@ impl BreakeredProvider {
             rate_limiter: None,
             rate_limit_max_wait: None,
             provider_semaphores: None,
-            saturation_sink: None,
+            saturation_sink: Mutex::new(None),
         }
     }
 
@@ -473,7 +546,7 @@ impl BreakeredProvider {
             rate_limiter: Some(rate_limiter),
             rate_limit_max_wait: None,
             provider_semaphores: None,
-            saturation_sink: None,
+            saturation_sink: Mutex::new(None),
         }
     }
 
@@ -510,18 +583,35 @@ impl BreakeredProvider {
     /// pass a `Vec` collector through
     /// [`crate::llm::test_support::InMemorySaturationSink`] to
     /// assert on the fired events without standing up a database.
-    pub fn with_saturation_sink(mut self, sink: Arc<dyn SaturationSink>) -> Self {
-        self.saturation_sink = Some(sink);
+    pub fn with_saturation_sink(self, sink: Arc<dyn SaturationSink>) -> Self {
+        *self.saturation_sink.lock() = Some(sink);
         self
+    }
+
+    /// Set the [`SaturationSink`] on a wrapper that is already
+    /// shared (e.g. through `Arc<dyn Provider>` inside a
+    /// [`ProviderRegistry`]). The setter uses interior mutability
+    /// so the call does not need ownership of the wrapper; the
+    /// registry wiring path invokes it after every `Arc` clone has
+    /// been inserted.
+    ///
+    /// Calling this twice replaces the previous sink; tests that
+    /// build a wrapper directly prefer the consuming
+    /// [`Self::with_saturation_sink`] form which makes the
+    /// construction order obvious.
+    pub fn set_saturation_sink(&self, sink: Arc<dyn SaturationSink>) {
+        *self.saturation_sink.lock() = Some(sink);
     }
 
     /// Read the configured [`SaturationSink`] (if any). Exposed so
     /// registry-level wiring can verify the sink was attached
     /// without going through `Debug` (which elides the trait
-    /// object).
+    /// object). Returns a clone of the `Arc` because the trait
+    /// object lives behind a `Mutex` and the caller generally
+    /// wants to share the handle across threads.
     #[allow(dead_code)]
-    pub fn saturation_sink(&self) -> Option<&Arc<dyn SaturationSink>> {
-        self.saturation_sink.as_ref()
+    pub fn saturation_sink(&self) -> Option<Arc<dyn SaturationSink>> {
+        self.saturation_sink.lock().clone()
     }
 
     /// Borrow the inner provider (used by the probe spawner to reach
@@ -564,7 +654,12 @@ impl Provider for BreakeredProvider {
             // current failure_count to populate the structured
             // `details` so post-mortem can correlate the event
             // with the configured threshold.
-            if let Some(sink) = &self.saturation_sink {
+            //
+            // The lock is held only long enough to clone the `Arc`
+            // out of the `Mutex<Option<...>>`; the sink itself is
+            // `Send + Sync` so the subsequent `on_saturation` call
+            // runs without holding the registry-wide lock.
+            if let Some(sink) = self.saturation_sink.lock().clone() {
                 let ev = crate::telemetry::saturation::SaturationEvent::from_circuit_breaker(
                     self.inner.name(),
                     self.inner.model(),
@@ -592,7 +687,7 @@ impl Provider for BreakeredProvider {
                 // was fully empty, larger values mean there were
                 // still some tokens left (caller picked a strict
                 // horizon).
-                if let Some(sink) = &self.saturation_sink {
+                if let Some(sink) = self.saturation_sink.lock().clone() {
                     let ev = crate::telemetry::saturation::SaturationEvent::from_rate_limit(
                         self.inner.name(),
                         self.inner.model(),
@@ -766,15 +861,31 @@ pub fn registry_from_config(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     breaker_cfg: &CircuitBreakerConfig,
 ) -> Result<ProviderRegistry> {
+    registry_from_config_with_sink(cfg, breaker_cfg, None)
+}
+
+/// [`registry_from_config`] variant that also wires a push-side
+/// [`SaturationSink`] onto every wrapped provider. Used by the
+/// production CLI pipeline after [`crate::telemetry::Telemetry`]
+/// has been opened so circuit-open and rate-limit rejections
+/// land in both `telemetry/saturation.jsonl` and the
+/// `saturation_events` SQLite mirror. `sink = None` is the
+/// default; tests and tools that do not care about saturation
+/// telemetry stay on the [`registry_from_config`] shorthand.
+pub fn registry_from_config_with_sink(
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
+    breaker_cfg: &CircuitBreakerConfig,
+    sink: Option<Arc<dyn SaturationSink>>,
+) -> Result<ProviderRegistry> {
     match MoaganHome::resolve() {
-        Ok(home) => registry_from_config_with_home(cfg, breaker_cfg, Some(&home)),
+        Ok(home) => registry_from_config_with_home_and_sink(cfg, breaker_cfg, Some(&home), sink),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "provider registry: MOAGAN_HOME could not be resolved; \
                  building without the max_tokens auto-probe table"
             );
-            registry_from_config_with_home(cfg, breaker_cfg, None)
+            registry_from_config_with_home_and_sink(cfg, breaker_cfg, None, sink)
         }
     }
 }
@@ -792,9 +903,23 @@ pub fn registry_from_config_with_home(
     breaker_cfg: &CircuitBreakerConfig,
     home: Option<&MoaganHome>,
 ) -> Result<ProviderRegistry> {
+    registry_from_config_with_home_and_sink(cfg, breaker_cfg, home, None)
+}
+
+/// [`registry_from_config_with_home`] variant that also wires a
+/// push-side [`SaturationSink`]. Single source of truth for the
+/// builder logic; the sink-less shorthands delegate here with
+/// `sink = None`.
+pub fn registry_from_config_with_home_and_sink(
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
+    breaker_cfg: &CircuitBreakerConfig,
+    home: Option<&MoaganHome>,
+    sink: Option<Arc<dyn SaturationSink>>,
+) -> Result<ProviderRegistry> {
     use super::opencode_go::OpenCodeGoProvider;
     let mut by_name: HashMap<String, Arc<dyn Provider>> = HashMap::new();
     let mut breakers: HashMap<String, Arc<CircuitBreaker>> = HashMap::new();
+    let mut wrapped: HashMap<String, Arc<BreakeredProvider>> = HashMap::new();
     let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
     for (name, spec) in cfg {
         let provider: Arc<dyn Provider> = match spec.kind.as_str() {
@@ -823,16 +948,21 @@ pub fn registry_from_config_with_home(
             std::time::Duration::from_secs(breaker_cfg.window_secs),
             std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
         ));
-        let wrapped: Arc<BreakeredProvider> =
+        let entry: Arc<BreakeredProvider> =
             Arc::new(BreakeredProvider::new(provider, breaker.clone()));
+        if let Some(s) = sink.as_ref() {
+            entry.set_saturation_sink(s.clone());
+        }
         breakers.insert(name.clone(), breaker);
-        by_name.insert(name.clone(), wrapped.clone() as Arc<dyn Provider>);
-        wrapped_entries.push((name.clone(), wrapped));
+        wrapped.insert(name.clone(), entry.clone());
+        by_name.insert(name.clone(), entry.clone() as Arc<dyn Provider>);
+        wrapped_entries.push((name.clone(), entry));
     }
     let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
     let registry = ProviderRegistry {
         by_name,
         breakers,
+        wrapped,
         pool,
         pool_names,
         max_tokens_table: None,

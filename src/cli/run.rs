@@ -367,6 +367,18 @@ pub async fn run_full_pipeline(
         enabled_patterns: None,
     };
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
+    // PR #494 follow-up: wire the Telemetry handle into every
+    // BreakeredProvider wrapped by the registry. Without this
+    // hook, circuit-open and rate-limit rejections on the LLM call
+    // path land in memory only — the saturation JSONL stream and
+    // the SQLite `saturation_events` mirror stay empty in
+    // production. `Telemetry` implements `SaturationSink`
+    // (re-stamping the event with the current run_id), so passing
+    // the same `Arc<Telemetry>` everywhere keeps the JSONL +
+    // SQLite index in lock-step. The attachment is best-effort: a
+    // sink failure must never abort the run.
+    let sink: Arc<dyn crate::llm::provider::SaturationSink> = Arc::new(telemetry.clone());
+    providers.attach_saturation_sink(sink);
     if let Some(n) = max_parallelism {
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }

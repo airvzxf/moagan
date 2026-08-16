@@ -17,6 +17,16 @@
 //! Tests use a tiny in-process sink so the assertions stay
 //! deterministic without spinning up a SQLite connection for every
 //! event check.
+//!
+//! PR #494 follow-up: the
+//! [`registry_wires_saturation_sink_into_telemetry`] test exercises
+//! the production wiring — a `ProviderRegistry` built via
+//! `registry_from_config_with_sink` (or by attaching the sink post-
+//! construction through `attach_saturation_sink`) drives every
+//! `BreakeredProvider::send` rejection into the SQLite mirror + the
+//! `telemetry/saturation.jsonl` stream. Without this hook the
+//! saturation side stays empty in production; the existing direct-
+//! wrapper tests only cover the in-memory sink.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +37,7 @@ use moagan::error::Result;
 use moagan::ids::RunId;
 use moagan::llm::Role;
 use moagan::llm::circuit_breaker::CircuitBreaker;
-use moagan::llm::provider::{BreakeredProvider, Provider, SaturationSink};
+use moagan::llm::provider::{BreakeredProvider, Provider, ProviderRegistry, SaturationSink};
 use moagan::llm::rate_limiter::RateLimiter;
 use moagan::llm::wire::{Request, Response};
 use moagan::telemetry::Telemetry;
@@ -240,4 +250,199 @@ fn telemetry_mirrors_saturation_event_into_sqlite_and_jsonl() {
             .unwrap();
         assert!(future.is_empty());
     });
+}
+
+/// PR #494 follow-up: end-to-end wiring through a real
+/// `ProviderRegistry`. The CLI pipeline builds the registry first
+/// and attaches the [`Telemetry`] sink afterwards through
+/// [`ProviderRegistry::attach_saturation_sink`]; this test pins
+/// that path so a future refactor that drops the wiring surfaces
+/// as a failing test instead of an empty `saturation.jsonl` in
+/// production.
+#[test]
+fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
+    moagan::test_support::with_moagan_home("registry_saturation_wiring", |_home| {
+        let home = moagan::fs_layout::MoaganHome::resolve().unwrap();
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+        let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
+        db.register_run(run_id, "fast", "running", "0.8.0", None, None, None)?;
+        let telemetry = Telemetry::open(
+            run_id,
+            &run_dir,
+            moagan::redact::RedactPolicy::default(),
+            Some(db.clone()),
+        )?;
+
+        // Hand-rolled registry that mirrors what
+        // `cli/run.rs::run_full_pipeline` builds: a default
+        // `ProviderRegistry::default()` plus a single `insert`
+        // call (the mock + minimax-with-api-key paths in
+        // `build_registry_for_with_api_key`). The wrapping path
+        // populates the `wrapped` map the new
+        // `attach_saturation_sink` walks.
+        let mut registry = ProviderRegistry::default();
+        let inner: Arc<dyn Provider> = Arc::new(AlwaysErrorProvider);
+        // threshold=5 default — five opening errors trip it.
+        let breaker = Arc::new(CircuitBreaker::default());
+        let wrapper = Arc::new(BreakeredProvider::new(inner, breaker.clone()));
+        registry.insert("integration-sat".into(), wrapper.clone());
+
+        // The registry must record the wrapped entry in its
+        // `wrapped` map; otherwise `attach_saturation_sink` is a
+        // no-op and the test would pass on a broken wiring.
+        assert!(
+            registry.saturation_sink("integration-sat").is_none(),
+            "sink must be absent before wiring"
+        );
+        registry.attach_saturation_sink(Arc::new(telemetry.clone()));
+        assert!(
+            registry.saturation_sink("integration-sat").is_some(),
+            "sink must be attached after attach_saturation_sink"
+        );
+
+        // Resolve through the registry's public lookup path —
+        // mirrors the `RunContext::provider` route the production
+        // pipeline uses.
+        let provider = registry
+            .get("integration-sat")
+            .expect("registry must resolve the inserted provider");
+
+        // Drive the registry's send loop inside a current-thread
+        // runtime because the test is `#[test]` (sync) but
+        // `Provider::send` is async. `with_moagan_home` requires
+        // a sync closure; this matches the pattern in
+        // `tests/integration_validators.rs`.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async {
+            // Trip the breaker with five opening errors.
+            for _ in 0..5 {
+                let _ = provider.send(&dummy_request()).await;
+            }
+            assert!(
+                breaker.is_open(),
+                "breaker must be open after five opening errors"
+            );
+
+            // Now the next call hits the open path and must fire
+            // through the attached sink.
+            let result = provider.send(&dummy_request()).await;
+            assert!(result.is_err(), "circuit-open send must fail");
+            Ok::<_, moagan::error::Error>(())
+        })?;
+        telemetry.flush()?;
+
+        // The SQLite mirror must carry the event with the run id
+        // re-stamped by the Telemetry sink.
+        let rows = db.list_saturation_events(Some(0), Some("integration-sat"), 0)?;
+        assert!(
+            !rows.is_empty(),
+            "registry wiring must deliver at least one saturation row to SQLite"
+        );
+        let last = rows.last().unwrap();
+        assert_eq!(last.kind, "error");
+        assert_eq!(last.provider, "integration-sat");
+        assert_eq!(last.run_id.as_deref(), Some(run_id.to_string().as_str()));
+
+        // The JSONL stream must carry the same event.
+        let content = moagan::storage::compression::read_to_string(telemetry.saturation_path())?;
+        assert!(
+            content.contains("\"provider\":\"integration-sat\""),
+            "JSONL must contain the provider, got: {content}"
+        );
+        assert!(
+            content.contains("\"kind\":\"error\""),
+            "JSONL must contain the event kind, got: {content}"
+        );
+        Ok(())
+    })
+}
+
+/// Companion to [`registry_attach_saturation_sink_routes_to_telemetry`]
+/// exercising the second wiring path: `registry_from_config_with_sink`
+/// attaches the sink at construction time (no separate
+/// `attach_saturation_sink` call needed). The mock provider inside
+/// the test config trips the breaker on the first error so the
+/// production wiring path is exercised end-to-end.
+#[test]
+fn registry_from_config_with_sink_attaches_sink_at_construction() -> Result<()> {
+    use moagan::config::{CircuitBreakerConfig, ProviderConfig};
+    use moagan::llm::provider::registry_from_config_with_sink;
+
+    moagan::test_support::with_moagan_home("registry_from_config_with_sink", |_home| {
+        let home = moagan::fs_layout::MoaganHome::resolve().unwrap();
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+        let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
+        db.register_run(run_id, "fast", "running", "0.8.0", None, None, None)?;
+        let telemetry = Telemetry::open(
+            run_id,
+            &run_dir,
+            moagan::redact::RedactPolicy::default(),
+            Some(db.clone()),
+        )?;
+
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "mock-sat".into(),
+            ProviderConfig {
+                kind: "mock".into(),
+                endpoint: "mock://sat".into(),
+                model: "mock-model".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
+
+        // threshold=1 — a single opening error trips the breaker
+        // on the first call so the test stays fast.
+        let breaker_cfg = CircuitBreakerConfig {
+            threshold: 1,
+            window_secs: 60,
+            cooldown_secs: 60,
+        };
+
+        let sink: Arc<dyn SaturationSink> = Arc::new(telemetry.clone());
+        let registry = registry_from_config_with_sink(&cfg, &breaker_cfg, Some(sink.clone()))?;
+        assert!(
+            registry.saturation_sink("mock-sat").is_some(),
+            "sink must be attached at construction when supplied"
+        );
+
+        // The mock provider is empty; `send` returns an error by
+        // default. Trip the breaker via `record_failure` so we
+        // exercise the saturation sink without depending on the
+        // mock's canned-response behaviour. We do this through
+        // the public `CircuitBreaker::record_failure` route on
+        // the breaker the registry owns.
+        let breaker = registry
+            .breaker("mock-sat")
+            .expect("breaker must exist for the registered provider");
+        breaker.record_failure();
+        assert!(breaker.is_open(), "threshold=1 must open the breaker");
+        let provider = registry.get("mock-sat").expect("provider present");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let result = rt.block_on(provider.send(&dummy_request()));
+        assert!(result.is_err(), "circuit-open send must fail");
+        telemetry.flush()?;
+
+        let rows = db.list_saturation_events(Some(0), Some("mock"), 0)?;
+        assert!(
+            !rows.is_empty(),
+            "construction-time wiring must deliver at least one saturation row to SQLite"
+        );
+        Ok(())
+    })
 }
