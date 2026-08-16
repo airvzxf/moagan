@@ -27,6 +27,9 @@ use moagan::redact::patterns::{PatternKind, substitute};
 use moagan::storage::sqlite::{
     Db, ManifestEventRow, OutboxEventRow, ProviderRollupRow, RedactAuditRow,
 };
+use moagan::storage::{
+    ProcessLease, acquire_process_lock, heartbeat_process_lock, release_process_lock,
+};
 use std::collections::HashSet;
 
 /// Open a fresh DB and register one run. Returns the DB handle and
@@ -155,6 +158,48 @@ fn process_lock_acquire_release_round_trips_via_public_helper() {
     assert!(!db.acquire_process_lock("holder-B", 60, "fence-2").unwrap());
     assert!(db.release_process_lock("holder-A").unwrap());
     assert!(db.acquire_process_lock("holder-B", 60, "fence-3").unwrap());
+}
+
+/// T01-06 D.1.5: the typed `ProcessLease` API walks the full
+/// acquire → heartbeat → release lifecycle against a real Db.
+/// Mirrors `process_lock_acquire_release_round_trips_via_public_helper`
+/// but exercises the new module-level helpers and the
+/// last_heartbeat_unix column added in v019.
+#[test]
+fn process_lease_lifecycle_acquire_heartbeat_release() {
+    let (_tmp, db, run_id_str) = fresh_db_with_run();
+    let run_id: RunId = run_id_str.parse().expect("run_id is a valid UUID");
+    let holder = uuid::Uuid::new_v4();
+
+    let first: ProcessLease = acquire_process_lock(&db, run_id, holder, 60).expect("first acquire");
+    assert!(first.fencing_token > 0);
+    assert_eq!(first.acquired_at_unix, first.last_heartbeat_unix);
+
+    let renewed: ProcessLease =
+        heartbeat_process_lock(&db, run_id, holder, first.fencing_token).expect("heartbeat");
+    assert_eq!(renewed.fencing_token, first.fencing_token);
+    assert_eq!(renewed.acquired_at_unix, first.acquired_at_unix);
+    assert!(
+        renewed.last_heartbeat_unix >= first.last_heartbeat_unix,
+        "heartbeat must advance last_heartbeat_unix"
+    );
+
+    release_process_lock(&db, run_id, holder, first.fencing_token).expect("release");
+
+    // After release a fresh acquire must succeed and obtain a
+    // valid fencing token. The MAX+1 path scans the WHOLE
+    // `process_locks` table; on a freshly-released DB with no
+    // other rows the next fence is 1, so we only assert the
+    // token is a positive u64 (the "fence bumps on takeover"
+    // contract is verified separately in the unit test
+    // `process_lease_acquire_after_ttl_expiry_succeeds_with_higher_fence`).
+    let re_acquired: ProcessLease =
+        acquire_process_lock(&db, run_id, holder, 60).expect("re-acquire after release");
+    assert!(
+        re_acquired.fencing_token > 0,
+        "post-release fence must be a positive u64, got {}",
+        re_acquired.fencing_token
+    );
 }
 
 #[test]

@@ -121,13 +121,13 @@ section() {
 # =====================================================================
 section "SECTION 1 — Schema inspection (15 tests)"
 
-run_test "s6_schema_user_version_is_18_after_open" "$(cat <<'EOF'
+run_test "s6_schema_user_version_is_19_after_open" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
 "$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
-test "$v" = "18" || { echo "user_version=$v"; exit 1; }
+test "$v" = "19" || { echo "user_version=$v"; exit 1; }
 EOF
 )"
 
@@ -139,7 +139,7 @@ run_test "s6_schema_v005_applied_after_v004" "grep -A 2 'if current < 5' ${ROOT}
 
 run_test "s6_schema_v005_sets_user_version_5" "grep -A 1 'if current < 5' ${ROOT}/src/storage/sqlite.rs | grep -q 'apply_step(&conn, 5,'"
 
-run_test "s6_schema_run_migrations_lists_18_versions" "awk '/Run pending migrations/{f=1} f{print}' ${ROOT}/src/storage/sqlite.rs | grep -cE 'current < [0-9]+' | grep -qE '^18$'"
+run_test "s6_schema_run_migrations_lists_19_versions" "awk '/Run pending migrations/{f=1} f{print}' ${ROOT}/src/storage/sqlite.rs | grep -cE 'current < [0-9]+' | grep -qE '^19$'"
 
 run_test "s6_schema_checkpoints_table_has_12_columns" "$(cat <<'EOF'
 set -e
@@ -258,7 +258,7 @@ v1=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
 "$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v2=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
-test "$v1" = "$v2" && test "$v1" = "18" || { echo "v1=$v1 v2=$v2"; exit 1; }
+test "$v1" = "$v2" && test "$v1" = "19" || { echo "v1=$v1 v2=$v2"; exit 1; }
 EOF
 )"
 
