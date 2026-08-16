@@ -1,8 +1,10 @@
 //! Lightweight embedding interface for `cluster_by_embedder` (D.1.3).
 //!
-//! The default `HashingEmbedder` is dependency-free; the spec also
-//! lists `RemoteEmbedder` and `fastembed` as opt-in adapters
-//! (D.1.3, T18-09 §7.7) but those land in a follow-up sub-phase.
+//! The default `HashingEmbedder` is dependency-free. The opt-in
+//! [`remote::RemoteEmbedder`] adapter adds HTTP-backed embeddings
+//! for the four most common provider wire formats (OpenAI, Cohere,
+//! Voyage, and a generic OpenAI-compatible `Custom` fallback). The
+//! `fastembed` crate integration is deferred to a later sub-phase.
 //!
 //! The hashing embedder uses the FNV-1a 32-bit hash on
 //! alphanumeric tokens and signs the contribution by the top
@@ -16,6 +18,14 @@
 //! §7.7; T03-07 §2054-2060; T06-04 §8.3).
 
 use std::collections::HashMap;
+
+/// Network-backed embedding adapter. Opt-in via
+/// `[embedder.remote]` in `~/.config/moagan/config.toml`; the
+/// dependency-free [`HashingEmbedder`] remains the default. See the
+/// `remote` module docs for the provider list, auth model, and the
+/// async batch / sync single-text dual API.
+pub mod remote;
+pub use remote::{RemoteEmbedder, RemoteEmbedderConfig, RemoteEmbedderProvider};
 
 /// Embedding backend. Implementations map a chunk of text to a
 /// fixed-dimensional `f32` vector. All vectors returned by a given
