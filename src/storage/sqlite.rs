@@ -4501,7 +4501,7 @@ mod tests {
     /// `run_id`. Returns the row id so the test can then bypass
     /// the runtime and delete the parent row.
     fn seed_orphans_for(db: &Db, run_id: RunId) {
-        db.register_run(run_id, "fast", "running", "0.7.2", None, None, None)
+        db.register_run(run_id, "fast", "running", "0.8.0", None, None, None)
             .unwrap();
         db.record_call(
             "sweep-call-1",
