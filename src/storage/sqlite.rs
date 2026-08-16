@@ -81,6 +81,10 @@ mod sql_v017 {
     pub(super) const V017: &str = include_str!("migrations/v017_drop_manifest_versions.sql");
 }
 
+mod sql_v018 {
+    pub(super) const V018: &str = include_str!("migrations/v018_saturation_events.sql");
+}
+
 /// SQLite-side error variants.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -445,6 +449,12 @@ impl Db {
         if current < 17 {
             apply_step(&conn, 17, || -> Result<()> {
                 conn.execute_batch(sql_v017::V017)?;
+                Ok(())
+            })?;
+        }
+        if current < 18 {
+            apply_step(&conn, 18, || -> Result<()> {
+                conn.execute_batch(sql_v018::V018)?;
                 Ok(())
             })?;
         }
@@ -842,6 +852,96 @@ impl Db {
                     attempt: r.get(6)?,
                     message: r.get(7)?,
                     details: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Record a saturation event into the `saturation_events` table
+    /// (v018). Best-effort: callers (the `Telemetry::saturation`
+    /// sink) should treat a SQLite failure as a logged warning and
+    /// keep the JSONL stream as the canonical record. Returns `Ok`
+    /// on a pre-v018 database so legacy tests do not break.
+    pub fn record_saturation(
+        &self,
+        ev: &crate::telemetry::saturation::SaturationEvent,
+    ) -> Result<()> {
+        if self.user_version()? < 18 {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        let details_str = ev
+            .details
+            .as_ref()
+            .map(|d| d.to_string())
+            .unwrap_or_default();
+        conn.execute(
+            "INSERT INTO saturation_events \
+             (run_id, provider, model, kind, threshold_pct, observed_at_unix, details) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                ev.run_id,
+                ev.provider,
+                ev.model,
+                ev.kind.as_str(),
+                ev.threshold_pct,
+                ev.observed_at_unix,
+                details_str,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List saturation events, newest first. Filters by `provider`
+    /// and `since_unix` when supplied. `limit` caps the row count;
+    /// `0` means "no cap" (the caller picks; tests use a small
+    /// value to keep assertions stable).
+    ///
+    /// Returns an empty `Vec` on a pre-v018 database so legacy
+    /// callers (the dashboard, the CLI subcommand) never crash on
+    /// an upgrade in place.
+    pub fn list_saturation_events(
+        &self,
+        since_unix: Option<i64>,
+        provider: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SaturationRow>> {
+        if self.user_version()? < 18 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get()?;
+        // Build the WHERE clause dynamically so an absent filter
+        // does not push an `AND` with a dangling left-hand side.
+        // Parameter binding keeps the prepared statement safe.
+        let mut sql = String::from(
+            "SELECT run_id, provider, model, kind, threshold_pct, observed_at_unix, details \
+             FROM saturation_events WHERE 1=1",
+        );
+        let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(since) = since_unix {
+            sql.push_str(" AND observed_at_unix >= ?");
+            bind.push(Box::new(since));
+        }
+        if let Some(name) = provider {
+            sql.push_str(" AND provider = ?");
+            bind.push(Box::new(name.to_owned()));
+        }
+        sql.push_str(" ORDER BY observed_at_unix DESC, id DESC");
+        if limit > 0 {
+            sql.push_str(&format!(" LIMIT {limit}"));
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(bind.iter()), |r| {
+                Ok(SaturationRow {
+                    run_id: r.get(0)?,
+                    provider: r.get(1)?,
+                    model: r.get(2)?,
+                    kind: r.get(3)?,
+                    threshold_pct: r.get(4)?,
+                    observed_at_unix: r.get(5)?,
+                    details: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1854,6 +1954,29 @@ pub struct ManifestEventRow {
     pub details: Option<String>,
     /// Unix seconds.
     pub at_unix: i64,
+}
+
+/// One row from the `saturation_events` table (v018, catalog
+/// §D.23 + §D.27 push-side). Read by
+/// `moagan telemetry alerts list` and the dashboard's alerts view.
+/// The `details` field is the JSON-encoded structured payload
+/// (counts, breaker state) — never a raw prompt/response body.
+#[derive(Debug, Clone, Serialize)]
+pub struct SaturationRow {
+    /// Optional run id (NULL for pre-pipeline probe events).
+    pub run_id: Option<String>,
+    /// Provider name (e.g. `minimax`).
+    pub provider: String,
+    /// Model name (e.g. `MiniMax-M3`).
+    pub model: String,
+    /// Discriminator (`error` | `rate_limit` | `token`).
+    pub kind: String,
+    /// Saturation percentage at trigger time (0.0–100.0).
+    pub threshold_pct: f64,
+    /// Unix seconds when the event was observed.
+    pub observed_at_unix: i64,
+    /// JSON-encoded structured details.
+    pub details: Option<String>,
 }
 
 /// W2: the per-run stability verdict persisted by
@@ -3546,8 +3669,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert!(
-            v >= 17,
-            "user_version must reach v017 after Db::open, got {v}"
+            v >= 18,
+            "user_version must reach v018 after Db::open, got {v}"
         );
         let n: i64 = conn
             .query_row(
@@ -3588,8 +3711,8 @@ mod tests {
         );
     }
 
-    /// Re-opening a DB that already has v017 applied stays at
-    /// v017 without error. The runner's `if current < N` gates
+    /// Re-opening a DB that already has v018 applied stays at
+    /// v018 without error. The runner's `if current < N` gates
     /// make this trivially true, but the test pins the contract:
     /// `CREATE TABLE IF NOT EXISTS` is idempotent at the SQL
     /// level so a third, fourth, ... open of the same DB also
@@ -3597,7 +3720,9 @@ mod tests {
     /// `calls.retry_count` migration landed in v014; v015 then
     /// added the `calls.cost_usd` column on top; v016 dropped
     /// the four empty tables; v017 dropped the empty
-    /// `manifest_versions` table.)
+    /// `manifest_versions` table; v018 added the
+    /// `saturation_events` table for the v0.8 telemetry
+    /// push-side.)
     #[test]
     fn current_head_migration_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3610,7 +3735,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 17,
+            v, 18,
             "user_version must stay at the current head across consecutive reopens, got {v}"
         );
         // v015 added a single ALTER TABLE so no new tables to
@@ -3678,7 +3803,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert!(v >= 17, "user_version must reach v017, got {v}");
+        assert!(v >= 18, "user_version must reach v018, got {v}");
     }
 
     /// v015: `record_call_cost` writes the column for a known call
@@ -3897,8 +4022,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            v, 17,
-            "user_version must advance to v017 (the current head) after recovery, got {v}"
+            v, 18,
+            "user_version must advance to v018 (the current head) after recovery, got {v}"
         );
     }
 
@@ -3942,7 +4067,7 @@ mod tests {
     }
 
     /// `user_version` is stable across consecutive `Db::open`
-    /// calls on the same DB and reaches the current head (v017).
+    /// calls on the same DB and reaches the current head (v018).
     /// Pins the "each step runs at most once" invariant: if the
     /// runner ever re-applied a step, the second open would still
     /// see the same version (idempotency) but would also need to
@@ -3958,8 +4083,8 @@ mod tests {
         let v2 = read_user_version(&path);
         assert_eq!(v1, v2, "user_version must be stable across opens");
         assert_eq!(
-            v1, 17,
-            "user_version must reach the current head (v017), got {v1}"
+            v1, 18,
+            "user_version must reach the current head (v018), got {v1}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -3987,8 +4112,8 @@ mod tests {
         Db::open(&path).expect("Db::open must recover from v001 partial state");
         let v = read_user_version(&path);
         assert_eq!(
-            v, 17,
-            "user_version must reach the current head (v017) after recovery, got {v}"
+            v, 18,
+            "user_version must reach the current head (v018) after recovery, got {v}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -4042,8 +4167,8 @@ mod tests {
         }
         let v = read_user_version(&path);
         assert_eq!(
-            v, 17,
-            "user_version must reach the current head (v017) after 10 reopens, got {v}"
+            v, 18,
+            "user_version must reach the current head (v018) after 10 reopens, got {v}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

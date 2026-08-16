@@ -35,6 +35,7 @@ pub mod heartbeat;
 pub mod lineage_graph;
 pub mod redact;
 pub mod retention;
+pub mod saturation;
 pub mod verify;
 
 /// One phase event (start/end/error/cancel).
@@ -172,6 +173,12 @@ pub struct CheckpointEvent {
     pub at_unix: i64,
 }
 
+/// Re-export of the saturation event payload. The JSONL record on
+/// disk uses the same shape as [`crate::telemetry::saturation::SaturationEvent`];
+/// the alias lives here so `Telemetry::record_saturation` accepts the
+/// type without forcing callers to import the inner module.
+pub use crate::telemetry::saturation::SaturationEvent;
+
 /// Context for a warning. Carries the optional phase/role/call_id
 /// so the warning can be correlated with the call record.
 #[derive(Debug, Clone, Default)]
@@ -205,10 +212,15 @@ struct Inner {
     /// Plain JSONL because checkpoints are tiny and the dashboard
     /// tails them live (no gzip overhead).
     checkpoints_path: PathBuf,
+    /// Path to `telemetry/saturation.jsonl` (catalog §D.23 + §D.27,
+    /// v0.8 push-side). Plain JSONL for parity with `warnings`:
+    /// events are tiny and the alerts consumer streams them live.
+    saturation_path: PathBuf,
     phases: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     calls: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     warnings: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     checkpoints: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
+    saturation: Mutex<Option<RedactWriter<Box<dyn Write + Send>>>>,
     /// Optional SQLite index. When present, every `phase()` and
     /// `call()` mirrors the JSONL record into the corresponding
     /// table so `moagan inspect` returns live data.
@@ -248,6 +260,7 @@ impl Telemetry {
         let calls_path: PathBuf = run.telemetry().join("calls.jsonl.gz");
         let warnings_path: PathBuf = run.telemetry().join("warnings.jsonl");
         let checkpoints_path: PathBuf = run.telemetry().join("checkpoints.jsonl");
+        let saturation_path: PathBuf = run.telemetry().join("saturation.jsonl");
         let phases_writer = crate::storage::compression::open_gz_append(&phases_path)?;
         let calls_writer = crate::storage::compression::open_gz_append(&calls_path)?;
         let warnings_file = std::fs::OpenOptions::new()
@@ -258,6 +271,10 @@ impl Telemetry {
             .create(true)
             .append(true)
             .open(&checkpoints_path)?;
+        let saturation_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&saturation_path)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 run_id,
@@ -265,6 +282,7 @@ impl Telemetry {
                 calls_path,
                 warnings_path,
                 checkpoints_path,
+                saturation_path,
                 phases: Mutex::new(Some(RedactWriter::new(
                     phases_writer,
                     policy.clone(),
@@ -282,6 +300,11 @@ impl Telemetry {
                 ))),
                 checkpoints: Mutex::new(Some(RedactWriter::new(
                     Box::new(checkpoints_file),
+                    policy.clone(),
+                    Surface::Telemetry,
+                ))),
+                saturation: Mutex::new(Some(RedactWriter::new(
+                    Box::new(saturation_file),
                     policy,
                     Surface::Telemetry,
                 ))),
@@ -318,6 +341,7 @@ impl Telemetry {
                 calls_path: PathBuf::from("/dev/null"),
                 warnings_path: PathBuf::from("/dev/null"),
                 checkpoints_path: PathBuf::from("/dev/null"),
+                saturation_path: PathBuf::from("/dev/null"),
                 phases: Mutex::new(Some(RedactWriter::new(
                     Box::new(NullWriter),
                     policy.clone(),
@@ -334,6 +358,11 @@ impl Telemetry {
                     Surface::Telemetry,
                 ))),
                 checkpoints: Mutex::new(Some(RedactWriter::new(
+                    Box::new(NullWriter),
+                    policy.clone(),
+                    Surface::Telemetry,
+                ))),
+                saturation: Mutex::new(Some(RedactWriter::new(
                     Box::new(NullWriter),
                     policy,
                     Surface::Telemetry,
@@ -410,6 +439,13 @@ impl Telemetry {
     /// Path to the warnings log.
     pub fn warnings_path(&self) -> &Path {
         &self.inner.warnings_path
+    }
+
+    /// Path to the saturation events JSONL stream
+    /// (`telemetry/saturation.jsonl`). Used by the alerts consumer
+    /// to tail recent events without parsing the SQLite mirror.
+    pub fn saturation_path(&self) -> &Path {
+        &self.inner.saturation_path
     }
 
     /// Record a phase event. The `resume` flag is `true` when the
@@ -660,7 +696,117 @@ impl Telemetry {
         if let Some(w) = self.inner.warnings.lock().as_mut() {
             w.flush()?;
         }
+        if let Some(w) = self.inner.saturation.lock().as_mut() {
+            w.flush()?;
+        }
         Ok(())
+    }
+
+    /// Record a saturation event fired by the runtime
+    /// (catalog §D.23 + §D.27, v0.8 push-side). The event is
+    /// appended to `telemetry/saturation.jsonl` and mirrored to the
+    /// `saturation_events` SQLite table (when the index is enabled).
+    ///
+    /// Best-effort: a SQLite failure is logged as `tracing::warn!`
+    /// and never aborts the call. The JSONL stream is the canonical
+    /// timeline, so a SQLite miss does not lose data — operators
+    /// can replay the JSONL into SQLite through the `moagan
+    /// telemetry alerts list` consumer or a future repair tool.
+    ///
+    /// `event.run_id` is normally `Some(self.run_id)` for events
+    /// fired inside the pipeline; pre-pipeline probes (e.g. a
+    /// discovery call before the run is registered) leave it
+    /// `None` so the SQLite mirror still accepts the row.
+    pub fn saturation(&self, event: &SaturationEvent) -> Result<()> {
+        let bytes = serde_json::to_vec(event).map_err(crate::Error::from)?;
+        let mut g = self.inner.saturation.lock();
+        if let Some(w) = g.as_mut() {
+            w.write_all(&bytes)?;
+            w.write_all(b"\n")?;
+        }
+        drop(g);
+        if let Some(db) = &self.inner.db
+            && let Err(e) = db.record_saturation(event)
+        {
+            tracing::warn!(
+                provider = %event.provider,
+                kind = %event.kind,
+                error = %e,
+                "SQLite saturation_events mirror failed"
+            );
+        }
+        Ok(())
+    }
+
+    /// Convenience wrapper: build and record a `SaturationKind::Error`
+    /// event from a circuit breaker opening. Used by the
+    /// [`crate::llm::provider::BreakeredProvider`] hook.
+    pub fn record_circuit_open(
+        &self,
+        provider: &str,
+        model: &str,
+        failure_count: u32,
+    ) -> Result<()> {
+        let event = SaturationEvent::from_circuit_breaker(
+            provider,
+            model,
+            Some(self.inner.run_id.to_string()),
+            failure_count,
+        );
+        self.saturation(&event)
+    }
+
+    /// Convenience wrapper: build and record a
+    /// `SaturationKind::RateLimit` event from a token-bucket
+    /// rejection. Used by the
+    /// [`crate::llm::provider::BreakeredProvider`] hook.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_rate_limit(
+        &self,
+        provider: &str,
+        model: &str,
+        threshold_pct: f32,
+        capacity: u32,
+        refill_per_sec: u32,
+    ) -> Result<()> {
+        let event = SaturationEvent::from_rate_limit(
+            provider,
+            model,
+            Some(self.inner.run_id.to_string()),
+            threshold_pct,
+            capacity,
+            refill_per_sec,
+        );
+        self.saturation(&event)
+    }
+}
+
+impl crate::llm::provider::SaturationSink for Telemetry {
+    /// Push-side hook called by
+    /// [`crate::llm::provider::BreakeredProvider::send`] when the
+    /// wrapper rejects a call because the circuit breaker is open
+    /// or the rate-limiter budget is exhausted. The event is built
+    /// upstream with `run_id = None` (the wrapper is
+    /// telemetry-agnostic); here we re-stamp it with the current
+    /// run id so the SQLite mirror can join against the `runs`
+    /// table.
+    ///
+    /// Best-effort: a failure here is logged and swallowed (the
+    /// wrapper's caller was already on the error path; the
+    /// rejection must not be hidden by a sink failure).
+    fn on_saturation(&self, event: &SaturationEvent) {
+        let mut stamped = event.clone();
+        if stamped.run_id.is_none() {
+            stamped.run_id = Some(self.inner.run_id.to_string());
+        }
+        if let Err(e) = self.saturation(&stamped) {
+            tracing::warn!(
+                provider = %stamped.provider,
+                kind = %stamped.kind,
+                error = %e,
+                "saturation sink failed; event dropped"
+            );
+        }
     }
 }
 

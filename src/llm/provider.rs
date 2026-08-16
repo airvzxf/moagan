@@ -396,6 +396,28 @@ pub struct BreakeredProvider {
     /// throttling is applied — only the breaker, the (optional)
     /// rate limiter, and the global parallelism pool gate calls.
     provider_semaphores: Option<Arc<PerProviderSemaphores>>,
+    /// Push-side saturation sink (catalog §D.23 + §D.27, v0.8).
+    /// Fired when the wrapper rejects a call because the circuit
+    /// breaker is open or the rate-limiter budget is exhausted.
+    /// The sink stays optional so hand-rolled test paths that do
+    /// not need telemetry can construct a wrapper without it; the
+    /// production path wires it through
+    /// [`Self::with_saturation_sink`].
+    saturation_sink: Option<Arc<dyn SaturationSink>>,
+}
+
+/// Push-side sink for [`crate::telemetry::saturation::SaturationEvent`].
+///
+/// Implemented by `Telemetry` (which mirrors the event into the
+/// per-run JSONL stream and the SQLite index) and by the in-memory
+/// `Vec<>` used by tests. The trait keeps the wrapper
+/// telemetry-agnostic: the registry wires the right implementation
+/// at construction time so the LLM call path never reaches into
+/// the telemetry module directly.
+pub trait SaturationSink: Send + Sync {
+    /// Fire one saturation event. Implementations should be
+    /// best-effort: a failure must not abort the LLM call.
+    fn on_saturation(&self, event: &crate::telemetry::saturation::SaturationEvent);
 }
 
 impl std::fmt::Debug for BreakeredProvider {
@@ -431,6 +453,7 @@ impl BreakeredProvider {
             rate_limiter: None,
             rate_limit_max_wait: None,
             provider_semaphores: None,
+            saturation_sink: None,
         }
     }
 
@@ -450,6 +473,7 @@ impl BreakeredProvider {
             rate_limiter: Some(rate_limiter),
             rate_limit_max_wait: None,
             provider_semaphores: None,
+            saturation_sink: None,
         }
     }
 
@@ -474,6 +498,30 @@ impl BreakeredProvider {
     pub fn with_per_provider_semaphores(mut self, semaphores: Arc<PerProviderSemaphores>) -> Self {
         self.provider_semaphores = Some(semaphores);
         self
+    }
+
+    /// Attach a push-side [`SaturationSink`] (catalog §D.23 +
+    /// §D.27, v0.8). Every time the wrapper rejects a call because
+    /// the breaker is open or the rate limiter exhausted its
+    /// budget, the sink is invoked with the matching
+    /// [`crate::telemetry::saturation::SaturationEvent`].
+    ///
+    /// Production callers wire the [`Telemetry`] handle; tests can
+    /// pass a `Vec` collector through
+    /// [`crate::llm::test_support::InMemorySaturationSink`] to
+    /// assert on the fired events without standing up a database.
+    pub fn with_saturation_sink(mut self, sink: Arc<dyn SaturationSink>) -> Self {
+        self.saturation_sink = Some(sink);
+        self
+    }
+
+    /// Read the configured [`SaturationSink`] (if any). Exposed so
+    /// registry-level wiring can verify the sink was attached
+    /// without going through `Debug` (which elides the trait
+    /// object).
+    #[allow(dead_code)]
+    pub fn saturation_sink(&self) -> Option<&Arc<dyn SaturationSink>> {
+        self.saturation_sink.as_ref()
     }
 
     /// Borrow the inner provider (used by the probe spawner to reach
@@ -508,16 +556,56 @@ impl Provider for BreakeredProvider {
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         if self.breaker.is_open() {
+            // Push-side saturation: circuit-open rejections are
+            // one of the three signals the alerts consumer
+            // surfaces (catalog §D.19.5 → §D.23). The sink is
+            // best-effort: a failure here must not abort the
+            // error path the caller was already on. We use the
+            // current failure_count to populate the structured
+            // `details` so post-mortem can correlate the event
+            // with the configured threshold.
+            if let Some(sink) = &self.saturation_sink {
+                let ev = crate::telemetry::saturation::SaturationEvent::from_circuit_breaker(
+                    self.inner.name(),
+                    self.inner.model(),
+                    None,
+                    self.breaker.failure_count(),
+                );
+                sink.on_saturation(&ev);
+            }
             return Err(Error::Provider(format!(
                 "circuit open: provider '{}' sidelined",
                 self.inner.name()
             )));
         }
         if let Some(rl) = &self.rate_limiter {
-            let _wait = match self.rate_limit_max_wait {
-                Some(max) => rl.acquire_with_max(max).await?,
-                None => rl.acquire().await?,
+            let acquire_result = match self.rate_limit_max_wait {
+                Some(max) => rl.acquire_with_max(max).await,
+                None => rl.acquire().await.map(|_| Duration::ZERO),
             };
+            if let Err(e) = acquire_result {
+                // Rate-limiter rejection (catalog §D.19.6 → §D.23).
+                // The bucket was empty at the configured `max_wait`
+                // horizon, so the next refill would have exceeded
+                // it. The threshold reported in the event is the
+                // inverse of the bucket deficit: 0% means the bucket
+                // was fully empty, larger values mean there were
+                // still some tokens left (caller picked a strict
+                // horizon).
+                if let Some(sink) = &self.saturation_sink {
+                    let ev = crate::telemetry::saturation::SaturationEvent::from_rate_limit(
+                        self.inner.name(),
+                        self.inner.model(),
+                        None,
+                        0.0,
+                        rl.capacity(),
+                        rl.refill_per_sec(),
+                    );
+                    sink.on_saturation(&ev);
+                }
+                return Err(e);
+            }
+            let _wait = acquire_result?;
         }
         // Per-provider capacity gate (catalog §D.9.6): acquire one
         // permit from the inner provider's slot before the call and
