@@ -39,22 +39,31 @@
 //!
 //! ## API shape
 //!
-//! The remote adapter exposes an **async batch** API:
+//! The remote adapter exposes a **two-trait** surface:
 //!
-//! - [`RemoteEmbedder::embed_batch`] for `&[&str]` inputs.
-//! - [`RemoteEmbedder::embed_one`] for a single text (convenience
-//!   wrapper that calls `embed_batch` with a one-element slice).
+//! - [`super::AsyncEmbedder::embed_batch`] (canonical, async,
+//!   fallible) — for `&[&str]` inputs. This is what async-first
+//!   callers and the integration tests use.
+//! - [`RemoteEmbedder::embed_one`] — convenience wrapper that
+//!   delegates to `embed_batch` with a one-element slice.
+//! - [`super::Embedder::embed`] (sync, infallible) — re-export of the
+//!   sync bridge below. Operators that wire the remote embedder into
+//!   the legacy cluster-by-embedder path drop in `RemoteEmbedder`
+//!   exactly where they used to put `HashingEmbedder`; the sync
+//!   bridge handles the rest via `tokio::task::block_in_place`.
 //!
-//! It deliberately does **not** implement the synchronous
-//! [`super::Embedder`] trait. That trait is single-text and sync; the
-//! remote adapter is batch-and-async. Bridging the two with a
-//! blocking adapter introduces a runtime-inside-runtime hazard
-//! that surfaces only when the caller is itself `async`, which is
-//! the exact case the cluster-by-embedder path lives in. A future
-//! follow-up can add an explicit `AsyncEmbedder` trait + a sync
-//! bridge for the cluster path; for now operators who want the
-//! remote backend wire it through their own driver code that calls
-//! `embed_batch` directly.
+//! ### Multi-thread-runtime requirement for the sync bridge
+//!
+//! The sync `Embedder::embed` impl uses
+//! `tokio::task::block_in_place`, which **only works on worker
+//! threads of a multi-thread Tokio runtime**. Production satisfies
+//! this because `run_blocking()` in `src/lib.rs` builds the runtime
+//! with `Builder::new_multi_thread().enable_all()`. Tests of the
+//! sync bridge must use `#[tokio::test(flavor = "multi_thread")]`
+//! (or build an equivalent runtime explicitly). Pure async callers
+//! skip the sync trait entirely and use
+//! `AsyncEmbedder::embed_batch` directly — it has no such
+//! requirement, and is the canonical API for fallible embeddings.
 //!
 //! A small in-memory cache keyed by the verbatim input string keeps
 //! repeated embedding requests cheap and deterministic across runs
@@ -76,11 +85,13 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::llm::embed::{AsyncEmbedder, Embedder};
 use crate::secret::SecretString;
 
 /// Provider-specific wire format for the embeddings endpoint. The
@@ -415,7 +426,13 @@ impl RemoteEmbedder {
     /// callers that want cache semantics should look up the input
     /// strings themselves before invoking this method (the sync
     /// adapter does so automatically).
-    pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    ///
+    /// This is the private HTTP transport. The canonical async-batch
+    /// entry point is the [`AsyncEmbedder::embed_batch`] trait impl
+    /// below; this helper backs both that trait impl and the sync
+    /// [`Embedder`] bridge. Tests in the same module reach it via
+    /// the trait method on `RemoteEmbedder`.
+    async fn embed_batch_transport(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -465,10 +482,11 @@ impl RemoteEmbedder {
         Ok(vectors)
     }
 
-    /// Convenience wrapper around [`Self::embed_batch`] for a single
-    /// input. Same cache key contract as the rest of the public API.
+    /// Convenience wrapper around [`AsyncEmbedder::embed_batch`] for a
+    /// single input. Same cache-key contract as the rest of the
+    /// public API.
     pub async fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
-        let mut out = self.embed_batch(&[text]).await?;
+        let mut out = AsyncEmbedder::embed_batch(self, &[text]).await?;
         Ok(out.pop().unwrap_or_default())
     }
 
@@ -481,13 +499,108 @@ impl RemoteEmbedder {
     }
 
     /// Output dimensionality for the [`super::Embedder`] trait shape.
-    /// `RemoteEmbedder` does not implement [`super::Embedder`]
-    /// directly because the trait is synchronous while the remote
-    /// adapter is fundamentally async; this method is provided so an
-    /// async-side adapter wrapper can forward the value to the
-    /// `Embedder::dim` contract without a runtime dance.
+    /// `RemoteEmbedder` now implements [`super::Embedder`] directly
+    /// via [`tokio::task::block_in_place`] — see the trait impl below
+    /// for the multi-thread-runtime requirement.
     pub fn dim(&self) -> usize {
         self.dimensions
+    }
+}
+
+// ---------------------------------------------------------------------
+// Trait impls: `Embedder` (sync) + `AsyncEmbedder` (async batch).
+//
+// Both are required so the cluster-by-embedder path (D.1.3) can stay
+// sync while async-first callers (a future D.1.3 follow-up) get a
+// proper fallible API. The two impls share the cache (the canonical
+// short-circuit) and the underlying `embed_batch` transport; only the
+// re-entry bridge differs.
+//
+// ### Multi-thread-runtime requirement (READ THIS before use)
+//
+// `Embedder::embed` is synchronous. Network I/O is not. Bridging the
+// two without panicking requires `tokio::task::block_in_place`, which
+// the Tokio runtime **only supports on worker threads of a
+// multi-thread runtime**. Calling `embed()` from a single-thread
+// runtime (or from outside any Tokio runtime) panics with
+// "Cannot drop a runtime in a context where blocking is not allowed"
+// / "thread-local current runtime has been dropped".
+//
+// Production satisfies this requirement because `run_blocking()` in
+// `src/lib.rs` builds the runtime with
+// `Builder::new_multi_thread().enable_all()`. Tests of the sync
+// bridge must use `#[tokio::test(flavor = "multi_thread")]` (or
+// build an equivalent runtime explicitly). Pure async callers should
+// skip the sync trait entirely and use `AsyncEmbedder::embed_batch`
+// directly — it has no such requirement.
+// ---------------------------------------------------------------------
+
+impl Embedder for RemoteEmbedder {
+    fn dim(&self) -> usize {
+        self.dimensions
+    }
+
+    fn name(&self) -> &'static str {
+        "remote"
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        // Hot path: served from the in-memory cache so the cluster
+        // loop never round-trips for the same sketch text twice in
+        // a single run. Same `parking_lot::Mutex` lock pattern as
+        // `HashingEmbedder::embed` so the cache is contention-free
+        // across worker threads.
+        if let Some(v) = self.cache.lock().get(text) {
+            return v.clone();
+        }
+        // Cold path: one upstream call per unique text. The
+        // single-input batch reuses the same wire-format machinery
+        // as the multi-input path so the cache miss cost is uniform
+        // — operators do not pay an extra round-trip per text in
+        // exchange for the sync API.
+        let vectors = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(AsyncEmbedder::embed_batch(self, &[text]))
+        })
+        .unwrap_or_else(|e| {
+            // The sync `Embedder` contract is infallible; a network
+            // failure on a unique text is exceptional. Surface the
+            // underlying error via `panic!` rather than silently
+            // returning a zero-vector (which would corrupt cosine
+            // scores downstream). Callers that need fallible
+            // embeddings should hold a `dyn AsyncEmbedder` instead.
+            panic!(
+                "RemoteEmbedder::embed: upstream call failed for {}-dim unique text: {e:?}",
+                self.dimensions
+            )
+        });
+        // `embed_batch` returns one vector per input, in order. We
+        // sent one input, so `next()` (or `unwrap_or_default`) is
+        // safe — if the adapter had zero-length semantics this would
+        // be an empty vector.
+        let v = vectors.into_iter().next().unwrap_or_default();
+        if !v.is_empty() {
+            self.cache.lock().insert(text.to_owned(), v.clone());
+        }
+        v
+    }
+}
+
+#[async_trait]
+impl AsyncEmbedder for RemoteEmbedder {
+    /// Canonical async-batch API. Dispatches to the private HTTP
+    /// transport [`Self::embed_batch_transport`]. The cache lives in
+    /// the sync bridge (which looks the text up before re-entering);
+    /// the async path stays lock-free for inflight requests.
+    async fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> Result<Vec<Vec<f32>>> {
+        self.embed_batch_transport(texts).await
+    }
+
+    fn dim(&self) -> usize {
+        self.dimensions
+    }
+
+    fn name(&self) -> &'static str {
+        "remote"
     }
 }
 
@@ -952,5 +1065,168 @@ mod tests {
         let url = embedder.url();
         assert!(url.ends_with("/embeddings"), "got {url}");
         assert!(url.starts_with("https://example.com"), "got {url}");
+    }
+
+    // ---------------- Embedder + AsyncEmbedder trait impls ----------------
+
+    /// Sync `Embedder::name` and `Embedder::dim` are
+    /// configuration-derived and do not touch the runtime. Lock the
+    /// values in place so the sync bridge stays drop-in compatible
+    /// with the existing cluster-by-embedder call sites.
+    #[test]
+    fn embedder_trait_name_and_dim_match() {
+        let env_name = "MOAGAN_TEST_TRAIT_NAME_DIM_98239";
+        unsafe {
+            std::env::set_var(env_name, "k");
+        }
+        let embedder =
+            RemoteEmbedder::new("openai", "https://api.example.com/v1", env_name, "m", 1536)
+                .unwrap();
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+        let trait_obj: &dyn Embedder = &embedder;
+        assert_eq!(trait_obj.name(), "remote");
+        assert_eq!(trait_obj.dim(), 1536);
+    }
+
+    /// Async `AsyncEmbedder::name` and `AsyncEmbedder::dim` mirror the
+    /// sync trait so async-first callers do not have to re-import
+    /// configuration types just to log dimensionality.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_embedder_trait_name_and_dim_match() {
+        let env_name = "MOAGAN_TEST_ASYNC_TRAIT_98240";
+        unsafe {
+            std::env::set_var(env_name, "k");
+        }
+        let embedder =
+            RemoteEmbedder::new("cohere", "https://api.cohere.ai/v1", env_name, "m", 1024).unwrap();
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+        let trait_obj: &dyn AsyncEmbedder = &embedder;
+        assert_eq!(trait_obj.name(), "remote");
+        assert_eq!(trait_obj.dim(), 1024);
+    }
+
+    /// Sync `Embedder::embed` populates the cache on a cold call.
+    /// A second sync call with the same text returns the cached
+    /// vector without sending another HTTP request — pinning the
+    /// "cluster loop re-embeds the same sketch text cheaply"
+    /// invariant. The mock server's request count (2: pre-warm
+    /// plus cold sync, then unchanged after the cached hot sync)
+    /// is the network-side proof: if the cache stops working, the
+    /// post-hot call triggers another POST and the count
+    /// diverges.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_embedder_caches_cold_call() {
+        use crate::llm::embed::Embedder;
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/embeddings"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{"embedding": [0.1, 0.2, 0.3], "index": 0}]
+                })),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let env_name = "MOAGAN_TEST_SYNC_CACHE_98241";
+        unsafe {
+            std::env::set_var(env_name, "k");
+        }
+        let embedder = RemoteEmbedder::with_provider(
+            RemoteEmbedderProvider::Openai,
+            &format!("{}/v1", server.uri()),
+            env_name,
+            "m",
+            3,
+        )
+        .unwrap();
+
+        // Pre-warm the cache via the async trait path so the
+        // sync bridge exercises the cold branch on text "cold"
+        // and the hot branch on text "cold" + "cold" again.
+        let _ = AsyncEmbedder::embed_batch(&embedder, &["warm"])
+            .await
+            .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        // Cold sync call on a different text: must re-enter the
+        // transport, count the request, populate the cache. We
+        // expect exactly 2 requests total so far after this call.
+        let v1 = <RemoteEmbedder as Embedder>::embed(&embedder, "cold");
+        assert_eq!(v1, vec![0.1, 0.2, 0.3]);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+        // Hot sync call on the same text: must NOT issue another
+        // request, so the request count remains 2.
+        let v1_again = <RemoteEmbedder as Embedder>::embed(&embedder, "cold");
+        assert_eq!(v1_again, v1);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "second sync embed() must hit the cache, not the wire"
+        );
+
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+    }
+
+    /// Sync `Embedder::embed` on a totally new text uses
+    /// `tokio::task::block_in_place`. This test runs inside a
+    /// multi-thread tokio runtime (the production runtime shape)
+    /// so the bridge is allowed. If the multi-thread requirement
+    /// is ever loosened, this test starts failing and forces a
+    /// conscious decision.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_embedder_round_trips_through_wiremock() {
+        use crate::llm::embed::Embedder;
+
+        let server = wiremock::MockServer::start().await;
+        // Mock returns ONE vector per request — single-input sync
+        // calls match this contract; the cluster cache short-circuit
+        // (other test) verifies the no-second-POST path.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/embeddings"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [
+                        {"embedding": [0.1, 0.2, 0.3], "index": 0},
+                    ]
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let env_name = "MOAGAN_TEST_SYNC_BRIDGE_98242";
+        unsafe {
+            std::env::set_var(env_name, "k");
+        }
+        let embedder = RemoteEmbedder::with_provider(
+            RemoteEmbedderProvider::Openai,
+            &format!("{}/v1", server.uri()),
+            env_name,
+            "m",
+            3,
+        )
+        .unwrap();
+
+        let a = <RemoteEmbedder as Embedder>::embed(&embedder, "alpha");
+        assert_eq!(a, vec![0.1, 0.2, 0.3]);
+        let a_again = <RemoteEmbedder as Embedder>::embed(&embedder, "alpha");
+        assert_eq!(a_again, a);
+        // Only one POST: the second sync embed must have come from
+        // the cache, not the wire.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        unsafe {
+            std::env::remove_var(env_name);
+        }
     }
 }

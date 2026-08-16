@@ -19,6 +19,10 @@
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
+
+use crate::error::Result;
+
 /// Network-backed embedding adapter. Opt-in via
 /// `[embedder.remote]` in `~/.config/moagan/config.toml`; the
 /// dependency-free [`HashingEmbedder`] remains the default. See the
@@ -31,12 +35,50 @@ pub use remote::{RemoteEmbedder, RemoteEmbedderConfig, RemoteEmbedderProvider};
 /// fixed-dimensional `f32` vector. All vectors returned by a given
 /// `Embedder` instance must be L2-normalised so cosine similarity
 /// equals the dot product of two outputs.
+///
+/// The trait is **synchronous** and **infallible**: `embed()` must
+/// return a vector on every call. The dependency-free
+/// [`HashingEmbedder`] honours this directly because hashing cannot
+/// fail. The network-backed [`RemoteEmbedder`] honours it via a
+/// [`tokio::task::block_in_place`] bridge that **only works inside a
+/// multi-thread Tokio runtime** (`Builder::new_multi_thread()` or
+/// `#[tokio::test(flavor = "multi_thread")]`); production satisfies
+/// this because `run_blocking()` in `src/lib.rs` builds a
+/// multi-thread runtime.
+///
+/// For fallible, async-native embedding, prefer the
+/// [`AsyncEmbedder`] trait instead.
 pub trait Embedder: Send + Sync {
     /// Embed `text` into a fixed-dimensional vector.
     fn embed(&self, text: &str) -> Vec<f32>;
     /// Output dimensionality. Must be `> 0` and stable across calls.
     fn dim(&self) -> usize;
     /// Stable identifier for the backend (e.g. `"hashing"`).
+    fn name(&self) -> &'static str;
+}
+
+/// Async-native embedding trait. The canonical contract for any
+/// network-backed adapter: send a batch of inputs to the upstream,
+/// receive a vector per input. Fallible (`Result`) because network
+/// I/O is fallible.
+///
+/// Mirrors [`Embedder::dim`] and [`Embedder::name`] so callers that
+/// already hold a `&dyn Embedder` can switch to a `&dyn
+/// AsyncEmbedder` without an extra metadata hop. The `cluster`
+/// family of functions in `src/discovery/clusterer.rs` only depends
+/// on the sync trait today; the async trait is exposed for future
+/// async-first callers (D.1.3 follow-up).
+///
+/// Compliance: catalog 10-integrada-v0 §D.1.3 (T09-02; T18-09 §7.7).
+#[async_trait]
+pub trait AsyncEmbedder: Send + Sync {
+    /// Embed a batch of `texts` and return one vector per input, in
+    /// the same order. An empty `texts` slice yields an empty `Vec`
+    /// without any I/O.
+    async fn embed_batch<'a>(&'a self, texts: &'a [&'a str]) -> Result<Vec<Vec<f32>>>;
+    /// Output dimensionality. Must be `> 0` and stable across calls.
+    fn dim(&self) -> usize;
+    /// Stable identifier for the backend (e.g. `"remote"`).
     fn name(&self) -> &'static str;
 }
 
