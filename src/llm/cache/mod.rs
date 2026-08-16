@@ -930,6 +930,7 @@ mod tests {
             other_provider in "[a-z]{1,8}", other_model in "[a-z0-9-]{1,16}",
         ) {
             prop_assume!(provider != other_provider);
+            prop_assume!(model != other_model);
             let r = req("s", "u");
             let key_p1 = Cache::cache_key(&r, &provider, &model);
             let key_p2 = Cache::cache_key(&r, &other_provider, &model);
