@@ -689,7 +689,7 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
 /// pattern-based adversary pass (`AdversaryPhase`) is opt-in. The
 /// CLI flag `--adversary` overrides the per-mode default; `deep`
 /// enables it automatically because it is the only mode where the
-/// seven-pattern cost is amortised across a meaningful judge
+/// twelve-pattern cost is amortised across a meaningful judge
 /// panel. The phase writes `rankings/adversary_report.json` with
 /// one section per [`AdversaryPattern`].
 ///
@@ -723,7 +723,7 @@ pub(crate) fn resolve_replace_sources_enabled(mode: Mode, no_replace_sources: bo
 /// pattern-based adversary pass (`AdversaryPhase`) is opt-in. The
 /// CLI flag `--adversary` overrides the per-mode default; `deep`
 /// enables it automatically because it is the only mode where the
-/// seven-pattern cost is amortised across a meaningful judge
+/// twelve-pattern cost is amortised across a meaningful judge
 /// panel. The phase writes `rankings/adversary_report.json` with
 /// one section per [`AdversaryPattern`].
 pub fn build_pipeline_for_mode(

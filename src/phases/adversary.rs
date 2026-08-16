@@ -10,7 +10,10 @@
 //!   no I/O beyond reading `evaluations/`, `proposals/`, and writing
 //!   the single sidecar. Re-running it on the same inputs produces
 //!   the same byte-identical sidecar.
-//! - The seven canonical patterns (`AdversaryPattern::all_seven`)
+//! - The twelve canonical patterns (`AdversaryPattern::all`: the
+//!   original seven from PR-11 / v0.5 plus the five D.12.5 add-on
+//!   patterns `shared_blind_spots`, `unanimous_claims_without_evidence`,
+//!   `hidden_assumptions`, `omitted_risks`, `unverified_claims`)
 //!   produce one section each in the report. A section carries the
 //!   `fired_count` (how many proposals tripped the pattern) and a
 //!   per-proposal verdict with the raw metric payload so a
@@ -70,9 +73,9 @@ pub struct PatternAdversaryReport {
     /// `0` when the wall clock is unavailable (tests).
     pub generated_at_unix: i64,
     /// One section per [`AdversaryPattern`], in the canonical
-    /// order returned by [`AdversaryPattern::all_seven`]. The
-    /// length is always 7 by construction; the field is a `Vec`
-    /// for forward-compatibility (an eighth pattern would just
+    /// order returned by [`AdversaryPattern::all`]. The
+    /// length is always 12 by construction; the field is a `Vec`
+    /// for forward-compatibility (a thirteenth pattern would just
     /// append).
     pub sections: Vec<PatternAdversarySection>,
 }
@@ -232,14 +235,14 @@ impl Phase for AdversaryPhase {
         // even within a single mount).
         by_proposal.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Step 2: run all 7 patterns on each proposal and bucket
+        // Step 2: run all 12 patterns on each proposal and bucket
         // the verdicts per pattern. The bucket is a
         // `Vec<PatternVerdict>` aligned with `by_proposal` so the
         // post-process step can build the section's `per_proposal`
         // list without re-walking the proposals.
         let mut per_pattern: std::collections::BTreeMap<AdversaryPattern, Vec<PatternVerdict>> =
             std::collections::BTreeMap::new();
-        for pattern in AdversaryPattern::all_seven() {
+        for pattern in AdversaryPattern::all() {
             per_pattern.insert(pattern, Vec::with_capacity(by_proposal.len()));
         }
         for (proposal_id, agg, proposal) in &by_proposal {
@@ -258,12 +261,12 @@ impl Phase for AdversaryPhase {
         }
 
         // Step 3: build the per-pattern sections, preserving the
-        // canonical order from `AdversaryPattern::all_seven` so the
+        // canonical order from `AdversaryPattern::all` so the
         // JSON shape is stable across runs and across
         // refactors of `run_all_patterns` (the helper is the
         // canonical source of the order).
-        let mut sections: Vec<PatternAdversarySection> = Vec::with_capacity(7);
-        for pattern in AdversaryPattern::all_seven() {
+        let mut sections: Vec<PatternAdversarySection> = Vec::with_capacity(12);
+        for pattern in AdversaryPattern::all() {
             let verdicts = per_pattern.remove(&pattern).unwrap_or_default();
             let mut per_proposal = Vec::with_capacity(verdicts.len());
             let mut fired_count = 0_usize;
@@ -342,13 +345,13 @@ fn load_proposal(proposals_dir: &std::path::Path, proposal_id: &str) -> Proposal
 }
 
 /// Empty sections vector for the "no proposals evaluated" path:
-/// always seven entries, one per canonical pattern, all with
+/// always twelve entries, one per canonical pattern, all with
 /// `fired_count = 0` and an empty `per_proposal`. Keeps the JSON
 /// shape identical between "ran with zero proposals" and "ran with
 /// N proposals and none tripped" so consumers do not have to
 /// special-case the absence of the field.
 fn empty_sections() -> Vec<PatternAdversarySection> {
-    AdversaryPattern::all_seven()
+    AdversaryPattern::all()
         .into_iter()
         .map(|pattern| PatternAdversarySection {
             pattern,
@@ -443,10 +446,11 @@ mod tests {
     }
 
     /// The phase writes an `adversary_report.json` with exactly
-    /// seven sections, one per canonical pattern, when
-    /// `enable == true`. Pins the spec contract for PR-11.
+    /// twelve sections, one per canonical pattern, when
+    /// `enable == true`. Pins the spec contract for PR-11 +
+    /// D.12.5.
     #[test]
-    fn adversary_phase_writes_seven_sections() -> Result<()> {
+    fn adversary_phase_writes_twelve_sections() -> Result<()> {
         let (_tmp, home, run_id, ctx) = empty_ctx();
         write_evaluation(&home, run_id, "p_a", 8.0, 3);
         write_evaluation(&home, run_id, "p_b", 6.0, 1);
@@ -461,16 +465,16 @@ mod tests {
                     serde_json::from_slice(&raw).expect("report parses");
                 assert_eq!(
                     report.sections.len(),
-                    7,
-                    "expected 7 sections (one per AdversaryPattern), got {}",
+                    12,
+                    "expected 12 sections (one per AdversaryPattern), got {}",
                     report.sections.len()
                 );
                 assert_eq!(report.proposal_count, 2);
                 assert_eq!(report.schema_version, PATTERN_ADVERSARY_SCHEMA_VERSION);
-                // Section ordering must follow AdversaryPattern::all_seven().
+                // Section ordering must follow AdversaryPattern::all().
                 let patterns: Vec<AdversaryPattern> =
                     report.sections.iter().map(|s| s.pattern).collect();
-                assert_eq!(patterns, AdversaryPattern::all_seven().to_vec());
+                assert_eq!(patterns, AdversaryPattern::all().to_vec());
                 Ok(())
             }
             other => panic!("expected PhaseOutput::PatternAdversary, got {other:?}"),

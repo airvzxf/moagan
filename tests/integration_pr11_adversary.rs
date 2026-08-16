@@ -2,8 +2,9 @@
 //! correctly into a full pipeline run. Mirrors the MVP smoke
 //! (`tests/integration_mvp.rs`) but inserts the new phase between
 //! `JudgePhase` and `RankPhase`, then asserts the
-//! `rankings/adversary_report.json` sidecar exists with seven
-//! sections (one per canonical [`AdversaryPattern`]).
+//! `rankings/adversary_report.json` sidecar exists with twelve
+//! sections (one per canonical [`AdversaryPattern`]: the original
+//! seven from PR-11 plus the five D.12.5 add-on patterns).
 //!
 //! We use `Mode::Fast` instead of `Mode::Deep` to keep the mock
 //! fixture compact (fast mode runs 3 proposals × 3 judges = 9
@@ -198,11 +199,11 @@ fn build_pipeline(adversary_enabled: bool) -> Pipeline {
 }
 
 /// End-to-end smoke: with the phase enabled, the pipeline writes
-/// `rankings/adversary_report.json` with exactly seven sections,
-/// one per canonical pattern. This is the PR-11 acceptance
-/// contract.
+/// `rankings/adversary_report.json` with exactly twelve sections,
+/// one per canonical pattern. This is the PR-11 + D.12.5
+/// acceptance contract.
 #[test]
-fn adversary_phase_writes_seven_section_report() -> Result<()> {
+fn adversary_phase_writes_twelve_section_report() -> Result<()> {
     let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
@@ -235,22 +236,22 @@ fn adversary_phase_writes_seven_section_report() -> Result<()> {
         .expect("AdversaryPhase must emit PhaseOutput::PatternAdversary");
     assert!(adv_output.exists(), "adversary report sidecar must exist");
 
-    // Read the sidecar and assert the 7-section contract.
+    // Read the sidecar and assert the 12-section contract.
     let raw = std::fs::read(&adv_output).expect("sidecar readable");
     let report: moagan::phases::PatternAdversaryReport =
         serde_json::from_slice(&raw).expect("sidecar parses");
     assert_eq!(
         report.sections.len(),
-        7,
-        "expected 7 sections (one per AdversaryPattern), got {}",
+        12,
+        "expected 12 sections (one per AdversaryPattern), got {}",
         report.sections.len()
     );
     assert_eq!(report.schema_version, PATTERN_ADVERSARY_SCHEMA_VERSION);
 
-    // The section ordering must mirror `AdversaryPattern::all_seven()`
+    // The section ordering must mirror `AdversaryPattern::all()`
     // so downstream consumers can iterate deterministically.
     let observed: Vec<AdversaryPattern> = report.sections.iter().map(|s| s.pattern).collect();
-    assert_eq!(observed, AdversaryPattern::all_seven().to_vec());
+    assert_eq!(observed, AdversaryPattern::all().to_vec());
 
     // Each section must carry a per-proposal verdict so the
     // dashboard can render per-pattern / per-proposal drill-downs.

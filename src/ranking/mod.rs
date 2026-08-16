@@ -12,10 +12,14 @@
 //!   (T01-06 §16.12 step 4).
 //! - [`rubric`] — six-criterion rubric anchors consumed by the rank
 //!   phase to score each proposal.
-//! - [`adversary_patterns`] — D.22.1: seven pattern detectors that
-//!   map a metric to a boolean verdict and a free-form detail
-//!   string; the judge phase runs them to decide whether a proposal
-//!   needs a refine action.
+//! - [`adversary_patterns`] — D.22.1 + D.12.5: twelve pattern
+//!   detectors that map a metric to a boolean verdict and a
+//!   free-form detail string; the judge phase runs them to decide
+//!   whether a proposal needs a refine action. The original seven
+//!   patterns from PR-11 / v0.5 are augmented by the five D.12.5
+//!   add-on patterns (`shared_blind_spots`,
+//!   `unanimous_claims_without_evidence`, `hidden_assumptions`,
+//!   `omitted_risks`, `unverified_claims`).
 //! - [`refine_action`] — D.22.2: seven-variant [`RefineAction`]
 //!   enum the refine loop dispatches on; one action is picked per
 //!   fired [`AdversaryPattern`].
