@@ -1977,6 +1977,12 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // the same ceiling as the role it continues so a single
         // continuation can finish a long-form response.
         Role::Continuation => DEFAULT_MAX_TOKENS,
+        // A#11: discovery-mode LLM-as-judge. The detector emits
+        // a findings array; the prompt + schema together bound
+        // the response, but we keep the 1M ceiling so a model
+        // that wants to surface very long evidence excerpts is
+        // not artificially truncated.
+        Role::ContradictionJudge => DEFAULT_MAX_TOKENS,
     }
 }
 
@@ -2097,6 +2103,13 @@ pub fn temperature_for_role(
         // resolved by `role_settings` (0.5) so the call layer
         // does not have to special-case the role.
         Role::Continuation => 0.0,
+        // A#11: discovery-mode LLM-as-judge. T=0.0 so two runs
+        // over the same `(focal, candidates)` set produce
+        // identical findings — cluster-snapshot diffs rely on
+        // the call being stable. top_p is resolved by
+        // `role_settings` (0.2) so the call layer doesn't
+        // special-case the role.
+        Role::ContradictionJudge => 0.0,
     }
 }
 

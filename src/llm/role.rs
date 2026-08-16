@@ -142,6 +142,18 @@ pub enum Role {
     /// (D.21.6) — after the second failed attempt the dispatcher
     /// falls back to today's warning-only behaviour.
     Continuation,
+    /// ContradictionJudge — A#11. Discovery-mode LLM-as-judge used
+    /// by `discover_contradict` to compare a focal sketch against a
+    /// list of candidate sketches and surface contradictions with
+    /// severity (`minor` / `major` / `critical`), evidence, and
+    /// suggestion. Fully deterministic (`T=0.0, top_p=0.2,
+    /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000)`) so two runs over
+    /// the same `(focal, candidates)` set produce identical
+    /// findings — the cluster-snapshot diffability the rest of the
+    /// discovery pipeline relies on. The T=0.0 setting matches
+    /// `Role::Tagger` and `Role::FacetDeriver` (the two other
+    /// discovery-side deterministic roles).
+    ContradictionJudge,
 }
 
 impl Role {
@@ -174,6 +186,7 @@ impl Role {
             Self::JsonRepairV2 => "json_repair_v2",
             Self::HostilePromptDetector => "hostile_prompt_detector",
             Self::Continuation => "continuation",
+            Self::ContradictionJudge => "contradiction_judge",
         }
     }
 
@@ -244,6 +257,9 @@ impl Role {
             }
             Self::Continuation => {
                 "Continuation: {continued, finished, raw_excerpt, schema_version} (focused re-call after truncated response; T=0.0, top_p=0.5, max_tokens=1000000)"
+            }
+            Self::ContradictionJudge => {
+                "ContradictionJudge: {findings[]} (each finding is {{pair[id1,id2], severity, evidence, suggestion}}); severity is one of minor|major|critical (discovery LLM-as-judge; T=0.0, top_p=0.2, max_tokens=1000000)"
             }
         }
     }
@@ -324,6 +340,20 @@ impl Role {
             Self::Continuation => {
                 serde_json::from_value::<ContinuationReport>(value.clone()).map(|_| ())
             }
+            Self::ContradictionJudge => {
+                // A#11: the discovery contradiction judge returns
+                // a wrapper object whose `findings` field is an
+                // array of `{pair, severity, evidence, suggestion}`.
+                // The validator confirms the wrapper shape; the
+                // detector's own parse helper unwraps the array
+                // once the schema is satisfied. The empty-object
+                // case (no findings) is acceptable because
+                // `#[serde(default)]` on `findings` makes the field
+                // safe to omit when the judge decides nothing
+                // contradicts the focal sketch.
+                serde_json::from_value::<crate::domain::ContradictionJudgeReport>(value.clone())
+                    .map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -364,6 +394,7 @@ impl Role {
             Self::JsonRepairV2,
             Self::HostilePromptDetector,
             Self::Continuation,
+            Self::ContradictionJudge,
         ]
     }
 }
@@ -405,6 +436,7 @@ impl FromStr for Role {
             "json_repair_v2" => Ok(Self::JsonRepairV2),
             "hostile_prompt_detector" => Ok(Self::HostilePromptDetector),
             "continuation" => Ok(Self::Continuation),
+            "contradiction_judge" => Ok(Self::ContradictionJudge),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -442,7 +474,12 @@ mod tests {
         // (no phase ever calls them; the prompt files were dead
         // weight in the binary and the cache key). Count moves
         // from 28 to 26.
-        assert_eq!(Role::all().len(), 26);
+        // A#11: `ContradictionJudge` re-introduces a typed role
+        // for the discovery-mode LLM-as-judge detector. Count
+        // moves from 26 to 27. The detector function lives in
+        // `crate::discovery::contradiction`; this role enum entry
+        // is the typed identifier the call layer uses.
+        assert_eq!(Role::all().len(), 27);
     }
 
     #[test]
@@ -640,6 +677,50 @@ mod tests {
         assert_eq!(Role::Continuation.as_str(), "continuation");
     }
 
+    /// A#11: `Role::ContradictionJudge` exposes the typed
+    /// identifier the discovery contradiction detector uses
+    /// through `RunContext::call_with_retry_parse`. Wire form is
+    /// lowercase snake_case; round-trip through `FromStr` must
+    /// recover the variant byte-for-byte.
+    #[test]
+    fn role_contradiction_judge_as_str_returns_lowercase_snake_case() {
+        assert_eq!(Role::ContradictionJudge.as_str(), "contradiction_judge");
+    }
+
+    /// A#11: round-trip the variant through `FromStr` so the
+    /// catalog stays total over the lowercase snake_case wire form.
+    #[test]
+    fn role_contradiction_judge_from_str_round_trips() {
+        let s = Role::ContradictionJudge.as_str();
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::ContradictionJudge, back);
+    }
+
+    /// A#11: validate the wire-form envelope the contradiction
+    /// judge emits. The wrapper object carries an optional
+    /// `findings: Vec<...>` plus a schema version. `{}` is also
+    /// acceptable (the model is told it can return zero findings).
+    #[test]
+    fn role_contradiction_judge_validate_json_accepts_valid_payload() {
+        let raw = serde_json::json!({
+            "findings": [
+                {
+                    "pair": ["sk_001", "sk_002"],
+                    "severity": "major",
+                    "evidence": "sk_001 assumes ACID; sk_002 assumes eventual",
+                    "suggestion": "Pick one consistency model explicitly"
+                }
+            ],
+            "schema_version": "contradiction_judge.v1"
+        });
+        assert!(Role::ContradictionJudge.validate_json(&raw).is_ok());
+        assert!(
+            Role::ContradictionJudge
+                .validate_json(&serde_json::json!({}))
+                .is_ok()
+        );
+    }
+
     /// PR-C2: round-trip the variant through `FromStr` so the
     /// catalog stays total over the lowercase snake_case wire form.
     #[test]
@@ -711,6 +792,7 @@ mod tests {
                     || desc.starts_with("JsonRepairV2:")
                     || desc.starts_with("HostilePromptDetector:")
                     || desc.starts_with("Continuation:")
+                    || desc.starts_with("ContradictionJudge:")
                     || desc.starts_with("Facets:"),
                 "{:?} description does not start with its name: {desc}",
                 r
@@ -800,5 +882,10 @@ mod tests {
         // keeps the role surface parity with every other opt-in
         // catalog role introduced under Track H.
         assert!(Role::Continuation.validate_json(&empty).is_ok());
+        // A#11: `ContradictionJudge` carries its own wrapper type
+        // with `#[serde(default)]`, so {} parses cleanly (the
+        // detector tells the model an empty `findings` array is
+        // a valid response).
+        assert!(Role::ContradictionJudge.validate_json(&empty).is_ok());
     }
 }

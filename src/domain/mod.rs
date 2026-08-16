@@ -1096,6 +1096,148 @@ pub struct HostilePromptReport {
     /// Schema version.
     pub schema_version: String,
 }
+/// Output of the `Role::ContradictionJudge` role (A#11).
+///
+/// Discovery-mode LLM-as-judge used by
+/// `crate::discovery::contradiction::find_contradictions_against`.
+/// Given one focal sketch and a list of candidate sketches the
+/// judge produces a `findings` array — each finding pins a
+/// contradiction pair against one of three severity buckets.
+/// The wrapper exists so `Role::ContradictionJudge.validate_json`
+/// can confirm the schema before the detector's own parse helper
+/// unwraps the array. `#[serde(default)]` keeps the validator
+/// accepting empty objects (the model is told it can emit zero
+/// findings when the focal sketch has no contradictions).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContradictionJudgeReport {
+    /// Per-pair contradiction findings the judge emitted. Empty
+    /// when the judge decided nothing contradicts the focal
+    /// sketch.
+    pub findings: Vec<ContradictionFinding>,
+    /// Wire-form schema version. Always
+    /// `"contradiction_judge.v1"` for the v1 prompt.
+    pub schema_version: String,
+}
+
+/// One contradiction the `Role::ContradictionJudge` surfaced.
+///
+/// The two sketch ids in `pair` are drawn verbatim from the user
+/// payload (the focal sketch is always position 0; the candidate it
+/// contradicts is at position 1). `severity` is one of `minor`,
+/// `major`, `critical` — the enum is reused by the deterministic
+/// parsing path so a malformed severity string does not silently
+/// land in `domain::Contradiction` as a free-form string. The
+/// detector accepts the legacy strings via [`Self::from_str_lossy`]
+/// so a model that emits `"high"` (the old severity vocabulary) is
+/// upgraded to `Major` instead of dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContradictionFinding {
+    /// Tuple of exactly two sketch ids (focal, candidate).
+    pub pair: [String; 2],
+    /// Severity bucket. Serialised as the lowercase snake_case
+    /// variant name on the wire.
+    pub severity: ContradictionSeverity,
+    /// Short verbatim or paraphrased excerpt that backs the call.
+    pub evidence: String,
+    /// One-line actionable reconciliation hint.
+    pub suggestion: String,
+}
+
+/// Severity buckets the contradiction judge can emit.
+///
+/// The discriminant ordering (`Minor`, `Major`, `Critical`) doubles
+/// as the rank used to sort findings for persistence — `Critical`
+/// surfaces first so the integrator / deliver phases see the most
+/// urgent fixes up top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContradictionSeverity {
+    /// Cosmetic or single trade-off disagreement. Persisted as
+    /// `"low"` so the existing `Contradiction` sidecar (which only
+    /// stores `"low"|"medium"|"high"`) keeps its wire form stable.
+    Minor,
+    /// Architecture-changing disagreement. Persisted as `"medium"`.
+    Major,
+    /// Mutually exclusive guarantees — both sketches cannot be
+    /// valid for the same brief. Persisted as `"high"`.
+    Critical,
+}
+
+impl ContradictionSeverity {
+    /// Parse a string into a severity bucket. Unknown strings fall
+    /// back to [`Self::Minor`] so the detector never silently
+    /// drops a finding on an unexpected label.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "critical" | "high" | "h" => Self::Critical,
+            "major" | "medium" | "med" | "m" => Self::Major,
+            "minor" | "low" | "l" => Self::Minor,
+            _ => Self::Minor,
+        }
+    }
+
+    /// Map the new severity vocabulary back to the legacy string
+    /// the existing `domain::Contradiction` sidecar expects
+    /// (`"low"|"medium"|"high"`). The mapping keeps the
+    /// `contradictions.json` schema unchanged so the integrator
+    /// phase can keep consuming it byte-for-byte.
+    pub fn legacy_label(&self) -> &'static str {
+        match self {
+            Self::Minor => "low",
+            Self::Major => "medium",
+            Self::Critical => "high",
+        }
+    }
+
+    /// Rank used to sort findings so `Critical` lands first.
+    pub fn rank(&self) -> u8 {
+        match self {
+            Self::Minor => 1,
+            Self::Major => 2,
+            Self::Critical => 3,
+        }
+    }
+}
+
+impl ContradictionFinding {
+    /// Lenient parse from a generic JSON value. Used by the
+    /// detector's own parse helper so a wrapper object whose
+    /// `findings` items have partially-missing fields still
+    /// surfaces the well-formed ones. Pairs whose `severity`
+    /// string is empty default to [`ContradictionSeverity::Minor`].
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let pair = value.get("pair")?;
+        let arr = pair.as_array()?;
+        if arr.len() != 2 {
+            return None;
+        }
+        let id0 = arr.first()?.as_str()?.to_owned();
+        let id1 = arr.get(1)?.as_str()?.to_owned();
+        let severity = value
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .map(ContradictionSeverity::from_str_lossy)
+            .unwrap_or(ContradictionSeverity::Minor);
+        let evidence = value
+            .get("evidence")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let suggestion = value
+            .get("suggestion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        Some(Self {
+            pair: [id0, id1],
+            severity,
+            evidence,
+            suggestion,
+        })
+    }
+}
+
 /// Output of the adversarial judge pass. Only emitted when the
 /// disagreement_score between normal judges exceeds the configured
 /// threshold; otherwise the proposal is left alone.
