@@ -168,12 +168,24 @@ impl SaturationTracker {
         self.mean_intra_cluster_similarity = mean_intra_cluster_similarity(clusters);
         self.last_aporate = self.mean_intra_cluster_similarity;
 
-        // Outlier accounting. We use the configured threshold so a
-        // caller that tunes the policy gets a coherent signal
-        // across the detector and the tracker.
-        let outliers =
-            detect_outliers_with_threshold(batch, clusters, self.policy.outlier_distance);
-        self.outliers_collected = self.outliers_collected.saturating_add(outliers.len());
+        // Outlier accounting. The detector treats unclustered
+        // sketches as outliers (outlier.rs:90), so during the
+        // matrix loop — where `clusters` is intentionally empty
+        // until the post-matrix phase runs — EVERY sketch would be
+        // counted as an outlier. That accumulator exists to safety
+        // net a clusterer that produced too many outliers; it is
+        // meaningless when there are no clusters yet. Skip the
+        // accumulation when the cluster list is empty so the
+        // `outliers_cap = min_sketches / 2` floor actually means
+        // "outliers relative to clusters", not "iteration count".
+        // The clusterer is the only caller that passes a non-empty
+        // `clusters` slice, so the gate is the right shape
+        // regardless of which driver ends up calling `update`.
+        if !clusters.is_empty() {
+            let outliers =
+                detect_outliers_with_threshold(batch, clusters, self.policy.outlier_distance);
+            self.outliers_collected = self.outliers_collected.saturating_add(outliers.len());
+        }
 
         // Per-model saturation: every model that appears in the
         // batch with a thesis identical (case-insensitive) to a
@@ -534,6 +546,13 @@ mod tests {
     /// reaches `min_sketches / 2`, the tracker returns
     /// `Stop(OutliersCollected)`. Pins the safety net so a
     /// future refactor cannot silently grow the cap.
+    ///
+    /// Note: the matrix loop drives `update` with `clusters: &[]`
+    /// — the cluster-aware guard inside `update` skips outlier
+    /// accumulation in that case, so we model the post-matrix
+    /// scenario here: clusters exist but none of them contain the
+    /// sketches in `batch`. With `min_sketches = 4` the cap is
+    /// `4 / 2 = 2`, so the four unclustered sketches trip it.
     #[test]
     fn update_outliers_collected_cap() {
         let mut t = SaturationTracker::with_policy(
@@ -551,13 +570,70 @@ mod tests {
             sketch("sk_003", "gamma", "minimalist"),
             sketch("sk_004", "delta", "minimalist"),
         ];
-        let decision = t.update(&batch, &[]);
+        let clusters = vec![cluster_with_cohesion(
+            "c_unrelated",
+            "off-topic",
+            vec![],
+            0.0,
+        )];
+        let decision = t.update(&batch, &clusters);
         assert_eq!(
             decision,
             StopDecision::Stop {
                 reason: StopReason::OutliersCollected
             }
         );
+    }
+
+    /// PR-D1 contract pin: the coordinator drives the matrix loop
+    /// with `clusters: &[]` (the clusterer runs in a post-matrix
+    /// phase). The outlier detector classifies every unclustered
+    /// sketch as an outlier, so without the cluster-aware guard
+    /// the `outliers_collected` counter would grow once per sketch
+    /// and trip `OutliersCollected` at `min_sketches / 2`, killing
+    /// the loop prematurely. The guard inside `update` makes the
+    /// counter inert while clusters are empty so the loop can
+    /// complete its full fan-out. This test pins the contract so
+    /// a future refactor that reverts the guard trips the test.
+    #[test]
+    fn update_does_not_count_outliers_when_clusters_empty() {
+        let mut t = SaturationTracker::with_policy(
+            2000,
+            StopPolicy {
+                min_sketches: 40,
+                max_sketches: 2000,
+                hard_cap: 2000,
+                outlier_distance: 0.3,
+                ..StopPolicy::default()
+            },
+        );
+        // Drive 1680 single-sketch iterations with empty clusters,
+        // mirroring the matrix loop under the operator's
+        // `[7 temps × 3 replicas]` profile. The caller (the
+        // coordinator) records the completion before consulting
+        // `update`, so the test mirrors the same call order.
+        for i in 0..1680 {
+            let sketch = sketch(
+                &format!("sk_{i:04}"),
+                &format!("thesis {i} alpha beta gamma"),
+                "minimalist",
+            );
+            t.record_completions(1);
+            let decision = t.update(&[sketch], &[]);
+            assert_eq!(
+                decision,
+                StopDecision::Continue,
+                "matrix loop must not trip OutliersCollected at iteration {i}"
+            );
+        }
+        assert_eq!(
+            t.outliers_collected, 0,
+            "outliers_collected must stay at 0 while clusters is empty"
+        );
+        assert_eq!(t.completed, 1680);
+        // The loop's outer `if n >= total` check is what stops the
+        // matrix loop, not the tracker. The tracker has not tripped
+        // any stop because none of the post-matrix conditions apply.
     }
 
     /// PR-19 verification: with `--cardinality 100` and 50%

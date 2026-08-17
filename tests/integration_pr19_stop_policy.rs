@@ -364,3 +364,67 @@ fn cluster_chunk_round_trips_through_embedder() {
         .expect("Quantum chunk must exist");
     assert_eq!(quantum_chunk.member_indices, vec![2]);
 }
+
+/// Operator-facing regression pin for the profile-expansion bug.
+///
+/// The user runs:
+///
+/// ```text
+/// moagan discover \
+///   --max-parallelism 64 \
+///   --temperature-profile 'provider=...;temperatures=0.0,0.3,0.6,1.0,1.3,1.6,1.9;replicas=3'
+/// ```
+///
+/// which expands the matrix by `7 × 3 = 21`. Before the fix the
+/// `coordinator` multiplied `min_sketches` by that expansion
+/// (`40 × 21 = 840`), giving `outliers_cap = 420`. Combined
+/// with the cluster-empty detector classifying every sketch as
+/// an outlier during the matrix loop, the loop tripped
+/// `OutliersCollected` at iteration #420 — the operator's
+/// intended 1680 sketches never reached disk. The fix is twofold:
+/// (a) drop the multiplication, (b) guard the outlier
+/// accumulator on `!clusters.is_empty()`. This test drives the
+/// tracker with the operator's exact shape and asserts that
+/// `OutliersCollected` never trips across the full 1680
+/// iterations.
+#[test]
+fn pr19_user_profile_7x3_does_not_trip_outliers_cap() {
+    let mut tracker = SaturationTracker::with_policy(
+        1680,
+        StopPolicy {
+            saturation_threshold: 0.05,
+            reserve_ratio: 0.25,
+            outlier_distance: 0.30,
+            min_sketches: 40,
+            max_sketches: 2000,
+            hard_cap: 2000,
+        },
+    );
+
+    for i in 0..1680 {
+        let sketch = Sketch {
+            id: format!("sk_{i:04}"),
+            thesis: format!("thesis {i} alpha beta gamma"),
+            angle: "minimalist".into(),
+            ..Sketch::default()
+        };
+        // Caller records completion before consulting `update`,
+        // mirroring the coordinator's call order.
+        tracker.record_completions(1);
+        let decision = tracker.update(&[sketch], &[]);
+        assert!(
+            !matches!(
+                decision,
+                StopDecision::Stop {
+                    reason: StopReason::OutliersCollected
+                }
+            ),
+            "OutliersCollected must not trip during the matrix loop (iteration {i})"
+        );
+    }
+    assert_eq!(
+        tracker.outliers_collected, 0,
+        "outliers_collected must stay at 0 while clusters is empty"
+    );
+    assert_eq!(tracker.completed, 1680);
+}
