@@ -78,6 +78,91 @@ pub fn find_conflicts<'a>(tags: &[&'a str]) -> Vec<(&'a str, &'a str)> {
     out
 }
 
+/// Catalog I.6 (opt-in) detectors. The three additional
+/// [`HardIncompat`] variants added by #504
+/// (`ClusterLocalInGlobal`, `PullInPushOnly`, `StatelessInStateful`)
+/// were shipped as typed records without a heuristic. This module
+/// adds the heuristics so a sub-fase (e.g. `SynthesizePhase`)
+/// that already calls [`find_conflicts`] can opt into the
+/// runtime-clash surface without expanding the tag-pair matrix.
+///
+/// The detectors are tag-set level: the caller passes the
+/// flattened tag list (typically the union of every proposal's
+/// tags in a cluster) and the helper returns `Some(HardIncompat)`
+/// when the heuristic matches, `None` otherwise. Each detector
+/// is independent so the unit tests pin the contract for one
+/// variant at a time, and [`detect_opt_in_hardincompat`] runs
+/// them in a fixed order for deterministic first-match
+/// resolution.
+///
+/// Detect [`HardIncompat::ClusterLocalInGlobal`]: a tag set
+/// containing both a `cluster_local` component and a `global`
+/// component. Case-insensitive on the tag literal so `Cluster_Local`
+/// and `cluster_local` both count. Returns the typed record on a
+/// match; the caller surfaces the [`explain`](HardIncompat::explain)
+/// message in the sidecar / log.
+pub fn detect_cluster_local_in_global(tags: &[&str]) -> Option<HardIncompat> {
+    let has_cluster_local = tags.iter().any(|t| t.eq_ignore_ascii_case("cluster_local"));
+    let has_global = tags.iter().any(|t| t.eq_ignore_ascii_case("global"));
+    (has_cluster_local && has_global).then_some(HardIncompat::ClusterLocalInGlobal)
+}
+
+/// Detect [`HardIncompat::PullInPushOnly`]: a tag set containing
+/// a pull-mode marker (`pull_based` OR `pull_required`) AND a
+/// push-mode marker (`push_only` OR `push_endpoint`). The
+/// disjunctive match on either side reflects the way operators
+/// describe the same architectural decision under different
+/// vocabulary (e.g. a polling worker can be tagged `pull_based`
+/// in some shops and `pull_required` in others; both should
+/// trigger the same incompatibility).
+pub fn detect_pull_in_push_only(tags: &[&str]) -> Option<HardIncompat> {
+    let has_pull = tags
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("pull_based") || t.eq_ignore_ascii_case("pull_required"));
+    let has_push = tags
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("push_only") || t.eq_ignore_ascii_case("push_endpoint"));
+    (has_pull && has_push).then_some(HardIncompat::PullInPushOnly)
+}
+
+/// Detect [`HardIncompat::StatelessInStateful`]: a tag set
+/// containing a `stateless` component AND a `stateful_required`
+/// marker. Symmetric in tag order — the variant fires whether
+/// `stateless` is paired with `stateful_required` or vice versa.
+pub fn detect_stateless_in_stateful(tags: &[&str]) -> Option<HardIncompat> {
+    let has_stateless = tags.iter().any(|t| t.eq_ignore_ascii_case("stateless"));
+    let has_stateful = tags
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("stateful_required"));
+    (has_stateless && has_stateful).then_some(HardIncompat::StatelessInStateful)
+}
+
+/// Run the three opt-in catalog detectors in a fixed order
+/// (`ClusterLocalInGlobal`, `PullInPushOnly`,
+/// `StatelessInStateful`) and return the first match. The order
+/// matches the enum declaration order in [`HardIncompat`] so the
+/// output is deterministic across runs. Returns `None` when
+/// none of the detectors fire — the caller should then fall
+/// through to the existing tag-pair matrix in
+/// [`find_conflicts`].
+///
+/// `tags` is the flattened union of every proposal's tag set in
+/// the cluster being checked. The caller is expected to dedupe
+/// first; the detectors themselves iterate the slice once and
+/// ignore duplicates.
+pub fn detect_opt_in_hardincompat(tags: &[&str]) -> Option<HardIncompat> {
+    if let Some(h) = detect_cluster_local_in_global(tags) {
+        return Some(h);
+    }
+    if let Some(h) = detect_pull_in_push_only(tags) {
+        return Some(h);
+    }
+    if let Some(h) = detect_stateless_in_stateful(tags) {
+        return Some(h);
+    }
+    None
+}
+
 /// Typed record of a hard incompatibility finding (catalog I.6).
 ///
 /// A gatekeeper (e.g. `SynthesizePhase`, an intake validator, a
@@ -943,5 +1028,179 @@ mod tests {
                 "StatelessInStateful must not be triggered by matrix pair {pair:?}"
             );
         }
+    }
+
+    // -- Catalog I.6 (opt-in): detector wiring -----------------------
+
+    /// `ClusterLocalInGlobal`: a tag set that contains BOTH
+    /// `cluster_local` and `global` must fire the detector. The
+    /// detector is symmetric in tag order — the test exercises
+    /// `global` appearing first to pin the contract.
+    #[test]
+    fn detect_cluster_local_in_global_fires_on_pair() {
+        let tags = vec!["global", "cluster_local", "sql"];
+        assert_eq!(
+            detect_cluster_local_in_global(&tags),
+            Some(HardIncompat::ClusterLocalInGlobal)
+        );
+        // Case-insensitive on both literals.
+        let tags = vec!["GLOBAL", "Cluster_Local"];
+        assert_eq!(
+            detect_cluster_local_in_global(&tags),
+            Some(HardIncompat::ClusterLocalInGlobal)
+        );
+    }
+
+    /// `ClusterLocalInGlobal`: a tag set that contains only one
+    /// of the two markers (or neither) must NOT fire. Pinned so
+    /// a refactor that drops the AND-conjunction surfaces here.
+    #[test]
+    fn detect_cluster_local_in_global_does_not_fire_without_pair() {
+        // Only cluster_local.
+        let tags = vec!["cluster_local", "sql", "rust"];
+        assert_eq!(detect_cluster_local_in_global(&tags), None);
+        // Only global.
+        let tags = vec!["global", "sql"];
+        assert_eq!(detect_cluster_local_in_global(&tags), None);
+        // Neither.
+        let tags = vec!["sql", "rust", "monolith"];
+        assert_eq!(detect_cluster_local_in_global(&tags), None);
+        // Empty.
+        let empty: Vec<&str> = Vec::new();
+        assert_eq!(detect_cluster_local_in_global(&empty), None);
+    }
+
+    /// `PullInPushOnly`: a tag set that contains a pull-mode
+    /// marker (`pull_based` OR `pull_required`) AND a push-mode
+    /// marker (`push_only` OR `push_endpoint`) must fire.
+    /// Pin every combination so a refactor that drops a
+    /// disjunct surfaces here.
+    #[test]
+    fn detect_pull_in_push_only_fires_on_pair() {
+        // pull_based + push_only
+        let tags = vec!["pull_based", "push_only"];
+        assert_eq!(
+            detect_pull_in_push_only(&tags),
+            Some(HardIncompat::PullInPushOnly)
+        );
+        // pull_based + push_endpoint
+        let tags = vec!["pull_based", "push_endpoint"];
+        assert_eq!(
+            detect_pull_in_push_only(&tags),
+            Some(HardIncompat::PullInPushOnly)
+        );
+        // pull_required + push_only
+        let tags = vec!["pull_required", "push_only"];
+        assert_eq!(
+            detect_pull_in_push_only(&tags),
+            Some(HardIncompat::PullInPushOnly)
+        );
+        // pull_required + push_endpoint
+        let tags = vec!["pull_required", "push_endpoint"];
+        assert_eq!(
+            detect_pull_in_push_only(&tags),
+            Some(HardIncompat::PullInPushOnly)
+        );
+    }
+
+    /// `PullInPushOnly`: a tag set that contains only pull-side
+    /// markers, only push-side markers, or neither must NOT fire.
+    #[test]
+    fn detect_pull_in_push_only_does_not_fire_without_pair() {
+        // Only pull-side markers.
+        let tags = vec!["pull_based", "pull_required"];
+        assert_eq!(detect_pull_in_push_only(&tags), None);
+        // Only push-side markers.
+        let tags = vec!["push_only", "push_endpoint"];
+        assert_eq!(detect_pull_in_push_only(&tags), None);
+        // Unrelated tags.
+        let tags = vec!["sql", "rust", "monolith"];
+        assert_eq!(detect_pull_in_push_only(&tags), None);
+        // Empty.
+        let empty: Vec<&str> = Vec::new();
+        assert_eq!(detect_pull_in_push_only(&empty), None);
+    }
+
+    /// `StatelessInStateful`: a tag set that contains BOTH
+    /// `stateless` and `stateful_required` must fire. The
+    /// detector is symmetric in tag order.
+    #[test]
+    fn detect_stateless_in_stateful_fires_on_pair() {
+        let tags = vec!["stateless", "stateful_required"];
+        assert_eq!(
+            detect_stateless_in_stateful(&tags),
+            Some(HardIncompat::StatelessInStateful)
+        );
+        // Reversed order.
+        let tags = vec!["stateful_required", "stateless"];
+        assert_eq!(
+            detect_stateless_in_stateful(&tags),
+            Some(HardIncompat::StatelessInStateful)
+        );
+        // Case-insensitive.
+        let tags = vec!["STATELESS", "Stateful_Required"];
+        assert_eq!(
+            detect_stateless_in_stateful(&tags),
+            Some(HardIncompat::StatelessInStateful)
+        );
+    }
+
+    /// `StatelessInStateful`: a tag set missing either side must
+    /// NOT fire. Pinned so a refactor that drops the
+    /// AND-conjunction surfaces here.
+    #[test]
+    fn detect_stateless_in_stateful_does_not_fire_without_pair() {
+        let tags = vec!["stateless", "sql"];
+        assert_eq!(detect_stateless_in_stateful(&tags), None);
+        let tags = vec!["stateful_required", "rust"];
+        assert_eq!(detect_stateless_in_stateful(&tags), None);
+        let tags = vec!["sql", "rust"];
+        assert_eq!(detect_stateless_in_stateful(&tags), None);
+        let empty: Vec<&str> = Vec::new();
+        assert_eq!(detect_stateless_in_stateful(&empty), None);
+    }
+
+    /// The wrapper [`detect_opt_in_hardincompat`] runs the three
+    /// detectors in a fixed order and returns the first match.
+    /// Pin the order (matching the enum declaration order) so a
+    /// refactor that re-orders the detector list surfaces here
+    /// before the wire form drifts.
+    #[test]
+    fn detect_opt_in_hardincompat_returns_first_match_in_deterministic_order() {
+        // Single variant matches: ClusterLocalInGlobal.
+        let tags = vec!["cluster_local", "global"];
+        assert_eq!(
+            detect_opt_in_hardincompat(&tags),
+            Some(HardIncompat::ClusterLocalInGlobal)
+        );
+        // Order: ClusterLocalInGlobal wins over the others.
+        let tags = vec![
+            "cluster_local",
+            "global",
+            "pull_based",
+            "push_only",
+            "stateless",
+            "stateful_required",
+        ];
+        assert_eq!(
+            detect_opt_in_hardincompat(&tags),
+            Some(HardIncompat::ClusterLocalInGlobal)
+        );
+        // Without ClusterLocalInGlobal, PullInPushOnly wins.
+        let tags = vec!["pull_based", "push_only", "stateless", "stateful_required"];
+        assert_eq!(
+            detect_opt_in_hardincompat(&tags),
+            Some(HardIncompat::PullInPushOnly)
+        );
+        // Without the first two, StatelessInStateful fires.
+        let tags = vec!["stateless", "stateful_required"];
+        assert_eq!(
+            detect_opt_in_hardincompat(&tags),
+            Some(HardIncompat::StatelessInStateful)
+        );
+        // No opt-in match — the caller is expected to fall
+        // through to `find_conflicts` for the matrix check.
+        let tags = vec!["sql", "rust", "monolith"];
+        assert_eq!(detect_opt_in_hardincompat(&tags), None);
     }
 }
