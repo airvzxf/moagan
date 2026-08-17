@@ -20,6 +20,19 @@
 #   lefthook install             # writes .git/hooks/{pre-commit,pre-push,commit-msg}
 #
 # Reference: docs/validation-tiers.md
+#
+# -----------------------------------------------------------------------------
+# Network-safety invariant (do not break)
+# -----------------------------------------------------------------------------
+# No hook in this file contacts a real LLM provider. Pre-commit and
+# pre-push run only static analysis + `cargo test --all-targets`; the
+# `--ignored`-gated real-LLM integration tests
+# (tests/integration_discover_*.rs, tests/integration_audit_e2e.rs) are
+# skipped at this layer. If you add a hook that needs an API key, gate
+# it on the corresponding `MOAGAN_<PROVIDER>_API_KEY` being unset and
+# `exit 0` when missing — never echo a real key, never fall through to
+# a real call. The CI workflows (`.github/workflows/test-ignored-*.yml`
+# and `e2e-network.yml`) are the only place real-provider calls fire.
 
 pre-commit:
   parallel: true
@@ -41,7 +54,7 @@ pre-push:
   parallel: false
   commands:
     test:
-      description: "T2 · cargo test --all-targets (skips known-flaky audit_e2e)"
+      description: "T2 · cargo test --all-targets (skips --ignored integration tests; no real LLM calls)"
       run: make test-ci
 
 commit-msg:
