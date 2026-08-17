@@ -613,19 +613,21 @@ impl DiscoveryCoordinator {
         // default profile (`[1.0] × 1`) the new `total` equals
         // the matrix cardinality, so v0.5 runs are unaffected.
         // With a configured profile the tracker can run the longer
-        // loop before declaring `OutliersCollected` or
-        // `MaxSketchesReached`. We also bump the policy's
-        // `min_sketches` floor proportionally so the
-        // `outliers_cap = min_sketches / 2` safety net scales with
-        // the expansion (the cap is a ratio against the floor; if
-        // the floor doesn't grow, a `[2 temps × 2 replicas]`
-        // profile would trip OutliersCollected after just 20
-        // calls).
-        let profile_expansion = profile_temperatures.len() * profile_replicas;
-        let mut expanded_policy = policy;
-        expanded_policy.min_sketches = expanded_policy
-            .min_sketches
-            .saturating_mul(profile_expansion.max(1));
+        // loop before declaring `MaxSketchesReached` (the
+        // `Saturated` branch is structurally unreachable while
+        // `clusters: &[Cluster]` is empty during the matrix loop).
+        //
+        // We previously multiplied `min_sketches` by the
+        // `profile_expansion` so the `outliers_cap = min_sketches / 2`
+        // safety net would scale with the expansion. That
+        // multiplication was removed: the cluster-aware guard in
+        // `SaturationTracker::update` (see `src/discovery/saturation.rs`)
+        // already prevents the outlier counter from accumulating
+        // while clusters are empty, so the multiplication shrunk
+        // the cap to 420 on a `[7 temps × 3 replicas]` profile and
+        // cut the loop short at iteration #420 — the operator's
+        // intent was the full 1680.
+        let expanded_policy = policy;
         tracker = SaturationTracker::with_policy(total.max(target), expanded_policy);
 
         // 5. Main loop: fan out every (cell, temperature, replica, sketch_index) tuple.
