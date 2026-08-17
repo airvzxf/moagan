@@ -5,7 +5,17 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Serialize concurrent runs to avoid artifact races.
+# DISABLED 2026-08-17: native DeepSeek pay-as-you-go budget exhausted (per
+# docs/pending-items-2026-08-13.md §9.3). This workflow was introduced in
+# PR #525 (Z1 restructure) but the upstream budget never recovered.
+# To re-enable: replace this stub with the original preflight-deepseek +
+# test-ignored-deepseek jobs from PR #525, and remove the `if: ${{ always() }}`
+# on the stub job below.
+#
+# History:
+# - PR #525 (2026-08-16): introduced as post-merge informative workflow
+# - PR #XXX (2026-08-17): stubbed because budget still exhausted
+
 concurrency:
   group: test-ignored-deepseek-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -13,80 +23,18 @@ concurrency:
 permissions:
   contents: read
 
-# Post-merge informative validation for the native deepseek provider.
-# Runs the integration_discover_deepseek -- --ignored test on every push to
-# main and on manual dispatch. NOT a PR gate — moved out of ci.yml in #Z1
-# to (a) reduce per-PR runner cost, (b) eliminate refs/pull/N/merge cache
-# pollution, (c) align with the e2e-network post-merge pattern.
-#
-# Timeout 120 min accommodates the rare case of a degraded upstream.
-
 jobs:
-  preflight-deepseek:
-    name: 'T3 · preflight — deepseek'
+  disabled-stub:
+    name: 'DISABLED — DeepSeek budget exhausted'
+    if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 1
     steps:
-      - name: probe deepseek
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      - name: skip with explanation
         run: |
-          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-            echo "SKIP: DEEPSEEK_API_KEY not set"
-            exit 0
-          fi
-          echo "DEEPSEEK: set, length=${#DEEPSEEK_API_KEY}, prefix=${DEEPSEEK_API_KEY:0:8}...${DEEPSEEK_API_KEY: -4}"
-          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
-          echo "DEEPSEEK http_status: $HTTP"
-          [[ "$HTTP" =~ ^2 ]] || exit 1
-
-  test-ignored-deepseek:
-    name: 'T2 · cargo test -- --ignored (deepseek)'
-    needs: preflight-deepseek
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt,clippy
-      - name: cargo test integration_discover_deepseek -- --ignored (gated on DEEPSEEK_API_KEY)
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          echo "============================================================"
-          echo "DIAGNOSTIC HEADER"
-          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
-          echo "  Runner:             $(uname -a)"
-          echo "  Working directory:  $(pwd)"
-          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "  Provider under test: deepseek"
-          echo "============================================================"
-          echo "API key presence:"
-          echo "  DEEPSEEK_API_KEY set: $([[ -n "${DEEPSEEK_API_KEY:-}" ]] && echo yes || echo no)"
-          echo "  DEEPSEEK_API_KEY length: ${#DEEPSEEK_API_KEY} chars"
-          echo "============================================================"
-          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-            echo "SKIP: DEEPSEEK_API_KEY not set on runner; deepseek --ignored test not run"
-            exit 0
-          fi
-          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
-          START_TS=$(date +%s)
-          cargo test --test integration_discover_deepseek -- --ignored --nocapture
-          CARGO_RC=$?
-          END_TS=$(date +%s)
-          echo "============================================================"
-          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
-          echo "============================================================"
-          exit $CARGO_RC
-
-      - name: upload test-ignored artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: moagan-test-ignored-deepseek-logs
-          path: target/test-runs/deepseek/
-          retention-days: 1
-          if-no-files-found: warn
+          echo "================================================================"
+          echo "DISABLED: test-ignored-deepseek is currently a stub."
+          echo "Reason: native DeepSeek pay-as-you-go budget exhausted."
+          echo "To re-enable: restore the original jobs from PR #525."
+          echo "================================================================"
+          exit 0
