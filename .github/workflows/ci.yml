@@ -20,36 +20,36 @@ permissions:
   contents: read
 
 # Tiered validation as documented in docs/validation-tiers.md, but split into
-# 10 parallel jobs to maximise wall-clock parallelism. The dependency graph:
+# 8 round-2 jobs to maximise wall-clock parallelism. The dependency graph:
 #
-#   fmt-check                ─┐
-#   guard-deps               ─┤   T0 (no deps, <2 s each)
-#                             │
-#   clippy                   ─┤   T1 (no deps, ~60 s)
-#                             │
-#   test-tests               ─┤
-#   test-lib                 ─┤
-#   test-doc                 ─┤   T2 (no deps, parallel)
-#   test-ignored-deepseek    ─┤
-#   test-ignored-opencode-go ─┤
-#   test-ignored-minimax     ─┤
-#   smoke                    ─┤
-#   e2e                      ─┘
+#   fmt-check              ─┐
+#   guard-deps             ─┤   T0 (no deps, <2 s each)
+#                           │
+#   clippy                 ─┤   T1 (no deps, ~60 s)
+#                           │
+#   test-tests             ─┤
+#   test-ignored-minimax   ─┤
+#   test-lib               ─┤
+#   smoke                  ─┤   T2/T3 (no deps except test-ignored-minimax
+#   e2e                    ─┤   which needs preflight-minimax)
+#   test-doc               ─┤
+#   preflight-minimax      ─┘   consumed by test-ignored-minimax only
 #
-#
-# The YAML declaration order is: test-tests, preflight-deepseek,
-# preflight-opencode_go, preflight-minimax, test-ignored-deepseek,
-# test-ignored-opencode-go, test-ignored-minimax, test-lib, smoke, e2e,
-# test-doc.
-# This is purely a visual ordering in the GitHub Actions UI; the actual
-# execution is parallel and the wall-clock critical path is dominated by
-# the slowest of the 8 round-2 jobs (the --ignored discovery tests at ~16 min).
+# The --ignored deepseek and opencode-go discovery tests were moved out of
+# this workflow in the Z1 restructure and now live in dedicated post-merge
+# workflows (`.github/workflows/test-ignored-deepseek.yml` and
+# `.github/workflows/test-ignored-opencode-go.yml`). They run only on push
+# to main and on workflow_dispatch — never on PRs — to (a) reduce per-PR
+# runner cost, (b) eliminate refs/pull/N/merge cache pollution from
+# Swatinem/rust-cache, and (c) align with the existing e2e-network
+# post-merge pattern.
 #
 # Wall-clock critical path:
-#   round 1 = max(fmt-check, guard-deps, clippy)                                     ~60 s
-#   round 2 = max(test-lib, test-tests, test-doc, test-ignored-deepseek,
-#                 test-ignored-opencode-go, test-ignored-minimax, smoke, e2e)                              ~16 min
-# Total: ~17 min cold / ~16 min warm (vs. ~5-8 min before this refactor).
+#   round 1 = max(fmt-check, guard-deps, clippy)                       ~60 s
+#   round 2 = max(test-lib, test-tests, test-doc, test-ignored-minimax,
+#                 smoke, e2e)                                            ~60 min cold (test-ignored-minimax)
+#                                                                        ~10 min warm
+# Total: ~62 min cold / ~11 min warm (vs. ~17 min cold before Z1).
 #
 # Required check names (must match the ruleset `protect-main` rule
 # `required_status_checks.required_status_checks[].context`):
@@ -61,6 +61,15 @@ permissions:
 #   - test-doc
 #   - smoke
 #   - e2e
+#
+# `test-ignored-minimax` is in the per-PR gate set as an INFORMATIVE check
+# only: it appears in the ruleset but the branch protection's
+# `mergeStateStatus` allows merge even when it fails (provider outage,
+# secret absent, or the 60 min timeout was hit). The other 8 checks
+# above are hard gates. The dedicated post-merge
+# `test-ignored-deepseek` / `test-ignored-opencode-go` workflows are not
+# part of the required status checks at all — they run on every push to
+# main for regression visibility.
 #
 # `e2e-network` is NOT in the required list (it runs only post-merge on main).
 
@@ -108,76 +117,20 @@ jobs:
       - name: cargo test (integration suite)
         run: cargo test --tests --no-fail-fast
 
-  # Pre-flight provider API probes. Each provider has its own per-provider
-  # preflight job so a single-provider outage does not block the others'
-  # downstream tests: test-ignored-deepseek gates only on preflight-deepseek,
-  # test-ignored-opencode-go gates only on preflight-opencode_go. Each probe
-  # is a 30 s HTTP GET to the provider's /v1/models endpoint. If the secret
-  # is absent the probe is skipped (exit 0); if the secret is set but the
-  # HTTP status is non-2xx (401, 403, 5xx, timeout, network error) the
-  # validator fails and only the `test-ignored-<provider>` job that
-  # `needs:` it is skipped — that is the desired GitHub Actions signal
-  # for a dead upstream. Prevents 25-min wasted runner time on a
-  # per-provider outage (PR #473).
-  preflight-deepseek:
-    name: 'T3 · preflight — deepseek'
-    if: false   # DISABLED 2026-08-15: native deepseek pay-as-you-go budget exhausted ($1 of $5 left); re-enable by removing this line when budget is restored
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - name: probe deepseek
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-            echo "SKIP: DEEPSEEK_API_KEY not set; deepseek not probed"
-            exit 0
-          fi
-          echo "DEEPSEEK probe:"
-          echo "  set: yes"
-          echo "  length: ${#DEEPSEEK_API_KEY} chars"
-          echo "  prefix: ${DEEPSEEK_API_KEY:0:8}...${DEEPSEEK_API_KEY: -4}"
-          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
-          echo "  http_status: $HTTP"
-          if [[ "$HTTP" =~ ^2 ]]; then
-            echo "  result: ok"
-            exit 0
-          else
-            echo "  result: FAIL (expected 2xx, got $HTTP)"
-            exit 1
-          fi
-
-  preflight-opencode_go:
-    name: 'T3 · preflight — opencode_go'
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - name: probe opencode_go
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-        run: |
-          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
-            echo "SKIP: OPENCODE_GO_API_KEY not set; opencode_go not probed"
-            exit 0
-          fi
-          echo "OPENCODE_GO probe:"
-          echo "  set: yes"
-          echo "  length: ${#OPENCODE_GO_API_KEY} chars"
-          echo "  prefix: ${OPENCODE_GO_API_KEY:0:8}...${OPENCODE_GO_API_KEY: -4}"
-          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
-            'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
-          echo "  http_status: $HTTP"
-          if [[ "$HTTP" =~ ^2 ]]; then
-            echo "  result: ok"
-            exit 0
-          else
-            echo "  result: FAIL (expected 2xx, got $HTTP)"
-            exit 1
-          fi
-
+  # Pre-flight provider API probe for MiniMax. Each provider has its own
+  # per-provider preflight job so a single-provider outage does not block
+  # the others' downstream tests. test-ignored-minimax gates only on
+  # preflight-minimax. The probe is a 30 s HTTP GET to the provider's
+  # /v1/models endpoint. If the secret is absent the probe is skipped
+  # (exit 0); if the secret is set but the HTTP status is non-2xx (401,
+  # 403, 5xx, timeout, network error) the validator fails and only the
+  # `test-ignored-minimax` job that `needs:` it is skipped — that is
+  # the desired GitHub Actions signal for a dead upstream. Prevents
+  # ~60 min wasted runner time on a MiniMax outage (PR #473).
+  #
+  # The deepseek and opencode_go preflights used to live here too; they
+  # were removed in the Z1 restructure alongside their test-ignored
+  # siblings (which moved to their own post-merge workflows).
   preflight-minimax:
     name: 'T3 · preflight — minimax'
     runs-on: ubuntu-latest
@@ -208,114 +161,16 @@ jobs:
             exit 1
           fi
 
-  test-ignored-deepseek:
-    name: 'T2 · cargo test -- --ignored (deepseek)'
-    if: false   # DISABLED 2026-08-15: native deepseek pay-as-you-go budget exhausted ($1 of $5 left); re-enable by removing this line when budget is restored
-    needs: preflight-deepseek
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt,clippy
-      - name: cargo test integration_discover_deepseek -- --ignored (gated on DEEPSEEK_API_KEY)
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          echo "============================================================"
-          echo "DIAGNOSTIC HEADER"
-          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
-          echo "  Runner:             $(uname -a)"
-          echo "  Working directory:  $(pwd)"
-          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "  Provider under test: deepseek"
-          echo "============================================================"
-          echo "API key presence:"
-          echo "  DEEPSEEK_API_KEY set: $([[ -n "${DEEPSEEK_API_KEY:-}" ]] && echo yes || echo no)"
-          echo "  DEEPSEEK_API_KEY length: ${#DEEPSEEK_API_KEY} chars"
-          echo "  DEEPSEEK_API_KEY prefix (first 8 chars, safe to echo): ${DEEPSEEK_API_KEY:0:8}"
-          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
-          echo "============================================================"
-          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-            echo "SKIP: DEEPSEEK_API_KEY not set on runner; deepseek --ignored test not run"
-            exit 0
-          fi
-          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
-          START_TS=$(date +%s)
-          cargo test --test integration_discover_deepseek -- --ignored --nocapture
-          CARGO_RC=$?
-          END_TS=$(date +%s)
-          echo "============================================================"
-          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
-          echo "============================================================"
-          exit $CARGO_RC
-
-      - name: upload test-ignored artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: moagan-test-ignored-deepseek-logs
-          path: target/test-runs/deepseek/
-          retention-days: 1
-          if-no-files-found: warn
-
-  test-ignored-opencode-go:
-    name: 'T2 · cargo test -- --ignored (opencode_go)'
-    needs: preflight-opencode_go
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt,clippy
-      - name: cargo test integration_discover_opencode_go -- --ignored (gated on OPENCODE_GO_API_KEY)
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-        run: |
-          echo "============================================================"
-          echo "DIAGNOSTIC HEADER"
-          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
-          echo "  Runner:             $(uname -a)"
-          echo "  Working directory:  $(pwd)"
-          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "  Provider under test: opencode_go"
-          echo "============================================================"
-          echo "API key presence:"
-          echo "  OPENCODE_GO_API_KEY set: $([[ -n "${OPENCODE_GO_API_KEY:-}" ]] && echo yes || echo no)"
-          echo "  OPENCODE_GO_API_KEY length: ${#OPENCODE_GO_API_KEY} chars"
-          echo "  OPENCODE_GO_API_KEY prefix (first 8 chars, safe to echo): ${OPENCODE_GO_API_KEY:0:8}"
-          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
-          echo "============================================================"
-          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
-            echo "SKIP: OPENCODE_GO_API_KEY not set on runner; opencode_go --ignored test not run"
-            exit 0
-          fi
-          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
-          START_TS=$(date +%s)
-          cargo test --test integration_discover_opencode_go -- --ignored --nocapture
-          CARGO_RC=$?
-          END_TS=$(date +%s)
-          echo "============================================================"
-          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
-          echo "============================================================"
-          exit $CARGO_RC
-
-      - name: upload test-ignored artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: moagan-test-ignored-opencode_go-logs
-          path: target/test-runs/opencode_go/
-          retention-days: 1
-          if-no-files-found: warn
-
   test-ignored-minimax:
     name: 'T2 · cargo test -- --ignored (minimax)'
     needs: preflight-minimax
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Bumped 25 → 60 min in Z1: a degraded MiniMax upstream can stretch
+    # a single --ignored test well past 25 min, and the previous timeout
+    # was the main cause of flaky PR-time failures. Per-PR cost is
+    # bounded because the test early-returns when MINIMAX_API_KEY is
+    # absent (a fork PR stays green at 0 s).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/rust-setup
