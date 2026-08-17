@@ -35,7 +35,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::domain::constraint::{HARD_INCOMPATIBILITIES, find_conflicts};
+use crate::domain::constraint::{
+    HARD_INCOMPATIBILITIES, HardIncompat, detect_opt_in_hardincompat, find_conflicts,
+};
 use crate::domain::{MergePlan, Proposal, SynthesizedProposal};
 use crate::error::Result;
 use crate::llm::Role;
@@ -210,6 +212,26 @@ impl SynthesizePhase {
     /// the summary, approach, tradeoffs, and evidence so we never miss
     /// a tag the model wrote in the body. Returns deduplicated tags
     /// preserving first-seen order.
+    ///
+    /// Tag sources:
+    ///
+    /// 1. Every literal in [`HARD_INCOMPATIBILITIES`] — the
+    ///    §D.13.15 matrix that drives the tag-pair detector.
+    /// 2. The opt-in catalog markers consumed by
+    ///    [`crate::domain::constraint::detect_opt_in_hardincompat`]
+    ///    (`cluster_local`, `global`, `pull_based`,
+    ///    `pull_required`, `push_only`, `push_endpoint`,
+    ///    `stateless`, `stateful_required`). They are not in the
+    ///    matrix but the opt-in detectors still need to see them
+    ///    when scanning a proposal's body. Without this list, an
+    ///    opt-in pair like `cluster_local` + `global` would never
+    ///    be extracted because neither literal appears in
+    ///    `HARD_INCOMPATIBILITIES`.
+    ///
+    /// The opt-in marker list is kept in this module (not in
+    /// `constraint.rs`) so the conflict module stays free of
+    /// phase-specific tag-extraction knowledge — the phase owns
+    /// the "scan a proposal's body" responsibility.
     pub fn extract_tags(proposal: &Proposal) -> Vec<String> {
         // Build the search corpus: every public text field on the
         // proposal. Tradeoffs and evidence are joined so a tag like
@@ -230,12 +252,34 @@ impl SynthesizePhase {
         let corpus_lower = corpus.to_lowercase();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
+        // Source 1: §D.13.15 matrix literals.
         for (a, b) in HARD_INCOMPATIBILITIES {
             for tag in [*a, *b] {
                 if !seen.contains(tag) && word_contains(&corpus_lower, tag) {
                     seen.insert(tag.to_string());
                     out.push(tag.to_string());
                 }
+            }
+        }
+        // Source 2: catalog I.6 (opt-in) marker literals. The
+        // list is exhaustive against the three opt-in
+        // detectors so a future variant addition must update
+        // both this list and the corresponding `detect_*`
+        // helper in `constraint.rs`.
+        const OPT_IN_MARKERS: &[&str] = &[
+            "cluster_local",
+            "global",
+            "pull_based",
+            "pull_required",
+            "push_only",
+            "push_endpoint",
+            "stateless",
+            "stateful_required",
+        ];
+        for tag in OPT_IN_MARKERS {
+            if !seen.contains(*tag) && word_contains(&corpus_lower, tag) {
+                seen.insert((*tag).to_string());
+                out.push((*tag).to_string());
             }
         }
         out
@@ -255,6 +299,32 @@ impl SynthesizePhase {
         } else {
             None
         }
+    }
+
+    /// Catalog I.6 (opt-in) detector wiring: run the three new
+    /// [`HardIncompat`] detectors (`ClusterLocalInGlobal`,
+    /// `PullInPushOnly`, `StatelessInStateful`) on the flattened
+    /// tag set of every proposal in the cluster. Returns the
+    /// first matched typed record, or `None` when none of the
+    /// opt-in heuristics fire — the caller should then fall
+    /// through to [`Self::cluster_conflict`] which checks the
+    /// §D.13.15 tag-pair matrix.
+    ///
+    /// The detection is additive: a cluster that already tripped
+    /// the tag-pair matrix still gets reported via the older path
+    /// so the wire form (`incompatible_tags: a,b`) is preserved.
+    /// The opt-in path returns a typed record whose
+    /// [`HardIncompat::explain`] message is stable enough to
+    /// surface in the JSON sidecar.
+    pub fn cluster_opt_in_hardincompat(
+        proposals: &[Proposal],
+    ) -> Option<(HardIncompat, Vec<String>)> {
+        let mut all_tags: Vec<String> = Vec::new();
+        for p in proposals {
+            all_tags.extend(Self::extract_tags(p));
+        }
+        let borrowed: Vec<&str> = all_tags.iter().map(String::as_str).collect();
+        detect_opt_in_hardincompat(&borrowed).map(|h| (h, all_tags))
     }
 
     /// Persist a `synthesized/skipped_<NN>.json` sidecar in `dir`.
@@ -280,6 +350,57 @@ impl SynthesizePhase {
             skipped: true,
             reason: format!("incompatible_tags: {a},{b}"),
             tags: tags.clone(),
+            schema_version: "v1".into(),
+        };
+        let bytes = serde_json::to_vec_pretty(&payload)?;
+        let path = dir.join(format!("skipped_{:02}.json", skipped_seq));
+        crate::atomic::writer::AtomicWriter::new().write(&path, &bytes)?;
+        Ok(path)
+    }
+
+    /// Catalog I.6 (opt-in) variant of
+    /// [`Self::write_skipped_in_dir`]: persists a sidecar whose
+    /// `reason` carries the typed [`HardIncompat`] variant name
+    /// (rather than the raw tag pair). The variant's
+    /// [`HardIncompat::explain`] message is serialised alongside
+    /// the kind tag so downstream readers can render the
+    /// human-readable description without re-deriving it. Same
+    /// wire shape as the matrix-driven writer — only the
+    /// `reason` and the extra `hard_incompat_kind` /
+    /// `hard_incompat_explain` fields differ.
+    fn write_skipped_opt_in_in_dir(
+        dir: &std::path::Path,
+        cluster_id: &str,
+        skipped_seq: usize,
+        hardincompat: &HardIncompat,
+        tags: &[String],
+    ) -> Result<PathBuf> {
+        #[derive(serde::Serialize)]
+        struct SkippedClusterOptIn {
+            cluster_id: String,
+            skipped: bool,
+            reason: String,
+            hard_incompat_kind: String,
+            hard_incompat_explain: String,
+            tags: Vec<String>,
+            schema_version: String,
+        }
+        let kind = match hardincompat {
+            HardIncompat::ClusterLocalInGlobal => "cluster_local_in_global",
+            HardIncompat::PullInPushOnly => "pull_in_push_only",
+            HardIncompat::StatelessInStateful => "stateless_in_stateful",
+            // The opt-in writer is private to this module and is
+            // only called from the opt-in branch; a future enum
+            // variant added here must update the match above.
+            _ => unreachable!("write_skipped_opt_in_in_dir called for non opt-in variant"),
+        };
+        let payload = SkippedClusterOptIn {
+            cluster_id: cluster_id.to_string(),
+            skipped: true,
+            reason: format!("hard_incompat: {kind}"),
+            hard_incompat_kind: kind.to_string(),
+            hard_incompat_explain: hardincompat.explain(),
+            tags: tags.to_vec(),
             schema_version: "v1".into(),
         };
         let bytes = serde_json::to_vec_pretty(&payload)?;
@@ -427,6 +548,34 @@ impl Phase for SynthesizePhase {
                         &cluster.id,
                         idx,
                         &conflict,
+                    )?;
+                    return Ok(Some(skipped_path));
+                }
+                // Catalog I.6 (opt-in) follow-up: the three new
+                // `HardIncompat` variants (`ClusterLocalInGlobal`,
+                // `PullInPushOnly`, `StatelessInStateful`) ride
+                // the same skip-the-merge path but with a typed
+                // reason so the sidecar carries the variant
+                // name + `explain()` message instead of a raw
+                // tag pair. The matrix-driven check above stays
+                // first so the legacy `incompatible_tags: a,b`
+                // wire form is preserved for the existing
+                // dashboard analytics; this branch is purely
+                // additive.
+                if let Some((hardincompat, tags)) =
+                    SynthesizePhase::cluster_opt_in_hardincompat(&proposals)
+                {
+                    tracing::warn!(
+                        cluster_id = %cluster.id,
+                        hard_incompat_kind = %hardincompat.explain(),
+                        "synthesize phase skipping cluster: opt-in hard incompat"
+                    );
+                    let skipped_path = SynthesizePhase::write_skipped_opt_in_in_dir(
+                        &dir,
+                        &cluster.id,
+                        idx,
+                        &hardincompat,
+                        &tags,
                     )?;
                     return Ok(Some(skipped_path));
                 }
@@ -919,5 +1068,151 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// Catalog I.6 (opt-in) detector wiring: end-to-end test
+    /// that `cluster_opt_in_hardincompat` runs on a flat list of
+    /// synthetic proposals whose text contains the opt-in tag
+    /// pair, and returns the typed `HardIncompat` variant the
+    /// phase uses to skip the merge.
+    ///
+    /// The proposals here are deliberately constructed so
+    /// [`Self::extract_tags`] (which is the whole-word, lowercase
+    /// scan over `summary + approach + tradeoffs + evidence`) can
+    /// recover the trigger tags. The tags `cluster_local` and
+    /// `global` are not in `HARD_INCOMPATIBILITIES` so the
+    /// matrix-driven `cluster_conflict` returns `None` — the
+    /// opt-in detector must do all the work.
+    #[test]
+    fn synthesize_cluster_opt_in_hardincompat_returns_typed_record() {
+        let proposals = vec![
+            Proposal {
+                id: "p_local".into(),
+                summary: "deploy a cluster_local sticky-session cache".into(),
+                approach: "in-process hashmap".into(),
+                tradeoffs: vec!["memory bounded by pod".into()],
+                evidence: vec!["redis sticky-session benchmarks".into()],
+                source_sketch: String::new(),
+                artifacts: Vec::new(),
+                replaced_by: None,
+                source_nodes: Vec::new(),
+            },
+            Proposal {
+                id: "p_global".into(),
+                summary: "publish a global webhook endpoint".into(),
+                approach: "anycast IP + load balancer".into(),
+                tradeoffs: vec!["multi-region failover".into()],
+                evidence: vec!["anycast latency study".into()],
+                source_sketch: String::new(),
+                artifacts: Vec::new(),
+                replaced_by: None,
+                source_nodes: Vec::new(),
+            },
+        ];
+        let (hardincompat, tags) = SynthesizePhase::cluster_opt_in_hardincompat(&proposals)
+            .expect("opt-in detector must fire on cluster_local + global pair");
+        assert_eq!(hardincompat, HardIncompat::ClusterLocalInGlobal);
+        assert!(
+            tags.iter().any(|t| t == "cluster_local"),
+            "tags must carry the cluster_local marker, got {tags:?}"
+        );
+        assert!(
+            tags.iter().any(|t| t == "global"),
+            "tags must carry the global marker, got {tags:?}"
+        );
+        // The matrix-driven detector must NOT fire here: the
+        // opt-in tag set is disjoint from `HARD_INCOMPATIBILITIES`.
+        assert!(
+            SynthesizePhase::cluster_conflict(&proposals).is_none(),
+            "cluster_local + global must not match the §D.13.15 matrix"
+        );
+    }
+
+    /// Catalog I.6 (opt-in) detector wiring: a cluster whose
+    /// tags do NOT carry any opt-in pair (and do NOT match the
+    /// `HARD_INCOMPATIBILITIES` matrix either) must return
+    /// `None` from BOTH `cluster_conflict` and
+    /// `cluster_opt_in_hardincompat`. This is the regression
+    /// guard that the opt-in branch is silent on plain
+    /// well-formed clusters.
+    #[test]
+    fn synthesize_cluster_opt_in_hardincompat_returns_none_on_clean_cluster() {
+        let proposals = vec![
+            Proposal {
+                id: "p_a".into(),
+                summary: "monolith sql deployment".into(),
+                approach: "single binary with postgres".into(),
+                tradeoffs: vec!["simpler operations".into()],
+                evidence: vec!["sql benchmarks".into()],
+                source_sketch: String::new(),
+                artifacts: Vec::new(),
+                replaced_by: None,
+                source_nodes: Vec::new(),
+            },
+            Proposal {
+                id: "p_b".into(),
+                summary: "self-hosted rust service".into(),
+                approach: "tokio + sqlx".into(),
+                tradeoffs: vec!["operator-friendly".into()],
+                evidence: vec!["rust deployment study".into()],
+                source_sketch: String::new(),
+                artifacts: Vec::new(),
+                replaced_by: None,
+                source_nodes: Vec::new(),
+            },
+        ];
+        assert!(
+            SynthesizePhase::cluster_conflict(&proposals).is_none(),
+            "clean cluster must not trip the §D.13.15 matrix"
+        );
+        assert!(
+            SynthesizePhase::cluster_opt_in_hardincompat(&proposals).is_none(),
+            "clean cluster must not trip any opt-in detector"
+        );
+    }
+
+    /// Catalog I.6 (opt-in) detector wiring: the matrix-driven
+    /// `cluster_conflict` must keep firing on the §D.13.15 pairs
+    /// even when the opt-in branch is also enabled. The two
+    /// detectors are additive — a cluster that trips BOTH should
+    /// be reported via the matrix path first (preserving the
+    /// legacy wire form `incompatible_tags: a,b`).
+    #[test]
+    fn synthesize_matrix_path_wins_over_opt_in_path_on_overlap() {
+        let proposals = vec![
+            Proposal {
+                id: "p_mono".into(),
+                summary: "monolith sql deployment".into(),
+                approach: "single binary".into(),
+                tradeoffs: vec![],
+                evidence: vec![],
+                source_sketch: String::new(),
+                artifacts: Vec::new(),
+                replaced_by: None,
+                source_nodes: Vec::new(),
+            },
+            Proposal {
+                id: "p_micro".into(),
+                summary: "microservices split across pods".into(),
+                approach: "per-service discovery".into(),
+                tradeoffs: vec![],
+                evidence: vec![],
+                source_sketch: String::new(),
+                artifacts: Vec::new(),
+                replaced_by: None,
+                source_nodes: Vec::new(),
+            },
+        ];
+        let matrix = SynthesizePhase::cluster_conflict(&proposals)
+            .expect("matrix must fire on monolith + microservices");
+        let (a, b, _tags) = matrix;
+        assert!(
+            (a == "monolith" && b == "microservices") || (a == "microservices" && b == "monolith"),
+            "matrix result must name the §D.13.15 pair, got {a},{b}"
+        );
+        assert!(
+            SynthesizePhase::cluster_opt_in_hardincompat(&proposals).is_none(),
+            "opt-in path must stay silent on a pure §D.13.15 pair"
+        );
     }
 }

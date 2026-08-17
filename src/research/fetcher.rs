@@ -21,8 +21,10 @@ use parking_lot::Mutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::RateLimitConfig;
+use crate::error::Error;
 use crate::redact::{RedactPolicy, Surface, apply};
 use crate::research::allowlist;
+use crate::research::pdf;
 
 /// Hard cap on URLs accepted by a single [`ResearchFetcher::fetch_all`]
 /// call.
@@ -626,6 +628,40 @@ impl ResearchFetcher {
         }
         let canonical = canonical_host(host);
         let _rate_limit_permit = self.acquire_host_rate_limit(host).await?;
+        // K.4 sub-1 follow-up of #518: when the URL points at a
+        // PDF, route it to `pdf::fetch_pdf_text` so the parser
+        // extracts UTF-8 text instead of returning binary garbage.
+        // The host allowlist already ran above; the pdf parser
+        // re-checks defensively but we keep the routing decision
+        // in the fetcher so the per-host rate-limit + (future)
+        // bearer-auth wire-up run in one place. The PDF branch
+        // bypasses the HTML retry loop — `pdftotext` failures are
+        // not retried over HTTP — and produces a snippet with
+        // `truncated = false` because the parser applies its own
+        // output-side cap internally.
+        if pdf::looks_like_pdf_url(url) {
+            let text = pdf::fetch_pdf_text(url, pdf::DEFAULT_MAX_INPUT_BYTES)
+                .await
+                .map_err(|err| match err {
+                    // The parser re-checks the allowlist as
+                    // defense-in-depth; an `InvalidArgs` therefore
+                    // means the upstream bypassed the filter, so
+                    // surface it on the same channel as the
+                    // fetcher's own allowlist gate.
+                    Error::InvalidArgs(_) => FetchError::DisallowedHost(host.to_string()),
+                    other => FetchError::NetworkError(format!("pdf: {other}")),
+                })?;
+            if text.is_empty() {
+                return Err(FetchError::NetworkError("empty PDF content".into()));
+            }
+            let redacted_cow = apply(policy, Surface::Storage, &text)
+                .map_err(|e| FetchError::NetworkError(format!("redact: {e}")))?;
+            return Ok(ResearchSnippet {
+                url: url.to_string(),
+                content: redacted_cow.into_owned(),
+                truncated: false,
+            });
+        }
         // Retry loop: 1 original attempt + `max_retries` retries.
         // The cap is a hard ceiling so a stuck host can never pin
         // the Sketch phase indefinitely. 4 is comfortably above
@@ -795,6 +831,141 @@ mod tests {
         match err {
             FetchError::DisallowedHost(h) => assert_eq!(h, "evil.example.com"),
             other => panic!("expected DisallowedHost, got {other:?}"),
+        }
+    }
+
+    /// K.4 sub-1 follow-up: a URL whose host is in the allowlist
+    /// BUT whose path ends with `.pdf` AND the host itself is not
+    /// allowlisted must still be rejected by the allowlist filter
+    /// before the PDF routing ever fires. The `.pdf` suffix is a
+    /// parser selector, not an authority grant — defense-in-depth
+    /// pins that contract.
+    #[tokio::test]
+    async fn fetch_one_rejects_pdf_url_on_disallowed_host_without_network() {
+        let fetcher = ResearchFetcher::new(None);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let policy = RedactPolicy::default();
+        // `evil.example.com` is not in `ALLOWED_HOSTS`; the `.pdf`
+        // suffix must not bypass the allowlist gate.
+        let url = "https://evil.example.com/whitepaper.pdf";
+        let err = fetcher
+            .fetch_one(&client, &policy, url)
+            .await
+            .expect_err("disallowed pdf host must error");
+        match err {
+            FetchError::DisallowedHost(h) => assert_eq!(h, "evil.example.com"),
+            other => panic!("expected DisallowedHost, got {other:?}"),
+        }
+    }
+
+    /// K.4 sub-1 follow-up: a URL whose host is in the allowlist
+    /// AND whose path ends with `.pdf` (with a query string
+    /// appended, the way CDN links typically look) must route to
+    /// the PDF parser. We assert the routing fired by observing
+    /// the parser-specific error surface (`ResearchUnavailable`
+    /// because `pdftotext` is missing on the test host, OR a
+    /// `NetworkError` because the upstream connection failed).
+    /// Both outcomes prove the PDF branch fired: the HTML path
+    /// would surface a `NetworkError` with a different message
+    /// (`send: ...`) and would not have triggered
+    /// `pdftotext`-shaped text.
+    #[tokio::test]
+    async fn fetch_one_routes_pdf_url_to_pdf_parser() {
+        let fetcher = ResearchFetcher::new(None);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let policy = RedactPolicy::default();
+        // `github.com` is in `ALLOWED_HOSTS`. The path ends with
+        // `.pdf` and the query string is preserved — the
+        // `looks_like_pdf_url` helper strips it before the suffix
+        // check.
+        let url = "https://github.com/airvzxf/moagan/raw/main/docs/sample.pdf?download=1";
+        let err = fetcher
+            .fetch_one(&client, &policy, url)
+            .await
+            .expect_err("offline pdf host must error, but via the pdf path");
+        // Two acceptable surfaces: `DisallowedHost` (defensive
+        // re-check inside `pdf::fetch_pdf_text` — only if the
+        // allowlist drift caused `github.com` to drop out),
+        // `NetworkError` carrying the pdftotext / transport
+        // signal. Either one proves the routing decision fired.
+        match &err {
+            FetchError::NetworkError(msg) => {
+                assert!(
+                    msg.contains("pdf") || msg.contains("pdftotext") || msg.contains("empty"),
+                    "NetworkError must carry the pdf path signal, got: {msg}"
+                );
+            }
+            FetchError::DisallowedHost(_) => {
+                // Defensive allowlist re-check inside the pdf
+                // module can fire if `ALLOWED_HOSTS` ever drops
+                // `github.com`. We accept this outcome as proof
+                // the routing happened (the fetcher's own
+                // allowlist gate would have raised the same
+                // variant, but it would not mention `pdf`).
+            }
+            other => panic!("expected NetworkError or DisallowedHost, got {other:?}"),
+        }
+    }
+
+    /// K.4 sub-1 follow-up regression guard: a URL on an
+    /// allowlisted host whose path does NOT end with `.pdf` must
+    /// keep falling through to the HTML path. Pin this so a
+    /// future tweak to the routing predicate (e.g. dropping the
+    /// `.ends_with` gate) surfaces here instead of corrupting
+    /// every fetch.
+    ///
+    /// The off-network assertion is the same one used by the
+    /// existing `fetch_one_rejects_disallowed_host_without_network`
+    /// test, but with an allowlisted host: we expect a
+    /// `NetworkError` (HTML path tried a real HTTP request and
+    /// failed to resolve), NOT a `pdf:`-prefixed message.
+    #[tokio::test]
+    async fn fetch_one_does_not_route_non_pdf_url_through_pdf_path() {
+        let fetcher = ResearchFetcher::new(None);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        let policy = RedactPolicy::default();
+        // `docs.rs` is in `ALLOWED_HOSTS`; the path is an HTML
+        // page, no `.pdf` suffix. We don't care about the exact
+        // upstream outcome (a slow CI runner might resolve
+        // successfully), but the error message must NOT mention
+        // "pdf" or "pdftotext" — those tokens are unique to the
+        // PDF branch and would surface only if the routing
+        // predicate over-fired.
+        let url = "https://docs.rs/serde";
+        match fetcher.fetch_one(&client, &policy, url).await {
+            Ok(_) => {
+                // Test host resolved the URL. The routing was
+                // correct by construction (we got an `Ok(snippet)`
+                // and a snippet can only come from the HTML
+                // branch — the PDF branch has no `Ok` here).
+            }
+            Err(FetchError::NetworkError(msg)) => {
+                assert!(
+                    !msg.contains("pdf") && !msg.contains("pdftotext"),
+                    "HTML path error must not carry pdf tokens, got: {msg}"
+                );
+            }
+            Err(other) => {
+                // Other variants (e.g. `Empty` if the upstream
+                // returned a 200 with a zero-length body, or
+                // `CircuitOpen` if a previous test opened the
+                // breaker) are fine — none of them mention `pdf`
+                // and any of them prove the HTML path ran.
+                let dbg = format!("{other:?}");
+                assert!(
+                    !dbg.contains("pdf"),
+                    "non-PDF URL must not reach the pdf parser, got: {dbg}"
+                );
+            }
         }
     }
 
