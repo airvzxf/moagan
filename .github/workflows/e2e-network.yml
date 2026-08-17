@@ -346,13 +346,37 @@ jobs:
       - name: Change to executable binary
         run: chmod +x target/release/moagan
 
-      - name: T3 · e2e-network (fast, real LLM)
+      - name: T3 · e2e-network (fast, real LLM, retry x4)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: fast
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
-        run: make e2e-network-fast
+        run: |
+          MAX_ATTEMPTS=4
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "================================================================"
+            echo "Attempt $attempt / $MAX_ATTEMPTS for section=fast"
+            echo "Started at $(date -u +%H:%M:%SZ)"
+            echo "================================================================"
+            START_TS=$(date +%s)
+            if make e2e-network-fast; then
+              END_TS=$(date +%s)
+              echo "Attempt $attempt succeeded in $((END_TS - START_TS))s"
+              exit 0
+            fi
+            END_TS=$(date +%s)
+            RC=$?
+            echo "Attempt $attempt failed with rc=$RC after $((END_TS - START_TS))s"
+            if [ $attempt -lt $MAX_ATTEMPTS ]; then
+              echo "Sleeping 60s before next attempt (backoff to let upstream recover)..."
+              sleep 60
+            fi
+          done
+          echo "================================================================"
+          echo "All $MAX_ATTEMPTS attempts exhausted. Failing the job."
+          echo "================================================================"
+          exit 1
 
       - name: upload fast artifacts
         if: always()
@@ -383,13 +407,37 @@ jobs:
       - name: Change to executable binary
         run: chmod +x target/release/moagan
 
-      - name: T3 · e2e-network (explore, real LLM)
+      - name: T3 · e2e-network (explore, real LLM, retry x4)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: explore
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
-        run: make e2e-network-explore
+        run: |
+          MAX_ATTEMPTS=4
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "================================================================"
+            echo "Attempt $attempt / $MAX_ATTEMPTS for section=explore"
+            echo "Started at $(date -u +%H:%M:%SZ)"
+            echo "================================================================"
+            START_TS=$(date +%s)
+            if make e2e-network-explore; then
+              END_TS=$(date +%s)
+              echo "Attempt $attempt succeeded in $((END_TS - START_TS))s"
+              exit 0
+            fi
+            END_TS=$(date +%s)
+            RC=$?
+            echo "Attempt $attempt failed with rc=$RC after $((END_TS - START_TS))s"
+            if [ $attempt -lt $MAX_ATTEMPTS ]; then
+              echo "Sleeping 60s before next attempt (backoff to let upstream recover)..."
+              sleep 60
+            fi
+          done
+          echo "================================================================"
+          echo "All $MAX_ATTEMPTS attempts exhausted. Failing the job."
+          echo "================================================================"
+          exit 1
 
       - name: upload explore artifacts
         if: always()
