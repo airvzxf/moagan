@@ -31,3 +31,7 @@ runs:
         # on warm cache.
         # See Swatinem/rust-cache README "Cache Effectiveness" section.
         cache-workspace-crates: true
+        # PR runs only lookup (reuse main cache), don't save new entries.
+        # Saves ~450 MB per closed PR. Main branch + workflow_dispatch
+        # still save (the condition evaluates to false on those events).
+        lookup-only: ${{ github.event_name == 'pull_request' }}

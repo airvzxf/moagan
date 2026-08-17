@@ -283,7 +283,10 @@ jobs:
     needs: [build-e2e-network, preflight-minimax]
     if: ${{ inputs.section == 'card80' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    # Bumped 55 → 120 min in Z1: a degraded MiniMax upstream can stretch
+    # the card80 block well past 55 min. Public-repo max is 360 min so
+    # we still have headroom.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -366,7 +369,9 @@ jobs:
     needs: [build-e2e-network, preflight-minimax]
     if: ${{ inputs.section == 'explore' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 28
+    # Bumped 28 → 120 min in Z1: same rationale as test-card80 — generous
+    # headroom for a degraded MiniMax upstream.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -408,8 +413,9 @@ jobs:
     runs-on: ubuntu-latest
     # One discovery round (~5 min of wire time) plus generous headroom
     # for a degraded upstream: the opencode_go /messages wire is fast
-    # but /chat/completions and /responses can add up.
-    timeout-minutes: 35
+    # but /chat/completions and /responses can add up. Bumped 35 → 120
+    # min in Z1 for upstream-degradation headroom.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -500,8 +506,9 @@ jobs:
     # another ~5 min for the cargo test --ignored step, plus generous
     # headroom for a degraded upstream. The compile step adds ~30-60 s
     # on warm cache (Swatinem/rust-cache prefix shared with the
-    # sibling jobs in this workflow).
-    timeout-minutes: 45
+    # sibling jobs in this workflow). Bumped 45 → 120 min in Z1 for
+    # upstream-degradation headroom.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -686,7 +693,10 @@ jobs:
     needs: [build-e2e-network, preflight-opencode_go]
     if: ${{ inputs.section == 'discover_opencode_go_models' || inputs.section == 'all' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Bumped 90 → 360 min in Z1: GitHub's public-repo per-job maximum.
+    # 14 opencode_go aliases × ~5 min each is the expected wall-clock
+    # (~70 min); 360 min gives ~5× headroom for a degraded upstream.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
