@@ -208,7 +208,7 @@ fn telemetry_mirrors_saturation_event_into_sqlite_and_jsonl() {
         let run_dir = home.run_dir(run_id);
         run_dir.ensure().unwrap();
         let db = moagan::storage::sqlite::Db::open(&home.meta_db_path()).unwrap();
-        db.register_run(run_id, "fast", "running", "0.9.0", None, None, None)
+        db.register_run(run_id, "fast", "running", "0.9.1", None, None, None)
             .unwrap();
         let t = Telemetry::open(
             run_id,
@@ -267,7 +267,7 @@ fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
         let run_dir = home.run_dir(run_id);
         run_dir.ensure().unwrap();
         let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
-        db.register_run(run_id, "fast", "running", "0.9.0", None, None, None)?;
+        db.register_run(run_id, "fast", "running", "0.9.1", None, None, None)?;
         let telemetry = Telemetry::open(
             run_id,
             &run_dir,
@@ -378,7 +378,7 @@ fn registry_from_config_with_sink_attaches_sink_at_construction() -> Result<()> 
         let run_dir = home.run_dir(run_id);
         run_dir.ensure().unwrap();
         let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
-        db.register_run(run_id, "fast", "running", "0.9.0", None, None, None)?;
+        db.register_run(run_id, "fast", "running", "0.9.1", None, None, None)?;
         let telemetry = Telemetry::open(
             run_id,
             &run_dir,
