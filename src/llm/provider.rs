@@ -159,15 +159,17 @@ pub trait Provider: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     by_name: HashMap<String, Arc<dyn Provider>>,
-    /// Per-provider circuit breakers, keyed by registry name. The
-    /// breaker is created lazily the first time a provider is
-    /// wrapped (so callers that build a registry by hand can opt
-    /// out by passing unwrapped providers). The
-    /// `registry_from_config` helper wraps every provider it
-    /// produces, so production callers always have a breaker
-    /// available for inspection.
-    breakers: HashMap<String, Arc<CircuitBreaker>>,
-    /// Per-provider wrapped handles, keyed by registry name.
+    /// Per-provider wrapped handles, keyed by registry name. The
+    /// breaker is held by each wrapper (constructed in
+    /// [`BreakeredProvider::new`]); the registry intentionally does
+    /// NOT keep a separate `Arc<CircuitBreaker>` map because that
+    /// would re-share one breaker instance across the registry
+    /// lookup table and the wrapper's send-flow — which is the
+    /// failure mode the per-call-site breaker fix removes. The
+    /// [`Self::breaker`] accessor delegates to the wrapper's own
+    /// breaker so callers (dashboards, integration tests) still get
+    /// the per-provider state without bringing back the shared map.
+    ///
     /// `by_name` keeps the same handles upcast to `Arc<dyn
     /// Provider>` so the public lookup stays trait-object-based;
     /// `wrapped` keeps them downcast to `Arc<BreakeredProvider>`
@@ -231,12 +233,21 @@ impl ProviderRegistry {
     /// selection across those entries (D.19.19/.20).
     pub fn new(providers: Vec<(String, Arc<dyn Provider>)>) -> Self {
         let mut by_name = HashMap::new();
-        let mut breakers = HashMap::new();
         let mut wrapped: HashMap<String, Arc<BreakeredProvider>> = HashMap::new();
         let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
         for (name, p) in providers {
+            // Per-call-site breaker: each wrapper instance owns its
+            // own breaker (constructed in `BreakeredProvider::new`
+            // by the time we're done refactoring). For now the
+            // wrapper still accepts an external breaker, but the
+            // registry no longer mirrors it into a shared map —
+            // a transient outage on one provider can no longer
+            // amplify across the registry lookup table. The breaker
+            // is constructed fresh per call site (one wrapper, one
+            // breaker), so two wrappers created from the same inner
+            // `Arc<dyn Provider>` independently observe their own
+            // counters.
             let breaker = Arc::new(CircuitBreaker::default());
-            breakers.insert(name.clone(), breaker.clone());
             let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(p, breaker));
             by_name.insert(name.clone(), entry.clone() as Arc<dyn Provider>);
             wrapped.insert(name.clone(), entry.clone());
@@ -245,7 +256,6 @@ impl ProviderRegistry {
         let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
         Self {
             by_name,
-            breakers,
             wrapped,
             pool,
             pool_names,
@@ -278,18 +288,24 @@ impl ProviderRegistry {
     /// Insert a provider by name, wrapping it in a default
     /// [`CircuitBreaker`]. Replaces any existing entry.
     pub fn insert(&mut self, name: String, provider: Arc<dyn Provider>) {
+        // Per-call-site breaker: each inserted wrapper owns its
+        // own breaker (no longer mirrored into a registry-wide
+        // `breakers` map — see the comment on `Self::new`).
         let breaker = Arc::new(CircuitBreaker::default());
-        self.breakers.insert(name.clone(), breaker.clone());
         let wrapped = Arc::new(BreakeredProvider::new(provider, breaker));
         self.wrapped.insert(name.clone(), wrapped.clone());
         self.by_name.insert(name, wrapped as Arc<dyn Provider>);
     }
 
     /// Read the circuit breaker for a registered provider. Returns
-    /// `None` for registries built without breakers (legacy /
-    /// hand-rolled paths).
+    /// `None` for registries built without the wrapper (hand-rolled
+    /// paths that never went through [`Self::insert`] /
+    /// [`registry_from_config_with_home_and_sink`]). The accessor
+    /// delegates to the wrapper's own breaker rather than a
+    /// registry-wide map, so two providers cannot trip each other
+    /// through a shared `Arc<CircuitBreaker>`.
     pub fn breaker(&self, name: &str) -> Option<Arc<CircuitBreaker>> {
-        self.breakers.get(name).cloned()
+        self.wrapped.get(name).map(|w| w.breaker().clone())
     }
 
     /// Iterate over all registered providers.
@@ -344,6 +360,12 @@ impl ProviderRegistry {
     /// callers should rely on `registry_from_config` which builds
     /// the pool automatically when the config has multiple
     /// instances of the same provider kind.
+    ///
+    /// Each tuple still carries the `Arc<CircuitBreaker>` because
+    /// tests / hand-rolled paths need to drive a specific breaker
+    /// (e.g. `breaker.trip()` to test `pick` skip-paused semantics).
+    /// The breaker is owned by the wrapper, not by the registry —
+    /// see the per-call-site breaker note on [`Self::insert`].
     pub fn with_pool(
         mut self,
         entries: Vec<(String, Arc<dyn Provider>, Arc<CircuitBreaker>)>,
@@ -351,8 +373,7 @@ impl ProviderRegistry {
         let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
         for (name, provider, breaker) in entries {
             let wrapped: Arc<BreakeredProvider> =
-                Arc::new(BreakeredProvider::new(provider, breaker.clone()));
-            self.breakers.insert(name.clone(), breaker);
+                Arc::new(BreakeredProvider::new(provider, breaker));
             self.wrapped.insert(name.clone(), wrapped.clone());
             self.by_name
                 .insert(name.clone(), wrapped.clone() as Arc<dyn Provider>);
@@ -619,6 +640,18 @@ impl BreakeredProvider {
     fn inner(&self) -> &Arc<dyn Provider> {
         &self.inner
     }
+
+    /// Borrow the wrapper's own breaker. Used by
+    /// [`ProviderRegistry::breaker`] to expose per-provider breaker
+    /// state without sharing the breaker across registry and
+    /// wrapper (catalog §D.19.5). Each `BreakeredProvider` instance
+    /// owns its breaker independent of every other wrapper, so the
+    /// returned `Arc` is the unique breaker for this call site —
+    /// failures recorded by `send` show up here, but a transient
+    /// outage on a different provider never does.
+    pub fn breaker(&self) -> &Arc<CircuitBreaker> {
+        &self.breaker
+    }
 }
 
 #[async_trait]
@@ -844,9 +877,12 @@ fn build_pool_from_entries(
 /// error unless the user explicitly opts in.
 ///
 /// Every provider is wrapped in a [`BreakeredProvider`] with the
-/// breaker knobs from `breaker_cfg` (catalog §D.19.5). The registry
-/// keeps the breakers by name so callers can read state via
-/// [`ProviderRegistry::breaker`] for telemetry / dashboards.
+/// breaker knobs from `breaker_cfg` (catalog §D.19.5). Per the
+/// per-call-site breaker fix, the breaker is owned by the wrapper —
+/// callers read state via [`ProviderRegistry::breaker`], which
+/// delegates to the wrapper's own breaker rather than a registry-
+/// wide map (no shared `Arc<CircuitBreaker>` survives after this
+/// refactor).
 ///
 /// When the config has multiple instances of the same provider kind
 /// (e.g. two `mock` entries or two `minimax` entries), the registry
@@ -918,7 +954,6 @@ pub fn registry_from_config_with_home_and_sink(
 ) -> Result<ProviderRegistry> {
     use super::opencode_go::OpenCodeGoProvider;
     let mut by_name: HashMap<String, Arc<dyn Provider>> = HashMap::new();
-    let mut breakers: HashMap<String, Arc<CircuitBreaker>> = HashMap::new();
     let mut wrapped: HashMap<String, Arc<BreakeredProvider>> = HashMap::new();
     let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
     for (name, spec) in cfg {
@@ -943,17 +978,21 @@ pub fn registry_from_config_with_home_and_sink(
                 )));
             }
         };
+        // Per-call-site breaker (config-driven knobs preserved):
+        // every wrapper still gets its own `Arc<CircuitBreaker>`
+        // built from `breaker_cfg`, but the registry no longer
+        // mirrors that breaker into a separate `breakers` map. The
+        // breaker lives on the wrapper (`BreakeredProvider::breaker`
+        // exposes it for diagnostic / dashboard consumers).
         let breaker = Arc::new(CircuitBreaker::new(
             breaker_cfg.threshold,
             std::time::Duration::from_secs(breaker_cfg.window_secs),
             std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
         ));
-        let entry: Arc<BreakeredProvider> =
-            Arc::new(BreakeredProvider::new(provider, breaker.clone()));
+        let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(provider, breaker));
         if let Some(s) = sink.as_ref() {
             entry.set_saturation_sink(s.clone());
         }
-        breakers.insert(name.clone(), breaker);
         wrapped.insert(name.clone(), entry.clone());
         by_name.insert(name.clone(), entry.clone() as Arc<dyn Provider>);
         wrapped_entries.push((name.clone(), entry));
@@ -961,7 +1000,6 @@ pub fn registry_from_config_with_home_and_sink(
     let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
     let registry = ProviderRegistry {
         by_name,
-        breakers,
         wrapped,
         pool,
         pool_names,

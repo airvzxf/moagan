@@ -189,11 +189,20 @@ impl CircuitBreaker {
 
 impl Default for CircuitBreaker {
     fn default() -> Self {
-        // Defaults match `CircuitBreakerConfig::default()` so the
-        // registry-built-in breakers and the config-driven breakers
-        // share the same opening policy out of the box. Spec
-        // surface: catalog 10-integrada-v0 §D.19.5.
-        Self::new(5, Duration::from_secs(60), Duration::from_secs(30))
+        // Lenient defaults: tolerate the 10 transient upstream errors
+        // a flaky cell-network call site typically produces before
+        // recovering, over a 5-minute window so a few-minute outage
+        // does not look like a provider-level failure. Cooldown is
+        // 60 s so a tripped breaker probes again within a minute —
+        // long enough to dodge a sustained outage, short enough that
+        // an isolated burst does not lock the provider out for the
+        // rest of the run. The registry does NOT share one breaker
+        // across providers: each call site in `ProviderRegistry::new`,
+        // `insert`, `with_pool`, and `registry_from_config_*`
+        // constructs its own `Arc<CircuitBreaker>` so a transient
+        // outage on one provider cannot cascade through shared
+        // state. Spec surface: catalog 10-integrada-v0 §D.19.5.
+        Self::new(50, Duration::from_secs(300), Duration::from_secs(60))
     }
 }
 
