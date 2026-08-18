@@ -1269,34 +1269,36 @@ mod tests {
         );
     }
 
-    /// PR-B1 (B1.4): `--max-parallelism` is validated up-front
-    /// (D.15.5: hard cap 64 simultaneous LLM calls). The helper
-    /// in `flags_batch.rs` is the source of truth for the
-    /// message — pin its contract here so a future tweak to
-    /// either the helper or the cheatsheet does not silently
-    /// drift the user-facing error string.
+    /// PR-B1 (B1.4) lifted to u32::MAX: `--max-parallelism` is
+    /// validated up-front against the helper in `flags_batch.rs`,
+    /// which now caps at `u32::MAX` (`4_294_967_295`). The helper
+    /// is the source of truth for the message — pin its contract
+    /// here so a future tweak to either the helper or the
+    /// cheatsheet does not silently drift the user-facing error
+    /// string.
     #[test]
     fn max_parallelism_helper_accepts_cap_and_below() {
-        assert!(flags_batch::validate_max_parallelism(64).is_ok());
+        assert!(flags_batch::validate_max_parallelism(4_294_967_295).is_ok());
         assert!(flags_batch::validate_max_parallelism(1).is_ok());
         assert!(flags_batch::validate_max_parallelism(0).is_ok());
     }
 
-    /// PR-B1 (B1.4): values above the cap must surface the
-    /// documented `exceeds maximum 64` message so CI scripts can
-    /// grep for it. The dispatcher wraps the helper's `String`
-    /// into `Error::InvalidArgs` (exit 2 per the cheatsheet §1
-    /// error matrix).
+    /// PR-B1 (B1.4) lifted to u32::MAX: values above the cap
+    /// must surface the documented
+    /// `exceeds maximum 4_294_967_295` message so CI scripts
+    /// can grep for it. The dispatcher wraps the helper's
+    /// `String` into `Error::InvalidArgs` (exit 2 per the
+    /// cheatsheet §1 error matrix).
     #[test]
     fn max_parallelism_helper_rejects_above_cap_with_clear_message() {
-        let err = flags_batch::validate_max_parallelism(65).expect_err("must error");
+        let err = flags_batch::validate_max_parallelism(4_294_967_296).expect_err("must error");
         assert!(
-            err.contains("exceeds maximum 64"),
+            err.contains("exceeds maximum 4_294_967_295"),
             "error must mention the cap; got {err:?}"
         );
-        let err = flags_batch::validate_max_parallelism(4096).expect_err("must error");
+        let err = flags_batch::validate_max_parallelism(usize::MAX).expect_err("must error");
         assert!(
-            err.contains("exceeds maximum 64"),
+            err.contains("exceeds maximum 4_294_967_295"),
             "error must mention the cap; got {err:?}"
         );
     }
