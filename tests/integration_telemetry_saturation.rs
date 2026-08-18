@@ -287,7 +287,13 @@ fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
         // threshold=5 default — five opening errors trip it.
         let breaker = Arc::new(CircuitBreaker::default());
         let wrapper = Arc::new(BreakeredProvider::new(inner, breaker.clone()));
-        registry.insert("integration-sat".into(), wrapper.clone());
+        // `insert_wrapped` mirrors the wrapper into both `by_name`
+        // (so `registry.get(...)` resolves it) and `wrapped` (so
+        // `attach_saturation_sink` can walk the wrapper's breaker).
+        // `insert` only touches `by_name`; the per-call-site
+        // breaker pattern means a wrapper inserted via `insert`
+        // is invisible to the saturation sink walker.
+        registry.insert_wrapped("integration-sat".into(), wrapper.clone());
 
         // The registry must record the wrapped entry in its
         // `wrapped` map; otherwise `attach_saturation_sink` is a

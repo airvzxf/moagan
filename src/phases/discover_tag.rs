@@ -116,9 +116,38 @@ impl Phase for DiscoverTagPhase {
         }
 
         if kept.is_empty() {
-            return Err(Error::InvalidState(
-                "discover_tag produced zero tags".into(),
-            ));
+            // Degraded mode: every tagging call failed (typically
+            // because the LLM is unreachable or the breaker is
+            // open). A hard failure here used to abort the entire
+            // run; we now keep the pipeline going on raw sketches
+            // (no tags) so the cluster / integrator / summary
+            // phases still produce useful output. The
+            // `tags/index.json` with `"degraded": true` is the
+            // signal downstream consumers see; the warning is
+            // the signal operators see.
+            let _ = ctx.telemetry.warn(
+                "phase.discover_tag.zero_tags",
+                "warn",
+                "discover_tag produced zero tags; continuing in degraded mode without per-sketch tags",
+                serde_json::json!({"total_sketches": paths.len(), "kept": 0}),
+                crate::telemetry::WarningContext {
+                    phase: Some("discover_tag".into()),
+                    role: Some("tagger".into()),
+                    ..Default::default()
+                },
+            );
+            let index: serde_json::Value = serde_json::json!({
+                "version": "v1",
+                "degraded": true,
+                "tags_dir": "tags",
+                "sketches_dir": "sketches",
+                "uncategorized_threshold": threshold.value,
+                "uncategorized_ratio": uncategorized_ratio(&all_tags),
+                "tally": serde_json::Value::Array(Vec::new()),
+            });
+            let index_path = tags_dir.join("index.json");
+            write_json(&index_path, &index)?;
+            return Ok(PhaseOutput::Sketches(Vec::new()));
         }
 
         // Index file: maps each sketch path to its tag path, plus a
@@ -166,6 +195,13 @@ impl Phase for DiscoverTagPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::Parallelism;
+    use crate::fs_layout::MoaganHome;
+    use crate::ids::RunId;
+    use crate::llm::provider::{Provider, ProviderRegistry};
+    use crate::llm::wire::Request;
+    use crate::telemetry::Telemetry;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn user_payload_round_trips_sketch() {
@@ -178,5 +214,134 @@ mod tests {
         let p = DiscoverTagPhase::user_payload(&s);
         assert!(p.contains("sk_001"));
         assert!(p.contains("single binary"));
+    }
+
+    /// Provider that always returns `Err(Error::Provider(...))` —
+    /// the retry-parse layer treats this as a non-retriable error
+    /// (it maps to `ErrorCode::InvalidResponse`, outside the
+    /// retriable set), so `discover_tag` sees one failure per
+    /// sketch and ends up with `kept == Vec::new()`.
+    struct AlwaysErrorProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for AlwaysErrorProvider {
+        fn name(&self) -> &str {
+            "always-error"
+        }
+        fn model(&self) -> &str {
+            "always-error-model"
+        }
+        fn endpoint(&self) -> &str {
+            "mock://always-error"
+        }
+        async fn send(&self, _req: &Request) -> Result<(u16, crate::llm::wire::Response)> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Provider("forced upstream failure".into()))
+        }
+    }
+
+    /// When every tagging call fails, the phase must NOT abort the
+    /// run. Instead it writes an empty `tags/index.json` with
+    /// `"degraded": true` and returns `Ok(PhaseOutput::Sketches(Vec::new()))`
+    /// so the cluster / integrator / summary phases can still
+    /// produce useful output. Pinned by the breaker-fix worktree so
+    /// a future refactor that re-introduces the hard error surfaces
+    /// as a failing test rather than a runtime `Err` aborting the
+    /// pipeline.
+    #[tokio::test]
+    async fn discover_tag_with_zero_successful_tags_returns_degraded_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().expect("ensure home");
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run dir");
+
+        // Stage one sketch so the empty-sketches short-circuit at
+        // the top of `execute` does not fire — we want to exercise
+        // the all-tagging-calls-failed branch instead.
+        let sketches_dir = run_dir.sketches();
+        std::fs::create_dir_all(&sketches_dir).expect("create sketches dir");
+        let sketch = Sketch {
+            id: "sk_zero_tag_test".into(),
+            thesis: "degraded-mode probe sketch".into(),
+            key_decisions: vec!["only sketch for this test".into()],
+            ..Default::default()
+        };
+        write_json(&sketches_dir.join("sk_zero_tag_test.json"), &sketch).expect("write sketch");
+
+        let registry = {
+            let inner = Arc::new(AlwaysErrorProvider {
+                calls: AtomicUsize::new(0),
+            });
+            let mut r = ProviderRegistry::default();
+            r.insert("always-error".into(), inner);
+            Arc::new(r)
+        };
+        let telemetry = Telemetry::open(
+            run_id,
+            &run_dir,
+            crate::redact::RedactPolicy::default(),
+            None,
+        )
+        .expect("telemetry open");
+        let ctx = RunContext::new(
+            run_id,
+            home.clone(),
+            registry,
+            "always-error".into(),
+            "always-error-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".into(),
+        );
+
+        let phase = DiscoverTagPhase;
+        let result = phase
+            .execute(&ctx)
+            .await
+            .expect("degraded mode must return Ok, never Err");
+
+        // Empty sketches list — the pipeline continues on raw
+        // sketches downstream.
+        match result {
+            PhaseOutput::Sketches(paths) => {
+                assert!(
+                    paths.is_empty(),
+                    "degraded mode must return an empty sketches list, got {paths:?}"
+                );
+            }
+            other => panic!("expected PhaseOutput::Sketches, got {other:?}"),
+        }
+
+        // `tags/index.json` must exist with `"degraded": true`. The
+        // cluster / integrator / summary phases read this file to
+        // decide whether to fall back to the raw-sketch path; an
+        // absent or malformed index would break them.
+        let tags_dir = run_dir.tags();
+        let index_path = tags_dir.join("index.json");
+        assert!(
+            index_path.exists(),
+            "tags/index.json must be written even in degraded mode (path: {index_path:?})"
+        );
+        let index: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&index_path).expect("read index"))
+                .expect("index is valid JSON");
+        assert_eq!(
+            index.get("degraded").and_then(|v| v.as_bool()),
+            Some(true),
+            "tags/index.json must carry \"degraded\": true in degraded mode, got {index}"
+        );
+        assert_eq!(
+            index
+                .get("tally")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(0),
+            "degraded mode must carry an empty tally, got {index}"
+        );
     }
 }
