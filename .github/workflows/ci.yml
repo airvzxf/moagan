@@ -126,7 +126,13 @@ jobs:
   smoke:
     name: 'T3 · make smoke'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Bumped 5 → 10 min after PR #544 (rate-limiter-scale) timed
+    # out at 5m00s on its first CI run. Locally the smoke suite
+    # finishes in ~30 s; the cold-runner + shared-cache penalty is
+    # what eats the budget. 10 min is the lowest multiple of 5 that
+    # gives the runner headroom on a degraded upstream without
+    # silently hiding a real regression.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/rust-setup
