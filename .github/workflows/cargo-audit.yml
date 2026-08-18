@@ -40,11 +40,21 @@ jobs:
         # (`package.kind == "dev-dependency"` is the discriminator). The
         # fetch is kept (no `--no-fetch`) so the nightly cron uses the
         # latest DB.
+        #
+        # Note on `.vulnerabilities.found`: recent cargo-audit (>=0.21)
+        # returns this field as a BOOLEAN (`true` when at least one
+        # vulnerability exists) instead of an array of records, with the
+        # actual list moved into `.vulnerabilities.list`. The map/select
+        # pipeline below treats anything that isn't an array as an empty
+        # list so both the boolean and the array shape pass through
+        # without `jq: Cannot iterate over boolean (true)`. The `count`
+        # field is always numeric and is the source of truth for the
+        # non-zero advisory case.
         run: |
           set -o pipefail
           cargo audit --json 2>&1 \
             | tee audit.raw.json \
-            | jq '{ vulnerabilities: { found: (.vulnerabilities.found // [] | map(select(.package.kind != "dev-dependency"))), count: (.vulnerabilities.count // 0) } }' \
+            | jq '{ vulnerabilities: { found: (((.vulnerabilities.found // []) | if type == "array" then map(select(.package.kind != "dev-dependency")) else [] end)), count: (.vulnerabilities.count // 0) } }' \
             > audit.json
 
       - name: Upload audit report
