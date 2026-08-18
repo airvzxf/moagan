@@ -298,6 +298,17 @@ pub async fn run_full_pipeline(
     } else {
         stub.provider.clone()
     };
+    // Resolve `max_parallelism` BEFORE building the provider registry
+    // so the registry can wire the per-provider `RateLimiter` from
+    // the resolved value. Validation has to come first (a typo like
+    // `--max-parallelism 4096` would silently raise the local bucket
+    // AND overwhelm the upstream rate-limit). The D.15.5 helper in
+    // `flags_batch.rs` is the same one the cheatsheet
+    // (`docs/cli-cheatsheet.md` §1 row 5) promises.
+    if let Some(n) = max_parallelism {
+        flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
+    }
+    let resolved_parallelism = max_parallelism.unwrap_or(cfg.max_parallelism);
     let providers = Arc::new(build_registry_for(
         cfg,
         &default_provider,
@@ -379,10 +390,29 @@ pub async fn run_full_pipeline(
     // sink failure must never abort the run.
     let sink: Arc<dyn crate::llm::provider::SaturationSink> = Arc::new(telemetry.clone());
     providers.attach_saturation_sink(sink);
-    if let Some(n) = max_parallelism {
-        flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
-    }
-    let parallelism = Parallelism::new(max_parallelism.unwrap_or(cfg.max_parallelism));
+    // Wire the per-provider rate limiter from the resolved
+    // `--max-parallelism`. The CLI-computed default (`capacity =
+    // max_parallelism`, `refill_per_sec = max_parallelism / 4`,
+    // floored at 1) is what makes `--max-parallelism=32`
+    // genuinely produce 32 in flight instead of being throttled at
+    // the hardcoded `refill_per_sec = 4` default. The
+    // per-provider override (`MOAGAN_RATE_LIMIT_<provider>` env
+    // var or `[rate_limit_per_provider]` in
+    // `~/.config/moagan/config.toml`) wins on conflict (catalog
+    // §D.19.6). Catalog §D.19.6 default is intentionally NOT
+    // consulted here so `--max-parallelism` does the right thing
+    // before any config-level override surfaces.
+    let effective_rate_limit = crate::config::RateLimitConfig {
+        capacity: resolved_parallelism as u32,
+        refill_per_sec: (resolved_parallelism / 4).max(1) as u32,
+        initial: None,
+    };
+    crate::llm::provider::attach_parallelism_rate_limit(
+        providers.as_ref(),
+        Some(&effective_rate_limit),
+        &cfg.rate_limit_per_provider,
+    );
+    let parallelism = Parallelism::new(resolved_parallelism);
 
     let ctx = RunContext::new_with_config(
         run_id,
