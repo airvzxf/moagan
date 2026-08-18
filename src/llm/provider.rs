@@ -295,19 +295,33 @@ impl ProviderRegistry {
     /// [`registry_from_config_with_home_and_sink`] (the production
     /// entry point). This `insert` method is a manual / test
     /// shim that preserves the caller's wrapper — hand-rolled
-    /// test paths (e.g.
-    /// `tests/integration_telemetry_saturation.rs`) construct a
-    /// `BreakeredProvider` with a specific breaker and rely on
-    /// the registry to keep that exact wrapper intact. Re-wrapping
-    /// here would shadow the caller's breaker and break those
-    /// tests. The accessor [`Self::breaker`] and the sink walker
-    /// [`Self::attach_saturation_sink`] operate on `self.wrapped`;
-    /// callers that want the wrapped state observable through the
-    /// registry should pass the wrapper through [`Self::new`]
-    /// (which always wraps with a fresh per-call-site breaker) or
-    /// insert via a thin shim that downcasts (TODO).
+    /// test paths (e.g. `src/phases/judge.rs` and
+    /// `src/discovery/coordinator.rs`) insert bare
+    /// `Arc<dyn Provider>` values like `MockProvider` or scripted
+    /// providers without a breaker, and the registry just needs
+    /// to expose them through `by_name`. The accessor
+    /// [`Self::breaker`] and the sink walker
+    /// [`Self::attach_saturation_sink`] operate on `self.wrapped`,
+    /// which is populated only by [`Self::new`] (production) and
+    /// [`Self::insert_wrapped`] (test shim that wants the wrapped
+    /// state observable through the registry).
     pub fn insert(&mut self, name: String, provider: Arc<dyn Provider>) {
         self.by_name.insert(name, provider);
+    }
+
+    /// Insert a pre-built [`BreakeredProvider`] wrapper. Mirrors
+    /// the wrapper into both `by_name` (for `get` lookup) and
+    /// `wrapped` (for `breaker`, `attach_saturation_sink`, and
+    /// the per-call-site breaker accessor). This is the test shim
+    /// `tests/integration_telemetry_saturation.rs` relies on to
+    /// wire a wrapper with a specific breaker (`default()` /
+    /// `lenient()` / hand-rolled) into the registry without
+    /// losing the breaker reference. Production code paths go
+    /// through [`Self::new`] which constructs the wrapper
+    /// internally and never needs this shim.
+    pub fn insert_wrapped(&mut self, name: String, wrapper: Arc<BreakeredProvider>) {
+        self.wrapped.insert(name.clone(), wrapper.clone());
+        self.by_name.insert(name, wrapper as Arc<dyn Provider>);
     }
 
     /// Read the circuit breaker for a registered provider. Returns
