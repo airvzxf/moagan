@@ -55,10 +55,12 @@ pub fn read_prompt_from_stdin() -> std::io::Result<String> {
 }
 
 /// D.15.5: validate that a `--max-parallelism` value does not
-/// exceed the hard cap of 64 simultaneous LLM calls.
+/// exceed `u32::MAX` (4_294_967_295) simultaneous LLM calls.
 pub fn validate_max_parallelism(n: usize) -> Result<(), String> {
-    if n > 64 {
-        Err(format!("--max-parallelism={n} exceeds maximum 64"))
+    if n > 4_294_967_295 {
+        Err(format!(
+            "--max-parallelism={n} exceeds maximum 4_294_967_295"
+        ))
     } else {
         Ok(())
     }
@@ -87,16 +89,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_max_parallelism_accepts_64() {
-        assert!(validate_max_parallelism(64).is_ok());
+    fn validate_max_parallelism_accepts_u32_max() {
+        assert!(validate_max_parallelism(4_294_967_295).is_ok());
         assert!(validate_max_parallelism(1).is_ok());
         assert!(validate_max_parallelism(0).is_ok());
     }
 
     #[test]
-    fn validate_max_parallelism_rejects_65() {
-        let err = validate_max_parallelism(65).expect_err("must error");
-        assert!(err.contains("exceeds maximum 64"));
+    fn validate_max_parallelism_rejects_above_u32_max() {
+        let err = validate_max_parallelism(4_294_967_296).expect_err("must error");
+        assert!(err.contains("exceeds maximum 4_294_967_295"));
     }
 
     #[test]
