@@ -367,8 +367,25 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     if let Some(n) = opts.max_parallelism {
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }
-    let max_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
-    let parallelism = Parallelism::new(max_parallelism);
+    let resolved_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
+    // Wire the per-provider `RateLimiter` from the resolved
+    // `--max-parallelism` so `parallelism=32` actually produces
+    // 32 in flight rather than being throttled at the hardcoded
+    // `refill_per_sec = 4` default. Per-provider overrides
+    // (`MOAGAN_RATE_LIMIT_<provider>` or
+    // `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`)
+    // beat the derived default on conflict (catalog §D.19.6).
+    let effective_rate_limit = crate::config::RateLimitConfig {
+        capacity: resolved_parallelism as u32,
+        refill_per_sec: (resolved_parallelism / 4).max(1) as u32,
+        initial: None,
+    };
+    crate::llm::provider::attach_parallelism_rate_limit(
+        providers.as_ref(),
+        Some(&effective_rate_limit),
+        &cfg.rate_limit_per_provider,
+    );
+    let parallelism = Parallelism::new(resolved_parallelism);
 
     // PR-D1: merge CLI `--temperature-profile` specs (last-wins per
     // provider) on top of the persisted `[discovery]` block from

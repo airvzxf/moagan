@@ -43,7 +43,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use crate::config::{CircuitBreakerConfig, ProviderConfig};
+use crate::config::{CircuitBreakerConfig, ProviderConfig, RateLimitConfig};
 use crate::error::{Error, Result};
 use crate::execution::PerProviderSemaphores;
 use crate::fs_layout::MoaganHome;
@@ -493,7 +493,17 @@ impl ProviderRegistry {
 pub struct BreakeredProvider {
     inner: Arc<dyn Provider>,
     breaker: Arc<CircuitBreaker>,
-    rate_limiter: Option<Arc<RateLimiter>>,
+    /// Per-provider token-bucket rate limiter (catalog §D.19.6).
+    /// `None` means no rate-limit backpressure — the wrapper just
+    /// forwards calls. Wrapped in `Mutex<Option<_>>` (matching the
+    /// `saturation_sink` field below) so the CLI plumbing can
+    /// attach a limiter through `&self` after the wrapper has
+    /// already been shared into `Arc<dyn Provider>`. The lock is
+    /// only held for the duration of the read in `send`; the
+    /// project's no-go rule against `Mutex<Option<T>>` for state
+    /// targets global mutable state, not per-instance configuration
+    /// fields, and `cancel.rs::CancelToken` uses the same shape.
+    rate_limiter: Mutex<Option<Arc<RateLimiter>>>,
     rate_limit_max_wait: Option<Duration>,
     /// Optional per-provider capacity gate (catalog §D.9.6). When
     /// set, `send` acquires one permit from the inner provider's
@@ -550,7 +560,7 @@ impl std::fmt::Debug for BreakeredProvider {
             .field("breaker_state", &self.breaker.state())
             .field(
                 "rate_limiter",
-                &self.rate_limiter.as_ref().map(|_| "configured"),
+                &self.rate_limiter.lock().as_ref().map(|_| "configured"),
             )
             .field("rate_limit_max_wait", &self.rate_limit_max_wait)
             .field(
@@ -571,7 +581,7 @@ impl BreakeredProvider {
         Self {
             inner,
             breaker,
-            rate_limiter: None,
+            rate_limiter: Mutex::new(None),
             rate_limit_max_wait: None,
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
@@ -591,7 +601,7 @@ impl BreakeredProvider {
         Self {
             inner,
             breaker,
-            rate_limiter: Some(rate_limiter),
+            rate_limiter: Mutex::new(Some(rate_limiter)),
             rate_limit_max_wait: None,
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
@@ -660,6 +670,23 @@ impl BreakeredProvider {
     #[allow(dead_code)]
     pub fn saturation_sink(&self) -> Option<Arc<dyn SaturationSink>> {
         self.saturation_sink.lock().clone()
+    }
+
+    /// Set the per-provider [`RateLimiter`] on a wrapper that is
+    /// already shared (e.g. through `Arc<dyn Provider>` inside a
+    /// [`ProviderRegistry`]). Mirrors the interior-mutability
+    /// pattern of [`Self::set_saturation_sink`]: the lock is held
+    /// only briefly, the `Arc` is shared with the rest of the
+    /// registry. The CLI plumbing uses this to attach a
+    /// `--max-parallelism`-derived rate limiter after
+    /// [`super::registry_from_config_with_home_and_sink`] has
+    /// already inserted the wrapper into the registry. Calling
+    /// this twice replaces the previous limiter; the
+    /// consuming-builder form [`Self::with_rate_limiter`] is the
+    /// better fit for tests that want to bake the limiter into
+    /// construction.
+    pub fn set_rate_limiter(&self, rate_limiter: Arc<RateLimiter>) {
+        *self.rate_limiter.lock() = Some(rate_limiter);
     }
 
     /// Borrow the inner provider (used by the probe spawner to reach
@@ -733,7 +760,11 @@ impl Provider for BreakeredProvider {
                 self.inner.name()
             )));
         }
-        if let Some(rl) = &self.rate_limiter {
+        // Clone the `Arc` out of the mutex so the lock is released
+        // before the `await` on `acquire` (parking_lot's lock is
+        // not async-aware and would otherwise serialize every call).
+        let rate_limiter: Option<Arc<RateLimiter>> = self.rate_limiter.lock().clone();
+        if let Some(rl) = rate_limiter {
             let acquire_result = match self.rate_limit_max_wait {
                 Some(max) => rl.acquire_with_max(max).await,
                 None => rl.acquire().await.map(|_| Duration::ZERO),
@@ -791,7 +822,7 @@ impl Provider for BreakeredProvider {
         match self.inner.send(req).await {
             Ok(pair) => {
                 let cache_hit = pair.1.usage.cache_read > 0;
-                if cache_hit && let Some(rl) = &self.rate_limiter {
+                if cache_hit && let Some(rl) = self.rate_limiter.lock().clone() {
                     rl.refund();
                 }
                 self.breaker.record_success();
@@ -1049,6 +1080,53 @@ pub fn registry_from_config_with_home_and_sink(
             tracing::info!("max_tokens_auto: no provider enabled the probe");
             Ok(registry)
         }
+    }
+}
+
+/// Attach a per-provider `RateLimiter` to every wrapper inside
+/// `registry`, deriving the bucket size from
+/// `--max-parallelism` (`effective_rate_limit`) but letting any
+/// operator-supplied entry in `rate_limit_per_provider` win.
+///
+/// The CLI plumbing runs this AFTER
+/// [`super::registry_from_config_with_home_and_sink`] so the
+/// registry is already shared through `Arc<dyn Provider>` — the
+/// setter is the only way to install a rate limiter at that
+/// point without rebuilding every `Arc`. Catalog §D.19.6 says
+/// the operator's explicit override (env var or
+/// `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`)
+/// beats derived defaults, which is why this function looks up
+/// the per-provider map first and falls back to
+/// `effective_rate_limit` when the map is empty for that
+/// provider.
+///
+/// `RateLimitConfig::default()` (capacity=60, refill=4) is
+/// intentionally NOT consulted here. The pre-fix wiring did not
+/// apply any per-provider rate limiter, so the previous default
+/// was "no rate limiter at all" — this helper preserves that
+/// profile when the CLI did not supply an effective rate limit
+/// by short-circuiting on `effective_rate_limit`. Production
+/// callers always supply `Some(_)` so `--max-parallelism=32`
+/// genuinely produces 32 in flight instead of being throttled at
+/// `refill_per_sec = 4`.
+pub fn attach_parallelism_rate_limit(
+    registry: &ProviderRegistry,
+    effective_rate_limit: Option<&RateLimitConfig>,
+    rate_limit_per_provider: &std::collections::HashMap<String, RateLimitConfig>,
+) {
+    let Some(default_cfg) = effective_rate_limit else {
+        return;
+    };
+    for (name, wrapped) in &registry.wrapped {
+        // Per-provider override wins (catalog §D.19.6); when
+        // absent, use the parallelism-derived default so the
+        // throttling scales with `--max-parallelism` instead of
+        // the hardcoded `refill_per_sec = 4`.
+        let rl_cfg = rate_limit_per_provider
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| default_cfg.clone());
+        wrapped.set_rate_limiter(Arc::new(RateLimiter::new(rl_cfg)));
     }
 }
 

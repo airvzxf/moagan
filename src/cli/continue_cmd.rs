@@ -474,6 +474,21 @@ pub async fn run_refine(
         super::run::build_registry_for(cfg, &default_provider, mock_dir)
             .map_err(|e| Error::InvalidState(format!("refine: {e}")))?,
     );
+    // Wire the per-provider rate limiter from `cfg.max_parallelism`
+    // so `--max-parallelism=32` actually produces 32 in flight
+    // instead of being throttled at `refill_per_sec = 4`. The
+    // per-provider override (`MOAGAN_RATE_LIMIT_<provider>` or
+    // `[rate_limit_per_provider]`) wins on conflict.
+    let refine_rate_limit = crate::config::RateLimitConfig {
+        capacity: cfg.max_parallelism as u32,
+        refill_per_sec: (cfg.max_parallelism / 4).max(1) as u32,
+        initial: None,
+    };
+    crate::llm::provider::attach_parallelism_rate_limit(
+        providers.as_ref(),
+        Some(&refine_rate_limit),
+        &cfg.rate_limit_per_provider,
+    );
     let default_model = cfg
         .provider(&default_provider)
         .map_err(|e| Error::InvalidState(format!("refine: {e}")))?
@@ -675,6 +690,21 @@ pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> 
     let providers = Arc::new(
         super::run::build_registry_for(cfg, &default_provider, None)
             .map_err(|e| Error::InvalidState(format!("rerank: {e}")))?,
+    );
+    // Wire the per-provider rate limiter from `cfg.max_parallelism`
+    // so `--max-parallelism=32` actually produces 32 in flight
+    // instead of being throttled at `refill_per_sec = 4`. The
+    // per-provider override (`MOAGAN_RATE_LIMIT_<provider>` or
+    // `[rate_limit_per_provider]`) wins on conflict.
+    let rerank_rate_limit = crate::config::RateLimitConfig {
+        capacity: cfg.max_parallelism as u32,
+        refill_per_sec: (cfg.max_parallelism / 4).max(1) as u32,
+        initial: None,
+    };
+    crate::llm::provider::attach_parallelism_rate_limit(
+        providers.as_ref(),
+        Some(&rerank_rate_limit),
+        &cfg.rate_limit_per_provider,
     );
     let default_model = cfg
         .provider(&default_provider)
