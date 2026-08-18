@@ -188,12 +188,40 @@ impl CircuitBreaker {
 }
 
 impl Default for CircuitBreaker {
+    /// Quick-tripping defaults (5/60s/30s) used by tests that
+    /// want to exercise breaker behaviour deterministically,
+    /// and by `BreakeredProvider` instances that wrap a mock
+    /// provider where trip-on-fifth-error is the right
+    /// contract. Production providers (the
+    /// `BreakeredProvider` instances built by
+    /// `ProviderRegistry::new` / `insert` / `with_pool` /
+    /// `registry_from_config_*`) use the **lenient** defaults
+    /// exposed by [`Self::lenient`] instead. The split keeps
+    /// the test surface stable (5/60s/30s) while production
+    /// tolerates the 10-error burst a flaky cell-network call
+    /// typically produces before recovering. Spec: catalog
+    /// 10-integrada-v0 §D.19.5.
     fn default() -> Self {
-        // Defaults match `CircuitBreakerConfig::default()` so the
-        // registry-built-in breakers and the config-driven breakers
-        // share the same opening policy out of the box. Spec
-        // surface: catalog 10-integrada-v0 §D.19.5.
         Self::new(5, Duration::from_secs(60), Duration::from_secs(30))
+    }
+}
+
+impl CircuitBreaker {
+    /// Lenient defaults for production: 50 failures in a 300 s
+    /// window with a 60 s cooldown. Tolerates the 10-error
+    /// burst a flaky cell-network call site typically produces
+    /// before recovering, over a 5-minute window so a
+    /// few-minute outage does not look like a provider-level
+    /// failure. Cooldown is 60 s so a tripped breaker probes
+    /// again within a minute — long enough to dodge a
+    /// sustained outage, short enough that an isolated burst
+    /// does not lock the provider out for the rest of the run.
+    /// Used by `ProviderRegistry::new` / `insert` /
+    /// `with_pool` / `registry_from_config_*` when each call
+    /// site constructs its own fresh `Arc<CircuitBreaker>`.
+    /// Spec: catalog 10-integrada-v0 §D.19.5.
+    pub fn lenient() -> Self {
+        Self::new(50, Duration::from_secs(300), Duration::from_secs(60))
     }
 }
 
