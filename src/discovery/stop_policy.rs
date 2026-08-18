@@ -142,12 +142,13 @@ pub const DEFAULT_RESERVE_RATIO: f32 = 0.25;
 pub const DEFAULT_OUTLIER_DISTANCE: f32 = 0.30;
 /// Default `min_sketches` (D.13.3). Pinned.
 pub const DEFAULT_MIN_SKETCHES: usize = 40;
-/// Default soft `max_sketches`. The spec doesn't pin a single
-/// value here, so we use the standard-mode hard ceiling as a
-/// sensible default.
-pub const DEFAULT_MAX_SKETCHES: usize = 80;
-/// Default `hard_cap` (D.13.3). Pinned.
-pub const DEFAULT_DISCOVERY_HARD_CAP: usize = 500;
+/// Default soft `max_sketches`. No effective cap; the matrix
+/// loop walks every candidate the `--temperature-profile`
+/// defines.
+pub const DEFAULT_MAX_SKETCHES: usize = 4_294_967_295;
+/// Default `hard_cap` (D.13.3). No effective cap; the matrix
+/// loop walks every candidate the `--temperature-profile` defines.
+pub const DEFAULT_DISCOVERY_HARD_CAP: usize = 4_294_967_295;
 
 #[cfg(test)]
 mod tests {
@@ -224,7 +225,7 @@ mod tests {
         assert!((p.reserve_ratio - 0.25).abs() < 1e-6);
         assert!((p.outlier_distance - 0.30).abs() < 1e-6);
         assert_eq!(p.min_sketches, 40);
-        assert_eq!(p.hard_cap, 500);
+        assert_eq!(p.hard_cap, 4_294_967_295);
     }
 
     /// D.13.3: `min_sketches <= max_sketches <= hard_cap` for the
