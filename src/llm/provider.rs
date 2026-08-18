@@ -246,8 +246,11 @@ impl ProviderRegistry {
             // is constructed fresh per call site (one wrapper, one
             // breaker), so two wrappers created from the same inner
             // `Arc<dyn Provider>` independently observe their own
-            // counters.
-            let breaker = Arc::new(CircuitBreaker::default());
+            // counters. Each fresh breaker uses the lenient
+            // production defaults (50/300s/60s); tests that need
+            // a fast-tripping 5/60s/30s breaker use
+            // `CircuitBreaker::default()` directly.
+            let breaker = Arc::new(CircuitBreaker::lenient());
             let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(p, breaker));
             by_name.insert(name.clone(), entry.clone() as Arc<dyn Provider>);
             wrapped.insert(name.clone(), entry.clone());
@@ -285,16 +288,26 @@ impl ProviderRegistry {
         self.by_name.get(name).cloned()
     }
 
-    /// Insert a provider by name, wrapping it in a default
-    /// [`CircuitBreaker`]. Replaces any existing entry.
+    /// Insert a provider by name. Stores the provider as-is
+    /// without re-wrapping. The per-call-site breaker fix lives in
+    /// [`Self::new`] (the constructor used by production
+    /// registries) and in
+    /// [`registry_from_config_with_home_and_sink`] (the production
+    /// entry point). This `insert` method is a manual / test
+    /// shim that preserves the caller's wrapper — hand-rolled
+    /// test paths (e.g.
+    /// `tests/integration_telemetry_saturation.rs`) construct a
+    /// `BreakeredProvider` with a specific breaker and rely on
+    /// the registry to keep that exact wrapper intact. Re-wrapping
+    /// here would shadow the caller's breaker and break those
+    /// tests. The accessor [`Self::breaker`] and the sink walker
+    /// [`Self::attach_saturation_sink`] operate on `self.wrapped`;
+    /// callers that want the wrapped state observable through the
+    /// registry should pass the wrapper through [`Self::new`]
+    /// (which always wraps with a fresh per-call-site breaker) or
+    /// insert via a thin shim that downcasts (TODO).
     pub fn insert(&mut self, name: String, provider: Arc<dyn Provider>) {
-        // Per-call-site breaker: each inserted wrapper owns its
-        // own breaker (no longer mirrored into a registry-wide
-        // `breakers` map — see the comment on `Self::new`).
-        let breaker = Arc::new(CircuitBreaker::default());
-        let wrapped = Arc::new(BreakeredProvider::new(provider, breaker));
-        self.wrapped.insert(name.clone(), wrapped.clone());
-        self.by_name.insert(name, wrapped as Arc<dyn Provider>);
+        self.by_name.insert(name, provider);
     }
 
     /// Read the circuit breaker for a registered provider. Returns
