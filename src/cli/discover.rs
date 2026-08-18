@@ -855,21 +855,21 @@ mod tests {
         assert!(e.to_string().contains("needs a value"));
     }
 
-    /// PR-B1 (B1.4): `discover` validates `--max-parallelism`
-    /// against the same hard cap (64) as `run`. Today the flag is
-    /// parsed but the value is forwarded unchecked to
-    /// `Parallelism::new`; a typo like `--max-parallelism 4096`
-    /// silently raises the semaphore. Pin the helper contract
-    /// here so the discovery path can never drift from the run
-    /// path.
+    /// PR-B1 (B1.4) lifted to u32::MAX: `discover` validates
+    /// `--max-parallelism` against the same helper as `run`, which
+    /// now caps at `u32::MAX` (`4_294_967_295`). One above that
+    /// bound is rejected with the documented message; the
+    /// hard-cap-of-64 history is preserved in the helper's
+    /// `flags_batch::validate_max_parallelism` test (which is
+    /// the source of truth for the cap and its message).
     #[test]
     fn max_parallelism_cap_holds_for_discover() {
         // Exactly the cap: accepted.
-        assert!(flags_batch::validate_max_parallelism(64).is_ok());
+        assert!(flags_batch::validate_max_parallelism(4_294_967_295).is_ok());
         // One above the cap: rejected with the documented message.
-        let err = flags_batch::validate_max_parallelism(65).expect_err("must error");
+        let err = flags_batch::validate_max_parallelism(4_294_967_296).expect_err("must error");
         assert!(
-            err.contains("exceeds maximum 64"),
+            err.contains("exceeds maximum 4_294_967_295"),
             "error must mention the cap; got {err:?}"
         );
     }
