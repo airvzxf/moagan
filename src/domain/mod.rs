@@ -12,7 +12,74 @@ use std::collections::BTreeMap;
 
 use crate::ids::RunId;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Lenient deserializer for `Vec<String>` fields.
+///
+/// The upstream MiniMax LLM occasionally returns a bare string where
+/// the schema expects an array of items — most often for the
+/// `objectives`, `constraints`, and `non_goals` fields of the Intake
+/// and Brief roles (regression observed in CI run 32279237605 and
+/// documented in issue #556). Strict `Vec<String>` deserialization
+/// errors out with a `schema violation` whenever this happens, which
+/// aborts the whole run before the audit log fills and breaks the
+/// `proxy_e2e_*_audit_log_*_count_ge_5` smoke assertions.
+///
+/// This helper accepts, without erroring:
+/// - a JSON array of strings → returned as-is,
+/// - a single JSON string → wrapped into a one-element `Vec`,
+/// - `null` / missing → empty `Vec` (defers to `#[serde(default)]`).
+///
+/// Anything else (`bool`, `number`, an object, …) is coerced to an
+/// empty `Vec` as a best-effort fallback — we never want one weird
+/// LLM reply to fail an entire `moagan run`. Issue #556 tracks the
+/// broader contract-violation story; this is the cheap, safe escape
+/// hatch that unblocks the smoke gates today.
+fn deserialize_lenient_vec_string<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde_json::Value;
+
+    let value = Value::deserialize(deserializer).unwrap_or(Value::Null);
+    let coerced: Vec<String> = match value {
+        Value::Null => Vec::new(),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Value::String(s) => s,
+                // nested array → flatten by joining the inner strings
+                Value::Array(inner) => inner
+                    .into_iter()
+                    .map(|v| match v {
+                        Value::String(s) => s,
+                        other => other.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                other => other.to_string(),
+            })
+            .collect(),
+        Value::String(s) => {
+            // Multi-line string → one entry per non-empty line; this
+            // matches how a model often flattens a single-string
+            // "objective" into a multi-line paragraph.
+            let lines: Vec<String> = s
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if lines.is_empty() {
+                vec![s.trim().to_owned()]
+            } else {
+                lines
+            }
+        }
+        other => vec![other.to_string()],
+    };
+    Ok(coerced)
+}
 
 /// Output of the intake phase.
 ///
@@ -20,19 +87,26 @@ use serde::{Deserialize, Serialize};
 /// become empty, and unknown fields from the model are silently
 /// ignored. The `MiniMax-M3` model with `thinking` enabled routinely
 /// mixes `Intake` and `Brief` fields in the same response, so the
-/// schema must tolerate that.
+/// schema must tolerate that. The `Vec<String>` fields also use
+/// `deserialize_lenient_vec_string` so that a model reply with a
+/// bare string (instead of an array) still parses — see the doc on
+/// that helper and issue #556.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Intake {
     /// The user's problem statement, rephrased by the LLM.
     pub problem: String,
     /// Concrete objectives extracted from the prompt.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub objectives: Vec<String>,
     /// Constraints (hard or soft) the user mentioned.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub constraints: Vec<String>,
     /// Non-goals explicitly or implicitly stated.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub non_goals: Vec<String>,
     /// Open questions the LLM flagged for clarification.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub open_questions: Vec<String>,
     /// Verbatim user prompt.
     pub raw_prompt: String,
@@ -41,7 +115,9 @@ pub struct Intake {
 /// Output of the clarify phase — the canonical brief.
 ///
 /// Same leniency as `Intake`. `acceptance` is a `Vec<String>` because
-/// the model returns it as a list, not a single string.
+/// the model returns it as a list, not a single string. All
+/// `Vec<String>` fields use `deserialize_lenient_vec_string` so a
+/// model reply with a bare string still parses (issue #556).
 ///
 /// Phase J (v0.3 «tercera etapa», sub-fase J): `context_block` is
 /// the verbatim text the intake phase prepended to the LLM prompt
@@ -57,18 +133,25 @@ pub struct Brief {
     /// Concrete problem.
     pub problem: String,
     /// Concrete objectives.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub objectives: Vec<String>,
     /// Concrete deliverables.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub deliverables: Vec<String>,
     /// Hard and soft constraints.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub constraints: Vec<String>,
     /// Assumptions the team is making.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub assumptions: Vec<String>,
     /// Explicit non-goals.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub non_goals: Vec<String>,
     /// Acceptance criteria (one bullet per item; the model emits a list).
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub acceptance: Vec<String>,
     /// Known risks.
+    #[serde(deserialize_with = "deserialize_lenient_vec_string")]
     pub risks: Vec<String>,
     /// Phase J: verbatim text prepended to the LLM prompt from a
     /// `--context` reference. Empty when the run had no context.
