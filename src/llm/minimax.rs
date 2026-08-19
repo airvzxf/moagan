@@ -670,10 +670,18 @@ mod tests {
         assert_eq!(json["model"], "MiniMax-M3");
         assert_eq!(json["max_tokens"], 32);
         assert_eq!(json["system"], "you are minimax");
+        // PR-D2 follow-up: JSON-required roles (Intake is one)
+        // get an assistant prefill of `{` to bias the model toward
+        // producing valid JSON. The test pins the two-message
+        // shape; the production code path also honours a
+        // caller-supplied `extra_messages` array.
         assert_eq!(
             json["messages"],
-            serde_json::json!([{"role": "user", "content": "hello upstream"}]),
-            "messages must be the Anthropic-compatible user-only array"
+            serde_json::json!([
+                {"role": "user", "content": "hello upstream"},
+                {"role": "assistant", "content": "{"},
+            ]),
+            "Intake must include the JSON prefill assistant message"
         );
         let temp = json["temperature"].as_f64().expect("temperature numeric");
         assert!((temp - 0.4).abs() < 1e-6, "temperature must round-trip");
