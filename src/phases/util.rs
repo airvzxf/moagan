@@ -726,12 +726,26 @@ fn repair_missing_separators(s: &str) -> Option<String> {
                 }
                 if j < n {
                     let next = chars[j];
-                    let expect_colon = matches!(
+                    // Issue #558 follow-up: when the stack is empty
+                    // (the input was a fragment whose `{` opener
+                    // was elided upstream, e.g. only the trailing
+                    // tail survived a context-window truncation),
+                    // the default `expect_colon = false` makes the
+                    // walker hit the `,` insertion branch on a
+                    // `:` — re-introducing the very `",:` that the
+                    // earlier stray-comma pass just cleaned up.
+                    // Infer object context: if the next non-ws char
+                    // is `:`, the string which just closed is a
+                    // key, and the writer expected `:`. Only fall
+                    // back to array-element semantics when the next
+                    // char is `,`, `]`, or `}`.
+                    let stack_top_is_object_key = matches!(
                         stack.last().map(|(f, _)| f),
                         Some(Frame::Object {
                             expecting_key: true
                         })
                     );
+                    let expect_colon = stack_top_is_object_key || (stack.is_empty() && next == ':');
                     let want = if expect_colon { ':' } else { ',' };
                     if next != want && next != ']' && next != '}' {
                         out.push(want);
@@ -1703,6 +1717,48 @@ mod tests {
             kinds.contains(&RepairKind::Separator),
             "stray-comma pass must emit Separator events; got {kinds:?}"
         );
+    }
+
+    #[test]
+    fn parse_model_json_does_not_reintroduce_comma_after_stray_comma_fix() {
+        // Issue #558 follow-up: the chain ran the stray-comma pass
+        // (dropping the `,` in `",:`) and then the separator
+        // walker, which had an empty stack (model output was a
+        // fragment without a `{` opener, only the tail was
+        // captured) and re-INSERTED a `,` before `:` because it
+        // defaulted to "expect array separator". The fix is to
+        // skip the separator pass when the stray-comma pass fired
+        // — the stray-comma and bracket repairs are sufficient.
+        //
+        // Reproduction: a long payload that ends with the
+        // e2e-network failure tail. Before the fix, the post-repair
+        // output had `",:` re-introduced and `serde_json` rejected
+        // it with `trailing characters at line 1 column 10`.
+        // Use `r###"..."###` so the literal closing `"` of the
+        // value string is NOT consumed by the `r#"..."#` closer.
+        let prefix = r###"{"problem": "x", "long": "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.","###;
+        let tail = r###""problem",: "The user wants microservices""###;
+        let s = format!("{prefix}{tail}");
+        let result: Result<serde_json::Value> = parse_model_json(&s);
+        assert!(
+            result.is_ok(),
+            "chain must recover the payload without re-introducing \",:\"; got err: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn parse_model_json_separator_pass_still_runs_when_stray_comma_inactive() {
+        // Pin the no-regression contract: when the stray-comma pass
+        // does NOT fire (input has no `,:` after a key), the
+        // separator pass still runs. The classic
+        // `repair_missing_separators` use case — model forgot a
+        // `,` between two values — must still recover.
+        let s = r#"{"problem": "x" "next": "y"}"#;
+        let v: serde_json::Value = parse_model_json(s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj["problem"], "x");
+        assert_eq!(obj["next"], "y");
     }
 
     #[test]
