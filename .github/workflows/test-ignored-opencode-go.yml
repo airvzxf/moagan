@@ -1,38 +1,20 @@
 name: test-ignored-opencode-go
 
+# Restored from PR #525 on 2026-08-19.
+# Earlier (PR #550, PR #555) the workflow had been collapsed to a
+# single "DISABLED — budget exhausted" stub job and the auto-trigger
+# removed, leaving it as a `workflow_dispatch`-only banner. This file
+# restores both jobs (preflight + cargo test -- --ignored) so the
+# workflow does real work whenever it fires — and so that, once the
+# native OpenCode Go budget comes back, the gate is already wired and
+# will run on every push to main with no further code change.
+
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
-# Stub workflow. Originally fired on every push to main and on manual
-# dispatch (PR #525), then auto-stubbed to a single-job "DISABLED"
-# banner (PR #550, mirror of PR #529's DeepSeek stub, since
-# OPENCODE_GO_API_KEY budget is also exhausted / unavailable).
-#
-# On 2026-08-19 the `push: branches: [main]` trigger was removed
-# entirely. The workflow now runs ONLY when the maintainer dispatches
-# it manually (`workflow_dispatch`). When dispatched, the
-# `disabled-stub` job prints the DISABLED banner as the
-# maintainer-facing reminder.
-#
-# Rationale: with the auto path gone, the workflow sits silently in
-# the workflow list — no runner minutes, no API tokens, no
-# misleading green check on every commit. The maintainer can still
-# trigger it any time to see the stub banner (or to confirm the
-# manual path works before restoring the real jobs).
-#
-# To re-enable for automatic runs:
-# 1. Re-add `push: branches: [main]` to `on:` above (parity with
-#    PR #525).
-# 2. Replace the `disabled-stub` job with the original
-#    `preflight-opencode_go` + `test-ignored-opencode-go` jobs from
-#    PR #525.
-#
-# History:
-# - PR #525 (2026-08-16): introduced as post-merge informative workflow
-# - PR #550 (2026-08-18): stubbed (OPENCODE_GO_API_KEY budget
-#   exhausted / unavailable)
-# - PR #XXX (2026-08-19): removed auto-trigger on push; manual-only
-
+# Serialize concurrent runs to avoid artifact races.
 concurrency:
   group: test-ignored-opencode-go-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -40,21 +22,86 @@ concurrency:
 permissions:
   contents: read
 
+# Post-merge informative validation for the opencode_go provider.
+# Runs the integration_discover_opencode_go -- --ignored test on every
+# push to main and on manual dispatch. NOT a PR gate — moved out of
+# ci.yml in #525 to (a) reduce per-PR runner cost, (b) eliminate
+# refs/pull/N/merge cache pollution, (c) align with the e2e-network
+# post-merge pattern.
+#
+# The `preflight-opencode_go` job probes the upstream with a 30 s HTTP
+# call and exits 0 (with a SKIP line) when OPENCODE_GO_API_KEY is
+# absent on the runner; `test-ignored-opencode-go` then gates on the
+# secret the same way and runs `cargo test -- --ignored` when it is
+# present. Timeout 120 min accommodates the rare case of a degraded
+# upstream.
+
 jobs:
-  disabled-stub:
-    name: 'DISABLED — OpenCode Go budget exhausted'
-    if: ${{ always() }}
+  preflight-opencode_go:
+    name: 'T3 · preflight — opencode_go'
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     steps:
-      - name: skip with explanation
+      - name: probe opencode_go
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
-          echo "================================================================"
-          echo "DISABLED: test-ignored-opencode-go is currently a stub."
-          echo "Reason: native OpenCode Go (OPENCODE_GO_API_KEY) budget exhausted."
-          echo "Auto-trigger on push to main was removed on 2026-08-19; this"
-          echo "workflow now runs only on manual dispatch."
-          echo "To re-enable: restore the original jobs from PR #525 and"
-          echo "re-add `push: branches: [main]` to `on:` above."
-          echo "================================================================"
-          exit 0
+          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
+            echo "SKIP: OPENCODE_GO_API_KEY not set"
+            exit 0
+          fi
+          echo "OPENCODE_GO: set, length=${#OPENCODE_GO_API_KEY}, prefix=${OPENCODE_GO_API_KEY:0:8}...${OPENCODE_GO_API_KEY: -4}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
+            'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
+          echo "OPENCODE_GO http_status: $HTTP"
+          [[ "$HTTP" =~ ^2 ]] || exit 1
+
+  test-ignored-opencode-go:
+    name: 'T2 · cargo test -- --ignored (opencode_go)'
+    needs: preflight-opencode_go
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+      - name: cargo test integration_discover_opencode_go -- --ignored (gated on OPENCODE_GO_API_KEY)
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          echo "============================================================"
+          echo "DIAGNOSTIC HEADER"
+          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+          echo "  Runner:             $(uname -a)"
+          echo "  Working directory:  $(pwd)"
+          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "  Provider under test: opencode_go"
+          echo "============================================================"
+          echo "API key presence:"
+          echo "  OPENCODE_GO_API_KEY set: $([[ -n "${OPENCODE_GO_API_KEY:-}" ]] && echo yes || echo no)"
+          echo "  OPENCODE_GO_API_KEY length: ${#OPENCODE_GO_API_KEY} chars"
+          echo "============================================================"
+          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
+            echo "SKIP: OPENCODE_GO_API_KEY not set on runner; opencode_go --ignored test not run"
+            exit 0
+          fi
+          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
+          START_TS=$(date +%s)
+          cargo test --test integration_discover_opencode_go -- --ignored --nocapture
+          CARGO_RC=$?
+          END_TS=$(date +%s)
+          echo "============================================================"
+          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
+          echo "============================================================"
+          exit $CARGO_RC
+
+      - name: upload test-ignored artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: moagan-test-ignored-opencode-go-logs
+          path: target/test-runs/opencode_go/
+          retention-days: 1
+          if-no-files-found: warn
