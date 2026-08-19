@@ -12,10 +12,44 @@ fn main() -> Result<()> {
         eprintln!("[moagan] loaded .env from {}", path.display());
     }
     init_tracing();
+    warn_runtime_coverage_unbounded_growth();
     install_panic_hook();
     #[cfg(debug_assertions)]
     trigger_phase_l_test_panic();
     moagan::run_blocking()
+}
+
+/// Emit a one-shot `tracing::warn!` at startup when the binary was
+/// built with SanCov runtime coverage. The SanCov runtime writes a
+/// `*.profraw` file at the path pointed at by `LLVM_PROFILE_FILE`,
+/// and the file grows unbounded with no internal cap — verified
+/// empirically on 2026-08-19 when a 5h 40m run produced a 66 GB
+/// `active.profraw` that filled `/home` to 96 %. The fix is a
+/// runtime rotation mechanism (see `src/coverage/`), but until that
+/// ships the operator needs to know to either rotate the file
+/// manually or use `target/debug/moagan` (no SanCov) for long
+/// runs.
+///
+/// The detection is conservative: warn whenever the `LLVM_PROFILE_FILE`
+/// env var is set AND the `coverage` Cargo feature is on. The
+/// feature flag governs whether the SanCov runtime symbols are
+/// linked; the env var governs whether the runtime writes
+/// anywhere. The combination is necessary for an actual `profraw`
+/// to appear.
+fn warn_runtime_coverage_unbounded_growth() {
+    #[cfg(feature = "coverage")]
+    {
+        if let Ok(path) = std::env::var("LLVM_PROFILE_FILE") {
+            tracing::warn!(
+                target: "moagan::coverage",
+                profraw_path = %path,
+                "runtime coverage: the SanCov `*.profraw` file grows unbounded; \
+                 long-running tests (>= 1 h) may exhaust disk. \
+                 Use `target/debug/moagan` (no SanCov) or rotate the file manually. \
+                 See ADR-0002 and scripts/coverage-wrap.sh for the rotation workflow."
+            );
+        }
+    }
 }
 
 fn init_tracing() {
