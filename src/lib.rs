@@ -14,6 +14,7 @@ pub mod checkpoint;
 pub mod cli;
 pub mod config;
 pub mod context;
+pub mod coverage;
 pub mod discovery;
 pub mod domain;
 pub mod error;

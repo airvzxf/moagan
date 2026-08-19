@@ -28,6 +28,9 @@ secrets/
 
 # Build / coverage artifacts
 coverage/
+# Source module is the runtime-coverage implementation, not a
+# build artifact (ADR-0002). Negation re-includes it under src/.
+!src/coverage/
 *.lcov
 *.profraw
 
