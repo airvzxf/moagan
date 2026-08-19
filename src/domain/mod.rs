@@ -1703,6 +1703,101 @@ mod tests {
         assert_eq!(back.context_block.as_deref(), Some("ctx"));
     }
 
+    /// The Intake / Brief Vec<String> fields use the lenient deserializer
+    /// (issue #556). Verify each input shape it accepts.
+    #[test]
+    fn intake_objectives_accepts_string_instead_of_array() {
+        // The exact failure mode from run 32279237605: a bare string
+        // where the schema wants an array of objectives.
+        let raw = r#"{
+            "problem": "Build e-commerce",
+            "objectives": "Identify the core services needed to support typical e-commerce functionality",
+            "constraints": [],
+            "non_goals": [],
+            "open_questions": [],
+            "raw_prompt": "x"
+        }"#;
+        let intake: Intake = serde_json::from_str(raw).expect("must not error on string-array");
+        assert_eq!(
+            intake.objectives,
+            vec!["Identify the core services needed to support typical e-commerce functionality"]
+        );
+    }
+
+    #[test]
+    fn intake_objectives_splits_multiline_string_into_entries() {
+        // A multi-line objective string should be split on non-empty
+        // lines so the model can flatten a paragraph into per-line items.
+        let raw = r#"{
+            "problem": "x",
+            "objectives": "- ship fast\n- ship safe\n- ship cheap",
+            "constraints": [],
+            "non_goals": [],
+            "open_questions": [],
+            "raw_prompt": "x"
+        }"#;
+        let intake: Intake = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            intake.objectives,
+            vec![
+                "- ship fast".to_string(),
+                "- ship safe".to_string(),
+                "- ship cheap".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn intake_objectives_accepts_array_of_strings() {
+        // The happy path stays unchanged: a JSON array of strings is
+        // returned as-is, no semantic regression.
+        let raw = r#"{
+            "problem": "x",
+            "objectives": ["fast", "safe"],
+            "constraints": ["c1"],
+            "non_goals": [],
+            "open_questions": ["q1", "q2"],
+            "raw_prompt": "x"
+        }"#;
+        let intake: Intake = serde_json::from_str(raw).unwrap();
+        assert_eq!(intake.objectives, vec!["fast", "safe"]);
+        assert_eq!(intake.constraints, vec!["c1"]);
+        assert_eq!(intake.open_questions, vec!["q1", "q2"]);
+    }
+
+    #[test]
+    fn intake_objectives_tolerates_null_and_missing() {
+        // null and missing fields must both yield empty Vec, never errors.
+        let from_null: Intake =
+            serde_json::from_str(r#"{"problem": "x", "objectives": null, "raw_prompt": "x"}"#)
+                .unwrap();
+        assert!(from_null.objectives.is_empty());
+
+        let from_missing: Intake =
+            serde_json::from_str(r#"{"problem": "x", "raw_prompt": "x"}"#).unwrap();
+        assert!(from_missing.objectives.is_empty());
+    }
+
+    #[test]
+    fn brief_objectives_accepts_string_instead_of_array() {
+        // Same lenient behaviour applies to the Brief struct.
+        let raw = r#"{
+            "problem": "x",
+            "objectives": "ship the thing",
+            "deliverables": ["d"],
+            "constraints": "stay within budget",
+            "assumptions": [],
+            "non_goals": [],
+            "acceptance": "release notes filed",
+            "risks": []
+        }"#;
+        let brief: Brief = serde_json::from_str(raw).expect("lenient on bare strings");
+        assert_eq!(brief.objectives, vec!["ship the thing"]);
+        assert_eq!(brief.deliverables, vec!["d"]);
+        assert_eq!(brief.constraints, vec!["stay within budget"]);
+        assert_eq!(brief.acceptance, vec!["release notes filed"]);
+    }
+
     /// Each LLM-output struct must accept an empty JSON object without
     /// failing the parse. The model frequently omits optional fields
     /// (especially `comments` on JudgeScore), and we tolerate that by
