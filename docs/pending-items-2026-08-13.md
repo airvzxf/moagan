@@ -531,28 +531,36 @@ LLM roles; los otros dos reutilizan `Role::Tagger`:
 | `drafts/` | `discover_integrate` | `Role::Integrator` |
 | `matrix_*` | `discover_matrix` | (sin `Role`; artefacto de cardinalidad) |
 
-### 9.2 — CORRECCIÓN: los bloques **nunca corren en CI** (no es que impriman SKIP)
+### 9.2 — CORRECCIÓN: los bloques `discover_*` del `e2e_audit_proxy.sh` **nunca corren en el path auto** (no es que impriman SKIP)
 
 **Claim stale (borrador §6.2)**: *"`e2e-network.yml` corre los bloques
 shell pero, sin API keys en CI, imprime `SKIP`"*.
 
 **Realidad verificada** (`verify-e2e-coverage` §B): los bloques **no se
-alcanzan en absoluto**; el guard de sección los excluye **antes** de
-llegar a la comprobación de la key.
+alcanzan en absoluto** en el path auto post-PR #555; el guard de
+sección los excluye **antes** de llegar a la comprobación de la key.
 
-- `scripts/e2e_audit_proxy.sh:491` exige
+- `scripts/e2e_audit_proxy.sh:546` exige
   `MOAGAN_SMOKE_SECTION ∈ {all, discover_opencode_go}`;
-  `:573-574` lo mismo para `discover_deepseek`.
-- `.github/workflows/e2e-network.yml` sólo ejecuta `card80` (`:142`),
-  `fast` (`:173`) y `explore` (`:198`), vía
-  `make e2e-network-card80|fast|explore` (`Makefile:110-120`).
-- **Ningún job de CI fija `MOAGAN_SMOKE_SECTION=discover_opencode_go`
+  `:661` lo mismo para `discover_deepseek`.
+- `.github/workflows/e2e-network.yml` (auto, en push a `main`) sólo
+  ejecuta `fast` (`:174`) y `explore` (`:232`), vía
+  `make e2e-network-fast|explore`. `card80` se movió a
+  `.github/workflows/e2e-network-card80.yml` (manual, 2026-08-19).
+- **Ningún job auto de CI fija `MOAGAN_SMOKE_SECTION=discover_opencode_go`
   ni `=discover_deepseek`**, y **no hay ninguna referencia a
-  `OPENCODE_GO_API_KEY` en `.github/workflows/`**. El único secreto
-  presente es `secrets.MINIMAX_API_KEY` (`e2e-network.yml:97,133,171,196`).
+  `OPENCODE_GO_API_KEY` ni `DEEPSEEK_API_KEY` en `.github/workflows/`**
+  fuera de los `test-ignored-*` post-merge. El único secreto del path
+  auto es `secrets.MINIMAX_API_KEY`
+  (`e2e-network.yml:123,160,192,251`).
 
-Corolario idéntico para los tests `#[ignore]`: **no existe ningún paso
-`cargo test -- --ignored` en ningún workflow**.
+Para los tests `#[ignore]`: `test-ignored-minimax.yml` corre
+`cargo test -- --ignored` en `push: branches: [main]`. Los
+`test-ignored-deepseek.yml` y `test-ignored-opencode-go.yml` (PR #555)
+quedaron como stubs `workflow_dispatch` only — el workflow existe para
+que la pestaña _Actions_ muestre el check en cada push a `main`, pero
+los jobs reales de `cargo test -- --ignored` se restauran por separado
+(subagente A, ver §9.3).
 
 ### 9.3 — CORRECCIÓN: roster real — 18 modelos, 15 usables, 14 sin e2e
 
@@ -607,15 +615,20 @@ upstream"*. Tras #464, que eliminó `--model deepseek-chat`, el default
 de config es literalmente `deepseek-v4-flash` y **no hay resolución de
 alias upstream**. Fix documental de 1 línea. **VERIFIED-OPEN**.
 
-**Post-2026-08-19 update**: el workflow
-`.github/workflows/test-ignored-opencode-go.yml` también pasó a stub
-informativo (simétrico al de DeepSeek de #529), con motivo
-"OPENCODE_GO_API_KEY budget exhausted". El fichero se conserva para
-que la pestaña _Actions_ muestre el check en verde en cada push a
-`main`, pero los jobs `preflight-opencode_go` y `test-ignored-opencode-go`
-ya no se ejecutan. Sólo `test-ignored-minimax` queda como discovery
-`--ignored` real en CI. El test `#[ignore]` en
-`tests/integration_discover_opencode_go.rs` sigue invocable a mano.
+**Post-2026-08-19 update (PR #555)**: el workflow
+`.github/workflows/e2e-network.yml` se reestructuró en auto (sólo
+`fast` + `explore` en push a `main`) + manuales
+(`e2e-network-card80.yml`,
+`test-ignored-{deepseek,opencode-go,minimax}.yml`). Los
+`test-ignored-deepseek.yml` y `test-ignored-opencode-go.yml` quedaron
+como stubs `workflow_dispatch` only con motivo "budget exhausted"
+(simétricos a #529/#550); el auto-trigger `push: branches: [main]` se
+eliminó de ambos para no consumir runner minutes con un banner. Los
+tests `#[ignore]` en
+`tests/integration_discover_{deepseek,opencode_go}.rs` siguen
+invocables a mano (`cargo test --test integration_discover_* -- --ignored`).
+La restauración de los jobs reales de `preflight + cargo test --ignored`
+en esos dos workflows queda pendiente (subagente A).
 
 ### 9.4 — Qué cubre realmente el bloque card80
 
@@ -656,8 +669,8 @@ con `docs/test-skips.md`.
 
 | Test | Fichero:línea | Gate | ¿Corre en CI? |
 |---|---|---|---|
-| `discover_opencode_go_writes_four_subdirs` | `tests/integration_discover_opencode_go.rs:32` | `#[ignore]` + early-return si falta `OPENCODE_GO_API_KEY` (`:34-37`) | ❌ no hay paso `--ignored` ni secreto |
-| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:32` | `#[ignore]` + early-return si falta `DEEPSEEK_API_KEY` (`:34-37`) | ❌ ídem |
+| `discover_opencode_go_writes_four_subdirs` | `tests/integration_discover_opencode_go.rs:32` | `#[ignore]` + early-return si falta `OPENCODE_GO_API_KEY` (`:34-37`) | ⚠️ stub `workflow_dispatch` en `test-ignored-opencode-go.yml` post-PR #555; restauración de preflight+cargo-test pendiente (subagente A) |
+| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:32` | `#[ignore]` + early-return si falta `DEEPSEEK_API_KEY` (`:34-37`) | ⚠️ stub `workflow_dispatch` en `test-ignored-deepseek.yml` post-PR #555; ídem |
 | `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | `#[ignore]`, motivo: flaky bajo ejecución paralela (documentado como known-flaky en `AGENTS.md`) | ❌ además `--skip`-eado por `make test-ci` |
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:396` | muta `RLIMIT_NPROC` a nivel de proceso | ❌ manual por diseño |
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:441` | muta `RLIMIT_AS` a nivel de proceso | ❌ manual por diseño |
