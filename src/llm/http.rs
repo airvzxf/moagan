@@ -169,7 +169,51 @@ impl MessagesResponseBody {
 /// `text` block from the response, so the thinking content is
 /// discarded — but the model's text block is more reliable as a
 /// result.
+///
+/// PR-D2 follow-up: when the role requires JSON output, append an
+/// assistant prefill of `{` to the messages array. The model
+/// continues from `{`, which biases its first emitted token
+/// toward the JSON-object shape and eliminates the
+/// unescaped-double-quote pathology that the run7 clarify phase
+/// hit (CLI examples like `eval ",<expr>"`). For non-JSON roles
+/// the prefill would be wrong, so we only emit it for the
+/// JSON-required set. The Anthropic-compatible provider ignores
+/// the prefill on the cache-key side (see
+/// [`crate::llm::wire::Request`]), so the cross-run cache stays
+/// valid.
 pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
+    use crate::llm::openai_compat::role_requires_json;
+    let mut messages: Vec<MessagesMessage> = vec![MessagesMessage {
+        role: "user",
+        content: req.user.clone(),
+    }];
+    if role_requires_json(req.role) && !req.extra_messages.is_empty() {
+        // Caller supplied a prefill (PromptPrefill strategy on
+        // retries); keep the caller's explicit messages as-is.
+        for m in &req.extra_messages {
+            let role = match m.role.as_str() {
+                "user" => "user",
+                "assistant" => "assistant",
+                "system" => "system",
+                _ => "user",
+            };
+            messages.push(MessagesMessage {
+                role,
+                content: m.content.clone(),
+            });
+        }
+    } else if role_requires_json(req.role) {
+        // Default: emit a JSON prefill for any JSON-required role.
+        // This is the broad-spectrum fix for the run7 pathology:
+        // when the model continues from `{`, it produces a clean
+        // JSON object start, eliminating the
+        // unescaped-double-quote-in-string pathology that
+        // triggered the abort.
+        messages.push(MessagesMessage {
+            role: "assistant",
+            content: "{".into(),
+        });
+    }
     MessagesRequestBody {
         model: &req.model,
         max_tokens: req.max_tokens,
@@ -177,10 +221,7 @@ pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
         top_p: req.top_p,
         thinking: None,
         system: &req.system,
-        messages: vec![MessagesMessage {
-            role: "user",
-            content: req.user.clone(),
-        }],
+        messages,
     }
 }
 
