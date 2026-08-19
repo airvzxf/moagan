@@ -364,7 +364,9 @@ impl Phase for DiscoverMatrixPhase {
                 // (the audit confirmed this; pinned here so
                 // the wire path stays consistent).
                 let retry_counter = Arc::new(AtomicU32::new(0));
-                let mut sketch: Sketch = retry_sketch_extraction(3, || {
+                // PR-D2 follow-up: 1 retry (down from 3) for the same reason
+                // as `src/discovery/coordinator.rs`.
+                let mut sketch: Sketch = retry_sketch_extraction(1, || {
                     let ctx = ctx.clone();
                     let user = user.clone();
                     let system = system.as_str().to_owned();
