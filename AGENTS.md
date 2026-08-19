@@ -15,7 +15,14 @@
 - LLM: raw HTTP via `reqwest`. **No Anthropic SDK** (CI guard at `scripts/check-no-anthropic-sdk.sh`).
 - Privacy: redact-on-write via `RedactWriter` and `RedactPolicy`.
 - Errors: `thiserror` for libraries, `anyhow` for `main.rs`.
-- Logging: `tracing` + `tracing-subscriber` JSON.
+- Logging: `tracing` + `tracing-subscriber` JSON (every event carries
+  `file:line:column` so post-mortem correlation is direct — see
+  ADR-0002).
+- Runtime coverage: opt-in via the `coverage` Cargo feature and
+  `RUSTFLAGS="-Cinstrument-coverage"`; SanCov `*.profraw` files land
+  in `<run_dir>/telemetry/coverage/` and are consumed by the
+  `moagan coverage show <run_id>` subcommand. See
+  [`docs/adr/0002-runtime-coverage.md`](docs/adr/0002-runtime-coverage.md).
 
 ## Coding conventions
 

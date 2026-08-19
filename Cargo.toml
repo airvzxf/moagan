@@ -23,8 +23,16 @@ path = "src/main.rs"
 # path. Only `--features dag` activates the optional DAG backend.
 # `scripts/check-no-forbidden-crates.sh` enforces the `optional = true`
 # form in `[dependencies]` and rejects a bare `petgraph = "0.6"` row.
+# ADR-0002: `coverage` documents the runtime coverage intent. The
+# actual SanCov instrumentation still requires the operator to pass
+# `RUSTFLAGS="-Cinstrument-coverage"` at build time (the Cargo
+# feature alone is not enough — the flag is a `rustc` flag, not a
+# `cfg` flag). The feature gates the runtime helpers in
+# `src/coverage/` so the default build (`cargo build` with no
+# features) does not pull the LLVM profile runtime symbols.
 default = []
 dag = ["dep:petgraph"]
+coverage = []
 
 [dependencies]
 # ADR-0001 §D-1: petgraph 0.6 with `serde` only; default features are
@@ -90,3 +98,17 @@ rustls = "0.23"
 # not link it. The `scripts/check-no-forbidden-crates.sh` guard
 # rejects a [dependencies] row and is enforced by lefthook pre-commit.
 proptest = "1.4"
+
+# ADR-0002 §A.2: a dedicated `coverage` profile for the
+# runtime-coverage binary. The profile inherits from `release` and
+# turns `debug` info on so SanCov (built into `rustc` via
+# `-Cinstrument-coverage`) can map counters back to source lines.
+# The profile is selected with `cargo build --profile coverage`.
+# It is NOT the production profile: the smoke-gate binary in
+# `make smoke` and the release artefacts still come from
+# `cargo build --release` (or the default debug profile for the
+# `make build` tier-1 check).
+[profile.coverage]
+inherits = "release"
+debug = true
+incremental = false

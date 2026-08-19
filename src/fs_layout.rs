@@ -362,6 +362,22 @@ impl RunDir<'_> {
         self.root.join("adversaries")
     }
 
+    /// `telemetry/coverage/` directory. ADR-0002: the destination
+    /// for SanCov `*.profraw` files when the binary is built with
+    /// `RUSTFLAGS="-Cinstrument-coverage"` and the `coverage` Cargo
+    /// feature is enabled. The recorder sets
+    /// `LLVM_PROFILE_FILE=<coverage>/<run_id>.profraw` at run
+    /// start; the LLVM runtime writes the counters there
+    /// continuously. Snapshots taken at phase boundaries or on
+    /// `tracing::error!` are renamed siblings under the same
+    /// directory. When the binary is NOT instrumented, the
+    /// directory is still created (idempotent) so the post-mortem
+    /// `moagan inspect coverage` subcommand has a stable, empty
+    /// target to report against.
+    pub fn coverage(&self) -> PathBuf {
+        self.telemetry().join("coverage")
+    }
+
     /// `problem_graph.json` — Phase G (v0.3). Holds the DAG produced
     /// by `DecomposePhase`; the file always exists after a deep run
     /// (trivial or not). `ensure` does not pre-create it because the
@@ -394,6 +410,7 @@ impl RunDir<'_> {
             self.synthesized(),
             self.cluster_proposals_dir(),
             self.adversaries(),
+            self.coverage(),
         ] {
             std::fs::create_dir_all(&d)?;
         }

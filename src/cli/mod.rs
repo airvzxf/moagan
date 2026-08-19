@@ -15,6 +15,7 @@ use crate::storage::sqlite::Db;
 
 pub mod audit;
 pub mod continue_cmd;
+pub mod coverage_cmd;
 pub mod diff;
 pub mod discover;
 pub mod doctor;
@@ -663,6 +664,15 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: telemetry_cmd::TelemetryCmd,
     },
+    /// `moagan coverage` — show the SanCov runtime coverage
+    /// report for one run. ADR-0002. The `text` sub-subcommand
+    /// always works (no external tool required); the `html`
+    /// sub-subcommand shells out to `grcov`.
+    Coverage {
+        /// Subcommand (`show`).
+        #[command(subcommand)]
+        sub: coverage_cmd::CoverageCmd,
+    },
     /// `moagan pause <run_id>` — serialise current run state to
     /// `<run_dir>/paused.json` and stamp a `paused.lock` with TTL
     /// 5 min. Track K.2b (catalog §D.22.5).
@@ -814,6 +824,7 @@ impl Cmd {
             Self::Audit { .. } => "External, transparent audit trail",
             Self::Discover { .. } => "Discovery mode (knowledge base by category)",
             Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
+            Self::Coverage { .. } => "Show the runtime coverage report for one run (ADR-0002)",
             Self::Validate { .. } => "Validate a brief without running the pipeline",
             Self::Diff { .. } => "Compare two runs side-by-side (params, artefacts, scores)",
             Self::Repair { .. } => "Reconcile filesystem vs SQLite",
@@ -1312,6 +1323,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Telemetry { sub } => telemetry_cmd::TelemetryCmd::dispatch(sub).await,
+        Cmd::Coverage { sub } => {
+            let rc = coverage_cmd::dispatch(&global_home, sub)?;
+            Ok(rc)
+        }
         Cmd::Validate { brief_path, mode } => {
             validate::run(validate::ValidateArgs { brief_path, mode })
         }

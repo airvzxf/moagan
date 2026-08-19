@@ -375,6 +375,11 @@ fn call_event(id: &str, ts: i64, hash: Option<&str>, cache_hit: bool) -> CallEve
         error: None,
         status: Some("ok".into()),
         retry_count: 0,
+        // ADR-0002: the test fixtures do not exercise the
+        // runtime coverage snapshot path (the test does not
+        // build a `CoverageRecorder`), so the field stays
+        // `None`.
+        coverage_snapshot: None,
     }
 }
 

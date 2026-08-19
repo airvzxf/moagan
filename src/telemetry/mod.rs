@@ -16,6 +16,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::Serialize;
 
+use crate::coverage::CoverageRecorder;
 use crate::error::Result;
 use crate::fs_layout::RunDir;
 use crate::ids::RunId;
@@ -63,6 +64,14 @@ pub struct PhaseEvent {
     /// `telemetry/phases.jsonl.gz`.
     #[serde(default)]
     pub resume: bool,
+    /// ADR-0002: path to the most recent coverage `profraw`
+    /// snapshot at the moment the phase event was emitted. `None`
+    /// when the binary is not instrumented (default build, or the
+    /// `coverage` feature off) or the runtime had not flushed any
+    /// counters yet. `serde(default)` keeps legacy rows
+    /// deserialisable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_snapshot: Option<String>,
 }
 
 /// One LLM call record.
@@ -117,6 +126,11 @@ pub struct CallEvent {
     /// pre-migration rows so legacy files deserialize cleanly.
     #[serde(default)]
     pub retry_count: u32,
+    /// ADR-0002: path to the most recent coverage `profraw`
+    /// snapshot at the moment the call event was emitted.
+    /// `serde(default)` so legacy rows deserialize cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_snapshot: Option<String>,
 }
 
 /// One warning event. Streamed to `telemetry/warnings.jsonl` and
@@ -225,6 +239,13 @@ struct Inner {
     /// `call()` mirrors the JSONL record into the corresponding
     /// table so `moagan inspect` returns live data.
     db: Option<Db>,
+    /// ADR-0002: runtime coverage recorder. `Some(_)` when the
+    /// binary was built with the `coverage` feature (operator
+    /// opted in), `None` for the default build. The recorder is
+    /// cheap to clone and read; the `phase()` and `call()` methods
+    /// call `snapshot()` to capture the active `profraw` path and
+    /// record it on the JSONL row.
+    coverage: Option<CoverageRecorder>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -235,6 +256,7 @@ impl std::fmt::Debug for Inner {
             .field("calls_path", &self.calls_path)
             .field("warnings_path", &self.warnings_path)
             .field("db_indexed", &self.db.is_some())
+            .field("coverage_active", &self.coverage.is_some())
             .finish()
     }
 }
@@ -243,6 +265,14 @@ impl Telemetry {
     /// Open the telemetry streams for a run. Creates the directory
     /// if it does not exist. When `db` is provided, every record is
     /// mirrored to SQLite as well as the JSONL files.
+    ///
+    /// ADR-0002: when the `coverage` Cargo feature is enabled, the
+    /// call also wires a [`CoverageRecorder`] into the SanCov
+    /// runtime so per-phase `profraw` snapshots are emitted into
+    /// `<run_dir>/telemetry/coverage/`. The recorder is a graceful
+    /// no-op when the binary is not instrumented, so the default
+    /// build keeps the exact same behaviour it had before this
+    /// method gained the extra line.
     pub fn open(
         run_id: RunId,
         run: &RunDir<'_>,
@@ -275,6 +305,14 @@ impl Telemetry {
             .create(true)
             .append(true)
             .open(&saturation_path)?;
+        // ADR-0002: wire the coverage recorder. The recorder
+        // is always constructed via `enable` so the
+        // `LLVM_PROFILE_FILE` env var is set; if the binary is
+        // not instrumented, the env var is a no-op and the
+        // runtime simply does not write any `profraw`. A
+        // future change can gate this on a `MOAGAN_COVERAGE=1`
+        // env var if operators want to opt out per-run.
+        let coverage = CoverageRecorder::enable(run, run_id)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 run_id,
@@ -309,6 +347,7 @@ impl Telemetry {
                     Surface::Telemetry,
                 ))),
                 db,
+                coverage: Some(coverage),
             }),
         })
     }
@@ -368,8 +407,21 @@ impl Telemetry {
                     Surface::Telemetry,
                 ))),
                 db: None,
+                // ADR-0002: the no-op telemetry stays a true
+                // no-op for tests that do not care about
+                // coverage. `noop()` does not set
+                // `LLVM_PROFILE_FILE` and does not touch the
+                // filesystem.
+                coverage: Some(CoverageRecorder::noop()),
             }),
         }
+    }
+
+    /// Borrow the runtime coverage recorder, if any. `None` only
+    /// for an explicit `coverage = None` initialisation; the
+    /// default `open` and `noop` both populate it.
+    pub fn coverage(&self) -> Option<&CoverageRecorder> {
+        self.inner.coverage.as_ref()
     }
 
     /// Path to the phases log.
@@ -463,6 +515,21 @@ impl Telemetry {
         error: Option<&str>,
         resume: bool,
     ) -> Result<()> {
+        // ADR-0002: capture the active `profraw` snapshot so the
+        // post-mortem story can correlate the phase event with
+        // the lines that were visited up to and including this
+        // point. The snapshot is best-effort: a failure here is
+        // logged at debug level and the event still gets
+        // written with `coverage_snapshot = None`.
+        let coverage_snapshot = self.inner.coverage.as_ref().and_then(|rec| {
+            match rec.snapshot(&format!("phase-{seq}")) {
+                Ok(snap) => Some(snap.path.to_string_lossy().into_owned()),
+                Err(e) => {
+                    tracing::debug!(phase, seq, error = %e, "coverage snapshot failed");
+                    None
+                }
+            }
+        });
         let ev = PhaseEvent {
             run_id: self.inner.run_id.to_string(),
             phase: phase.to_owned(),
@@ -471,6 +538,7 @@ impl Telemetry {
             at_unix: now_unix_secs(),
             error: error.map(str::to_owned),
             resume,
+            coverage_snapshot,
         };
         let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
         let mut g = self.inner.phases.lock();
@@ -509,6 +577,21 @@ impl Telemetry {
         error: Option<&str>,
         retry_count: u32,
     ) -> Result<()> {
+        // ADR-0002: snapshot coverage at the call boundary so the
+        // post-mortem story can correlate a failed LLM call with
+        // the lines of code that ran up to and including the
+        // failure. The snapshot is best-effort: a failure here is
+        // logged at debug level and the event still gets written
+        // with `coverage_snapshot = None`.
+        let coverage_snapshot = self.inner.coverage.as_ref().and_then(|rec| {
+            match rec.snapshot(&format!("call-{call_id}")) {
+                Ok(snap) => Some(snap.path.to_string_lossy().into_owned()),
+                Err(e) => {
+                    tracing::debug!(call_id, phase, error = %e, "coverage snapshot failed");
+                    None
+                }
+            }
+        });
         let ev = CallEvent {
             run_id: self.inner.run_id.to_string(),
             call_id: call_id.to_owned(),
@@ -529,6 +612,7 @@ impl Telemetry {
             error: error.map(str::to_owned),
             status: Some(crate::storage::sqlite::call_status(http_status, error).to_string()),
             retry_count,
+            coverage_snapshot,
         };
         let bytes = serde_json::to_vec(&ev).map_err(crate::Error::from)?;
         let mut g = self.inner.calls.lock();
@@ -869,11 +953,38 @@ mod tests {
             at_unix: 1,
             error: None,
             resume: false,
+            coverage_snapshot: None,
         };
         let j = serde_json::to_string(&ev).unwrap();
         let back: PhaseEvent = serde_json::from_str(&j).unwrap();
         assert_eq!(back.phase, "intake");
         assert!(!back.resume, "default resume flag must be false");
+        assert!(
+            back.coverage_snapshot.is_none(),
+            "default coverage_snapshot must be None"
+        );
+    }
+
+    /// ADR-0002: a `coverage_snapshot` field set to a relative
+    /// path round-trips through serde without alteration.
+    #[test]
+    fn phase_event_round_trip_with_coverage_snapshot() {
+        let ev = PhaseEvent {
+            run_id: "abc".into(),
+            phase: "intake".into(),
+            seq: 2,
+            status: "start".into(),
+            at_unix: 1,
+            error: None,
+            resume: false,
+            coverage_snapshot: Some("telemetry/coverage/run-abc-intake-start-0.profraw".into()),
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        let back: PhaseEvent = serde_json::from_str(&j).unwrap();
+        assert_eq!(
+            back.coverage_snapshot.as_deref(),
+            Some("telemetry/coverage/run-abc-intake-start-0.profraw")
+        );
     }
 
     /// v0.5 PR-24: legacy JSONL written before the `resume` field

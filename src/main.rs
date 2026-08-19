@@ -22,11 +22,26 @@ fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,moagan=debug"));
+    // Layer B of ADR-0002 (runtime coverage): every event carries the
+    // source call site (`file`, `line`, `column`) and the active
+    // span. The cost is essentially zero — the metadata is filled in
+    // by the `tracing` macros themselves, we just ask the JSON
+    // formatter to surface it. The JSON formatter emits the current
+    // span under the `span` key by default (and skips the full span
+    // list to keep the JSONL compact on deeply nested pipeline
+    // runs), so we do not need `with_current_span` / `with_span_list`
+    // — those flags only exist for the text formats.
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_target(true).with_writer(
-            moagan::telemetry::redact::ReportingLayer::new(std::io::stderr),
-        ))
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(moagan::telemetry::redact::ReportingLayer::new(
+                    std::io::stderr,
+                )),
+        )
         .try_init();
 }
 
