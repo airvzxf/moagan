@@ -407,6 +407,23 @@ fn repair_m3_brackets_with_trace(s: &str) -> (Option<String>, Vec<RepairTrace>) 
     let mut events: Vec<RepairTrace> = Vec::new();
     let mut current = s.to_owned();
 
+    // Run first so the stray-comma fix does not fight the colon /
+    // separator passes that follow — without this pass, the
+    // separator walker would interpret `",:` as "missing colon" and
+    // INSERT another `:`, producing `",:,` which is strictly worse
+    // than the original input.
+    if let Some(patched) = repair_stray_comma_after_key(&current)
+        && patched.len() != current.len()
+    {
+        let bytes_before = current.len();
+        let bytes_after = patched.len();
+        events.push(RepairTrace {
+            kind: RepairKind::Separator,
+            bytes_before,
+            bytes_after,
+        });
+        current = patched;
+    }
     if let Some(patched) = repair_missing_colon(&current)
         && patched.len() != current.len()
     {
@@ -528,6 +545,102 @@ fn repair_missing_colon(s: &str) -> Option<String> {
             out.push(':');
             changed = true;
         }
+    }
+    if changed { Some(out) } else { None }
+}
+
+// --- stray-comma-after-key repair (state machine) ---
+
+/// Drop a stray `,` that the model emitted between a key string and
+/// its `:`. The MiniMax upstream occasionally produces the
+/// pattern `"<key>",: "<value>"` instead of `"<key>": "<value>"`
+/// — the comma is structurally wrong because JSON expects only a
+/// `:` between key and value. This pass walks the input once,
+/// tracks string state, and when it sees `,` followed by
+/// (optional whitespace) `:`, it removes the `,` so the colon
+/// becomes the sole separator.
+///
+/// The pass is intentionally context-agnostic: it does not track
+/// object vs array frames, so an array like `["a", "b"]` is
+/// untouched (the `,` is followed by `"`, not `:`) and a valid
+/// object like `{"a": 1, "b": 2}` is untouched (the `,` is followed
+/// by `"`, not `:`). Only the malformed `",:` shape is rewritten.
+///
+/// Fixes the run logs surfaced by issue #558 on the
+/// `e2e-network` auto runs (fast + explore against the
+/// MiniMax upstream). The error message that exposed the pathology
+/// was:
+///
+/// ```text
+/// trailing characters at line 1 column 10; len=95 bytes;
+/// tail="\"problem\",: \"The user wants a microservices
+/// architecture designed for an e-commerce platform.\","
+/// ```
+///
+/// Returns `None` when the input has no `",:` shape (the common
+/// case), or `Some(patched)` when at least one occurrence was
+/// rewritten. Pairs with the colon / separator / bracket passes so
+/// the rest of the chain operates on the cleaned text.
+fn repair_stray_comma_after_key(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(n);
+    let mut in_string = false;
+    let mut escape = false;
+    let mut changed = false;
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if in_string && c == '\\' && i + 1 < n {
+            // Escape inside a string literal: copy both bytes
+            // verbatim so a `\"` does NOT close the string and a
+            // `\,` does NOT trigger the stray-comma fix mid-string.
+            out.push(c);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if in_string && escape {
+            out.push(c);
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if in_string {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // We are out of any string literal. If we hit a `,`,
+        // look past whitespace for the next non-whitespace char;
+        // if it is `:`, the model emitted `",:` instead of `":`,
+        // and we drop the stray `,` (and the whitespace between
+        // it and the `:`) so the colon becomes the only separator.
+        if c == ',' {
+            let mut j = i + 1;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < n && chars[j] == ':' {
+                changed = true;
+                // Skip past the comma and any whitespace — the
+                // next iteration of the loop emits the colon and
+                // every character that follows verbatim.
+                i = j;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
     }
     if changed { Some(out) } else { None }
 }
@@ -960,6 +1073,16 @@ fn repair_one_missing_bracket(s: &str) -> Option<String> {
         Some(s.to_owned())
     } else {
         // Add exactly ONE closer from the still-open top of the stack.
+        // Before appending, eat a trailing `,` left behind by a
+        // truncated payload — without this strip, the model output
+        // `{"a": "b",` (truncated after the comma) becomes
+        // `{"a": "b",}` which is still invalid JSON and the iterative
+        // loop can only see "balanced", so it stops with a broken
+        // candidate. Stripping the comma here yields `{"a": "b"}` and
+        // the parse succeeds on the next loop iteration.
+        if out.ends_with(',') {
+            out.pop();
+        }
         let needed = match stack.last().copied() {
             Some('{') => '}',
             Some('[') => ']',
@@ -1425,6 +1548,161 @@ mod tests {
         let s = r#"{"id":"p","suggestions"["a","b"]"#;
         let out = repair_m3_brackets(s).unwrap();
         assert_eq!(out, r#"{"id":"p","suggestions":["a","b"]}"#);
+    }
+
+    // --- stray-comma-after-key repair (issue #558) ---
+
+    #[test]
+    fn stray_comma_repair_drops_comma_after_key_with_colon() {
+        // The exact pathology from the failing e2e-network run:
+        // the model wrote `{"problem",: "..."` instead of
+        // `{"problem": "..."`. The pass must drop the `,` so the
+        // existing colon-repair sees a clean `":` boundary.
+        let s = r#"{"problem",: "The user wants microservices"}"#;
+        let out = repair_stray_comma_after_key(s).unwrap();
+        assert_eq!(out, r#"{"problem": "The user wants microservices"}"#);
+    }
+
+    #[test]
+    fn stray_comma_repair_handles_whitespace_before_colon() {
+        // `,` followed by (whitespace) `:` — the model emitted
+        // `"key",   : value`. The pass must drop both the `,` AND
+        // the whitespace between it and the `:` so the colon
+        // becomes the only separator.
+        let s = r#"{"key",   : "value"}"#;
+        let out = repair_stray_comma_after_key(s).unwrap();
+        assert_eq!(out, r#"{"key": "value"}"#);
+    }
+
+    #[test]
+    fn stray_comma_repair_preserves_valid_object_separators() {
+        // Sanity: a well-formed object with `,` between values
+        // (followed by another `"`, not `:`) is unchanged.
+        let s = r#"{"a": 1, "b": 2, "c": 3}"#;
+        assert!(repair_stray_comma_after_key(s).is_none());
+    }
+
+    #[test]
+    fn stray_comma_repair_preserves_array_commas() {
+        // Sanity: array commas between string elements are
+        // followed by `"` (not `:`), so the pass does not fire.
+        let s = r#"["a", "b", "c"]"#;
+        assert!(repair_stray_comma_after_key(s).is_none());
+    }
+
+    #[test]
+    fn stray_comma_repair_ignores_comma_inside_string_literal() {
+        // A `,` inside a string value must NOT trigger the fix —
+        // the walker tracks string state and treats the entire
+        // `"a, b"` span as opaque.
+        let s = r#"{"key": "a, b: c"}"#;
+        assert!(repair_stray_comma_after_key(s).is_none());
+    }
+
+    #[test]
+    fn stray_comma_repair_handles_mixed_valid_and_invalid_keys() {
+        // A real object with one valid key and one malformed
+        // `",:` key — only the malformed one is rewritten.
+        let s = r#"{"good": "a", "bad",: "b"}"#;
+        let out = repair_stray_comma_after_key(s).unwrap();
+        assert_eq!(out, r#"{"good": "a", "bad": "b"}"#);
+    }
+
+    #[test]
+    fn stray_comma_repair_handles_multiple_offenders() {
+        // Two malformed keys back-to-back, no valid keys.
+        let s = r#"{"a",: 1, "b",: 2}"#;
+        let out = repair_stray_comma_after_key(s).unwrap();
+        assert_eq!(out, r#"{"a": 1, "b": 2}"#);
+    }
+
+    #[test]
+    fn stray_comma_repair_returns_none_for_empty_input() {
+        assert!(repair_stray_comma_after_key("").is_none());
+    }
+
+    #[test]
+    fn stray_comma_repair_handles_escaped_quotes_inside_strings() {
+        // A string value contains an escaped quote followed by a
+        // colon-like sequence — the walker must stay inside the
+        // string until the actual close quote, so the `,:` after
+        // the value close is NOT confused for an offender.
+        let s = r#"{"key": "he said \"hi\": to me", "ok": 1}"#;
+        assert!(repair_stray_comma_after_key(s).is_none());
+    }
+
+    // --- end-to-end: stray-comma pass feeds the existing chain ---
+
+    #[test]
+    fn parse_model_json_recovers_stray_comma_after_key() {
+        // End-to-end: the chain runs in pipeline order so the
+        // stray-comma pass runs BEFORE the colon/separator passes
+        // and the bracket pass appends the missing `}`.
+        let s = r#"{"problem",: "microservices for e-commerce", "x",: 1}"#;
+        let v: serde_json::Value = parse_model_json(s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj["problem"], "microservices for e-commerce");
+        assert_eq!(obj["x"], 1);
+    }
+
+    #[test]
+    fn parse_model_json_recovers_truncated_payload_with_trailing_comma() {
+        // The second half of the issue #558 pathology: the model
+        // emitted a truncated payload ending in `...,"` — a stray
+        // comma with the value's close quote but no closer. The
+        // bracket repair must strip the trailing `,` BEFORE
+        // appending `}` so the result is `...}` (valid) instead of
+        // `...,}` (invalid).
+        let s = r#"{"problem": "x", "next": "y","#;
+        let v: serde_json::Value = parse_model_json(s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj["problem"], "x");
+        assert_eq!(obj["next"], "y");
+    }
+
+    #[test]
+    fn parse_model_json_recovers_issue_558_tail_exact_shape() {
+        // Exact reproduction of the issue #558 error tail:
+        // `tail="\"problem\",: \"The user wants a microservices
+        //  architecture designed for an e-commerce platform.\","`
+        // The full input here is a synthesised prefix + that tail
+        // so we cover the parse path that surfaced the bug.
+        let s = r#"{"problem",: "The user wants a microservices architecture designed for an e-commerce platform.","#;
+        let v: serde_json::Value = parse_model_json(s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(
+            obj["problem"],
+            "The user wants a microservices architecture designed for an e-commerce platform."
+        );
+    }
+
+    #[test]
+    fn parse_model_json_does_not_break_valid_intake_payload() {
+        // Pin the happy-path parity contract: a well-formed
+        // Intake-shaped payload still parses byte-for-byte. The
+        // new pass is a no-op on already-valid JSON.
+        let s = r#"{"problem":"x","objectives":["a","b"],"constraints":["c"],"non_goals":[],"open_questions":[],"raw_prompt":"hi"}"#;
+        let v: serde_json::Value = parse_model_json(s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj["problem"], "x");
+        assert_eq!(obj["objectives"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_model_json_traced_emits_separator_event_for_stray_comma() {
+        // Pin the trace contract: the stray-comma pass is
+        // classified as a Separator repair so post-execution
+        // reviewers can grep the warnings stream for it.
+        let s = r#"{"a",: 1, "b",: 2}"#;
+        let mut kinds: Vec<RepairKind> = Vec::new();
+        let _v: serde_json::Value = parse_model_json_traced(s, |ev| {
+            kinds.push(ev.kind);
+        })
+        .unwrap();
+        assert!(
+            kinds.contains(&RepairKind::Separator),
+            "stray-comma pass must emit Separator events; got {kinds:?}"
+        );
     }
 
     #[test]

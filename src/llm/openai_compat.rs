@@ -724,6 +724,69 @@ mod tests {
         assert!(super::role_requires_json(crate::llm::Role::Route));
     }
 
+    /// Issue #558 regression: the `e2e-network` auto runs (fast +
+    /// explore against the MiniMax upstream) emit Intake-shaped
+    /// JSON (`{problem, objectives[], ...}`). The MiniMax model
+    /// still produces malformed payloads ~1% of the time at high
+    /// temperature, so the Anthropic-compat provider relies on the
+    /// assistant prefill of `{` to bias the first emitted token
+    /// toward a clean JSON-object start. The prefill fires for
+    /// every role returned by `role_requires_json`, so we pin the
+    /// Intake contract here: a future edit that drops Intake from
+    /// the `matches!` list must fail this test, so the regression
+    /// cannot silently land.
+    ///
+    /// The companion parse-side fix lives in
+    /// `crate::phases::util::repair_stray_comma_after_key` (same
+    /// PR). The two together cover both halves of the issue: the
+    /// prefill eliminates the unescaped-quote / bracket pathology
+    /// for most calls, and the new repair pass strips the
+    /// `",:` shape that slips through when the prefill isn't
+    /// enough.
+    #[test]
+    fn intake_role_is_in_role_requires_json_for_prefill() {
+        use crate::llm::Role;
+        assert!(
+            super::role_requires_json(Role::Intake),
+            "Intake must remain in role_requires_json so the Anthropic-compat \
+             body builder emits the assistant prefill of `{{` (issue #558)"
+        );
+        // Pin the JSON-required role set as a whole so the contract
+        // is grep-able from the test alone. Each entry here matches
+        // a `Role` variant that the dispatcher expects to emit
+        // structured JSON for. Adding a new variant without adding
+        // it here will fail the test.
+        for role in [
+            Role::Intake,
+            Role::Clarify,
+            Role::Route,
+            Role::Gate,
+            Role::Critique,
+            Role::Repair,
+            Role::Rank,
+            Role::Synthesizer,
+            Role::Adversary,
+            Role::Decomposer,
+            Role::MergeSynthesizer,
+        ] {
+            assert!(
+                super::role_requires_json(role),
+                "{role:?} must remain a JSON-required role (the Anthropic-compat \
+                 prefill fires for it)"
+            );
+        }
+        // And the inverse: free-text / prose roles must NOT be on
+        // the list, otherwise the prefill would corrupt non-JSON
+        // outputs (Sketch writes prose, Deliver writes markdown).
+        for role in [Role::Sketch, Role::Deliver] {
+            assert!(
+                !super::role_requires_json(role),
+                "{role:?} must NOT be on role_requires_json — the prefill would \
+                 inject `{{` into a prose-shaped response"
+            );
+        }
+    }
+
     #[test]
     fn opencode_go_request_keeps_response_format_for_non_opted_out_models() {
         // The flip side of the previous test: an OpenCode Go model
