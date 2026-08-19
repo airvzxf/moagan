@@ -1,0 +1,84 @@
+name: e2e-network · card80 (manual)
+
+on:
+  workflow_dispatch:
+
+# Heavy MiniMax card80 block (~25 min of runner + real API spend).
+# Extracted from e2e-network.yml on 2026-08-19 to keep the auto-on-push
+# workflow cheap (saves ~25 min on every push to main and a full
+# card80's worth of API tokens). Dispatch manually when you want the
+# long-discover coverage; the auto workflow no longer carries card80.
+#
+# Trigger from the Actions tab → this workflow → "Run workflow". No
+# inputs.
+#
+# Self-builds the release binary locally instead of depending on the
+# artifact uploaded by `e2e-network.yml`'s `build-e2e-network` job,
+# because GitHub's `actions/upload-artifact` retention is 1 day and
+# manual dispatches can land days after the last auto run. The ~5 min
+# `cargo build --release` cost is dwarfed by the ~25 min of card80
+# round-trip, so the trade-off is acceptable.
+#
+# Concurrency: keyed on this run's id so two operator dispatches in
+# flight at the same time don't fight over a stale target/.
+
+concurrency:
+  group: e2e-network-card80-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test-card80:
+    name: 'Tier 3 · e2e — card80 (manual dispatch)'
+    runs-on: ubuntu-latest
+    # Bumped 55 → 120 min: a degraded MiniMax upstream can stretch
+    # the card80 block well past 55 min. Public-repo max is 360 min
+    # so we still have headroom.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./.github/actions/rust-setup
+
+      - name: Show toolchain
+        run: |
+          cargo --version
+          rustc --version
+
+      - name: Build release binary
+        env:
+          CARGO_INCREMENTAL: '1'
+        run: cargo build --release
+
+      - name: Change to executable binary
+        run: chmod +x target/release/moagan
+
+      - name: Verify MiniMax API key is present
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          if [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+            echo "ERROR: MINIMAX_API_KEY secret is not configured on this runner." >&2
+            echo "Add it via: gh secret set MINIMAX_API_KEY --repo airvzxf/moagan" >&2
+            exit 1
+          fi
+          echo "OK: MINIMAX_API_KEY is set ($(echo -n "$MINIMAX_API_KEY" | wc -c) chars)"
+
+      - name: T3 · e2e-network (card80, real LLM)
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          BIN: ${{ github.workspace }}/target/release/moagan
+          MOAGAN_SMOKE_SECTION: card80
+        run: make e2e-network-card80
+
+      - name: upload card80 artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-card80-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
+          include-hidden-files: true

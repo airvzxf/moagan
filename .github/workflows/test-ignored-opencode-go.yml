@@ -1,23 +1,37 @@
 name: test-ignored-opencode-go
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
-# DISABLED 2026-08-19: OpenCode Go (`OPENCODE_GO_API_KEY`) budget exhausted
-# / key not available on the runner (per docs/pending-items-2026-08-13.md
-# §9.3). This workflow was introduced in PR #525 (Z1 restructure) but the
-# upstream budget never recovered. Left active, the job would only print
-# `SKIP` on every push to main with no coverage value.
-# To re-enable: replace this stub with the original preflight-opencode_go +
-# test-ignored-opencode-go jobs from PR #525, and remove the `if: ${{ always() }}`
-# on the stub job below.
+# Stub workflow. Originally fired on every push to main and on manual
+# dispatch (PR #525), then auto-stubbed to a single-job "DISABLED"
+# banner (PR #550, mirror of PR #529's DeepSeek stub, since
+# OPENCODE_GO_API_KEY budget is also exhausted / unavailable).
+#
+# On 2026-08-19 the `push: branches: [main]` trigger was removed
+# entirely. The workflow now runs ONLY when the maintainer dispatches
+# it manually (`workflow_dispatch`). When dispatched, the
+# `disabled-stub` job prints the DISABLED banner as the
+# maintainer-facing reminder.
+#
+# Rationale: with the auto path gone, the workflow sits silently in
+# the workflow list — no runner minutes, no API tokens, no
+# misleading green check on every commit. The maintainer can still
+# trigger it any time to see the stub banner (or to confirm the
+# manual path works before restoring the real jobs).
+#
+# To re-enable for automatic runs:
+# 1. Re-add `push: branches: [main]` to `on:` above (parity with
+#    PR #525).
+# 2. Replace the `disabled-stub` job with the original
+#    `preflight-opencode_go` + `test-ignored-opencode-go` jobs from
+#    PR #525.
 #
 # History:
 # - PR #525 (2026-08-16): introduced as post-merge informative workflow
-# - PR #XXX (2026-08-19): stubbed to mirror the test-ignored-deepseek stub
-#   from PR #529 (native DeepSeek budget exhausted)
+# - PR #550 (2026-08-18): stubbed (OPENCODE_GO_API_KEY budget
+#   exhausted / unavailable)
+# - PR #XXX (2026-08-19): removed auto-trigger on push; manual-only
 
 concurrency:
   group: test-ignored-opencode-go-${{ github.event.pull_request.number || github.ref }}
@@ -38,6 +52,9 @@ jobs:
           echo "================================================================"
           echo "DISABLED: test-ignored-opencode-go is currently a stub."
           echo "Reason: native OpenCode Go (OPENCODE_GO_API_KEY) budget exhausted."
-          echo "To re-enable: restore the original jobs from PR #525."
+          echo "Auto-trigger on push to main was removed on 2026-08-19; this"
+          echo "workflow now runs only on manual dispatch."
+          echo "To re-enable: restore the original jobs from PR #525 and"
+          echo "re-add `push: branches: [main]` to `on:` above."
           echo "================================================================"
           exit 0
