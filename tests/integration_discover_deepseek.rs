@@ -2,10 +2,13 @@
 //! provider (PR #462; companion to the opencode_go close-out in
 //! `tests/integration_discover_opencode_go.rs`).
 //!
-//! `#[ignore]`d by default; only runs locally / in `e2e-network`
-//! when the operator's `DEEPSEEK_API_KEY` is exported. With no
-//! key the test returns `Ok(())` immediately so a CI matrix without
-//! the secret stays green. Run with:
+//! `#[ignore]`d by default; only runs locally / via
+//! `.github/workflows/test-ignored-deepseek.yml` (post-PR #555, manual
+//! dispatch — the auto `push: branches: [main]` trigger was removed in
+//! PR #555 because the native DeepSeek pay-as-you-go budget is
+//! exhausted) when the operator's `DEEPSEEK_API_KEY` is exported. With
+//! no key the test returns `Ok(())` immediately so a CI run without the
+//! secret stays green. Run with:
 //!
 //! ```bash
 //! DEEPSEEK_API_KEY=sk-... cargo test --test integration_discover_deepseek -- --ignored

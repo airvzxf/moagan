@@ -10,7 +10,7 @@ each check lives at the moment it does. Read it once, then trust it.
 | **T0** | <2 s | pre-commit (parallel) | `make fmt-check`, `make guard-deps` | Cheap checks that catch 80 % of "obviously wrong" commits. Fail = don't waste anyone's time. |
 | **T1** | 30–90 s | pre-commit (parallel) | `make lint` (`cargo clippy -D warnings`), `make build` | Real lint + the binary actually compiles. Run in parallel since they share no state. |
 | **T2** | 1–5 min | pre-push | `make test-ci` (`cargo test --all-targets`, skips known-flaky `audit_e2e` + `cli::diff::*`) | The 21 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
-| **T3** | 5–30 min | CI on PR + post-merge | `make smoke` + `make e2e` (PR); `make e2e-network` (post-merge) | Full gauntlet: static smokes, local e2e against the mock pipeline, and the long real-LLM e2e (only on `main`, see below). |
+| **T3** | 5–30 min | CI on PR + post-merge | `make smoke` + `make e2e` (PR); `make e2e-network` (post-merge, fast+explore rows) | Full gauntlet: static smokes, local e2e against the mock pipeline, and the real-LLM e2e (only on `main`, see below). Heavy card80 + 14-model opencode_go sweep + per-provider `--ignored` discovery live in dedicated manual-only workflows. |
 
 Plus one fast orthogonal check on the commit message itself:
 
@@ -75,18 +75,24 @@ Plus one fast orthogonal check on the commit message itself:
                                    ▼ PR merge to main
                                    │
    ┌─────────────────────────────────────────────────────────────────────┐
-   │  GitHub Actions — e2e-network.yml (post-merge)                    │
-   │  ─────────────────────────────────────                             │
+   │  GitHub Actions — e2e-network.yml (post-merge, auto on main)     │
+   │  ────────────────────────────────────────────                      │
    │                                                                   │
-   │  e2e-network (3-row strategy.matrix, real LLM, ~25 min wall-clock)│
-   │    - card80   ~25 min   (timeout-minutes: 28)                     │
-   │    - fast     ~2  min   (timeout-minutes: 6)                      │
-   │    - explore  ~8  min   (timeout-minutes: 12)                     │
-   │    - all three rows run in parallel on push;                       │
-   │      workflow_dispatch inputs.section can narrow to a single row │
+   │  e2e-network (2 jobs, real LLM, ~8 min wall-clock)                │
+   │    - fast     ~2  min   (timeout-minutes: 55)                     │
+   │    - explore  ~8  min   (timeout-minutes: 120)                    │
+   │    - both run in parallel after `build-e2e-network`               │
+   │      completes; gated by `preflight-minimax`                      │
    │    - builds release binary                                        │
-   │    - runs scripts/e2e_audit_proxy.sh with MOAGAN_SMOKE_SECTION=<row>│
-   │    - not a PR gate (would block PRs 25 min)                       │
+   │    - runs scripts/e2e_audit_proxy.sh with MOAGAN_SMOKE_SECTION=    │
+   │      fast|explore                                                 │
+   │    - not a PR gate (real-LLM cost)                                │
+   │                                                                   │
+   │  Manual-only siblings (workflow_dispatch, no auto on main):       │
+   │    - e2e-network-card80.yml              ~25 min, MiniMax card80   │
+   │    - test-ignored-deepseek.yml           stub (budget exhausted)  │
+   │    - test-ignored-opencode-go.yml        stub (budget exhausted)  │
+   │    - test-ignored-minimax.yml            ~? min, real --ignored run│
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘
                                    │
@@ -196,7 +202,9 @@ $ head -1 .git/hooks/pre-commit
 | Makefile targets (`validate`, `fmt-check`, `lint`, `test-ci`, `smoke`, `e2e`, `e2e-network`) | [`Makefile`](../Makefile) |
 | Composite action (checkout + toolchain + cache) | [`.github/actions/rust-setup/action.yml`](../.github/actions/rust-setup/action.yml) |
 | CI workflow (9 parallel jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
-| CI real-LLM e2e (main only) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
+| CI real-LLM e2e (main only, fast+explore auto) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
+| CI real-LLM e2e (manual-only card80) | [`.github/workflows/e2e-network-card80.yml`](../.github/workflows/e2e-network-card80.yml) |
+| CI `--ignored` test runs (post-merge) | [`.github/workflows/test-ignored-{minimax,deepseek,opencode-go}.yml`](../.github/workflows/) |
 | CI informational: code scanning | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) |
 | CI informational: dependency audit | [`.github/workflows/cargo-audit.yml`](../.github/workflows/cargo-audit.yml) |
 | CI release pipeline (tag-triggered) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |

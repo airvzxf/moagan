@@ -40,11 +40,21 @@
 #                                 PR #462), or
 #                                 `discover_opencode_go_models` (the
 #                                 ~70 min per-model coverage loop of
-#                                 SECTION A.quad). The CI workflow uses
-#                                 this to split the suite into a matrix;
-#                                 locally it lets the operator iterate
-#                                 on a single sub-block without paying
-#                                 the ~25 min card80 cost.
+#                                 SECTION A.quad).
+#
+#                                 Post-PR #555 the auto path of
+#                                 `.github/workflows/e2e-network.yml`
+#                                 runs only `fast` + `explore`. The
+#                                 `card80` block lives in
+#                                 `e2e-network-card80.yml` (manual
+#                                 dispatch); the `discover_opencode_go`
+#                                 / `discover_deepseek` /
+#                                 `discover_opencode_go_models`
+#                                 sub-blocks are operator-only — no
+#                                 CI job fixes those values. Locally
+#                                 the operator can still narrow to any
+#                                 single sub-block without paying the
+#                                 ~25 min card80 cost.
 #
 # Notes on the explore-mode correlation (audit_pairs +
 # audit_verify): the cross-run LLM cache is consulted first

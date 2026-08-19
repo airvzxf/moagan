@@ -88,17 +88,26 @@ the right-hand column. They are case-sensitive and must match what
 GitHub renders in the PR's "Checks" tab.
 
 `e2e-network` is intentionally NOT in the required list — it runs only
-post-merge on `main` (it's the 25-minute real-LLM audit, not a PR gate).
-As of PR #337 the workflow is a 3-row `strategy.matrix` (see
-`docs/validation-tiers.md` for the wall-clock breakdown); the three
-matrix jobs surface under the following display names and remain
-informational — none of them are required status checks:
+post-merge on `main` (it's the real-LLM audit, not a PR gate). As of
+PR #555 the auto path runs on every push to `main` and carries two
+matrix jobs (fast + explore); the heavy `card80` job was extracted
+into `e2e-network-card80.yml` (manual dispatch) and the per-provider
+discovery jobs (`preflight-deepseek`, `test-discover-deepseek`,
+`discover-deepseek`, `preflight-opencode_go`,
+`test-discover-opencode-go`, `discover-opencode-go`,
+`test-discover-opencode-go-models`) were removed outright. The
+remaining two jobs surface under the following display names and
+remain informational — none of them are required status checks:
 
 | Job ID (`jobs.<id>`) | Display name (`name:`) |
 |---|---|
-| `e2e-network` | `Tier 3 · e2e against real LLM (main only) — card80` |
-| `e2e-network` | `Tier 3 · e2e against real LLM (main only) — fast` |
-| `e2e-network` | `Tier 3 · e2e against real LLM (main only) — explore` |
+| `e2e-network` | `Tier 3 · e2e — fast` |
+| `e2e-network` | `Tier 3 · e2e — explore` |
+
+The manual-only `e2e-network-card80.yml` (single job `test-card80`,
+display name `Tier 3 · e2e — card80 (manual dispatch)`) and the
+`test-ignored-{deepseek,minimax,opencode-go}.yml` workflows are also
+informational; they show up as checks but do not block merges.
 
 The `codeql` and `cargo-audit` workflows are also informational; they
 show up as checks but do not block merges.

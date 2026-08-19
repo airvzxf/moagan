@@ -2,10 +2,13 @@
 //! (closes the v0.7 P8 discovery-validation gap documented in
 //! `docs/discovery-validation-research-2026-08-13.md`).
 //!
-//! `#[ignore]`d by default; only runs locally / in `e2e-network`
-//! when the operator's `OPENCODE_GO_API_KEY` is exported. With no
-//! key the test returns `Ok(())` immediately so a CI matrix without
-//! the secret stays green. Run with:
+//! `#[ignore]`d by default; only runs locally / via
+//! `.github/workflows/test-ignored-opencode-go.yml` (post-PR #555,
+//! manual dispatch — the auto `push: branches: [main]` trigger was
+//! removed in PR #555 because the OPENCODE_GO_API_KEY budget is
+//! exhausted) when the operator's `OPENCODE_GO_API_KEY` is exported.
+//! With no key the test returns `Ok(())` immediately so a CI run
+//! without the secret stays green. Run with:
 //!
 //! ```bash
 //! OPENCODE_GO_API_KEY=sk-... cargo test --test integration_discover_opencode_go -- --ignored
