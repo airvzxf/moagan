@@ -322,6 +322,26 @@ impl Telemetry {
         // future change can gate this on a `MOAGAN_COVERAGE=1`
         // env var if operators want to opt out per-run.
         let coverage = CoverageRecorder::enable(run, run_id)?;
+        // PR-2: start the rotation thread so the active `profraw`
+        // cannot grow unbounded. The thread checks the file size
+        // every `MOAGAN_COVERAGE_ROTATION_INTERVAL_SECS` (default
+        // 60 s) and triggers a snapshot when the file exceeds
+        // `MOAGAN_COVERAGE_PROFRAW_BYTES_MAX` (default 1 GiB).
+        // Without this, a long-running discovery test (e.g. run8
+        // 5h 40m on 2026-08-19) produced a 66 GB `active.profraw`
+        // that filled `/home` to 96 %. The thread is a no-op when
+        // the runtime was not actually wired (feature off, RUSTFLAGS
+        // missing).
+        coverage.start_rotation(
+            std::env::var("MOAGAN_COVERAGE_PROFRAW_BYTES_MAX")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1_073_741_824),
+            std::env::var("MOAGAN_COVERAGE_ROTATION_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(60),
+        );
         Ok(Self {
             inner: Arc::new(Inner {
                 run_id,

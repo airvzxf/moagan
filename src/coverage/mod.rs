@@ -349,6 +349,49 @@ impl CoverageRecorder {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Spawn a background thread that periodically checks the
+    /// active `profraw` file size and triggers a snapshot when it
+    /// exceeds `MOAGAN_COVERAGE_PROFRAW_BYTES_MAX` (default 1 GiB).
+    /// The snapshot renames the live file to a seq-tagged sibling
+    /// and the SanCov runtime creates a fresh one on its next
+    /// write, so disk usage stays bounded over arbitrary runtimes.
+    ///
+    /// Verified context: run8 on 2026-08-19 produced a 66 GB
+    /// `active.profraw` over 5h 40m because the previous build had
+    /// no rotation cap. Recovery was a manual `rm -rf` under
+    /// pressure with the disk at 96% used.
+    ///
+    /// The thread is a no-op when the recorder is not active.
+    /// Returns the `JoinHandle` so the caller can join on shutdown
+    /// (the impl currently does not block on it; the thread exits
+    /// after [`Self::is_active`] flips off, which only happens via
+    /// process exit anyway).
+    pub fn start_rotation(&self, max_bytes: u64, interval_secs: u64) -> Option<std::thread::JoinHandle<()>> {
+        if !self.active_flag {
+            return None;
+        }
+        let me = self.clone();
+        Some(std::thread::spawn(move || {
+            let interval = std::time::Duration::from_secs(interval_secs.max(1));
+            loop {
+                std::thread::sleep(interval);
+                let size = std::fs::metadata(&me.active)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if size > max_bytes {
+                    let tag = format!("rotate-{}-{}", size, me.seq.load(Ordering::Relaxed));
+                    if let Err(e) = me.snapshot(&tag) {
+                        tracing::warn!(
+                            error = %e,
+                            profraw = %me.active.display(),
+                            "coverage: rotation snapshot failed",
+                        );
+                    }
+                }
+            }
+        }))
+    }
 }
 
 #[cfg(test)]
