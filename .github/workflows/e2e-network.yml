@@ -5,148 +5,96 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      # Back-compat: previously this gated the card80 long-discover block.
+      # card80 was extracted into `e2e-network-card80.yml` (manual-only) on
+      # 2026-08-19, so this knob is now a no-op. Kept so external scripts
+      # that pass it via workflow_dispatch don't fail.
       skip_long_discover:
-        description: 'Skip the ~20 min card80 long-discover block (real LLM, ~5 min). Default: full 25 min run.'
+        description: 'Back-compat no-op. The card80 long-discover block lives in `e2e-network-card80.yml` (manual dispatch).'
         type: boolean
         required: false
         default: false
-      section:
-        description: 'Which section A sub-block to run. `all` (default) runs every section; pick a single one to iterate without paying the rest. `card80` ~25 min, `fast` ~2 min, `explore` ~8 min, `discover_opencode_go` ~20 min, `discover_deepseek` ~20 min, `discover_opencode_go_models` ~70 min (14-model coverage loop).'
-        type: choice
-        required: false
-        default: all
-        options:
-          - all
-          - card80
-          - fast
-          - explore
-          - discover_opencode_go
-          - discover_deepseek
-          - discover_opencode_go_models
 
 # Serialize concurrent runs that touch the same section set so the
 # artifact upload from `build` doesn't race a `test-*` job's download.
 concurrency:
-  group: e2e-network-${{ github.event.inputs.section || github.run_id }}
+  group: e2e-network-${{ github.run_id }}
   cancel-in-progress: false
 
-# Minimum token permissions: read repo contents. The MINIMAX_API_KEY,
-# OPENCODE_GO_API_KEY and DEEPSEEK_API_KEY secrets are consumed via
-# `secrets.*` and never written back to the repo.
+# Minimum token permissions: read repo contents. The MINIMAX_API_KEY
+# and OPENCODE_GO_API_KEY secrets are consumed via `secrets.*` and
+# never written back to the repo.
 permissions:
   contents: read
 
-# Long-running end-to-end suite that exercises the real MiniMax upstream.
-# Intentionally NOT part of the per-PR pipeline: it costs API calls and
-# ~25 minutes of runner time. Run only after merge to main.
+# Auto-trigger end-to-end suite: short + medium jobs only.
+# The long/heavy jobs (card80, the 14-model opencode_go sweep) were
+# extracted into dedicated manual-only workflows on 2026-08-19 to keep
+# this workflow cheap on every push to main:
+#   - `e2e-network-card80.yml`                          — MiniMax card80
+#   - `e2e-network-discover-opencode-go-models.yml`     — 14-model sweep
+#   - `test-ignored-deepseek.yml`                       — DeepSeek stub
+#   - `test-ignored-opencode-go.yml`                    — OpenCode Go stub
+# All four are `workflow_dispatch:` only; trigger them manually from
+# the Actions tab when you need them.
 #
-# Architecture (build-once + per-job conditions, supersedes the
-# 3-row matrix that built the release binary once per row):
+# Architecture (build-once + per-job conditions):
 #
 #   build-e2e-network            — runs once, uploads target/release/moagan
 #                                  as the `moagan-e2e-binary` artifact.
-#   preflight-deepseek           — needs: build-e2e-network; deepseek
-#                                  /v1/models HTTP probe that gates
-#                                  test-discover-deepseek. ~30 s.
+#                                  ~5 min on warm cache, ~12 min cold.
 #   preflight-opencode_go        — needs: build-e2e-network; opencode_go
 #                                  /v1/models HTTP probe that gates
 #                                  test-discover-opencode-go and
-#                                  test-discover-opencode-go-models. ~30 s.
+#                                  discover-opencode-go. ~30 s.
 #   preflight-minimax            — needs: build-e2e-network; minimax
 #                                  /v1/models HTTP probe that gates
-#                                  test-card80, test-fast, test-explore. ~30 s.
-#   test-card80                  — needs: [build-e2e-network,
-#                                  preflight-minimax]; gated on
-#                                  inputs.section in {card80, all, ''}.
+#                                  test-fast and test-explore. ~30 s.
 #   test-fast                    — needs: [build-e2e-network,
-#                                  preflight-minimax]; gated on
-#                                  inputs.section in {fast, all, ''}.
+#                                  preflight-minimax]; runs on every
+#                                  push to main. retry x4 with 60 s
+#                                  backoff. ~2 min.
 #   test-explore                 — needs: [build-e2e-network,
-#                                  preflight-minimax]; gated on
-#                                  inputs.section in {explore, all, ''}.
+#                                  preflight-minimax]; runs on every
+#                                  push to main. retry x4. ~8 min.
 #   test-discover-opencode-go    — needs: [build-e2e-network,
-#                                  preflight-opencode_go]; gated on
-#                                  inputs.section in
-#                                  {discover_opencode_go, all, ''}.
-#                                  Consumes OPENCODE_GO_API_KEY, not
-#                                  MINIMAX_API_KEY.
-#   test-discover-deepseek       — needs: [build-e2e-network,
-#                                  preflight-deepseek]; gated on
-#                                  inputs.section in
-#                                  {discover_deepseek, all, ''}.
-#                                  Consumes DEEPSEEK_API_KEY.
+#                                  preflight-opencode_go]; runs on every
+#                                  push to main. ~5 min of wire time.
+#                                  Consumes OPENCODE_GO_API_KEY.
 #   discover-opencode-go         — needs: [build-e2e-network,
-#                                  preflight-opencode_go]; gated on
-#                                  inputs.section in
-#                                  {discover_opencode_go, all, ''}.
-#                                  Same `make e2e-network-discover-*`
+#                                  preflight-opencode_go]; runs on every
+#                                  push to main. Same `make
+#                                  e2e-network-discover-opencode-go`
 #                                  step as the sibling
 #                                  `test-discover-opencode-go` job, PLUS
 #                                  a `cargo test --test
 #                                  integration_discover_opencode_go --
 #                                  --ignored` step (Tier A #10). The
 #                                  integration test early-returns when
-#                                  OPENCODE_GO_API_KEY is absent, so
-#                                  the runner stays green on forks.
-#   discover-deepseek            — needs: [build-e2e-network,
-#                                  preflight-deepseek]; currently
-#                                  DISABLED (`if: false`) while the
-#                                  deepseek pay-as-you-go budget is
-#                                  exhausted — match the existing
-#                                  `test-discover-deepseek` gating,
-#                                  re-enable by removing the `if: false`
-#                                  line when the budget is restored.
-#                                  When enabled the `if` matches
-#                                  `test-discover-deepseek`:
-#                                  {discover_deepseek, all, ''}.
-#   test-discover-opencode-go-models
-#                                — needs: [build-e2e-network,
-#                                  preflight-opencode_go] (gated on the
-#                                  preflight even though dispatch-only —
-#                                  dispatch iterations still benefit from
-#                                  the same gate). Gated on
-#                                  inputs.section in
-#                                  {discover_opencode_go_models, all}.
-#                                  NOT gated on '' — this job is
-#                                  dispatch-only, see below. The
-#                                  per-model coverage loop: 14
-#                                  opencode_go aliases × ~5 min each
-#                                  ≈ 70 min. Consumes
-#                                  OPENCODE_GO_API_KEY.
+#                                  OPENCODE_GO_API_KEY is absent, so a
+#                                  fork without the secret stays green.
 #
-# On `push` events `inputs.section` is undefined (= ''), so the five
-# active test jobs whose condition includes '' run in parallel after
-# `build-e2e-network` completes (wall-clock ≈ slowest row, ~25 min).
-# On `workflow_dispatch` with `section=<x>`, only the matching
-# `test-<x>` / `discover-<x>` job is materialised — the others don't
-# even appear in the run page. This replaces the previous matrix-filter
-# cascade that always materialised all three rows and then pruned two
-# of them.
+# Wall-clock on push: ~max(build ~5 min, slowest row ≈ 8 min
+# test-explore) ≈ 8 min plus ~5 min of artifact upload overlap. Total
+# ~8 min per push to main on warm cache; ~15 min cold.
 #
-# `test-discover-opencode-go-models` is the one exception: it is
-# deliberately dispatch-only (no `|| inputs.section == ''`). At ~70 min
-# of runner time and 14 real discovery runs of API spend, paying it on
-# every push to main is not sustainable. The cheaper single-provider
-# jobs `test-discover-opencode-go` and `test-discover-deepseek` stay
-# push-on and are what catch opencode_go / deepseek regressions; the
-# `discover-opencode-go` / `discover-deepseek` siblings add the
-# `cargo test -- --ignored` step (Tier A #10) on top of the same
-# round-trip, and the full per-model sweep is opt-in via
-# `workflow_dispatch` with `section: discover_opencode_go_models`
-# (just the loop) or `section: all` (the loop plus everything else).
+# Jobs removed on 2026-08-19 (this restructure):
+#   - preflight-deepseek, test-discover-deepseek, discover-deepseek:
+#     native deepseek pay-as-you-go budget has been exhausted since
+#     2026-08-15. The triplet was disabled via `if: false` in PR #529
+#     and is now deleted outright to keep the workflow free of zombie
+#     jobs. To restore: bring back the preflight + test-discover +
+#     discover-with-ignored triplet from PR #525 + #529 when the
+#     budget is back.
+#   - test-card80: moved to `e2e-network-card80.yml` (~25 min, manual).
+#   - test-discover-opencode-go-models: moved to
+#     `e2e-network-discover-opencode-go-models.yml` (~70 min, manual,
+#     14 opencode_go aliases).
 #
-# The discovery jobs (added for Tier A #8/#9/#10 of
-# `docs/pending-items-2026-08-13.md` §11) are what turn the
-# opencode_go / deepseek discovery blocks of
-# `scripts/e2e_audit_proxy.sh` from "never executed in CI" (§9.2) into
-# a real network round-trip — and the `cargo test -- --ignored` step
-# is what closes the per-push integration-test coverage gap. Each
-# block self-skips when its API key secret is absent, so a fork or a
-# runner without the secret stays green instead of failing.
-#
-# `inputs.skip_long_discover` is preserved exactly as before — it
-# still sets MOAGAN_SMOKE_LONG_DISCOVER=1 for the runner that picks
-# the card80 row.
+# On `push` events the 5 active jobs above run in parallel after
+# `build-e2e-network` completes (wall-clock ≈ slowest row, ~8 min).
+# On `workflow_dispatch` the run is identical — the heavy sections
+# live in their own manual workflows.
 #
 # Reference: docs/validation-tiers.md (Tier 3, main-only).
 #
@@ -199,42 +147,20 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Pre-flight provider API probes for the e2e-network suite. Each
-  # provider has its own per-provider preflight job so a single-provider
-  # outage does not block the others' downstream tests. Each probe is a
-  # 30 s HTTP GET to the provider's /v1/models endpoint; if a probe
-  # returns non-2xx (401, 403, 5xx, timeout, network error) the
-  # preflight fails and only the `test-*` jobs that `needs:` it are
-  # SKIPPED — that is the desired GitHub Actions signal for a dead
-  # upstream. Prevents ~25 min of wasted runner time on a per-provider
-  # outage (PR #473). Secret-absent → SKIP (exit 0) so fork PRs
-  # without secrets stay green. Only echoes presence, length, prefix
-  # (first 8 + literal `...` + last 4 chars), and the HTTP status code;
-  # never the secret value. The preflights need the release binary
-  # build because the test jobs that depend on them also need it, and
-  # adding the dependency keeps the gate serial rather than racy.
-  preflight-deepseek:
-    name: 'T3 · preflight — deepseek'
-    if: false   # DISABLED 2026-08-15: native deepseek pay-as-you-go budget exhausted ($1 of $5 left); re-enable by removing this line when budget is restored
-    needs: build-e2e-network
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - name: probe deepseek
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-            echo "SKIP: DEEPSEEK_API_KEY not set"
-            exit 0
-          fi
-          echo "DEEPSEEK: set, length=${#DEEPSEEK_API_KEY}, prefix=${DEEPSEEK_API_KEY:0:8}...${DEEPSEEK_API_KEY: -4}"
-          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
-          echo "DEEPSEEK http_status: $HTTP"
-          [[ "$HTTP" =~ ^2 ]] || exit 1
-
+  # Pre-flight provider API probes. Each provider has its own
+  # per-provider preflight job so a single-provider outage does not
+  # block the others' downstream tests. Each probe is a 30 s HTTP GET
+  # to the provider's /v1/models endpoint; if a probe returns non-2xx
+  # (401, 403, 5xx, timeout, network error) the preflight fails and
+  # only the `test-*` jobs that `needs:` it are SKIPPED — the desired
+  # GitHub Actions signal for a dead upstream. Prevents wasted runner
+  # time on a per-provider outage (PR #473). Secret-absent → SKIP
+  # (exit 0) so fork PRs without secrets stay green. Only echoes
+  # presence, length, prefix (first 8 + literal `...` + last 4 chars),
+  # and the HTTP status code; never the secret value. The preflights
+  # need the release binary build because the test jobs that depend
+  # on them also need it, and adding the dependency keeps the gate
+  # serial rather than racy.
   preflight-opencode_go:
     name: 'T3 · preflight — opencode_go'
     needs: build-e2e-network
@@ -278,61 +204,9 @@ jobs:
           echo "MINIMAX http_status: $HTTP"
           [[ "$HTTP" =~ ^2 ]] || exit 1
 
-  test-card80:
-    name: 'Tier 3 · e2e — card80'
-    needs: [build-e2e-network, preflight-minimax]
-    if: ${{ inputs.section == 'card80' || inputs.section == 'all' || inputs.section == '' }}
-    runs-on: ubuntu-latest
-    # Bumped 55 → 120 min in Z1: a degraded MiniMax upstream can stretch
-    # the card80 block well past 55 min. Public-repo max is 360 min so
-    # we still have headroom.
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: moagan-e2e-binary
-          path: target/release/
-
-      - name: Change to executable binary
-        run: chmod +x target/release/moagan
-
-      - name: T3 · e2e-network (card80, real LLM)
-        env:
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          # The e2e_audit_proxy.sh script checks BIN at target/debug/moagan by
-          # default. The build job built release, so override the path.
-          BIN: ${{ github.workspace }}/target/release/moagan
-          # The Makefile target already sets MOAGAN_SMOKE_SECTION, but
-          # we re-export it here so the script's own guard sees the
-          # same value (defence-in-depth against a future contributor
-          # adding a manual `bash scripts/...` invocation that
-          # bypasses the Makefile).
-          MOAGAN_SMOKE_SECTION: card80
-          # Expose the `skip_long_discover` input as the env var the
-          # e2e_audit_proxy.sh script reads (default: 0 = full card80
-          # block). Push events ignore the input; workflow_dispatch
-          # with `skip_long_discover: true` overrides to '1' for a
-          # ~5 min card80 run. The fast / explore rows ignore this
-          # knob — the long-discover skip is a card80-only thing.
-          MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
-        run: make e2e-network-card80
-
-      - name: upload card80 artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: moagan-e2e-card80-logs
-          path: ${{ github.workspace }}/.runs/
-          retention-days: 1
-          if-no-files-found: warn
-          include-hidden-files: true
-
   test-fast:
     name: 'Tier 3 · e2e — fast'
     needs: [build-e2e-network, preflight-minimax]
-    if: ${{ inputs.section == 'fast' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
@@ -391,10 +265,8 @@ jobs:
   test-explore:
     name: 'Tier 3 · e2e — explore'
     needs: [build-e2e-network, preflight-minimax]
-    if: ${{ inputs.section == 'explore' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
-    # Bumped 28 → 120 min in Z1: same rationale as test-card80 — generous
-    # headroom for a degraded MiniMax upstream.
+    # Generous headroom for a degraded MiniMax upstream.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -457,12 +329,10 @@ jobs:
   test-discover-opencode-go:
     name: 'Tier 3 · e2e — discover_opencode_go'
     needs: [build-e2e-network, preflight-opencode_go]
-    if: ${{ inputs.section == 'discover_opencode_go' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     # One discovery round (~5 min of wire time) plus generous headroom
     # for a degraded upstream: the opencode_go /messages wire is fast
-    # but /chat/completions and /responses can add up. Bumped 35 → 120
-    # min in Z1 for upstream-degradation headroom.
+    # but /chat/completions and /responses can add up.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -492,70 +362,27 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
 
-  # Tier A #8, deepseek half: same shape as the job above but gated on
-  # DEEPSEEK_API_KEY and pointed at the native `deepseek` provider
-  # (api.deepseek.com), not the opencode_go relay.
-  test-discover-deepseek:
-    name: 'Tier 3 · e2e — discover_deepseek'
-    needs: [build-e2e-network, preflight-deepseek]
-    if: false   # DISABLED 2026-08-15: native deepseek pay-as-you-go budget exhausted ($1 of $5 left); re-enable by removing this line when budget is restored
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: moagan-e2e-binary
-          path: target/release/
-
-      - name: Change to executable binary
-        run: chmod +x target/release/moagan
-
-      - name: T3 · e2e-network (discover_deepseek, real LLM)
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          BIN: ${{ github.workspace }}/target/release/moagan
-          MOAGAN_SMOKE_SECTION: discover_deepseek
-        run: make e2e-network-discover-deepseek
-
-      - name: upload discover-deepseek artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: moagan-e2e-discover-deepseek-logs
-          path: ${{ github.workspace }}/.runs/
-          retention-days: 1
-          if-no-files-found: warn
-          include-hidden-files: true
-
   # Tier A #8 + #10 (docs/pending-items-2026-08-13.md §11):
-  # the existing `test-discover-opencode-go` and `test-discover-deepseek`
-  # jobs only run the `make e2e-network-discover-*` target (release
-  # binary + audit-proxy assertions). The companion
-  # `cargo test --test integration_discover_* -- --ignored` step is what
-  # the operator runs locally to validate the discovery integration
-  # test directly via the test harness (uses the debug binary through
-  # `env!("CARGO_BIN_EXE_moagan")`). Closing that gap means the
-  # integration test runs in CI on every push to main, gated on the
-  # same API key the existing job consumes — and the test itself
-  # early-returns if the secret is absent, so a fork without the key
-  # stays green.
+  # the `test-discover-opencode-go` job above only runs the
+  # `make e2e-network-discover-opencode-go` target (release binary +
+  # audit-proxy assertions). This companion job adds the
+  # `cargo test --test integration_discover_opencode_go -- --ignored`
+  # step (Tier A #10), so the integration test runs in CI on every
+  # push to main, gated on the same API key. The test early-returns
+  # if the secret is absent, so a fork without the key stays green.
   #
   # Naming: `discover-*` (no `test-` prefix) per the task description;
-  # the existing `test-discover-*` jobs stay as-is so the proxy
-  # audits keep their current artifact names and section gating.
+  # the `test-discover-opencode-go` job stays as-is so the proxy
+  # audits keep their current artifact names.
   discover-opencode-go:
     name: 'Tier 3 · e2e — discover_opencode_go (with --ignored)'
     needs: [build-e2e-network, preflight-opencode_go]
-    if: ${{ inputs.section == 'discover_opencode_go' || inputs.section == 'all' || inputs.section == '' }}
     runs-on: ubuntu-latest
     # One discovery round (~5 min of wire time) for the make step PLUS
     # another ~5 min for the cargo test --ignored step, plus generous
     # headroom for a degraded upstream. The compile step adds ~30-60 s
     # on warm cache (Swatinem/rust-cache prefix shared with the
-    # sibling jobs in this workflow). Bumped 45 → 120 min in Z1 for
-    # upstream-degradation headroom.
+    # sibling jobs in this workflow).
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -638,127 +465,3 @@ jobs:
           path: target/test-runs/opencode_go/
           retention-days: 1
           if-no-files-found: warn
-
-  # Tier A #8 + #10, deepseek half: same shape as the
-  # `discover-opencode-go` job above but gated on DEEPSEEK_API_KEY and
-  # pointed at the native `deepseek` provider (api.deepseek.com), not
-  # the opencode_go relay. Disabled while the deepseek pay-as-you-go
-  # budget is exhausted; re-enable by removing the `if: false` line
-  # (matches the gating on the existing `test-discover-deepseek` job).
-  discover-deepseek:
-    name: 'Tier 3 · e2e — discover_deepseek (with --ignored)'
-    needs: [build-e2e-network, preflight-deepseek]
-    if: false   # DISABLED 2026-08-15: native deepseek pay-as-you-go budget exhausted ($1 of $5 left); re-enable by removing this line when budget is restored
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: moagan-e2e-binary
-          path: target/release/
-
-      - name: Change to executable binary
-        run: chmod +x target/release/moagan
-
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt,clippy
-
-      - name: T3 · e2e-network (discover_deepseek, real LLM)
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          BIN: ${{ github.workspace }}/target/release/moagan
-          MOAGAN_SMOKE_SECTION: discover_deepseek
-        run: make e2e-network-discover-deepseek
-
-      - name: cargo test integration_discover_deepseek -- --ignored (gated on DEEPSEEK_API_KEY)
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          echo "============================================================"
-          echo "DIAGNOSTIC HEADER"
-          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
-          echo "  Runner:             $(uname -a)"
-          echo "  Working directory:  $(pwd)"
-          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "  Provider under test: deepseek"
-          echo "============================================================"
-          echo "API key presence:"
-          echo "  DEEPSEEK_API_KEY set: $([[ -n "${DEEPSEEK_API_KEY:-}" ]] && echo yes || echo no)"
-          echo "  DEEPSEEK_API_KEY length: ${#DEEPSEEK_API_KEY} chars"
-          echo "  DEEPSEEK_API_KEY prefix (first 8 chars, safe to echo): ${DEEPSEEK_API_KEY:0:8}"
-          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
-          echo "============================================================"
-          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-            echo "SKIP: DEEPSEEK_API_KEY not set on runner; deepseek --ignored test not run"
-            exit 0
-          fi
-          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
-          START_TS=$(date +%s)
-          cargo test --test integration_discover_deepseek -- --ignored --nocapture
-          CARGO_RC=$?
-          END_TS=$(date +%s)
-          echo "============================================================"
-          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
-          echo "============================================================"
-          exit $CARGO_RC
-
-      - name: upload discover-deepseek artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: moagan-e2e-discover-deepseek-logs
-          path: ${{ github.workspace }}/.runs/
-          retention-days: 1
-          if-no-files-found: warn
-          include-hidden-files: true
-
-      - name: upload discover-deepseek test artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: moagan-e2e-discover-deepseek-test-logs
-          path: target/test-runs/deepseek/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # Tier A #9: the per-model coverage loop. 14 opencode_go aliases run
-  # sequentially at ~5 min each, so the ceiling is deliberately ~90 min
-  # — by far the longest job in the repo. It is the only thing that
-  # exercises the /v1/responses (gpt-5.6-luna) and /v1/messages
-  # (qwen3.*) wire formats against a real upstream; before it, only
-  # /v1/chat/completions had ever made a real request (§9.3).
-  #
-  # Dispatch-only on purpose: the `if` below omits the
-  # `|| inputs.section == ''` arm the other jobs carry, so a `push` to
-  # main does NOT pay ~70 min of runner time and 14 real discovery runs
-  # of API spend. Opt in with `workflow_dispatch` +
-  # `section: discover_opencode_go_models`, or `section: all`.
-  test-discover-opencode-go-models:
-    name: 'Tier 3 · e2e — discover_opencode_go_models (14 models, ~70 min)'
-    needs: [build-e2e-network, preflight-opencode_go]
-    if: ${{ inputs.section == 'discover_opencode_go_models' || inputs.section == 'all' }}
-    runs-on: ubuntu-latest
-    # Bumped 90 → 360 min in Z1: GitHub's public-repo per-job maximum.
-    # 14 opencode_go aliases × ~5 min each is the expected wall-clock
-    # (~70 min); 360 min gives ~5× headroom for a degraded upstream.
-    timeout-minutes: 360
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: moagan-e2e-binary
-          path: target/release/
-
-      - name: Change to executable binary
-        run: chmod +x target/release/moagan
-
-      - name: T3 · e2e-network (discover_opencode_go_models, real LLM)
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-          BIN: ${{ github.workspace }}/target/release/moagan
-          MOAGAN_SMOKE_SECTION: discover_opencode_go_models
-        run: make e2e-network-discover-opencode-go-models
