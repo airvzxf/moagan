@@ -37,11 +37,17 @@ permissions:
 # The --ignored deepseek, opencode-go, and minimax discovery tests live in
 # dedicated post-merge workflows (`.github/workflows/test-ignored-deepseek.yml`,
 # `.github/workflows/test-ignored-opencode-go.yml`,
-# `.github/workflows/test-ignored-minimax.yml`). They run only on push to main
-# and on workflow_dispatch — never on PRs — to (a) reduce per-PR runner cost,
-# (b) eliminate refs/pull/N/merge cache pollution from Swatinem/rust-cache,
+# `.github/workflows/test-ignored-minimax.yml`). They trigger only on push to
+# main and on workflow_dispatch — never on PRs — to (a) reduce per-PR runner
+# cost, (b) eliminate refs/pull/N/merge cache pollution from Swatinem/rust-cache,
 # and (c) align with the existing e2e-network post-merge pattern. No
 # real-provider network test runs in this workflow.
+#
+# As of 2026-08-19, `test-ignored-deepseek` and `test-ignored-opencode-go`
+# are disabled stubs (their upstream budgets are exhausted — see
+# `docs/pending-items-2026-08-13.md §9.3` and PR #529). Only
+# `test-ignored-minimax` still runs the real `--ignored` discovery test;
+# the two stubs render as green ✅ informational checks on every push.
 #
 # Wall-clock critical path:
 #   round 1 = max(fmt-check, guard-deps, clippy)                       ~60 s
@@ -61,9 +67,11 @@ permissions:
 #
 # All 8 checks are hard gates. The post-merge
 # `test-ignored-deepseek` / `test-ignored-opencode-go` / `test-ignored-minimax`
-# workflows are not part of the required status checks at all — they run on
-# every push to main for regression visibility, gated on each provider's
-# API key being present.
+# workflows are not part of the required status checks at all — they trigger
+# on every push to main for regression visibility. `test-ignored-minimax`
+# runs the real `--ignored` discovery test (gated on `MINIMAX_API_KEY`); the
+# other two are disabled stubs (see comment block above and
+# `docs/pending-items-2026-08-13.md §9.3`).
 #
 # `e2e-network` is NOT in the required list (it runs only post-merge on main).
 

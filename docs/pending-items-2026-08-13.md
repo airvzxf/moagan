@@ -607,6 +607,16 @@ upstream"*. Tras #464, que eliminó `--model deepseek-chat`, el default
 de config es literalmente `deepseek-v4-flash` y **no hay resolución de
 alias upstream**. Fix documental de 1 línea. **VERIFIED-OPEN**.
 
+**Post-2026-08-19 update**: el workflow
+`.github/workflows/test-ignored-opencode-go.yml` también pasó a stub
+informativo (simétrico al de DeepSeek de #529), con motivo
+"OPENCODE_GO_API_KEY budget exhausted". El fichero se conserva para
+que la pestaña _Actions_ muestre el check en verde en cada push a
+`main`, pero los jobs `preflight-opencode_go` y `test-ignored-opencode-go`
+ya no se ejecutan. Sólo `test-ignored-minimax` queda como discovery
+`--ignored` real en CI. El test `#[ignore]` en
+`tests/integration_discover_opencode_go.rs` sigue invocable a mano.
+
 ### 9.4 — Qué cubre realmente el bloque card80
 
 Per `verify-e2e-coverage` §E: `scripts/e2e_audit_proxy.sh` SECCIÓN A
