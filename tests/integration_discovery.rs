@@ -1411,8 +1411,10 @@ fn retry_sketch_valid_payload() -> String {
 /// exactly these 3 and return.
 fn retry_sketch_mock() -> Arc<MockProvider> {
     let mut p = MockProvider::empty();
+    // PR-D2 follow-up: the discovery matrix now uses 1 retry
+    // (down from 3) for broken JSON, so the mock only needs two
+    // responses: one broken attempt + one successful retry.
     p.push(MockResponse::plain("not-json-at-all"));
-    p.push(MockResponse::plain("{still-broken"));
     p.push(MockResponse::plain(retry_sketch_valid_payload()));
     p.set_cycle(false);
     Arc::new(p)
@@ -1475,33 +1477,34 @@ async fn discovery_retry_sketch_extraction_wires_up_to_discover_matrix() {
         "discover".into(),
     );
 
-    // 1 cell × 1 sketch_per_cell = 1 sketch. The phase will run
-    // the retry helper once, which consumes the 3 mock calls in
-    // order (2 broken JSON + 1 valid Sketch).
+    // 1 cell × 1 sketch_per_cell = 1 sketch. The phase runs
+    // the retry helper with max_retries=1 (PR-D2 follow-up: 3→1),
+    // which consumes 2 mock calls in order (1 broken JSON +
+    // 1 valid Sketch).
     let matrix = DiscoverMatrixPhase::from_dimensions(1, 1, 1);
     let output = matrix.execute(&ctx).await.expect("phase execute");
     ctx.telemetry.flush().expect("telemetry flush");
 
-    // Assertion 1: the mock recorded exactly 3 LLM calls.
+    // Assertion 1: the mock recorded exactly 2 LLM calls.
     let recorded = mock.calls();
     assert_eq!(
         recorded.len(),
-        3,
-        "expected 3 mock calls (2 fails + 1 success), got {}",
+        2,
+        "expected 2 mock calls (1 fail + 1 success), got {}",
         recorded.len()
     );
 
-    // Assertion 2: calls.jsonl.gz has 3 entries (one per LLM call,
+    // Assertion 2: calls.jsonl.gz has 2 entries (one per LLM call,
     // regardless of parse outcome).
     let calls_path = ctx.telemetry.calls_path().to_path_buf();
     let calls_entries = read_calls_jsonl(&calls_path);
     assert_eq!(
         calls_entries.len(),
-        3,
+        2,
         "calls.jsonl.gz must hold one entry per LLM call"
     );
 
-    // Assertion 3: the 3 entries carry `retry_count` 0, 1, 2 in
+    // Assertion 3: the 2 entries carry `retry_count` 0, 1 in
     // started_unix order. The JSONL file is append-only, but we
     // still sort defensively in case the gzip writer ever batches
     // entries.
@@ -1523,10 +1526,10 @@ async fn discovery_retry_sketch_extraction_wires_up_to_discover_matrix() {
         .collect();
     assert_eq!(
         retry_counts,
-        vec![0, 1, 2],
-        "retry_count must be 0, 1, 2 in started_unix order, got {retry_counts:?}"
+        vec![0, 1],
+        "retry_count must be 0, 1 in started_unix order, got {retry_counts:?}"
     );
-    // The 2nd retry (index 2) must carry the successful sketch's
+    // The successful sketch on the 2nd attempt (index 1, retry_count 1) must carry
     // `cache_key`; the 1st and 2nd retries (0, 1) recorded parse
     // failures. `parse_model_json` always wraps its failure in
     // `Error::SchemaViolation`, which `call_with_retry_parse`
@@ -1549,11 +1552,11 @@ async fn discovery_retry_sketch_extraction_wires_up_to_discover_matrix() {
         .collect();
     assert_eq!(
         call_ids.len(),
-        3,
+        2,
         "each retry must allocate a fresh call_id, got {call_ids:?}"
     );
 
-    // Assertion 4: the persisted sketch is the successful 3rd
+    // Assertion 4: the persisted sketch is the successful 2nd
     // response and meets the minimum-thesis gate (≥30 chars).
     let PhaseOutput::Sketches(paths) = output else {
         panic!("expected PhaseOutput::Sketches");

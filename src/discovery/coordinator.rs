@@ -690,7 +690,15 @@ impl DiscoveryCoordinator {
                             );
                         }
 
-                        let sketch_result = retry_sketch_extraction(3, || {
+                        // PR-D2 follow-up: 1 retry (down from 3) because MiniMax-M3
+                        // deterministically produces unescaped-double-quote pathology at
+                        // temperature >= 1.0 (see PR-D2 notes). 4 attempts per failed
+                        // iteration was projecting onto a ~30-day test for cardinalidad 880
+                        // × 21 temps × 3 replicas. The coordinator ALREADY records parse
+                        // failures via `state.record_failure()` and continues, so dropping
+                        // retries loses nothing on the happy path and trades ~75 % wasted
+                        // LLM calls for a 4× speedup overall.
+                        let sketch_result = retry_sketch_extraction(1, || {
                             let ctx = ctx_for_attempt.clone();
                             let user = user_for_attempt.clone();
                             let system = system_for_attempt.to_string();

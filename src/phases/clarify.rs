@@ -36,7 +36,16 @@ impl Phase for ClarifyPhase {
             system,
             user,
             "Brief: {problem, objectives, deliverables[], constraints[], assumptions[], non_goals[], acceptance[], risks[]}",
-            5,
+            // PR-D2 follow-up: 2 retries (down from 5) because
+            // we have seen MiniMax-M3 emit unescaped quotes inside
+            // JSON string fields and the failure mode is
+            // deterministic at temperature >= 0; burning the full
+            // 5-retry budget here just delays the inevitable abort.
+            // The clarify phase has a hard schema, so partial
+            // recovery (Path B tolerant extraction) is the
+            // primary recovery path; the retry budget is purely
+            // an LLM re-prompt safety net.
+            2,
         )
         .await?;
         if brief.context_block.is_none() {
