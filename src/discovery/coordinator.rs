@@ -559,7 +559,7 @@ impl DiscoveryCoordinator {
         // 3. Load (or initialize) the persisted state so a crashed
         //    mid-loop run resumes from the last successful sketch
         //    instead of redoing the whole fan-out.
-        let mut state = match SketchLoopState::load(&run_dir)? {
+        let state = match SketchLoopState::load(&run_dir)? {
             Some(persisted) => {
                 tracing::info!(
                     completed = persisted.completed_sketches.len(),
@@ -648,26 +648,72 @@ impl DiscoveryCoordinator {
         );
 
         // 5. Main loop: fan out every (cell, temperature, replica, sketch_index) tuple.
-        let mut n: usize = state.completed_sketches.len();
-        let mut stop_reason: Option<StopReason> = None;
+        //
+        // PR-2 (perf/discovery-parallelism): the loop is now parallel. Each iteration
+        // is spawned as a `tokio::task` (recorded in a `JoinSet` per AGENTS.md) and
+        // the `ctx.parallelism` semaphore limits the number of concurrent LLM calls.
+        // The previous implementation was sequential because the loop awaited each
+        // call in-place — the semaphore was acquired/released per iteration but
+        // only one permit was ever in flight. Throughput was ~3.3 sketches/min on
+        // every run regardless of `--max-parallelism` (verified against run7
+        // 8h 1619 sketches and run8 5h 40m 1348 sketches). Now the throughput
+        // honours the operator's chosen parallelism.
+        //
+        // Shared state is wrapped in `Arc<std::sync::Mutex<>>` so concurrent tasks
+        // can mutate `state` and `tracker`. The mutex is held briefly (just for
+        // the mutation + `save`) and the file IO completes before the next spawn
+        // — there is no observed contention in practice because the LLM round-trip
+        // (15–18 s) dwarfs the lock window.
+        //
+        // Stop conditions:
+        // - `total` reached (`completed + failed >= total`)
+        // - `tracker` returned `Stop` (any task may set this)
+        // - `cancel` token tripped
+        // The outer loop polls these between spawns. In-flight tasks complete
+        // whatever they have in flight before the `join_set` drains.
+        let shared_state = Arc::new(std::sync::Mutex::new(state));
+        let shared_tracker = Arc::new(std::sync::Mutex::new(tracker));
+        let shared_stop_reason: Arc<std::sync::Mutex<Option<StopReason>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let id_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut join_set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let mut n: usize = 0;
         'outer: for cell in cells.iter() {
             for &temperature in profile_temperatures.iter() {
                 for replica in 0..profile_replicas {
                     for sketch_index in 0..per_cell {
                         if cancel.is_cancelled() {
                             tracing::warn!(n = n, total = total, "discovery: cancelled mid-loop");
-                            return Err(cancel.into_error().into());
-                        }
-                        if n >= total {
-                            tracing::info!(
-                                n = n,
-                                total = total,
-                                "discovery: loop target reached; break 'outer"
-                            );
                             break 'outer;
                         }
-                        let _permit = ctx.parallelism.acquire().await?;
-                        let id = format!("sk_{:04}", n);
+                        // Stop condition: target reached OR the tracker has declared Stop.
+                        {
+                            let s = shared_state.lock().expect("state poisoned");
+                            let completed = s.completed_sketches.len();
+                            let failed = s.failed_attempts as usize;
+                            drop(s);
+                            if completed + failed >= total {
+                                tracing::info!(
+                                    n = n,
+                                    total = total,
+                                    "discovery: loop target reached; break 'outer"
+                                );
+                                break 'outer;
+                            }
+                            if shared_stop_reason
+                                .lock()
+                                .expect("stop_reason poisoned")
+                                .is_some()
+                            {
+                                break 'outer;
+                            }
+                        }
+
+                        let id = format!(
+                            "sk_{:04}",
+                            id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        );
                         let user = build_user_payload(&brief_text, cell, sketch_index);
 
                         let cell_for_angle = cell.clone();
@@ -676,6 +722,12 @@ impl DiscoveryCoordinator {
                         let id_for_attempt = id.clone();
                         let ctx_for_attempt = ctx.clone();
                         let n_for_attempt = n;
+                        let state_for_task = Arc::clone(&shared_state);
+                        let tracker_for_task = Arc::clone(&shared_tracker);
+                        let stop_reason_for_task = Arc::clone(&shared_stop_reason);
+                        let sketches_dir_for_task = sketches_dir.clone();
+                        let run_dir_for_task = run_dir.clone();
+                        let cancel_for_task = cancel.clone();
 
                         if n < 5 || n.is_multiple_of(100) {
                             tracing::trace!(
@@ -698,122 +750,144 @@ impl DiscoveryCoordinator {
                         // failures via `state.record_failure()` and continues, so dropping
                         // retries loses nothing on the happy path and trades ~75 % wasted
                         // LLM calls for a 4× speedup overall.
-                        let sketch_result = retry_sketch_extraction(1, || {
-                            let ctx = ctx_for_attempt.clone();
-                            let user = user_for_attempt.clone();
-                            let system = system_for_attempt.to_string();
-                            let id = id_for_attempt.clone();
-                            let cell = cell_for_angle.clone();
-                            let attempt = n_for_attempt;
-                            async move {
-                                let started_unix = crate::time::now_unix_secs();
-                                // PR-D1: stamp the explicit
-                                // `temperature` from the active
-                                // profile so the cache key in
-                                // `src/llm/cache/mod.rs:117`
-                                // differentiates across
-                                // `(cell, temperature, replica)`
-                                // tuples. Retries bypass the
-                                // cache (the original
-                                // `call_with_retry_parse` rule;
-                                // pinned here so the coordinator
-                                // mirrors it).
-                                let raw = if attempt == 0 {
-                                    ctx.call_with_retry_at_temp(
-                                        crate::llm::Role::Sketch,
-                                        system,
-                                        user,
-                                        0,
-                                        temperature,
-                                    )
-                                    .await?
-                                } else {
-                                    ctx.call_uncached_at_temp(
-                                        crate::llm::Role::Sketch,
-                                        system,
-                                        user,
-                                        started_unix,
-                                        attempt as u32,
-                                        temperature,
-                                    )
-                                    .await?
-                                };
-                                let schema_hint =
-                                    crate::llm::prompts::system_prompt(crate::llm::Role::Sketch)
-                                        .to_owned();
-                                let mut sketch: Sketch = ctx.parse_model_json(
-                                    crate::llm::Role::Sketch,
-                                    &raw.text,
-                                    &schema_hint,
-                                )?;
-                                if sketch.id.is_empty() {
-                                    sketch.id = id;
-                                }
-                                sketch.angle = format!("{}:{}", cell.dimension_id, cell.facet_id);
-                                Ok::<Sketch, Error>(sketch)
+                        //
+                        // PR-2: the entire iteration runs inside the spawned task. The
+                        // task acquires a parallelism permit (semaphore.acquire) BEFORE
+                        // the LLM call so the in-flight count is bounded; the permit is
+                        // released when the permit guard drops at the end of the task.
+                        join_set.spawn(async move {
+                            // Cancellation honor: bail before burning API budget.
+                            if cancel_for_task.is_cancelled() {
+                                return;
                             }
-                        })
-                        .await;
+                            let _permit = match ctx_for_attempt.parallelism.acquire().await {
+                                Ok(p) => p,
+                                Err(_) => return,
+                            };
 
-                        match sketch_result {
-                            Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
-                                let path = sketches_dir.join(format!("{}.json", sketch.id));
-                                write_json(&path, &sketch)?;
-                                state.record_completion(sketch.id.clone());
-                                state.save(&run_dir)?;
-                                tracker.record_completions(1);
-                                tracing::debug!(
-                                    sketch_id = %sketch.id,
-                                    n = n,
-                                    total = total,
-                                    angle = %sketch.angle,
-                                    thesis_len = sketch.thesis.len(),
-                                    completed = tracker.completed,
-                                    "discovery: sketch accepted"
-                                );
-                                let decision = tracker.update(&[sketch], &[]);
-                                if let StopDecision::Stop { reason } = decision {
-                                    tracing::warn!(
-                                        n = n,
-                                        total = total,
-                                        completed = tracker.completed,
-                                        target = tracker.target,
-                                        reason = ?reason,
-                                        "discovery: tracker returned Stop"
-                                    );
-                                    if matches!(reason, StopReason::Saturated) {
-                                        TelemetryEvent::DiscoverySaturated {
-                                            run_id: run_id.to_string(),
-                                            coverage: tracker.coverage(),
-                                            at_unix: crate::time::now_unix_secs(),
-                                        }
-                                        .emit();
+                            let sketch_result = retry_sketch_extraction(1, || {
+                                let ctx = ctx_for_attempt.clone();
+                                let user = user_for_attempt.clone();
+                                let system = system_for_attempt.to_string();
+                                let id = id_for_attempt.clone();
+                                let cell = cell_for_angle.clone();
+                                let attempt = n_for_attempt;
+                                async move {
+                                    let started_unix = crate::time::now_unix_secs();
+                                    let raw = if attempt == 0 {
+                                        ctx.call_with_retry_at_temp(
+                                            crate::llm::Role::Sketch,
+                                            system,
+                                            user,
+                                            0,
+                                            temperature,
+                                        )
+                                        .await?
+                                    } else {
+                                        ctx.call_uncached_at_temp(
+                                            crate::llm::Role::Sketch,
+                                            system,
+                                            user,
+                                            started_unix,
+                                            attempt as u32,
+                                            temperature,
+                                        )
+                                        .await?
+                                    };
+                                    let schema_hint = crate::llm::prompts::system_prompt(
+                                        crate::llm::Role::Sketch,
+                                    )
+                                    .to_owned();
+                                    let mut sketch: Sketch = ctx.parse_model_json(
+                                        crate::llm::Role::Sketch,
+                                        &raw.text,
+                                        &schema_hint,
+                                    )?;
+                                    if sketch.id.is_empty() {
+                                        sketch.id = id;
                                     }
-                                    stop_reason = Some(reason);
-                                    break 'outer;
+                                    sketch.angle =
+                                        format!("{}:{}", cell.dimension_id, cell.facet_id);
+                                    Ok::<Sketch, Error>(sketch)
+                                }
+                            })
+                            .await;
+
+                            match sketch_result {
+                                Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
+                                    let path = sketches_dir_for_task
+                                        .join(format!("{}.json", sketch.id));
+                                    let _ = write_json(&path, &sketch);
+                                    let decision = {
+                                        let mut s = state_for_task.lock().expect("state poisoned");
+                                        s.record_completion(sketch.id.clone());
+                                        let _ = s.save(&run_dir_for_task);
+                                        drop(s);
+                                        let mut t = tracker_for_task.lock().expect("tracker poisoned");
+                                        t.record_completions(1);
+                                        let t_completed = t.completed;
+                                        let t_target = t.target;
+                                        let decision = t.update(std::slice::from_ref(&sketch), &[]);
+                                        let coverage = t.coverage();
+                                        tracing::debug!(
+                                            sketch_id = %sketch.id,
+                                            n = n_for_attempt,
+                                            total = total,
+                                            angle = %sketch.angle,
+                                            thesis_len = sketch.thesis.len(),
+                                            completed = t_completed,
+                                            "discovery: sketch accepted"
+                                        );
+                                        if let StopDecision::Stop { reason } = &decision {
+                                            tracing::warn!(
+                                                n = n_for_attempt,
+                                                total = total,
+                                                completed = t_completed,
+                                                target = t_target,
+                                                reason = ?reason,
+                                                "discovery: tracker returned Stop"
+                                            );
+                                            if matches!(reason, StopReason::Saturated) {
+                                                TelemetryEvent::DiscoverySaturated {
+                                                    run_id: run_id.to_string(),
+                                                    coverage,
+                                                    at_unix: crate::time::now_unix_secs(),
+                                                }
+                                                .emit();
+                                            }
+                                        }
+                                        decision
+                                    };
+                                    if let StopDecision::Stop { reason } = decision {
+                                        *stop_reason_for_task
+                                            .lock()
+                                            .expect("stop_reason poisoned") = Some(reason);
+                                    }
+                                }
+                                Ok(sketch) => {
+                                    tracing::warn!(
+                                        sketch_id = %id,
+                                        n = n_for_attempt,
+                                        thesis_len = sketch.thesis.trim().len(),
+                                        "discovery: sketch rejected (thesis too short)"
+                                    );
+                                    let mut s = state_for_task.lock().expect("state poisoned");
+                                    s.record_failure();
+                                    let _ = s.save(&run_dir_for_task);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        sketch_id = %id,
+                                        n = n_for_attempt,
+                                        error = %e,
+                                        "discovery: sketch extraction failed after retries; recording failure"
+                                    );
+                                    let mut s = state_for_task.lock().expect("state poisoned");
+                                    s.record_failure();
+                                    let _ = s.save(&run_dir_for_task);
                                 }
                             }
-                            Ok(sketch) => {
-                                tracing::warn!(
-                                    sketch_id = %id,
-                                    n = n,
-                                    thesis_len = sketch.thesis.trim().len(),
-                                    "discovery: sketch rejected (thesis too short)"
-                                );
-                                state.record_failure();
-                                state.save(&run_dir)?;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    sketch_id = %id,
-                                    n = n,
-                                    error = %e,
-                                    "discovery: sketch extraction failed after retries; recording failure"
-                                );
-                                state.record_failure();
-                                state.save(&run_dir)?;
-                            }
-                        }
+                        });
 
                         n += 1;
                         tokio::task::yield_now().await;
@@ -822,12 +896,33 @@ impl DiscoveryCoordinator {
             }
         }
 
+        // Drain in-flight tasks. Cancellation cooperates: each task
+        // checks `cancel_for_task.is_cancelled()` before the LLM call
+        // and bails, so a SIGTERM mid-loop returns within ~one LLM
+        // round-trip.
+        while join_set.join_next().await.is_some() {}
+
+        // Snapshot final state for the trace + outcome under the
+        // mutex and release the lock before the cleanup and the
+        // outcome construction.
+        let (final_completed, final_failed, final_stop_reason) = {
+            let s = shared_state.lock().expect("state poisoned");
+            let completed = s.completed_sketches.len();
+            let failed = s.failed_attempts as usize;
+            drop(s);
+            let stop = shared_stop_reason
+                .lock()
+                .expect("stop_reason poisoned")
+                .clone();
+            (completed, failed, stop)
+        };
+
         tracing::info!(
-            completed = n,
+            completed = final_completed,
             total = total,
-            stop_reason = ?stop_reason,
-            completed_in_state = state.completed_sketches.len(),
-            failed = state.failed_attempts,
+            stop_reason = ?final_stop_reason,
+            completed_in_state = final_completed,
+            failed = final_failed,
             "discovery: loop exit"
         );
 
@@ -835,16 +930,19 @@ impl DiscoveryCoordinator {
         //    (either the target was reached or the tracker said
         //    `Stop`). The sketches under <run_dir>/sketches/ stay
         //    on disk so downstream phases can read them.
-        state.mark_done();
+        {
+            let mut s = shared_state.lock().expect("state poisoned");
+            s.mark_done();
+            let _ = s.save(&run_dir);
+        }
         SketchLoopState::delete(&run_dir)?;
 
-        let _ = stop_reason; // Reserved for the future post-stop telemetry surface.
         let _ = legacy;
 
         Ok(DiscoveryOutcome {
             run_id,
-            sketches_completed: state.completed_sketches.len(),
-            sketches_failed: state.failed_attempts as usize,
+            sketches_completed: final_completed,
+            sketches_failed: final_failed,
             legacy_used: false,
         })
     }
