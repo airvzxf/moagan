@@ -87,6 +87,71 @@ pub use inspect::{
     grcov_available, render_text, scan_run,
 };
 
+// ADR-0002 §A.2: explicit FFI declaration for the LLVM SanCov
+// runtime. The stable Rust toolchain does NOT auto-link the
+// `compiler-rt` profile runtime when the binary is built with
+// `RUSTFLAGS="-Cinstrument-coverage"`; `cargo-llvm-cov` does
+// it via a small FFI trick. We mirror that here: the extern
+// declaration forces the linker to pull in the object file
+// that provides `__llvm_profile_write_file` and friends, and
+// the call site triggers a runtime flush of the in-memory
+// counters to the file pointed at by `LLVM_PROFILE_FILE`.
+//
+// The newer compiler-rt also exports `__llvm_profile_dump`,
+// which is a thin wrapper around `__llvm_profile_write_file`.
+// We declare the lower-level entry point directly because
+// (a) `__llvm_profile_dump` is not always present (older
+// compiler-rt only ships the `_write_file` symbol) and
+// (b) the local symbol `dump_runtime_counters` already
+// documents the intent, so we do not need the extra wrapper.
+//
+// The FFI is gated behind the `coverage` Cargo feature so the
+// default build (`cargo build` with no features) does not pull
+// the symbol and the linker does not need a stub. On the default
+// build the recorder is a true no-op; the snapshot's flush
+// branch reduces to "no file existed before, no file exists
+// after, return the active path".
+#[cfg(feature = "coverage")]
+unsafe extern "C" {
+    fn __llvm_profile_write_file();
+}
+
+/// Best-effort flush of the SanCov runtime counters. Calls
+/// `__llvm_profile_write_file()` when the recorder is active AND
+/// the binary was linked against the runtime (i.e. the
+/// `coverage` feature is on AND `RUSTFLAGS="-Cinstrument-coverage"`
+/// was passed at build time). On the default build, the call is
+/// compiled out entirely.
+///
+/// `#[inline(never)]` plus the volatile `black_box` on the
+/// function pointer together defeat LLVM's "side-effect-free
+/// extern" elision. The compiler-rt profile runtime writes to a
+/// file the optimizer does not model, so without these hints the
+/// call gets dropped. `core::hint::black_box` is the official
+/// escape hatch for "this call has effects I cannot model".
+#[cfg(feature = "coverage")]
+#[inline(never)]
+fn dump_runtime_counters() {
+    // SAFETY: `__llvm_profile_write_file` is async-signal-safe
+    // per the LLVM compiler-rt documentation, takes no arguments,
+    // and returns no value. The `black_box` around the function
+    // pointer prevents the optimizer from eliding the call as
+    // side-effect-free.
+    let f: unsafe extern "C" fn() = __llvm_profile_write_file;
+    let f = std::hint::black_box(f);
+    unsafe { f() };
+}
+
+/// Default-build stub. The `cfg`-gated `dump_runtime_counters`
+/// is the one that actually does work; this one exists so the
+/// call site in [`CoverageRecorder::snapshot`] does not need its
+/// own `#[cfg]`.
+#[cfg(not(feature = "coverage"))]
+fn dump_runtime_counters() {
+    // Intentionally empty: the default build has no SanCov
+    // runtime linked, so there is nothing to flush.
+}
+
 /// One captured coverage snapshot. The path is stable; the
 /// underlying `profraw` is frozen at the moment of the rename
 /// (further counter updates go to a new `profraw` that the
@@ -208,21 +273,52 @@ impl CoverageRecorder {
     /// flushed any counters). Both cases return the active path
     /// so callers can always record *something* into the JSONL.
     pub fn snapshot(&self, tag: &str) -> Result<CoverageSnapshot> {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            tag = tag,
+            seq = seq,
+            active = %self.active.display(),
+            snapshots_dir = %self.snapshots_dir.display(),
+            active_exists = self.active.exists(),
+            active_flag = self.active_flag,
+            "coverage: snapshot start"
+        );
         if !self.active_flag {
             return Ok(CoverageSnapshot {
                 path: self.active.clone(),
                 tag: tag.to_owned(),
-                seq: self.seq.fetch_add(1, Ordering::Relaxed),
+                seq,
             });
         }
-        if !self.active.exists() {
+        // Force the SanCov runtime to flush the in-memory
+        // counters to the active `profraw` file. Without this
+        // call the runtime buffers the counters and only writes
+        // them on process exit (via `atexit`), so a long-running
+        // pipeline would never produce a snapshot until the
+        // run terminates.
+        dump_runtime_counters();
+        let after_dump = self.active.exists();
+        let after_size = if after_dump {
+            std::fs::metadata(&self.active)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        tracing::debug!(
+            tag = tag,
+            seq = seq,
+            after_dump_exists = after_dump,
+            after_dump_size = after_size,
+            "coverage: dump flushed"
+        );
+        if !after_dump {
             return Ok(CoverageSnapshot {
                 path: self.active.clone(),
                 tag: tag.to_owned(),
-                seq: self.seq.fetch_add(1, Ordering::Relaxed),
+                seq,
             });
         }
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let active_name = self
             .active
             .file_name()

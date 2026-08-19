@@ -128,13 +128,15 @@ fn render_html(report: &CoverageReport, html_out: Option<&std::path::Path>) -> R
     });
     let status = std::process::Command::new("grcov")
         .arg(report.coverage_dir.as_os_str())
+        .arg("--binary-path")
+        .arg(std::env::current_exe().map_err(crate::Error::from)?)
         .arg("--source-dir")
         .arg(".") // The caller is expected to run from a checkout.
         .arg("--branch")
         .arg("--ignore-not-existing")
-        .arg("--output-format")
+        .arg("--output-types")
         .arg("html")
-        .arg("-o")
+        .arg("--output-path")
         .arg(&out)
         .status()
         .map_err(crate::Error::from)?;
