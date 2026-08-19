@@ -367,7 +367,11 @@ impl CoverageRecorder {
     /// (the impl currently does not block on it; the thread exits
     /// after [`Self::is_active`] flips off, which only happens via
     /// process exit anyway).
-    pub fn start_rotation(&self, max_bytes: u64, interval_secs: u64) -> Option<std::thread::JoinHandle<()>> {
+    pub fn start_rotation(
+        &self,
+        max_bytes: u64,
+        interval_secs: u64,
+    ) -> Option<std::thread::JoinHandle<()>> {
         if !self.active_flag {
             return None;
         }
@@ -376,9 +380,7 @@ impl CoverageRecorder {
             let interval = std::time::Duration::from_secs(interval_secs.max(1));
             loop {
                 std::thread::sleep(interval);
-                let size = std::fs::metadata(&me.active)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let size = std::fs::metadata(&me.active).map(|m| m.len()).unwrap_or(0);
                 if size > max_bytes {
                     let tag = format!("rotate-{}-{}", size, me.seq.load(Ordering::Relaxed));
                     if let Err(e) = me.snapshot(&tag) {
