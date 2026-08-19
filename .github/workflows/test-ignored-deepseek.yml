@@ -1,17 +1,36 @@
 name: test-ignored-deepseek
 
-# Restored from PR #525 on 2026-08-19.
-# Earlier (PR #529, PR #555) the workflow had been collapsed to a
-# single "DISABLED — budget exhausted" stub job and the auto-trigger
-# removed, leaving it as a `workflow_dispatch`-only banner. This file
-# restores both jobs (preflight + cargo test -- --ignored) so the
-# workflow does real work whenever it fires — and so that, once the
-# native DeepSeek budget comes back, the gate is already wired and
-# will run on every push to main with no further code change.
+# Manual-only post-merge validation for the native DeepSeek provider.
+# Triggers exclusively on `workflow_dispatch:` so it costs zero runner
+# minutes and zero upstream tokens on every push to `main`. Dispatch
+# from the Actions tab when you actually want to exercise the
+# integration_discover_deepseek test path; otherwise the workflow sits
+# silently in the workflow list with no green check on every commit
+# (the misleading "STUB but green" pattern was the rationale for
+# removing the auto-trigger in PR #529 / PR #555).
+#
+# Both jobs (preflight-deepseek + test-ignored-deepseek) do real work
+# when the workflow fires:
+# - `preflight-deepseek` probes the upstream with a 30 s HTTP call
+#   against https://api.deepseek.com/v1/models. Exit 0 + SKIP line when
+#   DEEPSEEK_API_KEY is absent on the runner; non-2xx exits 1 (the
+#   gating signal the test job `needs:`'s).
+# - `test-ignored-deepseek` runs `cargo test --test
+#   integration_discover_deepseek -- --ignored`. Early-returns via
+#   `Skip` on secret-absent (the test body checks for that first), so a
+#   fork without the key still goes green.
+#
+# Timeout 120 min per job covers the degraded-upstream case (~45 min on
+# a healthy local run, ~90 min on a slow upstream).
+#
+# Restored from the PR #525 shape on 2026-08-19 (PR #555 had previously
+# collapsed this file to a 1-job `disabled-stub` banner); the auto
+# `push: branches: [main]` trigger was deliberately NOT added because
+# the DeepSeek budget is currently exhausted (~$1 of $5 left per docs/
+# pending-items-2026-08-13.md §9.3) and we want each merge to main to
+# be cheap even when the budget is back.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 # Serialize concurrent runs to avoid artifact races.
@@ -21,18 +40,6 @@ concurrency:
 
 permissions:
   contents: read
-
-# Post-merge informative validation for the native deepseek provider.
-# Runs the integration_discover_deepseek -- --ignored test on every push to
-# main and on manual dispatch. NOT a PR gate — moved out of ci.yml in #525
-# to (a) reduce per-PR runner cost, (b) eliminate refs/pull/N/merge cache
-# pollution, (c) align with the e2e-network post-merge pattern.
-#
-# The `preflight-deepseek` job probes the upstream with a 30 s HTTP call
-# and exits 0 (with a SKIP line) when DEEPSEEK_API_KEY is absent on the
-# runner; `test-ignored-deepseek` then gates on the secret the same way
-# and runs `cargo test -- --ignored` when it is present. Timeout 120 min
-# accommodates the rare case of a degraded upstream.
 
 jobs:
   preflight-deepseek:
