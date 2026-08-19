@@ -22,15 +22,18 @@ concurrency:
   cancel-in-progress: false
 
 # Minimum token permissions: read repo contents. The MINIMAX_API_KEY
-# and OPENCODE_GO_API_KEY secrets are consumed via `secrets.*` and
-# never written back to the repo.
+# secret is consumed via `secrets.*` and never written back to the
+# repo. OPENCODE_GO_API_KEY / DEEPSEEK_API_KEY are no longer consumed
+# here (moved to manual-only workflows in this restructure).
 permissions:
   contents: read
 
 # Auto-trigger end-to-end suite: short + medium jobs only.
-# The long/heavy jobs (card80, the 14-model opencode_go sweep) were
-# extracted into dedicated manual-only workflows on 2026-08-19 to keep
-# this workflow cheap on every push to main:
+# This workflow runs on every push to main and carries exactly the
+# MiniMax fast + explore rows. The long/heavy jobs (card80, the
+# 14-model opencode_go sweep) and the per-provider discovery / ignored
+# tests were extracted into dedicated manual-only workflows on
+# 2026-08-19 to keep this workflow cheap on every push to main:
 #   - `e2e-network-card80.yml`                          — MiniMax card80
 #   - `e2e-network-discover-opencode-go-models.yml`     — 14-model sweep
 #   - `test-ignored-deepseek.yml`                       — DeepSeek stub
@@ -43,10 +46,6 @@ permissions:
 #   build-e2e-network            — runs once, uploads target/release/moagan
 #                                  as the `moagan-e2e-binary` artifact.
 #                                  ~5 min on warm cache, ~12 min cold.
-#   preflight-opencode_go        — needs: build-e2e-network; opencode_go
-#                                  /v1/models HTTP probe that gates
-#                                  test-discover-opencode-go and
-#                                  discover-opencode-go. ~30 s.
 #   preflight-minimax            — needs: build-e2e-network; minimax
 #                                  /v1/models HTTP probe that gates
 #                                  test-fast and test-explore. ~30 s.
@@ -57,26 +56,10 @@ permissions:
 #   test-explore                 — needs: [build-e2e-network,
 #                                  preflight-minimax]; runs on every
 #                                  push to main. retry x4. ~8 min.
-#   test-discover-opencode-go    — needs: [build-e2e-network,
-#                                  preflight-opencode_go]; runs on every
-#                                  push to main. ~5 min of wire time.
-#                                  Consumes OPENCODE_GO_API_KEY.
-#   discover-opencode-go         — needs: [build-e2e-network,
-#                                  preflight-opencode_go]; runs on every
-#                                  push to main. Same `make
-#                                  e2e-network-discover-opencode-go`
-#                                  step as the sibling
-#                                  `test-discover-opencode-go` job, PLUS
-#                                  a `cargo test --test
-#                                  integration_discover_opencode_go --
-#                                  --ignored` step (Tier A #10). The
-#                                  integration test early-returns when
-#                                  OPENCODE_GO_API_KEY is absent, so a
-#                                  fork without the secret stays green.
 #
-# Wall-clock on push: ~max(build ~5 min, slowest row ≈ 8 min
-# test-explore) ≈ 8 min plus ~5 min of artifact upload overlap. Total
-# ~8 min per push to main on warm cache; ~15 min cold.
+# Wall-clock on push: ~max(build ~5 min, slowest row ≈ test-explore ~8 min)
+# ≈ 8 min plus artifact upload overlap. Total ~8 min per push to main
+# on warm cache; ~15 min cold.
 #
 # Jobs removed on 2026-08-19 (this restructure):
 #   - preflight-deepseek, test-discover-deepseek, discover-deepseek:
@@ -86,12 +69,19 @@ permissions:
 #     jobs. To restore: bring back the preflight + test-discover +
 #     discover-with-ignored triplet from PR #525 + #529 when the
 #     budget is back.
+#   - preflight-opencode_go, test-discover-opencode-go,
+#     discover-opencode-go: per-provider discovery is no longer part
+#     of the auto path. Discovery is opt-in via the manual workflows
+#     listed above (card80 covers MiniMax discovery; the 14-model
+#     sweep covers opencode_go discovery). To restore automatic
+#     discovery runs: re-add the four `discover-*` jobs and the
+#     opencode_go preflight here.
 #   - test-card80: moved to `e2e-network-card80.yml` (~25 min, manual).
 #   - test-discover-opencode-go-models: moved to
 #     `e2e-network-discover-opencode-go-models.yml` (~70 min, manual,
 #     14 opencode_go aliases).
 #
-# On `push` events the 5 active jobs above run in parallel after
+# On `push` events the 3 active jobs above run in parallel after
 # `build-e2e-network` completes (wall-clock ≈ slowest row, ~8 min).
 # On `workflow_dispatch` the run is identical — the heavy sections
 # live in their own manual workflows.
@@ -147,41 +137,18 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Pre-flight provider API probes. Each provider has its own
-  # per-provider preflight job so a single-provider outage does not
-  # block the others' downstream tests. Each probe is a 30 s HTTP GET
-  # to the provider's /v1/models endpoint; if a probe returns non-2xx
-  # (401, 403, 5xx, timeout, network error) the preflight fails and
-  # only the `test-*` jobs that `needs:` it are SKIPPED — the desired
-  # GitHub Actions signal for a dead upstream. Prevents wasted runner
-  # time on a per-provider outage (PR #473). Secret-absent → SKIP
-  # (exit 0) so fork PRs without secrets stay green. Only echoes
-  # presence, length, prefix (first 8 + literal `...` + last 4 chars),
-  # and the HTTP status code; never the secret value. The preflights
-  # need the release binary build because the test jobs that depend
-  # on them also need it, and adding the dependency keeps the gate
+  # Pre-flight probe for MiniMax. 30 s HTTP GET to the
+  # /v1/models endpoint; non-2xx (401, 403, 5xx, timeout, network
+  # error) fails the preflight and the test-fast / test-explore jobs
+  # that `needs:` it are SKIPPED — the desired GitHub Actions signal
+  # for a dead upstream. Prevents wasted runner time on a
+  # provider-wide outage (PR #473). Secret-absent → SKIP (exit 0) so
+  # fork PRs without secrets stay green. Only echoes presence,
+  # length, prefix (first 8 + literal `...` + last 4 chars), and the
+  # HTTP status code; never the secret value. The preflight needs
+  # the release binary build because the test jobs that depend on
+  # it also need it, and adding the dependency keeps the gate
   # serial rather than racy.
-  preflight-opencode_go:
-    name: 'T3 · preflight — opencode_go'
-    needs: build-e2e-network
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - name: probe opencode_go
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-        run: |
-          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
-            echo "SKIP: OPENCODE_GO_API_KEY not set"
-            exit 0
-          fi
-          echo "OPENCODE_GO: set, length=${#OPENCODE_GO_API_KEY}, prefix=${OPENCODE_GO_API_KEY:0:8}...${OPENCODE_GO_API_KEY: -4}"
-          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $OPENCODE_GO_API_KEY" \
-            'https://opencode.ai/zen/go/v1/models' || echo "TIMEOUT")
-          echo "OPENCODE_GO http_status: $HTTP"
-          [[ "$HTTP" =~ ^2 ]] || exit 1
-
   preflight-minimax:
     name: 'T3 · preflight — minimax'
     needs: build-e2e-network
@@ -320,148 +287,3 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
           include-hidden-files: true
-
-  # Tier A #8 (docs/pending-items-2026-08-13.md §11): the A.bis
-  # discovery block of scripts/e2e_audit_proxy.sh had no CI job, so
-  # it had never run outside an operator's laptop. Gated on
-  # OPENCODE_GO_API_KEY; the script prints "SKIP: …" and exits 0 when
-  # the secret is absent.
-  test-discover-opencode-go:
-    name: 'Tier 3 · e2e — discover_opencode_go'
-    needs: [build-e2e-network, preflight-opencode_go]
-    runs-on: ubuntu-latest
-    # One discovery round (~5 min of wire time) plus generous headroom
-    # for a degraded upstream: the opencode_go /messages wire is fast
-    # but /chat/completions and /responses can add up.
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: moagan-e2e-binary
-          path: target/release/
-
-      - name: Change to executable binary
-        run: chmod +x target/release/moagan
-
-      - name: T3 · e2e-network (discover_opencode_go, real LLM)
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-          BIN: ${{ github.workspace }}/target/release/moagan
-          MOAGAN_SMOKE_SECTION: discover_opencode_go
-        run: make e2e-network-discover-opencode-go
-
-      - name: upload discover-opencode-go artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: moagan-e2e-discover-opencode-go-logs
-          path: ${{ github.workspace }}/.runs/
-          retention-days: 1
-          if-no-files-found: warn
-          include-hidden-files: true
-
-  # Tier A #8 + #10 (docs/pending-items-2026-08-13.md §11):
-  # the `test-discover-opencode-go` job above only runs the
-  # `make e2e-network-discover-opencode-go` target (release binary +
-  # audit-proxy assertions). This companion job adds the
-  # `cargo test --test integration_discover_opencode_go -- --ignored`
-  # step (Tier A #10), so the integration test runs in CI on every
-  # push to main, gated on the same API key. The test early-returns
-  # if the secret is absent, so a fork without the key stays green.
-  #
-  # Naming: `discover-*` (no `test-` prefix) per the task description;
-  # the `test-discover-opencode-go` job stays as-is so the proxy
-  # audits keep their current artifact names.
-  discover-opencode-go:
-    name: 'Tier 3 · e2e — discover_opencode_go (with --ignored)'
-    needs: [build-e2e-network, preflight-opencode_go]
-    runs-on: ubuntu-latest
-    # One discovery round (~5 min of wire time) for the make step PLUS
-    # another ~5 min for the cargo test --ignored step, plus generous
-    # headroom for a degraded upstream. The compile step adds ~30-60 s
-    # on warm cache (Swatinem/rust-cache prefix shared with the
-    # sibling jobs in this workflow).
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: moagan-e2e-binary
-          path: target/release/
-
-      - name: Change to executable binary
-        run: chmod +x target/release/moagan
-
-      # Build the debug binary that the cargo test harness uses via
-      # `env!("CARGO_BIN_EXE_moagan")`. Without this, the --ignored
-      # step below cannot compile.
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt,clippy
-
-      - name: T3 · e2e-network (discover_opencode_go, real LLM)
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-          BIN: ${{ github.workspace }}/target/release/moagan
-          MOAGAN_SMOKE_SECTION: discover_opencode_go
-        run: make e2e-network-discover-opencode-go
-
-      # Tier A #10: cargo test -- --ignored step. Closes the
-      # discovery integration-test coverage gap on every push to main.
-      # The test itself early-returns if OPENCODE_GO_API_KEY is not
-      # set (tests/integration_discover_opencode_go.rs:34-37), so the
-      # runner stays green when the secret is absent — the same
-      # gating the existing `test-discover-*` job relies on.
-      - name: cargo test integration_discover_opencode_go -- --ignored (gated on OPENCODE_GO_API_KEY)
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-        run: |
-          echo "============================================================"
-          echo "DIAGNOSTIC HEADER"
-          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
-          echo "  Runner:             $(uname -a)"
-          echo "  Working directory:  $(pwd)"
-          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "  Provider under test: opencode_go"
-          echo "============================================================"
-          echo "API key presence:"
-          echo "  OPENCODE_GO_API_KEY set: $([[ -n "${OPENCODE_GO_API_KEY:-}" ]] && echo yes || echo no)"
-          echo "  OPENCODE_GO_API_KEY length: ${#OPENCODE_GO_API_KEY} chars"
-          echo "  OPENCODE_GO_API_KEY prefix (first 8 chars, safe to echo): ${OPENCODE_GO_API_KEY:0:8}"
-          echo "  (prefix is a non-secret identifier like 'sk-PMU4xI'; safe to log)"
-          echo "============================================================"
-          if [[ -z "${OPENCODE_GO_API_KEY:-}" ]]; then
-            echo "SKIP: OPENCODE_GO_API_KEY not set on runner; opencode_go --ignored test not run"
-            exit 0
-          fi
-          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
-          START_TS=$(date +%s)
-          cargo test --test integration_discover_opencode_go -- --ignored --nocapture
-          CARGO_RC=$?
-          END_TS=$(date +%s)
-          echo "============================================================"
-          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
-          echo "============================================================"
-          exit $CARGO_RC
-
-      - name: upload discover-opencode-go artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: moagan-e2e-discover-opencode-go-logs
-          path: ${{ github.workspace }}/.runs/
-          retention-days: 1
-          if-no-files-found: warn
-          include-hidden-files: true
-
-      - name: upload discover-opencode-go test artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: moagan-e2e-discover-opencode-go-test-logs
-          path: target/test-runs/opencode_go/
-          retention-days: 1
-          if-no-files-found: warn
