@@ -1,39 +1,39 @@
 name: test-ignored-deepseek
 
+# Manual-only post-merge validation for the native DeepSeek provider.
+# Triggers exclusively on `workflow_dispatch:` so it costs zero runner
+# minutes and zero upstream tokens on every push to `main`. Dispatch
+# from the Actions tab when you actually want to exercise the
+# integration_discover_deepseek test path; otherwise the workflow sits
+# silently in the workflow list with no green check on every commit
+# (the misleading "STUB but green" pattern was the rationale for
+# removing the auto-trigger in PR #529 / PR #555).
+#
+# Both jobs (preflight-deepseek + test-ignored-deepseek) do real work
+# when the workflow fires:
+# - `preflight-deepseek` probes the upstream with a 30 s HTTP call
+#   against https://api.deepseek.com/v1/models. Exit 0 + SKIP line when
+#   DEEPSEEK_API_KEY is absent on the runner; non-2xx exits 1 (the
+#   gating signal the test job `needs:`'s).
+# - `test-ignored-deepseek` runs `cargo test --test
+#   integration_discover_deepseek -- --ignored`. Early-returns via
+#   `Skip` on secret-absent (the test body checks for that first), so a
+#   fork without the key still goes green.
+#
+# Timeout 120 min per job covers the degraded-upstream case (~45 min on
+# a healthy local run, ~90 min on a slow upstream).
+#
+# Restored from the PR #525 shape on 2026-08-19 (PR #555 had previously
+# collapsed this file to a 1-job `disabled-stub` banner); the auto
+# `push: branches: [main]` trigger was deliberately NOT added because
+# the DeepSeek budget is currently exhausted (~$1 of $5 left per docs/
+# pending-items-2026-08-13.md §9.3) and we want each merge to main to
+# be cheap even when the budget is back.
+
 on:
   workflow_dispatch:
 
-# Stub workflow. Originally fired on every push to main and on manual
-# dispatch (PR #525), then auto-stubbed to a single-job "DISABLED"
-# banner (PR #529, native DeepSeek budget exhausted).
-#
-# On 2026-08-19 the `push: branches: [main]` trigger was removed
-# entirely. The workflow now runs ONLY when the maintainer dispatches
-# it manually (`workflow_dispatch`). When dispatched, the
-# `disabled-stub` job prints the DISABLED banner as the
-# maintainer-facing reminder.
-#
-# Rationale: with the auto path gone, the workflow sits silently in
-# the workflow list — no runner minutes, no API tokens, no
-# misleading green check on every commit. The maintainer can still
-# trigger it any time to see the stub banner (or to confirm the
-# manual path works before restoring the real jobs).
-#
-# To re-enable for automatic runs:
-# 1. Re-add `push: branches: [main]` to `on:` above (parity with
-#    PR #525).
-# 2. Replace the `disabled-stub` job with the original
-#    `preflight-deepseek` + `test-ignored-deepseek` jobs from PR #525.
-# 3. Drop the `if: false` lines on `preflight-deepseek` /
-#    `test-discover-deepseek` / `discover-deepseek` in
-#    `e2e-network.yml` (also deleted on 2026-08-19; restore from
-#    PR #525 + PR #529).
-#
-# History:
-# - PR #525 (2026-08-16): introduced as post-merge informative workflow
-# - PR #529 (2026-08-17): stubbed because budget still exhausted
-# - PR #XXX (2026-08-19): removed auto-trigger on push; manual-only
-
+# Serialize concurrent runs to avoid artifact races.
 concurrency:
   group: test-ignored-deepseek-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -42,20 +42,71 @@ permissions:
   contents: read
 
 jobs:
-  disabled-stub:
-    name: 'DISABLED — DeepSeek budget exhausted'
-    if: ${{ always() }}
+  preflight-deepseek:
+    name: 'T3 · preflight — deepseek'
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     steps:
-      - name: skip with explanation
+      - name: probe deepseek
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          echo "================================================================"
-          echo "DISABLED: test-ignored-deepseek is currently a stub."
-          echo "Reason: native DeepSeek pay-as-you-go budget exhausted."
-          echo "Auto-trigger on push to main was removed on 2026-08-19; this"
-          echo "workflow now runs only on manual dispatch."
-          echo "To re-enable: restore the original jobs from PR #525 and"
-          echo "re-add `push: branches: [main]` to `on:` above."
-          echo "================================================================"
-          exit 0
+          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+            echo "SKIP: DEEPSEEK_API_KEY not set"
+            exit 0
+          fi
+          echo "DEEPSEEK: set, length=${#DEEPSEEK_API_KEY}, prefix=${DEEPSEEK_API_KEY:0:8}...${DEEPSEEK_API_KEY: -4}"
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            'https://api.deepseek.com/v1/models' || echo "TIMEOUT")
+          echo "DEEPSEEK http_status: $HTTP"
+          [[ "$HTTP" =~ ^2 ]] || exit 1
+
+  test-ignored-deepseek:
+    name: 'T2 · cargo test -- --ignored (deepseek)'
+    needs: preflight-deepseek
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+      - name: cargo test integration_discover_deepseek -- --ignored (gated on DEEPSEEK_API_KEY)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          echo "============================================================"
+          echo "DIAGNOSTIC HEADER"
+          echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
+          echo "  Runner:             $(uname -a)"
+          echo "  Working directory:  $(pwd)"
+          echo "  Date (UTC):         $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "  Provider under test: deepseek"
+          echo "============================================================"
+          echo "API key presence:"
+          echo "  DEEPSEEK_API_KEY set: $([[ -n "${DEEPSEEK_API_KEY:-}" ]] && echo yes || echo no)"
+          echo "  DEEPSEEK_API_KEY length: ${#DEEPSEEK_API_KEY} chars"
+          echo "============================================================"
+          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+            echo "SKIP: DEEPSEEK_API_KEY not set on runner; deepseek --ignored test not run"
+            exit 0
+          fi
+          echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
+          START_TS=$(date +%s)
+          cargo test --test integration_discover_deepseek -- --ignored --nocapture
+          CARGO_RC=$?
+          END_TS=$(date +%s)
+          echo "============================================================"
+          echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
+          echo "============================================================"
+          exit $CARGO_RC
+
+      - name: upload test-ignored artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: moagan-test-ignored-deepseek-logs
+          path: target/test-runs/deepseek/
+          retention-days: 1
+          if-no-files-found: warn
