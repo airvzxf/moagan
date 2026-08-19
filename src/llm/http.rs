@@ -181,6 +181,18 @@ impl MessagesResponseBody {
 /// the prefill on the cache-key side (see
 /// [`crate::llm::wire::Request`]), so the cross-run cache stays
 /// valid.
+///
+/// Issue #558 pins the contract: `Role::Intake` MUST stay on the
+/// `role_requires_json` list (see
+/// `crate::llm::openai_compat::role_requires_json`). The Intake
+/// shape `{problem, objectives[], constraints[], non_goals[],
+/// open_questions[], raw_prompt}` is the first JSON the MiniMax
+/// upstream emits on every `moagan run`/`moagan discover` call,
+/// and the `e2e-network` auto rows fail when the model still
+/// drifts into malformed output even with the prefill. The
+/// parse-side repair in
+/// `crate::phases::util::repair_stray_comma_after_key` covers the
+/// cases the prefill does not.
 pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
     use crate::llm::openai_compat::role_requires_json;
     let mut messages: Vec<MessagesMessage> = vec![MessagesMessage {
