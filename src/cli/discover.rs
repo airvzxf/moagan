@@ -357,11 +357,9 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     )?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
     // PR-B1: `--max-parallelism` is validated up-front (D.15.5:
-    // hard cap 64 simultaneous LLM calls). Today the flag is parsed
-    // but the value is passed through `Parallelism::new` unchecked;
-    // a typo like `--max-parallelism 4096` silently raises the
-    // semaphore and overwhelms the upstream rate-limit. The
-    // helper in `flags_batch.rs` is the same one the cheatsheet
+    // hard cap u32::MAX simultaneous LLM calls after PR #543 lifted
+    // the cap from 64 to honour the operator's choice). The helper
+    // in `flags_batch.rs` is the same one the cheatsheet
     // (`docs/cli-cheatsheet.md` §1 row 5) promises, so we surface
     // its exact error message.
     if let Some(n) = opts.max_parallelism {
