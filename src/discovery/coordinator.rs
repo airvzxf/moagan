@@ -742,14 +742,18 @@ impl DiscoveryCoordinator {
                             );
                         }
 
-                        // PR-D2 follow-up: 1 retry (down from 3) because MiniMax-M3
-                        // deterministically produces unescaped-double-quote pathology at
-                        // temperature >= 1.0 (see PR-D2 notes). 4 attempts per failed
-                        // iteration was projecting onto a ~30-day test for cardinalidad 880
-                        // × 21 temps × 3 replicas. The coordinator ALREADY records parse
-                        // failures via `state.record_failure()` and continues, so dropping
-                        // retries loses nothing on the happy path and trades ~75 % wasted
-                        // LLM calls for a 4× speedup overall.
+                        // PR-D2 follow-up: 2 retries (up from 1, down from the
+                        // original 3) because run8 on 2026-08-19 had a 4.2 % sketch
+                        // rejection rate vs 1.6 % on run7. Verified bucket: 45 of
+                        // 57 rejections were JSON parse failures (trailing comma,
+                        // schema mismatch) caused by the temperature 1.0+ pathology
+                        // on MiniMax-M3. Two retries (3 attempts) recover the
+                        // majority of those failures without re-introducing the
+                        // 30-day cardinalidad 880 projection that motivated the
+                        // drop from 3 to 1 in the first place — the dominant
+                        // retry cost is the 15–18 s LLM round-trip, and 2 retries
+                        // add at most 36 s per failing iteration, which is bounded
+                        // by the rest of the test runtime.
                         //
                         // PR-2: the entire iteration runs inside the spawned task. The
                         // task acquires a parallelism permit (semaphore.acquire) BEFORE
@@ -765,7 +769,7 @@ impl DiscoveryCoordinator {
                                 Err(_) => return,
                             };
 
-                            let sketch_result = retry_sketch_extraction(1, || {
+                            let sketch_result = retry_sketch_extraction(2, || {
                                 let ctx = ctx_for_attempt.clone();
                                 let user = user_for_attempt.clone();
                                 let system = system_for_attempt.to_string();
