@@ -1240,6 +1240,102 @@ algorithm and the cache-file format.
 
 ---
 
+## 20. `moagan coverage show <run_id>`
+
+**👁 What it is** — Renders the SanCov runtime coverage report for one run. ADR-0002. Layer B of the design (enriched `tracing` JSONL with `file:line:column` metadata) is always on; layer A (the `*.profraw` files this command reads) only exists when the binary was built with the `coverage` Cargo feature AND `RUSTFLAGS="-Cinstrument-coverage"`. The text view always works (it just prints a "not instrumented" hint when no `profraw` is on disk); the HTML view shells out to `grcov` and fails with a clear error when `grcov` is not on `PATH`.
+
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| `<run_id>` malformed | `InvalidArgs` |
+| `--format text` (default) | writes the snapshot table to stdout, always exit 0 |
+| `--format html` without `grcov` on `PATH` | `InvalidState` (exit 80) with a copy-pasteable `grcov` invocation hint |
+| `--format html` with `grcov` | writes `<run_dir>/coverage.html` and exits 0 |
+| `--since-tag <needle>` | filters the snapshot list to files whose name contains the needle (case-insensitive substring match); handy for narrowing to one phase or call id |
+| `--html-out <path>` | override the HTML output path (default `<run_dir>/coverage.html`) |
+
+**⚙️ Internal flow**
+
+```
+cli::dispatch → Cmd::Coverage { sub: CoverageCmd::Show { .. } }
+  → coverage_cmd::dispatch(&home, sub)
+  → run_dir = home.run_dir(run_id)
+  → report  = coverage::scan_run(&run_dir)        // collect *.profraw + sizes
+  → if --since-tag: report = coverage::filter_by_tag(&report, tag)
+  → match format:
+       Text → print!(render_text(&report))         // always 0
+       Html → ensure_instrumented(&report)? + Command::new("grcov")…
+```
+
+The text view is intentionally pure-Rust — it just lists the
+`profraw` files and their sizes, and prints the exact `grcov`
+and `llvm-profdata` + `llvm-cov` commands the operator can run
+to render the report by hand. This keeps the post-mortem story
+useful even on machines without `grcov` installed.
+
+The HTML view needs `grcov` on `PATH`. The detection lives in
+`coverage::grcov_available()` (a `which(1)`-style probe). When
+`grcov` is missing the command exits non-zero with a message
+that names the install method (`pacman -S grcov` on Arch,
+`cargo install grcov` elsewhere).
+
+**Build flags**
+
+The default `cargo build` does NOT produce coverage data. To
+enable it:
+
+```bash
+RUSTFLAGS="-Cinstrument-coverage" cargo build --features coverage --release
+# Sanity-check the binary links the runtime
+nm target/release/moagan | grep -i __llvm_profile
+```
+
+The `coverage` Cargo feature is **default-off** (mirrors the
+existing `dag` feature). The release artefacts in `release.yml`
+are unaffected.
+
+**Example — text view of a non-instrumented run**
+
+```bash
+$ moagan coverage show 01a0178c --format text
+run 01a0178c  coverage report
+  dir : ~/.local/share/moagan/.runs/01a0178c/telemetry/coverage
+  status: not instrumented — no `*.profraw` files in the coverage directory
+  hint  : rebuild with `--features coverage` and
+          `RUSTFLAGS="-Cinstrument-coverage"` to enable
+          SanCov runtime coverage
+```
+
+**Example — text view of an instrumented run**
+
+```bash
+$ moagan coverage show 01a0178c --format text --since-tag phase-3
+run 01a0178c  coverage report
+  dir : ~/.local/share/moagan/.runs/01a0178c/telemetry/coverage
+  status: instrumented — 2 `profraw` file(s)
+
+  file                                                          size (B)
+  ------------------------------------------------------------  ----------
+  01a0178c-phase-3-2.profraw                                            412
+  01a0178c-phase-3-3.profraw                                          1,287
+
+  to render the per-line coverage report, run from a shell:
+    grcov ~/.local/share/moagan/.runs/01a0178c/telemetry/coverage …
+```
+
+**❌ Errors / exit codes**
+
+| Case | Error | Exit |
+|---|---|---|
+| `<run_id>` malformed | `InvalidArgs` | 2 |
+| `--format html` and `grcov` not on `PATH` | `InvalidState` | 80 |
+| `grcov` exit non-zero | `InvalidState` | 80 |
+| run dir missing | (text view: empty report) | 0 |
+| run dir missing + `--format html` | `InvalidState` | 80 |
+
+---
+
 # Appendix A — Master exit-code table
 
 (T01-06 §12.3 + extended catalog)
@@ -1295,6 +1391,7 @@ algorithm and the cache-file format.
 | `pause` | `paused run <id> at phase '<name>' (N completed phases)` | `<run_dir>/paused.{json,lock}` |
 | `list` | one run id per line or `(no paused runs)` | (read-only) |
 | `rate` | `rated <proposal> = <score> for run <id>` | preference cache |
+| `coverage show` | text table (or "not instrumented" hint) | `<run_dir>/telemetry/coverage/*.profraw` |
 
 ---
 
@@ -1332,3 +1429,4 @@ algorithm and the cache-file format.
 | `moagan list` | Enumerate runs with `paused.json` |
 | `moagan rate` | Manually rate a proposal (preference cache) |
 | `moagan probe max_tokens` | Bulk-probe `(provider, model)` ceilings and persist (§19) |
+| `moagan coverage show` | Render the SanCov runtime coverage report for one run (ADR-0002) |
