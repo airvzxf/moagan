@@ -12,6 +12,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -246,6 +247,14 @@ struct Inner {
     /// call `snapshot()` to capture the active `profraw` path and
     /// record it on the JSONL row.
     coverage: Option<CoverageRecorder>,
+    /// Periodic flush support. Every record method bumps
+    /// `flush_counter`; when `(counter + 1) % flush_every == 0`
+    /// the recorder auto-flushes so a killed-before-flush process
+    /// does not lose the most recent events to the gzip buffer.
+    flush_counter: AtomicU64,
+    /// Flush threshold. Read once from `MOAGAN_TELEMETRY_FLUSH_EVERY`
+    /// at construction; `0` disables auto-flush.
+    flush_every: u64,
 }
 
 impl std::fmt::Debug for Inner {
@@ -348,6 +357,11 @@ impl Telemetry {
                 ))),
                 db,
                 coverage: Some(coverage),
+                flush_counter: AtomicU64::new(0),
+                flush_every: std::env::var("MOAGAN_TELEMETRY_FLUSH_EVERY")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(50),
             }),
         })
     }
@@ -413,6 +427,8 @@ impl Telemetry {
                 // `LLVM_PROFILE_FILE` and does not touch the
                 // filesystem.
                 coverage: Some(CoverageRecorder::noop()),
+                flush_counter: AtomicU64::new(0),
+                flush_every: 0, // tests do not auto-flush
             }),
         }
     }
@@ -480,6 +496,7 @@ impl Telemetry {
                 "SQLite checkpoint mirror failed"
             );
         }
+        self.flush_if_due();
         Ok(())
     }
 
@@ -552,6 +569,7 @@ impl Telemetry {
         {
             tracing::warn!(phase, seq, status, error = %e, "SQLite phase mirror failed");
         }
+        self.flush_if_due();
         Ok(())
     }
 
@@ -677,6 +695,7 @@ impl Telemetry {
         {
             tracing::warn!(call_id, error = %e, "provider_rollups write failed");
         }
+        self.flush_if_due();
         Ok(())
     }
 
@@ -766,6 +785,7 @@ impl Telemetry {
                 tracing::warn!(code = ev.code, error = %e, "redact_audit write failed");
             }
         }
+        self.flush_if_due();
         Ok(())
     }
 
@@ -783,7 +803,32 @@ impl Telemetry {
         if let Some(w) = self.inner.saturation.lock().as_mut() {
             w.flush()?;
         }
+        tracing::debug!(
+            phases = self.inner.phases_path.display().to_string(),
+            calls = self.inner.calls_path.display().to_string(),
+            "telemetry: explicit flush"
+        );
         Ok(())
+    }
+
+    /// Auto-flush helper. The gzip/RedactWriter pipeline is buffered,
+    /// so a long-running pipeline that never calls `flush()` (e.g.
+    /// killed before `main` returns) can lose the most recent phase
+    /// events. The threshold is read once at construction from
+    /// `MOAGAN_TELEMETRY_FLUSH_EVERY` (default 50). Every N-th call
+    /// to a record method on this `Telemetry` invokes `flush()`.
+    fn flush_if_due(&self) {
+        let n = self
+            .inner
+            .flush_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let every = self.inner.flush_every;
+        if every > 0
+            && (n + 1).is_multiple_of(every)
+            && let Err(e) = self.flush()
+        {
+            tracing::warn!(error = %e, "telemetry: auto-flush failed");
+        }
     }
 
     /// Record a saturation event fired by the runtime
@@ -819,6 +864,7 @@ impl Telemetry {
                 "SQLite saturation_events mirror failed"
             );
         }
+        self.flush_if_due();
         Ok(())
     }
 

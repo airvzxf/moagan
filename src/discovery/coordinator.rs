@@ -630,17 +630,40 @@ impl DiscoveryCoordinator {
         let expanded_policy = policy;
         tracker = SaturationTracker::with_policy(total.max(target), expanded_policy);
 
+        let resume_from = state.completed_sketches.len();
+        tracing::info!(
+            total = total,
+            cells = cells.len(),
+            per_cell = per_cell,
+            profile_temps = profile_temperatures.len(),
+            profile_replicas = profile_replicas,
+            target_override = target,
+            tracker_target = tracker.target,
+            tracker_hard_cap = tracker.policy.hard_cap,
+            tracker_max_sketches = tracker.policy.max_sketches,
+            tracker_min_sketches = tracker.policy.min_sketches,
+            resume_from = resume_from,
+            completed_so_far = state.completed_sketches.len(),
+            "discovery: loop initialised"
+        );
+
         // 5. Main loop: fan out every (cell, temperature, replica, sketch_index) tuple.
         let mut n: usize = state.completed_sketches.len();
         let mut stop_reason: Option<StopReason> = None;
         'outer: for cell in cells.iter() {
             for &temperature in profile_temperatures.iter() {
-                for _replica in 0..profile_replicas {
+                for replica in 0..profile_replicas {
                     for sketch_index in 0..per_cell {
                         if cancel.is_cancelled() {
+                            tracing::warn!(n = n, total = total, "discovery: cancelled mid-loop");
                             return Err(cancel.into_error().into());
                         }
                         if n >= total {
+                            tracing::info!(
+                                n = n,
+                                total = total,
+                                "discovery: loop target reached; break 'outer"
+                            );
                             break 'outer;
                         }
                         let _permit = ctx.parallelism.acquire().await?;
@@ -653,6 +676,19 @@ impl DiscoveryCoordinator {
                         let id_for_attempt = id.clone();
                         let ctx_for_attempt = ctx.clone();
                         let n_for_attempt = n;
+
+                        if n < 5 || n.is_multiple_of(100) {
+                            tracing::trace!(
+                                n = n,
+                                total = total,
+                                cell_dim = %cell.dimension_id,
+                                cell_facet = %cell.facet_id,
+                                temperature = temperature,
+                                replica = replica,
+                                sketch_index = sketch_index,
+                                "discovery: iteration start"
+                            );
+                        }
 
                         let sketch_result = retry_sketch_extraction(3, || {
                             let ctx = ctx_for_attempt.clone();
@@ -718,13 +754,24 @@ impl DiscoveryCoordinator {
                                 state.record_completion(sketch.id.clone());
                                 state.save(&run_dir)?;
                                 tracker.record_completions(1);
+                                tracing::debug!(
+                                    sketch_id = %sketch.id,
+                                    n = n,
+                                    total = total,
+                                    angle = %sketch.angle,
+                                    thesis_len = sketch.thesis.len(),
+                                    completed = tracker.completed,
+                                    "discovery: sketch accepted"
+                                );
                                 let decision = tracker.update(&[sketch], &[]);
                                 if let StopDecision::Stop { reason } = decision {
-                                    tracing::info!(
-                                        reason = ?reason,
+                                    tracing::warn!(
+                                        n = n,
+                                        total = total,
                                         completed = tracker.completed,
                                         target = tracker.target,
-                                        "DiscoveryCoordinator::run_with_ctx: tracker returned Stop"
+                                        reason = ?reason,
+                                        "discovery: tracker returned Stop"
                                     );
                                     if matches!(reason, StopReason::Saturated) {
                                         TelemetryEvent::DiscoverySaturated {
@@ -738,15 +785,22 @@ impl DiscoveryCoordinator {
                                     break 'outer;
                                 }
                             }
-                            Ok(_) => {
+                            Ok(sketch) => {
+                                tracing::warn!(
+                                    sketch_id = %id,
+                                    n = n,
+                                    thesis_len = sketch.thesis.trim().len(),
+                                    "discovery: sketch rejected (thesis too short)"
+                                );
                                 state.record_failure();
                                 state.save(&run_dir)?;
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     sketch_id = %id,
+                                    n = n,
                                     error = %e,
-                                    "sketch extraction failed after retries; recording failure"
+                                    "discovery: sketch extraction failed after retries; recording failure"
                                 );
                                 state.record_failure();
                                 state.save(&run_dir)?;
@@ -759,6 +813,15 @@ impl DiscoveryCoordinator {
                 }
             }
         }
+
+        tracing::info!(
+            completed = n,
+            total = total,
+            stop_reason = ?stop_reason,
+            completed_in_state = state.completed_sketches.len(),
+            failed = state.failed_attempts,
+            "discovery: loop exit"
+        );
 
         // 6. Clean up the persisted state file on a clean stop
         //    (either the target was reached or the tracker said

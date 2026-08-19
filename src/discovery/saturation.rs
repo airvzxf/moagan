@@ -168,6 +168,20 @@ impl SaturationTracker {
         self.mean_intra_cluster_similarity = mean_intra_cluster_similarity(clusters);
         self.last_aporate = self.mean_intra_cluster_similarity;
 
+        tracing::trace!(
+            completed = self.completed,
+            target = self.target,
+            cluster_count = self.cluster_count,
+            batch_len = batch.len(),
+            intra_sim = self.mean_intra_cluster_similarity,
+            outliers = self.outliers_collected,
+            hard_cap = self.policy.hard_cap,
+            max_sketches = self.policy.max_sketches,
+            min_sketches = self.policy.min_sketches,
+            saturation_threshold = self.policy.saturation_threshold,
+            "saturation: update entry"
+        );
+
         // Outlier accounting. The detector treats unclustered
         // sketches as outliers (outlier.rs:90), so during the
         // matrix loop — where `clusters` is intentionally empty
@@ -211,6 +225,11 @@ impl SaturationTracker {
         }
 
         if self.completed >= self.policy.hard_cap {
+            tracing::debug!(
+                completed = self.completed,
+                hard_cap = self.policy.hard_cap,
+                "saturation: stop candidate hit (hard_cap)"
+            );
             return StopDecision::Stop {
                 reason: StopReason::MaxSketchesReached,
             };
@@ -218,25 +237,51 @@ impl SaturationTracker {
         if self.mean_intra_cluster_similarity >= self.policy.saturation_threshold
             && reserve_spent(self.completed, self.target, self.policy.reserve_ratio)
         {
+            tracing::debug!(
+                completed = self.completed,
+                intra_sim = self.mean_intra_cluster_similarity,
+                threshold = self.policy.saturation_threshold,
+                reserve = self.policy.reserve_ratio,
+                "saturation: stop candidate hit (Saturated)"
+            );
             return StopDecision::Stop {
                 reason: StopReason::Saturated,
             };
         }
         if self.completed >= self.policy.max_sketches {
+            tracing::debug!(
+                completed = self.completed,
+                max_sketches = self.policy.max_sketches,
+                "saturation: stop candidate hit (max_sketches)"
+            );
             return StopDecision::Stop {
                 reason: StopReason::MaxSketchesReached,
             };
         }
         if self.outliers_collected >= outliers_cap(self.policy.min_sketches) {
+            tracing::debug!(
+                outliers = self.outliers_collected,
+                cap = outliers_cap(self.policy.min_sketches),
+                "saturation: stop candidate hit (OutliersCollected)"
+            );
             return StopDecision::Stop {
                 reason: StopReason::OutliersCollected,
             };
         }
         if self.completed >= self.policy.min_sketches && batch.is_empty() {
+            tracing::debug!(
+                completed = self.completed,
+                min_sketches = self.policy.min_sketches,
+                "saturation: stop candidate hit (MinSketchesReached)"
+            );
             return StopDecision::Stop {
                 reason: StopReason::MinSketchesReached,
             };
         }
+        tracing::trace!(
+            completed = self.completed,
+            "saturation: no stop condition matched; Continue"
+        );
         StopDecision::Continue
     }
 }
