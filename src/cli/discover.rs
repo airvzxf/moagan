@@ -377,7 +377,20 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     // beat the derived default on conflict (catalog §D.19.6).
     let effective_rate_limit = crate::config::RateLimitConfig {
         capacity: resolved_parallelism as u32,
-        refill_per_sec: (resolved_parallelism / 4).max(1) as u32,
+        // PR-2 (perf/discovery-parallelism): the discovery loop is
+        // now actually parallel (see `coordinator::run_with_ctx_and_target`,
+        // `join_set.spawn`). The previous `parallelism / 4` default
+        // was calibrated for the old sequential loop where the
+        // bottleneck was a single concurrent call — it silently
+        // throttled dispatcher throughput to 1/4 of the configured
+        // parallelism. With the parallel loop, the rate limiter
+        // and the semaphore have the same knob — both limit
+        // concurrent in-flight calls — so the default matches
+        // 1:1. Operators who want a lower rate than the parallelism
+        // cap can override with `MOAGAN_RATE_LIMIT_<provider>` (the
+        // `attach_parallelism_rate_limit` call below applies that
+        // override whenever the per-provider config is set).
+        refill_per_sec: resolved_parallelism.max(1) as u32,
         initial: None,
     };
     crate::llm::provider::attach_parallelism_rate_limit(
