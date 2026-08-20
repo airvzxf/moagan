@@ -1473,18 +1473,34 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // validating the cross-run plumbing AND the per-run
             // planner.
             let cfg = Config::load()?;
+            // `--runs-dir` is the path of the `.runs` directory
+            // (the global_home.root()). The preflight derives the
+            // parent from it so that the discover run lives at
+            // `<runs-dir>/<id>` rather than the doubled
+            // `<runs-dir>/.runs/<id>` path that `home.run_dir`
+            // would otherwise produce.
+            let home_root = runs_dir
+                .clone()
+                .map(|p| {
+                    if p.ends_with(".runs") {
+                        p.parent().map(|x| x.to_path_buf()).unwrap_or(p)
+                    } else {
+                        p
+                    }
+                })
+                .unwrap_or_else(|| global_home.root().to_path_buf());
             let discover_run_id = discover::run(
                 discover::DiscoverOptions {
                     provider: provider.clone(),
                     prompt: prompt.clone(),
-                    home: runs_dir.clone(),
+                    home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),
                     cardinality: 8,
                     max_parallelism,
                     dimensions: 8,
                     facets_per_dimension: 1,
                     cluster_threshold: 0.7,
-                    out_dir: runs_dir.clone(),
+                    out_dir: Some(home_root.join(".runs")),
                     non_interactive,
                     cache_facets: false,
                     temperature_profiles: vec![discover::TemperatureProfileSpec {
@@ -1503,7 +1519,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     mode: Mode::Fast,
                     provider: provider.clone(),
                     prompt: prompt.clone(),
-                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
+                    home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),
                     non_interactive,
                     max_parallelism,
