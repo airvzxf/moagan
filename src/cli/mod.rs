@@ -655,6 +655,34 @@ pub enum Cmd {
         #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
         temperature_profiles: Vec<String>,
     },
+    /// Smoke-test the full pipeline end-to-end without the
+    /// cardinalidad 80 minimum. Runs `discover` with cardinality
+    /// 8 (one sketch per dimension × facets_per_dimension=1), a
+    /// single temperature (1.0), and 1 replica. Intended for CI
+    /// smoke tests and quick "does the LLM API still work?"
+    /// loops. Output is a tiny portfolio; the JSON runs are
+    /// skipped because the cardinality is below the production
+    /// matrix threshold.
+    Preflight {
+        /// Provider name (must be in config).
+        #[arg(long, default_value = "minimax")]
+        provider: String,
+        /// User prompt.
+        #[arg(long)]
+        prompt: String,
+        /// Override the home directory.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Load mock responses from this directory (provider=mock only).
+        #[arg(long)]
+        mock_dir: Option<std::path::PathBuf>,
+        /// Override the global concurrent-LLM cap.
+        #[arg(long, value_name = "N")]
+        max_parallelism: Option<usize>,
+        /// Non-interactive: no prompts.
+        #[arg(long, default_value_t = false)]
+        non_interactive: bool,
+    },
     /// `moagan telemetry` — read-only inspection, dashboard, export,
     /// verify, and retention. v0.3 sub-fase I (T01-06 §10.7 + §10.8
     /// + §10.9 + §10.10; V4 §8.7 + §8.8).
@@ -833,6 +861,9 @@ impl Cmd {
             }
             Self::List { .. } => "List runs (filter by --paused)",
             Self::Rate { .. } => "Record a user rating for a proposal (opt-in learning loop)",
+            Self::Preflight { .. } => {
+                "Smoke-test the full pipeline end-to-end with cardinality 8 (1 sketch per dimension), single temperature, single replica"
+            }
         }
     }
 }
@@ -1381,6 +1412,53 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 },
             )?;
             Ok(code)
+        }
+        Cmd::Preflight {
+            provider,
+            prompt,
+            runs_dir,
+            mock_dir,
+            max_parallelism,
+            non_interactive,
+        } => {
+            // Preflight: thin wrapper around `discover` with a
+            // fixed 8-sketch cardinality (dimensions ×
+            // facets_per_dimension = 8 × 1), single temperature
+            // (1.0), single replica. Bypasses the 80-sketch
+            // minimum on `discover` so CI smoke tests and
+            // operator quick-checks don't need to wait for the
+            // production matrix. The discover path still goes
+            // through the full coordinator (matrix build,
+            // coordinator.run_with_ctx_and_target, post-matrix
+            // pipeline) so a preflight that fails is a strong
+            // signal that the whole discovery pipeline is mis-
+            // configured, not just the matrix.
+            let cfg = Config::load()?;
+            let run_id = discover::run(
+                discover::DiscoverOptions {
+                    provider: provider.clone(),
+                    prompt: prompt.clone(),
+                    home: runs_dir.clone(),
+                    mock_dir: mock_dir.clone(),
+                    cardinality: 8,
+                    max_parallelism,
+                    dimensions: 8,
+                    facets_per_dimension: 1,
+                    cluster_threshold: 0.7,
+                    out_dir: runs_dir.clone(),
+                    non_interactive,
+                    cache_facets: false,
+                    temperature_profiles: vec![discover::TemperatureProfileSpec {
+                        provider: "MiniMax-M3".to_owned(),
+                        temperatures: vec![1.0],
+                        replicas_per_temperature: 1,
+                    }],
+                },
+                &cfg,
+            )
+            .await?;
+            println!("preflight run_id: {run_id}");
+            Ok(0)
         }
         Cmd::List { paused } => {
             if !paused {
