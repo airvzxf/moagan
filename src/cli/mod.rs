@@ -655,14 +655,21 @@ pub enum Cmd {
         #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
         temperature_profiles: Vec<String>,
     },
-    /// Smoke-test the full pipeline end-to-end without the
-    /// cardinalidad 80 minimum. Runs `discover` with cardinality
-    /// 8 (one sketch per dimension × facets_per_dimension=1), a
-    /// single temperature (1.0), and 1 replica. Intended for CI
-    /// smoke tests and quick "does the LLM API still work?"
-    /// loops. Output is a tiny portfolio; the JSON runs are
-    /// skipped because the cardinality is below the production
-    /// matrix threshold.
+    /// Smoke-test the full pipeline end-to-end via `moagan run --mode fast`.
+    /// Designed for CI smoke tests and operator quick-checks
+    /// ("does the LLM API still respond? did the last config
+    /// change break the pipeline?"). Cost: ~30-60 s of API
+    /// budget and ~3 MB of disk per run, vs ~5-15 min for a normal
+    /// full-matrix run.
+    ///
+    /// Wraps the FULL pipeline (intake → clarify → sketch →
+    /// judges → tag → cluster → facets → portfolio) — NOT just
+    /// the discovery loop. The original v1 of this subcommand
+    /// only wrapped `discover`, but that silently missed the
+    /// upstream phases where the LLM is most likely to return
+    /// malformed JSON (per the e2e-network flakes on 2026-08-20).
+    /// A preflight that reports `run id: <uuid>` is a strong
+    /// signal that the entire pipeline is healthy.
     Preflight {
         /// Provider name (must be in config).
         #[arg(long, default_value = "minimax")]
@@ -862,7 +869,7 @@ impl Cmd {
             Self::List { .. } => "List runs (filter by --paused)",
             Self::Rate { .. } => "Record a user rating for a proposal (opt-in learning loop)",
             Self::Preflight { .. } => {
-                "Smoke-test the full pipeline end-to-end with cardinality 8 (1 sketch per dimension), single temperature, single replica"
+                "Smoke-test the full pipeline end-to-end via `moagan run --mode fast` (intake → clarify → sketch → judges → tag → cluster → facets → portfolio)"
             }
         }
     }
@@ -1421,38 +1428,39 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             max_parallelism,
             non_interactive,
         } => {
-            // Preflight: thin wrapper around `discover` with a
-            // fixed 8-sketch cardinality (dimensions ×
-            // facets_per_dimension = 8 × 1), single temperature
-            // (1.0), single replica. Bypasses the 80-sketch
-            // minimum on `discover` so CI smoke tests and
-            // operator quick-checks don't need to wait for the
-            // production matrix. The discover path still goes
-            // through the full coordinator (matrix build,
-            // coordinator.run_with_ctx_and_target, post-matrix
-            // pipeline) so a preflight that fails is a strong
-            // signal that the whole discovery pipeline is mis-
-            // configured, not just the matrix.
+            // Preflight runs the FULL pipeline (intake →
+            // clarify → sketch → judges → tag → cluster → facets
+            // → portfolio) via `moagan run --mode fast`, not just
+            // the discovery loop. The original v1 of this
+            // subcommand only wrapped `discover` with low
+            // cardinality, but that misses the upstream intake
+            // and clarify phases — the most common regression
+            // points in practice (per the e2e-network fail
+            // 2026-08-20 on `a9a3c7f`, the LLM returns
+            // JSON fragments in the intake phase that the parser
+            // cannot recover). A preflight that skips intake
+            // would silently miss that class of bug.
+            //
+            // The wrapper uses `mode = fast` (the cheapest mode
+            // that still runs every phase) and the operator‑
+            // supplied prompt verbatim. CLI overrides are
+            // forwarded so the preflight respects the same
+            // parallelism / mock_dir / non‑interactive knobs as
+            // the full `run` command.
             let cfg = Config::load()?;
-            let run_id = discover::run(
-                discover::DiscoverOptions {
+            let run_id = run::run(
+                run::RunOptions {
+                    mode: Mode::Fast,
                     provider: provider.clone(),
                     prompt: prompt.clone(),
-                    home: runs_dir.clone(),
+                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir: mock_dir.clone(),
-                    cardinality: 8,
-                    max_parallelism,
-                    dimensions: 8,
-                    facets_per_dimension: 1,
-                    cluster_threshold: 0.7,
-                    out_dir: runs_dir.clone(),
                     non_interactive,
-                    cache_facets: false,
-                    temperature_profiles: vec![discover::TemperatureProfileSpec {
-                        provider: "MiniMax-M3".to_owned(),
-                        temperatures: vec![1.0],
-                        replicas_per_temperature: 1,
-                    }],
+                    max_parallelism,
+                    no_replace_sources: false,
+                    adversary: false,
+                    context: None,
+                    context_scope: crate::context::loader::ContextScope::DEFAULT,
                 },
                 &cfg,
             )
