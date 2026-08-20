@@ -1,0 +1,142 @@
+# Changelog
+
+All notable changes to `moagan` will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.9.2] - 2026-08-20
+
+### Fixed
+
+- **Parser chain stability** (#562) — `repair_missing_separators` in
+  `src/phases/util.rs` now infers object context when the stack is empty
+  and the next non-whitespace char is `:`. The previous behaviour re-inserted
+  a stray `,` between a JSON key and its colon, breaking the lenient
+  repair chain for fragments without a leading `{`. Unit-tested in
+  `phases::util::tests::parse_model_json_does_not_reintroduce_comma_after_stray_comma_fix`.
+  Closes `#558`.
+
+- **SanCov profraw rotation** (#563) — the `*.profraw` file emitted by
+  the
+  SanCov runtime coverage instrumentation previously grew unbounded
+  (~12 GB/hour on a healthily running pipeline). Added
+  `CoverageRecorder::start_rotation(max_bytes, interval_secs)` that
+  rotates the active file when it exceeds `MOAGAN_COVERAGE_PROFRAW_BYTES_MAX`
+  (default 1 GiB). The slice capture is renamed to a timestamped
+  sibling; merge with `llvm-profdata merge *.profraw.*` for cumulative
+  coverage.
+
+- **SanCov runtime warning** (#562) — `moagan` now emits a
+  `tracing::warn!` at startup when the binary was built with the
+  `coverage` Cargo feature AND `LLVM_PROFILE_FILE` is set, so the
+  operator knows the runtime file will grow unbounded without
+  rotation. The `start_rotation` thread spawned by `Telemetry::open`
+  keeps the warning actionable.
+
+- **Run-comparison script hardening** (#562) — `scripts/comparison/run-comparison.sh`
+  now traps SIGINT/SIGTERM and quarantines failed runs to
+  `.failed-<unix-ts>` siblings instead of leaving 60+ GB on disk
+  when the underlying discovery run is aborted. Verified context:
+  run8 on 2026-08-19 left a 66 GB `active.profraw` because the
+  previous cleanup was conditional on `rc=0`.
+
+- **Sketch extraction retries** (#564) — sketches that fail JSON parse
+  on the first attempt are now retried up to 2 times (3 attempts
+  total). Run8 on 2026-08-19 had a 4.2 % rejection rate; the
+  additional retry recovers the majority of JSON-fragment failures
+  caused by the temperature 1.0+ pathology on MiniMax-M3, without
+  re-introducing the 30-day cardinality 880 projection that motivated
+  the original drop from 3 to 1.
+
+- **Stale `clippy` comment** (#564) — the audit comment in
+  `src/cli/discover.rs:359` documenting the `--max-parallelism`
+  cap was last touched when the cap was 64. PR #543 lifted it to
+  `u32::MAX` (1) and PR #544 scaled the rate limiter with the cap;
+  the comment is now refreshed to match the current state without
+  implying a 64-call hard limit that no longer exists.
+
+### Changed
+
+- **Rate limiter refill** (#563) — the rate limiter default
+  `refill_per_sec` was previously `parallelism / 4`, calibrated for
+  the old sequential discovery loop where the bottleneck was a
+  single concurrent call. The discovery loop is now actually
+  parallel (see `perf` below), so the semaphore and the rate
+  limiter are the same knob (both limit in-flight calls). The
+  default now matches 1:1: `refill_per_sec = parallelism`. Operators
+  who want a lower rate than the parallelism cap can override with
+  `MOAGAN_RATE_LIMIT_<provider>`.
+
+### Performance
+
+- **Discovery loop parallelisation** (#563) — `src/discovery/coordinator.rs`
+  spawned each `(cell, temperature, replica, sketch_index)` iteration
+  as a separate `tokio::task` via a `tokio::task::JoinSet`
+  (per AGENTS.md: no `tokio::spawn` without a recorded join handle).
+  The semaphore (`ctx.parallelism`) limits the number of concurrent
+  LLM calls. The previous implementation was sequential because
+  the loop awaited each call in-place; the semaphore was acquired
+  and released immediately, and only one permit was ever in flight.
+  Throughput was ~3.3 sketches/min on every run regardless of
+  `--max-parallelism` (verified against run7 8h 1619 sketches and
+  run8 5h 40m 1348 sketches). The parallel loop honours the
+  configured parallelism; a `--max-parallelism 64` run that took
+  8 hours now targets the same workload in ~15-20 min.
+
+- **Discovery lock discipline** (#563) — `SketchLoopState` and
+  `SaturationTracker` are now wrapped in `Arc<std::sync::Mutex<>>`
+  so concurrent tasks can safely mutate them. The mutex is held
+  only for the mutation + `state.save`; the lock window is a few
+  microseconds, dominated by the LLM round-trip (15-18 s).
+
+### Added
+
+- **`moagan preflight` subcommand** (#564, #566) — smoke-tests the
+  full pipeline end-to-end against the real provider. Two-run flow:
+  1. `moagan discover` with cardinalidad 8 (1 sketch per dimension
+     × facets_per_dimension = 1), 1 temperature (1.0), 1 replica.
+  2. `moagan run --mode fast` with `--context <discover_run_id>
+     --context-full` so the second run consumes the discover run's
+     library through the cross-run `--context` plumbing.
+  Both run ids are printed on stdout so the operator can drill
+  into either one with `moagan inspect`. Cost: ~60-120 s of API
+  budget and ~3 MB of disk per preflight. Exits 0 only when both
+  runs succeed; a non-zero exit code is a strong signal that the
+  pipeline broke somewhere.
+
+- **`scripts/smoke_preflight.sh`** (#566) — T3 smoke coverage for
+  the preflight subcommand. Four tests against the mock provider
+  in `tests/fixtures/mock_provider`:
+  `preflight_two_run_ids_printed`, `preflight_mock_creates_discover_sketches`,
+  `preflight_non_interactive_no_prompts`, `preflight_invalid_provider_fails_fast`.
+  Wired into the `Makefile` `SMOKE_SCRIPTS` list so `make smoke` (the
+  T3 gate in the validation gauntlet) runs it.
+
+### Internal
+
+- The `src/discovery/coordinator.rs` loop now uses
+  `tokio::task::JoinSet` and `let _permit = ctx.parallelism.acquire()`
+  inside each spawned task. Stop conditions (target reached, tracker
+  `Stop`, cancel tripped) are polled between spawns; in-flight tasks
+  continue to whatever they have in flight before the `JoinSet`
+  drains.
+
+- `startup_reconcile` is invoked at the top of every pipeline-opening
+  dispatch (T3 D.28.3 + D.28.4). It reconciles filesystem vs SQLite
+  and sweeps orphan `*.tmp.<uuid>` and stale `*.lock` files. The
+  `Config::startup_reconcile` flag (default `true`) and
+  `MOAGAN_STARTUP_RECONCILE=false` env var gate the call.
+
+## [0.9.1] - 2026-08-19
+
+### Fixed
+
+- Anthropic prefill `{` for JSON-required roles (#554) — the wire
+  layer now emits a leading `{` in the assistant prefill when the
+  response payload is expected to be a JSON object. Avoids the
+  upstream MiniMax model stalling on the first character of the
+  response.
+
+[0.9.2]: https://github.com/airvzxf/moagan/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/airvzxf/moagan/compare/v0.9.0...v0.9.1
