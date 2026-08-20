@@ -655,14 +655,33 @@ pub enum Cmd {
         #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
         temperature_profiles: Vec<String>,
     },
-    /// Smoke-test the full pipeline end-to-end without the
-    /// cardinalidad 80 minimum. Runs `discover` with cardinality
-    /// 8 (one sketch per dimension × facets_per_dimension=1), a
-    /// single temperature (1.0), and 1 replica. Intended for CI
-    /// smoke tests and quick "does the LLM API still work?"
-    /// loops. Output is a tiny portfolio; the JSON runs are
-    /// skipped because the cardinality is below the production
-    /// matrix threshold.
+    /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
+    /// against the real provider. Two-run flow:
+    ///
+    /// 1. `moagan discover` with cardinalidad 8 (1 sketch per
+    ///    dimension × facets_per_dimension = 1), 1 temperature
+    ///    (1.0), 1 replica. Produces a `run_id` with a
+    ///    persisted `sketches/` library.
+    /// 2. `moagan run --mode fast` that consumes the discover
+    ///    run's library via `--context <run_id> --context-full`
+    ///    (the `Full` scope loads every text-like file under the
+    ///    run dir, including `sketches/*.json`).
+    ///
+    /// Cost: ~60-120 s of API budget, ~3 MB of disk. Exercises
+    /// both the discovery code path (matrix build + coordinator)
+    /// AND the run --mode fast path (intake → clarify → sketch →
+    /// judges → tag → cluster → facets → portfolio), so a
+    /// preflight that succeeds is a strong end-to-end signal.
+    /// Both run ids are printed on stdout so the operator can
+    /// drill into either one.
+    ///
+    /// The pre-PR-564 version only wrapped `discover`, which
+    /// missed the upstream intake/clarify phases. PR #565 wrapped
+    /// `run --mode fast` only, which duplicates the existing
+    /// fast-mode test coverage. The two-step flow is the actual
+    /// addition because it links the two runs through
+    /// `--context`, validating the cross-run plumbing AND the
+    /// per-run planner.
     Preflight {
         /// Provider name (must be in config).
         #[arg(long, default_value = "minimax")]
@@ -862,7 +881,7 @@ impl Cmd {
             Self::List { .. } => "List runs (filter by --paused)",
             Self::Rate { .. } => "Record a user rating for a proposal (opt-in learning loop)",
             Self::Preflight { .. } => {
-                "Smoke-test the full pipeline end-to-end with cardinality 8 (1 sketch per dimension), single temperature, single replica"
+                "Smoke-test the END-TO-END pipeline (discover + run --mode fast) against the real provider. Runs `discover` with cardinalidad 8 + 1 temp + 1 replica, then feeds the discover run's library into a `run --mode fast` via `--context <discover_run_id> --context-full`. Both run ids are printed on stdout."
             }
         }
     }
@@ -1421,31 +1440,67 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             max_parallelism,
             non_interactive,
         } => {
-            // Preflight: thin wrapper around `discover` with a
-            // fixed 8-sketch cardinality (dimensions ×
-            // facets_per_dimension = 8 × 1), single temperature
-            // (1.0), single replica. Bypasses the 80-sketch
-            // minimum on `discover` so CI smoke tests and
-            // operator quick-checks don't need to wait for the
-            // production matrix. The discover path still goes
-            // through the full coordinator (matrix build,
-            // coordinator.run_with_ctx_and_target, post-matrix
-            // pipeline) so a preflight that fails is a strong
-            // signal that the whole discovery pipeline is mis-
-            // configured, not just the matrix.
+            // Preflight runs the FULL discovery → fast pipeline
+            // end-to-end against the real provider, with a 8-sketch
+            // matrix so the cost is bounded:
+            //
+            // 1. `moagan discover` with cardinalidad 8 (one sketch
+            //    per dimension × facets_per_dimension = 1), single
+            //    temperature (1.0), single replica. Produces a
+            //    `run_id` with a persisted `sketches/` library.
+            // 2. `moagan run --mode fast` that consumes the
+            //    discover run's library via `--context <run_id>
+            //    --context-full` (the `Full` scope loads
+            //    every text-like file under the run dir, including
+            //    `sketches/*.json`).
+            //
+            // Cost: ~30-60 s of API budget per step (~60-120 s
+            // total), ~3 MB of disk per run. The two-step flow
+            // exercises BOTH the discovery code path
+            // (matrix build + coordinator) AND the run --mode fast
+            // path (intake → clarify → sketch → judges → tag →
+            // cluster → facets → portfolio), so a preflight that
+            // succeeds is a strong end‑to‑end signal. A preflight
+            // that fails tells the operator exactly which step
+            // regressed because we print both run ids.
+            //
+            // The pre-PR-564 version only wrapped `discover`, which
+            // missed the upstream intake/clarify phases. PR #565
+            // wrapped `run --mode fast` only, which the operator
+            // pointed out duplicates the existing fast-mode test
+            // coverage. The two-step flow is the actual addition
+            // because it links the two runs through `--context`,
+            // validating the cross-run plumbing AND the per-run
+            // planner.
             let cfg = Config::load()?;
-            let run_id = discover::run(
+            // `--runs-dir` is the path of the `.runs` directory
+            // (the global_home.root()). The preflight derives the
+            // parent from it so that the discover run lives at
+            // `<runs-dir>/<id>` rather than the doubled
+            // `<runs-dir>/.runs/<id>` path that `home.run_dir`
+            // would otherwise produce.
+            let home_root = runs_dir
+                .clone()
+                .map(|p| {
+                    if p.ends_with(".runs") {
+                        p.parent().map(|x| x.to_path_buf()).unwrap_or(p)
+                    } else {
+                        p
+                    }
+                })
+                .unwrap_or_else(|| global_home.root().to_path_buf());
+            let discover_run_id = discover::run(
                 discover::DiscoverOptions {
                     provider: provider.clone(),
                     prompt: prompt.clone(),
-                    home: runs_dir.clone(),
+                    home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),
                     cardinality: 8,
                     max_parallelism,
                     dimensions: 8,
                     facets_per_dimension: 1,
                     cluster_threshold: 0.7,
-                    out_dir: runs_dir.clone(),
+                    out_dir: Some(home_root.join(".runs")),
                     non_interactive,
                     cache_facets: false,
                     temperature_profiles: vec![discover::TemperatureProfileSpec {
@@ -1457,7 +1512,26 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 &cfg,
             )
             .await?;
-            println!("preflight run_id: {run_id}");
+            println!("preflight discover run_id: {discover_run_id}");
+
+            let fast_run_id = run::run(
+                run::RunOptions {
+                    mode: Mode::Fast,
+                    provider: provider.clone(),
+                    prompt: prompt.clone(),
+                    home: Some(home_root.clone()),
+                    mock_dir: mock_dir.clone(),
+                    non_interactive,
+                    max_parallelism,
+                    no_replace_sources: false,
+                    adversary: false,
+                    context: Some(discover_run_id.to_string()),
+                    context_scope: crate::context::loader::ContextScope::Full,
+                },
+                &cfg,
+            )
+            .await?;
+            println!("preflight fast run_id: {fast_run_id}");
             Ok(0)
         }
         Cmd::List { paused } => {

@@ -17,7 +17,8 @@ SMOKE_SCRIPTS := \
 	scripts/smoke_adversary_judge.sh \
 	scripts/smoke_human_checkpoint.sh \
 	scripts/smoke_checkpoint_mirror.sh \
-	scripts/smoke_phase_d_integration.sh
+	scripts/smoke_phase_d_integration.sh \
+	scripts/smoke_preflight.sh
 
 E2E_SCRIPTS_LOCAL := \
 	scripts/e2e_pipeline_modes.sh \
