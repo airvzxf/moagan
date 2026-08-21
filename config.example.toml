@@ -29,6 +29,16 @@ cooldown_secs = 180
 # See `src/config/mod.rs` CircuitBreakerConfig for the full schema; this
 # file only documents the fields most operators want to override.
 
+# Per-role rate-limit override (catalog §D.19.6). Key is the
+# `Role::as_str()` value (snake_case: "tagger", "facet_deriver",
+# "extractor", etc.). Empty by default = only the per-provider bucket
+# applies. Use this when the upstream provider has a tighter quota for
+# one role (e.g. tagger fan-out of 1500+ calls after the post-matrix
+# stages).
+#
+# [rate_limit_per_role]
+# tagger = { capacity = 30, refill_per_sec = 2 }
+
 # Provider overrides (DO NOT put real API keys here — use `.env` + MoaganHome):
 #
 # [providers.minimax]
