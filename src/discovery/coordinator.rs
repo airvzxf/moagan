@@ -769,7 +769,7 @@ impl DiscoveryCoordinator {
                                 Err(_) => return,
                             };
 
-                            let sketch_result = retry_sketch_extraction(2, || {
+                            let sketch_result = retry_sketch_extraction(10, || {
                                 let ctx = ctx_for_attempt.clone();
                                 let user = user_for_attempt.clone();
                                 let system = system_for_attempt.to_string();
