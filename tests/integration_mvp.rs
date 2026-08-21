@@ -1547,7 +1547,10 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         .execute(&ctx),
     )
     .await
-    .map_err(|_| moagan::Error::Timeout("local HTTP judge test".into()))??;
+    .map_err(|_| moagan::Error::Timeout {
+        message: "local HTTP judge test".into(),
+        http_status: None,
+    })??;
     let moagan::phases::PhaseOutput::Evaluations(paths) = output else {
         panic!("expected evaluations");
     };

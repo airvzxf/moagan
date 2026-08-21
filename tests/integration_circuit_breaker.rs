@@ -121,7 +121,10 @@ fn always_open_error() -> Error {
     // Provider carries the "upstream 5xx" semantic per
     // llm/http.rs::classify_status; Error::is_circuit_opening()
     // returns true for it.
-    Error::Provider("upstream 503: service unavailable".into())
+    Error::Provider {
+        message: "upstream 503: service unavailable".into(),
+        http_status: Some(503),
+    }
 }
 
 fn always_non_opening_error() -> Error {
@@ -176,7 +179,7 @@ async fn breaker_legacy_field_does_not_short_circuit_send() {
     // 6th call still hits the inner provider (no short-circuit) and
     // returns the same opening error.
     let sixth = wrapper.send(&dummy_request()).await;
-    assert!(matches!(sixth, Err(Error::Provider(_))));
+    assert!(matches!(sixth, Err(Error::Provider { .. })));
     assert_eq!(
         scripted.call_count(),
         6,

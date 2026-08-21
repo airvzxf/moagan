@@ -86,7 +86,10 @@ impl OpenAiCompatProvider {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .map_err(|e| Error::Provider(format!("build http client: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("build http client: {e}"),
+                http_status: None,
+            })?;
         Ok(Self {
             name: spec.kind.clone(),
             model: spec.model.clone(),
@@ -461,13 +464,20 @@ impl OpenAiCompatProvider {
                     let status = resp.status();
                     let code = status.as_u16();
                     if status.is_success() {
-                        let parsed: ChatResponse = resp
-                            .json()
-                            .await
-                            .map_err(|e| Error::Provider(format!("decode: {e}")))?;
-                        let choice = parsed.choices.into_iter().next().ok_or_else(|| {
-                            Error::Provider("openai-compat: empty choices array".into())
-                        })?;
+                        let parsed: ChatResponse =
+                            resp.json().await.map_err(|e| Error::Provider {
+                                message: format!("decode: {e}"),
+                                http_status: None,
+                            })?;
+                        let choice =
+                            parsed
+                                .choices
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| Error::Provider {
+                                    message: "openai-compat: empty choices array".into(),
+                                    http_status: None,
+                                })?;
                         let finish_reason = choice.finish_reason;
                         let truncated = finish_reason.as_deref() == Some("length");
                         let usage = parsed.usage.unwrap_or_default();
@@ -488,15 +498,21 @@ impl OpenAiCompatProvider {
                     }
                     let body = resp.text().await.unwrap_or_default();
                     if attempt >= max_retries {
-                        return Err(Error::Provider(format!(
-                            "openai-compat: HTTP {code} after {attempt} attempts: {body}"
-                        )));
+                        return Err(Error::Provider {
+                            message: format!(
+                                "openai-compat: HTTP {code} after {attempt} attempts: {body}"
+                            ),
+                            http_status: Some(code),
+                        });
                     }
                     tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
                 }
                 Err(e) => {
                     if attempt >= max_retries {
-                        return Err(Error::Provider(format!("openai-compat: network: {e}")));
+                        return Err(Error::Provider {
+                            message: format!("openai-compat: network: {e}"),
+                            http_status: None,
+                        });
                     }
                     tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
                 }

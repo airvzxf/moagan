@@ -174,8 +174,10 @@ pub fn acquire_process_lock(
         [],
         |row| row.get(0),
     )?;
-    let next_fence = u64::try_from(next_fence_i64)
-        .map_err(|_| Error::Provider("process lock fence overflowed u64".into()))?;
+    let next_fence = u64::try_from(next_fence_i64).map_err(|_| Error::Provider {
+        message: "process lock fence overflowed u64".into(),
+        http_status: None,
+    })?;
 
     conn.execute(
         "INSERT INTO process_locks \
@@ -230,9 +232,10 @@ pub fn heartbeat_process_lock(
         )));
     };
 
-    let parsed_fence = stored_fence
-        .parse::<u64>()
-        .map_err(|_| Error::Provider("process lock fence is not a u64".into()))?;
+    let parsed_fence = stored_fence.parse::<u64>().map_err(|_| Error::Provider {
+        message: "process lock fence is not a u64".into(),
+        http_status: None,
+    })?;
     if parsed_fence != fencing_token || stored_expires <= now {
         return Err(Error::LockHeld(format!(
             "process lock fence mismatch or expired for run={run_id} holder={holder}"
@@ -282,9 +285,10 @@ pub fn release_process_lock(
         return Ok(());
     };
 
-    let parsed_fence = stored_fence
-        .parse::<u64>()
-        .map_err(|_| Error::Provider("process lock fence is not a u64".into()))?;
+    let parsed_fence = stored_fence.parse::<u64>().map_err(|_| Error::Provider {
+        message: "process lock fence is not a u64".into(),
+        http_status: None,
+    })?;
     if parsed_fence != fencing_token || stored_expires <= now {
         return Err(Error::LockHeld(format!(
             "process lock fence mismatch or expired for run={run_id} holder={holder}"

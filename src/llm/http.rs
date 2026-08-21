@@ -19,7 +19,10 @@ pub fn build_client() -> std::result::Result<Client, Error> {
         .connect_timeout(Duration::from_secs(15))
         .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| Error::Provider(format!("build reqwest client: {e}")))
+        .map_err(|e| Error::Provider {
+            message: format!("build reqwest client: {e}"),
+            http_status: None,
+        })
 }
 
 /// Build the headers for an Anthropic-compatible POST.
@@ -31,18 +34,24 @@ pub fn build_headers(
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         HeaderName::from_static("x-api-key"),
-        HeaderValue::from_str(api_key)
-            .map_err(|e| Error::InvalidApiKey(format!("x-api-key: {e}")))?,
+        HeaderValue::from_str(api_key).map_err(|e| Error::InvalidApiKey {
+            message: format!("x-api-key: {e}"),
+            http_status: None,
+        })?,
     );
     headers.insert(
         HeaderName::from_static("anthropic-version"),
         HeaderValue::from_static("2023-06-01"),
     );
     for (k, v) in extra {
-        let name = HeaderName::from_bytes(k.as_bytes())
-            .map_err(|e| Error::Provider(format!("header {k}: {e}")))?;
-        let value = HeaderValue::from_str(v)
-            .map_err(|e| Error::Provider(format!("header {k} value: {e}")))?;
+        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| Error::Provider {
+            message: format!("header {k}: {e}"),
+            http_status: None,
+        })?;
+        let value = HeaderValue::from_str(v).map_err(|e| Error::Provider {
+            message: format!("header {k} value: {e}"),
+            http_status: None,
+        })?;
         headers.insert(name, value);
     }
     let _ = AUTHORIZATION;
@@ -69,11 +78,23 @@ pub fn build_headers(
 pub fn classify_status(status: StatusCode, body: &str) -> Error {
     let code = status.as_u16();
     match code {
-        401 | 403 => Error::InvalidApiKey(format!("http {status}: {body}")),
+        401 | 403 => Error::InvalidApiKey {
+            message: format!("http {status}: {body}"),
+            http_status: Some(code),
+        },
         429 => classify_throttled_or_plan_exhausted(body),
-        408 | 504 | 524 => Error::Timeout(format!("http {status}: {body}")),
-        500..=599 => Error::Provider(format!("upstream {status}: {body}")),
-        _ => Error::Provider(format!("http {status}: {body}")),
+        408 | 504 | 524 => Error::Timeout {
+            message: format!("http {status}: {body}"),
+            http_status: Some(code),
+        },
+        500..=599 => Error::Provider {
+            message: format!("upstream {status}: {body}"),
+            http_status: Some(code),
+        },
+        _ => Error::Provider {
+            message: format!("http {status}: {body}"),
+            http_status: Some(code),
+        },
     }
 }
 
@@ -85,16 +106,24 @@ pub fn classify_status(status: StatusCode, body: &str) -> Error {
 /// doubt, route to `Throttled`, because the adaptive governor
 /// absorbs it cheaply; misrouting a `PlanExhausted` as
 /// `Throttled` would just delay the breaker tripping by a few 429s.
+///
+/// Both arms carry `http_status: Some(429)` so the telemetry layer
+/// populates `calls.http_status = 429` regardless of which arm the
+/// classifier picks.
 fn classify_throttled_or_plan_exhausted(body: &str) -> Error {
     let lower = body.to_ascii_lowercase();
     let plan_exhausted_keywords = ["plan", "monthly", "quota", "subscription", "upgrade"];
     let is_plan_exhausted = plan_exhausted_keywords.iter().any(|kw| lower.contains(kw));
     if is_plan_exhausted {
-        Error::PlanExhausted(format!("http 429: {body}"))
+        Error::PlanExhausted {
+            message: format!("http 429: {body}"),
+            http_status: Some(429),
+        }
     } else {
         Error::Throttled {
             retry_after_ms: None,
             message: body.to_string(),
+            http_status: Some(429),
         }
     }
 }
@@ -103,10 +132,15 @@ fn classify_throttled_or_plan_exhausted(body: &str) -> Error {
 /// `Retry-After` header was already parsed by the caller. Keeps
 /// the wire layer (`opencode_go_anthropic.rs`) free of `http.rs`
 /// internals — it just hands the parsed duration to this helper.
+///
+/// `http_status: Some(429)` is hard-coded because this helper is
+/// only called from the 429 throttle path; the actual status code
+/// is implicit in the call site.
 pub fn throttled_with_retry_after(body: &str, retry_after: Option<Duration>) -> Error {
     Error::Throttled {
         retry_after_ms: retry_after.map(|d| d.as_millis() as u64),
         message: body.to_string(),
+        http_status: Some(429),
     }
 }
 
@@ -290,8 +324,10 @@ pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
 pub(crate) fn request_body_sha256(req: &Request) -> std::result::Result<String, Error> {
     use sha2::{Digest, Sha256};
 
-    let bytes = serde_json::to_vec(&body_from_request(req))
-        .map_err(|e| Error::Provider(format!("encode request body: {e}")))?;
+    let bytes = serde_json::to_vec(&body_from_request(req)).map_err(|e| Error::Provider {
+        message: format!("encode request body: {e}"),
+        http_status: None,
+    })?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
@@ -325,7 +361,7 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             "{\"error\":\"Token Plan rate limit reached\"}",
         );
-        assert!(matches!(err, Error::PlanExhausted(_)));
+        assert!(matches!(err, Error::PlanExhausted { .. }));
     }
 
     #[test]
@@ -354,19 +390,19 @@ mod tests {
     #[test]
     fn classify_status_maps_401_to_invalid_api_key() {
         let err = classify_status(StatusCode::UNAUTHORIZED, "nope");
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
     }
 
     #[test]
     fn classify_status_maps_504_to_timeout() {
         let err = classify_status(StatusCode::GATEWAY_TIMEOUT, "upstream");
-        assert!(matches!(err, Error::Timeout(_)));
+        assert!(matches!(err, Error::Timeout { .. }));
     }
 
     #[test]
     fn classify_status_maps_500_to_provider() {
         let err = classify_status(StatusCode::INTERNAL_SERVER_ERROR, "boom");
-        assert!(matches!(err, Error::Provider(_)));
+        assert!(matches!(err, Error::Provider { .. }));
     }
 
     #[test]

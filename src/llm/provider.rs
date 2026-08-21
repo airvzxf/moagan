@@ -1578,7 +1578,10 @@ mod tests {
     }
 
     fn opening_error() -> Error {
-        Error::Provider("upstream 503".into())
+        Error::Provider {
+            message: "upstream 503".into(),
+            http_status: None,
+        }
     }
 
     fn breaker_request() -> Request {
@@ -1624,7 +1627,7 @@ mod tests {
         let provider = BreakeredProvider::new(inner.clone(), breaker.clone());
 
         let result = provider.send(&breaker_request()).await;
-        assert!(matches!(result, Err(Error::Provider(_))));
+        assert!(matches!(result, Err(Error::Provider { .. })));
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
         assert_eq!(breaker.failure_count(), 0);
         assert!(!breaker.is_open());
@@ -1861,10 +1864,10 @@ mod tests {
             .await
             .expect_err("overflow must return an error");
         match err {
-            Error::Provider(msg) => {
+            Error::Provider { message, .. } => {
                 assert!(
-                    msg.contains("budget exhausted"),
-                    "overflow error must mention budget exhausted, got: {msg}"
+                    message.contains("budget exhausted"),
+                    "overflow error must mention budget exhausted, got: {message}"
                 );
             }
             other => panic!("expected Error::Provider, got {other:?}"),

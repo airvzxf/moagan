@@ -353,9 +353,12 @@ pub async fn detect_max_tokens(
 
     let discovered = if phase2_accepted { lo_strict } else { lo };
     if discovered < MIN_AUTOPROBE_FLOOR {
-        return Err(Error::Provider(format!(
-            "auto-probe failed to discover a usable max_tokens (got {discovered}); provider likely rejected every probe"
-        )));
+        return Err(Error::Provider {
+            message: format!(
+                "auto-probe failed to discover a usable max_tokens (got {discovered}); provider likely rejected every probe"
+            ),
+            http_status: None,
+        });
     }
     Ok(discovered.max(floor).min(ceiling))
 }
@@ -478,19 +481,23 @@ impl MaxTokensTableFile {
     pub fn load(path: &std::path::Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
-                let parsed: Self = toml::from_str(&s).map_err(|e| {
-                    Error::Provider(format!(
+                let parsed: Self = toml::from_str(&s).map_err(|e| Error::Provider {
+                    message: format!(
                         "max_tokens_auto.toml at {} is malformed: {e}",
                         path.display()
-                    ))
+                    ),
+                    http_status: None,
                 })?;
                 if parsed.schema_version > Self::CURRENT_SCHEMA_VERSION {
-                    return Err(Error::Provider(format!(
-                        "max_tokens_auto.toml at {} has schema_version={}, this binary only knows up to {}",
-                        path.display(),
-                        parsed.schema_version,
-                        Self::CURRENT_SCHEMA_VERSION
-                    )));
+                    return Err(Error::Provider {
+                        message: format!(
+                            "max_tokens_auto.toml at {} has schema_version={}, this binary only knows up to {}",
+                            path.display(),
+                            parsed.schema_version,
+                            Self::CURRENT_SCHEMA_VERSION
+                        ),
+                        http_status: None,
+                    });
                 }
                 Ok(parsed)
             }
@@ -503,23 +510,33 @@ impl MaxTokensTableFile {
     /// mid-write cannot leave a truncated file.
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Error::Provider(format!(
+            std::fs::create_dir_all(parent).map_err(|e| Error::Provider {
+                message: format!(
                     "create dir for max_tokens_auto.toml at {}: {e}",
                     parent.display()
-                ))
+                ),
+                http_status: None,
             })?;
         }
-        let body = toml::to_string_pretty(self)
-            .map_err(|e| Error::Provider(format!("encode max_tokens_auto.toml: {e}")))?;
+        let body = toml::to_string_pretty(self).map_err(|e| Error::Provider {
+            message: format!("encode max_tokens_auto.toml: {e}"),
+            http_status: None,
+        })?;
         let tmp = tempfile::Builder::new()
             .suffix(".toml.tmp")
             .tempfile_in(path.parent().unwrap_or(std::path::Path::new(".")))
-            .map_err(|e| Error::Provider(format!("tempfile for max_tokens_auto.toml: {e}")))?;
-        std::fs::write(tmp.path(), body)
-            .map_err(|e| Error::Provider(format!("write max_tokens_auto.toml: {e}")))?;
-        tmp.persist(path)
-            .map_err(|e| Error::Provider(format!("rename max_tokens_auto.toml into place: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("tempfile for max_tokens_auto.toml: {e}"),
+                http_status: None,
+            })?;
+        std::fs::write(tmp.path(), body).map_err(|e| Error::Provider {
+            message: format!("write max_tokens_auto.toml: {e}"),
+            http_status: None,
+        })?;
+        tmp.persist(path).map_err(|e| Error::Provider {
+            message: format!("rename max_tokens_auto.toml into place: {e}"),
+            http_status: None,
+        })?;
         Ok(())
     }
 }
@@ -638,7 +655,7 @@ mod tests {
         .await
         .expect_err("provider rejects everything must error");
         match err {
-            Error::Provider(msg) => assert!(msg.contains("auto-probe failed")),
+            Error::Provider { message, .. } => assert!(message.contains("auto-probe failed")),
             other => panic!("expected Error::Provider, got {other:?}"),
         }
     }
@@ -720,7 +737,7 @@ mod tests {
         std::fs::write(&path, "schema_version = 999\n[providers]\n").unwrap();
         let err = MaxTokensTableFile::load(&path).expect_err("future schema must error");
         match err {
-            Error::Provider(msg) => assert!(msg.contains("schema_version")),
+            Error::Provider { message, .. } => assert!(message.contains("schema_version")),
             other => panic!("expected Error::Provider, got {other:?}"),
         }
     }
@@ -732,7 +749,7 @@ mod tests {
         std::fs::write(&path, "this is = not valid toml = at all").unwrap();
         let err = MaxTokensTableFile::load(&path).expect_err("malformed must error");
         match err {
-            Error::Provider(msg) => assert!(msg.contains("malformed")),
+            Error::Provider { message, .. } => assert!(message.contains("malformed")),
             other => panic!("expected Error::Provider, got {other:?}"),
         }
     }

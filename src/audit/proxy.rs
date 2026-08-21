@@ -153,7 +153,10 @@ pub async fn start(cfg: ProxyConfig) -> Result<ProxyHandle> {
         .redirect(Policy::none())
         .no_gzip()
         .build()
-        .map_err(|e| Error::Provider(format!("build audit HTTP client: {e}")))?;
+        .map_err(|e| Error::Provider {
+            message: format!("build audit HTTP client: {e}"),
+            http_status: None,
+        })?;
     let sink = Arc::new(Mutex::new(AuditSink::new()));
     if let Some(path) = resolve_log_path(&cfg)? {
         sink.lock().await.ensure(&path)?;

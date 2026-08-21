@@ -132,10 +132,10 @@ impl Pipeline {
             Err(_) => {
                 ctx.cancel()
                     .cancel(crate::cancel::CancelReason::TotalTimeout);
-                Err(crate::Error::Timeout(format!(
-                    "run exceeded {} seconds",
-                    timeout.as_secs()
-                )))
+                Err(crate::Error::Timeout {
+                    message: format!("run exceeded {} seconds", timeout.as_secs()),
+                    http_status: None,
+                })
             }
         }
     }
@@ -158,11 +158,14 @@ impl Pipeline {
                             .cancel(crate::cancel::CancelReason::PhaseTimeout(
                                 phase.name().to_owned(),
                             ));
-                        Err(crate::Error::Timeout(format!(
-                            "phase {} exceeded {} seconds",
-                            phase.name(),
-                            timeout.as_secs()
-                        )))
+                        Err(crate::Error::Timeout {
+                            message: format!(
+                                "phase {} exceeded {} seconds",
+                                phase.name(),
+                                timeout.as_secs()
+                            ),
+                            http_status: None,
+                        })
                     }
                 }
             };
@@ -481,7 +484,7 @@ mod tests {
             std::time::Duration::ZERO,
         );
         let result = pipe.run(&ctx).await;
-        assert!(matches!(result, Err(crate::Error::Timeout(_))));
+        assert!(matches!(result, Err(crate::Error::Timeout { .. })));
         assert_eq!(
             ctx.cancel().reason(),
             Some(crate::cancel::CancelReason::PhaseTimeout("slow".into()))
@@ -496,7 +499,7 @@ mod tests {
             std::time::Duration::from_millis(20),
         );
         let result = pipe.run(&ctx).await;
-        assert!(matches!(result, Err(crate::Error::Timeout(_))));
+        assert!(matches!(result, Err(crate::Error::Timeout { .. })));
         assert_eq!(
             ctx.cancel().reason(),
             Some(crate::cancel::CancelReason::TotalTimeout)

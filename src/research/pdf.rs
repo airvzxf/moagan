@@ -132,20 +132,25 @@ pub async fn fetch_pdf_text(url: &str, max_bytes: u32) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .map_err(|e| Error::Provider(format!("pdf reqwest client build: {e}")))?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| Error::Provider(format!("pdf fetch send: {e}")))?;
+        .map_err(|e| Error::Provider {
+            message: format!("pdf reqwest client build: {e}"),
+            http_status: None,
+        })?;
+    let resp = client.get(url).send().await.map_err(|e| Error::Provider {
+        message: format!("pdf fetch send: {e}"),
+        http_status: None,
+    })?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(Error::Provider(format!("pdf fetch status {status}")));
+        return Err(Error::Provider {
+            message: format!("pdf fetch status {status}"),
+            http_status: Some(status.as_u16()),
+        });
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| Error::Provider(format!("pdf fetch body: {e}")))?;
+    let bytes = resp.bytes().await.map_err(|e| Error::Provider {
+        message: format!("pdf fetch body: {e}"),
+        http_status: None,
+    })?;
     if bytes.is_empty() {
         return Err(Error::ResearchUnavailable("empty pdf response".into()));
     }
@@ -209,28 +214,31 @@ async fn extract_pdf_text_with_binary(binary: &str, bytes: &[u8]) -> Result<Stri
                     "pdftotext binary not found; install poppler-utils".into(),
                 )
             } else {
-                Error::Provider(format!("pdftotext spawn: {e}"))
+                Error::Provider {
+                    message: format!("pdftotext spawn: {e}"),
+                    http_status: None,
+                }
             }
         })?;
 
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| Error::Provider("pdftotext stdin missing".into()))?;
-    stdin
-        .write_all(bytes)
-        .await
-        .map_err(|e| Error::Provider(format!("pdftotext stdin write: {e}")))?;
+    let mut stdin = child.stdin.take().ok_or_else(|| Error::Provider {
+        message: "pdftotext stdin missing".into(),
+        http_status: None,
+    })?;
+    stdin.write_all(bytes).await.map_err(|e| Error::Provider {
+        message: format!("pdftotext stdin write: {e}"),
+        http_status: None,
+    })?;
     drop(stdin);
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Provider("pdftotext stdout missing".into()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| Error::Provider("pdftotext stderr missing".into()))?;
+    let stdout = child.stdout.take().ok_or_else(|| Error::Provider {
+        message: "pdftotext stdout missing".into(),
+        http_status: None,
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| Error::Provider {
+        message: "pdftotext stderr missing".into(),
+        http_status: None,
+    })?;
 
     // Read both pipes concurrently. The read caps are defensive:
     // stdout is bounded by MAX_OUTPUT_BYTES + a small slack for
@@ -241,18 +249,24 @@ async fn extract_pdf_text_with_binary(binary: &str, bytes: &[u8]) -> Result<Stri
         read_capped(stdout, read_cap),
         read_capped(stderr, STDERR_CAP),
     )
-    .map_err(|e| Error::Provider(format!("pdftotext read: {e}")))?;
+    .map_err(|e| Error::Provider {
+        message: format!("pdftotext read: {e}"),
+        http_status: None,
+    })?;
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| Error::Provider(format!("pdftotext wait: {e}")))?;
+    let status = child.wait().await.map_err(|e| Error::Provider {
+        message: format!("pdftotext wait: {e}"),
+        http_status: None,
+    })?;
     if !status.success() {
-        return Err(Error::Provider(format!(
-            "pdftotext exit {}: {}",
-            status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&stderr_bytes)
-        )));
+        return Err(Error::Provider {
+            message: format!(
+                "pdftotext exit {}: {}",
+                status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&stderr_bytes)
+            ),
+            http_status: None,
+        });
     }
 
     Ok(String::from_utf8_lossy(&stdout_bytes).into_owned())
@@ -371,7 +385,7 @@ mod tests {
             .await
             .expect_err("garbage input must surface as Provider error");
         assert!(
-            matches!(err, Error::Provider(_)),
+            matches!(err, Error::Provider { .. }),
             "non-zero pdftotext exit must classify as Provider, got {err:?}"
         );
         assert!(

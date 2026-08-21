@@ -137,7 +137,10 @@ mod tests {
     fn run_uses_exit_code_mapper() {
         let e = Error::InvalidArgs("x".into());
         assert_eq!(exit_code(&e), 2);
-        let e = Error::PlanExhausted("x".into());
+        let e = Error::PlanExhausted {
+            message: "x".into(),
+            http_status: None,
+        };
         assert_eq!(exit_code(&e), 4);
     }
 

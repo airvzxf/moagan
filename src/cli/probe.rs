@@ -153,8 +153,10 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         // than walking `2^1..2^30` against values the upstream
         // will reject (e.g. DeepSeek-direct caps at 393_216).
         let ceiling = provider_arc.max_tokens_probe_ceiling();
-        let transport = ProviderProbeTransport::new(provider_arc)
-            .map_err(|e| Error::Provider(format!("probe: build transport: {e}")))?;
+        let transport = ProviderProbeTransport::new(provider_arc).map_err(|e| Error::Provider {
+            message: format!("probe: build transport: {e}"),
+            http_status: None,
+        })?;
         let transport: Arc<dyn crate::llm::probe::ProbeTransport> = Arc::new(transport);
 
         // The table does both the probe and the persistence in

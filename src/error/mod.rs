@@ -97,14 +97,29 @@ pub enum Error {
     InvalidArgs(String),
 
     /// API key is missing or malformed.
-    #[error("invalid api key: {0}")]
-    InvalidApiKey(String),
+    #[error("invalid api key: {message}")]
+    InvalidApiKey {
+        /// Human-readable reason (typically `"http 401: ..."` or
+        /// `"http 403: ..."`).
+        message: String,
+        /// HTTP status code captured at error-construction time, if
+        /// the upstream returned one. `None` for non-HTTP sources
+        /// (config validation, missing env, etc.).
+        http_status: Option<u16>,
+    },
 
     /// Provider plan is exhausted (token budget consumed). Persistent
     /// failure — opening the breaker per-(provider, role) is the right
     /// response; do NOT retry until the cooldown elapses.
-    #[error("plan exhausted: {0}")]
-    PlanExhausted(String),
+    #[error("plan exhausted: {message}")]
+    PlanExhausted {
+        /// Human-readable reason (typically `"http 429: ..."`).
+        message: String,
+        /// HTTP status code captured at error-construction time. For
+        /// this variant it is almost always `Some(429)`; `None` only
+        /// for callers that synthesise the error locally.
+        http_status: Option<u16>,
+    },
 
     /// Provider returned a transient rate-limit (HTTP 429 with
     /// `Retry-After` header). The adaptive
@@ -122,11 +137,22 @@ pub enum Error {
         /// post-mortem can correlate the throttle hit with the
         /// specific RPM / TPM / 429 message the upstream returned.
         message: String,
+        /// HTTP status code captured at error-construction time. For
+        /// this variant it is almost always `Some(429)`; `None` for
+        /// callers that synthesise the error locally.
+        http_status: Option<u16>,
     },
 
     /// Operation timed out.
-    #[error("timeout: {0}")]
-    Timeout(String),
+    #[error("timeout: {message}")]
+    Timeout {
+        /// Human-readable reason (typically `"http 408: ..."`,
+        /// `"http 504: ..."` or `"http 524: ..."`).
+        message: String,
+        /// HTTP status code captured at error-construction time, if
+        /// the upstream returned one.
+        http_status: Option<u16>,
+    },
 
     /// Operation cancelled by user or supervisor.
     #[error("cancelled: {0}")]
@@ -145,8 +171,16 @@ pub enum Error {
     LockHeld(String),
 
     /// Provider returned a non-recoverable error.
-    #[error("provider error: {0}")]
-    Provider(String),
+    #[error("provider error: {message}")]
+    Provider {
+        /// Human-readable reason (typically `"http 5xx: ..."`,
+        /// `"upstream 5xx: ..."` or `"network: ..."`).
+        message: String,
+        /// HTTP status code captured at error-construction time, if
+        /// the upstream returned one. `None` for non-HTTP sources
+        /// (network errors, sqlite, cache, etc.).
+        http_status: Option<u16>,
+    },
 
     /// Mock provider ran out of canned responses.
     #[error("mock provider exhausted")]
@@ -266,6 +300,28 @@ pub enum Error {
 }
 
 impl Error {
+    /// HTTP status code captured at error-construction time, if any.
+    /// Returns `Some(code)` for errors that originated at the HTTP
+    /// transport layer (e.g. `429`, `503`); `None` for errors that
+    /// originated below the transport (sqlite, cache, schema
+    /// validation, capability gate, network layer, etc.).
+    ///
+    /// This is the field that lets the telemetry layer populate
+    /// `calls.http_status` for failed calls — without it, every
+    /// error row ended up with `http_status = NULL` and the operator
+    /// had to parse the message string to know whether the upstream
+    /// returned 429, 500, or just dropped the connection.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::InvalidApiKey { http_status, .. }
+            | Self::PlanExhausted { http_status, .. }
+            | Self::Throttled { http_status, .. }
+            | Self::Timeout { http_status, .. }
+            | Self::Provider { http_status, .. } => *http_status,
+            _ => None,
+        }
+    }
+
     /// Public, stable error code. Maps every `Error` variant to
     /// the closest `ErrorCode` (D.12.8). The mapping is
     /// best-effort: variants that do not have a clean bucket fall
@@ -275,15 +331,15 @@ impl Error {
         match self {
             Self::Io(_) => ErrorCode::Io,
             Self::InvalidArgs(_) => ErrorCode::InvalidArgs,
-            Self::InvalidApiKey(_) => ErrorCode::Auth,
-            Self::PlanExhausted(_) => ErrorCode::QuotaExceeded,
+            Self::InvalidApiKey { .. } => ErrorCode::Auth,
+            Self::PlanExhausted { .. } => ErrorCode::QuotaExceeded,
             Self::Throttled { .. } => ErrorCode::Http429,
-            Self::Timeout(_) => ErrorCode::TimeoutPhase,
+            Self::Timeout { .. } => ErrorCode::TimeoutPhase,
             Self::Cancelled(_) => ErrorCode::Cancelled,
             Self::SchemaViolation(_) => ErrorCode::SchemaViolation,
             Self::InvalidState(_) => ErrorCode::InvalidState,
             Self::LockHeld(_) => ErrorCode::InvalidState,
-            Self::Provider(_) => ErrorCode::InvalidResponse,
+            Self::Provider { .. } => ErrorCode::InvalidResponse,
             Self::MockExhausted => ErrorCode::NeedsInput,
             Self::Cache(_) => ErrorCode::Io,
             Self::Cancel(_) => ErrorCode::Cancelled,
@@ -301,14 +357,14 @@ impl Error {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             Self::InvalidArgs(_) => ExitCode::InvalidArgs,
-            Self::InvalidApiKey(_) => ExitCode::ApiKeyInvalid,
-            Self::PlanExhausted(_) => ExitCode::PlanExhausted,
+            Self::InvalidApiKey { .. } => ExitCode::ApiKeyInvalid,
+            Self::PlanExhausted { .. } => ExitCode::PlanExhausted,
             Self::Throttled { .. } => ExitCode::ProviderError,
-            Self::Timeout(_) => ExitCode::Timeout,
+            Self::Timeout { .. } => ExitCode::Timeout,
             Self::Cancelled(_) | Self::Cancel(_) => ExitCode::Cancelled,
             Self::SchemaViolation(_) => ExitCode::SchemaViolation,
             Self::Io(_) => ExitCode::IoError,
-            Self::MockExhausted | Self::Provider(_) => ExitCode::ProviderError,
+            Self::MockExhausted | Self::Provider { .. } => ExitCode::ProviderError,
             Self::Cache(_) | Self::InvalidState(_) | Self::LockHeld(_) => ExitCode::ContextError,
             Self::NeedsInput(_) => ExitCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
@@ -364,7 +420,10 @@ impl Error {
     pub fn is_circuit_opening(&self) -> bool {
         matches!(
             self,
-            Self::InvalidApiKey(_) | Self::Provider(_) | Self::PlanExhausted(_) | Self::Timeout(_)
+            Self::InvalidApiKey { .. }
+                | Self::Provider { .. }
+                | Self::PlanExhausted { .. }
+                | Self::Timeout { .. }
         )
     }
 
@@ -386,14 +445,15 @@ impl Error {
             Self::Throttled {
                 retry_after_ms,
                 message,
+                ..
             } => ProviderCause::Throttled {
                 retry_after: *retry_after_ms,
                 message: message.clone(),
             },
-            Self::PlanExhausted(message) => ProviderCause::PlanExhausted {
+            Self::PlanExhausted { message, .. } => ProviderCause::PlanExhausted {
                 message: message.clone(),
             },
-            Self::Provider(message) => ProviderCause::Other {
+            Self::Provider { message, .. } => ProviderCause::Other {
                 code: 0,
                 message: message.clone(),
             },
@@ -453,13 +513,19 @@ impl From<IoError> for Error {
 
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
-        Error::Provider(format!("sqlite: {e}"))
+        Error::Provider {
+            message: format!("sqlite: {e}"),
+            http_status: None,
+        }
     }
 }
 
 impl From<r2d2::Error> for Error {
     fn from(e: r2d2::Error) -> Self {
-        Error::Provider(format!("sqlite pool: {e}"))
+        Error::Provider {
+            message: format!("sqlite pool: {e}"),
+            http_status: None,
+        }
     }
 }
 
@@ -653,14 +719,29 @@ mod tests {
             ExitCode::InvalidArgs
         );
         assert_eq!(
-            Error::InvalidApiKey("x".into()).exit_code(),
+            Error::InvalidApiKey {
+                message: "x".into(),
+                http_status: None,
+            }
+            .exit_code(),
             ExitCode::ApiKeyInvalid
         );
         assert_eq!(
-            Error::PlanExhausted("x".into()).exit_code(),
+            Error::PlanExhausted {
+                message: "x".into(),
+                http_status: None,
+            }
+            .exit_code(),
             ExitCode::PlanExhausted
         );
-        assert_eq!(Error::Timeout("x".into()).exit_code(), ExitCode::Timeout);
+        assert_eq!(
+            Error::Timeout {
+                message: "x".into(),
+                http_status: None,
+            }
+            .exit_code(),
+            ExitCode::Timeout
+        );
         assert_eq!(
             Error::Cancelled("x".into()).exit_code(),
             ExitCode::Cancelled
@@ -674,7 +755,11 @@ mod tests {
     #[test]
     fn error_exit_code_method_maps_extended_variants() {
         assert_eq!(
-            Error::Provider("x".into()).exit_code(),
+            Error::Provider {
+                message: "x".into(),
+                http_status: None,
+            }
+            .exit_code(),
             ExitCode::ProviderError
         );
         assert_eq!(Error::MockExhausted.exit_code(), ExitCode::ProviderError);
@@ -696,14 +781,38 @@ mod tests {
     #[test]
     fn compatibility_exit_code_function_returns_numeric_code() {
         assert_eq!(exit_code(&Error::InvalidArgs("x".into())), 2);
-        assert_eq!(exit_code(&Error::InvalidApiKey("x".into())), 3);
-        assert_eq!(exit_code(&Error::PlanExhausted("x".into())), 4);
-        assert_eq!(exit_code(&Error::Timeout("x".into())), 5);
+        assert_eq!(
+            exit_code(&Error::InvalidApiKey {
+                message: "x".into(),
+                http_status: None,
+            }),
+            3
+        );
+        assert_eq!(
+            exit_code(&Error::PlanExhausted {
+                message: "x".into(),
+                http_status: None,
+            }),
+            4
+        );
+        assert_eq!(
+            exit_code(&Error::Timeout {
+                message: "x".into(),
+                http_status: None,
+            }),
+            5
+        );
         assert_eq!(exit_code(&Error::Cancelled("x".into())), 6);
         assert_eq!(exit_code(&Error::Cancel(CancelSignal)), 6);
         assert_eq!(exit_code(&Error::SchemaViolation("x".into())), 7);
         assert_eq!(exit_code(&Error::MockExhausted), 40);
-        assert_eq!(exit_code(&Error::Provider("x".into())), 40);
+        assert_eq!(
+            exit_code(&Error::Provider {
+                message: "x".into(),
+                http_status: None,
+            }),
+            40
+        );
     }
 
     #[test]
@@ -727,12 +836,30 @@ mod tests {
             Error::InvalidArgs("x".into()).code(),
             ErrorCode::InvalidArgs
         );
-        assert_eq!(Error::InvalidApiKey("x".into()).code(), ErrorCode::Auth);
         assert_eq!(
-            Error::PlanExhausted("x".into()).code(),
+            Error::InvalidApiKey {
+                message: "x".into(),
+                http_status: None,
+            }
+            .code(),
+            ErrorCode::Auth
+        );
+        assert_eq!(
+            Error::PlanExhausted {
+                message: "x".into(),
+                http_status: None,
+            }
+            .code(),
             ErrorCode::QuotaExceeded
         );
-        assert_eq!(Error::Timeout("x".into()).code(), ErrorCode::TimeoutPhase);
+        assert_eq!(
+            Error::Timeout {
+                message: "x".into(),
+                http_status: None,
+            }
+            .code(),
+            ErrorCode::TimeoutPhase
+        );
         assert_eq!(Error::Cancelled("x".into()).code(), ErrorCode::Cancelled);
         assert_eq!(
             Error::SchemaViolation("x".into()).code(),
@@ -743,7 +870,11 @@ mod tests {
             ErrorCode::InvalidState
         );
         assert_eq!(
-            Error::Provider("x".into()).code(),
+            Error::Provider {
+                message: "x".into(),
+                http_status: None,
+            }
+            .code(),
             ErrorCode::InvalidResponse
         );
         assert_eq!(Error::MockExhausted.code(), ErrorCode::NeedsInput);
@@ -798,7 +929,13 @@ mod tests {
     fn code_serializes_to_screaming_snake_case() {
         let cases = [
             (Error::InvalidArgs("x".into()), "INVALID_ARGS"),
-            (Error::InvalidApiKey("x".into()), "AUTH"),
+            (
+                Error::InvalidApiKey {
+                    message: "x".into(),
+                    http_status: None,
+                },
+                "AUTH",
+            ),
             (Error::Cancelled("x".into()), "CANCELLED"),
             (Error::SchemaViolation("x".into()), "SCHEMA_VIOLATION"),
             (Error::InvalidState("x".into()), "INVALID_STATE"),
@@ -819,9 +956,18 @@ mod tests {
     fn code_is_consistent_with_policy_helpers() {
         let variants = [
             Error::InvalidArgs("x".into()),
-            Error::InvalidApiKey("x".into()),
-            Error::PlanExhausted("x".into()),
-            Error::Timeout("x".into()),
+            Error::InvalidApiKey {
+                message: "x".into(),
+                http_status: None,
+            },
+            Error::PlanExhausted {
+                message: "x".into(),
+                http_status: None,
+            },
+            Error::Timeout {
+                message: "x".into(),
+                http_status: None,
+            },
             Error::Cancelled("x".into()),
             Error::SchemaViolation("x".into()),
             Error::InvalidState("x".into()),
@@ -862,10 +1008,34 @@ mod tests {
     /// exists to catch.
     #[test]
     fn is_circuit_opening_classifies_openers() {
-        assert!(Error::InvalidApiKey("x".into()).is_circuit_opening());
-        assert!(Error::Provider("x".into()).is_circuit_opening());
-        assert!(Error::PlanExhausted("x".into()).is_circuit_opening());
-        assert!(Error::Timeout("x".into()).is_circuit_opening());
+        assert!(
+            Error::InvalidApiKey {
+                message: "x".into(),
+                http_status: None,
+            }
+            .is_circuit_opening()
+        );
+        assert!(
+            Error::Provider {
+                message: "x".into(),
+                http_status: None,
+            }
+            .is_circuit_opening()
+        );
+        assert!(
+            Error::PlanExhausted {
+                message: "x".into(),
+                http_status: None,
+            }
+            .is_circuit_opening()
+        );
+        assert!(
+            Error::Timeout {
+                message: "x".into(),
+                http_status: None,
+            }
+            .is_circuit_opening()
+        );
     }
 
     /// Non-openers are operator errors, contract mismatches, or
@@ -905,18 +1075,127 @@ mod tests {
         // the helper compensates for the lossy code() mapping.
         assert!(ErrorCode::Http500.is_circuit_opening());
         assert!(
-            Error::Provider("http 500: boom".into()).is_circuit_opening(),
+            Error::Provider {
+                message: "http 500: boom".into(),
+                http_status: None,
+            }
+            .is_circuit_opening(),
             "Error::Provider must trip the breaker (covers Http500/502/503/504 upstream errors)"
         );
         assert!(ErrorCode::Http429.is_circuit_opening());
         assert!(
-            Error::PlanExhausted("http 429: throttled".into()).is_circuit_opening(),
+            Error::PlanExhausted {
+                message: "http 429: throttled".into(),
+                http_status: None,
+            }
+            .is_circuit_opening(),
             "Error::PlanExhausted must trip the breaker (covers Http429)"
         );
         assert!(ErrorCode::Auth.is_circuit_opening());
         assert!(
-            Error::InvalidApiKey("http 401: bad".into()).is_circuit_opening(),
+            Error::InvalidApiKey {
+                message: "http 401: bad".into(),
+                http_status: None,
+            }
+            .is_circuit_opening(),
             "Error::InvalidApiKey must trip the breaker (covers Auth)"
         );
+    }
+
+    // --- http_status ---------------------------------------------
+    // Pin the accessor that the telemetry layer relies on for
+    // `calls.http_status`. Without it, every error row ended up
+    // with `http_status = NULL` and the operator had to parse the
+    // message string to know whether the upstream returned 429,
+    // 500, or just dropped the connection.
+
+    #[test]
+    fn http_status_returns_captured_code_for_http_transport_variants() {
+        assert_eq!(
+            Error::InvalidApiKey {
+                message: "http 401: bad".into(),
+                http_status: Some(401),
+            }
+            .http_status(),
+            Some(401)
+        );
+        assert_eq!(
+            Error::PlanExhausted {
+                message: "http 429: throttled".into(),
+                http_status: Some(429),
+            }
+            .http_status(),
+            Some(429)
+        );
+        assert_eq!(
+            Error::Throttled {
+                retry_after_ms: Some(1000),
+                message: "throttled".into(),
+                http_status: Some(429),
+            }
+            .http_status(),
+            Some(429)
+        );
+        assert_eq!(
+            Error::Timeout {
+                message: "http 504: gw".into(),
+                http_status: Some(504),
+            }
+            .http_status(),
+            Some(504)
+        );
+        assert_eq!(
+            Error::Provider {
+                message: "upstream 503: svc".into(),
+                http_status: Some(503),
+            }
+            .http_status(),
+            Some(503)
+        );
+    }
+
+    #[test]
+    fn http_status_returns_none_when_field_not_set() {
+        // HTTP-transport variants with `http_status: None` (e.g. a
+        // synthetic error constructed in tests, or a local failure
+        // that bypassed the transport layer) must report `None`.
+        assert_eq!(
+            Error::InvalidApiKey {
+                message: "synthetic".into(),
+                http_status: None,
+            }
+            .http_status(),
+            None
+        );
+        assert_eq!(
+            Error::Provider {
+                message: "network: ...".into(),
+                http_status: None,
+            }
+            .http_status(),
+            None
+        );
+    }
+
+    #[test]
+    fn http_status_returns_none_for_non_transport_variants() {
+        // Variants that never carry an HTTP status (sqlite, cache,
+        // schema, validation, cancellation) must report `None`
+        // regardless of input.
+        assert_eq!(Error::InvalidArgs("x".into()).http_status(), None);
+        assert_eq!(Error::SchemaViolation("x".into()).http_status(), None);
+        assert_eq!(Error::InvalidState("x".into()).http_status(), None);
+        assert_eq!(Error::Cancelled("x".into()).http_status(), None);
+        assert_eq!(Error::Cache("x".into()).http_status(), None);
+        assert_eq!(
+            Error::DiscoveryQualityTooLow {
+                failed: 6,
+                total: 10,
+                threshold_pct: 50,
+            }
+            .http_status(),
+            None
+        );
+        assert_eq!(Error::MockExhausted.http_status(), None);
     }
 }

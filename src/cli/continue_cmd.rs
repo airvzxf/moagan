@@ -1016,15 +1016,18 @@ pub(crate) fn parse_mode(s: &str) -> Result<super::Mode> {
 ///   - literal       — the value itself.
 fn resolve_api_key_spec(spec: &str) -> Result<String> {
     if let Some(var) = spec.strip_prefix("env:") {
-        return std::env::var(var)
-            .map_err(|_| Error::InvalidApiKey(format!("env: variable {var} not set")));
+        return std::env::var(var).map_err(|_| Error::InvalidApiKey {
+            message: format!("env: variable {var} not set"),
+            http_status: None,
+        });
     }
     if let Some(path) = spec.strip_prefix("file:") {
         let p = Path::new(path);
         if !p.is_file() {
-            return Err(Error::InvalidApiKey(format!(
-                "file: path does not exist: {path}"
-            )));
+            return Err(Error::InvalidApiKey {
+                message: format!("file: path does not exist: {path}"),
+                http_status: None,
+            });
         }
         let raw = fs::read_to_string(p)?;
         // Trim trailing newline so the value matches `std::env::var`.
@@ -1032,9 +1035,11 @@ fn resolve_api_key_spec(spec: &str) -> Result<String> {
     }
     // Reject `prompt:` (interactive) per AGENTS no-go list.
     if spec.starts_with("prompt:") {
-        return Err(Error::InvalidApiKey(
-            "interactive (prompt:) is not supported in v0.3; use env:VAR or file:path".into(),
-        ));
+        return Err(Error::InvalidApiKey {
+            message: "interactive (prompt:) is not supported in v0.3; use env:VAR or file:path"
+                .into(),
+            http_status: None,
+        });
     }
     Ok(spec.to_string())
 }
@@ -1150,7 +1155,7 @@ mod tests {
         let v = resolve_api_key_spec("env:MOAGAN_TEST_KEY").unwrap();
         assert_eq!(v, "secret");
         let err = resolve_api_key_spec("env:MOAGAN_TEST_KEY_NOT_SET").unwrap_err();
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
         let v = resolve_api_key_spec("literal-value").unwrap();
         assert_eq!(v, "literal-value");
     }
@@ -1159,7 +1164,7 @@ mod tests {
     #[test]
     fn resolve_api_key_spec_rejects_prompt() {
         let err = resolve_api_key_spec("prompt:foo").unwrap_err();
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
     }
 
     /// `parse_mode` round-trips every documented mode.

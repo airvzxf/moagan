@@ -66,7 +66,10 @@ pub trait WireFormat: Send + Sync {
     /// `serde_json::to_vec` step.
     fn encode_value(&self, req: &Request) -> Result<serde_json::Value> {
         let bytes = self.encode_body(req)?;
-        serde_json::from_slice(&bytes).map_err(|e| Error::Provider(format!("encode_value: {e}")))
+        serde_json::from_slice(&bytes).map_err(|e| Error::Provider {
+            message: format!("encode_value: {e}"),
+            http_status: None,
+        })
     }
 }
 
@@ -82,15 +85,22 @@ impl WireFormat for AnthropicWire {
 
     fn encode_body(&self, req: &Request) -> Result<Vec<u8>> {
         let body = super::http::body_from_request(req);
-        serde_json::to_vec(&body).map_err(|e| Error::Provider(format!("encode: {e}")))
+        serde_json::to_vec(&body).map_err(|e| Error::Provider {
+            message: format!("encode: {e}"),
+            http_status: None,
+        })
     }
 
     fn decode(&self, status: u16, body: &[u8]) -> Result<WireResponse> {
         let parsed: super::http::MessagesResponseBody =
-            serde_json::from_slice(body).map_err(|e| Error::Provider(format!("decode: {e}")))?;
-        let response = parsed
-            .into_response()
-            .map_err(|e| Error::Provider(e.to_string()))?;
+            serde_json::from_slice(body).map_err(|e| Error::Provider {
+                message: format!("decode: {e}"),
+                http_status: None,
+            })?;
+        let response = parsed.into_response().map_err(|e| Error::Provider {
+            message: e.to_string(),
+            http_status: None,
+        })?;
         Ok(WireResponse {
             status,
             body: response,
@@ -113,17 +123,26 @@ impl WireFormat for OpenAiWire {
 
     fn encode_body(&self, req: &Request) -> Result<Vec<u8>> {
         let value = build_openai_body(req);
-        serde_json::to_vec(&value).map_err(|e| Error::Provider(format!("encode: {e}")))
+        serde_json::to_vec(&value).map_err(|e| Error::Provider {
+            message: format!("encode: {e}"),
+            http_status: None,
+        })
     }
 
     fn decode(&self, status: u16, body: &[u8]) -> Result<WireResponse> {
         let parsed: OpenAiChatResponse =
-            serde_json::from_slice(body).map_err(|e| Error::Provider(format!("decode: {e}")))?;
+            serde_json::from_slice(body).map_err(|e| Error::Provider {
+                message: format!("decode: {e}"),
+                http_status: None,
+            })?;
         let choice = parsed
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| Error::Provider("openai wire: empty choices array".into()))?;
+            .ok_or_else(|| Error::Provider {
+                message: "openai wire: empty choices array".into(),
+                http_status: None,
+            })?;
         let finish_reason = choice.finish_reason;
         let truncated = finish_reason.as_deref() == Some("length");
         let usage = parsed.usage.unwrap_or_default();
@@ -170,12 +189,17 @@ impl WireFormat for ResponsesWire {
             "top_p": req.top_p,
             "stream": false,
         });
-        serde_json::to_vec(&value).map_err(|e| Error::Provider(format!("encode: {e}")))
+        serde_json::to_vec(&value).map_err(|e| Error::Provider {
+            message: format!("encode: {e}"),
+            http_status: None,
+        })
     }
 
     fn decode(&self, status: u16, body: &[u8]) -> Result<WireResponse> {
-        let parsed: ResponsesBody =
-            serde_json::from_slice(body).map_err(|e| Error::Provider(format!("decode: {e}")))?;
+        let parsed: ResponsesBody = serde_json::from_slice(body).map_err(|e| Error::Provider {
+            message: format!("decode: {e}"),
+            http_status: None,
+        })?;
         let mut text = String::new();
         for out in parsed.output {
             for c in out.content {
@@ -228,14 +252,20 @@ impl WireFormat for CustomWire {
     }
 
     fn encode_body(&self, _req: &Request) -> Result<Vec<u8>> {
-        serde_json::to_vec(&self.schema).map_err(|e| Error::Provider(format!("encode custom: {e}")))
+        serde_json::to_vec(&self.schema).map_err(|e| Error::Provider {
+            message: format!("encode custom: {e}"),
+            http_status: None,
+        })
     }
 
     fn decode(&self, _status: u16, _body: &[u8]) -> Result<WireResponse> {
-        Err(Error::Provider(format!(
-            "custom wire '{}' has no decoder wired up; configure one via the dispatcher",
-            self.id
-        )))
+        Err(Error::Provider {
+            message: format!(
+                "custom wire '{}' has no decoder wired up; configure one via the dispatcher",
+                self.id
+            ),
+            http_status: None,
+        })
     }
 }
 
@@ -525,7 +555,7 @@ mod tests {
         let err = wire
             .decode(200, &serde_json::to_vec(&raw).unwrap())
             .expect_err("empty choices must error");
-        assert!(matches!(err, Error::Provider(_)));
+        assert!(matches!(err, Error::Provider { .. }));
     }
 
     /// 429 with a "rate limit" message body without `plan`/
@@ -555,7 +585,7 @@ mod tests {
         let body = r#"{"error": {"message": "Token Plan rate limit reached: Upgrade your Token Plan", "type": "rate_limit_error"}}"#;
         let err = wire.classify_error(429, body);
         assert!(
-            matches!(err, Error::PlanExhausted(_)),
+            matches!(err, Error::PlanExhausted { .. }),
             "429 with 'plan' keyword body must classify as PlanExhausted, got: {err:?}"
         );
     }
@@ -568,7 +598,7 @@ mod tests {
         let wire = OpenAiWire;
         let body = "unauthorized";
         let err = wire.classify_error(401, body);
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
     }
 
     /// Responses API round-trip: encode produces an `input`
@@ -636,6 +666,6 @@ mod tests {
         let err = wire
             .decode(200, b"{}")
             .expect_err("custom wire must surface unconfigured decoder");
-        assert!(matches!(err, Error::Provider(_)));
+        assert!(matches!(err, Error::Provider { .. }));
     }
 }

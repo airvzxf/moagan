@@ -48,7 +48,10 @@ mod tests {
             async move {
                 let n = calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
-                    Err(Error::Provider("transient".into()))
+                    Err(Error::Provider {
+                        message: "transient".into(),
+                        http_status: None,
+                    })
                 } else {
                     Ok("ok")
                 }
@@ -67,7 +70,10 @@ mod tests {
             let calls = Arc::clone(&calls_inner);
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err(Error::Provider("permanent".into()))
+                Err(Error::Provider {
+                    message: "permanent".into(),
+                    http_status: None,
+                })
             }
         })
         .await;

@@ -75,9 +75,12 @@ impl RateLimiter {
                 let secs = deficit / g.refill_per_sec.max(1) as f64;
                 let wait = Duration::from_secs_f64(secs);
                 if wait > max {
-                    return Err(Error::Provider(format!(
-                        "rate limiter budget exhausted: would wait {wait:?} > max {max:?}"
-                    )));
+                    return Err(Error::Provider {
+                        message: format!(
+                            "rate limiter budget exhausted: would wait {wait:?} > max {max:?}"
+                        ),
+                        http_status: None,
+                    });
                 }
                 g.tokens += wait.as_secs_f64() * g.refill_per_sec as f64;
                 g.tokens = g.tokens.min(g.capacity as f64);

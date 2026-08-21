@@ -237,7 +237,10 @@ mod tests {
         }
         async fn send(&self, _req: &Request) -> Result<(u16, crate::llm::wire::Response)> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(Error::Provider("forced upstream failure".into()))
+            Err(Error::Provider {
+                message: "forced upstream failure".into(),
+                http_status: None,
+            })
         }
     }
 

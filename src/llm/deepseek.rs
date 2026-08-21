@@ -56,15 +56,18 @@ impl DeepSeekProvider {
     /// so existing CI / shell setups keep working untouched.
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
         let key = super::api_keys::lookup_key("deepseek", None)
-            .ok_or_else(|| {
-                Error::InvalidApiKey(
-                    "DEEPSEEK_API_KEY not set; provide via env, --api-key, or api_keys.toml".into(),
-                )
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: "DEEPSEEK_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                    .into(),
+                http_status: None,
             })?
             .map_err(|e| match e {
-                Error::InvalidApiKey(msg) => Error::InvalidApiKey(format!(
-                    "deepseek: {msg}; check api_keys.toml and the env var fallback"
-                )),
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "deepseek: {message}; check api_keys.toml and the env var fallback"
+                    ),
+                    http_status: None,
+                },
                 other => other,
             })?;
         Self::new(spec, SecretString::new(key))
@@ -155,7 +158,7 @@ mod tests {
             std::env::remove_var("DEEPSEEK_API_KEY");
         }
         let result = DeepSeekProvider::from_config(&config());
-        assert!(matches!(result, Err(Error::InvalidApiKey(_))));
+        assert!(matches!(result, Err(Error::InvalidApiKey { .. })));
     }
 
     #[test]
