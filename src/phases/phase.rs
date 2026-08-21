@@ -349,11 +349,21 @@ impl RunContext {
     /// updates both governors based on the result. Centralising the
     /// state machine here keeps the four `call_*` methods free of
     /// the same boilerplate.
+    ///
+    /// Cascade-avoidance: when the breaker is already open at the
+    /// start of the call we return early with the synthetic
+    /// "circuit open" error — that error is *self-inflicted*, not
+    /// a signal of a real provider failure, so the post-call
+    /// `record_failure()` would just re-arm the breaker and feed
+    /// itself. We capture `was_open` pre-call and only record
+    /// PlanExhausted on the failure path when the breaker was
+    /// closed at the start of the call.
     async fn dispatch_with_governors<F, T>(&self, role: Role, inner: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>>,
     {
-        if self.breaker_for(role).is_open() {
+        let was_open = self.breaker_for(role).is_open();
+        if was_open {
             return Err(Error::PlanExhausted(format!(
                 "circuit open: provider '{}' role '{}' sidelined",
                 self.default_provider,
@@ -365,12 +375,24 @@ impl RunContext {
         let result = inner.await;
         match &result {
             Ok(_) => governor.on_success(),
-            Err(e) => match e.provider_cause() {
-                Some(ProviderCause::Throttled { retry_after, .. }) => {
+            Err(e) => match (e.provider_cause(), was_open) {
+                // 429 throttle: never trips the breaker (per-role throttle
+                // governor handles it via AIMD backoff).
+                (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
                     governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
                 }
-                Some(ProviderCause::PlanExhausted { .. }) => {
+                // PlanExhausted upstream: only record a breaker failure
+                // when the breaker was CLOSED at the start of this call.
+                // If was_open was already true, the PlanExhausted is the
+                // self-inflicted "circuit open" error from the early-return
+                // (or a peer that recorded concurrently) and counting it
+                // again would pump the failure tally back up and never let
+                // the breaker close.
+                (Some(ProviderCause::PlanExhausted { .. }), false) => {
                     self.breaker_for(role).record_failure();
+                }
+                (Some(ProviderCause::PlanExhausted { .. }), true) => {
+                    // Self-inflicted: do nothing.
                 }
                 _ => {}
             },
