@@ -132,7 +132,10 @@ mod tests {
             payload: "{}".into(),
         }];
         let result: Result<()> = record_with(&db, &events, || {
-            Err(crate::error::Error::Provider("sidecar boom".into()))
+            Err(crate::error::Error::Provider {
+                message: "sidecar boom".into(),
+                http_status: None,
+            })
         });
         assert!(result.is_err(), "sidecar error must propagate");
         let rows = db.list_outbox_events_for_run(&run.to_string()).unwrap();

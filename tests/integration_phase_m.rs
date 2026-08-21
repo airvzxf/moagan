@@ -69,7 +69,10 @@ fn error_already_exists_returns_code_already_exists() {
     // the current Error enum; we verify it routes to Auth and that
     // Auth is circuit-opening (per the catalog decision D.12.8:
     // "auth failures should sidelining the provider").
-    let err = Error::InvalidApiKey("missing key".into());
+    let err = Error::InvalidApiKey {
+        message: "missing key".into(),
+        http_status: None,
+    };
     assert_eq!(err.code(), ErrorCode::Auth);
     assert_eq!(err.code().stable(), "AUTH");
     assert!(err.code().is_circuit_opening());

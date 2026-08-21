@@ -176,27 +176,33 @@ impl RemoteEmbedderProvider {
     fn parse_response(self, body: &serde_json::Value) -> Result<Vec<Vec<f32>>> {
         match self {
             Self::Openai | Self::Voyage | Self::Custom => {
-                let data = body.get("data").and_then(|v| v.as_array()).ok_or_else(|| {
-                    Error::Provider(format!("{}: response missing 'data' array", self.as_str()))
-                })?;
+                let data =
+                    body.get("data")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| Error::Provider {
+                            message: format!("{}: response missing 'data' array", self.as_str()),
+                            http_status: None,
+                        })?;
                 let mut out = Vec::with_capacity(data.len());
                 for (idx, entry) in data.iter().enumerate() {
                     let embedding = entry
                         .get("embedding")
                         .and_then(|v| v.as_array())
-                        .ok_or_else(|| {
-                            Error::Provider(format!(
+                        .ok_or_else(|| Error::Provider {
+                            message: format!(
                                 "{}: data[{idx}] missing 'embedding' array",
                                 self.as_str()
-                            ))
+                            ),
+                            http_status: None,
                         })?;
                     let mut vec = Vec::with_capacity(embedding.len());
                     for (j, x) in embedding.iter().enumerate() {
-                        let f = x.as_f64().ok_or_else(|| {
-                            Error::Provider(format!(
+                        let f = x.as_f64().ok_or_else(|| Error::Provider {
+                            message: format!(
                                 "{}: data[{idx}].embedding[{j}] is not a number",
                                 self.as_str()
-                            ))
+                            ),
+                            http_status: None,
                         })?;
                         vec.push(f as f32);
                     }
@@ -208,27 +214,24 @@ impl RemoteEmbedderProvider {
                 let embeddings = body
                     .get("embeddings")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| {
-                        Error::Provider(format!(
-                            "{}: response missing 'embeddings' array",
-                            self.as_str()
-                        ))
+                    .ok_or_else(|| Error::Provider {
+                        message: format!("{}: response missing 'embeddings' array", self.as_str()),
+                        http_status: None,
                     })?;
                 let mut out = Vec::with_capacity(embeddings.len());
                 for (idx, entry) in embeddings.iter().enumerate() {
-                    let embedding = entry.as_array().ok_or_else(|| {
-                        Error::Provider(format!(
-                            "{}: embeddings[{idx}] is not an array",
-                            self.as_str()
-                        ))
+                    let embedding = entry.as_array().ok_or_else(|| Error::Provider {
+                        message: format!("{}: embeddings[{idx}] is not an array", self.as_str()),
+                        http_status: None,
                     })?;
                     let mut vec = Vec::with_capacity(embedding.len());
                     for (j, x) in embedding.iter().enumerate() {
-                        let f = x.as_f64().ok_or_else(|| {
-                            Error::Provider(format!(
+                        let f = x.as_f64().ok_or_else(|| Error::Provider {
+                            message: format!(
                                 "{}: embeddings[{idx}][{j}] is not a number",
                                 self.as_str()
-                            ))
+                            ),
+                            http_status: None,
                         })?;
                         vec.push(f as f32);
                     }
@@ -386,7 +389,10 @@ impl RemoteEmbedder {
             .connect_timeout(Duration::from_secs(15))
             .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|e| Error::Provider(format!("build reqwest client: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("build reqwest client: {e}"),
+                http_status: None,
+            })?;
         Ok(Self {
             provider,
             endpoint: endpoint.trim_end_matches('/').to_owned(),
@@ -446,12 +452,15 @@ impl RemoteEmbedder {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Provider(format!("{}: network: {e}", self.provider.as_str())))?;
+            .map_err(|e| Error::Provider {
+                message: format!("{}: network: {e}", self.provider.as_str()),
+                http_status: None,
+            })?;
         let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| Error::Provider(format!("{}: read body: {e}", self.provider.as_str())))?;
+        let bytes = response.bytes().await.map_err(|e| Error::Provider {
+            message: format!("{}: read body: {e}", self.provider.as_str()),
+            http_status: None,
+        })?;
         // Status check FIRST so an upstream that returns a non-JSON
         // error body (e.g. an HTML 401 page from a misconfigured
         // auth proxy) surfaces as a typed HTTP error instead of a
@@ -463,21 +472,32 @@ impl RemoteEmbedder {
             return Err(classify_status(status, &body_str));
         }
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-            Error::Provider(format!(
-                "{}: decode JSON (HTTP {status}): {e}",
-                self.provider.as_str()
-            ))
+            // HTTP status was successful (`!is_success()` returned
+            // false above), so the response was 2xx — the upstream
+            // sent a payload we couldn't decode. `http_status: None`
+            // is correct here because the failure is at the JSON
+            // layer, not the transport layer.
+            Error::Provider {
+                message: format!(
+                    "{}: decode JSON (HTTP {status}): {e}",
+                    self.provider.as_str()
+                ),
+                http_status: None,
+            }
         })?;
         let vectors = self.provider.parse_response(&parsed)?;
         // Reject mismatched vector count up-front so the caller does
         // not silently misalign inputs and outputs.
         if vectors.len() != texts.len() {
-            return Err(Error::Provider(format!(
-                "{}: response carried {} vectors for {} inputs",
-                self.provider.as_str(),
-                vectors.len(),
-                texts.len()
-            )));
+            return Err(Error::Provider {
+                message: format!(
+                    "{}: response carried {} vectors for {} inputs",
+                    self.provider.as_str(),
+                    vectors.len(),
+                    texts.len()
+                ),
+                http_status: None,
+            });
         }
         Ok(vectors)
     }
@@ -624,17 +644,20 @@ fn parse_provider(name: &str) -> Result<RemoteEmbedderProvider> {
 /// exit code matches the rest of the auth-failure surface.
 fn read_api_key(env_name: &str) -> Result<SecretString> {
     let raw = std::env::var(env_name).map_err(|e| match e {
-        std::env::VarError::NotPresent => {
-            Error::InvalidApiKey(format!("remote embedder: env var '{env_name}' is not set"))
-        }
-        std::env::VarError::NotUnicode(_) => Error::InvalidApiKey(format!(
-            "remote embedder: env var '{env_name}' is not valid unicode"
-        )),
+        std::env::VarError::NotPresent => Error::InvalidApiKey {
+            message: format!("remote embedder: env var '{env_name}' is not set"),
+            http_status: None,
+        },
+        std::env::VarError::NotUnicode(_) => Error::InvalidApiKey {
+            message: format!("remote embedder: env var '{env_name}' is not valid unicode"),
+            http_status: None,
+        },
     })?;
     if raw.trim().is_empty() {
-        return Err(Error::InvalidApiKey(format!(
-            "remote embedder: env var '{env_name}' is empty"
-        )));
+        return Err(Error::InvalidApiKey {
+            message: format!("remote embedder: env var '{env_name}' is empty"),
+            http_status: None,
+        });
     }
     Ok(SecretString::new(raw))
 }
@@ -650,8 +673,10 @@ fn build_auth_headers(api_key: &SecretString) -> Result<HeaderMap> {
     let auth_value = format!("Bearer {}", api_key.expose());
     headers.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&auth_value)
-            .map_err(|e| Error::Provider(format!("build authorization header: {e}")))?,
+        HeaderValue::from_str(&auth_value).map_err(|e| Error::Provider {
+            message: format!("build authorization header: {e}"),
+            http_status: None,
+        })?,
     );
     Ok(headers)
 }
@@ -830,7 +855,7 @@ mod tests {
         let err = RemoteEmbedderProvider::Openai
             .parse_response(&raw)
             .unwrap_err();
-        assert!(matches!(err, Error::Provider(_)), "got {err:?}");
+        assert!(matches!(err, Error::Provider { .. }), "got {err:?}");
     }
 
     #[test]
@@ -839,7 +864,7 @@ mod tests {
         let err = RemoteEmbedderProvider::Openai
             .parse_response(&raw)
             .unwrap_err();
-        assert!(matches!(err, Error::Provider(_)));
+        assert!(matches!(err, Error::Provider { .. }));
     }
 
     #[test]
@@ -848,7 +873,7 @@ mod tests {
         let err = RemoteEmbedderProvider::Cohere
             .parse_response(&raw)
             .unwrap_err();
-        assert!(matches!(err, Error::Provider(_)));
+        assert!(matches!(err, Error::Provider { .. }));
     }
 
     #[test]
@@ -857,7 +882,7 @@ mod tests {
         let err = RemoteEmbedderProvider::Cohere
             .parse_response(&raw)
             .unwrap_err();
-        assert!(matches!(err, Error::Provider(_)));
+        assert!(matches!(err, Error::Provider { .. }));
     }
 
     // ---------------- auth header ----------------
@@ -889,13 +914,13 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             "{\"message\":\"token plan rate limit reached\"}",
         );
-        assert!(matches!(err, Error::PlanExhausted(_)));
+        assert!(matches!(err, Error::PlanExhausted { .. }));
     }
 
     #[test]
     fn classify_status_401_maps_to_invalid_api_key() {
         let err = classify_status(StatusCode::UNAUTHORIZED, "no");
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
     }
 
     // ---------------- constructor validation ----------------
@@ -966,7 +991,7 @@ mod tests {
             1536,
         )
         .unwrap_err();
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
     }
 
     #[test]
@@ -986,7 +1011,7 @@ mod tests {
             std::env::remove_var(env_name);
         }
         let err = result.unwrap_err();
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
     }
 
     #[test]

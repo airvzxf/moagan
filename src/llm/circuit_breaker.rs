@@ -265,19 +265,37 @@ impl BreakerConfig {
         let mut tokens = s.split([':', ' ']).filter(|t| !t.is_empty());
         let threshold = tokens
             .next()
-            .ok_or_else(|| Error::Provider("circuit_breaker: missing threshold".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "circuit_breaker: missing threshold".into(),
+                http_status: None,
+            })?
             .parse::<u32>()
-            .map_err(|e| Error::Provider(format!("circuit_breaker: threshold: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("circuit_breaker: threshold: {e}"),
+                http_status: None,
+            })?;
         let window_secs = tokens
             .next()
-            .ok_or_else(|| Error::Provider("circuit_breaker: missing window_secs".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "circuit_breaker: missing window_secs".into(),
+                http_status: None,
+            })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider(format!("circuit_breaker: window_secs: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("circuit_breaker: window_secs: {e}"),
+                http_status: None,
+            })?;
         let cooldown_secs = tokens
             .next()
-            .ok_or_else(|| Error::Provider("circuit_breaker: missing cooldown_secs".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "circuit_breaker: missing cooldown_secs".into(),
+                http_status: None,
+            })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider(format!("circuit_breaker: cooldown_secs: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("circuit_breaker: cooldown_secs: {e}"),
+                http_status: None,
+            })?;
         Ok(Self::new(
             threshold,
             Duration::from_secs(window_secs),
@@ -402,7 +420,12 @@ mod tests {
         let cb = CircuitBreaker::new(2, Duration::from_secs(60), Duration::from_secs(60));
         for _ in 0..2 {
             let r: Result<()> = cb
-                .run(|| async { Err::<(), _>(crate::Error::Provider("x".into())) })
+                .run(|| async {
+                    Err::<(), _>(crate::Error::Provider {
+                        message: "x".into(),
+                        http_status: None,
+                    })
+                })
                 .await;
             assert!(r.is_err());
         }

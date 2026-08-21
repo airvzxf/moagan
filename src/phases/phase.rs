@@ -364,11 +364,14 @@ impl RunContext {
     {
         let was_open = self.breaker_for(role).is_open();
         if was_open {
-            return Err(Error::PlanExhausted(format!(
-                "circuit open: provider '{}' role '{}' sidelined",
-                self.default_provider,
-                role.as_str()
-            )));
+            return Err(Error::PlanExhausted {
+                message: format!(
+                    "circuit open: provider '{}' role '{}' sidelined",
+                    self.default_provider,
+                    role.as_str()
+                ),
+                http_status: None,
+            });
         }
         let governor = self.governor_for(role);
         let _throttle_sleep = governor.pre_call().await;
@@ -1216,7 +1219,7 @@ impl RunContext {
                     cache_key.as_deref().unwrap_or(""),
                     request_body_sha256.as_deref(),
                     false,
-                    None,
+                    e.http_status(),
                     0,
                     0,
                     0,
@@ -2094,7 +2097,7 @@ fn error_code_is_retriable(code: Option<ErrorCode>) -> bool {
 
 fn should_retry_error(err: &Error) -> bool {
     error_code_is_retriable(Some(err.code()))
-        || matches!(err, Error::Provider(_) | Error::PlanExhausted(_))
+        || matches!(err, Error::Provider { .. } | Error::PlanExhausted { .. })
 }
 
 /// Internal loop-control flag for `call_with_retry_parse`. The
@@ -2576,7 +2579,10 @@ mod tests {
 
     #[tokio::test]
     async fn call_with_retry_parse_bails_on_non_retriable_error() {
-        let (_temp, ctx, script) = retry_context(vec![Err(Error::InvalidApiKey("bad".into()))]);
+        let (_temp, ctx, script) = retry_context(vec![Err(Error::InvalidApiKey {
+            message: "bad".into(),
+            http_status: None,
+        })]);
         let result = ctx
             .call_with_retry_parse::<serde_json::Value>(
                 Role::Intake,
@@ -2586,14 +2592,17 @@ mod tests {
                 5,
             )
             .await;
-        assert!(matches!(result, Err(Error::InvalidApiKey(_))));
+        assert!(matches!(result, Err(Error::InvalidApiKey { .. })));
         assert_eq!(script.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
     async fn call_with_retry_parse_retries_on_retriable_error() {
         let (_temp, ctx, script) = retry_context(vec![
-            Err(Error::Provider("temporary outage".into())),
+            Err(Error::Provider {
+                message: "temporary outage".into(),
+                http_status: None,
+            }),
             Ok((200, response(r#"{"ok":true}"#))),
         ]);
         let result = ctx
@@ -2882,7 +2891,10 @@ mod tests {
     async fn phase_skips_continuation_on_first_transport_error() {
         let (temp, ctx, script) = retry_context(vec![
             Ok((200, truncated_response(r#"{"x":"#))),
-            Err(Error::Provider("transport died".into())),
+            Err(Error::Provider {
+                message: "transport died".into(),
+                http_status: None,
+            }),
         ]);
         let result = ctx
             .call_with_retry_parse::<serde_json::Value>(

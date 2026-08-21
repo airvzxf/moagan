@@ -214,10 +214,15 @@ impl MockProvider {
         entries.sort();
 
         for entry in entries {
-            let raw = fs::read_to_string(&entry)
-                .map_err(|e| Error::Provider(format!("mock read {entry:?}: {e}")))?;
-            let resp: MockResponseJson = serde_json::from_str(&raw)
-                .map_err(|e| Error::Provider(format!("mock parse {entry:?}: {e}")))?;
+            let raw = fs::read_to_string(&entry).map_err(|e| Error::Provider {
+                message: format!("mock read {entry:?}: {e}"),
+                http_status: None,
+            })?;
+            let resp: MockResponseJson =
+                serde_json::from_str(&raw).map_err(|e| Error::Provider {
+                    message: format!("mock parse {entry:?}: {e}"),
+                    http_status: None,
+                })?;
             let resp: MockResponse = resp.into();
 
             // Route by immediate parent directory. `path.parent()`

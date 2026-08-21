@@ -113,34 +113,70 @@ impl ThrottleConfig {
         let mut tokens = s.split([':', ' ']).filter(|t| !t.is_empty());
         let initial = tokens
             .next()
-            .ok_or_else(|| Error::Provider("throttle: missing initial_concurrency".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "throttle: missing initial_concurrency".into(),
+                http_status: None,
+            })?
             .parse::<u32>()
-            .map_err(|e| Error::Provider(format!("throttle: initial_concurrency: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("throttle: initial_concurrency: {e}"),
+                http_status: None,
+            })?;
         let max = tokens
             .next()
-            .ok_or_else(|| Error::Provider("throttle: missing max_concurrency".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "throttle: missing max_concurrency".into(),
+                http_status: None,
+            })?
             .parse::<u32>()
-            .map_err(|e| Error::Provider(format!("throttle: max_concurrency: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("throttle: max_concurrency: {e}"),
+                http_status: None,
+            })?;
         let initial_backoff = tokens
             .next()
-            .ok_or_else(|| Error::Provider("throttle: missing initial_backoff_ms".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "throttle: missing initial_backoff_ms".into(),
+                http_status: None,
+            })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider(format!("throttle: initial_backoff_ms: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("throttle: initial_backoff_ms: {e}"),
+                http_status: None,
+            })?;
         let max_backoff = tokens
             .next()
-            .ok_or_else(|| Error::Provider("throttle: missing max_backoff_ms".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "throttle: missing max_backoff_ms".into(),
+                http_status: None,
+            })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider(format!("throttle: max_backoff_ms: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("throttle: max_backoff_ms: {e}"),
+                http_status: None,
+            })?;
         let additive_after = tokens
             .next()
-            .ok_or_else(|| Error::Provider("throttle: missing additive_after_ms".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "throttle: missing additive_after_ms".into(),
+                http_status: None,
+            })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider(format!("throttle: additive_after_ms: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("throttle: additive_after_ms: {e}"),
+                http_status: None,
+            })?;
         let jitter = tokens
             .next()
-            .ok_or_else(|| Error::Provider("throttle: missing jitter_ms".into()))?
+            .ok_or_else(|| Error::Provider {
+                message: "throttle: missing jitter_ms".into(),
+                http_status: None,
+            })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider(format!("throttle: jitter_ms: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("throttle: jitter_ms: {e}"),
+                http_status: None,
+            })?;
         Ok(Self::new(
             initial,
             max,

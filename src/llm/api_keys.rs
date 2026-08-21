@@ -92,9 +92,12 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
     if let Some(rest) = trimmed_spec.strip_prefix("env:") {
         let var = rest.trim();
         std::env::var(var).ok().filter(|s| !s.trim().is_empty()).ok_or_else(|| {
-            Error::InvalidApiKey(format!(
-                "api_keys.toml spec {spec:?} requested env var {var:?} for {env_var:?}, which is unset or blank"
-            ))
+            Error::InvalidApiKey {
+                message: format!(
+                    "api_keys.toml spec {spec:?} requested env var {var:?} for {env_var:?}, which is unset or blank"
+                ),
+                http_status: None,
+            }
         })
     } else if let Some(rest) = trimmed_spec.strip_prefix("file:") {
         let path = PathBuf::from(rest.trim());
@@ -103,22 +106,29 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                Error::InvalidApiKey(format!(
-                    "api_keys.toml spec {spec:?} requested file {path:?} for {env_var:?}, which could not be read or was empty"
-                ))
+                Error::InvalidApiKey {
+                    message: format!(
+                        "api_keys.toml spec {spec:?} requested file {path:?} for {env_var:?}, which could not be read or was empty"
+                    ),
+                    http_status: None,
+                }
             })
     } else if literal_allowed() {
         if trimmed_spec.is_empty() {
-            Err(Error::InvalidApiKey(format!(
-                "api_keys.toml literal spec for {env_var:?} was empty"
-            )))
+            Err(Error::InvalidApiKey {
+                message: format!("api_keys.toml literal spec for {env_var:?} was empty"),
+                http_status: None,
+            })
         } else {
             Ok(trimmed_spec.to_string())
         }
     } else {
-        Err(Error::InvalidApiKey(format!(
-            "api_keys.toml spec {spec:?} for {env_var:?} is a literal but MOAGAN_API_KEY_ALLOW_LITERAL is not set"
-        )))
+        Err(Error::InvalidApiKey {
+            message: format!(
+                "api_keys.toml spec {spec:?} for {env_var:?} is a literal but MOAGAN_API_KEY_ALLOW_LITERAL is not set"
+            ),
+            http_status: None,
+        })
     }
 }
 
@@ -296,7 +306,7 @@ mod tests {
         let result =
             lookup_key("minimax", Some(tmp.path())).expect("spec was configured, must return Some");
         let err = result.expect_err("missing env var must surface Err");
-        assert!(matches!(err, Error::InvalidApiKey(_)));
+        assert!(matches!(err, Error::InvalidApiKey { .. }));
     }
 
     #[test]

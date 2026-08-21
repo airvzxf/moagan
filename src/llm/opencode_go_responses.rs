@@ -104,11 +104,10 @@ impl OpenCodeGoResponsesProvider {
         let key = std::env::var("OPENCODE_GO_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                Error::InvalidApiKey(
-                    "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
-                        .into(),
-                )
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
+                    .into(),
+                http_status: None,
             })?;
         Self::new(spec, SecretString::new(key))
     }
@@ -231,7 +230,10 @@ fn build_client() -> Result<reqwest::Client> {
         .connect_timeout(std::time::Duration::from_secs(15))
         .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| Error::Provider(format!("build reqwest client: {e}")))
+        .map_err(|e| Error::Provider {
+            message: format!("build reqwest client: {e}"),
+            http_status: None,
+        })
 }
 
 /// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
@@ -389,8 +391,14 @@ fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
             Ok(None) => break,
             Err(e) => {
                 return Err(match e {
-                    SseError::Io(err) => Error::Provider(format!("sse io: {err}")),
-                    SseError::Parse(err) => Error::Provider(format!("sse parse: {err}")),
+                    SseError::Io(err) => Error::Provider {
+                        message: format!("sse io: {err}"),
+                        http_status: None,
+                    },
+                    SseError::Parse(err) => Error::Provider {
+                        message: format!("sse parse: {err}"),
+                        http_status: None,
+                    },
                 });
             }
         }
@@ -488,10 +496,11 @@ impl OpenCodeGoResponsesProvider {
                     );
                     if status.is_success() {
                         let decode_started = std::time::Instant::now();
-                        let parsed: ResponsesBody = resp
-                            .json()
-                            .await
-                            .map_err(|e| Error::Provider(format!("decode: {e}")))?;
+                        let parsed: ResponsesBody =
+                            resp.json().await.map_err(|e| Error::Provider {
+                                message: format!("decode: {e}"),
+                                http_status: None,
+                            })?;
                         tracing::debug!(
                             provider = self.name,
                             attempt,
@@ -527,14 +536,28 @@ impl OpenCodeGoResponsesProvider {
                     }
                     let body = resp.text().await.unwrap_or_default();
                     let err = match status_code {
-                        401 | 403 => Error::InvalidApiKey(format!("http {status_code}: {body}")),
-                        429 => Error::PlanExhausted(format!("http {status_code}: {body}")),
-                        408 | 504 | 524 => Error::Timeout(format!("http {status_code}: {body}")),
-                        _ => Error::Provider(format!("http {status_code}: {body}")),
+                        401 | 403 => Error::InvalidApiKey {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
+                        429 => Error::PlanExhausted {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
+                        408 | 504 | 524 => Error::Timeout {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
+                        _ => Error::Provider {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
                     };
                     let retryable = matches!(
                         err,
-                        Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
+                        Error::Timeout { .. }
+                            | Error::PlanExhausted { .. }
+                            | Error::Provider { .. }
                     );
                     if !retryable || attempt >= max_retries {
                         return Err(err);
@@ -543,7 +566,10 @@ impl OpenCodeGoResponsesProvider {
                 }
                 Err(e) => {
                     if attempt >= max_retries {
-                        return Err(Error::Provider(format!("network: {e}")));
+                        return Err(Error::Provider {
+                            message: format!("network: {e}"),
+                            http_status: None,
+                        });
                     }
                     Self::sleep_with_jitter(attempt, None).await;
                 }
@@ -578,23 +604,38 @@ impl OpenCodeGoResponsesProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Provider(format!("network: {e}")))?;
+            .map_err(|e| Error::Provider {
+                message: format!("network: {e}"),
+                http_status: None,
+            })?;
         let status = resp.status();
         let status_code = status.as_u16();
         if !status.is_success() {
             let raw = resp.text().await.unwrap_or_default();
             let err = match status_code {
-                401 | 403 => Error::InvalidApiKey(format!("http {status_code}: {raw}")),
-                429 => Error::PlanExhausted(format!("http {status_code}: {raw}")),
-                408 | 504 | 524 => Error::Timeout(format!("http {status_code}: {raw}")),
-                _ => Error::Provider(format!("http {status_code}: {raw}")),
+                401 | 403 => Error::InvalidApiKey {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
+                429 => Error::PlanExhausted {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
+                408 | 504 | 524 => Error::Timeout {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
+                _ => Error::Provider {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
             };
             return Err(err);
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::Provider(format!("stream body read: {e}")))?;
+        let bytes = resp.bytes().await.map_err(|e| Error::Provider {
+            message: format!("stream body read: {e}"),
+            http_status: None,
+        })?;
         tracing::debug!(
             provider = self.name,
             status = status_code,
@@ -694,7 +735,7 @@ mod tests {
             max_token_auto_save: true,
             plan: None,
         });
-        assert!(matches!(result, Err(Error::InvalidApiKey(_))));
+        assert!(matches!(result, Err(Error::InvalidApiKey { .. })));
     }
 
     #[test]
@@ -815,9 +856,9 @@ data: {not json}\n\n";
             };
             let err = p.send(&req).await.unwrap_err();
             match err {
-                Error::Provider(msg) => assert!(
-                    msg.contains("sse parse"),
-                    "expected sse parse error, got {msg:?}"
+                Error::Provider { message, .. } => assert!(
+                    message.contains("sse parse"),
+                    "expected sse parse error, got {message:?}"
                 ),
                 other => panic!("expected Error::Provider, got {other:?}"),
             }

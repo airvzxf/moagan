@@ -103,11 +103,10 @@ impl OpenCodeGoAnthropicProvider {
         let key = std::env::var("OPENCODE_GO_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                Error::InvalidApiKey(
-                    "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
-                        .into(),
-                )
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
+                    .into(),
+                http_status: None,
             })?;
         Self::new(spec, SecretString::new(key))
     }
@@ -296,10 +295,11 @@ impl OpenCodeGoAnthropicProvider {
                     let retry_after = retry_after(&resp);
                     if status.is_success() {
                         let decode_started = std::time::Instant::now();
-                        let parsed: OpenCodeGoMessagesResponseBody = resp
-                            .json()
-                            .await
-                            .map_err(|e| Error::Provider(format!("decode response: {e}")))?;
+                        let parsed: OpenCodeGoMessagesResponseBody =
+                            resp.json().await.map_err(|e| Error::Provider {
+                                message: format!("decode response: {e}"),
+                                http_status: None,
+                            })?;
                         tracing::debug!(
                             provider = self.name,
                             attempt,
@@ -321,10 +321,10 @@ impl OpenCodeGoAnthropicProvider {
                     // `Retry-After` header when the upstream set one.
                     let retryable = matches!(
                         err,
-                        Error::Timeout(_)
-                            | Error::PlanExhausted(_)
+                        Error::Timeout { .. }
+                            | Error::PlanExhausted { .. }
                             | Error::Throttled { .. }
-                            | Error::Provider(_)
+                            | Error::Provider { .. }
                     );
                     if !retryable || attempt >= max_retries {
                         return Err(err);
@@ -333,7 +333,10 @@ impl OpenCodeGoAnthropicProvider {
                 }
                 Err(e) => {
                     if attempt >= max_retries {
-                        return Err(Error::Provider(format!("network: {e}")));
+                        return Err(Error::Provider {
+                            message: format!("network: {e}"),
+                            http_status: None,
+                        });
                     }
                     Self::sleep_with_jitter(attempt, None).await;
                 }
@@ -680,7 +683,7 @@ mod tests {
             max_token_auto_save: true,
             plan: None,
         });
-        assert!(matches!(result, Err(Error::InvalidApiKey(_))));
+        assert!(matches!(result, Err(Error::InvalidApiKey { .. })));
     }
 
     /// Per-provider `max_tokens` cap (e.g. DeepSeek-style `8192`) must

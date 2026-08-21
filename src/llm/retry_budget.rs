@@ -136,13 +136,13 @@ pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
 ///   cap is a contract, not a flaky transient.
 pub fn reason_from_error(err: &Error) -> RetryReason {
     match err {
-        Error::Timeout(_) => RetryReason::Timeout,
-        Error::PlanExhausted(_) | Error::Throttled { .. } => RetryReason::RateLimit,
+        Error::Timeout { .. } => RetryReason::Timeout,
+        Error::PlanExhausted { .. } | Error::Throttled { .. } => RetryReason::RateLimit,
         Error::SchemaViolation(_) => RetryReason::Schema,
-        Error::Provider(_) | Error::Cache(_) | Error::Io(_) => RetryReason::Transport,
+        Error::Provider { .. } | Error::Cache(_) | Error::Io(_) => RetryReason::Transport,
         Error::MockExhausted => RetryReason::Truncated,
         Error::InvalidArgs(_)
-        | Error::InvalidApiKey(_)
+        | Error::InvalidApiKey { .. }
         | Error::InvalidState(_)
         | Error::LockHeld(_)
         | Error::NeedsInput(_)
@@ -282,7 +282,10 @@ mod tests {
     #[test]
     fn reason_from_error_timeout_maps_to_timeout_reason() {
         assert_eq!(
-            reason_from_error(&Error::Timeout("x".into())),
+            reason_from_error(&Error::Timeout {
+                message: "x".into(),
+                http_status: None,
+            }),
             RetryReason::Timeout,
         );
     }
@@ -305,7 +308,10 @@ mod tests {
     #[test]
     fn reason_from_error_provider_maps_to_transport_reason() {
         assert_eq!(
-            reason_from_error(&Error::Provider("x".into())),
+            reason_from_error(&Error::Provider {
+                message: "x".into(),
+                http_status: None,
+            }),
             RetryReason::Transport,
         );
     }
@@ -317,7 +323,10 @@ mod tests {
     #[test]
     fn reason_from_error_plan_exhausted_maps_to_rate_limit_reason() {
         assert_eq!(
-            reason_from_error(&Error::PlanExhausted("x".into())),
+            reason_from_error(&Error::PlanExhausted {
+                message: "x".into(),
+                http_status: None,
+            }),
             RetryReason::RateLimit,
         );
     }
@@ -380,7 +389,10 @@ mod tests {
             RetryReason::Transport,
         );
         assert_eq!(
-            reason_from_error(&Error::InvalidApiKey("x".into())),
+            reason_from_error(&Error::InvalidApiKey {
+                message: "x".into(),
+                http_status: None,
+            }),
             RetryReason::Transport,
         );
         assert_eq!(
@@ -396,11 +408,39 @@ mod tests {
     #[test]
     fn reason_from_error_then_budget_for_round_trips_through_matrix() {
         let cases = [
-            (Error::Timeout("x".into()), Mode::Standard, 2),
-            (Error::Provider("x".into()), Mode::Standard, 2),
-            (Error::PlanExhausted("x".into()), Mode::Deep, 3),
+            (
+                Error::Timeout {
+                    message: "x".into(),
+                    http_status: None,
+                },
+                Mode::Standard,
+                2,
+            ),
+            (
+                Error::Provider {
+                    message: "x".into(),
+                    http_status: None,
+                },
+                Mode::Standard,
+                2,
+            ),
+            (
+                Error::PlanExhausted {
+                    message: "x".into(),
+                    http_status: None,
+                },
+                Mode::Deep,
+                3,
+            ),
             (Error::SchemaViolation("x".into()), Mode::Deep, 2),
-            (Error::Provider("x".into()), Mode::Fast, 1),
+            (
+                Error::Provider {
+                    message: "x".into(),
+                    http_status: None,
+                },
+                Mode::Fast,
+                1,
+            ),
         ];
         for (err, mode, expected) in cases {
             let b = budget_for(mode, reason_from_error(&err));

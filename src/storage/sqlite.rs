@@ -103,8 +103,14 @@ pub enum SqliteError {
 impl From<SqliteError> for crate::Error {
     fn from(e: SqliteError) -> Self {
         match e {
-            SqliteError::Sqlite(s) => crate::Error::Provider(format!("sqlite: {s}")),
-            SqliteError::Pool(p) => crate::Error::Provider(format!("sqlite pool: {p}")),
+            SqliteError::Sqlite(s) => crate::Error::Provider {
+                message: format!("sqlite: {s}"),
+                http_status: None,
+            },
+            SqliteError::Pool(p) => crate::Error::Provider {
+                message: format!("sqlite pool: {p}"),
+                http_status: None,
+            },
         }
     }
 }
@@ -2748,9 +2754,13 @@ impl Db {
         };
 
         let stored_holder = stored_key.strip_prefix(&prefix).unwrap_or_default();
-        let current_fence = stored_fence
-            .parse::<u64>()
-            .map_err(|_| crate::error::Error::Provider("sqlite: invalid lease fence".into()))?;
+        let current_fence =
+            stored_fence
+                .parse::<u64>()
+                .map_err(|_| crate::error::Error::Provider {
+                    message: "sqlite: invalid lease fence".into(),
+                    http_status: None,
+                })?;
         let active = stored_expires > now;
         if let Some(expected) = expected_fence {
             if stored_holder != holder || current_fence != expected || !active {
@@ -2760,9 +2770,13 @@ impl Db {
             return Err(crate::error::Error::LockHeld(run_id.to_string()));
         }
 
-        let next_fence = current_fence
-            .checked_add(1)
-            .ok_or_else(|| crate::error::Error::Provider("sqlite: lease fence overflow".into()))?;
+        let next_fence =
+            current_fence
+                .checked_add(1)
+                .ok_or_else(|| crate::error::Error::Provider {
+                    message: "sqlite: lease fence overflow".into(),
+                    http_status: None,
+                })?;
         conn.execute(
             "UPDATE process_locks SET holder = ?, acquired_at_unix = ?, expires_at_unix = ?, fence = ? \
              WHERE holder = ?",
@@ -2808,7 +2822,10 @@ impl Db {
         };
         let parsed = raw
             .parse::<u64>()
-            .map_err(|_| crate::error::Error::Provider("sqlite: invalid lease fence".into()))?;
+            .map_err(|_| crate::error::Error::Provider {
+                message: "sqlite: invalid lease fence".into(),
+                http_status: None,
+            })?;
         Ok(Some(parsed))
     }
 
@@ -3130,9 +3147,12 @@ fn count_artefacts_in(dir: &Path) -> Result<usize> {
         if is_atomic_tmp_path(&p) {
             continue;
         }
-        count = count.checked_add(1).ok_or_else(|| {
-            crate::error::Error::Provider(format!("artefact count overflow at {}", p.display()))
-        })?;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| crate::error::Error::Provider {
+                message: format!("artefact count overflow at {}", p.display()),
+                http_status: None,
+            })?;
     }
     Ok(count)
 }
@@ -4495,7 +4515,10 @@ mod tests {
             conn.execute_batch("CREATE TABLE new_table (id INTEGER)")?;
             // Simulate the crash: the schema SQL succeeded but
             // the closure errors out before the PRAGMA bump.
-            Err(crate::Error::Provider("simulated crash".into()))
+            Err(crate::Error::Provider {
+                message: "simulated crash".into(),
+                http_status: None,
+            })
         });
         assert!(result.is_err(), "failing closure must surface");
 

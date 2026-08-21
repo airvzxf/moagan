@@ -78,15 +78,18 @@ impl MinimaxProvider {
     /// so existing CI / shell setups keep working untouched.
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
         let key = super::api_keys::lookup_key("minimax", None)
-            .ok_or_else(|| {
-                Error::InvalidApiKey(
-                    "MINIMAX_API_KEY not set; provide via env, --api-key, or api_keys.toml".into(),
-                )
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: "MINIMAX_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                    .into(),
+                http_status: None,
             })?
             .map_err(|e| match e {
-                Error::InvalidApiKey(msg) => Error::InvalidApiKey(format!(
-                    "minimax: {msg}; check api_keys.toml and the env var fallback"
-                )),
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "minimax: {message}; check api_keys.toml and the env var fallback"
+                    ),
+                    http_status: None,
+                },
                 other => other,
             })?;
         Self::new(spec, SecretString::new(key))
@@ -195,10 +198,11 @@ impl MinimaxProvider {
                         let retry_after = retry_after(&resp);
                         if status.is_success() {
                             let decode_started = Instant::now();
-                            let parsed: MessagesResponseBody = resp
-                                .json()
-                                .await
-                                .map_err(|e| Error::Provider(format!("decode response: {e}")))?;
+                            let parsed: MessagesResponseBody =
+                                resp.json().await.map_err(|e| Error::Provider {
+                                    message: format!("decode response: {e}"),
+                                    http_status: None,
+                                })?;
                             tracing::debug!(
                                 provider = self.name,
                                 attempt,
@@ -207,9 +211,10 @@ impl MinimaxProvider {
                                 elapsed_ms = decode_started.elapsed().as_millis(),
                                 "Provider HTTP stage"
                             );
-                            let resp = parsed
-                                .into_response()
-                                .map_err(|e| Error::Provider(e.to_string()))?;
+                            let resp = parsed.into_response().map_err(|e| Error::Provider {
+                                message: e.to_string(),
+                                http_status: None,
+                            })?;
                             return Ok((status_code, resp));
                         }
                         let body = resp.text().await.unwrap_or_default();
@@ -228,10 +233,10 @@ impl MinimaxProvider {
                         //   covers role-shaping.
                         let retryable = matches!(
                             err,
-                            Error::Timeout(_)
-                                | Error::PlanExhausted(_)
+                            Error::Timeout { .. }
+                                | Error::PlanExhausted { .. }
                                 | Error::Throttled { .. }
-                                | Error::Provider(_)
+                                | Error::Provider { .. }
                         );
                         if !retryable || attempt >= probe_max_retries {
                             return Err(err);
@@ -240,7 +245,10 @@ impl MinimaxProvider {
                     }
                     Err(e) => {
                         if attempt >= probe_max_retries {
-                            return Err(Error::Provider(format!("network: {e}")));
+                            return Err(Error::Provider {
+                                message: format!("network: {e}"),
+                                http_status: None,
+                            });
                         }
                         Self::sleep_with_jitter(attempt, None).await;
                     }
@@ -438,7 +446,7 @@ mod tests {
             plan: None,
         };
         let r = MinimaxProvider::from_config(&cfg);
-        assert!(matches!(r, Err(Error::InvalidApiKey(_))));
+        assert!(matches!(r, Err(Error::InvalidApiKey { .. })));
     }
 
     fn test_provider(endpoint: String) -> MinimaxProvider {
@@ -495,7 +503,7 @@ mod tests {
 
         let result = provider.send(&test_request()).await;
 
-        assert!(matches!(result, Err(Error::Provider(_))));
+        assert!(matches!(result, Err(Error::Provider { .. })));
         assert_eq!(breaker.failure_count(), 1);
     }
 

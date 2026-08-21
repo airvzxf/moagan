@@ -109,7 +109,7 @@ async fn openai_round_trip_returns_vectors() {
         .expect_err("embed_one with mocked 2-vector response must mismatch");
     use moagan::error::Error;
     assert!(
-        matches!(err, Error::Provider(_)),
+        matches!(err, Error::Provider { .. }),
         "expected Provider on count mismatch, got {err:?}"
     );
 }
@@ -174,7 +174,7 @@ async fn auth_header_is_bearer() {
     let result = embedder.embed_batch(&["x"]).await;
     match result {
         Ok(v) => assert_eq!(v, vec![vec![0.0]]),
-        Err(Error::Provider(msg)) => {
+        Err(Error::Provider { message: msg, .. }) => {
             // Fallback path: if the matcher did not match, the
             // server returns 404 and the request fails. The test
             // contract is "successful call proves the bearer
@@ -209,7 +209,7 @@ async fn http_401_maps_to_invalid_api_key() {
         .await
         .expect_err("401 must error");
     assert!(
-        matches!(err, Error::InvalidApiKey(_)),
+        matches!(err, Error::InvalidApiKey { .. }),
         "expected InvalidApiKey, got {err:?}"
     );
 }
@@ -245,7 +245,7 @@ async fn http_429_maps_to_plan_exhausted() {
         .await
         .expect_err("429 must error");
     assert!(
-        matches!(err, Error::PlanExhausted(_)),
+        matches!(err, Error::PlanExhausted { .. }),
         "expected PlanExhausted, got {err:?}"
     );
 }
@@ -313,7 +313,7 @@ async fn http_500_maps_to_provider_error() {
         .await
         .expect_err("500 must error");
     assert!(
-        matches!(err, Error::Provider(_)),
+        matches!(err, Error::Provider { .. }),
         "expected Provider, got {err:?}"
     );
 }
@@ -346,7 +346,7 @@ async fn response_count_mismatch_is_provider_error() {
         .await
         .expect_err("mismatch must error");
     assert!(
-        matches!(err, Error::Provider(_)),
+        matches!(err, Error::Provider { .. }),
         "expected Provider, got {err:?}"
     );
 }
@@ -377,7 +377,7 @@ async fn non_json_4xx_surfaces_as_status_error() {
         .await
         .expect_err("non-JSON 401 must error");
     assert!(
-        matches!(err, Error::InvalidApiKey(_)),
+        matches!(err, Error::InvalidApiKey { .. }),
         "expected InvalidApiKey (not JSON-decode Provider), got {err:?}"
     );
 }

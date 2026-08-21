@@ -332,8 +332,9 @@ fn count_artefacts_in_dir(dir: &Path) -> Result<usize> {
         if crate::reconcile::is_atomic_tmp(&p) {
             continue;
         }
-        count = count.checked_add(1).ok_or_else(|| {
-            Error::Provider(format!("artefact count overflow at {}", p.display()))
+        count = count.checked_add(1).ok_or_else(|| Error::Provider {
+            message: format!("artefact count overflow at {}", p.display()),
+            http_status: None,
         })?;
     }
     Ok(count)

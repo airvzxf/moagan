@@ -164,16 +164,19 @@ impl OpenCodeGoProvider {
     /// env var so existing CI / shell setups keep working untouched.
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
         let key = super::api_keys::lookup_key("opencode_go", None)
-            .ok_or_else(|| {
-                Error::InvalidApiKey(
+            .ok_or_else(|| Error::InvalidApiKey {
+                message:
                     "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or api_keys.toml"
                         .into(),
-                )
+                http_status: None,
             })?
             .map_err(|e| match e {
-                Error::InvalidApiKey(msg) => Error::InvalidApiKey(format!(
-                    "opencode_go: {msg}; check api_keys.toml and the env var fallback"
-                )),
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "opencode_go: {message}; check api_keys.toml and the env var fallback"
+                    ),
+                    http_status: None,
+                },
                 other => other,
             })?;
         Self::new(spec, SecretString::new(key))
@@ -241,7 +244,7 @@ impl Provider for OpenCodeGoProvider {
         // OpenCode Go after the map is updated — the operator can
         // extend MODEL_TEMPERATURE_OVERRIDES later without losing
         // runtime coverage.
-        if let Err(Error::Provider(body)) = &first {
+        if let Err(Error::Provider { message: body, .. }) = &first {
             let lower = body.to_ascii_lowercase();
             let temp_blocked = (lower.contains("invalid temperature")
                 || lower.contains("only 1 is allowed")
@@ -325,7 +328,7 @@ mod tests {
             std::env::remove_var("OPENCODE_GO_API_KEY");
         }
         let result = OpenCodeGoProvider::from_config(&config());
-        assert!(matches!(result, Err(Error::InvalidApiKey(_))));
+        assert!(matches!(result, Err(Error::InvalidApiKey { .. })));
     }
 
     #[test]
