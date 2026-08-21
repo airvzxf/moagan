@@ -3137,6 +3137,41 @@ mod tests {
         );
     }
 
+    /// `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>` opts
+    /// the named role into a role-scoped token bucket. The role name
+    /// matches `Role::as_str()` (snake_case); the prefix is distinct
+    /// from the per-provider `MOAGAN_RATE_LIMIT_<provider>` so the
+    /// two maps never collide. Mirrors the per-provider env test
+    /// but exercises the role-scoped branch.
+    #[test]
+    fn config_env_var_rate_limit_role_tag_must_not_crash_other_role() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Sanity: setting a per-provider env var with a role-style
+        // suffix would otherwise be misread as a provider. The
+        // `MOAGAN_RATE_LIMIT_<suffix>` loop explicitly skips
+        // `ROLE_*` suffixes so the per-role map stays empty when
+        // only the per-provider var is set.
+        unsafe {
+            std::env::set_var("MOAGAN_RATE_LIMIT_MINIMAX", "30:5");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_RATE_LIMIT_MINIMAX");
+        }
+        let provider = cfg
+            .rate_limit_per_provider
+            .get("minimax")
+            .expect("minimax entry must be populated by per-provider env");
+        assert_eq!(provider.capacity, 30);
+        assert_eq!(provider.refill_per_sec, 5);
+        assert!(
+            cfg.rate_limit_per_role.is_empty(),
+            "per-provider env var must not leak into the role map, got {:?}",
+            cfg.rate_limit_per_role
+        );
+    }
+
     /// TOML round-trip preserves the per-provider rate-limit knobs
     /// so operators can pin their choice in
     /// `~/.config/moagan/config.toml`.
