@@ -30,6 +30,7 @@ use moagan::error::{Error, Result};
 use moagan::llm::Role;
 use moagan::llm::circuit_breaker::CircuitBreaker;
 use moagan::llm::provider::{BreakeredProvider, Provider};
+use moagan::llm::provider_pool::ProviderPoolEntry;
 use moagan::llm::wire::{CallRecord, Request, Response, Usage};
 
 /// A programmable provider for breaker tests. Holds a closure
@@ -130,11 +131,17 @@ fn always_non_opening_error() -> Error {
     Error::SchemaViolation("payload did not match schema".into())
 }
 
-/// Spec §D.19.5: 5 opening errors inside the window open the
-/// breaker; subsequent calls fail fast without touching the
-/// inner provider.
+/// v0.9.6: `BreakeredProvider::send` no longer records failures
+/// into the legacy per-provider breaker. Recording moved to the
+/// per-`(provider, role)` breaker in `RunContext::call_with_retry_parse`
+/// (`dispatch_with_governors`); the legacy field is now used only
+/// by the provider pool's `is_available` signal. This test pins
+/// the new contract: after 5 opening errors the inner provider
+/// still sees every call (no short-circuit), the breaker stays
+/// closed, and the per-`(provider, role)` breaker in
+/// `RunContext` is the one that would trip.
 #[tokio::test]
-async fn breaker_opens_after_threshold_failures() {
+async fn breaker_legacy_field_does_not_short_circuit_send() {
     let scripted = Arc::new(ScriptedProvider::new(
         "scripted",
         "scripted-model",
@@ -149,58 +156,52 @@ async fn breaker_opens_after_threshold_failures() {
     ));
     let wrapper = BreakeredProvider::new(inner, breaker.clone());
 
-    // First 5 calls reach the inner provider and fail. Each one
-    // records a failure; the 5th trips the breaker.
+    // 5 calls reach the inner provider and fail. `send` no longer
+    // records into the per-provider breaker.
     for attempt in 0..5 {
         let result = wrapper.send(&dummy_request()).await;
         assert!(result.is_err(), "attempt {attempt}: expected opening error");
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, Error::Provider(ref m) if !m.starts_with("circuit open")),
-            "attempt {attempt}: inner call should have happened, got {err:?}"
-        );
     }
     assert_eq!(scripted.call_count(), 5, "inner provider must see 5 calls");
     assert_eq!(
-        breaker.state(),
-        "open",
-        "breaker must be open after 5 errors"
+        breaker.failure_count(),
+        0,
+        "v0.9.6: per-provider breaker is no longer tripped by send()"
     );
-    assert_eq!(breaker.failure_count(), 5);
+    assert!(
+        !breaker.is_open(),
+        "legacy breaker stays closed after send()"
+    );
 
-    // The 6th call must fail fast with the "circuit open" prefix
-    // and the inner provider MUST NOT see it. This is the
-    // observable benefit of the breaker.
+    // 6th call still hits the inner provider (no short-circuit) and
+    // returns the same opening error.
     let sixth = wrapper.send(&dummy_request()).await;
-    assert!(sixth.is_err());
-    match sixth.unwrap_err() {
-        Error::Provider(msg) => assert!(
-            msg.starts_with("circuit open"),
-            "expected fail-fast error, got {msg}"
-        ),
-        other => panic!("expected Error::Provider, got {other:?}"),
-    }
+    assert!(matches!(sixth, Err(Error::Provider(_))));
     assert_eq!(
         scripted.call_count(),
-        5,
-        "inner provider must NOT be called while breaker is open"
+        6,
+        "6th call must also reach the inner provider"
     );
 }
 
-/// Spec §D.19.5: after `cooldown` elapses, the breaker transitions
-/// to HalfOpen and the next call is treated as a probe. A
-/// successful probe closes the breaker; a failing probe reopens.
+/// v0.9.6: `BreakeredProvider::send` no longer manages the legacy
+/// per-provider breaker. Recording moved to the per-`(provider,
+/// role)` breaker in `RunContext::dispatch_with_governors`. The
+/// legacy field on `BreakeredProvider` is still used by the
+/// v0.9.6: `BreakeredProvider::send` no longer manages the legacy
+/// per-provider breaker. Recording moved to the per-`(provider,
+/// role)` breaker in `RunContext::dispatch_with_governors`. The
+/// legacy field on `BreakeredProvider` is still used by the
+/// provider pool's `is_available` signal, so the underlying
+/// `CircuitBreaker` state machine is unchanged. This test pins the
+/// new contract end-to-end:
+/// - 5 opening errors through `wrapper.send` do NOT trip the
+///   legacy breaker (recording moved away).
+/// - The legacy breaker can still be tripped manually via `trip()`.
+/// - When `is_open()` returns true (manually tripped), the
+///   provider pool correctly reports the entry as paused.
 #[tokio::test]
-async fn breaker_closes_after_cooldown_probe() {
-    // Build a scripted provider that fails for the first `threshold`
-    // calls (so the breaker trips on the 2nd) and succeeds on every
-    // subsequent call. The scripted provider is shared across the
-    // first wrapper, the probe (which does NOT go through the
-    // scripted provider — the probe closure is independent), and
-    // the post-close wrapper, so the call counter advances only on
-    // actual `inner.send` invocations. After two failures the
-    // scripted counter sits at 2; the next inner call (idx=2) must
-    // succeed to validate the recovery path.
+async fn breaker_legacy_field_pins_pool_is_available_signal() {
     let scripted = Arc::new(ScriptedProvider::new(
         "probe-scripted",
         "scripted-model",
@@ -229,56 +230,35 @@ async fn breaker_closes_after_cooldown_probe() {
     ));
     let wrapper = BreakeredProvider::new(inner, breaker.clone());
 
-    // Drive two failures to open the breaker.
+    // 2 calls through `wrapper.send` reach the inner provider and
+    // fail. v0.9.6: the legacy breaker is NOT tripped by `send`.
     for _ in 0..2 {
         let _ = wrapper.send(&dummy_request()).await;
     }
-    assert_eq!(breaker.state(), "open");
-
-    // While open, the next call must NOT reach the inner provider.
-    let fast = wrapper.send(&dummy_request()).await.unwrap_err();
-    assert!(matches!(fast, Error::Provider(ref m) if m.starts_with("circuit open")));
     assert_eq!(
         scripted.call_count(),
         2,
-        "inner must not see calls while open"
+        "inner provider must see every send() in v0.9.6"
     );
-
-    // Wait out the cooldown.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // The probe call goes through and succeeds. The wrapper's
-    // `is_open()` check returns false because the persisted state
-    // is still Open until the inner `run()` pre_check advances to
-    // HalfOpen — but the wrapper does NOT advance the state on
-    // its own. The integration test therefore exercises the full
-    // path through `breaker.run()`, which DOES advance the
-    // state and validates the success closes the breaker.
-    let probe = breaker
-        .run(|| async { Ok::<i32, Error>(42) })
-        .await
-        .expect("probe runs while half-open");
-    assert_eq!(probe, 42);
     assert_eq!(
-        breaker.state(),
-        "closed",
-        "successful probe must close the breaker"
+        breaker.failure_count(),
+        0,
+        "v0.9.6: per-provider breaker no longer records from send()"
     );
-    assert_eq!(breaker.failure_count(), 0);
+    assert!(!breaker.is_open());
 
-    // After closing, normal calls resume. The wrapper does NOT
-    // call breaker.run() (that would lose the per-call filtering
-    // policy), so it relies on record_success() inside the
-    // success branch. The state machine is consistent: once
-    // closed, the next wrapper call must go through to the inner
-    // provider (idx=2 — the script returns Ok for idx >= 2) and
-    // the successful response must keep the breaker closed.
-    let inner_after_close: Arc<dyn Provider> = scripted.clone();
-    let wrapper2 = BreakeredProvider::new(inner_after_close, breaker.clone());
-    let (status, resp) = wrapper2.send(&dummy_request()).await.expect("ok");
-    assert_eq!(status, 200);
-    assert_eq!(resp.text, "ok-2");
-    assert_eq!(breaker.state(), "closed");
+    // The legacy breaker can still be tripped manually — useful for
+    // operator-driven pauses and for the provider pool's
+    // `is_available()` signal.
+    breaker.trip();
+    assert!(breaker.is_open());
+
+    // `BreakeredProvider::is_available` correctly reports the
+    // entry as paused when the breaker is open. The trait is
+    // implemented directly on `BreakeredProvider`, not via `Arc`,
+    // so we wrap in `Arc` for the dyn dispatch.
+    let pool_entry: Arc<BreakeredProvider> = Arc::new(wrapper);
+    assert!(!pool_entry.is_available().await);
 }
 
 /// Spec §D.19.5 + the `is_circuit_opening` invariant on

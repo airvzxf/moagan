@@ -12,6 +12,7 @@ pub mod control_tokens;
 pub mod cost;
 pub mod deepseek;
 pub mod embed;
+pub mod governor;
 pub mod http;
 pub mod json_extractor;
 pub mod json_strategy;

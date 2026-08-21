@@ -214,9 +214,24 @@ impl MinimaxProvider {
                         }
                         let body = resp.text().await.unwrap_or_default();
                         let err = classify_status(status, &body);
+                        // Retryable classifications:
+                        // - `Timeout` and `Provider`: transient network / upstream blip.
+                        // - `PlanExhausted`: persistent quota — but the per-(provider,
+                        //   role) breaker hasn't tripped yet, so a one-shot retry is
+                        //   worthwhile when the downstream `phase::call_*` retry budget
+                        //   allows it.
+                        // - `Throttled`: transient rate-limit — retry after the throttle's
+                        //   adaptive backoff so the recovery is bounded by `Retry-After`
+                        //   when the upstream provided one. The throttle governor lives
+                        //   upstream of this loop, so the `sleep_with_jitter(attempt,
+                        //   retry_after)` is purely the per-attempt wait; the throttle
+                        //   covers role-shaping.
                         let retryable = matches!(
                             err,
-                            Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
+                            Error::Timeout(_)
+                                | Error::PlanExhausted(_)
+                                | Error::Throttled { .. }
+                                | Error::Provider(_)
                         );
                         if !retryable || attempt >= probe_max_retries {
                             return Err(err);

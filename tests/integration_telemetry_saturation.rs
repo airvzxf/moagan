@@ -106,7 +106,14 @@ fn dummy_request() -> Request {
 #[tokio::test]
 async fn circuit_open_fires_saturation_event() {
     let inner: Arc<dyn Provider> = Arc::new(AlwaysErrorProvider);
-    // threshold=1 so a single opening error trips the breaker.
+    // v0.9.6: the per-provider breaker no longer trips automatically
+    // from `send()` — that path moved to the per-(provider, role)
+    // breaker in `RunContext::dispatch_with_governors`. The
+    // legacy breaker is now used by the provider pool's
+    // `is_available()` signal and is opened manually (via
+    // `trip()`) by admin tools. The test below mimics that path:
+    // open the breaker, then verify the next `send()` fires the
+    // saturation event through the sink.
     let breaker = Arc::new(CircuitBreaker::new(
         1,
         Duration::from_secs(60),
@@ -115,12 +122,18 @@ async fn circuit_open_fires_saturation_event() {
     let sink = Arc::new(VecSink::default());
     let wrapper = BreakeredProvider::new(inner, breaker.clone()).with_saturation_sink(sink.clone());
 
-    // First call: inner provider returns an opening error. The
-    // wrapper counts the failure (1/1) and the breaker opens.
-    let _ = wrapper.send(&dummy_request()).await;
+    // v0.9.6: the saturation signal fires when the next call
+    // observes a tripped breaker (admin-opened). The signal is
+    // delivered from `send`'s pre-check; even though
+    // `BreakeredProvider::send` no longer short-circuits by
+    // itself, the saturation event is still the canonical
+    // signal the alert consumer reads.
+    //
+    // v0.9.5 path: rely on auto-trip via opening errors. The
+    // legacy test mode is no longer reachable through `send`.
+    // We trip manually to keep the assertion path alive.
+    breaker.trip();
 
-    // Second call: breaker is open, so the wrapper short-circuits
-    // and fires a SaturationKind::Error event through the sink.
     let result = wrapper.send(&dummy_request()).await;
     assert!(result.is_err());
 
@@ -324,14 +337,13 @@ fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
             .enable_all()
             .build()?;
         rt.block_on(async {
-            // Trip the breaker with five opening errors.
-            for _ in 0..5 {
-                let _ = provider.send(&dummy_request()).await;
-            }
-            assert!(
-                breaker.is_open(),
-                "breaker must be open after five opening errors"
-            );
+            // v0.9.6: the breaker no longer auto-trips from `send()`
+            // (recording moved to the per-(provider, role) breaker
+            // in `RunContext::dispatch_with_governors`). Trip
+            // manually here so the saturation-signal path stays
+            // covered.
+            breaker.trip();
+            assert!(breaker.is_open(), "breaker must be open after manual trip");
 
             // Now the next call hits the open path and must fire
             // through the attached sink.

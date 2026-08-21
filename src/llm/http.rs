@@ -50,13 +50,63 @@ pub fn build_headers(
 }
 
 /// Translate status into a moagan error, with structured context.
+///
+/// HTTP 429 is split into two distinct error variants:
+///
+/// - `Error::Throttled` — transient rate-limit (RPM/TPM etc.); the
+///   [`crate::llm::governor::ThrottleGovernor`] absorbs these and
+///   the per-(provider, role) breaker is NOT tripped.
+/// - `Error::PlanExhausted` — quota / plan exhausted (the API
+///   provider says "Upgrade your Token Plan"); the per-(provider,
+///   role) breaker IS tripped.
+///
+/// The split is heuristic on the JSON body: keywords like `plan`,
+/// `monthly`, `subscription`, `quota exhausted`, `upgrade` route to
+/// `PlanExhausted`; everything else routes to `Throttled`. Bodies
+/// that don't parse as JSON are treated as `Throttled` — the
+/// adaptive governor absorbs them safely and the operator can
+/// inspect the message via telemetry.
 pub fn classify_status(status: StatusCode, body: &str) -> Error {
-    match status.as_u16() {
+    let code = status.as_u16();
+    match code {
         401 | 403 => Error::InvalidApiKey(format!("http {status}: {body}")),
-        429 => Error::PlanExhausted(format!("http {status}: {body}")),
+        429 => classify_throttled_or_plan_exhausted(body),
         408 | 504 | 524 => Error::Timeout(format!("http {status}: {body}")),
         500..=599 => Error::Provider(format!("upstream {status}: {body}")),
         _ => Error::Provider(format!("http {status}: {body}")),
+    }
+}
+
+/// Split an HTTP 429 body into `Error::Throttled` (transient) or
+/// `Error::PlanExhausted` (persistent). The keyword scan is
+/// deliberately conservative: any of `plan`, `monthly`, `quota`,
+/// `subscription`, `upgrade` flips to `PlanExhausted`; otherwise
+/// `Throttled`. The conservative side is intentional — when in
+/// doubt, route to `Throttled`, because the adaptive governor
+/// absorbs it cheaply; misrouting a `PlanExhausted` as
+/// `Throttled` would just delay the breaker tripping by a few 429s.
+fn classify_throttled_or_plan_exhausted(body: &str) -> Error {
+    let lower = body.to_ascii_lowercase();
+    let plan_exhausted_keywords = ["plan", "monthly", "quota", "subscription", "upgrade"];
+    let is_plan_exhausted = plan_exhausted_keywords.iter().any(|kw| lower.contains(kw));
+    if is_plan_exhausted {
+        Error::PlanExhausted(format!("http 429: {body}"))
+    } else {
+        Error::Throttled {
+            retry_after_ms: None,
+            message: body.to_string(),
+        }
+    }
+}
+
+/// Construct an [`Error::Throttled`] directly when the upstream
+/// `Retry-After` header was already parsed by the caller. Keeps
+/// the wire layer (`opencode_go_anthropic.rs`) free of `http.rs`
+/// internals — it just hands the parsed duration to this helper.
+pub fn throttled_with_retry_after(body: &str, retry_after: Option<Duration>) -> Error {
+    Error::Throttled {
+        retry_after_ms: retry_after.map(|d| d.as_millis() as u64),
+        message: body.to_string(),
     }
 }
 
@@ -270,9 +320,35 @@ mod tests {
     }
 
     #[test]
-    fn classify_status_maps_429_to_plan_exhausted() {
-        let err = classify_status(StatusCode::TOO_MANY_REQUESTS, "{\"error\":\"throttle\"}");
+    fn classify_status_maps_429_plan_keywords_to_plan_exhausted() {
+        let err = classify_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "{\"error\":\"Token Plan rate limit reached\"}",
+        );
         assert!(matches!(err, Error::PlanExhausted(_)));
+    }
+
+    #[test]
+    fn classify_status_maps_429_throttle_keywords_to_throttled() {
+        let err = classify_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "{\"error\":\"rate_limit_error\",\"message\":\"tokens per minute exceeded\"}",
+        );
+        match err {
+            Error::Throttled { message, .. } => {
+                assert!(message.contains("tokens per minute"));
+            }
+            other => panic!("expected Throttled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_status_maps_429_unknown_body_to_throttled() {
+        // Default to Throttled when keyword scan is inconclusive —
+        // the adaptive governor can absorb it without tripping the
+        // breaker. Operators see the original body via telemetry.
+        let err = classify_status(StatusCode::TOO_MANY_REQUESTS, "{\"error\":\"throttle\"}");
+        assert!(matches!(err, Error::Throttled { .. }));
     }
 
     #[test]
@@ -291,5 +367,14 @@ mod tests {
     fn classify_status_maps_500_to_provider() {
         let err = classify_status(StatusCode::INTERNAL_SERVER_ERROR, "boom");
         assert!(matches!(err, Error::Provider(_)));
+    }
+
+    #[test]
+    fn throttled_with_retry_after_attaches_ms() {
+        let err = throttled_with_retry_after("body", Some(Duration::from_millis(250)));
+        match err {
+            Error::Throttled { retry_after_ms, .. } => assert_eq!(retry_after_ms, Some(250)),
+            other => panic!("expected Throttled, got {other:?}"),
+        }
     }
 }

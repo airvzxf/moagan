@@ -5,6 +5,43 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - Unreleased
+
+### Fixed
+
+- **Per-provider circuit breaker cascade on facet-deriver 429**
+  (the bug surfaced in `run-real-600` with v0.9.5). Two-tier
+  recovery: `Error::Throttled` (transient HTTP 429 with RPM/TPM
+  message) is absorbed by the per-`(provider, role)` adaptive
+  throttle governor (AIMD backpressure that drops concurrency and
+  increases the pre-call backoff with jitter); `Error::PlanExhausted`
+  (token plan / monthly quota / subscription keywords) trips the
+  per-`(provider, role)` circuit breaker. The legacy per-provider
+  breaker is kept only for the provider pool's `is_available()`
+  signal; it no longer short-circuits `send()`.
+
+### Added
+
+- **`Error::Throttled { retry_after_ms, message }`** variant —
+  HTTP 429 with a non-plan body now classifies as transient
+  rate-limit (handled by the throttle governor) rather than the
+  pre-v0.9.6 `PlanExhausted` blanket-classification.
+- **`Error::provider_cause()`** — helper that categorises
+  provider-side errors into `PlanExhausted`, `Throttled`, or `Other`
+  for the call-site governor / breaker to consume.
+- **`ThrottleGovernor` + `GovernorRegistry`** (in
+  `src/llm/governor.rs`) — per-`(provider, role)` AIMD
+  backpressure. Reduces per-role in-flight concurrency and
+  increases the pre-call backoff on transient 429s, recovers
+  via additive increase + decay. Configurable via
+  `[throttle_per_role]` in `~/.config/moagan/config.toml` or
+  `MOAGAN_THROTTLE_PER_ROLE_<role>=<initial>:<max>:<init_backoff>:<max_backoff>:<additive_after>:<jitter>`.
+- **`BreakerRegistry`** (in `src/llm/circuit_breaker.rs`) —
+  per-`(provider, role)` breaker registry. Replaces the v0.9.4
+  per-provider breaker. Configurable via
+  `[circuit_breaker_per_role]` in `~/.config/moagan/config.toml` or
+  `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>=<threshold>:<window_secs>:<cooldown_secs>`.
+
 ## [0.9.5] - 2026-08-21
 
 ### Fixed

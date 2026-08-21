@@ -100,9 +100,29 @@ pub enum Error {
     #[error("invalid api key: {0}")]
     InvalidApiKey(String),
 
-    /// Provider plan is exhausted (token budget consumed).
+    /// Provider plan is exhausted (token budget consumed). Persistent
+    /// failure — opening the breaker per-(provider, role) is the right
+    /// response; do NOT retry until the cooldown elapses.
     #[error("plan exhausted: {0}")]
     PlanExhausted(String),
+
+    /// Provider returned a transient rate-limit (HTTP 429 with
+    /// `Retry-After` header). The adaptive
+    /// [`crate::llm::governor::ThrottleGovernor`] absorbs these by
+    /// reducing per-role concurrency and increasing backoff; the
+    /// breaker does NOT trip on this class. When `retry_after_ms`
+    /// is `Some(_)`, the value comes from the `Retry-After` response
+    /// header (seconds in HTTP date or delta-seconds form).
+    #[error("provider throttled: {message} (retry_after_ms={retry_after_ms:?})")]
+    Throttled {
+        /// Optional `Retry-After` from the upstream response. `None`
+        /// when the header was absent or unparseable.
+        retry_after_ms: Option<u64>,
+        /// The full upstream error message; surfaced verbatim so
+        /// post-mortem can correlate the throttle hit with the
+        /// specific RPM / TPM / 429 message the upstream returned.
+        message: String,
+    },
 
     /// Operation timed out.
     #[error("timeout: {0}")]
@@ -257,6 +277,7 @@ impl Error {
             Self::InvalidArgs(_) => ErrorCode::InvalidArgs,
             Self::InvalidApiKey(_) => ErrorCode::Auth,
             Self::PlanExhausted(_) => ErrorCode::QuotaExceeded,
+            Self::Throttled { .. } => ErrorCode::Http429,
             Self::Timeout(_) => ErrorCode::TimeoutPhase,
             Self::Cancelled(_) => ErrorCode::Cancelled,
             Self::SchemaViolation(_) => ErrorCode::SchemaViolation,
@@ -282,6 +303,7 @@ impl Error {
             Self::InvalidArgs(_) => ExitCode::InvalidArgs,
             Self::InvalidApiKey(_) => ExitCode::ApiKeyInvalid,
             Self::PlanExhausted(_) => ExitCode::PlanExhausted,
+            Self::Throttled { .. } => ExitCode::ProviderError,
             Self::Timeout(_) => ExitCode::Timeout,
             Self::Cancelled(_) | Self::Cancel(_) => ExitCode::Cancelled,
             Self::SchemaViolation(_) => ExitCode::SchemaViolation,
@@ -345,6 +367,76 @@ impl Error {
             Self::InvalidApiKey(_) | Self::Provider(_) | Self::PlanExhausted(_) | Self::Timeout(_)
         )
     }
+
+    /// Categorize the provider-side errors that demand *recovery* —
+    /// distinguishing transient throttling (handled by
+    /// [`crate::llm::governor::ThrottleGovernor`]) from persistent
+    /// plan exhaustion (handled by [`crate::llm::circuit_breaker`])
+    /// from generic provider faults (handled by the retry budget
+    /// already configured on the call site).
+    ///
+    /// The two failure modes look similar upstream — both surface
+    /// as HTTP 429 — but require opposite actions. Treating them
+    /// identically caused the v0.9.5 cascade where one role's 429
+    /// opened the breaker for every other role on the same
+    /// provider. The split lands each mode with the recovery path
+    /// that fits.
+    pub fn provider_cause(&self) -> Option<ProviderCause> {
+        Some(match self {
+            Self::Throttled {
+                retry_after_ms,
+                message,
+            } => ProviderCause::Throttled {
+                retry_after: *retry_after_ms,
+                message: message.clone(),
+            },
+            Self::PlanExhausted(message) => ProviderCause::PlanExhausted {
+                message: message.clone(),
+            },
+            Self::Provider(message) => ProviderCause::Other {
+                code: 0,
+                message: message.clone(),
+            },
+            _ => return None,
+        })
+    }
+}
+
+/// Recovery-side categorization produced by
+/// [`Error::provider_cause`]. The throttle governor consumes the
+/// `Throttled` arm; the per-(provider, role) circuit breaker
+/// consumes the `PlanExhausted` arm; everything else falls through
+/// to the standard retry-budget path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderCause {
+    /// Persistent quota / plan exhaustion. Open the breaker per
+    /// `(provider, role)`; cancel remaining retries.
+    PlanExhausted {
+        /// Verbatim upstream error message so post-mortem can
+        /// correlate the trip with the request that triggered it.
+        message: String,
+    },
+    /// Transient rate-limit (HTTP 429 with `Retry-After`). Reduce
+    /// per-role concurrency and increase backoff via the
+    /// [`crate::llm::governor::ThrottleGovernor`]; do **not** open
+    /// the breaker.
+    Throttled {
+        /// `Retry-After` from the upstream response in milliseconds.
+        /// `None` when the header was absent or unparseable.
+        retry_after: Option<u64>,
+        /// Verbatim upstream error message; surfaced for telemetry.
+        message: String,
+    },
+    /// Generic provider fault (5xx, transport, parse). Recovery is
+    /// the call-site retry budget; neither governor nor breaker
+    /// reacts.
+    Other {
+        /// HTTP status code (`0` for transport / parse failures
+        /// where no status line was parsed).
+        code: u16,
+        /// Verbatim upstream error message; surfaced for telemetry.
+        message: String,
+    },
 }
 
 impl From<io::Error> for Error {

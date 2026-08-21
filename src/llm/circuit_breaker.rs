@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 //! Per-provider circuit breaker.
 //!
 //! After `threshold` consecutive failures inside `window`, the breaker
@@ -18,12 +20,14 @@
 //! Spec: catalog 10-integrada-v0 §D.19.5 (T00-08 §1428-1435; T08-03
 //! §5.8; T00-09; T03-03).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::error::{Error, Result};
+use crate::llm::role::Role;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -225,6 +229,157 @@ impl CircuitBreaker {
     }
 }
 
+/// Per-role circuit breaker configuration. The values are
+/// consumed by [`BreakerRegistry::new_with_config`]; an empty
+/// config means the registry falls back to the
+/// [`CircuitBreaker::lenient`] defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct BreakerConfig {
+    pub threshold: u32,
+    pub window: Duration,
+    pub cooldown: Duration,
+}
+
+impl From<crate::config::BreakerConfig> for BreakerConfig {
+    fn from(c: crate::config::BreakerConfig) -> Self {
+        Self {
+            threshold: c.threshold,
+            window: Duration::from_secs(c.window_secs),
+            cooldown: Duration::from_secs(c.cooldown_secs),
+        }
+    }
+}
+
+impl BreakerConfig {
+    pub const fn new(threshold: u32, window: Duration, cooldown: Duration) -> Self {
+        Self {
+            threshold,
+            window,
+            cooldown,
+        }
+    }
+
+    /// Parse `THRESHOLD:WINDOW_SECS:COOLDOWN_SECS`. Used by
+    /// `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>` env-var parsing.
+    pub fn from_env_str(s: &str) -> Result<Self> {
+        let mut tokens = s.split([':', ' ']).filter(|t| !t.is_empty());
+        let threshold = tokens
+            .next()
+            .ok_or_else(|| Error::Provider("circuit_breaker: missing threshold".into()))?
+            .parse::<u32>()
+            .map_err(|e| Error::Provider(format!("circuit_breaker: threshold: {e}")))?;
+        let window_secs = tokens
+            .next()
+            .ok_or_else(|| Error::Provider("circuit_breaker: missing window_secs".into()))?
+            .parse::<u64>()
+            .map_err(|e| Error::Provider(format!("circuit_breaker: window_secs: {e}")))?;
+        let cooldown_secs = tokens
+            .next()
+            .ok_or_else(|| Error::Provider("circuit_breaker: missing cooldown_secs".into()))?
+            .parse::<u64>()
+            .map_err(|e| Error::Provider(format!("circuit_breaker: cooldown_secs: {e}")))?;
+        Ok(Self::new(
+            threshold,
+            Duration::from_secs(window_secs),
+            Duration::from_secs(cooldown_secs),
+        ))
+    }
+}
+
+impl Default for BreakerConfig {
+    /// Default: matches the per-provider lenient breaker from
+    /// v0.9.4 (50 errors / 300 s window / 60 s cooldown) so a
+    /// bare registry matches the pre-v0.9.6 behaviour for
+    /// `PlanExhausted` (the only error class this breaker still
+    /// reacts to).
+    fn default() -> Self {
+        Self::new(50, Duration::from_secs(300), Duration::from_secs(60))
+    }
+}
+
+/// Per-`(provider, role)` registry of circuit breakers. Each
+/// `(provider, role)` pair gets its own [`CircuitBreaker`] so a
+/// `PlanExhausted` on `minimax`/`facet_deriver` does not trip the
+/// breaker used by `minimax`/`tagger` (and vice versa).
+///
+/// The registry default config is [`BreakerConfig::default`];
+/// callers can pre-create a pair with
+/// [`Self::new_with_config`] so the very first call observes the
+/// operator-tuned values. Lazy creation is also supported via
+/// [`Self::breaker_for`] for code paths that only know the pair
+/// at call time.
+#[derive(Debug, Default, Clone)]
+pub struct BreakerRegistry {
+    by_pair: Arc<RwLock<HashMap<(String, Role), CircuitBreaker>>>,
+    default_config: BreakerConfig,
+}
+
+impl BreakerRegistry {
+    pub fn new() -> Self {
+        Self {
+            by_pair: Arc::new(RwLock::new(HashMap::new())),
+            default_config: BreakerConfig::default(),
+        }
+    }
+
+    pub fn new_with_config(default_config: BreakerConfig) -> Self {
+        Self {
+            by_pair: Arc::new(RwLock::new(HashMap::new())),
+            default_config,
+        }
+    }
+
+    /// Pre-create a breaker with a non-default config for the
+    /// supplied `(provider, role)` pair. The first call to
+    /// `breaker_for(provider, role)` returns this breaker
+    /// instead of constructing a default one.
+    pub fn pre_create(&mut self, provider: &str, role: Role, cfg: BreakerConfig) -> &mut Self {
+        let key = (provider.to_string(), role);
+        let breaker = CircuitBreaker::new(cfg.threshold, cfg.window, cfg.cooldown);
+        self.by_pair.write().insert(key, breaker);
+        self
+    }
+
+    /// Get or lazily create the breaker for `(provider, role)`.
+    /// The caller owns the [`CircuitBreaker`] (cheap to clone via
+    /// `Arc<Mutex<_>>`) so they can consult `is_open()` /
+    /// `record_*()` without racing other pairs.
+    pub fn breaker_for(&self, provider: &str, role: Role) -> CircuitBreaker {
+        let key = (provider.to_string(), role);
+        {
+            let r = self.by_pair.read();
+            if let Some(b) = r.get(&key) {
+                return b.clone();
+            }
+        }
+        let mut w = self.by_pair.write();
+        if let Some(b) = w.get(&key) {
+            return b.clone();
+        }
+        let breaker = CircuitBreaker::new(
+            self.default_config.threshold,
+            self.default_config.window,
+            self.default_config.cooldown,
+        );
+        w.insert(key, breaker.clone());
+        breaker
+    }
+
+    /// True iff the breaker for `(provider, role)` is currently
+    /// rejecting calls.
+    pub fn is_open(&self, provider: &str, role: Role) -> bool {
+        self.breaker_for(provider, role).is_open()
+    }
+
+    /// Snapshot for telemetry. Unknown pairs return None.
+    pub fn snapshot(&self, provider: &str, role: Role) -> Option<(String, u32)> {
+        let key = (provider.to_string(), role);
+        let r = self.by_pair.read();
+        r.get(&key)
+            .map(|b| (b.state().to_string(), b.failure_count()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,4 +475,66 @@ mod tests {
             "is_open() is a snapshot of the persisted state and stays Open until a call triggers pre_check"
         );
     }
+}
+
+#[test]
+fn breaker_config_from_env_str_parses() {
+    let cfg = BreakerConfig::from_env_str("5:300:1800").unwrap();
+    assert_eq!(cfg.threshold, 5);
+    assert_eq!(cfg.window, Duration::from_secs(300));
+    assert_eq!(cfg.cooldown, Duration::from_secs(1800));
+}
+
+#[test]
+fn breaker_registry_separates_pairs() {
+    let mut reg = BreakerRegistry::new();
+    reg.pre_create(
+        "minimax",
+        Role::Tagger,
+        BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
+    );
+    let tagger = reg.breaker_for("minimax", Role::Tagger);
+    let facet = reg.breaker_for("minimax", Role::FacetDeriver);
+    // Same provider, different role -> distinct breakers.
+    tagger.trip();
+    assert!(tagger.is_open());
+    assert!(!facet.is_open());
+}
+
+#[test]
+fn breaker_registry_lazy_creation_uses_default_config() {
+    let reg = BreakerRegistry::new_with_config(BreakerConfig::new(
+        2,
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    ));
+    let b = reg.breaker_for("minimax", Role::Tagger);
+    // Default threshold is 2: two failures trip.
+    b.record_failure();
+    b.record_failure();
+    assert!(b.is_open());
+}
+
+#[test]
+fn breaker_registry_failure_only_affects_target_pair() {
+    let mut reg = BreakerRegistry::new_with_config(BreakerConfig::new(
+        1,
+        Duration::from_secs(60),
+        Duration::from_secs(30),
+    ));
+    reg.pre_create(
+        "minimax",
+        Role::Tagger,
+        BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
+    );
+    reg.pre_create(
+        "opencode_go",
+        Role::Tagger,
+        BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
+    );
+    let m = reg.breaker_for("minimax", Role::Tagger);
+    let o = reg.breaker_for("opencode_go", Role::Tagger);
+    m.trip();
+    assert!(m.is_open());
+    assert!(!o.is_open());
 }

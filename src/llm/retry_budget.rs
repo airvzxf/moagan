@@ -137,7 +137,7 @@ pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
 pub fn reason_from_error(err: &Error) -> RetryReason {
     match err {
         Error::Timeout(_) => RetryReason::Timeout,
-        Error::PlanExhausted(_) => RetryReason::RateLimit,
+        Error::PlanExhausted(_) | Error::Throttled { .. } => RetryReason::RateLimit,
         Error::SchemaViolation(_) => RetryReason::Schema,
         Error::Provider(_) | Error::Cache(_) | Error::Io(_) => RetryReason::Transport,
         Error::MockExhausted => RetryReason::Truncated,

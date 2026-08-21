@@ -528,17 +528,35 @@ mod tests {
         assert!(matches!(err, Error::Provider(_)));
     }
 
-    /// 429 maps to `PlanExhausted` via the shared
-    /// `classify_status` helper. Other status codes stay stable
-    /// across wire formats so dashboards see one shape.
+    /// 429 with a "rate limit" message body without `plan`/
+    /// `monthly`/`subscription` keywords classifies as
+    /// `Error::Throttled` (transient) — `ThrottleGovernor`
+    /// absorbs it. The pre-v0.9.6 test expected `PlanExhausted`
+    /// because every 429 was treated as persistent; v0.9.6 splits
+    /// the two so the adaptive governor can do its job.
     #[test]
-    fn openai_wire_decodes_429_as_rate_limited() {
+    fn openai_wire_decodes_429_throttle_body_as_throttled() {
         let wire = OpenAiWire;
-        let body = r#"{"error": {"message": "rate limit", "type": "rate_limit_error"}}"#;
+        let body =
+            r#"{"error": {"message": "tokens per minute exceeded", "type": "rate_limit_error"}}"#;
+        let err = wire.classify_error(429, body);
+        assert!(
+            matches!(err, Error::Throttled { .. }),
+            "plain 429 with RPM keyword body must classify as Throttled, got: {err:?}"
+        );
+    }
+
+    /// 429 with `plan` keyword body classifies as
+    /// `Error::PlanExhausted` (persistent) — the per-(provider,
+    /// role) breaker trips.
+    #[test]
+    fn openai_wire_decodes_429_plan_body_as_plan_exhausted() {
+        let wire = OpenAiWire;
+        let body = r#"{"error": {"message": "Token Plan rate limit reached: Upgrade your Token Plan", "type": "rate_limit_error"}}"#;
         let err = wire.classify_error(429, body);
         assert!(
             matches!(err, Error::PlanExhausted(_)),
-            "429 must classify as PlanExhausted, got: {err:?}"
+            "429 with 'plan' keyword body must classify as PlanExhausted, got: {err:?}"
         );
     }
 

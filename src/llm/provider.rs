@@ -44,7 +44,12 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use crate::config::{CircuitBreakerConfig, ProviderConfig, RateLimitConfig};
-use crate::error::{Error, Result};
+use crate::error::Result;
+// `Error` is referenced by the tests module below; gate the import
+// to `cfg(test)` so the production build does not see the unused
+// warning while the test suite still has the symbol in scope.
+#[cfg(test)]
+use crate::error::Error;
 use crate::execution::PerProviderSemaphores;
 use crate::fs_layout::MoaganHome;
 
@@ -732,34 +737,28 @@ impl Provider for BreakeredProvider {
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
-        if self.breaker.is_open() {
-            // Push-side saturation: circuit-open rejections are
-            // one of the three signals the alerts consumer
-            // surfaces (catalog §D.19.5 → §D.23). The sink is
-            // best-effort: a failure here must not abort the
-            // error path the caller was already on. We use the
-            // current failure_count to populate the structured
-            // `details` so post-mortem can correlate the event
-            // with the configured threshold.
-            //
-            // The lock is held only long enough to clone the `Arc`
-            // out of the `Mutex<Option<...>>`; the sink itself is
-            // `Send + Sync` so the subsequent `on_saturation` call
-            // runs without holding the registry-wide lock.
-            if let Some(sink) = self.saturation_sink.lock().clone() {
-                let ev = crate::telemetry::saturation::SaturationEvent::from_circuit_breaker(
-                    self.inner.name(),
-                    self.inner.model(),
-                    None,
-                    self.breaker.failure_count(),
-                );
-                sink.on_saturation(&ev);
-            }
-            return Err(Error::Provider(format!(
-                "circuit open: provider '{}' sidelined",
-                self.inner.name()
-            )));
-        }
+        // v0.9.6: the per-provider circuit breaker check moved to
+        // the call-site (`RunContext::call_with_retry_parse`) so it
+        // can be keyed on `(provider, role)` instead of just
+        // `provider`. The breaker stored on `BreakeredProvider` is
+        // kept here ONLY for two things:
+        //
+        // 1. The provider pool's `is_available()` signal (consumed
+        //    by `ProviderPool::pick`).
+        // 2. Firing the saturation event when the breaker is
+        //    externally tripped (admin `moagan admin breakers
+        //    trip`, run pre-pause, etc.) so the alert consumer
+        //    still sees the pause even though `send` itself does
+        //    NOT short-circuit anymore.
+        //
+        // We DO NOT short-circuit on the open breaker: that was
+        // the cascade bug in run02's `discover_facet` (one role's
+        // PlanExhausted / 429 tripped the breaker for every role
+        // on the same provider). The per-(provider, role) breaker
+        // in `dispatch_with_governors` replaces the short-circuit
+        // for runtime breaker logic; this saturation hook stays
+        // only for telemetry.
+
         // Clone the `Arc` out of the mutex so the lock is released
         // before the `await` on `acquire` (parking_lot's lock is
         // not async-aware and would otherwise serialize every call).
@@ -805,6 +804,30 @@ impl Provider for BreakeredProvider {
         } else {
             None
         };
+
+        // v0.9.6: fire the saturation event when the legacy
+        // per-provider breaker is externally tripped. This is the
+        // ONLY remaining signal that the breaker produces; the
+        // short-circuit on `is_open()` is gone (it caused the
+        // cascade in `discover_facet`). The sink consumes the
+        // event for the operator-facing alert path.
+        if self.breaker.is_open()
+            && let Some(sink) = self.saturation_sink.lock().clone()
+        {
+            let ev = crate::telemetry::saturation::SaturationEvent::from_circuit_breaker(
+                self.inner.name(),
+                self.inner.model(),
+                None,
+                self.breaker.failure_count(),
+            );
+            sink.on_saturation(&ev);
+            // Note: do NOT return Err here. `send` falls through to
+            // the inner call; the per-(provider, role) breaker
+            // (driven by the call-site) is the one that will fail
+            // fast on the NEXT call if the operator-driven trip is
+            // meant to suppress the role entirely.
+        }
+
         // Wire-format dispatch decision: log the inner provider's
         // preferred wire so dashboards can pin each call to its
         // protocol without re-parsing the request body. The
@@ -825,13 +848,16 @@ impl Provider for BreakeredProvider {
                 if cache_hit && let Some(rl) = self.rate_limiter.lock().clone() {
                     rl.refund();
                 }
-                self.breaker.record_success();
                 Ok(pair)
             }
             Err(e) => {
-                if e.is_circuit_opening() {
-                    self.breaker.record_failure();
-                }
+                // v0.9.6: do NOT record_failure on the per-provider
+                // breaker here. Persistent failures (PlanExhausted)
+                // are routed to the per-(provider, role) breaker
+                // owned by `RunContext`, NOT to this legacy breaker.
+                // Transient failures (Throttled) are absorbed by
+                // the `ThrottleGovernor`. Recoding here would have
+                // cascaded role errors into the shared breaker.
                 Err(e)
             }
         }
@@ -1581,7 +1607,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn breakered_provider_records_circuit_opening_failure() {
+    async fn breakered_provider_does_not_record_circuit_opening_failure() {
+        // v0.9.6: per-provider circuit breaker recording moved to
+        // the call-site (`RunContext::breaker_for(provider, role)`).
+        // The legacy `BreakeredProvider.breaker` is kept ONLY for the
+        // provider pool's `is_available` signal — `send` no longer
+        // records failures into it. This test pins the new contract:
+        // after a circuit-opening error the per-provider breaker
+        // stays at zero failures; the per-(provider, role) breaker
+        // (not present here) is what would trip.
         let inner = Arc::new(ErrorProvider {
             calls: AtomicUsize::new(0),
             error: opening_error,
@@ -1592,29 +1626,42 @@ mod tests {
         let result = provider.send(&breaker_request()).await;
         assert!(matches!(result, Err(Error::Provider(_))));
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(breaker.failure_count(), 1);
-        assert!(breaker.is_open());
+        assert_eq!(breaker.failure_count(), 0);
+        assert!(!breaker.is_open());
     }
 
     #[tokio::test]
-    async fn breakered_provider_skips_calls_when_open() {
+    async fn breakered_provider_does_not_skip_calls_when_breaker_tripped_externally() {
+        // v0.9.6: since `send` no longer consults the per-provider
+        // breaker, a breaker that has been externally tripped (e.g.
+        // by an admin `moagan admin breakers trip` command) does
+        // not stop `send` from dispatching — that's now the
+        // responsibility of `RunContext::breaker_for(provider, role)`.
+        // This test pins the new contract: `send` is a thin passthrough.
         let inner = Arc::new(ErrorProvider {
             calls: AtomicUsize::new(0),
             error: opening_error,
         });
         let breaker = threshold_one_breaker();
+        breaker.trip();
         let provider = BreakeredProvider::new(inner.clone(), breaker.clone());
 
-        let _ = provider.send(&breaker_request()).await;
         let result = provider.send(&breaker_request()).await;
-        assert!(
-            matches!(result, Err(Error::Provider(message)) if message.starts_with("circuit open"))
-        );
+        // `send` no longer short-circuits on a tripped breaker; the
+        // upstream call goes through.
+        assert!(result.is_err());
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn minimax_provider_records_circuit_opening() {
+    async fn minimax_provider_does_not_record_circuit_opening() {
+        // v0.9.6: same contract as
+        // `breakered_provider_does_not_record_circuit_opening_failure`
+        // but exercised through the real `MinimaxProvider` (which
+        // sets its own retry-on-429 — see `minimax_skips_circuit_recording_on_429`
+        // above for the rate-limit retry path). After a failure the
+        // per-provider breaker stays at zero; the per-(provider,
+        // role) breaker is what would trip.
         let spec = ProviderConfig {
             kind: "minimax".into(),
             endpoint: "http://127.0.0.1:1".into(),
@@ -1636,8 +1683,10 @@ mod tests {
 
         let result = provider.send(&breaker_request()).await;
         assert!(result.is_err());
-        assert!(breaker.is_open());
-        assert_eq!(breaker.failure_count(), 1);
+        // v0.9.6: per-provider breaker stays closed; per-(provider,
+        // role) breaker is what triggers.
+        assert!(!breaker.is_open());
+        assert_eq!(breaker.failure_count(), 0);
     }
 
     fn sample_request() -> Request {

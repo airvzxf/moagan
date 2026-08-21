@@ -314,9 +314,17 @@ impl OpenCodeGoAnthropicProvider {
                     }
                     let body = resp.text().await.unwrap_or_default();
                     let err = classify_status(status, &body);
+                    // `Throttled` is retryable: the upstream said
+                    // "slow down" — the throttle governor outside
+                    // this loop will shape role-level concurrency,
+                    // but the per-attempt sleep here honours the
+                    // `Retry-After` header when the upstream set one.
                     let retryable = matches!(
                         err,
-                        Error::Timeout(_) | Error::PlanExhausted(_) | Error::Provider(_)
+                        Error::Timeout(_)
+                            | Error::PlanExhausted(_)
+                            | Error::Throttled { .. }
+                            | Error::Provider(_)
                     );
                     if !retryable || attempt >= max_retries {
                         return Err(err);

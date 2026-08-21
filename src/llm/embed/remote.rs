@@ -658,15 +658,15 @@ fn build_auth_headers(api_key: &SecretString) -> Result<HeaderMap> {
 
 /// Translate an HTTP status into a typed error. Mirrors the mapping in
 /// `crate::llm::http::classify_status` so the embedder and the chat
-/// providers agree on what counts as auth / throttle / timeout / 5xx.
+/// providers agree on what counts as auth / throttle / timeout /
+/// 5xx. The 429 arm splits into `Throttled` (transient, absorbed
+/// by `ThrottleGovernor`) vs `PlanExhausted` (persistent, trips the
+/// per-(provider, role) breaker) using the same keyword scan as the
+/// chat helper. We delegate to the shared helper rather than
+/// reimplementing the scan.
 fn classify_status(status: StatusCode, body: &str) -> Error {
-    match status.as_u16() {
-        401 | 403 => Error::InvalidApiKey(format!("http {status}: {body}")),
-        429 => Error::PlanExhausted(format!("http {status}: {body}")),
-        408 | 504 | 524 => Error::Timeout(format!("http {status}: {body}")),
-        500..=599 => Error::Provider(format!("upstream {status}: {body}")),
-        _ => Error::Provider(format!("http {status}: {body}")),
-    }
+    use crate::llm::http::classify_status as upstream_classify;
+    upstream_classify(status, body)
 }
 
 #[cfg(test)]
@@ -871,8 +871,24 @@ mod tests {
     }
 
     #[test]
-    fn classify_status_429_maps_to_plan_exhausted() {
+    fn classify_status_429_maps_to_throttled() {
+        // v0.9.6 split: 429 with a non-plan body is the transient
+        // throttle case (`ThrottleGovernor` absorbs it). The
+        // pre-split behavior that mapped every 429 to
+        // `PlanExhausted` was removed together with the cascade
+        // bug in discover_facet.
         let err = classify_status(StatusCode::TOO_MANY_REQUESTS, "throttle");
+        assert!(matches!(err, Error::Throttled { .. }));
+    }
+
+    #[test]
+    fn classify_status_429_plan_body_maps_to_plan_exhausted() {
+        // The keyword scan keeps the old `PlanExhausted` arm for
+        // genuine quota-exhaustion messages.
+        let err = classify_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "{\"message\":\"token plan rate limit reached\"}",
+        );
         assert!(matches!(err, Error::PlanExhausted(_)));
     }
 
