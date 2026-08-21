@@ -427,7 +427,7 @@ async fn run_hostile_detector(ctx: &RunContext, normalised: &str) -> Result<Host
             system,
             user,
             "HostilePromptDetector: {input, verdict, confidence, reasons[], recommended_action}",
-            1,
+            10,
         )
         .await?;
     Ok(classify_hostile_report(&report))
