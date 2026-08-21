@@ -223,6 +223,26 @@ pub struct Config {
     /// prompt cache does not drain the local bucket.
     #[serde(default)]
     pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
+    /// Track E (catalog §D.19.6): per-role token-bucket knobs.
+    /// Same shape as `rate_limit_per_provider` but keyed by the
+    /// `Role::as_str()` value (e.g. `"tagger"`, `"facet_deriver"`,
+    /// `"extractor"`). Empty by default = no per-role limit, only the
+    /// per-provider bucket applies. Opt in via env
+    /// `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>` or
+    /// by setting `[rate_limit_per_role]` in
+    /// `~/.config/moagan/config.toml`.
+    ///
+    /// Why: the upstream provider has its own rate-limit window that
+    /// is tighter than the per-provider bucket for chatty roles
+    /// like `tagger` (1500+ LLM calls per fan-out). Forcing the
+    /// per-role bucket is the only way to throttle the call rate
+    /// below the provider's quota without affecting the rest of the
+    /// pipeline. Once acquired, the per-role limiter sleeps the
+    /// caller — the same "throttle" effect the per-provider bucket
+    /// has, but at a per-role granularity so the operator can
+    /// target just the role that needs it.
+    #[serde(default)]
+    pub rate_limit_per_role: std::collections::HashMap<String, RateLimitConfig>,
     /// Track E (E8 partial): knobs for the two D.7.1 catalog
     /// roles that the Discovery coordinator can invoke —
     /// `Role::PersonaPicker` and `Role::AnglePicker`. Both are
@@ -816,6 +836,7 @@ impl Default for Config {
             research_urls: Vec::new(),
             research: ResearchConfig::default(),
             rate_limit_per_provider: std::collections::HashMap::new(),
+            rate_limit_per_role: std::collections::HashMap::new(),
             discovery: DiscoveryWiringConfig::default(),
             discovery_matrix: DiscoveryMatrixConfig::default(),
             export: ExportConfig::default(),
@@ -1566,17 +1587,42 @@ impl Config {
         // values (missing colon, non-numeric tokens) are silently
         // ignored so a stale export does not corrupt an existing
         // TOML-loaded entry. The provider name is lowercased to
-        // match the canonical `[providers]` table keys.
+        // match the canonical `[providers]` table keys. Roles are
+        // a separate prefix (`MOAGAN_RATE_LIMIT_ROLE_<role>`) and
+        // are skipped here so a per-role env var is not misread as
+        // a provider named `role.tagger`.
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_RATE_LIMIT_") else {
                 continue;
             };
-            if suffix.is_empty() {
+            if suffix.is_empty() || suffix.starts_with("ROLE_") {
                 continue;
             }
             let provider = suffix.to_ascii_lowercase();
             if let Some(cfg) = parse_rate_limit_env(&value) {
                 self.rate_limit_per_provider.insert(provider, cfg);
+            }
+        }
+        // Track E (catalog §D.19.6): per-role rate-limit knobs.
+        // `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>`
+        // opts the named role into a role-scoped token bucket that
+        // is acquired by `call_with_retry` / `call_uncached` on
+        // top of the per-provider bucket. Same last-write-wins
+        // semantics as the per-provider env var; the role name
+        // matches the `Role::as_str()` value (snake_case). Garbage
+        // values (missing colon, non-numeric tokens) are silently
+        // ignored so a stale export does not corrupt an existing
+        // TOML-loaded entry.
+        for (key, value) in std::env::vars() {
+            let Some(suffix) = key.strip_prefix("MOAGAN_RATE_LIMIT_ROLE_") else {
+                continue;
+            };
+            if suffix.is_empty() {
+                continue;
+            }
+            let role = suffix.to_ascii_lowercase();
+            if let Some(cfg) = parse_rate_limit_env(&value) {
+                self.rate_limit_per_role.insert(role, cfg);
             }
         }
         // Per-provider `omit_max_tokens` override from env vars of the
@@ -3091,6 +3137,41 @@ mod tests {
         );
     }
 
+    /// `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>` opts
+    /// the named role into a role-scoped token bucket. The role name
+    /// matches `Role::as_str()` (snake_case); the prefix is distinct
+    /// from the per-provider `MOAGAN_RATE_LIMIT_<provider>` so the
+    /// two maps never collide. Mirrors the per-provider env test
+    /// but exercises the role-scoped branch.
+    #[test]
+    fn config_env_var_rate_limit_role_tag_must_not_crash_other_role() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Sanity: setting a per-provider env var with a role-style
+        // suffix would otherwise be misread as a provider. The
+        // `MOAGAN_RATE_LIMIT_<suffix>` loop explicitly skips
+        // `ROLE_*` suffixes so the per-role map stays empty when
+        // only the per-provider var is set.
+        unsafe {
+            std::env::set_var("MOAGAN_RATE_LIMIT_MINIMAX", "30:5");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_RATE_LIMIT_MINIMAX");
+        }
+        let provider = cfg
+            .rate_limit_per_provider
+            .get("minimax")
+            .expect("minimax entry must be populated by per-provider env");
+        assert_eq!(provider.capacity, 30);
+        assert_eq!(provider.refill_per_sec, 5);
+        assert!(
+            cfg.rate_limit_per_role.is_empty(),
+            "per-provider env var must not leak into the role map, got {:?}",
+            cfg.rate_limit_per_role
+        );
+    }
+
     /// TOML round-trip preserves the per-provider rate-limit knobs
     /// so operators can pin their choice in
     /// `~/.config/moagan/config.toml`.
@@ -3117,6 +3198,50 @@ mod tests {
             .expect("minimax entry must survive TOML round-trip");
         assert_eq!(entry.capacity, 20);
         assert_eq!(entry.refill_per_sec, 2);
+    }
+
+    /// Per-role rate-limit (catalog §D.19.6) defaults to an empty
+    /// map so a fresh installation behaves bit-identical to a
+    /// pre-fix run. The operator opts in via
+    /// `[rate_limit_per_role]` in `~/.config/moagan/config.toml`.
+    #[test]
+    fn config_rate_limit_per_role_default_is_empty() {
+        let cfg = Config::default();
+        assert!(
+            cfg.rate_limit_per_role.is_empty(),
+            "rate_limit_per_role must default to empty (D.19.6 off-by-default), got {:?}",
+            cfg.rate_limit_per_role
+        );
+    }
+
+    /// Per-role rate-limit entries survive a TOML round-trip so
+    /// operators can persist the per-role override across
+    /// `moagan` invocations. The key is the `Role::as_str()`
+    /// (snake_case); the value is the bucket shape.
+    #[test]
+    fn config_rate_limit_per_role_toml_round_trip() {
+        let mut rate_limit_per_role = std::collections::HashMap::new();
+        rate_limit_per_role.insert(
+            "tagger".into(),
+            RateLimitConfig {
+                capacity: 30,
+                refill_per_sec: 2,
+                initial: Some(30),
+            },
+        );
+        let cfg = Config {
+            rate_limit_per_role,
+            ..Config::default()
+        };
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        let entry = back
+            .rate_limit_per_role
+            .get("tagger")
+            .expect("tagger entry must survive TOML round-trip");
+        assert_eq!(entry.capacity, 30);
+        assert_eq!(entry.refill_per_sec, 2);
+        assert_eq!(entry.initial, Some(30));
     }
 
     #[test]

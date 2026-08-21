@@ -5,6 +5,31 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-08-21
+
+### Added
+
+- **Per-role rate-limit (catalog §D.19.6)** — new `[rate_limit_per_role]`
+  TOML knob (also reachable via env `MOAGAN_RATE_LIMIT_ROLE_<role>`
+  or `RateLimitConfig::default()` extension) throttles a single role
+  independently of the per-provider bucket. Resolves the run06
+  cascade where the post-matrix tagger fan-out (1500+ LLM calls)
+  saturated the upstream provider's quota and produced
+  1484+ placeholder clusters with empty `label`/`summary`, which
+  then inflated `discovery_context.json.facet_ids` to 15,668.
+  Empty by default (no per-role limit) so existing runs are
+  bit-identical. Operators opt in with, e.g.:
+  ```toml
+  [rate_limit_per_role]
+  tagger = { capacity = 30, refill_per_sec = 2 }
+  ```
+  Acquired in `call_with_retry` after the cache lookup and in
+  `call_uncached` so the retry path (which bypasses the cache)
+  honours the same per-role bucket. CLI wiring at
+  `src/cli/discover.rs` parses each string key into a `Role` via
+  `<str>::parse::<Role>()`; unknown role names are silently
+  skipped so a stale config never aborts the run.
+
 ## [0.9.2] - 2026-08-20
 
 ### Fixed

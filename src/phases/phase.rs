@@ -101,6 +101,16 @@ pub struct RunContext {
     cancel: Cancel,
     phase_timeout: Duration,
     total_timeout: Duration,
+    /// Per-role rate-limiters, keyed by `Role`. Empty by default =
+    /// no per-role limit (the per-provider bucket still applies).
+    /// Wired by the CLI boundary from `cfg.rate_limit_per_role` via
+    /// [`Self::with_role_rate_limits`]. Acquired once per LLM call
+    /// by `call_with_retry` / `call_uncached` before dispatching to
+    /// the provider so the operator can throttle a chatty role
+    /// (e.g. `tagger` in the post-matrix fan-out) without touching
+    /// the per-provider bucket.
+    pub rate_limit_per_role:
+        std::collections::HashMap<Role, Arc<crate::llm::rate_limiter::RateLimiter>>,
     /// Interval between lease renewals issued by the heartbeat task.
     /// Default: 30 s. Phases can override via
     /// [`RunContext::with_heartbeat_interval_secs`]; tests that need a
@@ -242,6 +252,7 @@ impl RunContext {
             cancel: Cancel::new(),
             phase_timeout: Duration::ZERO,
             total_timeout: Duration::ZERO,
+            rate_limit_per_role: std::collections::HashMap::new(),
             heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
             heartbeat_holder: "heartbeat".to_owned(),
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
@@ -249,6 +260,24 @@ impl RunContext {
             capability_resolver: None,
             models_dev_catalog: None,
         }
+    }
+
+    /// Attach the per-role rate-limiters wired by the CLI boundary
+    /// from `cfg.rate_limit_per_role`. Each entry is a `Role`
+    /// key (parsed from the operator's snake_case string) plus the
+    /// `Arc<RateLimiter>` that `call_with_retry` / `call_uncached`
+    /// acquire before the provider dispatch. Empty map (the
+    /// default) means no per-role limit — the per-provider bucket
+    /// still applies as before.
+    pub fn with_role_rate_limits(
+        mut self,
+        rate_limit_per_role: std::collections::HashMap<
+            Role,
+            Arc<crate::llm::rate_limiter::RateLimiter>,
+        >,
+    ) -> Self {
+        self.rate_limit_per_role = rate_limit_per_role;
+        self
     }
 
     /// Attach the auto-probe `max_tokens` table so
@@ -578,6 +607,17 @@ impl RunContext {
                 .register(&prompt_id, cache_key.clone());
             return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
         }
+        // Per-role rate-limit (catalog §D.19.6): acquire the bucket
+        // for this role before the upstream dispatch. The token
+        // sleep serializes the chatty roles (e.g. `tagger` in the
+        // post-matrix fan-out) so the upstream provider's quota is
+        // respected regardless of `--max-parallelism`. The
+        // per-provider bucket still applies inside the wrapper, so
+        // the two limits compound: the per-role bucket throttles the
+        // role, the per-provider bucket throttles the wire.
+        if let Some(rl) = self.rate_limit_per_role.get(&role) {
+            let _wait = rl.acquire().await?;
+        }
         self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
             .await
             .inspect(|_response| {
@@ -648,6 +688,17 @@ impl RunContext {
                 .register(&prompt_id, cache_key.clone());
             return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
         }
+        // Per-role rate-limit (catalog §D.19.6): acquire the bucket
+        // for this role before the upstream dispatch. The token
+        // sleep serializes the chatty roles (e.g. `tagger` in the
+        // post-matrix fan-out) so the upstream provider's quota is
+        // respected regardless of `--max-parallelism`. The
+        // per-provider bucket still applies inside the wrapper, so
+        // the two limits compound: the per-role bucket throttles the
+        // role, the per-provider bucket throttles the wire.
+        if let Some(rl) = self.rate_limit_per_role.get(&role) {
+            let _wait = rl.acquire().await?;
+        }
         self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
             .await
             .inspect(|_response| {
@@ -693,6 +744,12 @@ impl RunContext {
             attachments: vec![],
             tool_choice: None,
         };
+        // Per-role rate-limit (catalog §D.19.6): mirror the
+        // acquire in `call_with_retry` so the retry path (which
+        // bypasses the cache) honours the same per-role bucket.
+        if let Some(rl) = self.rate_limit_per_role.get(&role) {
+            let _wait = rl.acquire().await?;
+        }
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
     }
@@ -750,6 +807,12 @@ impl RunContext {
             attachments: vec![],
             tool_choice: None,
         };
+        // Per-role rate-limit (catalog §D.19.6): mirror the
+        // acquire in `call_with_retry` so the retry path (which
+        // bypasses the cache) honours the same per-role bucket.
+        if let Some(rl) = self.rate_limit_per_role.get(&role) {
+            let _wait = rl.acquire().await?;
+        }
         self.dispatch_to_provider(req, None, started_unix, retry_count)
             .await
     }
