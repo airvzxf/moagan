@@ -381,9 +381,40 @@ impl Error {
     /// but operates directly on the [`Error`] variant so the policy
     /// does not depend on the [`crate::Error::code`] mapping — the
     /// latter collapses several variants onto the same code
-    /// (`Provider` → `InvalidResponse`, `PlanExhausted` →
-    /// `QuotaExceeded`, `Timeout` → `TimeoutPhase`) and loses the
-    /// HTTP-status distinction the breaker is supposed to act on.
+    /// (`Provider` → `InvalidResponse`, `Timeout` → `TimeoutPhase`)
+    /// and loses the HTTP-status distinction the breaker is
+    /// supposed to act on.
+    ///
+    /// **v0.9.8 policy change** — `PlanExhausted` is no longer an
+    /// opener. Rationale: the upstream can return HTTP 429 for
+    /// two distinct reasons, and the keyword scan in
+    /// `classify_throttled_or_plan_exhausted` (`llm/http.rs`)
+    /// cannot reliably distinguish them:
+    ///
+    /// 1. **True plan exhaustion** — the account has hit its
+    ///    monthly quota. The breaker should open so we don't
+    ///    hammer a paying-customer limit.
+    /// 2. **Saturation / rate-limit** — the per-window RPM/TPM cap
+    ///    was exceeded because we sent too many calls too fast.
+    ///    The breaker should NOT open; the
+    ///    [`crate::llm::governor::ThrottleGovernor`] is the right
+    ///    tool (AIMD on the per-(provider, role) concurrency
+    ///    cap with exponential backoff).
+    ///
+    /// MiniMax-M3 returns `"Token Plan rate limit reached: ..."`
+    /// for **both** signals — the keyword "plan" matches
+    /// unconditionally, so the classifier routes every 429 into
+    /// `PlanExhausted` and the breaker fires as if the quota
+    /// were permanently gone. The throttle governor would have
+    /// back-off'd gracefully instead.
+    ///
+    /// Until we can prove the upstream differentiates the two
+    /// signals (e.g. via a different `error.type` or a
+    /// `Retry-After` header that distinguishes "wait N seconds"
+    /// from "wait until next billing cycle"), the safer default
+    /// is to let the throttle handle every 429 and reserve the
+    /// breaker for signals the upstream makes unambiguous
+    /// (auth, 5xx, timeout).
     ///
     /// Openers:
     ///
@@ -395,10 +426,6 @@ impl Error {
     ///   `classify_status` (in `llm/http.rs`) routes HTTP 500..=599
     ///   here, so this is the path the breaker needs to catch the
     ///   common "provider is down" signal.
-    /// - [`Error::PlanExhausted`] — HTTP 429 from the provider. The
-    ///   mapping in `code()` collapses it onto `QuotaExceeded`,
-    ///   which is not in `is_circuit_opening()`; this helper
-    ///   re-asserts the spec policy directly.
     /// - [`Error::Timeout`] — HTTP 408/504/524 or any phase-level
     ///   timeout. The breaker treats sustained timeouts as a
     ///   provider-health signal, distinct from the retry budget's
@@ -406,6 +433,13 @@ impl Error {
     ///
     /// Non-openers:
     ///
+    /// - [`Error::PlanExhausted`] — HTTP 429. The throttle
+    ///   governor absorbs these via AIMD; opening the breaker
+    ///   here would cause every role to be sidelined for the
+    ///   cooldown window the moment a single 429 burst happens.
+    /// - [`Error::Throttled`] — HTTP 429 with `Retry-After`.
+    ///   Same rationale as `PlanExhausted`; the throttle
+    ///   governor is the dedicated path for these.
     /// - [`Error::SchemaViolation`], [`Error::InvalidArgs`],
     ///   [`Error::InvalidState`] — operator / contract errors that
     ///   have nothing to do with the provider's health.
@@ -420,10 +454,7 @@ impl Error {
     pub fn is_circuit_opening(&self) -> bool {
         matches!(
             self,
-            Self::InvalidApiKey { .. }
-                | Self::Provider { .. }
-                | Self::PlanExhausted { .. }
-                | Self::Timeout { .. }
+            Self::InvalidApiKey { .. } | Self::Provider { .. } | Self::Timeout { .. }
         )
     }
 
@@ -1004,8 +1035,12 @@ mod tests {
     // provider.rs (and any future caller) can rely on the policy
     // without re-deriving it.
 
-    /// Openers cover the 5xx / 429 / auth / timeout set the breaker
-    /// exists to catch.
+    /// Openers cover the 5xx / auth / timeout set the breaker
+    /// exists to catch. **v0.9.8**: `PlanExhausted` and `Throttled`
+    /// are no longer openers — see `is_circuit_opening` doc-comment
+    /// for the full rationale (the upstream returns the same
+    /// 429 body for true quota exhaustion and for saturation;
+    /// the throttle governor handles both).
     #[test]
     fn is_circuit_opening_classifies_openers() {
         assert!(
@@ -1023,13 +1058,6 @@ mod tests {
             .is_circuit_opening()
         );
         assert!(
-            Error::PlanExhausted {
-                message: "x".into(),
-                http_status: None,
-            }
-            .is_circuit_opening()
-        );
-        assert!(
             Error::Timeout {
                 message: "x".into(),
                 http_status: None,
@@ -1038,7 +1066,10 @@ mod tests {
         );
     }
 
-    /// Non-openers are operator errors, contract mismatches, or
+    /// `PlanExhausted` and `Throttled` (the two HTTP-429 buckets)
+    /// must NOT open the breaker post-v0.9.8 — the throttle
+    /// governor is the dedicated handler for those. The other
+    /// non-openers are operator errors, contract mismatches, or
     /// local I/O — they do not indicate a provider outage.
     #[test]
     fn is_circuit_opening_classifies_non_openers() {
@@ -1051,6 +1082,24 @@ mod tests {
         assert!(!Error::Io(IoError::Raw(io::Error::other("x"))).is_circuit_opening());
         assert!(!Error::Cache("x".into()).is_circuit_opening());
         assert!(!Error::NeedsInput("x".into()).is_circuit_opening());
+        // v0.9.8: the 429 buckets are explicitly non-openers.
+        assert!(
+            !Error::PlanExhausted {
+                message: "http 429: throttled".into(),
+                http_status: Some(429),
+            }
+            .is_circuit_opening(),
+            "v0.9.8: PlanExhausted must NOT trip the breaker; the throttle governor handles 429s"
+        );
+        assert!(
+            !Error::Throttled {
+                retry_after_ms: None,
+                message: "throttled".into(),
+                http_status: Some(429),
+            }
+            .is_circuit_opening(),
+            "v0.9.8: Throttled must NOT trip the breaker; the throttle governor handles 429s"
+        );
         assert!(
             !Error::DiscoveryQualityTooLow {
                 failed: 6,
@@ -1062,17 +1111,16 @@ mod tests {
     }
 
     /// The opener set matches the [`ErrorCode::is_circuit_opening`]
-    /// set semantically (HTTP 5xx/429 + Auth + transport), even
-    /// though the routing goes through `Error` variants instead of
-    /// `ErrorCode`. The test guards against drift: if a new opener
-    /// appears in `ErrorCode`, the matching `Error` variant must
-    /// also flip, or the breaker integration in `provider.rs` will
-    /// silently miss the new failure class.
+    /// set for the unambiguous signals (5xx + Auth + transport),
+    /// and the 429 buckets are explicitly NOT in the opener set
+    /// even though `ErrorCode::Http429` says they should be — the
+    /// keyword scan in `llm/http.rs::classify_status` cannot tell
+    /// true quota exhaustion from saturation, and the throttle
+    /// governor is the right tool for both.
     #[test]
     fn is_circuit_opening_aligns_with_error_code_policy() {
-        // Openers in ErrorCode that map to non-opening Error variants
-        // should still trip through Error::is_circuit_opening because
-        // the helper compensates for the lossy code() mapping.
+        // Unambiguous openers: keep the `Error::Provider` check
+        // (covers Http500/502/503/504 upstream errors).
         assert!(ErrorCode::Http500.is_circuit_opening());
         assert!(
             Error::Provider {
@@ -1082,15 +1130,7 @@ mod tests {
             .is_circuit_opening(),
             "Error::Provider must trip the breaker (covers Http500/502/503/504 upstream errors)"
         );
-        assert!(ErrorCode::Http429.is_circuit_opening());
-        assert!(
-            Error::PlanExhausted {
-                message: "http 429: throttled".into(),
-                http_status: None,
-            }
-            .is_circuit_opening(),
-            "Error::PlanExhausted must trip the breaker (covers Http429)"
-        );
+        // Auth: 401/403 is unambiguous, the breaker should open.
         assert!(ErrorCode::Auth.is_circuit_opening());
         assert!(
             Error::InvalidApiKey {
@@ -1099,6 +1139,21 @@ mod tests {
             }
             .is_circuit_opening(),
             "Error::InvalidApiKey must trip the breaker (covers Auth)"
+        );
+        // v0.9.8: 429 is an intentional divergence from
+        // `ErrorCode::Http429::is_circuit_opening()`. The upstream
+        // does not distinguish quota exhaustion from saturation,
+        // so we let the throttle governor handle every 429. This
+        // test documents the divergence so a future reader
+        // doesn't "fix" it back without understanding the cost.
+        assert!(ErrorCode::Http429.is_circuit_opening());
+        assert!(
+            !Error::PlanExhausted {
+                message: "http 429: throttled".into(),
+                http_status: Some(429),
+            }
+            .is_circuit_opening(),
+            "v0.9.8 DIVERGENCE: ErrorCode::Http429 says trip, but Error::PlanExhausted does NOT — see is_circuit_opening doc-comment"
         );
     }
 
