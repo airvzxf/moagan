@@ -5,7 +5,7 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.6] - Unreleased
+## [0.9.6] - 2026-08-21
 
 ### Fixed
 
@@ -19,6 +19,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-`(provider, role)` circuit breaker. The legacy per-provider
   breaker is kept only for the provider pool's `is_available()`
   signal; it no longer short-circuits `send()`.
+
+- **Missing-open-brace repair pass** (PR #575): the MiniMax-M3
+  upstream occasionally emits the object body without the outer
+  `{` (e.g. literally `"problem": "Design a calculator", ...}`).
+  The tolerant extractor could not find a `{` or `[` to balance, so
+  the chain returned `Error::SchemaViolation(rc=7)` and the whole
+  run aborted on the very first sketch. New `RepairKind::OpenBrace`
+  pass prepends `{` when the (possibly BOM- or prose-prefixed)
+  input starts with a JSON key. Runs explicitly before Path B
+  extraction so Path B sees the balanced object instead of the
+  inner `["..."]` substring.
+
+- **Self-inflicted circuit-open cascade guard** (PR #575): on
+  `card-1576 par-512` the upstream returned `PlanExhausted` (429)
+  for individual sketches. The per-`(provider, role)` breaker
+  tripped, but every subsequent call on the already-open path
+  returned the synthetic `PlanExhausted("circuit open: ...")` and
+  the post-call match caught that same variant and re-armed the
+  breaker via `record_failure()`. The breaker never recovered.
+  Now `was_open` is captured pre-call and `record_failure` only
+  fires on `PlanExhausted` when the breaker was CLOSED at the
+  start of the call. Self-inflicted circuit-open errors are no-ops.
 
 ### Added
 
