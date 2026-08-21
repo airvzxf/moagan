@@ -223,6 +223,26 @@ pub struct Config {
     /// prompt cache does not drain the local bucket.
     #[serde(default)]
     pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
+    /// Track E (catalog §D.19.6): per-role token-bucket knobs.
+    /// Same shape as `rate_limit_per_provider` but keyed by the
+    /// `Role::as_str()` value (e.g. `"tagger"`, `"facet_deriver"`,
+    /// `"extractor"`). Empty by default = no per-role limit, only the
+    /// per-provider bucket applies. Opt in via env
+    /// `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>` or
+    /// by setting `[rate_limit_per_role]` in
+    /// `~/.config/moagan/config.toml`.
+    ///
+    /// Why: the upstream provider has its own rate-limit window that
+    /// is tighter than the per-provider bucket for chatty roles
+    /// like `tagger` (1500+ LLM calls per fan-out). Forcing the
+    /// per-role bucket is the only way to throttle the call rate
+    /// below the provider's quota without affecting the rest of the
+    /// pipeline. Once acquired, the per-role limiter sleeps the
+    /// caller — the same "throttle" effect the per-provider bucket
+    /// has, but at a per-role granularity so the operator can
+    /// target just the role that needs it.
+    #[serde(default)]
+    pub rate_limit_per_role: std::collections::HashMap<String, RateLimitConfig>,
     /// Track E (E8 partial): knobs for the two D.7.1 catalog
     /// roles that the Discovery coordinator can invoke —
     /// `Role::PersonaPicker` and `Role::AnglePicker`. Both are
@@ -816,6 +836,7 @@ impl Default for Config {
             research_urls: Vec::new(),
             research: ResearchConfig::default(),
             rate_limit_per_provider: std::collections::HashMap::new(),
+            rate_limit_per_role: std::collections::HashMap::new(),
             discovery: DiscoveryWiringConfig::default(),
             discovery_matrix: DiscoveryMatrixConfig::default(),
             export: ExportConfig::default(),
@@ -3117,6 +3138,50 @@ mod tests {
             .expect("minimax entry must survive TOML round-trip");
         assert_eq!(entry.capacity, 20);
         assert_eq!(entry.refill_per_sec, 2);
+    }
+
+    /// Per-role rate-limit (catalog §D.19.6) defaults to an empty
+    /// map so a fresh installation behaves bit-identical to a
+    /// pre-fix run. The operator opts in via
+    /// `[rate_limit_per_role]` in `~/.config/moagan/config.toml`.
+    #[test]
+    fn config_rate_limit_per_role_default_is_empty() {
+        let cfg = Config::default();
+        assert!(
+            cfg.rate_limit_per_role.is_empty(),
+            "rate_limit_per_role must default to empty (D.19.6 off-by-default), got {:?}",
+            cfg.rate_limit_per_role
+        );
+    }
+
+    /// Per-role rate-limit entries survive a TOML round-trip so
+    /// operators can persist the per-role override across
+    /// `moagan` invocations. The key is the `Role::as_str()`
+    /// (snake_case); the value is the bucket shape.
+    #[test]
+    fn config_rate_limit_per_role_toml_round_trip() {
+        let mut rate_limit_per_role = std::collections::HashMap::new();
+        rate_limit_per_role.insert(
+            "tagger".into(),
+            RateLimitConfig {
+                capacity: 30,
+                refill_per_sec: 2,
+                initial: Some(30),
+            },
+        );
+        let cfg = Config {
+            rate_limit_per_role,
+            ..Config::default()
+        };
+        let raw = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        let entry = back
+            .rate_limit_per_role
+            .get("tagger")
+            .expect("tagger entry must survive TOML round-trip");
+        assert_eq!(entry.capacity, 30);
+        assert_eq!(entry.refill_per_sec, 2);
+        assert_eq!(entry.initial, Some(30));
     }
 
     #[test]
