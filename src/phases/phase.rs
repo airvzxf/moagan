@@ -380,22 +380,22 @@ impl RunContext {
             Ok(_) => governor.on_success(),
             Err(e) => match (e.provider_cause(), was_open) {
                 // 429 throttle: never trips the breaker (per-role throttle
-                // governor handles it via AIMD backoff).
+                // governor handles it via AIMD backoff). v0.9.8 also
+                // routes `PlanExhausted` here for the same reason —
+                // `Error::is_circuit_opening()` no longer returns true
+                // for `PlanExhausted` and the upstream does not let us
+                // tell saturation from true quota exhaustion, so the
+                // breaker stays reserved for unambiguous 5xx/4xx-auth/
+                // timeout signals.
                 (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
                     governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
                 }
-                // PlanExhausted upstream: only record a breaker failure
-                // when the breaker was CLOSED at the start of this call.
-                // If was_open was already true, the PlanExhausted is the
-                // self-inflicted "circuit open" error from the early-return
-                // (or a peer that recorded concurrently) and counting it
-                // again would pump the failure tally back up and never let
-                // the breaker close.
-                (Some(ProviderCause::PlanExhausted { .. }), false) => {
-                    self.breaker_for(role).record_failure();
-                }
-                (Some(ProviderCause::PlanExhausted { .. }), true) => {
-                    // Self-inflicted: do nothing.
+                (Some(ProviderCause::PlanExhausted { .. }), _) => {
+                    // Self-inflicted: do nothing on the breaker path.
+                    // The throttle governor already saw the 429 via
+                    // `pre_call`; counting it again here would just
+                    // feed the same code path the user already saw
+                    // saturate the breaker in v0.9.7.
                 }
                 _ => {}
             },
