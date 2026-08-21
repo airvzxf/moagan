@@ -2,7 +2,7 @@
 //! JSON to disk atomically, and parse LLM responses.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -82,6 +82,45 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value).map_err(crate::Error::from)?;
     AtomicWriter::new().write(path, &bytes)?;
     Ok(())
+}
+
+/// Return the *.json files inside `dir` that are primary artefacts,
+/// excluding the sealed `.meta.json` sidecars that the FS layer
+/// writes next to every artefact.
+///
+/// Every domain struct that the discovery loop reads back is
+/// `#[serde(default)]`, so a `.meta.json` sidecar deserialises
+/// cleanly into a record with empty ids / cluster_ids / empty
+/// facet lists. Without this filter the cluster, facet, and tag
+/// passes absorb the sidecars as phantom records: 579 phantom
+/// clusters with `members:[""]`, 580 phantom facet lists with
+/// `cluster_id:""`, and 578 wasted tagger LLM calls per run
+/// (verified on run-real-600, .runs/01a0228d-…).
+///
+/// The filter mirrors the one already in place in
+/// `discover_extract`, `discover_summary`, `discover_integrate`,
+/// `discover_contradict`, `propose`, and `discovery::context`.
+/// Factoring it here keeps the predicate in a single place so
+/// future directory walks do not re-introduce the bug.
+///
+/// Non-`.json` files and the `index.json` summary sidecars are
+/// excluded implicitly by the extension filter; callers that need
+/// `index.json` should open it explicitly via [`read_json`].
+pub fn primary_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|r| r.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().and_then(|s| s.to_str()) == Some("json")
+                && !p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".meta.json"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    paths.sort();
+    Ok(paths)
 }
 
 /// Return the last `max_bytes` bytes of `s` as a UTF-8 safe slice.
@@ -1201,6 +1240,61 @@ mod tests {
     struct Sample {
         a: u32,
         b: String,
+    }
+
+    /// `primary_json_paths` filters out the `.meta.json` sidecars
+    /// persisted next to every artefact. The discovery loop relies
+    /// on this filter: phantom clusters (579 of them on
+    /// run-real-600/.runs/01a0228d-…) and phantom facet lists come
+    /// from reading those sidecars back as primary records. Pin
+    /// the predicate so a future "always include sidecars" change
+    /// cannot sneak past review.
+    #[test]
+    fn primary_json_paths_excludes_meta_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Primary artefacts:
+        std::fs::write(dir.join("sk_0001.json"), b"{}").unwrap();
+        std::fs::write(dir.join("sk_0002.json"), b"{}").unwrap();
+        std::fs::write(dir.join("index.json"), b"{}").unwrap();
+
+        // Sealed sidecars that must be excluded:
+        std::fs::write(dir.join("sk_0001.json.meta.json"), b"{}").unwrap();
+        std::fs::write(dir.join("sk_0002.json.meta.json"), b"{}").unwrap();
+
+        let mut paths = primary_json_paths(dir).unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                dir.join("index.json"),
+                dir.join("sk_0001.json"),
+                dir.join("sk_0002.json"),
+            ],
+            "primary_json_paths leaked a .meta.json sidecar"
+        );
+        for p in &paths {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            assert!(
+                !name.ends_with(".meta.json"),
+                "primary_json_paths returned sidecar {name}"
+            );
+        }
+    }
+
+    /// A directory that holds only `.meta.json` sidecars (no
+    /// primary artefacts) yields an empty vec, NOT a hard error.
+    /// The caller — `discover_tag` on a fresh run — surfaces the
+    /// empty vec as the standard "zero sketches" warning rather
+    /// than as an IO failure.
+    #[test]
+    fn primary_json_paths_only_sidecars_yields_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("sk_0001.json.meta.json"), b"{}").unwrap();
+        let paths = primary_json_paths(dir).unwrap();
+        assert!(paths.is_empty());
     }
 
     static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
