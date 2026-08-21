@@ -1587,17 +1587,42 @@ impl Config {
         // values (missing colon, non-numeric tokens) are silently
         // ignored so a stale export does not corrupt an existing
         // TOML-loaded entry. The provider name is lowercased to
-        // match the canonical `[providers]` table keys.
+        // match the canonical `[providers]` table keys. Roles are
+        // a separate prefix (`MOAGAN_RATE_LIMIT_ROLE_<role>`) and
+        // are skipped here so a per-role env var is not misread as
+        // a provider named `role.tagger`.
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_RATE_LIMIT_") else {
                 continue;
             };
-            if suffix.is_empty() {
+            if suffix.is_empty() || suffix.starts_with("ROLE_") {
                 continue;
             }
             let provider = suffix.to_ascii_lowercase();
             if let Some(cfg) = parse_rate_limit_env(&value) {
                 self.rate_limit_per_provider.insert(provider, cfg);
+            }
+        }
+        // Track E (catalog §D.19.6): per-role rate-limit knobs.
+        // `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>`
+        // opts the named role into a role-scoped token bucket that
+        // is acquired by `call_with_retry` / `call_uncached` on
+        // top of the per-provider bucket. Same last-write-wins
+        // semantics as the per-provider env var; the role name
+        // matches the `Role::as_str()` value (snake_case). Garbage
+        // values (missing colon, non-numeric tokens) are silently
+        // ignored so a stale export does not corrupt an existing
+        // TOML-loaded entry.
+        for (key, value) in std::env::vars() {
+            let Some(suffix) = key.strip_prefix("MOAGAN_RATE_LIMIT_ROLE_") else {
+                continue;
+            };
+            if suffix.is_empty() {
+                continue;
+            }
+            let role = suffix.to_ascii_lowercase();
+            if let Some(cfg) = parse_rate_limit_env(&value) {
+                self.rate_limit_per_role.insert(role, cfg);
             }
         }
         // Per-provider `omit_max_tokens` override from env vars of the
