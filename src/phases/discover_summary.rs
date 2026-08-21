@@ -132,7 +132,11 @@ impl DiscoverSummaryPhase {
                 Some(s) => s.to_string(),
                 None => continue,
             };
-            if !name.starts_with("cat_") || !name.ends_with(".json") || name == "cat_index.json" {
+            if !name.starts_with("cat_")
+                || !name.ends_with(".json")
+                || name == "cat_index.json"
+                || name.ends_with(".meta.json")
+            {
                 continue;
             }
             let doc: CategoryDoc = match crate::phases::util::read_json(&path) {
@@ -158,7 +162,14 @@ impl DiscoverSummaryPhase {
         match std::fs::read_dir(facets_dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                .filter(|e| {
+                    let p = e.path();
+                    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    // Exclude `.meta.json` sidecars and any other sidecar that
+                    // happens to share the `.json` extension suffix.
+                    !name.ends_with(".meta.json")
+                        && (p.extension().and_then(|s| s.to_str()) == Some("json"))
+                })
                 .count(),
             Err(_) => 0,
         }
