@@ -5,6 +5,39 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-08-21
+
+### Fixed
+
+- **`.meta.json` sidecar leak in discovery walks** — `discover_cluster`,
+  `discover_facet`, and `discover_tag` filtered on
+  `extension == "json"` only, which also matched the
+  `.meta.json` sealed sidecars the FS layer writes next to every
+  artefact. Because every domain struct (`Sketch`, `Cluster`,
+  `FacetList`, `SketchTags`) is `#[serde(default)]`, the sidecars
+  deserialised cleanly into records with empty ids / cluster_ids /
+  empty facet lists. The downstream extract phase then saw 579
+  phantom clusters with `members:[""]` and skipped them, yielding
+  zero facet extractions and aborting with
+  `discover_extract produced zero facet extractions`. Reproduced
+  pre-fix on `run-real-600` (`01a0228d-da36-7583-afc0-52bd3b825d82`):
+  1156 sketch files (578 real + 578 sidecar), 1160 cluster files
+  (579 with `members:[""]` + 1 cluster_00 with all 578 real
+  members). The filter that already excluded `.meta.json` in
+  `discover_extract`, `discover_summary`, `discover_integrate`,
+  `discover_contradict`, `propose`, and `discovery::context` is
+  now factored into `phases::util::primary_json_paths` and used by
+  the three missing call sites. End-to-end verified post-fix on
+  card-80 par-8 (mini-validate / `01a022d9-…`): 80 sketches, 2
+  clusters (0 phantom), 1 facet list (0 empty `cluster_id`), 6
+  facet `.md` extractions, rc=0 elapsed=292 s. Sister fix:
+  setting `MOAGAN_RATE_LIMIT_ROLE_FACET_DERIVER=30:2` (alongside
+  the v0.9.4 tagger knob) is required when running with
+  `--cardinality 80` or higher — the facet-deriver fan-out
+  similarly rate-limits upstream and defaults to an empty facet
+  list when the upstream returns 429s (verified on the same mini
+  run without the env var: 6 extractions vs 0).
+
 ## [0.9.4] - 2026-08-21
 
 ### Added

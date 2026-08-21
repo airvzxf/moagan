@@ -106,13 +106,14 @@ impl Phase for DiscoverClusterPhase {
         let clusters_dir = ctx.run_dir().clusters();
         std::fs::create_dir_all(&clusters_dir)?;
 
-        // Read every sketch.
-        let mut sketch_paths: Vec<PathBuf> = std::fs::read_dir(&sketches_dir)?
-            .filter_map(|r| r.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
-            .collect();
-        sketch_paths.sort();
+        // Read every sketch. The filter drops the sealed
+        // `.meta.json` sidecars — without it, every sidecar
+        // deserialised to a `Sketch` with `id = ""` and produced a
+        // phantom singleton cluster. Verified on
+        // run-real-600/.runs/01a0228d-…: 579 of the 580 persisted
+        // clusters had `members:[""]`. See
+        // `phases::util::primary_json_paths`.
+        let sketch_paths: Vec<PathBuf> = crate::phases::util::primary_json_paths(&sketches_dir)?;
 
         let mut records: Vec<SketchRecord> = Vec::with_capacity(sketch_paths.len());
         for path in &sketch_paths {

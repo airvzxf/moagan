@@ -113,14 +113,24 @@ impl Phase for DiscoverFacetPhase {
         let brief: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let brief_text = serde_json::to_string(&brief).map_err(Error::from)?;
 
-        let mut cluster_paths: Vec<PathBuf> = std::fs::read_dir(&clusters_dir)?
-            .filter_map(|r| r.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().and_then(|s| s.to_str()) == Some("json")
-                    && p.file_name().and_then(|s| s.to_str()) != Some("index.json")
-            })
-            .collect();
+        // Walk clusters_dir for primary `cluster_NN.json` files. The
+        // filter drops both `index.json` (the tally sidecar
+        // emitted by `discover_cluster`) and every `*.meta.json`
+        // sealed sidecar. Without the `.meta.json` filter, each
+        // sidecar is read as a phantom cluster file with empty
+        // members; the tagger pass runs once per sidecar and the
+        // facet list ends up referencing `cluster_NN` ids that
+        // do not survive the `discover_extract` round
+        // (`cluster.members.is_empty()` skips them). Verified on
+        // run-real-600/.runs/01a0228d-…: the same 579 phantom
+        // clusters cascaded into 579 empty `FacetList`s in
+        // `facets/` and one valid `FacetList` pointing at the
+        // only real cluster.
+        let mut cluster_paths: Vec<PathBuf> =
+            crate::phases::util::primary_json_paths(&clusters_dir)?
+                .into_iter()
+                .filter(|p| p.file_name().and_then(|s| s.to_str()) != Some("index.json"))
+                .collect();
         cluster_paths.sort();
 
         if cluster_paths.is_empty() {

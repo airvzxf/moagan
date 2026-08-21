@@ -46,12 +46,11 @@ impl Phase for DiscoverTagPhase {
         let tags_dir = ctx.run_dir().tags();
         std::fs::create_dir_all(&tags_dir)?;
 
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(&sketches_dir)?
-            .filter_map(|r| r.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
-            .collect();
-        paths.sort();
+        // Read every primary sketch. Without the `.meta.json` filter,
+        // every sealed sidecar was passed to the tagger — 578
+        // phantom `SketchTags` written to `tags/` per run with empty
+        // `sketch_id`. Filter mirrors `discover_cluster::execute`.
+        let paths: Vec<PathBuf> = crate::phases::util::primary_json_paths(&sketches_dir)?;
 
         if paths.is_empty() {
             return Err(Error::InvalidState(
