@@ -1,0 +1,37 @@
+# Example user-level config for `moagan`.
+#
+# This file is documentation. `moagan` does NOT read it; copies of it live at
+# `~/.config/moagan/config.toml` (the XDG-compliant home for moagan).
+# To activate any settings here, copy this file to the path above and edit.
+#
+# When `MoaganHome::resolve()` boots, it merges the on-disk TOML with the
+# `#[serde(default)]` `Default` impls in `src/config/mod.rs`. Every field has
+# a default, so you can omit any section and get the in-code default.
+
+[circuit_breaker]
+# Threshold for tripping the breaker per provider, inside `window_secs`.
+# Default is 5, which is too tight for long discovery fan-outs (50 errors
+# in 5 min is easy to hit on flaky upstreams). 200 is the recommended
+# value to tolerate upstream noise on the MiniMax-M3 wire (`anthropic`).
+# Override per-provider if needed.
+threshold = 200
+
+# Sliding window for failure counting, in seconds.
+# Default is 60 s; 600 s gives the breaker a wider memory of recent errors.
+window_secs = 600
+
+# Time the breaker stays open before transitioning to HalfOpen. After
+# cooldown, the next call is a probe; success closes, failure re-opens.
+# Default is 30 s; 180 s is the recommended value when running multiple
+# discovery tests in succession.
+cooldown_secs = 180
+
+# See `src/config/mod.rs` CircuitBreakerConfig for the full schema; this
+# file only documents the fields most operators want to override.
+
+# Provider overrides (DO NOT put real API keys here — use `.env` + MoaganHome):
+#
+# [providers.minimax]
+# kind = "minimax"
+# endpoint = "http://localhost:8086/anthropic/v1"
+# model = "MiniMax-M3"
