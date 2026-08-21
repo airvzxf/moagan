@@ -35,6 +35,7 @@ use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
+use crate::llm::Role;
 use crate::phases::Pipeline;
 use crate::phases::PipelineKind;
 use crate::phases::RunContext;
@@ -442,7 +443,27 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         effective_cfg.phase_timeout_secs,
         effective_cfg.total_timeout_secs,
     )
-    .with_interactive(!opts.non_interactive);
+    .with_interactive(!opts.non_interactive)
+    // Per-role rate-limit (catalog §D.19.6): wire each
+    // `[rate_limit_per_role]` entry into a `RateLimiter` keyed by
+    // the parsed `Role`. Unknown role names are silently skipped
+    // so a stale config never aborts the run; the per-role bucket
+    // then throttles the chatty roles (e.g. `tagger` in the
+    // post-matrix fan-out) without affecting the per-provider
+    // bucket the rest of the pipeline uses.
+    .with_role_rate_limits({
+        let mut rate_limit_per_role: std::collections::HashMap<_, _> =
+            std::collections::HashMap::new();
+        for (role_name, cfg) in &effective_cfg.rate_limit_per_role {
+            if let Ok(role) = role_name.parse::<Role>() {
+                rate_limit_per_role.insert(
+                    role,
+                    std::sync::Arc::new(crate::llm::rate_limiter::RateLimiter::new(cfg.clone())),
+                );
+            }
+        }
+        rate_limit_per_role
+    });
 
     let pipeline = build_pre_matrix_pipeline();
     let pipeline_future = pipeline.run(&ctx);
