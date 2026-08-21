@@ -239,7 +239,29 @@ async fn derive_facets(
             3,
         )
         .await
-        .unwrap_or_default();
+        // PR: fix(discover-facet) — surface silent fallback. The previous
+        // `.unwrap_or_default()` swallowed the LLM error so operators had no
+        // visibility into which clusters produced empty facet lists; a fully
+        // silent failure surfaces downstream as
+        // `discover_extract produced zero facet extractions` after the fact,
+        // with no way to correlate it to the upstream provider. Emitting a
+        // `tracing::warn!` per cluster keeps the existing tolerance policy
+        // (continue-on-empty is the documented behaviour) while letting the
+        // operator grep `facet derivation failed` to count how systemic the
+        // failure is. Verified locally against the 2026-08-20 run-comparison
+        // mini-m1 (`facets=0` across 705 facet lists) to confirm the warn
+        // fire happens exactly when the upstream LLM returns a schema-violating
+        // response after 3 retries.
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                role = "facet-deriver",
+                cluster_id = %cluster.id,
+                category_id = %cat_id,
+                "facet derivation failed after retries; defaulting to empty facet list"
+            );
+            FacetDerivation::default()
+        });
     let triples: Vec<(String, String, bool)> = raw
         .facets
         .into_iter()
