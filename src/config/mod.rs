@@ -243,6 +243,35 @@ pub struct Config {
     /// target just the role that needs it.
     #[serde(default)]
     pub rate_limit_per_role: std::collections::HashMap<String, RateLimitConfig>,
+    /// v0.9.6: per-`role` adaptive throttle governor knobs
+    /// (AIMD backpressure for transient 429s). Same shape as
+    /// `rate_limit_per_role` but consumed by
+    /// [`crate::llm::governor::ThrottleGovernor`] instead of
+    /// [`crate::llm::rate_limiter::RateLimiter`]. The two are
+    /// complementary: the bucket caps the rate, the governor
+    /// reacts to the upstream's 429 stream. Empty by default =
+    /// no governor; the call-site creates a default-config
+    /// governor the first time a role is invoked, so a fresh
+    /// installation behaves like v0.9.5 (no adaptive
+    /// backpressure, but with the new error-classification
+    /// making `Throttled` go to the governor lane rather than
+    /// the breaker). Opt-in via `[throttle_per_role]` in
+    /// `~/.config/moagan/config.toml` or
+    /// `MOAGAN_THROTTLE_PER_ROLE_<role>=<initial>:<max>:<init_backoff>:<max_backoff>:<additive_after>:<jitter>`.
+    #[serde(default)]
+    pub throttle_per_role: std::collections::HashMap<String, ThrottleConfig>,
+    /// v0.9.6: per-`role` circuit breaker knobs. Same shape as
+    /// the per-provider breaker that v0.9.4 deprecated, but
+    /// keyed on `(provider, role)` (provider is `default_provider`
+    /// at the call-site) instead of `(provider)` so a `PlanExhausted`
+    /// on `minimax`/`facet_deriver` does not trip
+    /// `minimax`/`tagger`. Empty by default = no breaker; the
+    /// call-site creates a default-config breaker the first time
+    /// a role is invoked. Opt-in via `[circuit_breaker_per_role]`
+    /// in `~/.config/moagan/config.toml` or
+    /// `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>=<threshold>:<window_secs>:<cooldown_secs>`.
+    #[serde(default)]
+    pub circuit_breaker_per_role: std::collections::HashMap<String, BreakerConfig>,
     /// Track E (E8 partial): knobs for the two D.7.1 catalog
     /// roles that the Discovery coordinator can invoke —
     /// `Role::PersonaPicker` and `Role::AnglePicker`. Both are
@@ -659,6 +688,71 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// v0.9.6: per-`role` adaptive throttle governor config.
+/// Consumed by [`crate::llm::governor::ThrottleGovernor`]. The
+/// shape is `INITIAL:MAX:INITIAL_BACKOFF_MS:MAX_BACKOFF_MS:ADDITIVE_AFTER_MS:JITTER_MS`,
+/// serialised as a TOML inline table or via the matching
+/// `MOAGAN_THROTTLE_PER_ROLE_<role>` env var.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ThrottleConfig {
+    /// Initial per-role in-flight concurrency cap. `>= 1`. Default 4.
+    pub initial_concurrency: u32,
+    /// Maximum per-role in-flight concurrency cap after recovery.
+    /// `>= initial_concurrency`. Default 16.
+    pub max_concurrency: u32,
+    /// First-429 backoff. `>= 0`; `0` means zero backoff on the
+    /// first 429 (the doubling sequence then takes over from
+    /// `1` ms). Default 500.
+    pub initial_backoff_ms: u64,
+    /// Cap on the exponential backoff sequence. Default 30_000 (30 s).
+    pub max_backoff_ms: u64,
+    /// Window during which a silent role (no 429s) is allowed to
+    /// additively restore concurrency. Default 5_000.
+    pub additive_after_ms: u64,
+    /// Random jitter bound applied to the backoff sleep. Default
+    /// 500.
+    pub jitter_ms: u64,
+}
+
+impl Default for ThrottleConfig {
+    fn default() -> Self {
+        Self {
+            initial_concurrency: 4,
+            max_concurrency: 16,
+            initial_backoff_ms: 500,
+            max_backoff_ms: 30_000,
+            additive_after_ms: 5_000,
+            jitter_ms: 500,
+        }
+    }
+}
+
+/// v0.9.6: per-`role` circuit breaker config. Consumed by
+/// [`crate::llm::circuit_breaker::BreakerConfig`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BreakerConfig {
+    /// Consecutive failures inside `window` that trip the breaker.
+    /// Default 5.
+    pub threshold: u32,
+    /// Window during which `threshold` consecutive failures trip.
+    /// Default 300.
+    pub window_secs: u64,
+    /// Cooldown after a trip before the half-open probe. Default 30.
+    pub cooldown_secs: u64,
+}
+
+impl Default for BreakerConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 5,
+            window_secs: 300,
+            cooldown_secs: 30,
+        }
+    }
+}
+
 /// Per-criterion weights used by the `RankPhase` to compute the
 /// weighted score from the aggregated `JudgeScore`. Each weight is a
 /// non-negative `f32`; the relative magnitude determines the
@@ -837,6 +931,8 @@ impl Default for Config {
             research: ResearchConfig::default(),
             rate_limit_per_provider: std::collections::HashMap::new(),
             rate_limit_per_role: std::collections::HashMap::new(),
+            throttle_per_role: std::collections::HashMap::new(),
+            circuit_breaker_per_role: std::collections::HashMap::new(),
             discovery: DiscoveryWiringConfig::default(),
             discovery_matrix: DiscoveryMatrixConfig::default(),
             export: ExportConfig::default(),
@@ -1625,6 +1721,43 @@ impl Config {
                 self.rate_limit_per_role.insert(role, cfg);
             }
         }
+        // v0.9.6: per-role adaptive-throttle governor knobs.
+        // `MOAGAN_THROTTLE_PER_ROLE_<role>=<initial>:<max>:<init_backoff>:<max_backoff>:<additive_after>:<jitter>`
+        // opts the named role into the AIMD governor. The role
+        // name matches `Role::as_str()` value (snake_case).
+        // Garbage values (missing colons, non-numeric tokens) are
+        // silently ignored so a stale export does not corrupt an
+        // existing TOML-loaded entry.
+        for (key, value) in std::env::vars() {
+            let Some(suffix) = key.strip_prefix("MOAGAN_THROTTLE_PER_ROLE_") else {
+                continue;
+            };
+            if suffix.is_empty() {
+                continue;
+            }
+            let role = suffix.to_ascii_lowercase();
+            if let Some(cfg) = parse_throttle_env(&value) {
+                self.throttle_per_role.insert(role, cfg);
+            }
+        }
+        // v0.9.6: per-role circuit-breaker knobs.
+        // `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>=<threshold>:<window_secs>:<cooldown_secs>`
+        // opts the named role into a per-(provider, role) breaker
+        // that trips on persistent `PlanExhausted`. The role name
+        // matches `Role::as_str()` value (snake_case). Garbage
+        // values are silently ignored.
+        for (key, value) in std::env::vars() {
+            let Some(suffix) = key.strip_prefix("MOAGAN_CIRCUIT_BREAKER_PER_ROLE_") else {
+                continue;
+            };
+            if suffix.is_empty() {
+                continue;
+            }
+            let role = suffix.to_ascii_lowercase();
+            if let Some(cfg) = parse_breaker_env(&value) {
+                self.circuit_breaker_per_role.insert(role, cfg);
+            }
+        }
         // Per-provider `omit_max_tokens` override from env vars of the
         // form `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true|false`. The provider
         // name is uppercased and both dots and hyphens are rewritten to
@@ -1698,6 +1831,43 @@ fn parse_rate_limit_env(s: &str) -> Option<RateLimitConfig> {
         capacity,
         refill_per_sec,
         initial: None,
+    })
+}
+
+/// Parse the `MOAGAN_THROTTLE_PER_ROLE_<role>` env var. The shape is
+/// `INITIAL:MAX:INITIAL_BACKOFF_MS:MAX_BACKOFF_MS:ADDITIVE_AFTER_MS:JITTER_MS`.
+/// Returns `None` for any value that does not parse so a stale /
+/// malformed export leaves the existing knob alone.
+fn parse_throttle_env(s: &str) -> Option<ThrottleConfig> {
+    let mut tokens = s.trim().split(':').map(str::trim);
+    let initial_concurrency: u32 = tokens.next()?.parse().ok()?;
+    let max_concurrency: u32 = tokens.next()?.parse().ok()?;
+    let initial_backoff_ms: u64 = tokens.next()?.parse().ok()?;
+    let max_backoff_ms: u64 = tokens.next()?.parse().ok()?;
+    let additive_after_ms: u64 = tokens.next()?.parse().ok()?;
+    let jitter_ms: u64 = tokens.next()?.parse().ok()?;
+    Some(ThrottleConfig {
+        initial_concurrency,
+        max_concurrency,
+        initial_backoff_ms,
+        max_backoff_ms,
+        additive_after_ms,
+        jitter_ms,
+    })
+}
+
+/// Parse the `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>` env var.
+/// The shape is `THRESHOLD:WINDOW_SECS:COOLDOWN_SECS`. Returns
+/// `None` for any value that does not parse.
+fn parse_breaker_env(s: &str) -> Option<BreakerConfig> {
+    let mut tokens = s.trim().split(':').map(str::trim);
+    let threshold: u32 = tokens.next()?.parse().ok()?;
+    let window_secs: u64 = tokens.next()?.parse().ok()?;
+    let cooldown_secs: u64 = tokens.next()?.parse().ok()?;
+    Some(BreakerConfig {
+        threshold,
+        window_secs,
+        cooldown_secs,
     })
 }
 

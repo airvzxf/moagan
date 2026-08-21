@@ -9,6 +9,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::error::ProviderCause;
+use crate::llm::circuit_breaker::BreakerRegistry;
+use crate::llm::governor::{GovernorRegistry, ThrottleGovernor};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -111,6 +115,22 @@ pub struct RunContext {
     /// the per-provider bucket.
     pub rate_limit_per_role:
         std::collections::HashMap<Role, Arc<crate::llm::rate_limiter::RateLimiter>>,
+    /// v0.9.6: adaptive throttle governors keyed by
+    /// `(provider, role)`. Each LLM call consults the governor for
+    /// `(self.default_provider, role)` to apply a per-role adaptive
+    /// backoff on transient 429s. The governor is the consumer of
+    /// `Error::Throttled` errors; the breaker keyed on
+    /// `(provider, role)` (see [`Self::breaker_per_role`]) consumes
+    /// `Error::PlanExhausted`. Two-tier separation matches the spec
+    /// in `docs/adr/<throttle-governor>`.
+    pub throttle: GovernorRegistry,
+    /// v0.9.6: per-`(provider, role)` circuit breakers consumed by
+    /// `RunContext::call_*` for `PlanExhausted` errors. The earlier
+    /// per-provider breaker on `BreakeredProvider` was removed
+    /// because it caused the cascade in `discover_facet` (one role's
+    /// 429 tripped every role on the same provider). Per-role
+    /// scoping keeps each role isolated.
+    pub breaker_per_role: BreakerRegistry,
     /// Interval between lease renewals issued by the heartbeat task.
     /// Default: 30 s. Phases can override via
     /// [`RunContext::with_heartbeat_interval_secs`]; tests that need a
@@ -253,6 +273,8 @@ impl RunContext {
             phase_timeout: Duration::ZERO,
             total_timeout: Duration::ZERO,
             rate_limit_per_role: std::collections::HashMap::new(),
+            throttle: GovernorRegistry::new(),
+            breaker_per_role: BreakerRegistry::new(),
             heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL_SECS,
             heartbeat_holder: "heartbeat".to_owned(),
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
@@ -278,6 +300,104 @@ impl RunContext {
     ) -> Self {
         self.rate_limit_per_role = rate_limit_per_role;
         self
+    }
+
+    /// v0.9.6: attach the per-`(provider, role)` adaptive throttle
+    /// governors wired by the CLI boundary from
+    /// `cfg.throttle_per_role`. The empty default means no
+    /// throttle — `GovernorRegistry::governor_for(role)` lazily
+    /// creates a default-config governor the first time any role
+    /// is called, so omitting this keeps the v0.9.5 behaviour
+    /// (no adaptive backpressure, no governor-side telemetry).
+    pub fn with_throttle_governors(mut self, throttle: GovernorRegistry) -> Self {
+        self.throttle = throttle;
+        self
+    }
+
+    /// v0.9.6: attach the per-`(provider, role)` breaker registry
+    /// wired by the CLI boundary from `cfg.circuit_breaker_per_role`.
+    /// The default-constructed [`BreakerRegistry`] uses
+    /// lenient defaults (50/300/60) matching the v0.9.4
+    /// per-provider breaker.
+    pub fn with_breakers_per_role(mut self, breakers: BreakerRegistry) -> Self {
+        self.breaker_per_role = breakers;
+        self
+    }
+
+    /// v0.9.6: lookup (or lazily create) the breaker for
+    /// `(default_provider, role)`. Used by `call_with_retry` to
+    /// fast-fail when PlanExhausted was tripped on a previous
+    /// call, and by `call_*_at_temp` to record persistent
+    /// failures.
+    pub fn breaker_for(&self, role: Role) -> crate::llm::circuit_breaker::CircuitBreaker {
+        self.breaker_per_role
+            .breaker_for(&self.default_provider, role)
+    }
+
+    /// v0.9.6: lookup (or lazily create) the throttle governor
+    /// for `(default_provider, role)`. The same `Arc` is returned
+    /// across all callers so the AIMD state is consistent.
+    pub fn governor_for(&self, role: Role) -> Arc<ThrottleGovernor> {
+        self.throttle.governor_for(&self.default_provider, role)
+    }
+
+    /// v0.9.6: shared AIMD-throttle / per-(provider, role)-breaker
+    /// pre-call + post-call wrapper used by every `call_*` method.
+    /// Consults the breaker first (fast-fail when PlanExhausted was
+    /// tripped on a previous call for this pair), sleeps for the
+    /// governor's adaptive backoff, runs the inner dispatch, then
+    /// updates both governors based on the result. Centralising the
+    /// state machine here keeps the four `call_*` methods free of
+    /// the same boilerplate.
+    ///
+    /// Cascade-avoidance: when the breaker is already open at the
+    /// start of the call we return early with the synthetic
+    /// "circuit open" error — that error is *self-inflicted*, not
+    /// a signal of a real provider failure, so the post-call
+    /// `record_failure()` would just re-arm the breaker and feed
+    /// itself. We capture `was_open` pre-call and only record
+    /// PlanExhausted on the failure path when the breaker was
+    /// closed at the start of the call.
+    async fn dispatch_with_governors<F, T>(&self, role: Role, inner: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        let was_open = self.breaker_for(role).is_open();
+        if was_open {
+            return Err(Error::PlanExhausted(format!(
+                "circuit open: provider '{}' role '{}' sidelined",
+                self.default_provider,
+                role.as_str()
+            )));
+        }
+        let governor = self.governor_for(role);
+        let _throttle_sleep = governor.pre_call().await;
+        let result = inner.await;
+        match &result {
+            Ok(_) => governor.on_success(),
+            Err(e) => match (e.provider_cause(), was_open) {
+                // 429 throttle: never trips the breaker (per-role throttle
+                // governor handles it via AIMD backoff).
+                (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
+                    governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
+                }
+                // PlanExhausted upstream: only record a breaker failure
+                // when the breaker was CLOSED at the start of this call.
+                // If was_open was already true, the PlanExhausted is the
+                // self-inflicted "circuit open" error from the early-return
+                // (or a peer that recorded concurrently) and counting it
+                // again would pump the failure tally back up and never let
+                // the breaker close.
+                (Some(ProviderCause::PlanExhausted { .. }), false) => {
+                    self.breaker_for(role).record_failure();
+                }
+                (Some(ProviderCause::PlanExhausted { .. }), true) => {
+                    // Self-inflicted: do nothing.
+                }
+                _ => {}
+            },
+        }
+        result
     }
 
     /// Attach the auto-probe `max_tokens` table so
@@ -618,11 +738,21 @@ impl RunContext {
         if let Some(rl) = self.rate_limit_per_role.get(&role) {
             let _wait = rl.acquire().await?;
         }
-        self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
-            .await
-            .inspect(|_response| {
-                self.prompt_cache.lock().register(&prompt_id, cache_key);
+        // v0.9.6: fast-fail when the per-`(provider, role)`
+        // breaker is open from a previous `PlanExhausted`. The
+        // record-update happens after the dispatch returns, inside
+        // the `match` block below. Centralised in
+        // `dispatch_with_governors` so the four `call_*` methods
+        // share the same AIMD + breaker state machine.
+        let dispatch_result = self
+            .dispatch_with_governors(role, async {
+                self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
+                    .await
             })
+            .await;
+        dispatch_result.inspect(|_response| {
+            self.prompt_cache.lock().register(&prompt_id, cache_key);
+        })
     }
 
     /// Like [`Self::call_with_retry`] but stamps the request with an
@@ -699,11 +829,17 @@ impl RunContext {
         if let Some(rl) = self.rate_limit_per_role.get(&role) {
             let _wait = rl.acquire().await?;
         }
-        self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
-            .await
-            .inspect(|_response| {
-                self.prompt_cache.lock().register(&prompt_id, cache_key);
-            })
+        // v0.9.6: AIMD-throttle + per-(provider, role)-breaker
+        // wrapper. See `dispatch_with_governors` for the full state
+        // machine; the four `call_*` methods all share it.
+        self.dispatch_with_governors(role, async {
+            self.dispatch_to_provider(req, Some(cache_key.clone()), started_unix, retry_count)
+                .await
+        })
+        .await
+        .inspect(|_response| {
+            self.prompt_cache.lock().register(&prompt_id, cache_key);
+        })
     }
 
     /// Provider-uncached variant of [`Self::call_with_retry_at_temp`]
@@ -750,8 +886,12 @@ impl RunContext {
         if let Some(rl) = self.rate_limit_per_role.get(&role) {
             let _wait = rl.acquire().await?;
         }
-        self.dispatch_to_provider(req, None, started_unix, retry_count)
-            .await
+        // v0.9.6: AIMD-throttle + breaker. See `dispatch_with_governors`.
+        self.dispatch_with_governors(role, async {
+            self.dispatch_to_provider(req, None, started_unix, retry_count)
+                .await
+        })
+        .await
     }
 
     /// Provider call without consulting the cache. Used on parse-
@@ -813,8 +953,12 @@ impl RunContext {
         if let Some(rl) = self.rate_limit_per_role.get(&role) {
             let _wait = rl.acquire().await?;
         }
-        self.dispatch_to_provider(req, None, started_unix, retry_count)
-            .await
+        // v0.9.6: AIMD-throttle + breaker. See `dispatch_with_governors`.
+        self.dispatch_with_governors(role, async {
+            self.dispatch_to_provider(req, None, started_unix, retry_count)
+                .await
+        })
+        .await
     }
 
     /// Send the prepared request to the provider, record telemetry,

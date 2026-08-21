@@ -218,9 +218,17 @@ async fn http_401_maps_to_invalid_api_key() {
 async fn http_429_maps_to_plan_exhausted() {
     use moagan::error::Error;
     let server = MockServer::start().await;
+    // v0.9.6: 429 splits into `Throttled` (transient) vs
+    // `PlanExhausted` (persistent) via keyword scan on the body.
+    // `token plan rate limit` is the canonical PlanExhausted
+    // message; the v0.9.5 "throttle" body that previously mapped
+    // to PlanExhausted now routes to Throttled.
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
-        .respond_with(ResponseTemplate::new(429).set_body_string("{\"error\":\"throttle\"}"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_string("{\"error\":\"token plan rate limit reached\"}"),
+        )
         .mount(&server)
         .await;
 
@@ -240,6 +248,46 @@ async fn http_429_maps_to_plan_exhausted() {
         matches!(err, Error::PlanExhausted(_)),
         "expected PlanExhausted, got {err:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_429_throttle_body_maps_to_throttled() {
+    use moagan::error::Error;
+    let server = MockServer::start().await;
+    // v0.9.6 split: 429 with a "throttle" body without `plan`/
+    // `monthly`/`subscription` keywords classifies as
+    // `Error::Throttled` (transient) — the per-(provider, role)
+    // ThrottleGovernor absorbs these; the breaker is NOT tripped.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_string("{\"error\":\"tokens per minute exceeded\"}"),
+        )
+        .mount(&server)
+        .await;
+
+    let embedder = embedder_against(
+        &server,
+        RemoteEmbedderProvider::Openai,
+        "m",
+        4,
+        "MOAGAN_TEST_REMOTE_429_THROTTLED",
+        "k",
+    );
+    let err = embedder
+        .embed_batch(&["x"])
+        .await
+        .expect_err("429 must error");
+    match err {
+        Error::Throttled { message, .. } => {
+            assert!(
+                message.contains("tokens per minute"),
+                "throttle message must contain upstream text, got: {message}"
+            );
+        }
+        other => panic!("expected Throttled, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

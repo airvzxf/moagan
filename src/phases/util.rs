@@ -52,6 +52,12 @@ pub enum RepairKind {
     /// A missing closer (`}` or `]`) was appended, or a misplaced
     /// closer was rebalanced.
     Bracket,
+    /// A missing leading `{` was inserted when the model emitted
+    /// the object body straight from the first key (`"foo": ...}`)
+    /// without the outer opener. Validates the heuristic via a
+    /// post-parse retry so we never prepend a `{` to a JSON value
+    /// that was already valid.
+    OpenBrace,
 }
 
 impl RepairKind {
@@ -61,6 +67,7 @@ impl RepairKind {
             Self::Colon => "colon",
             Self::Separator => "separator",
             Self::Bracket => "bracket",
+            Self::OpenBrace => "open_brace",
         }
     }
 }
@@ -271,8 +278,34 @@ where
             return Ok(v);
         }
     }
-    if let Ok((start, end)) = json_extractor::extract_tolerant_json(&cleaned) {
-        let candidate = &cleaned[start..end];
+    // Open-brace pass: prepend `{` when the payload starts with a
+    // `"key":` instead of an actual `{`. This MUST run BEFORE the
+    // Path B extraction: if the model writes the object body
+    // straight from the first key (`"problem": "..."`), Path B
+    // would otherwise find the FIRST `[` in an inner array (e.g.
+    // `["objectives": ...]`) and extract just that array,
+    // discarding the rest of the object. Prepending `{` first
+    // gives Path B a balanced outer object to find.
+    let braced = if let Some(patched) = repair_missing_open_brace(&cleaned) {
+        let bytes_before = cleaned.len();
+        let bytes_after = patched.len();
+        sink(RepairEvent {
+            kind: RepairKind::OpenBrace,
+            bytes_before,
+            bytes_after,
+        });
+        patched
+    } else {
+        cleaned.to_string()
+    };
+    // Retry the direct parse on the braced input. The most common
+    // case is that prepending `{` produces a parseable JSON
+    // object on the first retry.
+    if let Ok(v) = serde_json::from_str::<T>(&braced) {
+        return Ok(v);
+    }
+    if let Ok((start, end)) = json_extractor::extract_tolerant_json(&braced) {
+        let candidate = &braced[start..end];
         if let Ok(v) = serde_json::from_str::<T>(candidate) {
             return Ok(v);
         }
@@ -290,17 +323,17 @@ where
             }
         }
     }
-    let (repaired, repairs) = repair_m3_brackets_with_trace(&cleaned);
+    let (repaired, repairs) = repair_m3_brackets_with_trace(&braced);
     let Some(repaired) = repaired else {
-        let e = serde_json::from_str::<T>(&cleaned)
+        let e = serde_json::from_str::<T>(&braced)
             .err()
             .expect("parse failed above");
-        let tail = safe_tail(&cleaned, 500);
+        let tail = safe_tail(&braced, 500);
         return Err(crate::Error::SchemaViolation(format!(
             "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
-            cleaned.len(),
+            braced.len(),
             tail,
-            cleaned
+            braced
         )));
     };
     for r in repairs {
@@ -446,6 +479,34 @@ fn repair_m3_brackets_with_trace(s: &str) -> (Option<String>, Vec<RepairTrace>) 
     let mut events: Vec<RepairTrace> = Vec::new();
     let mut current = s.to_owned();
 
+    // Run first (before the stray-comma / colon / separator passes)
+    // so the model output that begins with `"key": ...` instead of
+    // `{` (the m3 "missing opening brace" pathology) is repaired
+    // with a single leading `{`. Without this pass, downstream
+    // walks never see a `{` to balance against, so the trailing
+    // `}` looks like a stray closer and the chain ends with
+    // `[repair_brackets_iterative]` returning `None`. Smoke batches
+    // surfaced this on `card-80 par-8 T=[0.3,0.7,1.0,1.3,1.8]`
+    // (run-real-80 variant) against MiniMax-M3: every first sketch
+    // from the matrix returned a payload starting with `"problem":`
+    // and the run aborted with rc=7 schema violation on the very
+    // first cell. The pass only prepends when the input is
+    // structurally object-like (lead string key followed by `:`),
+    // and only trims a leading prose prefix — it never appends a
+    // closer, so a balanced payload stays untouched.
+    if let Some(patched) = repair_missing_open_brace(&current)
+        && patched.len() != current.len()
+    {
+        let bytes_before = current.len();
+        let bytes_after = patched.len();
+        events.push(RepairTrace {
+            kind: RepairKind::OpenBrace,
+            bytes_before,
+            bytes_after,
+        });
+        current = patched;
+    }
+
     // Run first so the stray-comma fix does not fight the colon /
     // separator passes that follow — without this pass, the
     // separator walker would interpret `",:` as "missing colon" and
@@ -507,6 +568,183 @@ fn repair_m3_brackets_with_trace(s: &str) -> (Option<String>, Vec<RepairTrace>) 
         Some(repaired) => (Some(repaired), events),
         None => (None, events),
     }
+}
+
+/// Detect the m3 "missing opening brace" pathology — the model emits
+/// the object body straight from the first key, e.g.
+///
+/// ```text
+/// "problem": "Design and specify a Linux/Wayland-only calculator",
+/// "objectives": ["Pick exactly one option"],
+/// ...
+/// }
+/// ```
+///
+/// without the outer `{`. The rest of the chain (stray-comma / colon
+/// / separator / bracket repair) cannot recover this shape because
+/// none of the openers (`{` or `[`) it balances against ever
+/// appears, so the trailing `}` looks like a stray closer and the
+/// helper returns `None`. The extractor
+/// ([`crate::llm::json_extractor::extract_tolerant_json`]) likewise
+/// returns `ExtractError::NoJsonFound` because no `{` or `[` is
+/// present at the start of the input (or after a leading prose /
+/// BOM / JS comment).
+///
+/// Heuristic, in order:
+///
+/// 1. Skip a leading UTF-8 BOM and any JS line / block comment so
+///    a payload that's *only* a comment is rejected outright. Also
+///    skip past any prose prefix that ends with a newline before
+///    the first `{` (e.g. `Sure, here you go:\n"problem": ...`).
+/// 2. After the prefix is consumed, the next non-whitespace byte
+///    must be `"` (the opening quote of a key string); if it is
+///    `{` or `[`, the input is already a JSON value and we leave
+///    it alone.
+/// 3. Parse the key string honouring `\"` escapes; if it doesn't
+///    terminate cleanly, give up. The next non-whitespace byte
+///    after the closing quote must be `:` (the key/value
+///    separator), otherwise the input is something else (a top
+///    level string, an array of strings, …) and we don't touch it.
+/// 4. Prepend `{` and return. We do NOT append a closer — the
+///    bracket repair pass that runs next will balance the rest of
+///    the structure.
+///
+/// Returns `None` when the heuristic does not match (already-valid
+/// input, JSON-with-prose-preceded opening brace, top-level string,
+/// …). The caller wires the `Some` branch through
+/// [`RepairKind::OpenBrace`].
+fn repair_missing_open_brace(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    // 1. Strip an optional leading UTF-8 BOM.
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        i = 3;
+    }
+    // 2. Skip JS comments sitting at the front of the payload.
+    while i < bytes.len() {
+        if skip_js_comment_open_pre(bytes, i) {
+            // Both `//` and `/*` openers are 2 bytes long; the
+            // branch below distinguishes them by content.
+            let is_line = bytes[i + 1] == b'/';
+            i += 2;
+            // Advance past the rest of the line / block: use the
+            // helpers already in `json_extractor` via inline walk
+            // so we don't add a cross-module dependency.
+            if is_line {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            } else {
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            continue;
+        }
+        break;
+    }
+    // 3. Skip past any prose prefix — non-`{`, non-`[`, non-`"`
+    // bytes. The heuristic must tolerate a leading sentence
+    // (e.g. `Sure, here you go:\n"answer": 42`) and a block of
+    // multi-line prose before the first key. We stop at the
+    // first `{` / `[` (return `None`, the payload is already
+    // parseable downstream), the first `"` (skip to the key
+    // string check), or end of input (no key found).
+    let mut j = i;
+    while j < bytes.len() {
+        let b = bytes[j];
+        if b == b'{' || b == b'[' {
+            // The payload starts with a JSON opener — already valid
+            // (or repairable downstream). Leave it alone.
+            return None;
+        }
+        if b == b'"' {
+            // Probably the opening quote of a key string. Fall
+            // through to the key-string check.
+            break;
+        }
+        // A prose byte (non-whitespace, non-newline, non-quote,
+        // non-opener) is a candidate for fast-forwarding past a
+        // whole sentence. Whitespace and newlines are advanced
+        // one byte at a time so the loop makes forward progress
+        // (the inner walker never increments `j` itself when the
+        // stop byte is a newline — the outer loop must).
+        if b != b'\n' && !(b as char).is_whitespace() {
+            while j < bytes.len()
+                && bytes[j] != b'\n'
+                && bytes[j] != b'"'
+                && bytes[j] != b'{'
+                && bytes[j] != b'['
+            {
+                j += 1;
+            }
+            continue;
+        }
+        j += 1;
+    }
+    if j >= bytes.len() || bytes[j] != b'"' {
+        return None;
+    }
+    // 4. Parse the key string. Honour `\"` escapes so a `"\""` in
+    // the key doesn't close the string prematurely.
+    let key_start = j;
+    let mut k = j + 1;
+    let mut ended = false;
+    while k < bytes.len() {
+        let b = bytes[k];
+        if b == b'\\' && k + 1 < bytes.len() {
+            k += 2;
+            continue;
+        }
+        if b == b'"' {
+            ended = true;
+            k += 1;
+            break;
+        }
+        k += 1;
+    }
+    if !ended {
+        return None;
+    }
+    // 5. Skip whitespace, then require `:`.
+    while k < bytes.len() && (bytes[k] as char).is_whitespace() {
+        k += 1;
+    }
+    if k >= bytes.len() || bytes[k] != b':' {
+        return None;
+    }
+    // Heuristic matched: insert `{` AT the key position, after
+    // any prose prefix / BOM but before the key. Preserving the
+    // prefix is important for two reasons:
+    //
+    // 1. The upstream tolerant extractor (Path B) lets prose
+    //    prefixes through — it strips them only when searching for
+    //    the first `{` or `[`. If we moved the prefix to the right
+    //    of `{`, that strip pass would silently truncate the
+    //    payload and the user would lose context.
+    // 2. A leading UTF-8 BOM must sit BEFORE the JSON value
+    //    (RFC 8259 §8.1: `leading BOM is optional but only valid
+    //    before the JSON value`). Putting `{` after the BOM keeps
+    //    the payload spec-compliant.
+    //
+    // The common case is `key_start == 0` (no BOM, no prose),
+    // which collapses to a single leading `{` prepended to the
+    // input.
+    let to_prepend_at = key_start;
+    let mut out = String::with_capacity(s.len() + 1);
+    out.push_str(&s[..to_prepend_at]);
+    out.push('{');
+    out.push_str(&s[to_prepend_at..]);
+    Some(out)
+}
+
+/// Local helper that reports whether `bytes[i..i+2]` opens a JS
+/// line (`//`) or block (`/*`) comment. Mirrors
+/// `json_extractor::skip_js_comment` so the open-brace pass can run
+/// without importing the extractor crate.
+fn skip_js_comment_open_pre(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && bytes[i] == b'/' && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*')
 }
 
 /// Walk the input, find places where a string literal is followed by
@@ -1993,6 +2231,142 @@ mod tests {
         // No repair events were emitted because the chain refused to
         // write the unterminated input.
         assert!(kinds.is_empty());
+    }
+
+    // --- open-brace repair tests ---------------------------------------
+    //
+    // The MiniMax-M3 "missing opening brace" pathology (the model
+    // emits the object body straight from the first key, e.g.
+    // `"problem": "..."` without the outer `{`) surfaced in the
+    // run-meta-sidecars-stress `card-80 par-8` validation matrix:
+    // every first sketch returned a payload starting with
+    // `"problem":` and the run aborted with rc=7 schema violation
+    // before the matrix could produce a single sketch. The tests
+    // below pin the new `repair_missing_open_brace` pass and its
+    // integration into `parse_model_json_traced`.
+
+    #[test]
+    fn repair_missing_open_brace_prepends_open_brace_to_bare_key_payload() {
+        // The exact pathology from the run-meta-sidecars-stress
+        // run01: model emits the object body without the outer `{`.
+        // The pass must prepend `{` so the bracket repair pass can
+        // balance the trailing `}` that the model did emit.
+        let s = r#""problem": "Design a calculator",
+"objectives": ["Pick one option"],
+"risks": ["`meval` lacks precision"]
+}"#;
+        let patched = repair_missing_open_brace(s).expect("must prepend");
+        assert_eq!(
+            patched,
+            r#"{"problem": "Design a calculator",
+"objectives": ["Pick one option"],
+"risks": ["`meval` lacks precision"]
+}"#
+        );
+        // Pre-pend is exactly one byte; the bracket pass that
+        // runs next will append the trailing `}` if the model
+        // truncated it.
+        assert_eq!(patched.len(), s.len() + 1);
+    }
+
+    #[test]
+    fn repair_missing_open_brace_passes_through_balanced_input() {
+        // Already-valid input — the pass must NOT trigger and the
+        // function must return `None` so `parse_model_json_traced`
+        // short-circuits on the direct parse.
+        let s = r#"{"a":1,"b":[2,3]}"#;
+        assert!(repair_missing_open_brace(s).is_none());
+    }
+
+    #[test]
+    fn repair_missing_open_brace_passes_through_top_level_string() {
+        // A top-level string is a valid JSON value, not a missing
+        // object. The heuristic must not prepend `{` to it.
+        let s = r#""just a string, no object here""#;
+        assert!(repair_missing_open_brace(s).is_none());
+    }
+
+    #[test]
+    fn repair_missing_open_brace_passes_through_root_array() {
+        // A root array is fine on its own: the bracket repair pass
+        // already handles `[...]` shapes, so the open-brace pass
+        // must not touch it.
+        let s = r#"[1, 2, 3]"#;
+        assert!(repair_missing_open_brace(s).is_none());
+    }
+
+    #[test]
+    fn repair_missing_open_brace_handles_prose_prefix() {
+        // A leading prose block followed by the key (the model
+        // wrote a sentence before the payload). The pass must skip
+        // the prose, locate the key, and prepend `{` only at the
+        // key position.
+        let s = "Sure, here is the JSON:\n\"answer\": 42";
+        let patched = repair_missing_open_brace(s).expect("prose + key must trigger");
+        assert_eq!(patched, "Sure, here is the JSON:\n{\"answer\": 42");
+    }
+
+    #[test]
+    fn repair_missing_open_brace_handles_leading_bom() {
+        // A UTF-8 BOM at the front of the payload must not derail
+        // the heuristic.
+        let s = "\u{feff}\"problem\": \"Design\"";
+        let patched = repair_missing_open_brace(s).expect("BOM-prefix payload must trigger");
+        assert_eq!(patched, "\u{feff}{\"problem\": \"Design\"");
+    }
+
+    #[test]
+    fn repair_missing_open_brace_handles_escaped_quote_in_key() {
+        // A key that contains an escaped quote (`"a\"b": ...`)
+        // must still be parsed correctly; the walker's `\\"`
+        // handling must advance past the escape so the closing
+        // `"` is the real key terminator.
+        let s = r#""a\"b": 1"#;
+        let patched = repair_missing_open_brace(s).expect("escaped-quote key must trigger");
+        assert_eq!(patched, r#"{"a\"b": 1"#);
+    }
+
+    #[test]
+    fn repair_missing_open_brace_passes_through_unterminated_key() {
+        // An unterminated key string is unrepairable; the pass
+        // must hand off to the next repair rather than corrupt
+        // the input.
+        let s = r#""problem: "Design""#;
+        assert!(repair_missing_open_brace(s).is_none());
+    }
+
+    #[test]
+    fn repair_missing_open_brace_passes_through_prose_without_key() {
+        // Plain prose with no leading key `"..."` is not a JSON
+        // object with a missing opener — it is something else
+        // entirely. The pass must not touch it.
+        let s = "this is just prose, no key follow";
+        assert!(repair_missing_open_brace(s).is_none());
+    }
+
+    #[test]
+    fn parse_model_json_traced_recovers_missing_open_brace() {
+        // End-to-end check: the run01 pathological payload —
+        // `"problem": "Design..."` with no outer `{` — must
+        // parse cleanly through `parse_model_json_traced`, and
+        // the open-brace pass must fire (one `OpenBrace` event).
+        let s = r#""problem": "Design a calculator",
+"objectives": ["Pick one"],
+"risks": ["`meval`"]
+}"#;
+        let mut kinds: Vec<RepairKind> = Vec::new();
+        let v: serde_json::Value = parse_model_json_traced(s, |ev| kinds.push(ev.kind))
+            .expect("missing-open-brace payload must parse after the open-brace pass");
+        assert_eq!(v["problem"], serde_json::json!("Design a calculator"));
+        assert_eq!(v["objectives"], serde_json::json!(["Pick one"]));
+        assert_eq!(v["risks"], serde_json::json!(["`meval`"]));
+        // The open-brace pass MUST fire; downstream passes may
+        // also fire (e.g. Bracket if the model also truncated the
+        // trailing `}`), but the contract is the OpenBrace event.
+        assert!(
+            kinds.contains(&RepairKind::OpenBrace),
+            "open-brace pass must fire; got kinds={kinds:?}"
+        );
     }
 
     // --- iterative bracket-repair tests -------------------------------

@@ -463,6 +463,46 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
             }
         }
         rate_limit_per_role
+    })
+    // v0.9.6: per-`role` adaptive throttle governors. Each
+    // `[throttle_per_role]` entry is a `ThrottleConfig` keyed by
+    // `Role`. The default-constructed `GovernorRegistry` returns a
+    // default-config governor the first time an unknown role is
+    // called, so omitting the entry matches the v0.9.5 default
+    // (no adaptive backpressure).
+    .with_throttle_governors({
+        let mut throttle = crate::llm::governor::GovernorRegistry::new();
+        let dp = default_provider.clone();
+        for (role_name, cfg) in &effective_cfg.throttle_per_role {
+            if let Ok(role) = role_name.parse::<Role>() {
+                throttle.with_config_for(
+                    &dp,
+                    role,
+                    crate::llm::governor::ThrottleConfig::from(cfg.clone()),
+                );
+            }
+        }
+        throttle
+    })
+    // v0.9.6: per-`(provider, role)` circuit breakers. Each
+    // `[circuit_breaker_per_role]` entry is a `BreakerConfig` keyed
+    // by `Role`. The provider is `default_provider` at the
+    // call-site so the lookup matches what the
+    // `ThrottleGovernor` and the per-`(provider, role)` breaker
+    // share.
+    .with_breakers_per_role({
+        let mut breakers = crate::llm::circuit_breaker::BreakerRegistry::new();
+        let dp = default_provider.clone();
+        for (role_name, cfg) in &effective_cfg.circuit_breaker_per_role {
+            if let Ok(role) = role_name.parse::<Role>() {
+                breakers.pre_create(
+                    &dp,
+                    role,
+                    crate::llm::circuit_breaker::BreakerConfig::from(*cfg),
+                );
+            }
+        }
+        breakers
     });
 
     let pipeline = build_pre_matrix_pipeline();
