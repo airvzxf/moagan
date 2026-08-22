@@ -18,6 +18,7 @@ pub mod continue_cmd;
 pub mod coverage_cmd;
 pub mod diff;
 pub mod discover;
+pub mod discover_explain;
 pub mod doctor;
 pub mod flags_batch;
 pub mod forbidden;
@@ -692,6 +693,16 @@ pub enum Cmd {
         /// v0.5 single-shot contract byte-for-byte. Default empty.
         #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
         temperature_profiles: Vec<String>,
+        /// F3 (Track G.2): print the cardinality calculation and
+        /// exit. Does NOT start a run, does NOT call the LLM
+        /// (even when `--llm-derive` is set), does NOT create a
+        /// run directory. The cells count is reported as a
+        /// placeholder when no `--matrix-spec` is supplied (the
+        /// `Role::DimensionDeriver` would normally own that
+        /// resolution at runtime). Useful as a pre-flight sanity
+        /// check before a real run.
+        #[arg(long, default_value_t = false)]
+        explain: bool,
     },
     /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
     /// against the real provider. Two-run flow:
@@ -1373,6 +1384,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             non_interactive,
             cache_facets,
             temperature_profiles,
+            explain,
         } => {
             if sketches_per_cell < 10 {
                 return Err(Error::InvalidArgs(format!(
@@ -1408,6 +1420,43 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 .map(|s| discover::TemperatureProfileSpec::parse(s))
                 .collect::<std::result::Result<Vec<_>, Error>>()?;
             let cfg = Config::load()?;
+            // F3 (Track G.2): `--explain` short-circuits BEFORE
+            // `discover::run` so the pipeline is never invoked.
+            // The dispatcher prints the formatted table to
+            // stdout and exits 0; no `run_id` is allocated, no
+            // run dir is created, the LLM is never called.
+            //
+            // The plan suggests wiring this inside
+            // `discover::run`, but placing the short-circuit at
+            // the dispatcher boundary keeps the explain path
+            // entirely outside the pipeline (the dispatcher
+            // already loads `cfg`, parses the profiles, and
+            // owns the "discovery run id: ..." print — so
+            // short-circuiting here avoids printing a fake
+            // `discovery run id: 00000000-...` placeholder).
+            if explain {
+                let explain_opts = discover::DiscoverOptions {
+                    provider: provider.clone(),
+                    prompt: prompt.clone(),
+                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
+                    mock_dir: mock_dir.clone(),
+                    sketches_per_cell,
+                    max_parallelism,
+                    dimensions,
+                    facets_per_dimension,
+                    matrix_spec: matrix_spec.clone(),
+                    llm_derive,
+                    cluster_threshold,
+                    out_dir: None,
+                    non_interactive,
+                    cache_facets,
+                    temperature_profiles: parsed_profiles,
+                    explain: true,
+                };
+                let rendered = discover_explain::build_and_format(&explain_opts, &cfg)?;
+                println!("{rendered}");
+                return Ok(0);
+            }
             let run_id = discover::run(
                 discover::DiscoverOptions {
                     provider,
@@ -1425,6 +1474,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     non_interactive,
                     cache_facets,
                     temperature_profiles: parsed_profiles,
+                    explain: false,
                 },
                 &cfg,
             )
@@ -1570,6 +1620,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         temperatures: vec![1.0],
                         replicas_per_temperature: 1,
                     }],
+                    explain: false,
                 },
                 &cfg,
             )

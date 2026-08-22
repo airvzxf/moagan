@@ -293,6 +293,13 @@ pub struct DiscoverOptions {
     /// uses the default `[1.0] × 1` profile (the v0.5 single-shot
     /// contract).
     pub temperature_profiles: Vec<TemperatureProfileSpec>,
+    /// F3 (Track G.2): `--explain` flag from the CLI. The
+    /// dispatcher reads this to short-circuit before the
+    /// pipeline starts; the field is kept on the options struct
+    /// so `discover_explain::build_and_format` can be called
+    /// from a single helper with the full picture. Default
+    /// `false` so existing call sites stay unchanged.
+    pub explain: bool,
 }
 
 /// Parsed CLI form of a per-provider temperature profile (PR-D1).
@@ -1033,6 +1040,7 @@ pub async fn run_resume(
         non_interactive,
         cache_facets: false,
         temperature_profiles: Vec::new(),
+        explain: false,
     };
     let post_pipeline = build_post_matrix_pipeline(&post_opts);
 
@@ -1103,6 +1111,7 @@ fn build_canonical_for_resume_pipeline(manifest: &Manifest) -> Pipeline {
         non_interactive: true,
         cache_facets: false,
         temperature_profiles: Vec::new(),
+        explain: false,
     };
     build_discovery_pipeline(&opts, &Config::load().unwrap_or_default())
 }

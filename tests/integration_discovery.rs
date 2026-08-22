@@ -186,6 +186,7 @@ async fn discovery_pipeline_composes_all_seven_phases() {
         non_interactive: true,
         cache_facets: false,
         temperature_profiles: Vec::new(),
+        explain: false,
     };
     let pipeline = build_discovery_pipeline(&opts, &moagan::config::Config::default());
     let names = pipeline.names();
