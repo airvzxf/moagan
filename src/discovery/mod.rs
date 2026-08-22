@@ -20,6 +20,7 @@ pub mod facet_cache;
 pub mod id;
 pub mod integrator;
 pub mod matrix;
+pub mod matrix_spec;
 pub mod outlier;
 pub mod pause;
 pub mod persona_angle;
@@ -34,6 +35,7 @@ pub mod tagger_threshold;
 pub use context::DiscoveryContext;
 pub use coordinator::{DiscoveryCoordinator, DiscoveryOutcome};
 pub use id::{ContradictionId, FacetId, SketchId};
+pub use matrix_spec::{DerivedDimensions, DimensionSpec, FacetSpec, MatrixSpec};
 pub use outlier::{detect_outliers, detect_outliers_with_threshold};
 pub use stop_policy::{
     BlockReason, DEFAULT_DISCOVERY_HARD_CAP, DEFAULT_MAX_SKETCHES, DEFAULT_MIN_SKETCHES,

@@ -24,6 +24,8 @@
 
 use std::collections::BTreeMap;
 
+use rayon::prelude::*;
+
 use crate::llm::embed::{Embedder, cosine};
 use crate::ranking::cluster::jaccard_distance;
 
@@ -135,20 +137,39 @@ pub fn cluster_id_for(idx: usize) -> String {
 
 /// Compute the centroid "popularity" of a cluster — the number of
 /// members (the LLM-refinement step stretches this into a label).
+///
+/// **F4 (parallel CPU-bound)**: the `O(n²)` Jaccard pair scan is
+/// distributed across `n` outer iterations via `rayon::par_iter`.
+/// Each row `(i, ..)` independently sums `(i+1..n)` Jaccard
+/// similarities, and the per-row partial sums are reduced with a
+/// final `sum()`. The pair count is the same as the sequential
+/// reference; only the addition order changes. Float sum order can
+/// permute ULPs, so callers that compare `cohesion` across
+/// versions should allow `1e-6` tolerance — the unit tests in this
+/// module use that threshold.
 pub fn cohesion(records: &[SketchRecord], chunk: &ClusterChunk) -> f32 {
     if chunk.member_indices.is_empty() {
         return 0.0;
     }
-    let mut total = 0.0_f32;
     let n = chunk.member_indices.len();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let a = &records[chunk.member_indices[i]].text;
-            let b = &records[chunk.member_indices[j]].text;
-            let d = jaccard_distance(a, b);
-            total += 1.0 - d;
-        }
-    }
+    // Distribute the upper-triangular row scan across cores. The
+    // inner `(i + 1..n)` loop stays sequential per row because the
+    // chunk size is small (5–10 in the operator's runs) and
+    // bridging it to a parallel iterator costs more than the
+    // work it would save.
+    let total: f32 = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut row_total = 0.0_f32;
+            for j in (i + 1)..n {
+                let a = &records[chunk.member_indices[i]].text;
+                let b = &records[chunk.member_indices[j]].text;
+                let d = jaccard_distance(a, b);
+                row_total += 1.0 - d;
+            }
+            row_total
+        })
+        .sum();
     let pairs = n * (n.saturating_sub(1)) / 2;
     if pairs == 0 {
         1.0
@@ -302,5 +323,106 @@ mod tests {
         sorted.sort();
         assert_eq!(sorted, vec![0, 1]);
         assert!(groups.iter().any(|g| g == &vec![2]));
+    }
+
+    // -----------------------------------------------------------------
+    // F4 snapshot tests for `cohesion`. Float sum order can change
+    // by a few ULPs when the reduction tree is parallel, so the
+    // comparison allows a `1e-6` tolerance as documented in the
+    // function's docstring. The pair-set itself is identical
+    // because the parallel iterator enumerates exactly the same
+    // `(i, j)` upper-triangular pairs as the sequential loop.
+    // -----------------------------------------------------------------
+
+    /// Pre-rayon sequential reference for `cohesion`. Kept as a
+    /// private helper so the F4 snapshot test can compare the
+    /// parallel reduction against the exact algorithm the refactor
+    /// replaced.
+    fn cohesion_sequential(records: &[SketchRecord], chunk: &ClusterChunk) -> f32 {
+        if chunk.member_indices.is_empty() {
+            return 0.0;
+        }
+        let mut total = 0.0_f32;
+        let n = chunk.member_indices.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let a = &records[chunk.member_indices[i]].text;
+                let b = &records[chunk.member_indices[j]].text;
+                let d = jaccard_distance(a, b);
+                total += 1.0 - d;
+            }
+        }
+        let pairs = n * (n.saturating_sub(1)) / 2;
+        if pairs == 0 {
+            1.0
+        } else {
+            total / pairs as f32
+        }
+    }
+
+    /// Build a deterministic cluster fixture of `size` records
+    /// with varied token features. The seed is fixed so re-runs
+    /// produce the same numbers; the test compares parallel vs
+    /// sequential reductions, not two RNG outputs.
+    fn fixture_records(size: usize) -> Vec<SketchRecord> {
+        let mut rng = fastrand::Rng::with_seed(0xC0FF_EE42_DEAD_BEEF);
+        (0..size)
+            .map(|i| {
+                let mut text = String::new();
+                let word_count = rng.usize(6..14);
+                for w in 0..word_count {
+                    if w > 0 {
+                        text.push(' ');
+                    }
+                    let word_len = rng.usize(4..9);
+                    for _ in 0..word_len {
+                        text.push(rng.u8(b'a'..=b'z') as char);
+                    }
+                }
+                SketchRecord {
+                    id: format!("sk_{i:03}"),
+                    text,
+                }
+            })
+            .collect()
+    }
+
+    /// F4 snapshot: `cohesion` over a 20-record cluster must match
+    /// the pre-rayon sequential reference within `1e-6`. The
+    /// `1e-6` tolerance covers float sum reorder; the pair set is
+    /// identical because the parallel iterator enumerates the same
+    /// `(i, j)` upper-triangular indices.
+    #[test]
+    fn cohesion_parallel_matches_sequential_size_20() {
+        let records = fixture_records(20);
+        let chunk = ClusterChunk {
+            member_indices: (0..20).collect(),
+            texts: records.iter().map(|r| r.text.clone()).collect(),
+        };
+        let parallel = cohesion(&records, &chunk);
+        let sequential = cohesion_sequential(&records, &chunk);
+        assert!(
+            (parallel - sequential).abs() < 1e-6,
+            "cohesion rayon refactor must match the sequential reference within 1e-6; parallel={parallel} sequential={sequential}"
+        );
+    }
+
+    /// F4 mini-benchmark: confirms `cohesion` over a 20-record
+    /// cluster completes in a reasonable time. The `O(n²)` pair
+    /// count is 190, distributed across cores by `rayon::par_iter`.
+    #[test]
+    fn cohesion_parallel_completes_in_reasonable_time() {
+        let records = fixture_records(20);
+        let chunk = ClusterChunk {
+            member_indices: (0..20).collect(),
+            texts: records.iter().map(|r| r.text.clone()).collect(),
+        };
+        let start = std::time::Instant::now();
+        let _ = cohesion(&records, &chunk);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "cohesion(20) took {elapsed:?} — parallel path is hung"
+        );
     }
 }

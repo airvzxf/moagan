@@ -389,7 +389,7 @@ impl Default for ExportConfig {
 /// `DiscoveryWiringConfig` is about which roles the discovery
 /// pipeline auto-invokes, while this one is about how the matrix
 /// fan-out iterates over temperatures and replicas.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiscoveryMatrixConfig {
     /// Per-provider sampling-temperature profiles keyed by the
@@ -405,6 +405,82 @@ pub struct DiscoveryMatrixConfig {
     /// uses [`crate::discovery::matrix::TemperatureProfile::default()`]
     /// (`[1.0] × 1`) — the v0.5 single-shot contract.
     pub default_profile: Option<crate::discovery::matrix::TemperatureProfile>,
+    /// F1 (Track G.2): operator-supplied dimension list. Same
+    /// grammar as the `--matrix-spec` CLI flag (repetible AND
+    /// consolidated with `;`). When non-empty, the matrix
+    /// fan-out uses these dimensions verbatim and the
+    /// `discover_dimensions` phase is skipped. CLI flag wins
+    /// on conflict.
+    #[serde(default)]
+    pub matrix_spec: Vec<String>,
+    /// F1 (Track G.2): target dimension count when the operator
+    /// passes `--dimensions N` without a spec. The LLM uses this
+    /// as a soft hint; the actual dimension count is the
+    /// `Role::DimensionDeriver`'s call. `None` lets the LLM pick
+    /// freely.
+    #[serde(default)]
+    pub dimensions: Option<usize>,
+    /// F1 (Track G.2): target facets per dimension when the
+    /// operator passes `--dimensions N --facets-per-dimension M`
+    /// without a spec. `None` lets the LLM pick asymmetric
+    /// counts per dimension (the F1 contract).
+    #[serde(default)]
+    pub facets_per_dimension: Option<usize>,
+    /// F1 (Track G.2): when `true` and the operator supplied
+    /// neither a `--matrix-spec` nor a persisted
+    /// `[discovery_matrix].matrix_spec`, the discovery
+    /// pipeline always calls `Role::DimensionDeriver` to derive
+    /// the dimension list. Default `false` so existing runs
+    /// that rely on the legacy `--dimensions/--facets-per-dimension`
+    /// pair keep working without an LLM call. CLI
+    /// `--llm-derive` flag wins on conflict.
+    #[serde(default)]
+    pub llm_derive_first: bool,
+    /// F2 (Track G.2): sketches-per-cell floor for the matrix
+    /// fan-out. The matrix's total cardinality is
+    /// `cells() × sketches_per_cell`; the CLI's
+    /// `--sketches-per-cell` flag (default `10`) and the
+    /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var override
+    /// the persisted value on conflict (CLI wins, then env,
+    /// then TOML). Default `10` replaces the legacy v0.5
+    /// cardinality floor of `80` — the new contract decouples
+    /// the per-cell fan-out from the cells count so a 4-dim
+    /// × 2-facet matrix produces 80 sketches only when the
+    /// operator explicitly sets `sketches_per_cell = 20`.
+    /// The previous `MOAGAN_DISCOVERY_CARDINALITY` env var is
+    /// removed; operators with that export must rename it.
+    #[serde(default = "default_sketches_per_cell")]
+    pub sketches_per_cell: usize,
+}
+
+/// F2 default: 10 sketches per cell. Replaces the v0.5
+/// `cardinality = 80` floor so a fresh install fans out
+/// `cells() × 10` sketches instead of always 80. Operators who
+/// want the v0.5 behaviour set `sketches_per_cell = 20` (4×2)
+/// or pass `--sketches-per-cell 20`.
+fn default_sketches_per_cell() -> usize {
+    10
+}
+
+/// F2 minimum allowed value for `sketches_per_cell`. The CLI's
+/// `--sketches-per-cell` flag and the `MOAGAN_DISCOVERY_SKETCHES_PER_CELL`
+/// env var reject anything below this floor. Matches the v0.5
+/// spec lower band (V4 §6.4 said "40–500" sketches; F2 splits
+/// that into "10 per cell minimum" + "operator picks cells count").
+pub(crate) const MIN_SKETCHES_PER_CELL: usize = 10;
+
+impl Default for DiscoveryMatrixConfig {
+    fn default() -> Self {
+        Self {
+            temperature_profiles: std::collections::HashMap::new(),
+            default_profile: None,
+            matrix_spec: Vec::new(),
+            dimensions: None,
+            facets_per_dimension: None,
+            llm_derive_first: false,
+            sketches_per_cell: default_sketches_per_cell(),
+        }
+    }
 }
 
 /// Track E (E8 partial): knobs for the two D.7.1 catalog roles
@@ -1667,6 +1743,19 @@ impl Config {
         // flip the bit either way without touching the config file.
         // Garbage / blank exports leave the existing value alone so
         // a stale export does not silently toggle the helper.
+        // F2 (Track G.2): the discovery `sketches_per_cell` knob
+        // replaces the legacy v0.5 `cardinality` floor. The env var
+        // `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` overrides the TOML
+        // value on conflict; the CLI flag `--sketches-per-cell` wins
+        // over both (see `cli::discover::run`). Garbage / blank
+        // exports leave the existing value alone so a stale env
+        // var does not silently flip the floor.
+        if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL")
+            && let Ok(n) = v.trim().parse::<usize>()
+            && n >= MIN_SKETCHES_PER_CELL
+        {
+            self.discovery_matrix.sketches_per_cell = n;
+        }
         if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS") {
             let normalised = v.trim().to_ascii_lowercase();
             match normalised.as_str() {

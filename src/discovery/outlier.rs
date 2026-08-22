@@ -23,6 +23,8 @@
 
 use std::collections::HashSet;
 
+use rayon::prelude::*;
+
 use crate::domain::{Cluster, Sketch};
 
 // `SketchId` was originally declared here. PR-23 (D.13.5) moved
@@ -58,6 +60,15 @@ pub fn detect_outliers(samples: &[Sketch], clusters: &[Cluster]) -> Vec<SketchId
 }
 
 /// Like [`detect_outliers`] but with an explicit threshold.
+///
+/// **F4 (parallel CPU-bound)**: the per-sample Jaccard scan is
+/// `O(N × C)` (samples × clusters) and fully parallel — each
+/// sketch's outlier decision depends only on the precomputed
+/// `cluster_features` and `clustered_ids`. `par_iter().enumerate()`
+/// preserves input index order in the output vector, so the
+/// subsequent sequential dedup pass keeps the FIRST-occurrence
+/// contract and the resulting `Vec<SketchId>` matches the
+/// pre-rayon order exactly.
 pub fn detect_outliers_with_threshold(
     samples: &[Sketch],
     clusters: &[Cluster],
@@ -76,29 +87,48 @@ pub fn detect_outliers_with_threshold(
         .flat_map(|c| c.members.iter().map(String::as_str))
         .collect();
 
+    // Phase 1 (parallel): compute the per-sample outlier decision
+    // while preserving the original index so the dedup phase can
+    // drop later duplicates without changing which occurrence was
+    // kept. `par_iter` from rayon yields the same `(idx, item)`
+    // ordering as the sequential walk, so the collected Vec keeps
+    // the input order bit-identical.
+    let decisions: Vec<(String, bool)> = samples
+        .par_iter()
+        .enumerate()
+        .filter_map(|(_, sketch)| {
+            let id = sketch.id.as_str();
+            if id.is_empty() {
+                return None;
+            }
+            let sketch_feats = sketch_features(sketch);
+            let is_outlier = if !clustered_ids.contains(id) {
+                // Not in any cluster → outlier (the natural case).
+                true
+            } else {
+                cluster_features
+                    .iter()
+                    .map(|cf| jaccard_distance(&sketch_feats, cf))
+                    .fold(f32::INFINITY, f32::min)
+                    >= outlier_distance
+            };
+            Some((id.to_string(), is_outlier))
+        })
+        .collect();
+
+    // Phase 2 (sequential): dedup by id, keeping the FIRST
+    // occurrence (matches the pre-rayon behaviour where
+    // `seen.insert` short-circuited the iteration order). The
+    // parallel phase above preserved input order, so this loop
+    // visits samples in the same sequence as the original code.
     let mut seen: HashSet<String> = HashSet::new();
-    let mut outliers: Vec<SketchId> = Vec::new();
-    for sketch in samples {
-        let id = sketch.id.as_str();
-        if id.is_empty() {
+    let mut outliers: Vec<SketchId> = Vec::with_capacity(decisions.len());
+    for (id, is_outlier) in decisions {
+        if !seen.insert(id.clone()) {
             continue;
         }
-        if !seen.insert(id.to_string()) {
-            continue;
-        }
-        let sketch_feats = sketch_features(sketch);
-        let is_outlier = if !clustered_ids.contains(id) {
-            // Not in any cluster → outlier (the natural case).
-            true
-        } else {
-            cluster_features
-                .iter()
-                .map(|cf| jaccard_distance(&sketch_feats, cf))
-                .fold(f32::INFINITY, f32::min)
-                >= outlier_distance
-        };
         if is_outlier {
-            outliers.push(SketchId(id.to_string()));
+            outliers.push(SketchId(id));
         }
     }
     outliers
@@ -276,5 +306,165 @@ mod tests {
         let c: HashSet<String> = ["qux"].iter().map(|s| s.to_string()).collect();
         assert!((jaccard_distance(&a, &b) - 0.0).abs() < 1e-6);
         assert!((jaccard_distance(&a, &c) - 1.0).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------
+    // F4 snapshot tests — `detect_outliers_with_threshold` with a
+    // 100-sketch × 8-cluster fixture must return the same id
+    // sequence as the pre-rayon sequential reference. The fixture
+    // builds clusters with member ids that match a subset of the
+    // sketches, leaving the rest as natural outliers; the parallel
+    // path must surface the same ids in the same order.
+    // -----------------------------------------------------------------
+
+    /// Pre-rayon sequential reference for
+    /// `detect_outliers_with_threshold`. Kept alongside the
+    /// parallel implementation so the F4 snapshot test can verify
+    /// the refactor preserves both the picked-id set and its
+    /// order.
+    fn detect_outliers_sequential(
+        samples: &[Sketch],
+        clusters: &[Cluster],
+        outlier_distance: f32,
+    ) -> Vec<SketchId> {
+        let cluster_features: Vec<HashSet<String>> =
+            clusters.iter().map(cluster_features).collect();
+        let clustered_ids: HashSet<&str> = clusters
+            .iter()
+            .flat_map(|c| c.members.iter().map(String::as_str))
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut outliers: Vec<SketchId> = Vec::new();
+        for sketch in samples {
+            let id = sketch.id.as_str();
+            if id.is_empty() {
+                continue;
+            }
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            let sketch_feats = sketch_features(sketch);
+            let is_outlier = if !clustered_ids.contains(id) {
+                true
+            } else {
+                cluster_features
+                    .iter()
+                    .map(|cf| jaccard_distance(&sketch_feats, cf))
+                    .fold(f32::INFINITY, f32::min)
+                    >= outlier_distance
+            };
+            if is_outlier {
+                outliers.push(SketchId(id.to_string()));
+            }
+        }
+        outliers
+    }
+
+    /// F4 snapshot: `detect_outliers_with_threshold` over
+    /// 100 sketches × 8 clusters must return the same id sequence
+    /// as the pre-rayon sequential reference. The fixture mixes
+    /// clustered sketches (low Jaccard distance → not outlier)
+    /// with unclustered sketches (natural outlier) so both code
+    /// paths execute.
+    #[test]
+    fn detect_outliers_parallel_matches_sequential_n100_c8() {
+        let mut rng = fastrand::Rng::with_seed(0x0DD1_ED0E_DEAD_BEEF);
+        let samples: Vec<Sketch> = (0..100)
+            .map(|i| {
+                let mut thesis = String::new();
+                let word_count = rng.usize(4..10);
+                for w in 0..word_count {
+                    if w > 0 {
+                        thesis.push(' ');
+                    }
+                    let word_len = rng.usize(4..9);
+                    for _ in 0..word_len {
+                        thesis.push(rng.u8(b'a'..=b'z') as char);
+                    }
+                }
+                Sketch {
+                    id: format!("sk_{i:03}"),
+                    thesis,
+                    angle: "minimalist".into(),
+                    ..Sketch::default()
+                }
+            })
+            .collect();
+
+        // Eight clusters, each containing a handful of sketches
+        // from the fixture. Member ids use the same `sk_NNN`
+        // scheme so `clustered_ids.contains(id)` works for those
+        // entries.
+        let clusters: Vec<Cluster> = (0..8)
+            .map(|c| {
+                let mut members = Vec::new();
+                for i in 0..5 {
+                    members.push(format!("sk_{:03}", c * 12 + i));
+                }
+                Cluster {
+                    id: format!("cluster_{c:02}"),
+                    label: format!("cluster label {c}"),
+                    members,
+                    ..Cluster::default()
+                }
+            })
+            .collect();
+
+        let parallel = detect_outliers_with_threshold(&samples, &clusters, 0.30);
+        let sequential = detect_outliers_sequential(&samples, &clusters, 0.30);
+        assert_eq!(
+            parallel, sequential,
+            "detect_outliers rayon refactor must match the sequential reference"
+        );
+    }
+
+    /// F4 mini-benchmark: confirms the parallel detector completes
+    /// in a reasonable time on the 100×8 fixture. The O(N×C) scan
+    /// distributes across cores via `par_iter`.
+    #[test]
+    fn detect_outliers_parallel_completes_in_reasonable_time() {
+        let mut rng = fastrand::Rng::with_seed(0x0DD1_ED0E_DEAD_BEEF);
+        let samples: Vec<Sketch> = (0..100)
+            .map(|i| {
+                let mut thesis = String::new();
+                let word_count = rng.usize(4..10);
+                for w in 0..word_count {
+                    if w > 0 {
+                        thesis.push(' ');
+                    }
+                    let word_len = rng.usize(4..9);
+                    for _ in 0..word_len {
+                        thesis.push(rng.u8(b'a'..=b'z') as char);
+                    }
+                }
+                Sketch {
+                    id: format!("sk_{i:03}"),
+                    thesis,
+                    angle: "minimalist".into(),
+                    ..Sketch::default()
+                }
+            })
+            .collect();
+        let clusters: Vec<Cluster> = (0..8)
+            .map(|c| {
+                let mut members = Vec::new();
+                for i in 0..5 {
+                    members.push(format!("sk_{:03}", c * 12 + i));
+                }
+                Cluster {
+                    id: format!("cluster_{c:02}"),
+                    label: format!("cluster label {c}"),
+                    members,
+                    ..Cluster::default()
+                }
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let _ = detect_outliers_with_threshold(&samples, &clusters, 0.30);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "detect_outliers(100×8) took {elapsed:?} — parallel path is hung"
+        );
     }
 }

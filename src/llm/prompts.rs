@@ -114,6 +114,20 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
+        // F1 (Track G.2 `discover_dimensions`): brief-derived
+        // exploration-matrix dimensions. Deterministic (T=0.0)
+        // so two runs against the same brief produce identical
+        // dimension lists — the `discovery_dimensions.json`
+        // sidecar relies on this for cache-key stability.
+        // top_p=0.2 mirrors `Role::ContradictionJudge` /
+        // `Role::FacetDeriver`: the JSON contract pins the
+        // shape and only the wording is variable.
+        Role::DimensionDeriver => Some(RoleSettings {
+            temperature: 0.0,
+            top_p: 0.2,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            json_mode: true,
+        }),
         _ => None,
     }
 }
@@ -146,6 +160,7 @@ const JSON_REPAIR_V2_PROMPT: &str = include_str!("prompts/json_repair_v2.md");
 const HOSTILE_PROMPT_DETECTOR_PROMPT: &str = include_str!("prompts/hostile_prompt_detector.md");
 const CONTINUATION_PROMPT: &str = include_str!("prompts/continuation.md");
 const CONTRADICTION_JUDGE_PROMPT: &str = include_str!("prompts/contradiction_judge.md");
+const DIMENSION_DERIVER_PROMPT: &str = include_str!("prompts/discover_dimensions.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -183,6 +198,7 @@ pub fn prompt_set_hash() -> String {
                 HOSTILE_PROMPT_DETECTOR_PROMPT,
                 CONTINUATION_PROMPT,
                 CONTRADICTION_JUDGE_PROMPT,
+                DIMENSION_DERIVER_PROMPT,
             ]
             .join("\u{1f}");
             blake3_hex(all.as_bytes())
@@ -220,6 +236,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::HostilePromptDetector => HOSTILE_PROMPT_DETECTOR_PROMPT,
         Role::Continuation => CONTINUATION_PROMPT,
         Role::ContradictionJudge => CONTRADICTION_JUDGE_PROMPT,
+        Role::DimensionDeriver => DIMENSION_DERIVER_PROMPT,
     }
 }
 

@@ -92,10 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   facet `.md` extractions, rc=0 elapsed=292 s. Sister fix:
   setting `MOAGAN_RATE_LIMIT_ROLE_FACET_DERIVER=30:2` (alongside
   the v0.9.4 tagger knob) is required when running with
-  `--cardinality 80` or higher — the facet-deriver fan-out
-  similarly rate-limits upstream and defaults to an empty facet
-  list when the upstream returns 429s (verified on the same mini
-  run without the env var: 6 extractions vs 0).
+  `--sketches-per-cell 10` (4-dim × 2-facet matrix → 80
+  sketches) or higher — the facet-deriver fan-out similarly
+  rate-limits upstream and defaults to an empty facet list when
+  the upstream returns 429s (verified on the same mini run
+  without the env var: 6 extractions vs 0).
 
 ## [0.9.4] - 2026-08-21
 

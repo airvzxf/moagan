@@ -10,7 +10,7 @@
 #                               lower value in CI to fail fast when
 #                               the upstream is degraded.
 #   MOAGAN_SMOKE_LONG_DISCOVER  set to 1 to skip the long-running
-#                               `discover --cardinality 80` block
+#                               `discover --sketches-per-cell 20` block
 #                               (saves ~25 min). The other real
 #                               proxy runs (mode fast, mode explore)
 #                               still execute.
@@ -127,8 +127,8 @@ run_test "cli_bin_runs" "[[ -x $BIN ]]"
 run_test "cli_help_lists_discover" "$BIN --help 2>&1 | grep -q 'discover'"
 run_test "cli_help_mentions_phase_b" \
   "$BIN discover --help 2>&1 | grep -qiE 'phase B|knowledge base|discovery mode'"
-run_test "cli_discover_help_prints_cardinality" \
-  "$BIN discover --help 2>&1 | grep -q '\\-\\-cardinality'"
+run_test "cli_discover_help_prints_sketches_per_cell" \
+  "$BIN discover --help 2>&1 | grep -q '\\-\\-sketches-per-cell'"
 run_test "cli_discover_help_prints_dimensions" \
   "$BIN discover --help 2>&1 | grep -q '\\-\\-dimensions'"
 run_test "cli_discover_help_prints_facets" \
@@ -153,38 +153,41 @@ run_test "cli_audit_help_mentions_verify" \
   "$BIN audit --help 2>&1 | grep -q 'verify'"
 
 # ---------------------------------------------------------------------
-# SECTION 2 — Cardinality validation (10 tests)
+# SECTION 2 — Sketches-per-cell validation (10 tests)
 # ---------------------------------------------------------------------
 
-run_test "cardinality_5_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 5 2>&1 | grep -q 'below the discovery minimum'"
+run_test "sketches_per_cell_5_rejected" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 5 2>&1 | grep -q 'below the minimum of 10'"
 
-run_test "cardinality_0_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 0 2>&1 | grep -q 'below the discovery minimum'"
+run_test "sketches_per_cell_0_rejected" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 10'"
 
-run_test "cardinality_1_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 1 2>&1 | grep -q 'below the discovery minimum'"
+run_test "sketches_per_cell_1_rejected" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 1 2>&1 | grep -q 'below the minimum of 10'"
 
-run_test "cardinality_79_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 79 2>&1 | grep -q 'below the discovery minimum'"
+run_test "sketches_per_cell_9_rejected" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 9 2>&1 | grep -q 'below the minimum of 10'"
 
-run_test "cardinality_80_floor_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 80 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+run_test "sketches_per_cell_10_floor_ok" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
-run_test "cardinality_160_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 160 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+run_test "sketches_per_cell_25_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
-run_test "cardinality_500_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 500 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+run_test "sketches_per_cell_100_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
-run_test "cardinality_invalid_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
+run_test "legacy_cardinality_rejected" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 80 2>&1 | grep -q 'was renamed to --sketches-per-cell'"
 
-run_test "cardinality_missing_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
+run_test "sketches_per_cell_invalid_value" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
 
-run_test "cardinality_zero_dimensions_rejected_or_warns" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 80 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'; test \$? -le 1"
+run_test "sketches_per_cell_missing_value" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
+
+run_test "sketches_per_cell_zero_dimensions_rejected_or_warns" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'; test \$? -le 1"
 
 # ---------------------------------------------------------------------
 # SECTION 3 — Role inventory (14 tests)
@@ -817,11 +820,11 @@ run_test "summary_exec_present" \
 run_test "discovery_pipeline_intake_first" \
   "grep -q 'Pipeline::new' ${ROOT}/src/cli/discover.rs | head -1 && grep -q 'push(IntakePhase)' ${ROOT}/src/cli/discover.rs"
 
-run_test "discovery_cardinality_floor_80" \
-  "grep -q 'cardinality {cardinality} below the discovery minimum of 80\\|cardinality {value} below the discovery minimum of 80' ${ROOT}/src/cli/mod.rs"
+run_test "discovery_sketches_per_cell_floor_10" \
+  "grep -q 'sketches-per-cell {sketches_per_cell} below the minimum of 10' ${ROOT}/src/cli/mod.rs"
 
 run_test "discovery_floor_in_discover_rs" \
-  "grep -q 'below the discovery minimum of 80' ${ROOT}/src/cli/discover.rs"
+  "grep -q 'below the minimum of 10' ${ROOT}/src/cli/discover.rs"
 
 run_test "discovery_calls_build_registry" \
   "grep -q 'build_registry_for' ${ROOT}/src/cli/discover.rs"
@@ -1119,37 +1122,37 @@ rm -rf "$WORK_J"
 
 WORK_K=$(mkhome)
 run_test "discover_run_creates_run_root" \
-  "MOAGAN_HOME=$WORK_K $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_K/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
+  "MOAGAN_HOME=$WORK_K $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_K/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
 rm -rf "$WORK_K"
 
 WORK_L=$(mkhome)
 run_test "discover_run_creates_tags_dir" \
-  "MOAGAN_HOME=$WORK_L $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_L/.runs/*/tags/ 2>/dev/null | head -1 | grep -qE '/tags/$'"
+  "MOAGAN_HOME=$WORK_L $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_L/.runs/*/tags/ 2>/dev/null | head -1 | grep -qE '/tags/$'"
 rm -rf "$WORK_L"
 
 WORK_M=$(mkhome)
 run_test "discover_run_creates_clusters_dir" \
-  "MOAGAN_HOME=$WORK_M $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_M/.runs/*/clusters/ 2>/dev/null | head -1 | grep -qE '/clusters/$'"
+  "MOAGAN_HOME=$WORK_M $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_M/.runs/*/clusters/ 2>/dev/null | head -1 | grep -qE '/clusters/$'"
 rm -rf "$WORK_M"
 
 WORK_N=$(mkhome)
 run_test "discover_run_creates_facets_dir" \
-  "MOAGAN_HOME=$WORK_N $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_N/.runs/*/facets/ 2>/dev/null | head -1 | grep -qE '/facets/$'"
+  "MOAGAN_HOME=$WORK_N $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_N/.runs/*/facets/ 2>/dev/null | head -1 | grep -qE '/facets/$'"
 rm -rf "$WORK_N"
 
 WORK_O=$(mkhome)
 run_test "discover_run_creates_extractions_dir" \
-  "MOAGAN_HOME=$WORK_O $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_O/.runs/*/extractions/ 2>/dev/null | head -1 | grep -qE '/extractions/$'"
+  "MOAGAN_HOME=$WORK_O $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_O/.runs/*/extractions/ 2>/dev/null | head -1 | grep -qE '/extractions/$'"
 rm -rf "$WORK_O"
 
 WORK_P=$(mkhome)
 run_test "discover_run_creates_contradictions_dir" \
-  "MOAGAN_HOME=$WORK_P $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_P/.runs/*/contradictions/ 2>/dev/null | head -1 | grep -qE '/contradictions/$'"
+  "MOAGAN_HOME=$WORK_P $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_P/.runs/*/contradictions/ 2>/dev/null | head -1 | grep -qE '/contradictions/$'"
 rm -rf "$WORK_P"
 
 WORK_Q=$(mkhome)
 run_test "discover_run_creates_drafts_dir" \
-  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/drafts/ 2>/dev/null | head -1 | grep -qE '/drafts/$'"
+  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/drafts/ 2>/dev/null | head -1 | grep -qE '/drafts/$'"
 rm -rf "$WORK_Q"
 
 # The remaining tests need content; mock provider cycles so these
@@ -1157,12 +1160,12 @@ rm -rf "$WORK_Q"
 
 WORK_T=$(mkhome)
 run_test "discover_run_creates_summary_md" \
-  "MOAGAN_HOME=$WORK_T $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/summary.md 2>/dev/null | head -1 | grep -q summary.md; test \$? -le 1"
+  "MOAGAN_HOME=$WORK_T $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/summary.md 2>/dev/null | head -1 | grep -q summary.md; test \$? -le 1"
 rm -rf "$WORK_T"
 
 WORK_U=$(mkhome)
 run_test "discover_run_creates_summary_json" \
-  "MOAGAN_HOME=$WORK_U $BIN discover --provider mock --prompt 'probe' --cardinality 80 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/summary.json 2>/dev/null | head -1 | grep -q summary.json; test \$? -le 1"
+  "MOAGAN_HOME=$WORK_U $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/summary.json 2>/dev/null | head -1 | grep -q summary.json; test \$? -le 1"
 rm -rf "$WORK_U"
 
 # ---------------------------------------------------------------------

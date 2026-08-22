@@ -9,7 +9,11 @@
 # After each test completes, the run dir is deleted so the next
 # launch of this script starts fresh.
 #
-# Cardinalidad mínima = 80 (validated via mini-prueba).
+# Cardinalidad mínima = 80 (validated via mini-prueba). F2
+# (Track G.2): the comparison still uses the legacy 4-dim ×
+# 2-facet default layout (8 cells); the script now derives
+# `--sketches-per-cell = ceil(cardinality / 8)` so the v0.5
+# cardinality floor survives the rename.
 
 set -u
 
@@ -73,7 +77,13 @@ run_test() {
     export RUNS_DIR
 
     local LOG="$LOG_DIR/${RUN_LABEL}.log"
-    echo "[$(date -Iseconds)] START $RUN_LABEL cardinality=$CARD profile='$TEMP_PROFILE' parallel=$PARALLEL"
+    # F2 (Track G.2): `CARD` is the v0.5 `cardinality` floor
+    # (cells × sketches_per_cell). With the legacy 4-dim ×
+    # 2-facet default (`--dimensions 4 --facets-per-dimension 2`)
+    # we have 8 cells, so `sketches_per_cell = CARD / 8`.
+    # `ceil`-division so e.g. CARD=256 → 32 per cell.
+    local SPC=$(( (CARD + 7) / 8 ))
+    echo "[$(date -Iseconds)] START $RUN_LABEL cardinality=$CARD (sketches_per_cell=$SPC, cells=8) profile='$TEMP_PROFILE' parallel=$PARALLEL"
     echo "  log: $LOG"
     echo "  runs-dir: $RUNS_DIR"
 
@@ -84,7 +94,9 @@ run_test() {
         --provider minimax \
         --max-parallelism "$PARALLEL" \
         --non-interactive \
-        --cardinality "$CARD" \
+        --sketches-per-cell "$SPC" \
+        --dimensions 4 \
+        --facets-per-dimension 2 \
         --runs-dir "$RUNS_DIR" \
         --temperature-profile "$TEMP_PROFILE" \
         2>&1 | tee "$LOG"

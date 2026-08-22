@@ -99,7 +99,7 @@ The cheatsheet was last touched in PR #319 (commit `1590877`). Since then the v0
 |---|---|---|---|
 | `DEFAULT_MAX_TOKENS` (every role, every provider) | varies | `1_000_000` | `src/llm/prompts.rs:20` |
 | OpenCode Go `max_tokens` cap (every wire shape) | propagated from `DEFAULT_MAX_TOKENS` (upstream rejected > 393_216) | hard-capped at `16_384` | `src/llm/capabilities.rs:43` (`OPENCODE_GO_MAX_TOKENS_CAP`) |
-| `moagan discover` cardinality floor | `50` | `80` | `src/cli/mod.rs:1234`, `src/cli/discover.rs:509` |
+| `moagan discover --sketches-per-cell` floor | `50` (legacy `cardinality`) | `10` (F2) | `src/cli/mod.rs`, `src/cli/discover.rs` |
 | `moagan run --hash-algo` default | `blake3` | `blake3` (unchanged; verified `src/config/mod.rs:294` + `src/cli/flags_batch.rs:13-20`) | — |
 
 ### Config-file precedence — strict cwd-overrides-user (PR-B2 / #342)
@@ -802,9 +802,9 @@ cli::dispatch → Cmd::Audit::Verify → audit::verify_cmd(VerifyArgs)
 
 | Combination | Behaviour |
 |---|---|
-| `--cardinality < 80` | `InvalidArgs` ("below the discovery minimum of 80") |
-| `--cardinality 0` | `InvalidArgs` |
-| `--cardinality` absent | default 80 |
+| `--sketches-per-cell < 10` | `InvalidArgs` ("below the minimum of 10") |
+| `--sketches-per-cell 0` | `InvalidArgs` |
+| `--sketches-per-cell` absent | default 10 (4×2 matrix → 80 sketches, matching the legacy floor) |
 | `--dimensions × --facets-per-dimension` | matrix size = `dimensions × facets` |
 | `--cluster-threshold` outside `[0, 1]` | parse error → unexpected behaviour |
 | `--cache-facets` | cross-run cache keyed by `sha256(brief + category_id)`, TTL `MOAGAN_FACET_CACHE_TTL_SECS` |
@@ -824,10 +824,10 @@ cli::dispatch → Cmd::Discover → discover::run(DiscoverOptions, &cfg)
   → RunContext::new(...) + with_timeouts + with_interactive(!non_interactive)
   → build_pre_matrix_pipeline() = intake + clarify → pipeline.run()   [tokio::select! Ctrl-C]
   → DiscoveryCoordinator::new(home, run_id, cancel, Brief::default(), "deployment-model:serverless", Mode::Fast)
-  → coordinator.run_with_ctx_and_target(ctx, Some(cardinality))
+  → coordinator.run_with_ctx_and_target(ctx, Some(sketches_per_cell))
        → persona_picker (if cfg.discovery.persona_enabled)
        → angle_picker (if cfg.discovery.angle_enabled && angle_clusters_min)
-       → loop with SaturationTracker until cardinality or saturation:
+       → loop with SaturationTracker until matrix.cardinality() or saturation:
             → spawn sketch LLM call (matrix entry)
             → save sketches/sk_NN.json
        → DiscoveryOutcome { sketches_completed, sketches_failed }
@@ -890,7 +890,7 @@ If you set the same provider both ways, the CLI flag wins (see `src/cli/discover
 
 | Case | Error | Exit |
 |---|---|---|
-| `--cardinality < 80` | `InvalidArgs` | 2 |
+| `--sketches-per-cell < 10` | `InvalidArgs` ("below the minimum of 10") | 2 |
 | `--temperature-profile` missing `provider=` / `temperatures=` / `replicas=` | `InvalidArgs` (named key in the message) | 2 |
 | `--temperature-profile` temperature outside `0.0..=2.0` | `InvalidArgs` ("out of range 0.0..=2.0") | 2 |
 | `--temperature-profile replicas=0` | `InvalidArgs` ("replicas must be >= 1") | 2 |
