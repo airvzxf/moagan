@@ -454,6 +454,27 @@ impl DiscoveryCoordinator {
         // When the operator sets neither, the map is empty and the
         // default profile falls back to `TemperatureProfile::default()`
         // (`[1.0] × 1`) — bit-identical to v0.5.
+        //
+        // F1 (Track G.2 `discover_dimensions`): the coordinator
+        // builds its `ExplorationMatrix` from one of three sources,
+        // first match wins:
+        //
+        // 1. `<run_dir>/discovery_dimensions.json` sidecar
+        //    (populated by the `discover_dimensions` phase or a
+        //    prior run with `--matrix-spec` / `--llm-derive`).
+        //    The matrix inherits those dimensions verbatim so a
+        //    resumed run never re-derives.
+        // 2. The operator's `--matrix-spec` flag (carried on
+        //    `ctx.config.discovery_matrix.matrix_spec`). The spec
+        //    is parsed and promoted to a matrix.
+        // 3. The legacy `--dimensions N --facets-per-dimension M`
+        //    pair (carried on the same config block). The matrix
+        //    is built with `dim-NN` placeholders so the legacy
+        //    CLI still works during the F1 transition window.
+        //
+        // The `target` argument (CLI `--cardinality`) translates
+        // into `sketches_per_cell = max(target / cells, 1)` so the
+        // 80-sketch floor survives asymmetric facet counts.
         let temperature_profiles = ctx.config.discovery_matrix.temperature_profiles.clone();
         let default_profile = ctx
             .config
@@ -461,11 +482,10 @@ impl DiscoveryCoordinator {
             .default_profile
             .clone()
             .unwrap_or_default();
-        let matrix = ExplorationMatrix::default_for_with_profiles(
-            target,
-            temperature_profiles,
-            default_profile,
-        );
+        let matrix = build_coordinator_matrix(&run_dir, target, &ctx.config.discovery_matrix)?;
+        let mut matrix = matrix;
+        matrix.temperature_profiles = temperature_profiles;
+        matrix.default_profile = default_profile;
         let matrix_path = run_dir.join("exploration_matrix.json");
         write_json(&matrix_path, &matrix)?;
         tracing::info!(
@@ -960,6 +980,103 @@ pub enum CoordinatorError {
     /// out of the coordinator without bespoke mapping.
     #[error(transparent)]
     Error(#[from] crate::error::Error),
+}
+
+/// Build the matrix the coordinator will fan out against. F1
+/// (Track G.2) sources the matrix from three places, first match
+/// wins:
+///
+/// 1. `<run_dir>/discovery_dimensions.json` sidecar — the
+///    dimensions the `discover_dimensions` phase derived (or
+///    that a prior run persisted via `--matrix-spec`). A resumed
+///    run picks up the cached dimensions verbatim.
+/// 2. `ctx.config.discovery_matrix.matrix_spec` — the operator's
+///    `--matrix-spec` flag(s), persisted via the
+///    `[discovery_matrix]` block. The coordinator parses the spec
+///    the same way the CLI does and promotes it to a matrix.
+/// 3. The legacy `--dimensions N --facets-per-dimension M` pair
+///    carried on `ctx.config.discovery_matrix.dimensions` /
+///    `facets_per_dimension`. The matrix uses `dim-NN` placeholders
+///    so legacy CLI invocations still work during the F1
+///    transition window. F2 drops the path entirely.
+///
+/// The `target` (CLI `--cardinality`) is the total sketch count
+/// the operator requested. The matrix's `sketches_per_cell` is
+/// `max(target / cells, 1)` so the 80-sketch floor survives even
+/// when the LLM-derive path picks fewer cells than the legacy
+/// 4×2 default.
+fn build_coordinator_matrix(
+    run_dir: &Path,
+    target: usize,
+    cfg: &crate::config::DiscoveryMatrixConfig,
+) -> crate::error::Result<ExplorationMatrix> {
+    // 1. Sidecar (resume + LLM-derive)
+    if let Some(matrix) =
+        ExplorationMatrix::load_or_derive(run_dir, derive_per_cell_hint(target, cfg))?
+    {
+        return Ok(matrix);
+    }
+    // 2. Operator-supplied spec (repetible / consolidated)
+    let non_empty: Vec<&String> = cfg
+        .matrix_spec
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if !non_empty.is_empty() {
+        let spec = crate::discovery::MatrixSpec::parse_all(non_empty.into_iter().cloned())?;
+        spec.validate()?;
+        let per_cell = (target / spec.cells().max(1)).max(1);
+        return Ok(ExplorationMatrix::from_spec(spec, per_cell));
+    }
+    // 3. Legacy `--dimensions N --facets-per-dimension M` pair
+    if let (Some(dims), Some(facets)) = (cfg.dimensions, cfg.facets_per_dimension) {
+        let mut spec = crate::discovery::MatrixSpec::default();
+        for i in 0..dims.max(1) {
+            let id = format!("dim-{:02}", i);
+            let mut spec_facets = Vec::with_capacity(facets.max(1));
+            for j in 0..facets.max(1) {
+                spec_facets.push(crate::discovery::matrix_spec::FacetSpec {
+                    id: format!("f{}", j + 1),
+                    label: format!("F{}", j + 1),
+                    description: String::new(),
+                });
+            }
+            spec.dimensions
+                .push(crate::discovery::matrix_spec::DimensionSpec {
+                    id,
+                    label: format!("Dimension {}", i),
+                    facets: spec_facets,
+                });
+        }
+        let per_cell = (target / spec.cells().max(1)).max(1);
+        return Ok(ExplorationMatrix::from_spec(spec, per_cell));
+    }
+    // 4. Pure LLM-derive: no spec, no legacy counts — the matrix
+    //    starts empty and the `discover_dimensions` phase will
+    //    populate it before the matrix fan-out runs. The
+    //    coordinator surfaces the empty matrix so a downstream
+    //    `ExplorationMatrix::load_or_derive` call (in the matrix
+    //    phase) reads the freshly-written sidecar.
+    Ok(ExplorationMatrix::new(
+        Vec::new(),
+        derive_per_cell_hint(target, cfg),
+    ))
+}
+
+/// Translate the operator's target into a per-cell fan-out for
+/// the no-sidecar paths. The hint matches the spec/cells-derived
+/// formula the other branches use, so the per-cell count stays
+/// consistent across the four matrix-source branches.
+fn derive_per_cell_hint(target: usize, cfg: &crate::config::DiscoveryMatrixConfig) -> usize {
+    let cells_hint = if let (Some(dims), Some(facets)) = (cfg.dimensions, cfg.facets_per_dimension)
+    {
+        dims * facets.max(1)
+    } else if let Some(dims) = cfg.dimensions {
+        dims * 2
+    } else {
+        8
+    };
+    (target / cells_hint.max(1)).max(1)
 }
 
 /// Build the user payload the LLM sees for one `(cell, sketch_index)`
@@ -1587,10 +1704,26 @@ mod tests {
     /// provider. Mirrors `build_picker_ctx` but uses the standard
     /// `mock` registry so the coordinator's LLM calls go through
     /// the production `RunContext::call_with_retry` path.
+    ///
+    /// F1 (Track G.2): the default config has no
+    /// `[discovery_matrix].matrix_spec` and no legacy dimension
+    /// counts, so the coordinator's matrix would be empty (the
+    /// `discover_dimensions` phase is the one that fills it in
+    /// the production path). For these regression tests we
+    /// pre-populate the `matrix_spec` with the legacy 4×2 layout
+    /// so the coordinator can build a non-empty matrix without
+    /// touching an LLM.
     fn build_run_ctx(home: MoaganHome, scripted: Arc<ScriptedProvider>) -> Arc<RunContext> {
         let mut registry = crate::llm::ProviderRegistry::default();
         registry.insert("mock".into(), scripted);
-        let cfg = Arc::new(crate::config::Config::default());
+        let mut cfg = crate::config::Config::default();
+        cfg.discovery_matrix.matrix_spec = vec![
+            "a=x,y".to_string(),
+            "b=x,y".to_string(),
+            "c=x,y".to_string(),
+            "d=x,y".to_string(),
+        ];
+        let cfg = Arc::new(cfg);
         Arc::new(RunContext::new_with_config(
             RunId::new(),
             Arc::new(home),
@@ -1657,14 +1790,19 @@ mod tests {
         .expect("run_with_ctx should succeed with mock provider");
 
         let target = Cardinality::for_mode_default(Mode::Standard).soft;
-        // `ExplorationMatrix::default_for(target)` produces
-        // `4 dims × 2 facets × max(target/8, 1) = 8` sketches; the
-        // mode-derived soft target (7) is a lower bound the matrix
-        // rounds up to fill its 8 cells. The coordinator's actual
-        // fan-out is the matrix's cardinality (8), not the soft
-        // target (7), so the assertion uses the matrix-driven value.
-        let matrix_card =
-            crate::discovery::matrix::ExplorationMatrix::default_for(target).cardinality();
+        // F1 (Track G.2): the coordinator now sources its matrix
+        // from the operator's `--matrix-spec` (carried on
+        // `ctx.config.discovery_matrix.matrix_spec`) instead of the
+        // legacy `default_for` 4×2 default. The test config
+        // pre-populates `matrix_spec` with 4 dims × 2 facets
+        // (`a=x,y`, `b=x,y`, …) so the matrix shape matches the
+        // pre-F1 contract: 8 cells × max(target/8, 1) sketches
+        // per cell = 8 sketches. The mode-derived soft target (7)
+        // is a lower bound the matrix rounds up to fill its 8
+        // cells. The coordinator's actual fan-out is the matrix's
+        // cardinality (8), not the soft target (7), so the
+        // assertion uses the matrix-driven value.
+        let matrix_card = legacy_4x2_cardinality(target);
         assert_eq!(
             outcome.sketches_completed, matrix_card,
             "matrix cardinality must be reached end-to-end (target={target}, matrix={matrix_card})"
@@ -1877,8 +2015,7 @@ mod tests {
         // `Cardinality::for_mode_default(Mode::Standard).soft = 7`
         // floor rounds up to fill the 8 cells).
         let target = Cardinality::for_mode_default(Mode::Standard).soft;
-        let matrix_card =
-            crate::discovery::matrix::ExplorationMatrix::default_for(target).cardinality();
+        let matrix_card = legacy_4x2_cardinality(target);
         let scripted = TemperatureRecordingProvider::new(
             (0..matrix_card)
                 .map(|i| sketch_payload(&format!("sk_{i:04}")))
@@ -1913,10 +2050,23 @@ mod tests {
             );
             // The default Config has an empty `discovery_matrix`;
             // the matrix picks up `[1.0] × 1` from
-            // `TemperatureProfile::default()`.
+            // `TemperatureProfile::default()`. F1 (Track G.2):
+            // the test populates `matrix_spec` with the legacy
+            // 4×2 layout so the coordinator's matrix builder has
+            // a non-empty shape to fan out against — without
+            // this, the F1 build_coordinator_matrix would
+            // produce an empty matrix and the v0.5 sketch-count
+            // contract this test pins would no longer hold.
             let mut registry = crate::llm::ProviderRegistry::default();
             registry.insert("mock".into(), scripted_for_ctx);
-            let cfg = Arc::new(crate::config::Config::default());
+            let mut cfg = crate::config::Config::default();
+            cfg.discovery_matrix.matrix_spec = vec![
+                "a=x,y".to_string(),
+                "b=x,y".to_string(),
+                "c=x,y".to_string(),
+                "d=x,y".to_string(),
+            ];
+            let cfg = Arc::new(cfg);
             let ctx = Arc::new(RunContext::new_with_config(
                 run_id,
                 Arc::new(home.clone()),
@@ -1995,11 +2145,20 @@ mod tests {
         // Cardinality = 8. With the active provider's profile
         // (`[0.0, 0.5] × 2 = 4`) the total fan-out is 8 × 4 = 32.
         let target = Cardinality::for_mode_default(Mode::Standard).soft;
-        let matrix = crate::discovery::matrix::ExplorationMatrix::default_for_with_profiles(
-            target,
-            profiles.clone(),
-            default_profile,
+        // F1 (Track G.2): the legacy `default_for_with_profiles`
+        // constructor is gone. The test reconstructs the same
+        // 4×2 matrix shape via `ExplorationMatrix::new` plus the
+        // explicit profiles. The test config populates
+        // `discovery_matrix.matrix_spec` with the equivalent
+        // spec so the coordinator picks it up the same way the
+        // pre-F1 path did.
+        let matrix = crate::discovery::matrix::ExplorationMatrix::new(
+            legacy_4x2_dimensions(),
+            (target / 8).max(1),
         );
+        let mut matrix = matrix;
+        matrix.temperature_profiles = profiles.clone();
+        matrix.default_profile = default_profile;
         let expected_calls =
             matrix.cells() * matrix.sketches_per_cell * matrix.profile_for("mock-model").total();
         let scripted = TemperatureRecordingProvider::new(
@@ -2039,10 +2198,23 @@ mod tests {
             // Build the effective Config with the explicit profile
             // map; the coordinator reads it via
             // `ctx.config.discovery_matrix.temperature_profiles`.
+            // F1 (Track G.2): the config also carries the legacy
+            // 4×2 `matrix_spec` so the coordinator's matrix
+            // builder picks up the same shape the pre-F1 test
+            // derived from `default_for_with_profiles`.
             let cfg = crate::config::Config {
                 discovery_matrix: crate::config::DiscoveryMatrixConfig {
                     temperature_profiles: matrix.temperature_profiles.clone(),
                     default_profile: Some(matrix.default_profile.clone()),
+                    matrix_spec: vec![
+                        "a=x,y".to_string(),
+                        "b=x,y".to_string(),
+                        "c=x,y".to_string(),
+                        "d=x,y".to_string(),
+                    ],
+                    dimensions: None,
+                    facets_per_dimension: None,
+                    llm_derive_first: false,
                 },
                 ..crate::config::Config::default()
             };
@@ -2087,5 +2259,84 @@ mod tests {
                  profile must be `[0.0, 0.5] × 2`"
             );
         }
+    }
+
+    // ---- F1 helpers: legacy 4×2 matrix shape used by the ----
+    // ---- pre-F1 coordinator regression tests.            ----
+
+    /// F1 (Track G.2): the pre-F1 coordinator regression tests
+    /// assume the legacy 4×2 default matrix. The new
+    /// `ExplorationMatrix` API has no `default_for` constructor;
+    /// these helpers rebuild the same shape (4 dims × 2 facets)
+    /// explicitly so the assertions stay byte-identical to the
+    /// pre-F1 tests.
+    fn legacy_4x2_cardinality(target: usize) -> usize {
+        legacy_4x2_dimensions().len() * 2 * ((target / (legacy_4x2_dimensions().len() * 2)).max(1))
+    }
+
+    /// Build the 4-dim × 2-facet legacy matrix dimensions. Mirrors
+    /// the pre-F1 `default_for` 4-axis layout: `deployment-model`,
+    /// `storage`, `consistency`, `observability` (each with 2
+    /// facets).
+    fn legacy_4x2_dimensions() -> Vec<crate::discovery::matrix::Dimension> {
+        use crate::discovery::matrix::{Dimension, Facet};
+        vec![
+            Dimension {
+                id: "deployment-model".into(),
+                label: "Deployment model".into(),
+                facets: vec![
+                    Facet {
+                        id: "serverless".into(),
+                        label: "serverless".into(),
+                    },
+                    Facet {
+                        id: "self-hosted".into(),
+                        label: "self-hosted".into(),
+                    },
+                ],
+            },
+            Dimension {
+                id: "storage".into(),
+                label: "Storage strategy".into(),
+                facets: vec![
+                    Facet {
+                        id: "sql".into(),
+                        label: "SQL".into(),
+                    },
+                    Facet {
+                        id: "kv".into(),
+                        label: "embedded key-value".into(),
+                    },
+                ],
+            },
+            Dimension {
+                id: "consistency".into(),
+                label: "Consistency model".into(),
+                facets: vec![
+                    Facet {
+                        id: "strong".into(),
+                        label: "strong".into(),
+                    },
+                    Facet {
+                        id: "eventual".into(),
+                        label: "eventual".into(),
+                    },
+                ],
+            },
+            Dimension {
+                id: "observability".into(),
+                label: "Observability".into(),
+                facets: vec![
+                    Facet {
+                        id: "logs-only".into(),
+                        label: "logs only".into(),
+                    },
+                    Facet {
+                        id: "metrics-tracing".into(),
+                        label: "metrics + tracing".into(),
+                    },
+                ],
+            },
+        ]
     }
 }

@@ -2193,6 +2193,12 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // that wants to surface very long evidence excerpts is
         // not artificially truncated.
         Role::ContradictionJudge => DEFAULT_MAX_TOKENS,
+        // F1 (Track G.2 `discover_dimensions`): the
+        // dimensions-deriver returns a `Dimensions` envelope with
+        // 2-6 dimension triples (each carrying 1-5 facet triples
+        // with descriptions). The unified 1M ceiling keeps room
+        // for the LLM to surface descriptions without truncation.
+        Role::DimensionDeriver => DEFAULT_MAX_TOKENS,
     }
 }
 
@@ -2320,6 +2326,12 @@ pub fn temperature_for_role(
         // `role_settings` (0.2) so the call layer doesn't
         // special-case the role.
         Role::ContradictionJudge => 0.0,
+        // F1 (Track G.2 `discover_dimensions`): deterministic
+        // T=0.0 so two runs against the same brief produce
+        // identical dimension lists — the
+        // `discovery_dimensions.json` sidecar relies on this
+        // for cache-key stability.
+        Role::DimensionDeriver => 0.0,
     }
 }
 
@@ -2396,6 +2408,14 @@ pub enum PhaseOutput {
     /// Phase G: `problem_graph.json` was written. Empty path means
     /// the phase was skipped or short-circuited to a trivial graph.
     ProblemGraph(PathBuf),
+    /// F1 (Track G.2 `discover_dimensions`):
+    /// `<run_dir>/discovery_dimensions.json` was written. Empty
+    /// path means the phase was skipped (e.g. the operator
+    /// supplied `--matrix-spec` and the LLM-derive path was
+    /// short-circuited). The path is the sidecar the matrix
+    /// phase reads so the matrix fan-out reuses the same
+    /// dimensions without re-issuing the LLM call.
+    DiscoveryDimensions(PathBuf),
 }
 
 /// A unit of pipeline work.

@@ -405,6 +405,37 @@ pub struct DiscoveryMatrixConfig {
     /// uses [`crate::discovery::matrix::TemperatureProfile::default()`]
     /// (`[1.0] × 1`) — the v0.5 single-shot contract.
     pub default_profile: Option<crate::discovery::matrix::TemperatureProfile>,
+    /// F1 (Track G.2): operator-supplied dimension list. Same
+    /// grammar as the `--matrix-spec` CLI flag (repetible AND
+    /// consolidated with `;`). When non-empty, the matrix
+    /// fan-out uses these dimensions verbatim and the
+    /// `discover_dimensions` phase is skipped. CLI flag wins
+    /// on conflict.
+    #[serde(default)]
+    pub matrix_spec: Vec<String>,
+    /// F1 (Track G.2): target dimension count when the operator
+    /// passes `--dimensions N` without a spec. The LLM uses this
+    /// as a soft hint; the actual dimension count is the
+    /// `Role::DimensionDeriver`'s call. `None` lets the LLM pick
+    /// freely.
+    #[serde(default)]
+    pub dimensions: Option<usize>,
+    /// F1 (Track G.2): target facets per dimension when the
+    /// operator passes `--dimensions N --facets-per-dimension M`
+    /// without a spec. `None` lets the LLM pick asymmetric
+    /// counts per dimension (the F1 contract).
+    #[serde(default)]
+    pub facets_per_dimension: Option<usize>,
+    /// F1 (Track G.2): when `true` and the operator supplied
+    /// neither a `--matrix-spec` nor a persisted
+    /// `[discovery_matrix].matrix_spec`, the discovery
+    /// pipeline always calls `Role::DimensionDeriver` to derive
+    /// the dimension list. Default `false` so existing runs
+    /// that rely on the legacy `--dimensions/--facets-per-dimension`
+    /// pair keep working without an LLM call. CLI
+    /// `--llm-derive` flag wins on conflict.
+    #[serde(default)]
+    pub llm_derive_first: bool,
 }
 
 /// Track E (E8 partial): knobs for the two D.7.1 catalog roles

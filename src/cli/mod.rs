@@ -608,12 +608,41 @@ pub enum Cmd {
         /// Override the global concurrent-LLM cap.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
-        /// Number of dimensions in the exploration matrix. Default 4.
-        #[arg(long, default_value_t = 4, value_name = "N")]
-        dimensions: usize,
-        /// Number of facets per dimension. Default 2.
-        #[arg(long, default_value_t = 2, value_name = "N")]
-        facets_per_dimension: usize,
+        /// F1 (Track G.2): target number of dimensions in the
+        /// exploration matrix. `None` lets the
+        /// `Role::DimensionDeriver` pick the dimension count
+        /// freely (asymmetric facets are allowed). Ignored
+        /// when `--matrix-spec` is supplied; required when
+        /// the operator wants `--facets-per-dimension` to be
+        /// honoured without a spec.
+        #[arg(long, value_name = "N")]
+        dimensions: Option<usize>,
+        /// F1 (Track G.2): target facets per dimension when the
+        /// operator does NOT supply a `--matrix-spec`. Requires
+        /// `--dimensions`; without a spec the LLM is free to
+        /// pick asymmetric facet counts (the F1 contract).
+        #[arg(long, value_name = "N")]
+        facets_per_dimension: Option<usize>,
+        /// F1 (Track G.2): operator-supplied matrix spec.
+        /// Repetible; each occurrence appends one dimension.
+        /// Two accepted formats (the parser handles both):
+        ///
+        /// * Repetible form — `--matrix-spec 'auth=oauth,api-key'`
+        ///   --matrix-spec 'storage=sql,kv'`. Each flag declares
+        ///   exactly one dimension.
+        /// * Consolidated form — a single flag can declare several
+        ///   dimensions separated by `;`:
+        ///   `--matrix-spec 'deployment=serverless,self-hosted;storage=sql,kv'`.
+        ///
+        /// When non-empty, the matrix uses the spec verbatim and
+        /// the `Role::DimensionDeriver` is NOT invoked.
+        #[arg(long = "matrix-spec", value_name = "SPEC", action = clap::ArgAction::Append)]
+        matrix_spec: Vec<String>,
+        /// F1 (Track G.2): force the LLM-derive path even when
+        /// the operator did not pass a spec. Useful in CI to
+        /// exercise the `Role::DimensionDeriver` call.
+        #[arg(long, default_value_t = false)]
+        llm_derive: bool,
         /// SimHash threshold for clustering (0..=1). Default 0.7.
         #[arg(long, default_value_t = 0.7)]
         cluster_threshold: f32,
@@ -1329,6 +1358,8 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             max_parallelism,
             dimensions,
             facets_per_dimension,
+            matrix_spec,
+            llm_derive,
             cluster_threshold,
             non_interactive,
             cache_facets,
@@ -1338,6 +1369,24 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 return Err(Error::InvalidArgs(format!(
                     "cardinality {cardinality} below the discovery minimum of 80"
                 )));
+            }
+            // F1: `--facets-per-dimension` only makes sense when the
+            // operator is opting into the LLM-derive path AND has a
+            // target dimension count. Without `--matrix-spec` and
+            // without `--llm-derive`, the LLM picks facets
+            // asymmetrically per dimension; honouring a rigid
+            // `--facets-per-dimension` flag in that path is a
+            // contradiction, so reject it cleanly.
+            if facets_per_dimension.is_some()
+                && matrix_spec.iter().all(|s| s.trim().is_empty())
+                && !llm_derive
+                && dimensions.is_none()
+            {
+                return Err(Error::InvalidArgs(
+                    "facets-per-dimension requires an explicit --matrix-spec; \
+                     without one facets are derived per-dimension by the LLM"
+                        .to_string(),
+                ));
             }
             // PR-D1: parse the CLI `--temperature-profile` specs into
             // a typed `Vec<TemperatureProfileSpec>`. Each spec is
@@ -1360,6 +1409,8 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     max_parallelism,
                     dimensions,
                     facets_per_dimension,
+                    matrix_spec,
+                    llm_derive,
                     cluster_threshold,
                     out_dir: None,
                     non_interactive,
@@ -1497,8 +1548,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     mock_dir: mock_dir.clone(),
                     cardinality: 8,
                     max_parallelism,
-                    dimensions: 8,
-                    facets_per_dimension: 1,
+                    dimensions: Some(8),
+                    facets_per_dimension: Some(1),
+                    matrix_spec: Vec::new(),
+                    llm_derive: false,
                     cluster_threshold: 0.7,
                     out_dir: Some(home_root.join(".runs")),
                     non_interactive,

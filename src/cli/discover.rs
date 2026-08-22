@@ -30,6 +30,8 @@ use std::sync::Arc;
 
 use crate::cli::flags_batch;
 use crate::config::Config;
+use crate::discovery::matrix::ExplorationMatrix;
+use crate::discovery::matrix_spec::MatrixSpec;
 use crate::discovery::{DiscoveryCoordinator, DiscoveryOutcome};
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
@@ -40,9 +42,9 @@ use crate::phases::Pipeline;
 use crate::phases::PipelineKind;
 use crate::phases::RunContext;
 use crate::phases::{
-    ClarifyPhase, DiscoverClusterPhase, DiscoverContradictPhase, DiscoverExtractPhase,
-    DiscoverFacetPhase, DiscoverIntegratePhase, DiscoverMatrixPhase, DiscoverSummaryPhase,
-    DiscoverTagPhase, IntakePhase,
+    ClarifyPhase, DiscoverClusterPhase, DiscoverContradictPhase, DiscoverDimensionsPhase,
+    DiscoverExtractPhase, DiscoverFacetPhase, DiscoverIntegratePhase, DiscoverMatrixPhase,
+    DiscoverSummaryPhase, DiscoverTagPhase, IntakePhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -53,44 +55,159 @@ use crate::domain::Manifest;
 
 use super::run::build_registry_for;
 
+/// Default `sketches_per_cell` floor (F1). The matrix's per-cell
+/// fan-out is `cells() * sketches_per_cell`. F2 will rename
+/// `--cardinality` to `--sketches-per-cell` and lower this
+/// floor to 10.
+pub const DEFAULT_SKETCHES_PER_CELL: usize = 80;
+
+/// Resolve the operator's input into an [`ExplorationMatrix`].
+///
+/// F1 (Track G.2) resolves in this order, first match wins:
+///
+/// 1. `--matrix-spec` (CLI flag, repetitive or consolidated) →
+///    [`MatrixSpec::parse_all`]. The matrix uses the spec verbatim;
+///    the `discover_dimensions` phase is skipped.
+/// 2. `--dimensions N --facets-per-dimension M` (CLI flag pair, no
+///    spec) → build a programmatic spec with `N × M` cells. The
+///    matrix uses the spec verbatim; the `discover_dimensions`
+///    phase is skipped. Skipped when `--llm-derive` is `true` (the
+///    explicit LLM-derive opt-in overrides the count shortcut).
+/// 3. `--llm-derive` or `--dimensions N` (no spec, no per-dim
+///    count) → [`crate::phases::DiscoverDimensionsPhase`] runs at
+///    runtime to derive the dimension list from the brief via the
+///    LLM. The matrix's dimensions are loaded from the
+///    `<run_dir>/discovery_dimensions.json` sidecar.
+/// 4. No flag → same as (3) with no target count; the LLM is free
+///    to pick any number of dimensions with asymmetric facets.
+///
+/// F1 keeps the legacy `--cardinality` flag for backward
+/// compatibility — the matrix's `sketches_per_cell` is derived
+/// from `cardinality / cells()` (so the floor of 80 still
+/// applies when the LLM-derive path picks fewer than 1 cell per
+/// dim). F2 renames the flag and replaces the floor.
+pub fn resolve_matrix(opts: &DiscoverOptions, cfg: &Config) -> Result<(MatrixSpec, usize)> {
+    let sketches_per_cell = derive_sketches_per_cell(opts, cfg);
+    if let Some(spec) = parse_matrix_spec_inputs(&opts.matrix_spec)? {
+        return Ok((spec, sketches_per_cell));
+    }
+    if opts.llm_derive {
+        return Ok((MatrixSpec::default(), sketches_per_cell));
+    }
+    if let (Some(_dims), Some(facets_per_dim)) = (opts.dimensions, opts.facets_per_dimension) {
+        // Legacy `--dimensions N --facets-per-dimension M` pair —
+        // build a programmatic spec with placeholder ids. The
+        // operator uses this for tests; the LLM-derive path
+        // (above) is the preferred default.
+        let n = opts.dimensions.unwrap_or(1);
+        let mut spec = MatrixSpec::default();
+        for i in 0..n.max(1) {
+            let id = format!("dim-{:02}", i);
+            let mut facets = Vec::with_capacity(facets_per_dim.max(1));
+            for j in 0..facets_per_dim.max(1) {
+                facets.push(crate::discovery::matrix_spec::FacetSpec {
+                    id: format!("f{}", j + 1),
+                    label: format!("F{}", j + 1),
+                    description: String::new(),
+                });
+            }
+            spec.dimensions
+                .push(crate::discovery::matrix_spec::DimensionSpec {
+                    id,
+                    label: format!("Dimension {}", i),
+                    facets,
+                });
+        }
+        return Ok((spec, sketches_per_cell));
+    }
+    if opts.dimensions.is_some() {
+        // Operator passed `--dimensions N` without `--facets-per-dimension`.
+        // The LLM picks the facet count asymmetrically per
+        // dimension; the `discover_dimensions` phase owns the
+        // selection.
+        return Ok((MatrixSpec::default(), sketches_per_cell));
+    }
+    // No flag at all — full LLM-derive.
+    Ok((MatrixSpec::default(), sketches_per_cell))
+}
+
+/// Parse and validate the operator's `--matrix-spec` inputs.
+/// Returns `Ok(None)` when every entry is empty (the caller falls
+/// back to LLM-derive or the legacy count pair). Returns
+/// `Err(Error::InvalidArgs)` on the first malformed entry so the
+/// dispatcher surfaces a clear CLI message.
+fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
+    let non_empty: Vec<&String> = entries.iter().filter(|s| !s.trim().is_empty()).collect();
+    if non_empty.is_empty() {
+        return Ok(None);
+    }
+    let parsed = MatrixSpec::parse_all(non_empty.into_iter().cloned())?;
+    parsed.validate()?;
+    Ok(Some(parsed))
+}
+
+/// Translate the F1 fan-out inputs into a per-cell sketches
+/// count. The CLI's `--cardinality` flag is preserved for
+/// backward compat (F2 will rename it to `--sketches-per-cell`);
+/// for F1 the matrix's per-cell fan-out is `cardinality /
+/// max(cells, 1)`. When the LLM-derive path picks fewer cells
+/// than `cardinality / 10`, the matrix clamps to a minimum of
+/// `10` per cell so the operator's minimum of 80 survives.
+fn derive_sketches_per_cell(opts: &DiscoverOptions, _cfg: &Config) -> usize {
+    // Resolve cells the same way the matrix fan-out will; this
+    // mirrors the spec parse path.
+    let cells_hint: usize =
+        if let Some(spec) = parse_matrix_spec_inputs(&opts.matrix_spec).ok().flatten() {
+            spec.cells()
+        } else if let (Some(_), Some(facets)) = (opts.dimensions, opts.facets_per_dimension) {
+            opts.dimensions.unwrap_or(1) * facets.max(1)
+        } else if let Some(dims) = opts.dimensions {
+            // No per-dim count supplied; we still need a hint for
+            // the cardinality → sketches_per_cell derivation. Use
+            // 2 facets per dim as a placeholder (the LLM may pick
+            // more or fewer).
+            dims * 2
+        } else {
+            // No flag → full LLM-derive. Use a 4×2 hint (the legacy
+            // default). The LLM may pick more or fewer.
+            8
+        };
+    let per_cell = opts.cardinality / cells_hint.max(1);
+    per_cell.max(1)
+}
+
 /// Build the discovery pipeline. The phases are wired in the order
 /// they appear in V4 §6.3:
 ///
 /// 1. intake + clarify (mandatory seeding of the brief).
-/// 2. discover_matrix (sketch fan-out).
-/// 3. discover_tag (LLM tagger).
-/// 4. discover_cluster (SimHash + LLM refinement).
-/// 5. discover_contradict (cross-cluster disagreements).
-/// 6. discover_facet (per-cluster facet list).
-/// 7. discover_extract (per-facet markdown).
-/// 8. discover_integrate (one `final/cat_NN.md` per cluster).
-/// 9. discover_summary (executive index + optional uncategorized).
+/// 2. discover_dimensions (F1: LLM-derive or skip when --matrix-spec).
+/// 3. discover_matrix (sketch fan-out).
+/// 4. discover_tag (LLM tagger).
+/// 5. discover_cluster (SimHash + LLM refinement).
+/// 6. discover_contradict (cross-cluster disagreements).
+/// 7. discover_facet (per-cluster facet list).
+/// 8. discover_extract (per-facet markdown).
+/// 9. discover_integrate (one `final/cat_NN.md` per cluster).
+/// 10. discover_summary (executive index + optional uncategorized).
 ///
-/// PR-17 (Coordinator wire-up) preserves this builder as a
-/// "flat-pipeline" reference path. The CLI dispatcher
-/// ([`run`]) now drives the sketch fan-out through
-/// [`DiscoveryCoordinator::run_with_ctx`] and stitches the
-/// post-matrix phases back together via
-/// [`build_post_matrix_pipeline`]; the flat builder stays
-/// available for unit tests that want to inspect the canonical
-/// 10-phase order in isolation.
-///
-/// v0.5 PR-24: the same canonical list is also exposed via
-/// [`Pipeline::canonical_phase_order_for(PipelineKind::Discovery)`]
-/// so `Pipeline::resume_with_kind(canonical, last_phase, Discovery)`
-/// can dispatch correctly. Keep this list and
-/// [`Pipeline::canonical_phase_order_for(PipelineKind::Discovery)`]
-/// in lock-step: a re-ordering on either side silently breaks
-/// resume.
-pub fn build_discovery_pipeline(opts: &DiscoverOptions) -> Pipeline {
-    Pipeline::new()
-        .push(IntakePhase)
-        .push(ClarifyPhase)
-        .push(DiscoverMatrixPhase::from_dimensions(
-            opts.dimensions,
-            opts.facets_per_dimension,
-            opts.cardinality,
-        ))
+/// F1 (Track G.2) inserts `DiscoverDimensionsPhase` between
+/// `ClarifyPhase` and `DiscoverMatrixPhase`. The phase is a
+/// no-op when a `--matrix-spec` is supplied (the matrix uses the
+/// spec verbatim) and an active LLM-derive when the operator
+/// passed `--llm-derive` or no spec at all.
+pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
+    let (spec, _sketches_per_cell) =
+        resolve_matrix(opts, cfg).unwrap_or((MatrixSpec::default(), 10));
+    let needs_dimensions_phase = spec.dimensions.is_empty();
+    let mut pipeline = Pipeline::new().push(IntakePhase).push(ClarifyPhase);
+    if needs_dimensions_phase {
+        pipeline = pipeline.push(DiscoverDimensionsPhase);
+    }
+    pipeline
+        .push(DiscoverMatrixPhase::new(ExplorationMatrix::from_spec(
+            spec,
+            _sketches_per_cell,
+        )))
         .push(DiscoverTagPhase)
         .push(DiscoverClusterPhase {
             threshold: opts.cluster_threshold,
@@ -102,13 +219,20 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions) -> Pipeline {
         .push(DiscoverSummaryPhase)
 }
 
-/// Build the pre-matrix pipeline (intake + clarify). PR-17 splits the
-/// discovery flow so the sketch fan-out is driven by
-/// [`DiscoveryCoordinator::run_with_ctx`], not by the pipeline runner.
-/// Keeping `intake` + `clarify` in the pipeline preserves the
-/// pause/resume hooks at those phase boundaries.
-fn build_pre_matrix_pipeline() -> Pipeline {
-    Pipeline::new().push(IntakePhase).push(ClarifyPhase)
+/// Build the pre-matrix pipeline (intake + clarify + optional
+/// dimensions derivation). PR-17 splits the discovery flow so the
+/// sketch fan-out is driven by [`DiscoveryCoordinator::run_with_ctx`],
+/// not by the pipeline runner. Keeping `intake` + `clarify` in the
+/// pipeline preserves the pause/resume hooks at those phase
+/// boundaries.
+fn build_pre_matrix_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
+    let (spec, _sketches_per_cell) =
+        resolve_matrix(opts, cfg).unwrap_or((MatrixSpec::default(), 10));
+    let mut pipeline = Pipeline::new().push(IntakePhase).push(ClarifyPhase);
+    if spec.dimensions.is_empty() {
+        pipeline = pipeline.push(DiscoverDimensionsPhase);
+    }
+    pipeline
 }
 
 /// Build the post-matrix pipeline (tag → cluster → … → summary).
@@ -141,13 +265,24 @@ pub struct DiscoverOptions {
     /// Optional directory of canned mock responses.
     pub mock_dir: Option<PathBuf>,
     /// Minimum number of sketches to generate. Default 80.
+    /// F2 will rename this to `sketches_per_cell` and lower the
+    /// floor to 10.
     pub cardinality: usize,
     /// Optional override of the global parallel cap.
     pub max_parallelism: Option<usize>,
-    /// Number of dimensions in the exploration matrix. Default 4.
-    pub dimensions: usize,
-    /// Number of facets per dimension. Default 2.
-    pub facets_per_dimension: usize,
+    /// F1: target dimension count (no default — `None` means the
+    /// LLM picks freely).
+    pub dimensions: Option<usize>,
+    /// F1: target facets per dimension (no default — `None` means
+    /// the LLM picks asymmetrically per dimension).
+    pub facets_per_dimension: Option<usize>,
+    /// F1: operator-supplied matrix spec (repetible and
+    /// consolidated). When non-empty, the LLM-derive path is
+    /// skipped.
+    pub matrix_spec: Vec<String>,
+    /// F1: force the LLM-derive path even when the operator did
+    /// not pass a spec.
+    pub llm_derive: bool,
     /// SimHash threshold for clustering (0..=1). Default 0.7.
     pub cluster_threshold: f32,
     /// Output directory for the run. Defaults to MOAGAN_HOME resolution.
@@ -427,6 +562,27 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         // block wins.
     }
 
+    // F1 bridge: lift the CLI matrix knobs (`--matrix-spec` /
+    // `--dimensions` / `--facets-per-dimension` / `--llm-derive`)
+    // into `effective_cfg.discovery_matrix` so the coordinator
+    // (`src/discovery/coordinator.rs::build_coordinator_matrix`)
+    // and any downstream reader see the operator's CLI choice
+    // instead of the persisted `[discovery]` block alone. CLI
+    // always wins (matches the precedence the F1 subagent brief
+    // documented for `--temperature-profile`).
+    if !opts.matrix_spec.is_empty() {
+        effective_cfg.discovery_matrix.matrix_spec = opts.matrix_spec.clone();
+    }
+    if let Some(d) = opts.dimensions {
+        effective_cfg.discovery_matrix.dimensions = Some(d);
+    }
+    if let Some(f) = opts.facets_per_dimension {
+        effective_cfg.discovery_matrix.facets_per_dimension = Some(f);
+    }
+    if opts.llm_derive {
+        effective_cfg.discovery_matrix.llm_derive_first = true;
+    }
+
     let ctx = RunContext::new_with_config(
         run_id,
         Arc::clone(&home),
@@ -505,7 +661,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         breakers
     });
 
-    let pipeline = build_pre_matrix_pipeline();
+    let pipeline = build_pre_matrix_pipeline(&opts, &effective_cfg);
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
     let _outputs = tokio::select! {
@@ -615,8 +771,6 @@ pub(crate) fn parse_cardinality(args: &[String], default: usize) -> Result<usize
 /// for the resume matches the size the run was originally
 /// configured with.
 const RESUME_DEFAULT_CARDINALITY: usize = 80;
-const RESUME_DEFAULT_DIMENSIONS: usize = 4;
-const RESUME_DEFAULT_FACETS_PER_DIMENSION: usize = 2;
 const RESUME_DEFAULT_CLUSTER_THRESHOLD: f32 = 0.7;
 
 /// Read the discovery matrix cardinality from
@@ -815,8 +969,10 @@ pub async fn run_resume(
         mock_dir: None,
         cardinality: RESUME_DEFAULT_CARDINALITY,
         max_parallelism: None,
-        dimensions: RESUME_DEFAULT_DIMENSIONS,
-        facets_per_dimension: RESUME_DEFAULT_FACETS_PER_DIMENSION,
+        dimensions: None,
+        facets_per_dimension: None,
+        matrix_spec: Vec::new(),
+        llm_derive: false,
         cluster_threshold: RESUME_DEFAULT_CLUSTER_THRESHOLD,
         out_dir: None,
         non_interactive,
@@ -883,15 +1039,17 @@ fn build_canonical_for_resume_pipeline(manifest: &Manifest) -> Pipeline {
         mock_dir: None,
         cardinality: target,
         max_parallelism: None,
-        dimensions: RESUME_DEFAULT_DIMENSIONS,
-        facets_per_dimension: RESUME_DEFAULT_FACETS_PER_DIMENSION,
+        dimensions: None,
+        facets_per_dimension: None,
+        matrix_spec: Vec::new(),
+        llm_derive: false,
         cluster_threshold: RESUME_DEFAULT_CLUSTER_THRESHOLD,
         out_dir: None,
         non_interactive: true,
         cache_facets: false,
         temperature_profiles: Vec::new(),
     };
-    build_discovery_pipeline(&opts)
+    build_discovery_pipeline(&opts, &Config::load().unwrap_or_default())
 }
 
 /// Re-export of [`load_manifest`] for the dispatcher path; the

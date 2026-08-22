@@ -302,7 +302,10 @@ async fn discover_matrix_phase_runs_under_stop_policy_watch() {
     run_dir.ensure().unwrap();
     build_brief(&run_dir).unwrap();
 
-    let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x,y;b=x,y").expect("spec parses"),
+        2,
+    ));
     let mock = build_matrix_mock(matrix.matrix.sketches_per_cell, matrix.matrix.cells());
     let ctx = build_run_context(home.clone(), mock, run_id);
 

@@ -6,10 +6,27 @@
 //! the angle-rotated sketch fan-out of the standard pipeline because
 //! it samples the *space* systematically rather than rotating
 //! through a fixed list of personas.
+//!
+//! F1 (Track G.2) refactor: the matrix no longer hardcodes its
+//! dimensions. The new constructor
+//! [`ExplorationMatrix::new`] takes the dimensions verbatim —
+//! whether the operator supplied them via `--matrix-spec`, the
+//! `discover_dimensions` LLM-derive phase derived them from the
+//! brief, or a legacy code path built them programmatically.
+//! [`ExplorationMatrix::load_or_derive`] is the resume-side helper:
+//! load a previously-persisted `discovery_dimensions.json` if
+//! present, otherwise build a new matrix from the supplied spec
+//! (or empty fallback when the caller has no spec).
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::{Error, Result};
+use crate::phases::util::read_json;
+
+use super::matrix_spec::MatrixSpec;
 
 /// Per-provider sampling temperature profile (PR-D1, V4 §6.4
 /// evolution).
@@ -101,6 +118,83 @@ pub struct MatrixCell {
     pub label: String,
 }
 
+/// Sidecar filename under the run root that holds the LLM-derived
+/// matrix dimensions. F1 / Track G.2 (`discover_dimensions`):
+/// written by the new phase, read by the matrix phase and the
+/// resume path.
+pub const DISCOVERY_DIMENSIONS_FILENAME: &str = "discovery_dimensions.json";
+
+/// Schema version stored alongside the dimensions sidecar so a
+/// future bump is detectable without diffing field lists. Bump
+/// when the wire format changes in a non-backward-compatible way.
+pub const DISCOVERY_DIMENSIONS_SCHEMA_VERSION: &str = "dims-v1";
+
+/// On-disk shape of `<run_dir>/discovery_dimensions.json`. The
+/// matrix persists the brief-deriver's payload verbatim (minus
+/// the schema metadata) so the resume path can recover the same
+/// dimensions without re-issuing the LLM call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryDimensions {
+    /// Schema version for forward-compat detection.
+    pub schema_version: String,
+    /// BLAKE3 hash of the brief that drove the derivation (so a
+    /// resume can confirm the cached dimensions still match the
+    /// current brief).
+    pub brief_hash: String,
+    /// Dimensions + facets the LLM derived.
+    pub dimensions: Vec<Dimension>,
+    /// Optional descriptions map keyed by `(dimension_id,
+    /// facet_id)`. Populated when the LLM supplied descriptions
+    /// (the dimension-deriver prompt asks for them); an empty map
+    /// is acceptable. Serialised as a list of
+    /// `[dimension_id, facet_id, description]` triples so a
+    /// tuple-keyed `HashMap` round-trips through JSON (Rust's
+    /// default tuple-key serde representation is a nested
+    /// object that requires string keys at every level).
+    #[serde(default)]
+    pub descriptions: Vec<DimensionFacetDescription>,
+    /// Unix timestamp when the sidecar was written.
+    pub created_unix: i64,
+}
+
+/// One `(dimension_id, facet_id, description)` triple. The
+/// wire-format for [`DiscoveryDimensions::descriptions`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DimensionFacetDescription {
+    /// Dimension id.
+    pub dimension_id: String,
+    /// Facet id.
+    pub facet_id: String,
+    /// Free-text description the LLM supplied.
+    pub description: String,
+}
+
+impl DimensionFacetDescription {
+    /// Build a new triple.
+    pub fn new(
+        dimension_id: impl Into<String>,
+        facet_id: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            dimension_id: dimension_id.into(),
+            facet_id: facet_id.into(),
+            description: description.into(),
+        }
+    }
+}
+
+impl DiscoveryDimensions {
+    /// Look up the description for a `(dimension_id, facet_id)`
+    /// pair. Returns `None` when the LLM did not supply one.
+    pub fn description_for(&self, dim: &str, facet: &str) -> Option<&str> {
+        self.descriptions
+            .iter()
+            .find(|d| d.dimension_id == dim && d.facet_id == facet)
+            .map(|d| d.description.as_str())
+    }
+}
+
 /// The full exploration matrix.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExplorationMatrix {
@@ -108,7 +202,9 @@ pub struct ExplorationMatrix {
     pub dimensions: Vec<Dimension>,
     /// Number of sketches to generate per cell. Default 10
     /// (4 dims × 2 facets × 10 = 80 sketches, the user's chosen
-    /// floor).
+    /// floor). F1 surfaces this as `sketches_per_cell` so the
+    /// matrix fan-out is decoupled from a hardcoded `cardinality`
+    /// target; F2 renames the CLI flag accordingly.
     pub sketches_per_cell: usize,
     /// Per-provider sampling-temperature profiles keyed by the
     /// provider's MODEL name (e.g. `"MiniMax-M3"`, `"deepseek-v4-flash"`,
@@ -129,141 +225,70 @@ pub struct ExplorationMatrix {
 }
 
 impl ExplorationMatrix {
-    /// Build a matrix with the default dimensions and facets when no
-    /// explicit one is supplied. The defaults target the four most
-    /// universally-applicable axes: deployment model, storage
-    /// strategy, consistency model, and observability.
-    ///
-    /// Equivalent to `default_for_with_profiles(cardinality,
-    /// HashMap::new(), TemperatureProfile::default())` — the v0.5
-    /// single-shot contract is preserved bit-identically.
-    pub fn default_for(cardinality: usize) -> Self {
-        Self::default_for_with_profiles(cardinality, HashMap::new(), TemperatureProfile::default())
-    }
-
-    /// Variant of [`Self::default_for`] that accepts explicit
-    /// per-provider temperature profiles. Use this when the CLI
-    /// `--temperature-profile` flags (or the `[discovery]`
-    /// `config.toml` block) supplied a non-empty map.
-    pub fn default_for_with_profiles(
-        cardinality: usize,
-        temperature_profiles: HashMap<String, TemperatureProfile>,
-        default_profile: TemperatureProfile,
-    ) -> Self {
-        let dims = vec![
-            Dimension {
-                id: "deployment-model".into(),
-                label: "Deployment model".into(),
-                facets: vec![
-                    Facet {
-                        id: "serverless".into(),
-                        label: "serverless".into(),
-                    },
-                    Facet {
-                        id: "self-hosted".into(),
-                        label: "self-hosted".into(),
-                    },
-                ],
-            },
-            Dimension {
-                id: "storage".into(),
-                label: "Storage strategy".into(),
-                facets: vec![
-                    Facet {
-                        id: "sql".into(),
-                        label: "SQL".into(),
-                    },
-                    Facet {
-                        id: "kv".into(),
-                        label: "embedded key-value".into(),
-                    },
-                ],
-            },
-            Dimension {
-                id: "consistency".into(),
-                label: "Consistency model".into(),
-                facets: vec![
-                    Facet {
-                        id: "strong".into(),
-                        label: "strong".into(),
-                    },
-                    Facet {
-                        id: "eventual".into(),
-                        label: "eventual".into(),
-                    },
-                ],
-            },
-            Dimension {
-                id: "observability".into(),
-                label: "Observability".into(),
-                facets: vec![
-                    Facet {
-                        id: "logs-only".into(),
-                        label: "logs only".into(),
-                    },
-                    Facet {
-                        id: "metrics-tracing".into(),
-                        label: "metrics + tracing".into(),
-                    },
-                ],
-            },
-        ];
-        let cells = dims.iter().map(|d| d.facets.len().max(1)).sum::<usize>();
-        let per_cell = (cardinality / cells.max(1)).max(1);
+    /// Build a matrix from the supplied dimensions and a
+    /// `sketches_per_cell` fan-out. The matrix owns the dimensions
+    /// verbatim — no hardcoded defaults, no derivation. Callers
+    /// that need to source the dimensions from an operator spec,
+    /// the LLM deriver, or a sidecar reach this constructor via
+    /// [`ExplorationMatrix::from_spec`],
+    /// [`ExplorationMatrix::from_derived`], or
+    /// [`ExplorationMatrix::load_or_derive`].
+    pub fn new(dimensions: Vec<Dimension>, sketches_per_cell: usize) -> Self {
+        let sketches_per_cell = sketches_per_cell.max(1);
         Self {
-            dimensions: dims,
-            sketches_per_cell: per_cell,
-            temperature_profiles,
-            default_profile,
+            dimensions,
+            sketches_per_cell,
+            temperature_profiles: HashMap::new(),
+            default_profile: TemperatureProfile::default(),
         }
     }
 
-    /// Build a matrix from explicit `dimensions` and `facets_per_dim`.
-    /// The facets inside each dimension are auto-generated from the
-    /// count (`f1`, `f2`, …, `fN`).
-    ///
-    /// Equivalent to `from_dimensions_with_profiles(num_dimensions,
-    /// facets_per_dim, HashMap::new(),
-    /// TemperatureProfile::default())` — preserves v0.5 behaviour.
-    pub fn from_dimensions(num_dimensions: usize, facets_per_dim: usize) -> Self {
-        Self::from_dimensions_with_profiles(
-            num_dimensions,
-            facets_per_dim,
-            HashMap::new(),
-            TemperatureProfile::default(),
-        )
+    /// Build a matrix from an operator-supplied [`MatrixSpec`].
+    /// The spec's dimensions are promoted verbatim; the
+    /// `sketches_per_cell` parameter is the per-cell fan-out the
+    /// CLI / TOML resolved (F2 will move the flag from
+    /// `--cardinality` to `--sketches-per-cell`).
+    pub fn from_spec(spec: MatrixSpec, sketches_per_cell: usize) -> Self {
+        Self::new(spec.into_dimensions(), sketches_per_cell)
     }
 
-    /// Variant of [`Self::from_dimensions`] that accepts explicit
-    /// per-provider temperature profiles. Same shape as the
-    /// no-profile constructor; the profile parameters are stored on
-    /// the matrix so the discovery phase can iterate per-provider.
-    pub fn from_dimensions_with_profiles(
-        num_dimensions: usize,
-        facets_per_dim: usize,
-        temperature_profiles: HashMap<String, TemperatureProfile>,
-        default_profile: TemperatureProfile,
-    ) -> Self {
-        let dims = (0..num_dimensions)
-            .map(|i| Dimension {
-                id: format!("dim-{i:02}"),
-                label: format!("Dimension {i:02}"),
-                facets: (0..facets_per_dim)
-                    .map(|j| Facet {
-                        id: format!("f{}", j + 1),
-                        label: format!("F{}", j + 1),
-                    })
-                    .collect(),
-            })
-            .collect();
-        let cells = num_dimensions * facets_per_dim.max(1);
-        let per_cell = (80 / cells).max(1);
-        Self {
-            dimensions: dims,
-            sketches_per_cell: per_cell,
-            temperature_profiles,
-            default_profile,
+    /// Build a matrix from LLM-derived dimensions. The phase
+    /// already validated the brief-deriver's payload; this
+    /// constructor just wraps the `Vec<Dimension>` with the
+    /// operator-chosen fan-out.
+    pub fn from_derived(dimensions: Vec<Dimension>, sketches_per_cell: usize) -> Self {
+        Self::new(dimensions, sketches_per_cell)
+    }
+
+    /// Build a matrix from an existing
+    /// [`DiscoveryDimensions`] sidecar (the resume path) plus the
+    /// supplied fan-out. The constructor takes ownership so the
+    /// caller doesn't have to clone the dimensions just to wrap
+    /// them.
+    pub fn from_sidecar(sidecar: DiscoveryDimensions, sketches_per_cell: usize) -> Self {
+        Self::new(sidecar.dimensions, sketches_per_cell)
+    }
+
+    /// Load the dimensions sidecar from `<run_dir>/discovery_dimensions.json`
+    /// and build the matrix around it. Returns `Ok(None)` when the
+    /// sidecar is absent (a fresh run); returns
+    /// `Err(Error::InvalidState)` when the sidecar is present but
+    /// malformed (resume must surface, not silently drop).
+    pub fn load_or_derive(run_dir: &Path, sketches_per_cell: usize) -> Result<Option<Self>> {
+        let path = run_dir.join(DISCOVERY_DIMENSIONS_FILENAME);
+        if !path.exists() {
+            return Ok(None);
         }
+        let sidecar: DiscoveryDimensions = match read_json(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(Error::InvalidState(format!(
+                    "{} malformed: {e}",
+                    DISCOVERY_DIMENSIONS_FILENAME
+                )));
+            }
+        };
+        Ok(Some(Self::from_sidecar(sidecar, sketches_per_cell)))
     }
 
     /// Resolve the temperature profile for a given provider model
@@ -296,7 +321,10 @@ impl ExplorationMatrix {
         self.cells() * self.sketches_per_cell
     }
 
-    /// Number of cells (one per `dimension × facet` pair).
+    /// Number of cells (one per `dimension × facet` pair). With
+    /// F1's asymmetric facets the sum is per-dimension facet
+    /// counts (NOT a Cartesian product — the dimension-deriver
+    /// phase picks facet counts per dimension).
     pub fn cells(&self) -> usize {
         // Empty matrix has zero cells (no fan-out). A non-empty
         // matrix with a zero-facet dimension still counts that
@@ -338,76 +366,127 @@ impl ExplorationMatrix {
 mod tests {
     use super::*;
 
+    fn dims_2_3() -> Vec<Dimension> {
+        vec![
+            Dimension {
+                id: "deployment-model".into(),
+                label: "Deployment model".into(),
+                facets: vec![
+                    Facet {
+                        id: "serverless".into(),
+                        label: "serverless".into(),
+                    },
+                    Facet {
+                        id: "self-hosted".into(),
+                        label: "self-hosted".into(),
+                    },
+                ],
+            },
+            Dimension {
+                id: "storage".into(),
+                label: "Storage strategy".into(),
+                facets: vec![
+                    Facet {
+                        id: "sql".into(),
+                        label: "SQL".into(),
+                    },
+                    Facet {
+                        id: "kv".into(),
+                        label: "embedded key-value".into(),
+                    },
+                    Facet {
+                        id: "blob".into(),
+                        label: "blob".into(),
+                    },
+                ],
+            },
+        ]
+    }
+
     #[test]
-    fn default_for_80_sketches_yields_ten_per_cell() {
-        let m = ExplorationMatrix::default_for(80);
-        assert_eq!(
-            m.cardinality(),
-            80,
-            "cells={} * per_cell={}",
-            m.cells(),
-            m.sketches_per_cell
-        );
-        assert_eq!(m.cells(), 8);
+    fn new_uses_supplied_dimensions() {
+        let m = ExplorationMatrix::new(dims_2_3(), 10);
+        assert_eq!(m.dimensions.len(), 2);
         assert_eq!(m.sketches_per_cell, 10);
+        assert_eq!(m.cells(), 5);
+        assert_eq!(m.cardinality(), 50);
     }
 
     #[test]
-    fn default_for_160_doubles_per_cell() {
-        let m = ExplorationMatrix::default_for(160);
-        assert_eq!(m.cardinality(), 160);
+    fn new_clamps_sketches_per_cell_to_one() {
+        // Zero or below is treated as one so the matrix never
+        // silently produces zero work.
+        let m = ExplorationMatrix::new(dims_2_3(), 0);
+        assert_eq!(m.sketches_per_cell, 1);
+        assert_eq!(m.cardinality(), 5);
+    }
+
+    #[test]
+    fn from_spec_promotes_to_matrix_shape() {
+        let spec =
+            MatrixSpec::parse_one("deployment=serverless,self-hosted;storage=sql,kv,blob").unwrap();
+        let m = ExplorationMatrix::from_spec(spec, 12);
+        assert_eq!(m.dimensions.len(), 2);
+        assert_eq!(m.cells(), 5);
+        assert_eq!(m.sketches_per_cell, 12);
+        assert_eq!(m.cardinality(), 60);
+    }
+
+    #[test]
+    fn from_derived_passes_dimensions_through() {
+        let dims = vec![Dimension {
+            id: "auth".into(),
+            label: "Auth strategy".into(),
+            facets: vec![
+                Facet {
+                    id: "oauth".into(),
+                    label: "OAuth".into(),
+                },
+                Facet {
+                    id: "api-key".into(),
+                    label: "API key".into(),
+                },
+            ],
+        }];
+        let m = ExplorationMatrix::from_derived(dims, 20);
+        assert_eq!(m.dimensions.len(), 1);
+        assert_eq!(m.cells(), 2);
         assert_eq!(m.sketches_per_cell, 20);
+        assert_eq!(m.cardinality(), 40);
     }
 
     #[test]
-    fn from_dimensions_creates_auto_ids() {
-        let m = ExplorationMatrix::from_dimensions(3, 2);
-        assert_eq!(m.dimensions.len(), 3);
-        assert_eq!(m.dimensions[0].facets.len(), 2);
-        assert_eq!(m.dimensions[0].facets[0].id, "f1");
-        assert_eq!(m.dimensions[0].facets[1].id, "f2");
-        assert_eq!(m.dimensions[1].id, "dim-01");
-    }
-
-    #[test]
-    fn from_dimensions_with_zero_facets_uses_one_facet_min() {
-        // The contract: at least one cell per dimension so the
-        // matrix is never empty.
-        let m = ExplorationMatrix::from_dimensions(4, 0);
-        assert_eq!(m.cells(), 4);
-    }
-
-    #[test]
-    fn iter_cells_yields_dense_grid() {
-        let m = ExplorationMatrix::default_for(80);
+    fn iter_cells_yields_asymmetric_grid() {
+        // 2 + 3 = 5 cells, in declaration order, no Cartesian
+        // duplication.
+        let m = ExplorationMatrix::new(dims_2_3(), 1);
         let cells: Vec<_> = m.iter_cells().collect();
-        assert_eq!(cells.len(), 8);
-        assert!(
-            cells
-                .iter()
-                .any(|c| c.dimension_id == "deployment-model" && c.facet_id == "serverless")
-        );
-        assert!(
-            cells
-                .iter()
-                .any(|c| c.dimension_id == "observability" && c.facet_id == "metrics-tracing")
-        );
+        assert_eq!(cells.len(), 5);
+        let ids: Vec<(String, String)> = cells
+            .iter()
+            .map(|c| (c.dimension_id.clone(), c.facet_id.clone()))
+            .collect();
+        assert!(ids.contains(&("deployment-model".into(), "serverless".into())));
+        assert!(ids.contains(&("deployment-model".into(), "self-hosted".into())));
+        assert!(ids.contains(&("storage".into(), "sql".into())));
+        assert!(ids.contains(&("storage".into(), "kv".into())));
+        assert!(ids.contains(&("storage".into(), "blob".into())));
     }
 
     #[test]
     fn dimension_lookup_returns_match() {
-        let m = ExplorationMatrix::default_for(80);
+        let m = ExplorationMatrix::new(dims_2_3(), 1);
         assert_eq!(m.dimension("storage").unwrap().label, "Storage strategy");
         assert!(m.dimension("nope").is_none());
     }
 
     #[test]
     fn tally_counts_facets_per_dimension() {
-        let m = ExplorationMatrix::default_for(80);
+        let m = ExplorationMatrix::new(dims_2_3(), 1);
         let t = m.tally();
-        assert_eq!(t.len(), 4);
+        assert_eq!(t.len(), 2);
         assert_eq!(t["deployment-model"], 2);
-        assert_eq!(t["storage"], 2);
+        assert_eq!(t["storage"], 3);
     }
 
     #[test]
@@ -424,13 +503,13 @@ mod tests {
 
     #[test]
     fn cardinality_round_trips_through_json() {
-        let m = ExplorationMatrix::default_for(80);
+        let m = ExplorationMatrix::new(dims_2_3(), 16);
         let j = serde_json::to_string(&m).unwrap();
         let back: ExplorationMatrix = serde_json::from_str(&j).unwrap();
         assert_eq!(back.cardinality(), 80);
+        assert_eq!(back.cells(), 5);
+        assert_eq!(back.sketches_per_cell, 16);
     }
-
-    // ---- PR-D1: TemperatureProfile + per-provider profile tests ----
 
     /// PR-D1: the default profile is bit-identical to the v0.5
     /// single-shot contract. `TemperatureProfile::default()` must
@@ -477,7 +556,9 @@ mod tests {
             temperatures: vec![0.5],
             replicas_per_temperature: 2,
         };
-        let m = ExplorationMatrix::default_for_with_profiles(80, profiles, default_profile);
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        m.default_profile = default_profile;
         let explicit = m.profile_for("MiniMax-M3");
         assert_eq!(explicit.temperatures, vec![0.0, 0.3, 0.7, 1.0]);
         assert_eq!(explicit.replicas_per_temperature, 4);
@@ -487,29 +568,14 @@ mod tests {
     }
 
     /// PR-D1: with the default profile (`[1.0] × 1`) and an empty
-    /// per-provider map, `cardinality()` matches v0.5 — the
-    /// `total()` factor is `1`, so the formula is unchanged.
+    /// per-provider map, `cardinality()` matches the no-profile
+    /// case — the `total()` factor is `1`, so the formula is
+    /// unchanged.
     #[test]
     fn exploration_matrix_cardinality_unchanged_when_no_profiles() {
-        let m = ExplorationMatrix::default_for(80);
+        let m = ExplorationMatrix::new(dims_2_3(), 10);
         assert_eq!(m.profile_for("anything").total(), 1);
-        assert_eq!(m.cardinality(), 80);
-    }
-
-    /// PR-D1: the matrix's profile constructors preserve v0.5
-    /// `cardinality` when called without explicit profiles. Pin
-    /// `default_for` and `from_dimensions` to the no-profile path so
-    /// the audit's "bit-identical default" promise survives
-    /// refactors.
-    #[test]
-    fn exploration_matrix_constructors_default_to_no_profiles() {
-        let m1 = ExplorationMatrix::default_for(80);
-        assert!(m1.temperature_profiles.is_empty());
-        assert_eq!(m1.default_profile, TemperatureProfile::default());
-
-        let m2 = ExplorationMatrix::from_dimensions(3, 2);
-        assert!(m2.temperature_profiles.is_empty());
-        assert_eq!(m2.default_profile, TemperatureProfile::default());
+        assert_eq!(m.cardinality(), 50);
     }
 
     /// PR-D1: a profile-configured matrix round-trips through
@@ -526,19 +592,148 @@ mod tests {
                 replicas_per_temperature: 2,
             },
         );
-        let m = ExplorationMatrix::default_for_with_profiles(
-            80,
-            profiles,
-            TemperatureProfile {
-                temperatures: vec![0.5],
-                replicas_per_temperature: 1,
-            },
-        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        m.default_profile = TemperatureProfile {
+            temperatures: vec![0.5],
+            replicas_per_temperature: 1,
+        };
         let j = serde_json::to_string(&m).unwrap();
         let back: ExplorationMatrix = serde_json::from_str(&j).unwrap();
         let restored = back.profile_for("MiniMax-M3");
         assert_eq!(restored.temperatures, vec![0.0, 0.7]);
         assert_eq!(restored.replicas_per_temperature, 2);
         assert_eq!(back.default_profile.temperatures, vec![0.5]);
+    }
+
+    /// F1: an asymmetric matrix (3 dims with 1/2/3 facets) sums
+    /// to 6 cells and rounds to the supplied fan-out for the
+    /// cardinality calculation. The previous Cartesian-product
+    /// default (dims × facets) is gone.
+    #[test]
+    fn asymmetric_dimensions_sum_to_six_cells() {
+        let dims = vec![
+            Dimension {
+                id: "auth".into(),
+                label: "Auth".into(),
+                facets: vec![Facet {
+                    id: "oauth".into(),
+                    label: "OAuth".into(),
+                }],
+            },
+            Dimension {
+                id: "storage".into(),
+                label: "Storage".into(),
+                facets: vec![
+                    Facet {
+                        id: "sql".into(),
+                        label: "SQL".into(),
+                    },
+                    Facet {
+                        id: "kv".into(),
+                        label: "KV".into(),
+                    },
+                ],
+            },
+            Dimension {
+                id: "scaling".into(),
+                label: "Scaling".into(),
+                facets: vec![
+                    Facet {
+                        id: "vertical".into(),
+                        label: "Vertical".into(),
+                    },
+                    Facet {
+                        id: "horizontal".into(),
+                        label: "Horizontal".into(),
+                    },
+                    Facet {
+                        id: "auto".into(),
+                        label: "Auto".into(),
+                    },
+                ],
+            },
+        ];
+        let m = ExplorationMatrix::new(dims, 10);
+        assert_eq!(m.cells(), 6);
+        assert_eq!(m.cardinality(), 60);
+    }
+
+    /// F1: `cells()` is zero on an empty matrix so a misconfigured
+    /// spec (operator passed `--dimensions 0` for example) never
+    /// silently produces work.
+    #[test]
+    fn empty_matrix_has_zero_cells() {
+        let m = ExplorationMatrix::new(Vec::new(), 10);
+        assert_eq!(m.cells(), 0);
+        assert_eq!(m.cardinality(), 0);
+        assert_eq!(m.iter_cells().count(), 0);
+    }
+
+    /// F1: `load_or_derive` returns `Ok(None)` when the sidecar
+    /// is absent — a fresh run gets a clean `None` rather than an
+    /// error.
+    #[test]
+    fn load_or_derive_returns_none_when_sidecar_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let m = ExplorationMatrix::load_or_derive(dir.path(), 10).expect("load_or_derive ok");
+        assert!(m.is_none());
+    }
+
+    /// F1: `load_or_derive` reads the sidecar and rebuilds the
+    /// matrix around it. The dimensions come back verbatim.
+    #[test]
+    fn load_or_derive_reads_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dims = dims_2_3();
+        let sidecar = DiscoveryDimensions {
+            schema_version: DISCOVERY_DIMENSIONS_SCHEMA_VERSION.into(),
+            brief_hash: "abc".into(),
+            dimensions: dims.clone(),
+            descriptions: Vec::new(),
+            created_unix: 1,
+        };
+        let path = dir.path().join(DISCOVERY_DIMENSIONS_FILENAME);
+        std::fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let m = ExplorationMatrix::load_or_derive(dir.path(), 5)
+            .expect("load ok")
+            .expect("sidecar present");
+        assert_eq!(m.cells(), 5);
+        assert_eq!(m.sketches_per_cell, 5);
+        assert_eq!(m.cardinality(), 25);
+        assert_eq!(m.dimensions[0].id, dims[0].id);
+    }
+
+    /// F1: `load_or_derive` surfaces a malformed sidecar as
+    /// `Error::InvalidState` so a resume does not silently drop
+    /// the cached dimensions.
+    #[test]
+    fn load_or_derive_errors_on_malformed_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(DISCOVERY_DIMENSIONS_FILENAME);
+        std::fs::write(&path, b"{not json").unwrap();
+        let err = ExplorationMatrix::load_or_derive(dir.path(), 5).unwrap_err();
+        assert!(err.to_string().contains("malformed"));
+    }
+
+    /// F1: `DiscoveryDimensions` round-trips through JSON so a
+    /// resumed run can read it back byte-for-byte.
+    #[test]
+    fn discovery_dimensions_round_trip() {
+        let descs = vec![DimensionFacetDescription::new(
+            "deployment-model",
+            "serverless",
+            "Run on a managed runtime.",
+        )];
+        let sidecar = DiscoveryDimensions {
+            schema_version: DISCOVERY_DIMENSIONS_SCHEMA_VERSION.into(),
+            brief_hash: "deadbeef".into(),
+            dimensions: dims_2_3(),
+            descriptions: descs,
+            created_unix: 123,
+        };
+        let j = serde_json::to_string(&sidecar).unwrap();
+        let back: DiscoveryDimensions = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, sidecar);
     }
 }

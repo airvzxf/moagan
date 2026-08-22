@@ -152,6 +152,18 @@ fn build_ctx_with_auto_pickers(
             angle_clusters_min: 2,
             ..DiscoveryWiringConfig::default()
         },
+        // F1 (Track G.2): pre-populate `matrix_spec` with the
+        // legacy 4×2 layout so the coordinator's matrix builder
+        // has a non-empty shape to fan out against.
+        discovery_matrix: moagan::config::DiscoveryMatrixConfig {
+            matrix_spec: vec![
+                "a=x,y".to_string(),
+                "b=x,y".to_string(),
+                "c=x,y".to_string(),
+                "d=x,y".to_string(),
+            ],
+            ..moagan::config::DiscoveryMatrixConfig::default()
+        },
         ..Config::default()
     });
     RunContext::new_with_config(
@@ -347,6 +359,18 @@ async fn pr18_auto_pickers_disabled_skips_picker_rows() {
             angle_enabled: true,
             auto_pickers: false,
             ..DiscoveryWiringConfig::default()
+        },
+        // F1 (Track G.2): pre-populate `matrix_spec` with the
+        // legacy 4×2 layout so the coordinator's matrix builder
+        // has a non-empty shape to fan out against.
+        discovery_matrix: moagan::config::DiscoveryMatrixConfig {
+            matrix_spec: vec![
+                "a=x,y".to_string(),
+                "b=x,y".to_string(),
+                "c=x,y".to_string(),
+                "d=x,y".to_string(),
+            ],
+            ..moagan::config::DiscoveryMatrixConfig::default()
         },
         ..Config::default()
     });

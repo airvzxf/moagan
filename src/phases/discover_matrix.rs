@@ -5,12 +5,20 @@
 //! angles), the matrix phase samples the design space
 //! systematically:
 //!
-//! 1. The matrix has `dimensions × facets_per_dim` cells (e.g. 4 × 2
-//!    = 8).
-//! 2. Each cell produces `cardinality / cells` sketches (so the
-//!    minimum 80 is enforced by the matrix itself).
+//! 1. The matrix carries the dimensions and facets the upstream
+//!    `discover_dimensions` phase derived (or that the operator
+//!    supplied via `--matrix-spec`).
+//! 2. Each cell produces `sketches_per_cell` sketches so the
+//!    matrix's `cells() * sketches_per_cell` total matches the
+//!    operator-configured fan-out.
 //! 3. Each sketch is generated with the `discover_matrix` system
 //!    prompt and `(dimension, facet)` injected into the user payload.
+//!
+//! F1 (Track G.2) refactor: the phase no longer owns the matrix
+//! construction. It accepts a fully-built [`ExplorationMatrix`] via
+//! [`DiscoverMatrixPhase::new`] and the resume path uses
+//! [`DiscoverMatrixPhase::resolved`] to load the matrix from the
+//! `<run_dir>/discovery_dimensions.json` sidecar.
 //!
 //! Output: `sketches/sk_<uuid7>.json` (one per surviving sketch) plus
 //! `exploration_matrix.json` (the matrix that was used) so a second
@@ -42,31 +50,33 @@ use crate::telemetry::event::TelemetryEvent;
 /// were lost.
 pub struct DiscoverMatrixPhase {
     /// The matrix to use. The phase does NOT auto-pick defaults —
-    /// callers construct the matrix with `ExplorationMatrix::default_for`
-    /// or `from_dimensions` and pass it in.
+    /// callers construct the matrix with `ExplorationMatrix::new`,
+    /// `from_spec`, `from_derived`, or `load_or_derive` and pass it
+    /// in via [`DiscoverMatrixPhase::new`].
     pub matrix: ExplorationMatrix,
 }
 
 impl DiscoverMatrixPhase {
-    /// Build a phase with the default matrix sized for `cardinality`.
-    pub fn with_cardinality(cardinality: usize) -> Self {
-        Self {
-            matrix: ExplorationMatrix::default_for(cardinality),
-        }
+    /// Build a phase with a fully-constructed matrix. The caller
+    /// owns the matrix — the phase does not touch it.
+    pub fn new(matrix: ExplorationMatrix) -> Self {
+        Self { matrix }
     }
 
-    /// Build a phase from explicit `(dimensions, facets_per_dim)`,
-    /// sizing `sketches_per_cell` so the total reaches the con\\\
-    /// figured `cardinality` (default 80).
-    pub fn from_dimensions(
-        num_dimensions: usize,
-        facets_per_dim: usize,
-        cardinality: usize,
-    ) -> Self {
-        let mut m = ExplorationMatrix::from_dimensions(num_dimensions, facets_per_dim);
-        let cells = m.cells().max(1);
-        m.sketches_per_cell = (cardinality / cells).max(1);
-        Self { matrix: m }
+    /// Resume-side helper: load `<run_dir>/discovery_dimensions.json`
+    /// and build the matrix around it. Returns `Err(...)` when the
+    /// sidecar is missing or malformed so the dispatcher surfaces a
+    /// clear error rather than running with a phantom matrix.
+    pub fn resolved(ctx: &RunContext, sketches_per_cell: usize) -> Result<Self> {
+        match ExplorationMatrix::load_or_derive(ctx.run_dir().root(), sketches_per_cell)? {
+            Some(matrix) => Ok(Self { matrix }),
+            None => Err(Error::InvalidState(
+                "discover_matrix::resolved requires <run_dir>/discovery_dimensions.json; \
+                 either run `discover_dimensions` first or pass an explicit matrix via \
+                 `DiscoverMatrixPhase::new`"
+                    .into(),
+            )),
+        }
     }
 
     /// Persist the matrix alongside the sketches so the run can be
@@ -80,7 +90,7 @@ impl DiscoverMatrixPhase {
     /// Test-only helper so the matrix can be persisted without a
     /// full `RunContext`.
     #[cfg(test)]
-    fn persist_matrix_for_test(&self, run_dir: &crate::fs_layout::RunDir<'_>) -> Result<PathBuf> {
+    fn persist_matrix_for_test(&self, run_dir: &RunDir<'_>) -> Result<PathBuf> {
         let path = run_dir.root().join("exploration_matrix.json");
         write_json(&path, &self.matrix)?;
         Ok(path)
@@ -213,7 +223,7 @@ impl DiscoverMatrixPhase {
     /// Build the user payload for a `(cell, sketch_index)` pair.
     /// The sketch is told the brief and the cell's label, and asked
     /// to produce one sketch biased by that angle.
-    fn user_payload(brief: &str, cell: &MatrixCell, index: usize) -> String {
+    pub fn user_payload(brief: &str, cell: &MatrixCell, index: usize) -> String {
         format!(
             "{brief}\n\n\
          Use dimension=\"{dim_id}\" and facet=\"{facet_id}\" (label: \"{label}\") and \
@@ -574,19 +584,52 @@ impl Phase for DiscoverMatrixPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::matrix::{Dimension, Facet};
 
-    #[test]
-    fn with_cardinality_uses_default_matrix() {
-        let p = DiscoverMatrixPhase::with_cardinality(80);
-        assert_eq!(p.matrix.cardinality(), 80);
-        assert_eq!(p.matrix.cells(), 8);
+    fn dims_2_3() -> Vec<Dimension> {
+        vec![
+            Dimension {
+                id: "deployment-model".into(),
+                label: "Deployment model".into(),
+                facets: vec![
+                    Facet {
+                        id: "serverless".into(),
+                        label: "serverless".into(),
+                    },
+                    Facet {
+                        id: "self-hosted".into(),
+                        label: "self-hosted".into(),
+                    },
+                ],
+            },
+            Dimension {
+                id: "storage".into(),
+                label: "Storage strategy".into(),
+                facets: vec![
+                    Facet {
+                        id: "sql".into(),
+                        label: "SQL".into(),
+                    },
+                    Facet {
+                        id: "kv".into(),
+                        label: "embedded key-value".into(),
+                    },
+                    Facet {
+                        id: "blob".into(),
+                        label: "blob".into(),
+                    },
+                ],
+            },
+        ]
     }
 
     #[test]
-    fn from_dimensions_reaches_default_cardinality() {
-        let p = DiscoverMatrixPhase::from_dimensions(3, 2, 80);
-        assert_eq!(p.matrix.cells(), 6);
-        assert!(p.matrix.cardinality() >= 78);
+    fn new_uses_supplied_matrix() {
+        let m = ExplorationMatrix::new(dims_2_3(), 10);
+        let p = DiscoverMatrixPhase::new(m);
+        assert_eq!(p.matrix.cells(), 5);
+        assert_eq!(p.matrix.sketches_per_cell, 10);
+        assert_eq!(p.matrix.cardinality(), 50);
     }
 
     #[test]
@@ -618,14 +661,16 @@ mod tests {
     #[test]
     fn matrix_persists() {
         crate::test_support::with_moagan_home("discover_matrix_persists", |_home| {
-            let p = DiscoverMatrixPhase::with_cardinality(80);
+            let m = ExplorationMatrix::new(dims_2_3(), 10);
+            let p = DiscoverMatrixPhase::new(m);
             let home = Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
             let run_dir = home.run_dir(crate::ids::RunId::new());
             run_dir.ensure().unwrap();
             let path = p.persist_matrix_for_test(&run_dir).unwrap();
             assert!(path.exists());
             let back: ExplorationMatrix = read_json(&path).unwrap();
-            assert_eq!(back.cardinality(), 80);
+            assert_eq!(back.cardinality(), 50);
+            assert_eq!(back.cells(), 5);
         });
     }
 

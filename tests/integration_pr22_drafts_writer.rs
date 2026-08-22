@@ -166,7 +166,10 @@ async fn drafts_dir_contains_one_md_per_successful_sketch() {
     run_dir.ensure().unwrap();
     build_brief(&run_dir).unwrap();
 
-    let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x,y;b=x,y").expect("spec parses"),
+        2,
+    ));
     let mock = build_matrix_mock(matrix.matrix.cells(), matrix.matrix.sketches_per_cell);
     let ctx = build_run_context(home.clone(), mock, run_id);
 
@@ -257,7 +260,10 @@ async fn draft_body_carries_frontmatter_and_thesis() {
     run_dir.ensure().unwrap();
     build_brief(&run_dir).unwrap();
 
-    let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x,y;b=x,y").expect("spec parses"),
+        2,
+    ));
     let mock = build_matrix_mock(matrix.matrix.cells(), matrix.matrix.sketches_per_cell);
     let ctx = build_run_context(home.clone(), mock, run_id);
     matrix.execute(&ctx).await.expect("matrix phase runs");
@@ -348,7 +354,10 @@ async fn draft_count_matches_sketch_count_when_partial_failure() {
     run_dir.ensure().unwrap();
     build_brief(&run_dir).unwrap();
 
-    let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x,y;b=x,y").expect("spec parses"),
+        2,
+    ));
     let _total = matrix.matrix.cells() * matrix.matrix.sketches_per_cell;
     let mut p = MockProvider::empty();
     // 6 valid responses + 2 broken-JSON-on-every-attempt slots.
