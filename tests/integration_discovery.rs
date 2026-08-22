@@ -165,24 +165,30 @@ async fn discovery_pipeline_composes_all_seven_phases() {
     run_dir.ensure().unwrap();
     build_brief(&run_dir).unwrap();
 
-    // Build the pipeline programmatically with a small cardinality
-    // so the test stays fast.
+    // Build the pipeline programmatically with a small
+    // `sketches_per_cell` so the test stays fast. With the F2
+    // default of 10 the 4-cell matrix would fan out 40
+    // sketches — too many for a smoke test. The integration
+    // test stays fast by keeping `sketches_per_cell = 1`.
     let opts = moagan::cli::discover::DiscoverOptions {
         provider: "mock".into(),
         prompt: "Design a multi-tenant SaaS backend".into(),
         home: None,
         mock_dir: None,
-        cardinality: 8,
+        sketches_per_cell: 1,
         max_parallelism: Some(2),
-        dimensions: 2,
-        facets_per_dimension: 2,
+        dimensions: Some(2),
+        facets_per_dimension: Some(2),
+        matrix_spec: Vec::new(),
+        llm_derive: false,
         cluster_threshold: 0.7,
         out_dir: None,
         non_interactive: true,
         cache_facets: false,
         temperature_profiles: Vec::new(),
+        explain: false,
     };
-    let pipeline = build_discovery_pipeline(&opts);
+    let pipeline = build_discovery_pipeline(&opts, &moagan::config::Config::default());
     let names = pipeline.names();
     let expected = vec![
         "intake",
@@ -232,7 +238,10 @@ async fn discovery_pipeline_persists_exploration_matrix() {
         "discover".into(),
     );
 
-    let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x,y;b=x,y").expect("spec parses"),
+        2,
+    ));
     matrix.execute(&ctx).await.unwrap();
 
     let matrix_path = run_dir.root().join("exploration_matrix.json");
@@ -858,7 +867,10 @@ async fn discovery_pipeline_with_mock_emits_lifecycle() {
 
     // Build just the matrix part of the pipeline so we don't depend
     // on the follow-up phases having a populated set of inputs.
-    let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x,y;b=x,y").expect("spec parses"),
+        2,
+    ));
     let result = matrix.execute(&ctx).await;
     assert!(result.is_ok(), "discover_matrix should succeed with mocks");
 }
@@ -1481,7 +1493,10 @@ async fn discovery_retry_sketch_extraction_wires_up_to_discover_matrix() {
     // the retry helper with max_retries=1 (PR-D2 follow-up: 3→1),
     // which consumes 2 mock calls in order (1 broken JSON +
     // 1 valid Sketch).
-    let matrix = DiscoverMatrixPhase::from_dimensions(1, 1, 1);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x").expect("spec parses"),
+        1,
+    ));
     let output = matrix.execute(&ctx).await.expect("phase execute");
     ctx.telemetry.flush().expect("telemetry flush");
 

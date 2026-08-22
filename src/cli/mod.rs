@@ -18,6 +18,7 @@ pub mod continue_cmd;
 pub mod coverage_cmd;
 pub mod diff;
 pub mod discover;
+pub mod discover_explain;
 pub mod doctor;
 pub mod flags_batch;
 pub mod forbidden;
@@ -602,18 +603,56 @@ pub enum Cmd {
         /// Load mock responses from this directory (provider=mock only).
         #[arg(long)]
         mock_dir: Option<std::path::PathBuf>,
-        /// Minimum number of sketches to generate. Must be >= 80.
-        #[arg(long, default_value_t = 80, value_name = "N")]
-        cardinality: usize,
+        /// F2 (Track G.2): sketches per matrix cell. The matrix
+        /// fan-out is `cells() × sketches_per_cell ×
+        /// profile_total`. Default `10` (replaces the v0.5
+        /// `cardinality = 80` floor); must be `>= 10`. A 4-dim
+        /// × 2-facet matrix with the default fan-out produces
+        /// 80 sketches; raise `sketches_per_cell` to expand the
+        /// per-cell fan-out without adding cells. Overridden by
+        /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` (env) and
+        /// `[discovery_matrix].sketches_per_cell` (TOML); the
+        /// CLI flag wins on conflict.
+        #[arg(long = "sketches-per-cell", default_value_t = 10, value_name = "N")]
+        sketches_per_cell: usize,
         /// Override the global concurrent-LLM cap.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
-        /// Number of dimensions in the exploration matrix. Default 4.
-        #[arg(long, default_value_t = 4, value_name = "N")]
-        dimensions: usize,
-        /// Number of facets per dimension. Default 2.
-        #[arg(long, default_value_t = 2, value_name = "N")]
-        facets_per_dimension: usize,
+        /// F1 (Track G.2): target number of dimensions in the
+        /// exploration matrix. `None` lets the
+        /// `Role::DimensionDeriver` pick the dimension count
+        /// freely (asymmetric facets are allowed). Ignored
+        /// when `--matrix-spec` is supplied; required when
+        /// the operator wants `--facets-per-dimension` to be
+        /// honoured without a spec.
+        #[arg(long, value_name = "N")]
+        dimensions: Option<usize>,
+        /// F1 (Track G.2): target facets per dimension when the
+        /// operator does NOT supply a `--matrix-spec`. Requires
+        /// `--dimensions`; without a spec the LLM is free to
+        /// pick asymmetric facet counts (the F1 contract).
+        #[arg(long, value_name = "N")]
+        facets_per_dimension: Option<usize>,
+        /// F1 (Track G.2): operator-supplied matrix spec.
+        /// Repetible; each occurrence appends one dimension.
+        /// Two accepted formats (the parser handles both):
+        ///
+        /// * Repetible form — `--matrix-spec 'auth=oauth,api-key'`
+        ///   --matrix-spec 'storage=sql,kv'`. Each flag declares
+        ///   exactly one dimension.
+        /// * Consolidated form — a single flag can declare several
+        ///   dimensions separated by `;`:
+        ///   `--matrix-spec 'deployment=serverless,self-hosted;storage=sql,kv'`.
+        ///
+        /// When non-empty, the matrix uses the spec verbatim and
+        /// the `Role::DimensionDeriver` is NOT invoked.
+        #[arg(long = "matrix-spec", value_name = "SPEC", action = clap::ArgAction::Append)]
+        matrix_spec: Vec<String>,
+        /// F1 (Track G.2): force the LLM-derive path even when
+        /// the operator did not pass a spec. Useful in CI to
+        /// exercise the `Role::DimensionDeriver` call.
+        #[arg(long, default_value_t = false)]
+        llm_derive: bool,
         /// SimHash threshold for clustering (0..=1). Default 0.7.
         #[arg(long, default_value_t = 0.7)]
         cluster_threshold: f32,
@@ -654,6 +693,16 @@ pub enum Cmd {
         /// v0.5 single-shot contract byte-for-byte. Default empty.
         #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
         temperature_profiles: Vec<String>,
+        /// F3 (Track G.2): print the cardinality calculation and
+        /// exit. Does NOT start a run, does NOT call the LLM
+        /// (even when `--llm-derive` is set), does NOT create a
+        /// run directory. The cells count is reported as a
+        /// placeholder when no `--matrix-spec` is supplied (the
+        /// `Role::DimensionDeriver` would normally own that
+        /// resolution at runtime). Useful as a pre-flight sanity
+        /// check before a real run.
+        #[arg(long, default_value_t = false)]
+        explain: bool,
     },
     /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
     /// against the real provider. Two-run flow:
@@ -1325,19 +1374,40 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             prompt,
             runs_dir,
             mock_dir,
-            cardinality,
+            sketches_per_cell,
             max_parallelism,
             dimensions,
             facets_per_dimension,
+            matrix_spec,
+            llm_derive,
             cluster_threshold,
             non_interactive,
             cache_facets,
             temperature_profiles,
+            explain,
         } => {
-            if cardinality < 80 {
+            if sketches_per_cell < 10 {
                 return Err(Error::InvalidArgs(format!(
-                    "cardinality {cardinality} below the discovery minimum of 80"
+                    "sketches-per-cell {sketches_per_cell} below the minimum of 10"
                 )));
+            }
+            // F1: `--facets-per-dimension` only makes sense when the
+            // operator is opting into the LLM-derive path AND has a
+            // target dimension count. Without `--matrix-spec` and
+            // without `--llm-derive`, the LLM picks facets
+            // asymmetrically per dimension; honouring a rigid
+            // `--facets-per-dimension` flag in that path is a
+            // contradiction, so reject it cleanly.
+            if facets_per_dimension.is_some()
+                && matrix_spec.iter().all(|s| s.trim().is_empty())
+                && !llm_derive
+                && dimensions.is_none()
+            {
+                return Err(Error::InvalidArgs(
+                    "facets-per-dimension requires an explicit --matrix-spec; \
+                     without one facets are derived per-dimension by the LLM"
+                        .to_string(),
+                ));
             }
             // PR-D1: parse the CLI `--temperature-profile` specs into
             // a typed `Vec<TemperatureProfileSpec>`. Each spec is
@@ -1350,21 +1420,61 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 .map(|s| discover::TemperatureProfileSpec::parse(s))
                 .collect::<std::result::Result<Vec<_>, Error>>()?;
             let cfg = Config::load()?;
+            // F3 (Track G.2): `--explain` short-circuits BEFORE
+            // `discover::run` so the pipeline is never invoked.
+            // The dispatcher prints the formatted table to
+            // stdout and exits 0; no `run_id` is allocated, no
+            // run dir is created, the LLM is never called.
+            //
+            // The plan suggests wiring this inside
+            // `discover::run`, but placing the short-circuit at
+            // the dispatcher boundary keeps the explain path
+            // entirely outside the pipeline (the dispatcher
+            // already loads `cfg`, parses the profiles, and
+            // owns the "discovery run id: ..." print — so
+            // short-circuiting here avoids printing a fake
+            // `discovery run id: 00000000-...` placeholder).
+            if explain {
+                let explain_opts = discover::DiscoverOptions {
+                    provider: provider.clone(),
+                    prompt: prompt.clone(),
+                    home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
+                    mock_dir: mock_dir.clone(),
+                    sketches_per_cell,
+                    max_parallelism,
+                    dimensions,
+                    facets_per_dimension,
+                    matrix_spec: matrix_spec.clone(),
+                    llm_derive,
+                    cluster_threshold,
+                    out_dir: None,
+                    non_interactive,
+                    cache_facets,
+                    temperature_profiles: parsed_profiles,
+                    explain: true,
+                };
+                let rendered = discover_explain::build_and_format(&explain_opts, &cfg)?;
+                println!("{rendered}");
+                return Ok(0);
+            }
             let run_id = discover::run(
                 discover::DiscoverOptions {
                     provider,
                     prompt,
                     home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir,
-                    cardinality,
+                    sketches_per_cell,
                     max_parallelism,
                     dimensions,
                     facets_per_dimension,
+                    matrix_spec,
+                    llm_derive,
                     cluster_threshold,
                     out_dir: None,
                     non_interactive,
                     cache_facets,
                     temperature_profiles: parsed_profiles,
+                    explain: false,
                 },
                 &cfg,
             )
@@ -1495,10 +1605,12 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     prompt: prompt.clone(),
                     home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),
-                    cardinality: 8,
+                    sketches_per_cell: 10,
                     max_parallelism,
-                    dimensions: 8,
-                    facets_per_dimension: 1,
+                    dimensions: Some(8),
+                    facets_per_dimension: Some(1),
+                    matrix_spec: Vec::new(),
+                    llm_derive: false,
                     cluster_threshold: 0.7,
                     out_dir: Some(home_root.join(".runs")),
                     non_interactive,
@@ -1508,6 +1620,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         temperatures: vec![1.0],
                         replicas_per_temperature: 1,
                     }],
+                    explain: false,
                 },
                 &cfg,
             )

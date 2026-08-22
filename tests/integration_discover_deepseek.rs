@@ -18,8 +18,9 @@
 //! distinct discover_* LLM roles (V4 §6.5–§6.10) are non-empty:
 //! `tags/` (Tagger), `facets/` (FacetDeriver),
 //! `extractions/cat_*` (Extractor), `drafts/` (Integrator). The
-//! 2×2 matrix keeps fan-out small (~80 sketches) so the run stays
-//! under the 600 s default test timeout.
+//! 2×2 matrix keeps fan-out small (~80 sketches: 4 cells ×
+//! `--sketches-per-cell 20`) so the run stays under the 600 s
+//! default test timeout.
 
 use std::fs;
 use std::path::PathBuf;
@@ -74,8 +75,8 @@ fn discover_deepseek_writes_four_subdirs() {
             "deepseek",
             "--prompt",
             PROMPT,
-            "--cardinality",
-            "80",
+            "--sketches-per-cell",
+            "20",
             "--dimensions",
             "2",
             "--facets-per-dimension",

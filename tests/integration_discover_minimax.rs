@@ -18,9 +18,9 @@
 //! distinct discover_* LLM roles (V4 §6.5–§6.10) are non-empty:
 //! `tags/` (Tagger), `facets/` (FacetDeriver),
 //! `extractions/cat_*` (Extractor), `drafts/` (Integrator). The
-//! 1×1 matrix keeps fan-out very small (~80 sketches × 1 dimension
-//! × 1 facet/dim) so the run stays comfortably under the 600 s
-//! default test timeout and the per-sketch MiniMax cost stays
+//! 1×1 matrix keeps fan-out very small (~80 sketches: 1 cell ×
+//! `--sketches-per-cell 80`) so the run stays comfortably under
+//! the 600 s default test timeout and the per-sketch MiniMax cost stays
 //! modest (see `docs/pending-items-2026-08-13.md §9.3` for the
 //! MiniMax cost rationale — cheaper than the 2×2 matrix used by
 //! the deepseek/opencode_go siblings).
@@ -80,7 +80,7 @@ fn discover_minimax_writes_four_subdirs() {
             "minimax",
             "--prompt",
             PROMPT,
-            "--cardinality",
+            "--sketches-per-cell",
             "80",
             "--dimensions",
             "1",

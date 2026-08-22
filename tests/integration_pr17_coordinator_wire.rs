@@ -120,7 +120,27 @@ fn build_ctx(
     registry.insert("mock".into(), arc);
     let telemetry =
         Telemetry::open(run_id, run_dir, RedactPolicy::default(), None).expect("open telemetry");
-    RunContext::new(
+    // F1 (Track G.2): the coordinator now sources its matrix
+    // from the operator's `--matrix-spec` (carried on
+    // `ctx.config.discovery_matrix.matrix_spec`). The PR-17
+    // parity tests rely on the legacy 4×2 default so we
+    // pre-populate the spec here.
+    //
+    // F2 (Track G.2): pin `sketches_per_cell = 1` so the
+    // matrix cardinality stays at 8 cells × 1 = 8 (matching
+    // the pre-F2 contract these parity tests assert). The
+    // F2 default of 10 would inflate the mock buffer from 8
+    // to 80 entries and break the parity check.
+    let mut cfg = moagan::config::Config::default();
+    cfg.discovery_matrix.matrix_spec = vec![
+        "a=x,y".to_string(),
+        "b=x,y".to_string(),
+        "c=x,y".to_string(),
+        "d=x,y".to_string(),
+    ];
+    cfg.discovery_matrix.sketches_per_cell = 1;
+    let cfg = Arc::new(cfg);
+    RunContext::new_with_config(
         run_id,
         home,
         Arc::new(registry),
@@ -130,23 +150,83 @@ fn build_ctx(
         telemetry,
         "Design a multi-tenant SaaS backend".into(),
         "discover".into(),
+        cfg,
     )
 }
 
 /// Drive the matrix via the flat `DiscoverMatrixPhase`. The
 /// returned `PathBuf` is the run dir the operator can inspect to
-/// confirm the flat path's artefacts. The matrix shape is
-/// `ExplorationMatrix::default_for(8)` so the resulting
-/// cardinality (8) matches the coordinator's `default_for(4)`
-/// shape (4 dims × 2 facets × 1 per cell = 8).
+/// confirm the flat path's artefacts. The matrix shape is the
+/// legacy 4×2 layout with `cardinality=8` so the resulting
+/// cardinality (8) matches the coordinator's pre-F1 contract
+/// (4 dims × 2 facets × 1 per cell = 8).
 async fn run_flat_matrix(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockProvider>) -> PathBuf {
+    use moagan::discovery::matrix::{Dimension, ExplorationMatrix, Facet};
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().unwrap();
     seed_brief(&run_dir);
 
     let ctx = build_ctx(home.clone(), run_id, &run_dir, mock);
+    let dims = vec![
+        Dimension {
+            id: "deployment-model".into(),
+            label: "Deployment model".into(),
+            facets: vec![
+                Facet {
+                    id: "serverless".into(),
+                    label: "serverless".into(),
+                },
+                Facet {
+                    id: "self-hosted".into(),
+                    label: "self-hosted".into(),
+                },
+            ],
+        },
+        Dimension {
+            id: "storage".into(),
+            label: "Storage strategy".into(),
+            facets: vec![
+                Facet {
+                    id: "sql".into(),
+                    label: "SQL".into(),
+                },
+                Facet {
+                    id: "kv".into(),
+                    label: "embedded key-value".into(),
+                },
+            ],
+        },
+        Dimension {
+            id: "consistency".into(),
+            label: "Consistency model".into(),
+            facets: vec![
+                Facet {
+                    id: "strong".into(),
+                    label: "strong".into(),
+                },
+                Facet {
+                    id: "eventual".into(),
+                    label: "eventual".into(),
+                },
+            ],
+        },
+        Dimension {
+            id: "observability".into(),
+            label: "Observability".into(),
+            facets: vec![
+                Facet {
+                    id: "logs-only".into(),
+                    label: "logs only".into(),
+                },
+                Facet {
+                    id: "metrics-tracing".into(),
+                    label: "metrics + tracing".into(),
+                },
+            ],
+        },
+    ];
     let matrix = moagan::phases::DiscoverMatrixPhase {
-        matrix: moagan::discovery::matrix::ExplorationMatrix::default_for(8),
+        matrix: ExplorationMatrix::new(dims, 1),
     };
     matrix
         .execute(&ctx)
@@ -374,9 +454,9 @@ impl IterSketchJson for std::path::PathBuf {
 /// `DiscoveryCoordinator::run_with_ctx` API the way the CLI does
 /// and confirms the resulting artefacts are identical to the flat
 /// pipeline's. The full CLI binary invocation (`moagan discover
-/// --cardinality 80`) is exercised separately by the gauntlet's
-/// smoke tier (`make smoke`), where the binary is built and
-/// invoked against the local fixture.
+/// --sketches-per-cell <N>`) is exercised separately by the
+/// gauntlet's smoke tier (`make smoke`), where the binary is
+/// built and invoked against the local fixture.
 #[tokio::test]
 async fn pr17_discover_cli_invokes_coordinator_path() {
     let _guard = env_lock();

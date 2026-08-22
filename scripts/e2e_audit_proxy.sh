@@ -13,7 +13,7 @@
 #                                 lower value in CI to fail fast when
 #                                 the upstream is degraded.
 #   MOAGAN_SMOKE_LONG_DISCOVER    set to 1 to skip the long-running
-#                                 `discover --cardinality 80` block
+#                                 `discover --sketches-per-cell 20` block
 #                                 (saves ~25 min). The other real-proxy
 #                                 runs (mode fast, mode explore) still
 #                                 execute.
@@ -248,7 +248,8 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   echo ">>> Running real proxy e2e tests against minimax..."
   echo ""
 
-  # Real proxy run: cardinality 80 with 4 dimensions × 2 facets.
+  # Real proxy run: 4 dimensions × 2 facets ×
+  # `--sketches-per-cell 10` = 80 sketches (the F2 default).
   # This is a long-running end-to-end test (~25 min) so we cap it
   # at $MOAGAN_SMOKE_TIMEOUT (default 3600s) and treat any
   # successful discovery start as a pass. When MOAGAN_SMOKE_LONG_DISCOVER=1
@@ -285,7 +286,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     if start_proxy "$WORK_PROXY_1" "$PORTFILE_1"; then
       PROXY_PORT_1="$(cat "${PORTFILE_1}.port")"
       run_test "proxy_e2e_card80_discovers_summary" \
-        "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1 MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax --prompt 'Design a CLI for batch processing of CSV files' --cardinality 80 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_PROXY_1/discover.out; test \$? -le 1"
+        "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1 MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_PROXY_1/discover.out; test \$? -le 1"
 
       # Find the run dir
       PROXY_RUN_ID="$(ls "$WORK_PROXY_1/.runs/" 2>/dev/null | sort -r | head -1)"
@@ -562,7 +563,7 @@ if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
     # fan-out at ~80 sketches without paying for the full 4×2 card80.
     OC_PROMPT="Compare three Rust HTTP clients for binary streaming"
     run_test "proxy_e2e_discover_oc_run_id_present" \
-      "MOAGAN_HOME=$WORK_OC RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider opencode_go --prompt '$OC_PROMPT' --cardinality 80 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_OC/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_OC/discover.out"
+      "MOAGAN_HOME=$WORK_OC RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider opencode_go --prompt '$OC_PROMPT' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_OC/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_OC/discover.out"
 
     OC_RUN_ID="$(ls "$WORK_OC/.runs/" 2>/dev/null | sort -r | head -1)"
     if [[ -n "$OC_RUN_ID" ]]; then
@@ -677,7 +678,7 @@ if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
     # fan-out at ~80 sketches without paying for the full 4×2 card80.
     DS_PROMPT="Compare three Rust HTTP clients for binary streaming"
     run_test "proxy_e2e_discover_ds_run_id_present" \
-      "MOAGAN_HOME=$WORK_DS RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider deepseek --prompt '$DS_PROMPT' --cardinality 80 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_DS/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_DS/discover.out"
+      "MOAGAN_HOME=$WORK_DS RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider deepseek --prompt '$DS_PROMPT' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_DS/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_DS/discover.out"
 
     DS_RUN_ID="$(ls "$WORK_DS/.runs/" 2>/dev/null | sort -r | head -1)"
     if [[ -n "$DS_RUN_ID" ]]; then
@@ -788,7 +789,7 @@ if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
       # attributable to the model / wire format, not to the workload.
       MODEL_PROMPT="Compare three Rust HTTP clients for binary streaming"
       run_test "proxy_e2e_discover_oc_model_${MODEL}_run_id_present" \
-        "MOAGAN_HOME=$WORK_MODEL RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider $MODEL --prompt '$MODEL_PROMPT' --cardinality 80 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_MODEL/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_MODEL/discover.out"
+        "MOAGAN_HOME=$WORK_MODEL RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider $MODEL --prompt '$MODEL_PROMPT' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_MODEL/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_MODEL/discover.out"
 
       MODEL_RUN_ID="$(ls "$WORK_MODEL/.runs/" 2>/dev/null | sort -r | head -1)"
       if [[ -n "$MODEL_RUN_ID" ]]; then

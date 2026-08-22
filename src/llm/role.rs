@@ -154,6 +154,17 @@ pub enum Role {
     /// `Role::Tagger` and `Role::FacetDeriver` (the two other
     /// discovery-side deterministic roles).
     ContradictionJudge,
+    /// F1 (Track G.2 `discover_dimensions`): derives the
+    /// exploration-matrix dimensions and per-dimension facets from
+    /// the brief itself, replacing the legacy hardcoded 4×2
+    /// default. Fully deterministic (`T=0.0, top_p=0.2`,
+    /// `max_tokens=DEFAULT_MAX_TOKENS`) so two runs against the
+    /// same brief produce identical dimension lists — the
+    /// `discovery_dimensions.json` sidecar relies on this for
+    /// cache-key stability. Opt-in via `--llm-derive` or via
+    /// `[discovery_matrix].llm_derive_first=true`; a run that
+    /// passes `--matrix-spec` skips this role entirely.
+    DimensionDeriver,
 }
 
 impl Role {
@@ -187,6 +198,7 @@ impl Role {
             Self::HostilePromptDetector => "hostile_prompt_detector",
             Self::Continuation => "continuation",
             Self::ContradictionJudge => "contradiction_judge",
+            Self::DimensionDeriver => "dimension_deriver",
         }
     }
 
@@ -260,6 +272,9 @@ impl Role {
             }
             Self::ContradictionJudge => {
                 "ContradictionJudge: {findings[]} (each finding is {{pair[id1,id2], severity, evidence, suggestion}}); severity is one of minor|major|critical (discovery LLM-as-judge; T=0.0, top_p=0.2, max_tokens=1000000)"
+            }
+            Self::DimensionDeriver => {
+                "Dimensions: {dimensions[]: {id, label, facets[]: {id, label, description}}} (brief-derived matrix axes; T=0.0, top_p=0.2, max_tokens=1000000)"
             }
         }
     }
@@ -354,6 +369,23 @@ impl Role {
                 serde_json::from_value::<crate::domain::ContradictionJudgeReport>(value.clone())
                     .map(|_| ())
             }
+            Self::DimensionDeriver => {
+                // F1: the discovery dimensions deriver returns the
+                // same shape as the matrix's `Dimension` /
+                // `Facet` types — a `{dimensions: [...]}` envelope
+                // carrying one entry per dimension with a
+                // `facets: [...]` array. The validator confirms the
+                // wrapper shape; the phase's own helper re-parses
+                // the inner fields. `#[serde(default)]` on the
+                // domain type makes the empty-object case
+                // acceptable so a fluke "no dimensions" response
+                // fails the phase with a clear shape mismatch
+                // rather than a generic JSON error.
+                serde_json::from_value::<crate::discovery::matrix_spec::DerivedDimensions>(
+                    value.clone(),
+                )
+                .map(|_| ())
+            }
         };
         if let Err(e) = result {
             return Err(Error::SchemaViolation(format!(
@@ -395,6 +427,7 @@ impl Role {
             Self::HostilePromptDetector,
             Self::Continuation,
             Self::ContradictionJudge,
+            Self::DimensionDeriver,
         ]
     }
 }
@@ -437,6 +470,7 @@ impl FromStr for Role {
             "hostile_prompt_detector" => Ok(Self::HostilePromptDetector),
             "continuation" => Ok(Self::Continuation),
             "contradiction_judge" => Ok(Self::ContradictionJudge),
+            "dimension_deriver" => Ok(Self::DimensionDeriver),
             other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
         }
     }
@@ -479,7 +513,11 @@ mod tests {
         // moves from 26 to 27. The detector function lives in
         // `crate::discovery::contradiction`; this role enum entry
         // is the typed identifier the call layer uses.
-        assert_eq!(Role::all().len(), 27);
+        // F1 (Track G.2 `discover_dimensions`): the
+        // `DimensionDeriver` role enters the enum so the
+        // `discover_dimensions` phase has a typed identifier for
+        // its single LLM call. Count moves from 27 to 28.
+        assert_eq!(Role::all().len(), 28);
     }
 
     #[test]
@@ -793,7 +831,8 @@ mod tests {
                     || desc.starts_with("HostilePromptDetector:")
                     || desc.starts_with("Continuation:")
                     || desc.starts_with("ContradictionJudge:")
-                    || desc.starts_with("Facets:"),
+                    || desc.starts_with("Facets:")
+                    || desc.starts_with("Dimensions:"),
                 "{:?} description does not start with its name: {desc}",
                 r
             );
@@ -887,5 +926,64 @@ mod tests {
         // detector tells the model an empty `findings` array is
         // a valid response).
         assert!(Role::ContradictionJudge.validate_json(&empty).is_ok());
+        // F1 (Track G.2 `discover_dimensions`):
+        // `DimensionDeriver` carries a `DerivedDimensions`
+        // envelope with `#[serde(default)]`, so `{}` parses
+        // cleanly (the phase treats an empty envelope as "no
+        // dimensions produced" and surfaces a clear schema
+        // mismatch to the caller).
+        assert!(Role::DimensionDeriver.validate_json(&empty).is_ok());
+    }
+
+    /// F1: `Role::DimensionDeriver` round-trips through the
+    /// lowercase snake_case wire form (`dimension_deriver`). The
+    /// `as_str` output is the stable identifier the prompt
+    /// registry hashes into `prompt_set_hash`, so any drift here
+    /// would invalidate the cross-run prompt cache for the
+    /// whole `discover_dimensions` phase.
+    #[test]
+    fn role_dimension_deriver_as_str_returns_lowercase_snake_case() {
+        assert_eq!(Role::DimensionDeriver.as_str(), "dimension_deriver");
+    }
+
+    /// F1: round-trip the variant through `FromStr` so the
+    /// `Cmd::Discover` dispatcher and any persisted telemetry
+    /// rows survive a serialize/deserialize round-trip without
+    /// dropping the role identity.
+    #[test]
+    fn role_dimension_deriver_from_str_round_trips() {
+        let s = Role::DimensionDeriver.as_str();
+        let back: Role = s.parse().unwrap();
+        assert_eq!(Role::DimensionDeriver, back);
+    }
+
+    /// F1: validate a fully-populated `dimensions` envelope.
+    /// The shape is `{dimensions: [{id, label, facets: [{id,
+    /// label, description}]}]}` — a single nested list, the
+    /// minimum a real deriver returns. The validator must
+    /// accept it; a future schema addition that breaks the
+    /// parse will surface here before it lands.
+    #[test]
+    fn role_dimension_deriver_validate_json_accepts_valid_payload() {
+        let raw = serde_json::json!({
+            "dimensions": [
+                {
+                    "id": "deployment",
+                    "label": "Deployment model",
+                    "facets": [
+                        {"id": "serverless", "label": "Serverless", "description": "Run on a managed runtime."},
+                        {"id": "self_hosted", "label": "Self-hosted", "description": "Operator runs the binary."}
+                    ]
+                },
+                {
+                    "id": "storage",
+                    "label": "Storage strategy",
+                    "facets": [
+                        {"id": "sql", "label": "SQL", "description": "Relational backend."}
+                    ]
+                }
+            ]
+        });
+        assert!(Role::DimensionDeriver.validate_json(&raw).is_ok());
     }
 }

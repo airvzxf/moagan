@@ -206,8 +206,8 @@ fn detect_outliers_returns_unchanged_when_clusters_match_thesis() {
 
 #[test]
 fn pr19_verification_50_percent_saturation_trips_before_hard_cap() {
-    // Spec verification: with `--cardinality 100` and 50%
-    // saturation, the run should terminate well before the
+    // Spec verification: with a 100-sketch matrix fan-out and
+    // 50% saturation, the run should terminate well before the
     // hard cap. The math: saturation_point = 50,
     // reserve = ceil(50 * 0.25) = 13, trip_point = 63.
     let mut tracker = SaturationTracker::with_policy(
@@ -302,7 +302,10 @@ async fn discover_matrix_phase_runs_under_stop_policy_watch() {
     run_dir.ensure().unwrap();
     build_brief(&run_dir).unwrap();
 
-    let matrix = DiscoverMatrixPhase::from_dimensions(2, 2, 8);
+    let matrix = DiscoverMatrixPhase::new(moagan::discovery::matrix::ExplorationMatrix::from_spec(
+        moagan::discovery::matrix_spec::MatrixSpec::parse_one("a=x,y;b=x,y").expect("spec parses"),
+        2,
+    ));
     let mock = build_matrix_mock(matrix.matrix.sketches_per_cell, matrix.matrix.cells());
     let ctx = build_run_context(home.clone(), mock, run_id);
 
