@@ -8,11 +8,12 @@
 //! §10.2.
 //!
 //! The roadmap lists the verification statement as:
-//! > con `--cardinality 40` y saturación al 50%, el run termina
-//! > con ~60 sketches (cola reserva 25% + outliers)
+//! > con `--sketches-per-cell 5` (matriz 4×2 → 8 cells × 5 =
+//! > 40 sketches) y saturación al 50%, el run termina con ~60
+//! > sketches (cola reserva 25% + outliers)
 //!
 //! and the integration test requirement as:
-//! - Run `moagan discover --cardinality 40`, cancel at sketch 20.
+//! - Run `moagan discover --sketches-per-cell 5`, cancel at sketch 20.
 //! - Run `moagan continue --kind discovery --from-pause <run_id>`.
 //! - Assert `telemetry.jsonl` shows `discover_matrix` ran twice
 //!   (resume = true on the 2nd).

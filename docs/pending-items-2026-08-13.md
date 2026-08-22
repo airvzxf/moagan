@@ -635,7 +635,7 @@ en esos dos workflows queda pendiente (subagente A).
 Per `verify-e2e-coverage` §E: `scripts/e2e_audit_proxy.sh` SECCIÓN A
 (`:174-464`) es **sólo minimax**, con sidecar de audit-proxy
 (`MOAGAN_MINIMAX_ENDPOINT` → `http://127.0.0.1:$PORT/anthropic/v1`),
-`discover --cardinality 80 --dimensions 4 --facets-per-dimension 2
+`discover --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2
 --max-parallelism 4` (~25 min, `:222`) y **37 asserts** de artefactos,
 integridad del audit-log (CRC + id por fila, emparejamiento
 request/response), redacción (`x-api-key`, `authorization`), `audit

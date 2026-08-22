@@ -602,9 +602,18 @@ pub enum Cmd {
         /// Load mock responses from this directory (provider=mock only).
         #[arg(long)]
         mock_dir: Option<std::path::PathBuf>,
-        /// Minimum number of sketches to generate. Must be >= 80.
-        #[arg(long, default_value_t = 80, value_name = "N")]
-        cardinality: usize,
+        /// F2 (Track G.2): sketches per matrix cell. The matrix
+        /// fan-out is `cells() × sketches_per_cell ×
+        /// profile_total`. Default `10` (replaces the v0.5
+        /// `cardinality = 80` floor); must be `>= 10`. A 4-dim
+        /// × 2-facet matrix with the default fan-out produces
+        /// 80 sketches; raise `sketches_per_cell` to expand the
+        /// per-cell fan-out without adding cells. Overridden by
+        /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` (env) and
+        /// `[discovery_matrix].sketches_per_cell` (TOML); the
+        /// CLI flag wins on conflict.
+        #[arg(long = "sketches-per-cell", default_value_t = 10, value_name = "N")]
+        sketches_per_cell: usize,
         /// Override the global concurrent-LLM cap.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
@@ -1354,7 +1363,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             prompt,
             runs_dir,
             mock_dir,
-            cardinality,
+            sketches_per_cell,
             max_parallelism,
             dimensions,
             facets_per_dimension,
@@ -1365,9 +1374,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             cache_facets,
             temperature_profiles,
         } => {
-            if cardinality < 80 {
+            if sketches_per_cell < 10 {
                 return Err(Error::InvalidArgs(format!(
-                    "cardinality {cardinality} below the discovery minimum of 80"
+                    "sketches-per-cell {sketches_per_cell} below the minimum of 10"
                 )));
             }
             // F1: `--facets-per-dimension` only makes sense when the
@@ -1405,7 +1414,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     prompt,
                     home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir,
-                    cardinality,
+                    sketches_per_cell,
                     max_parallelism,
                     dimensions,
                     facets_per_dimension,
@@ -1546,7 +1555,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     prompt: prompt.clone(),
                     home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),
-                    cardinality: 8,
+                    sketches_per_cell: 10,
                     max_parallelism,
                     dimensions: Some(8),
                     facets_per_dimension: Some(1),

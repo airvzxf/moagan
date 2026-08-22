@@ -155,6 +155,10 @@ fn build_ctx_with_auto_pickers(
         // F1 (Track G.2): pre-populate `matrix_spec` with the
         // legacy 4×2 layout so the coordinator's matrix builder
         // has a non-empty shape to fan out against.
+        //
+        // F2 (Track G.2): pin `sketches_per_cell = 1` so the
+        // matrix cardinality stays at 8 cells × 1 = 8 (matching
+        // the pre-F2 contract these auto-picker tests assert).
         discovery_matrix: moagan::config::DiscoveryMatrixConfig {
             matrix_spec: vec![
                 "a=x,y".to_string(),
@@ -162,6 +166,7 @@ fn build_ctx_with_auto_pickers(
                 "c=x,y".to_string(),
                 "d=x,y".to_string(),
             ],
+            sketches_per_cell: 1,
             ..moagan::config::DiscoveryMatrixConfig::default()
         },
         ..Config::default()
@@ -363,6 +368,10 @@ async fn pr18_auto_pickers_disabled_skips_picker_rows() {
         // F1 (Track G.2): pre-populate `matrix_spec` with the
         // legacy 4×2 layout so the coordinator's matrix builder
         // has a non-empty shape to fan out against.
+        //
+        // F2 (Track G.2): pin `sketches_per_cell = 1` so the
+        // matrix cardinality stays at 8 cells × 1 = 8 (matching
+        // the pre-F2 contract these auto-picker tests assert).
         discovery_matrix: moagan::config::DiscoveryMatrixConfig {
             matrix_spec: vec![
                 "a=x,y".to_string(),
@@ -370,6 +379,7 @@ async fn pr18_auto_pickers_disabled_skips_picker_rows() {
                 "c=x,y".to_string(),
                 "d=x,y".to_string(),
             ],
+            sketches_per_cell: 1,
             ..moagan::config::DiscoveryMatrixConfig::default()
         },
         ..Config::default()

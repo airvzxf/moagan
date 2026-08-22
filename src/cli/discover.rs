@@ -55,11 +55,19 @@ use crate::domain::Manifest;
 
 use super::run::build_registry_for;
 
-/// Default `sketches_per_cell` floor (F1). The matrix's per-cell
-/// fan-out is `cells() * sketches_per_cell`. F2 will rename
-/// `--cardinality` to `--sketches-per-cell` and lower this
-/// floor to 10.
-pub const DEFAULT_SKETCHES_PER_CELL: usize = 80;
+/// F2 (Track G.2) default `sketches_per_cell`. The matrix's
+/// per-cell fan-out is `cells() * sketches_per_cell`. F2 lowers
+/// the v0.5 floor from `cardinality = 80` to
+/// `sketches_per_cell = 10` so the per-cell fan-out is the
+/// explicit knob (an operator who wants 80 sketches on a 4×2
+/// matrix sets `sketches_per_cell = 20`).
+pub const DEFAULT_SKETCHES_PER_CELL: usize = 10;
+
+/// F2 minimum allowed `sketches_per_cell`. Used by the CLI
+/// dispatcher's `--sketches-per-cell` validator AND the
+/// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env-var parser so both
+/// surfaces reject the same floor.
+pub const MIN_SKETCHES_PER_CELL: usize = 10;
 
 /// Resolve the operator's input into an [`ExplorationMatrix`].
 ///
@@ -81,13 +89,12 @@ pub const DEFAULT_SKETCHES_PER_CELL: usize = 80;
 /// 4. No flag → same as (3) with no target count; the LLM is free
 ///    to pick any number of dimensions with asymmetric facets.
 ///
-/// F1 keeps the legacy `--cardinality` flag for backward
-/// compatibility — the matrix's `sketches_per_cell` is derived
-/// from `cardinality / cells()` (so the floor of 80 still
-/// applies when the LLM-derive path picks fewer than 1 cell per
-/// dim). F2 renames the flag and replaces the floor.
-pub fn resolve_matrix(opts: &DiscoverOptions, cfg: &Config) -> Result<(MatrixSpec, usize)> {
-    let sketches_per_cell = derive_sketches_per_cell(opts, cfg);
+/// F2 (Track G.2) decouples the per-cell fan-out from the
+/// matrix's `cells()`: `sketches_per_cell` is the operator's
+/// explicit knob (CLI flag, env var, or TOML value) — no
+/// integer-division shortfall between cardinality and cells.
+pub fn resolve_matrix(opts: &DiscoverOptions, _cfg: &Config) -> Result<(MatrixSpec, usize)> {
+    let sketches_per_cell = opts.sketches_per_cell;
     if let Some(spec) = parse_matrix_spec_inputs(&opts.matrix_spec)? {
         return Ok((spec, sketches_per_cell));
     }
@@ -144,36 +151,6 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
     let parsed = MatrixSpec::parse_all(non_empty.into_iter().cloned())?;
     parsed.validate()?;
     Ok(Some(parsed))
-}
-
-/// Translate the F1 fan-out inputs into a per-cell sketches
-/// count. The CLI's `--cardinality` flag is preserved for
-/// backward compat (F2 will rename it to `--sketches-per-cell`);
-/// for F1 the matrix's per-cell fan-out is `cardinality /
-/// max(cells, 1)`. When the LLM-derive path picks fewer cells
-/// than `cardinality / 10`, the matrix clamps to a minimum of
-/// `10` per cell so the operator's minimum of 80 survives.
-fn derive_sketches_per_cell(opts: &DiscoverOptions, _cfg: &Config) -> usize {
-    // Resolve cells the same way the matrix fan-out will; this
-    // mirrors the spec parse path.
-    let cells_hint: usize =
-        if let Some(spec) = parse_matrix_spec_inputs(&opts.matrix_spec).ok().flatten() {
-            spec.cells()
-        } else if let (Some(_), Some(facets)) = (opts.dimensions, opts.facets_per_dimension) {
-            opts.dimensions.unwrap_or(1) * facets.max(1)
-        } else if let Some(dims) = opts.dimensions {
-            // No per-dim count supplied; we still need a hint for
-            // the cardinality → sketches_per_cell derivation. Use
-            // 2 facets per dim as a placeholder (the LLM may pick
-            // more or fewer).
-            dims * 2
-        } else {
-            // No flag → full LLM-derive. Use a 4×2 hint (the legacy
-            // default). The LLM may pick more or fewer.
-            8
-        };
-    let per_cell = opts.cardinality / cells_hint.max(1);
-    per_cell.max(1)
 }
 
 /// Build the discovery pipeline. The phases are wired in the order
@@ -264,10 +241,16 @@ pub struct DiscoverOptions {
     pub home: Option<PathBuf>,
     /// Optional directory of canned mock responses.
     pub mock_dir: Option<PathBuf>,
-    /// Minimum number of sketches to generate. Default 80.
-    /// F2 will rename this to `sketches_per_cell` and lower the
-    /// floor to 10.
-    pub cardinality: usize,
+    /// F2 (Track G.2): sketches per matrix cell. The matrix
+    /// fan-out is `cells() × sketches_per_cell ×
+    /// profile_total`. Default 10; floor 10 (replaces the
+    /// v0.5 `cardinality = 80` contract). The CLI's
+    /// `--sketches-per-cell` flag is the canonical
+    /// operator-facing knob; the
+    /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var and the
+    /// `[discovery_matrix].sketches_per_cell` TOML key are
+    /// merge-order fall-backs.
+    pub sketches_per_cell: usize,
     /// Optional override of the global parallel cap.
     pub max_parallelism: Option<usize>,
     /// F1: target dimension count (no default — `None` means the
@@ -582,6 +565,18 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     if opts.llm_derive {
         effective_cfg.discovery_matrix.llm_derive_first = true;
     }
+    // F2 (Track G.2): the CLI's `--sketches-per-cell` flag is the
+    // canonical source-of-truth for the matrix fan-out. The TOML
+    // `[discovery_matrix].sketches_per_cell` block is the fall-back
+    // when no flag was supplied. We do NOT honour a CLI flag named
+    // `--default-sketches-per-cell` to keep the surface small (the
+    // F1 audit said "no magic switch") so the persisted block
+    // wins on conflict (matching the `--temperature-profile` merge
+    // order). The `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var
+    // was applied in `Config::apply_env_overrides` BEFORE the CLI
+    // value overwrites it here, so the precedence chain is
+    // CLI > env > TOML > default (10).
+    effective_cfg.discovery_matrix.sketches_per_cell = opts.sketches_per_cell;
 
     let ctx = RunContext::new_with_config(
         run_id,
@@ -690,7 +685,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     );
     let coordinator_ctx = Arc::new(ctx.clone());
     let coordinator_future =
-        coordinator.run_with_ctx_and_target(coordinator_ctx.clone(), Some(opts.cardinality));
+        coordinator.run_with_ctx_and_target(coordinator_ctx.clone(), Some(opts.sketches_per_cell));
     tokio::pin!(coordinator_future);
     let outcome: DiscoveryOutcome = tokio::select! {
         result = &mut coordinator_future => result.map_err(|e| match e {
@@ -731,29 +726,55 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     Ok(run_id)
 }
 
-/// Pull the `Discover` subcommand's `cardinality` value out of an
-/// argument list, falling back to the provided default when the flag
-/// is absent. Used by `discover_cmd` to validate the input before
-/// spawning the run.
+/// Pull the `Discover` subcommand's `sketches_per_cell` value
+/// out of an argument list, falling back to the provided
+/// default when the flag is absent. Used by `discover_cmd` to
+/// validate the input before spawning the run. The F2 floor is
+/// `MIN_SKETCHES_PER_CELL = 10` (replaces the v0.5
+/// `cardinality >= 80` guard). The legacy `--cardinality` flag
+/// is rejected outright so a stale script does not silently
+/// fall back to the integer-division shortfall the F1
+/// `derive_sketches_per_cell` helper relied on.
 #[allow(dead_code)]
-pub(crate) fn parse_cardinality(args: &[String], default: usize) -> Result<usize> {
+pub(crate) fn parse_sketches_per_cell(args: &[String], default: usize) -> Result<usize> {
     let mut value = default;
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--cardinality" || args[i] == "--sketches" {
-            let next = args
-                .get(i + 1)
-                .ok_or_else(|| Error::InvalidArgs(format!("{} needs a value", args[i])))?;
-            value = next
+        let arg = &args[i];
+        if arg == "--sketches-per-cell" || arg.starts_with("--sketches-per-cell=") {
+            let raw = if let Some(eq) = arg.strip_prefix("--sketches-per-cell=") {
+                eq.to_owned()
+            } else {
+                // Consume the next arg as the flag's value, then
+                // break out of the loop (no further scan needed).
+                let next = args
+                    .get(i + 1)
+                    .ok_or_else(|| Error::InvalidArgs(format!("{} needs a value", arg)))?
+                    .clone();
+                value = next
+                    .trim()
+                    .parse()
+                    .map_err(|e| Error::InvalidArgs(format!("invalid sketches-per-cell: {e}")))?;
+                break;
+            };
+            value = raw
+                .trim()
                 .parse()
-                .map_err(|e| Error::InvalidArgs(format!("invalid cardinality: {e}")))?;
+                .map_err(|e| Error::InvalidArgs(format!("invalid sketches-per-cell: {e}")))?;
             break;
+        }
+        if arg == "--cardinality" || arg.starts_with("--cardinality=") {
+            return Err(Error::InvalidArgs(
+                "--cardinality was renamed to --sketches-per-cell in F2; \
+                 pass --sketches-per-cell <N> instead (floor 10)"
+                    .to_owned(),
+            ));
         }
         i += 1;
     }
-    if value < 80 {
+    if value < MIN_SKETCHES_PER_CELL {
         return Err(Error::InvalidArgs(format!(
-            "cardinality {value} below the discovery minimum of 80"
+            "sketches-per-cell {value} below the minimum of {MIN_SKETCHES_PER_CELL}"
         )));
     }
     Ok(value)
@@ -763,36 +784,70 @@ pub(crate) fn parse_cardinality(args: &[String], default: usize) -> Result<usize
 // v0.5 PR-24: discovery resume
 // =====================================================================
 
-/// Default cardinalities used by [`run_resume`] when the
-/// `discovery_matrix.json` artefact is missing or malformed on
-/// resume. The coordinator falls back to
-/// [`Cardinality::for_mode_default`] which uses 80 sketches; we
-/// pass 80 explicitly here so the `ExplorationMatrix` we rebuild
-/// for the resume matches the size the run was originally
-/// configured with.
-const RESUME_DEFAULT_CARDINALITY: usize = 80;
+/// F2 (Track G.2): default `sketches_per_cell` used by
+/// [`run_resume`] when the `<run_dir>/exploration_matrix.json`
+/// artefact is missing or malformed. Replaces the v0.5
+/// `RESUME_DEFAULT_CARDINALITY = 80` so a fresh resume rebuilds
+/// the matrix around the new per-cell floor instead of the
+/// legacy total cardinality.
+const RESUME_DEFAULT_SKETCHES_PER_CELL: usize = 10;
 const RESUME_DEFAULT_CLUSTER_THRESHOLD: f32 = 0.7;
 
-/// Read the discovery matrix cardinality from
-/// `<run_dir>/exploration_matrix.json` if present. Falls back to
-/// [`RESUME_DEFAULT_CARDINALITY`] when the file is missing or
-/// malformed; the coordinator's persisted state
+/// Read the discovery matrix `sketches_per_cell` from
+/// `<run_dir>/exploration_matrix.json` if present. Falls back
+/// to [`RESUME_DEFAULT_SKETCHES_PER_CELL`] when the file is
+/// missing or malformed; the coordinator's persisted state
 /// (`.discovery_state.json`) takes precedence over both when the
 /// matrix size does not match the loop's `completed_sketches`.
-fn resume_target_cardinality(home: &MoaganHome, run_id: RunId) -> usize {
+///
+/// F2 backward-read compat: an `exploration_matrix.json`
+/// persisted by a v0.5 (or earlier) run carries the legacy
+/// `cardinality` field but no `sketches_per_cell`. When the
+/// matrix shape (cells × sketches_per_cell) is recoverable from
+/// the legacy total, derive `sketches_per_cell = ceil(cardinality
+/// / cells)` so a resume picks up the operator's original
+/// fan-out instead of silently dropping to the new floor.
+fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
     let path = home.run_dir(run_id).root().join("exploration_matrix.json");
     let Ok(raw) = std::fs::read_to_string(&path) else {
-        return RESUME_DEFAULT_CARDINALITY;
+        return RESUME_DEFAULT_SKETCHES_PER_CELL;
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return RESUME_DEFAULT_CARDINALITY;
+        return RESUME_DEFAULT_SKETCHES_PER_CELL;
     };
-    value
+    // F2 first choice: explicit `sketches_per_cell` written by
+    // F2-aware matrix builds.
+    if let Some(n) = value
+        .get("sketches_per_cell")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .filter(|n| *n >= MIN_SKETCHES_PER_CELL)
+    {
+        return n;
+    }
+    // F2 backward-read: a v0.5 `exploration_matrix.json` carries
+    // `cardinality` + `dimensions`. Derive the per-cell fan-out
+    // so the resumed matrix matches the original run.
+    let legacy_cardinality = value
         .get("cardinality")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .filter(|n| *n > 0)
-        .unwrap_or(RESUME_DEFAULT_CARDINALITY)
+        .filter(|n| *n > 0);
+    let legacy_cells = value
+        .get("dimensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d.get("facets").and_then(|f| f.as_array()))
+                .map(|f| f.len())
+                .sum::<usize>()
+        })
+        .filter(|n| *n > 0);
+    if let (Some(card), Some(cells)) = (legacy_cardinality, legacy_cells) {
+        // Ceil-divide so 80 sketches on 8 cells → 10 per cell.
+        return card.div_ceil(cells).max(MIN_SKETCHES_PER_CELL);
+    }
+    RESUME_DEFAULT_SKETCHES_PER_CELL
 }
 
 /// Resume a paused or failed `moagan discover` run.
@@ -919,7 +974,7 @@ pub async fn run_resume(
             crate::cli::Mode::Fast,
         );
         let coordinator_ctx = Arc::new(ctx.clone());
-        let target = resume_target_cardinality(home_arc.as_ref(), run_id);
+        let target = resume_sketches_per_cell(home_arc.as_ref(), run_id);
         let outcome = match tokio::select! {
             result = coordinator.run_with_ctx_and_target(coordinator_ctx.clone(), Some(target)) => result,
             _ = tokio::signal::ctrl_c() => {
@@ -967,7 +1022,7 @@ pub async fn run_resume(
         prompt: String::new(),
         home: Some(home_arc.root().to_path_buf()),
         mock_dir: None,
-        cardinality: RESUME_DEFAULT_CARDINALITY,
+        sketches_per_cell: RESUME_DEFAULT_SKETCHES_PER_CELL,
         max_parallelism: None,
         dimensions: None,
         facets_per_dimension: None,
@@ -1020,12 +1075,12 @@ pub async fn run_resume(
 /// fall back to the documented defaults because the canonical
 /// pipeline only uses them at the matrix boundary.
 fn build_canonical_for_resume_pipeline(manifest: &Manifest) -> Pipeline {
-    let target = resume_target_cardinality(
+    let target = resume_sketches_per_cell(
         &MoaganHome::resolve().unwrap_or_else(|_| {
             // Fall back to a tempdir-anchored home if `MOAGAN_HOME`
             // is unset; `run_resume` always overwrites the run_dir
             // via `home.run_dir(run_id)` so this synthetic home is
-            // only used for the cardinality probe. Operators running
+            // only used for the per-cell probe. Operators running
             // `moagan continue` always have a real `MOAGAN_HOME`.
             let tmp = std::env::temp_dir().join(format!("moagan-resume-{}", manifest.run_id));
             MoaganHome::at(tmp)
@@ -1037,7 +1092,7 @@ fn build_canonical_for_resume_pipeline(manifest: &Manifest) -> Pipeline {
         prompt: String::new(),
         home: None,
         mock_dir: None,
-        cardinality: target,
+        sketches_per_cell: target,
         max_parallelism: None,
         dimensions: None,
         facets_per_dimension: None,
@@ -1066,39 +1121,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_cardinality_default_when_flag_missing() {
-        let v = parse_cardinality(&[], 80).unwrap();
-        assert_eq!(v, 80);
+    fn parse_sketches_per_cell_default_when_flag_missing() {
+        // Default falls back when no flag was supplied. The F2
+        // floor (10) is the canonical operator- default and matches
+        // the `default_value_t = 10` clap annotation on
+        // `--sketches-per-cell`.
+        let v = parse_sketches_per_cell(&[], 10).unwrap();
+        assert_eq!(v, 10);
     }
 
     #[test]
-    fn parse_cardinality_reads_explicit_flag() {
-        let v = parse_cardinality(&["--cardinality".to_string(), "120".to_string()], 80).unwrap();
-        assert_eq!(v, 120);
+    fn parse_sketches_per_cell_reads_explicit_flag() {
+        let v = parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "25".to_string()], 10)
+            .unwrap();
+        assert_eq!(v, 25);
     }
 
     #[test]
-    fn parse_cardinality_accepts_long_sketches_alias() {
-        let v = parse_cardinality(&["--sketches".to_string(), "200".to_string()], 80).unwrap();
-        assert_eq!(v, 200);
+    fn parse_sketches_per_cell_reads_eq_form() {
+        let v = parse_sketches_per_cell(&["--sketches-per-cell=40".to_string()], 10).unwrap();
+        assert_eq!(v, 40);
     }
 
     #[test]
-    fn parse_cardinality_rejects_below_minimum() {
-        let e = parse_cardinality(&["--cardinality".to_string(), "5".to_string()], 80).unwrap_err();
-        assert!(e.to_string().contains("below the discovery minimum"));
+    fn parse_sketches_per_cell_rejects_below_minimum() {
+        let e = parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "5".to_string()], 10)
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("below the minimum of 10"),
+            "error must mention the F2 floor; got {e:?}"
+        );
     }
 
     #[test]
-    fn parse_cardinality_rejects_non_numeric() {
+    fn parse_sketches_per_cell_accepts_floor() {
+        // 10 is the F2 floor; values at the floor must round-trip
+        // unchanged (the > check rejects only values strictly
+        // below 10).
+        let v = parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "10".to_string()], 10)
+            .unwrap();
+        assert_eq!(v, 10);
+    }
+
+    #[test]
+    fn parse_sketches_per_cell_rejects_legacy_cardinality_flag() {
+        // The v0.5 `--cardinality` flag is rejected outright in
+        // F2 so a stale script does not silently feed the
+        // integer-division shortfall the F1 path used to apply.
+        let e = parse_sketches_per_cell(&["--cardinality".to_string(), "80".to_string()], 10)
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("--cardinality was renamed"),
+            "error must name the rename; got {e:?}"
+        );
+    }
+
+    #[test]
+    fn parse_sketches_per_cell_rejects_non_numeric() {
         let e =
-            parse_cardinality(&["--cardinality".to_string(), "abc".to_string()], 80).unwrap_err();
-        assert!(e.to_string().contains("invalid cardinality"));
+            parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "abc".to_string()], 10)
+                .unwrap_err();
+        assert!(
+            e.to_string().contains("invalid sketches-per-cell"),
+            "error must mention the field name; got {e:?}"
+        );
     }
 
     #[test]
-    fn parse_cardinality_requires_value() {
-        let e = parse_cardinality(&["--cardinality".to_string()], 80).unwrap_err();
+    fn parse_sketches_per_cell_requires_value() {
+        let e = parse_sketches_per_cell(&["--sketches-per-cell".to_string()], 10).unwrap_err();
         assert!(e.to_string().contains("needs a value"));
     }
 
@@ -1201,5 +1292,123 @@ mod tests {
         let matrix_profile = spec.into_matrix_profile();
         assert_eq!(matrix_profile.temperatures, vec![0.0, 0.7]);
         assert_eq!(matrix_profile.replicas_per_temperature, 3);
+    }
+
+    // ---- F2 (Track G.2): sketches_per_cell resume helper ----
+
+    /// F2: a fresh resume probe (no `exploration_matrix.json`)
+    /// falls back to [`RESUME_DEFAULT_SKETCHES_PER_CELL`] = 10. The
+    /// v0.5 default was `80`; F2 lowers the floor so a fresh
+    /// install does not silently fan out the legacy cardinality.
+    #[test]
+    fn resume_sketches_per_cell_falls_back_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let run_id = RunId::new();
+        let v = resume_sketches_per_cell(&home, run_id);
+        assert_eq!(v, RESUME_DEFAULT_SKETCHES_PER_CELL);
+    }
+
+    /// F2: a malformed `exploration_matrix.json` falls back to the
+    /// default rather than panicking — the resume path is
+    /// best-effort and the matrix will be rebuilt around the
+    /// operator's CLI value at the next phase boundary.
+    #[test]
+    fn resume_sketches_per_cell_falls_back_on_malformed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run_dir");
+        std::fs::write(run_dir.root().join("exploration_matrix.json"), b"{not json").unwrap();
+        let v = resume_sketches_per_cell(&home, run_id);
+        assert_eq!(v, RESUME_DEFAULT_SKETCHES_PER_CELL);
+    }
+
+    /// F2: the F2-aware matrix shape
+    /// (`sketches_per_cell: 25`) round-trips through the helper
+    /// verbatim. The forward-read path wins over the legacy
+    /// `cardinality` field on conflict (a future migration would
+    /// have rewritten the file with the new field).
+    #[test]
+    fn resume_sketches_per_cell_reads_f2_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run_dir");
+        let matrix_json = serde_json::json!({
+            "cells": 4,
+            "sketches_per_cell": 25,
+            "cardinality": 1000, // legacy field — must be ignored when F2 field present
+            "dimensions": [],
+        });
+        std::fs::write(
+            run_dir.root().join("exploration_matrix.json"),
+            serde_json::to_vec(&matrix_json).unwrap(),
+        )
+        .unwrap();
+        let v = resume_sketches_per_cell(&home, run_id);
+        assert_eq!(v, 25);
+    }
+
+    /// F2 backward-read: a v0.5 `exploration_matrix.json` carries
+    /// only the legacy `cardinality` field plus the `dimensions`
+    /// array. The helper derives `sketches_per_cell = ceil(card /
+    /// cells)` so a resume picks up the operator's original
+    /// fan-out (4×2 → 80 sketches → 20 per cell, matching the
+    /// v0.5 default).
+    #[test]
+    fn resume_sketches_per_cell_derives_from_legacy_cardinality() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run_dir");
+        // 4 dims × 2 facets = 8 cells; cardinality = 80 → 10 per cell.
+        let matrix_json = serde_json::json!({
+            "cells": 8,
+            "cardinality": 80,
+            "dimensions": [
+                {"id": "a", "facets": [{"id": "x"}, {"id": "y"}]},
+                {"id": "b", "facets": [{"id": "x"}, {"id": "y"}]},
+                {"id": "c", "facets": [{"id": "x"}, {"id": "y"}]},
+                {"id": "d", "facets": [{"id": "x"}, {"id": "y"}]},
+            ],
+        });
+        std::fs::write(
+            run_dir.root().join("exploration_matrix.json"),
+            serde_json::to_vec(&matrix_json).unwrap(),
+        )
+        .unwrap();
+        let v = resume_sketches_per_cell(&home, run_id);
+        assert_eq!(v, 10);
+    }
+
+    /// F2 backward-read: ceil division. 81 sketches on 8 cells
+    /// rounds up to 11 per cell (not 10).
+    #[test]
+    fn resume_sketches_per_cell_ceil_divides_legacy_cardinality() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run_dir");
+        let matrix_json = serde_json::json!({
+            "cardinality": 81,
+            "dimensions": [
+                {"facets": [{"id": "x"}, {"id": "y"}]},
+                {"facets": [{"id": "x"}, {"id": "y"}]},
+                {"facets": [{"id": "x"}, {"id": "y"}]},
+                {"facets": [{"id": "x"}, {"id": "y"}]},
+            ],
+        });
+        std::fs::write(
+            run_dir.root().join("exploration_matrix.json"),
+            serde_json::to_vec(&matrix_json).unwrap(),
+        )
+        .unwrap();
+        let v = resume_sketches_per_cell(&home, run_id);
+        assert_eq!(v, 11);
     }
 }

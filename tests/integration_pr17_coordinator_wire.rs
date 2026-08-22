@@ -125,6 +125,12 @@ fn build_ctx(
     // `ctx.config.discovery_matrix.matrix_spec`). The PR-17
     // parity tests rely on the legacy 4×2 default so we
     // pre-populate the spec here.
+    //
+    // F2 (Track G.2): pin `sketches_per_cell = 1` so the
+    // matrix cardinality stays at 8 cells × 1 = 8 (matching
+    // the pre-F2 contract these parity tests assert). The
+    // F2 default of 10 would inflate the mock buffer from 8
+    // to 80 entries and break the parity check.
     let mut cfg = moagan::config::Config::default();
     cfg.discovery_matrix.matrix_spec = vec![
         "a=x,y".to_string(),
@@ -132,6 +138,7 @@ fn build_ctx(
         "c=x,y".to_string(),
         "d=x,y".to_string(),
     ];
+    cfg.discovery_matrix.sketches_per_cell = 1;
     let cfg = Arc::new(cfg);
     RunContext::new_with_config(
         run_id,
@@ -447,9 +454,9 @@ impl IterSketchJson for std::path::PathBuf {
 /// `DiscoveryCoordinator::run_with_ctx` API the way the CLI does
 /// and confirms the resulting artefacts are identical to the flat
 /// pipeline's. The full CLI binary invocation (`moagan discover
-/// --cardinality 80`) is exercised separately by the gauntlet's
-/// smoke tier (`make smoke`), where the binary is built and
-/// invoked against the local fixture.
+/// --sketches-per-cell <N>`) is exercised separately by the
+/// gauntlet's smoke tier (`make smoke`), where the binary is
+/// built and invoked against the local fixture.
 #[tokio::test]
 async fn pr17_discover_cli_invokes_coordinator_path() {
     let _guard = env_lock();

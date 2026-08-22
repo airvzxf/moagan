@@ -206,8 +206,8 @@ fn detect_outliers_returns_unchanged_when_clusters_match_thesis() {
 
 #[test]
 fn pr19_verification_50_percent_saturation_trips_before_hard_cap() {
-    // Spec verification: with `--cardinality 100` and 50%
-    // saturation, the run should terminate well before the
+    // Spec verification: with a 100-sketch matrix fan-out and
+    // 50% saturation, the run should terminate well before the
     // hard cap. The math: saturation_point = 50,
     // reserve = ceil(50 * 0.25) = 13, trip_point = 63.
     let mut tracker = SaturationTracker::with_policy(

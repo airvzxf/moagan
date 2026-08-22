@@ -165,14 +165,17 @@ async fn discovery_pipeline_composes_all_seven_phases() {
     run_dir.ensure().unwrap();
     build_brief(&run_dir).unwrap();
 
-    // Build the pipeline programmatically with a small cardinality
-    // so the test stays fast.
+    // Build the pipeline programmatically with a small
+    // `sketches_per_cell` so the test stays fast. With the F2
+    // default of 10 the 4-cell matrix would fan out 40
+    // sketches — too many for a smoke test. The integration
+    // test stays fast by keeping `sketches_per_cell = 1`.
     let opts = moagan::cli::discover::DiscoverOptions {
         provider: "mock".into(),
         prompt: "Design a multi-tenant SaaS backend".into(),
         home: None,
         mock_dir: None,
-        cardinality: 8,
+        sketches_per_cell: 1,
         max_parallelism: Some(2),
         dimensions: Some(2),
         facets_per_dimension: Some(2),

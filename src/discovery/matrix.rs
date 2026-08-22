@@ -17,6 +17,13 @@
 //! load a previously-persisted `discovery_dimensions.json` if
 //! present, otherwise build a new matrix from the supplied spec
 //! (or empty fallback when the caller has no spec).
+//!
+//! F2 (Track G.2): the matrix's `sketches_per_cell` is now an
+//! explicit input knob (CLI flag `--sketches-per-cell`, env var
+//! `MOAGAN_DISCOVERY_SKETCHES_PER_CELL`, or TOML
+//! `[discovery_matrix].sketches_per_cell`), no longer derived
+//! from the v0.5 `cardinality / cells` integer division. Default
+//! 10 replaces the v0.5 cardinality floor of 80.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
