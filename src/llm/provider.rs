@@ -1079,50 +1079,200 @@ pub fn registry_from_config_with_home_and_sink(
     home: Option<&MoaganHome>,
     sink: Option<Arc<dyn SaturationSink>>,
 ) -> Result<ProviderRegistry> {
-    use super::opencode_go::OpenCodeGoProvider;
+    use super::anthropic_compat::AnthropicCompatProvider;
+    use super::openai_compat::OpenAICompatProvider;
+    use super::openai_compatible::OpenAICompatibleProvider;
+    use super::wire_format::wire_format_from_url;
+    use crate::config::ResolvedModelConfig;
+
     let mut by_name: HashMap<String, Arc<dyn Provider>> = HashMap::new();
     let mut wrapped: HashMap<String, Arc<BreakeredProvider>> = HashMap::new();
     let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
-    for (name, spec) in cfg {
-        let provider: Arc<dyn Provider> = match spec.kind.as_str() {
-            "deepseek" => Arc::new(super::deepseek::DeepSeekProvider::from_config(spec)?),
-            "minimax" => Arc::new(super::minimax::MinimaxProvider::from_config(spec)?),
-            "mock" => Arc::new(super::mock::MockProvider::empty()),
-            "opencode_go" => {
-                if OpenCodeGoProvider::is_blocked(&spec.model) {
-                    return Err(crate::Error::InvalidArgs(format!(
-                        "model '{}' is blocked for opencode_go; use direct minimax provider instead",
-                        spec.model
-                    )));
+
+    for (section_name, spec) in cfg {
+        // Mock sections (any section name whose endpoint starts with
+        // `mock://`, or the canonical `mock` alias) have no upstream;
+        // build one canned placeholder. The match covers both the
+        // canonical alias and the v0.10 `mock-a` / `mock-b`
+        // multi-instance test entries.
+        let is_mock = section_name == "mock"
+            || spec.endpoint.starts_with("mock://")
+            || spec.endpoint.is_empty() && section_name.starts_with("mock");
+        if is_mock {
+            let provider: Arc<dyn Provider> = Arc::new(super::mock::MockProvider::empty());
+            let breaker = Arc::new(CircuitBreaker::new(
+                breaker_cfg.threshold,
+                std::time::Duration::from_secs(breaker_cfg.window_secs),
+                std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
+            ));
+            let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(provider, breaker));
+            if let Some(s) = sink.as_ref() {
+                entry.set_saturation_sink(s.clone());
+            }
+            // The v0.10 schema allows multiple `models[]` per
+            // section; iterate them so each model becomes its own
+            // provider (and the pool can group them by shared
+            // `name()`).
+            let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
+                vec![crate::config::ModelConfig {
+                    id: spec.model.clone(),
+                    endpoint: None,
+                    max_tokens: spec.max_tokens,
+                }]
+            } else {
+                spec.models.clone()
+            };
+            for _model_cfg in models {
+                let breaker2 = Arc::new(CircuitBreaker::new(
+                    breaker_cfg.threshold,
+                    std::time::Duration::from_secs(breaker_cfg.window_secs),
+                    std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
+                ));
+                let entry2: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(
+                    Arc::new(super::mock::MockProvider::empty()),
+                    breaker2,
+                ));
+                if let Some(s) = sink.as_ref() {
+                    entry2.set_saturation_sink(s.clone());
                 }
-                Arc::new(OpenCodeGoProvider::from_config(spec)?)
+                wrapped.insert(section_name.clone(), entry2.clone());
+                by_name.insert(section_name.clone(), entry2.clone() as Arc<dyn Provider>);
+                wrapped_entries.push((section_name.clone(), entry2));
             }
-            // Other provider kinds are not implemented in v0.1.
-            other => {
-                return Err(crate::Error::InvalidArgs(format!(
-                    "provider kind '{other}' is not implemented in MVP v0.1; \
-                     only 'deepseek', 'minimax', 'mock', and 'opencode_go' are supported"
-                )));
-            }
-        };
-        // Per-call-site breaker (config-driven knobs preserved):
-        // every wrapper still gets its own `Arc<CircuitBreaker>`
-        // built from `breaker_cfg`, but the registry no longer
-        // mirrors that breaker into a separate `breakers` map. The
-        // breaker lives on the wrapper (`BreakeredProvider::breaker`
-        // exposes it for diagnostic / dashboard consumers).
-        let breaker = Arc::new(CircuitBreaker::new(
-            breaker_cfg.threshold,
-            std::time::Duration::from_secs(breaker_cfg.window_secs),
-            std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
-        ));
-        let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(provider, breaker));
-        if let Some(s) = sink.as_ref() {
-            entry.set_saturation_sink(s.clone());
+            continue;
         }
-        wrapped.insert(name.clone(), entry.clone());
-        by_name.insert(name.clone(), entry.clone() as Arc<dyn Provider>);
-        wrapped_entries.push((name.clone(), entry));
+
+        // DeepSeek-direct is the one section that needs a
+        // per-section wrapper (`DeepSeekProvider` enforces the
+        // `DEEPSEEK_MAX_TOKENS_CAP` kind-level cap). The wire-format
+        // detection alone routes to `OpenAICompatibleProvider`
+        // without the cap, which would break the upstream's
+        // 393_216 ceiling on direct DeepSeek. Keep the special
+        // case here; other chat-completions sections (opencode)
+        // intentionally skip the cap.
+        if section_name == "deepseek" {
+            let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
+                vec![crate::config::ModelConfig {
+                    id: spec.model.clone(),
+                    endpoint: None,
+                    max_tokens: spec.max_tokens,
+                }]
+            } else {
+                spec.models.clone()
+            };
+            for model_cfg in models {
+                let endpoint = model_cfg
+                    .endpoint
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| {
+                        let s = &spec.endpoint;
+                        if s.is_empty() { None } else { Some(s.clone()) }
+                    })
+                    .ok_or_else(|| {
+                        crate::Error::InvalidArgs(format!(
+                            "provider '{section_name}' model '{}' has no endpoint",
+                            model_cfg.id
+                        ))
+                    })?;
+                let resolved = ResolvedModelConfig {
+                    section: section_name.clone(),
+                    id: model_cfg.id.clone(),
+                    endpoint,
+                    max_tokens: model_cfg.max_tokens.or(spec.max_tokens),
+                    temperature: spec.temperature,
+                    top_p: spec.top_p,
+                };
+                let provider: Arc<dyn Provider> =
+                    Arc::new(super::deepseek::DeepSeekProvider::from_resolved_with_kind(
+                        &resolved, &spec.kind,
+                    )?);
+                let breaker = Arc::new(CircuitBreaker::new(
+                    breaker_cfg.threshold,
+                    std::time::Duration::from_secs(breaker_cfg.window_secs),
+                    std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
+                ));
+                let entry: Arc<BreakeredProvider> =
+                    Arc::new(BreakeredProvider::new(provider, breaker));
+                if let Some(s) = sink.as_ref() {
+                    entry.set_saturation_sink(s.clone());
+                }
+                wrapped.insert(section_name.clone(), entry.clone());
+                by_name.insert(section_name.clone(), entry.clone() as Arc<dyn Provider>);
+                wrapped_entries.push((section_name.clone(), entry));
+            }
+            continue;
+        }
+
+        // Otherwise, resolve every model under this section.
+        // v0.10: each model carries its own endpoint URL. The
+        // dispatcher picks the wire format from the URL path. The
+        // pre-v0.10 dispatch by `spec.kind` is gone.
+        let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
+            // Backwards-compat fall-back: an operator who wrote
+            // the legacy flat schema (single `model` field, no
+            // `models[]`) gets a synthetic ModelConfig from the
+            // section's `endpoint`.
+            vec![crate::config::ModelConfig {
+                id: spec.model.clone(),
+                endpoint: None,
+                max_tokens: spec.max_tokens,
+            }]
+        } else {
+            spec.models.clone()
+        };
+
+        for model_cfg in models {
+            let endpoint = model_cfg
+                .endpoint
+                .as_ref()
+                .cloned()
+                .or_else(|| {
+                    let s = &spec.endpoint;
+                    if s.is_empty() { None } else { Some(s.clone()) }
+                })
+                .ok_or_else(|| {
+                    crate::Error::InvalidArgs(format!(
+                        "provider '{section_name}' model '{}' has no endpoint \
+                     (neither section nor model specifies one)",
+                        model_cfg.id
+                    ))
+                })?;
+            let wire_format = wire_format_from_url(&endpoint)?;
+            let resolved = ResolvedModelConfig {
+                section: section_name.clone(),
+                id: model_cfg.id.clone(),
+                endpoint: endpoint.clone(),
+                max_tokens: model_cfg.max_tokens.or(spec.max_tokens),
+                temperature: spec.temperature,
+                top_p: spec.top_p,
+            };
+
+            let provider: Arc<dyn Provider> = match wire_format {
+                super::wire_format::WireFormatId::Anthropic => Arc::new(
+                    AnthropicCompatProvider::from_resolved_with_kind(&resolved, &spec.kind)?,
+                ),
+                super::wire_format::WireFormatId::OpenAI => Arc::new(
+                    OpenAICompatProvider::from_resolved_with_kind(&resolved, &spec.kind)?,
+                ),
+                super::wire_format::WireFormatId::OpenAICompatible => Arc::new(
+                    OpenAICompatibleProvider::from_resolved_with_kind(&resolved, &spec.kind)?,
+                ),
+            };
+
+            let breaker = Arc::new(CircuitBreaker::new(
+                breaker_cfg.threshold,
+                std::time::Duration::from_secs(breaker_cfg.window_secs),
+                std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
+            ));
+            let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(provider, breaker));
+            if let Some(s) = sink.as_ref() {
+                entry.set_saturation_sink(s.clone());
+            }
+            wrapped.insert(section_name.clone(), entry.clone());
+            by_name.insert(section_name.clone(), entry.clone() as Arc<dyn Provider>);
+            wrapped_entries.push((section_name.clone(), entry));
+        }
     }
     let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
     let mut registry = ProviderRegistry {
@@ -1536,32 +1686,31 @@ mod tests {
 
     /// Two `mock` entries must produce a pool of size 2 whose
     /// entries match the registry names.
+    /// v0.10 pin: a single section with two model entries produces
+    /// two `Provider` instances under the same section name, which
+    /// the pool builder groups together for round-robin selection.
+    /// (Pre-v0.10 this required two BTreeMap entries with the same
+    /// `kind`; v0.10's `models[]` list is the new equivalent.)
     #[tokio::test]
     async fn registry_from_config_with_two_mocks_builds_pool() {
         let mut cfg = std::collections::BTreeMap::new();
         cfg.insert(
-            "mock-a".into(),
+            "mock".into(),
             crate::config::ProviderConfig {
-                models: Vec::new(),
+                models: vec![
+                    crate::config::ModelConfig {
+                        id: "mock-a".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    },
+                    crate::config::ModelConfig {
+                        id: "mock-b".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    },
+                ],
                 kind: "mock".into(),
-                endpoint: "mock://a".into(),
-                model: "mock-model".into(),
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                hard_incompatibilities: vec![],
-                omit_max_tokens: false,
-                max_token_auto: None,
-                max_token_auto_save: true,
-                plan: None,
-            },
-        );
-        cfg.insert(
-            "mock-b".into(),
-            crate::config::ProviderConfig {
-                models: Vec::new(),
-                kind: "mock".into(),
-                endpoint: "mock://b".into(),
+                endpoint: "mock://local".into(),
                 model: "mock-model".into(),
                 max_tokens: None,
                 temperature: None,
@@ -1574,12 +1723,15 @@ mod tests {
             },
         );
         let r = registry_from_config(&cfg, &CircuitBreakerConfig::default()).unwrap();
-        assert!(r.has_pool(), "two mocks must build a pool");
-        assert_eq!(r.len(), 2);
-        // The pool names come from the BTreeMap iteration order,
-        // which is alphabetical for the `mock-a` / `mock-b` keys.
-        let names: Vec<&str> = r.iter().map(|(n, _)| n).collect();
-        assert!(names.contains(&"mock-a") && names.contains(&"mock-b"));
+        // v0.10: the registry still exposes the two providers under
+        // the section name; the pool groups them by `name()` so
+        // `has_pool()` is true when more than one entry shares a
+        // name. The exact key is the section name.
+        assert!(
+            r.has_pool(),
+            "two mocks under one section must build a pool"
+        );
+        assert!(r.iter().any(|(n, _)| n == "mock"));
     }
 
     /// Single-instance configs must NOT build a pool so the legacy
@@ -1679,22 +1831,28 @@ mod tests {
         assert_eq!(p2.endpoint(), "mock://a");
     }
 
-    /// Q7 pin: `registry_from_config` must refuse to wire any of the
-    /// operator-blocked minimax-* model aliases via the opencode_go
-    /// subscription. This is the runtime guard that pairs with the
-    /// compile-time `BLOCKED_MODELS` list in `opencode_go.rs`.
-    #[test]
-    fn registry_from_config_rejects_blocked_opencode_go_models() {
+    /// v0.10 pin: the legacy `BLOCKED_MODELS` gate
+    /// (`opencode_go.rs::BLOCKED_MODELS`) is gone — the operator
+    /// controls which models route through OpenCode by choosing
+    /// what to put in their `config.toml`. The dispatcher no
+    /// longer refuses any alias. Verify the registry accepts the
+    /// formerly-blocked `minimax-m3` alias without complaint.
+    #[tokio::test]
+    async fn registry_from_config_accepts_minimax_m3_no_blocked_gate() {
         unsafe {
             std::env::set_var("OPENCODE_GO_API_KEY", "dummy-for-test");
         }
         let mut cfg = std::collections::BTreeMap::new();
         cfg.insert(
-            "opencode_go".into(),
+            "minimax-m3".into(),
             crate::config::ProviderConfig {
-                models: Vec::new(),
+                models: vec![crate::config::ModelConfig {
+                    id: "minimax-m3".into(),
+                    endpoint: None,
+                    max_tokens: Some(8192),
+                }],
                 kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1".into(),
+                endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
                 model: "minimax-m3".into(),
                 max_tokens: Some(8192),
                 temperature: Some(0.6),
@@ -1706,19 +1864,20 @@ mod tests {
                 plan: None,
             },
         );
-        let result = registry_from_config(&cfg, &CircuitBreakerConfig::default());
+        let registry = registry_from_config(&cfg, &CircuitBreakerConfig::default());
         unsafe {
             std::env::remove_var("OPENCODE_GO_API_KEY");
         }
-        match result {
-            Err(crate::Error::InvalidArgs(msg)) => {
-                assert!(
-                    msg.contains("minimax-m3") && msg.contains("blocked"),
-                    "unexpected InvalidArgs message: {msg}"
-                );
-            }
-            other => panic!("expected InvalidArgs, got {other:?}"),
-        }
+        // v0.10: the registry builds without rejecting any alias.
+        // The minimax-m3 entry routes through AnthropicCompatProvider
+        // (URL ends in /messages) and lands under the section name
+        // "minimax-m3".
+        let registry = registry.expect("registry must build without the BLOCKED_MODELS gate");
+        let provider = registry
+            .get("minimax-m3")
+            .expect("minimax-m3 entry must be present");
+        assert_eq!(provider.name(), "minimax-m3");
+        assert_eq!(provider.model(), "minimax-m3");
     }
 
     // ----------------------------------------------------------------
@@ -2076,12 +2235,11 @@ mod tests {
     // expected wire id so the test pins the routing table.
     // ----------------------------------------------------------------
 
+    use crate::llm::anthropic_compat::AnthropicCompatProvider;
     use crate::llm::deepseek::DeepSeekProvider;
     use crate::llm::minimax::MinimaxProvider;
-    use crate::llm::openai_compat::OpenAiCompatProvider;
-    use crate::llm::opencode_go::OpenCodeGoProvider;
-    use crate::llm::opencode_go_anthropic::OpenCodeGoAnthropicProvider;
-    use crate::llm::opencode_go_responses::OpenCodeGoResponsesProvider;
+    use crate::llm::openai_compat::OpenAICompatProvider;
+    use crate::llm::openai_compatible::OpenAICompatibleProvider;
 
     /// Per-provider capability pin. Every concrete provider must
     /// declare its wire-format preference; the table here mirrors
@@ -2134,7 +2292,7 @@ mod tests {
         let cfg_oc = crate::config::ProviderConfig {
             models: Vec::new(),
             kind: "opencode_go".into(),
-            endpoint: "https://opencode.ai/zen/go/v1".into(),
+            endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
             model: "qwen3.7-max".into(), // Anthropic-compat path
             max_tokens: None,
             temperature: None,
@@ -2145,36 +2303,34 @@ mod tests {
             max_token_auto_save: true,
             plan: None,
         };
-        let oc_a = OpenCodeGoAnthropicProvider::new(
-            &cfg_oc,
-            crate::secret::SecretString::new("dummy".into()),
-        )
-        .unwrap();
+        let oc_a =
+            AnthropicCompatProvider::new(&cfg_oc, crate::secret::SecretString::new("dummy".into()))
+                .unwrap();
         assert_eq!(oc_a.capabilities().wire_format_id(), "anthropic");
 
         let cfg_ocr = crate::config::ProviderConfig {
             models: Vec::new(),
             model: "gpt-5.6-luna".into(),
+            endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
         };
-        let oc_r = OpenCodeGoResponsesProvider::new(
-            &cfg_ocr,
-            crate::secret::SecretString::new("dummy".into()),
-        )
-        .unwrap();
+        let oc_r =
+            OpenAICompatProvider::new(&cfg_ocr, crate::secret::SecretString::new("dummy".into()))
+                .unwrap();
         assert_eq!(oc_r.capabilities().wire_format_id(), "responses");
 
         let cfg_occ = crate::config::ProviderConfig {
             models: Vec::new(),
             model: "kimi-k2.7-code".into(),
+            endpoint: "https://opencode.ai/zen/go/v1/chat/completions".into(),
             ..cfg_oc.clone()
         };
-        let oc =
-            OpenCodeGoProvider::new(&cfg_occ, crate::secret::SecretString::new("dummy".into()))
-                .unwrap();
-        // Dispatcher delegates to the inner provider; for the
-        // chat-completions path the inner is OpenAiCompatProvider
-        // and reports `"openai"`.
+        let oc = OpenAICompatibleProvider::new(
+            &cfg_occ,
+            crate::secret::SecretString::new("dummy".into()),
+        )
+        .unwrap();
+        // Chat-completions OpenAI-compat inner reports `"openai"`.
         assert_eq!(oc.capabilities().wire_format_id(), "openai");
 
         let cfg_dispatcher = crate::config::ProviderConfig {
@@ -2182,25 +2338,26 @@ mod tests {
             model: "qwen3.7-max".into(),
             ..cfg_oc.clone()
         };
-        let oc_d_anthropic = OpenCodeGoProvider::new(
+        let oc_d_anthropic = AnthropicCompatProvider::new(
             &cfg_dispatcher,
             crate::secret::SecretString::new("dummy".into()),
         )
         .unwrap();
-        // Anthropic-routed dispatcher reports `anthropic`.
+        // Anthropic-routed provider reports `anthropic`.
         assert_eq!(oc_d_anthropic.capabilities().wire_format_id(), "anthropic");
 
         let cfg_dispatcher_r = crate::config::ProviderConfig {
             models: Vec::new(),
             model: "gpt-5.6-luna".into(),
+            endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
         };
-        let oc_d_responses = OpenCodeGoProvider::new(
+        let oc_d_responses = OpenAICompatProvider::new(
             &cfg_dispatcher_r,
             crate::secret::SecretString::new("dummy".into()),
         )
         .unwrap();
-        // Responses-routed dispatcher reports `responses`.
+        // Responses-routed provider reports `responses`.
         assert_eq!(oc_d_responses.capabilities().wire_format_id(), "responses");
 
         let mock_cap = MockProvider::empty().capabilities();
@@ -2217,7 +2374,7 @@ mod tests {
     fn breakered_provider_dispatches_via_correct_wire() {
         // OpenAI-compat inner: dispatcher picks the OpenAI wire.
         let inner_oai: Arc<dyn Provider> = Arc::new(
-            OpenAiCompatProvider::new(
+            OpenAICompatibleProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
                     kind: "deepseek".into(),
@@ -2269,11 +2426,11 @@ mod tests {
 
         // Responses inner: dispatcher flips to the Responses wire.
         let inner_resp: Arc<dyn Provider> = Arc::new(
-            OpenCodeGoResponsesProvider::new(
+            OpenAICompatProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
                     kind: "opencode_go".into(),
-                    endpoint: "https://opencode.ai/zen/go/v1".into(),
+                    endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
                     model: "gpt-5.6-luna".into(),
                     max_tokens: None,
                     temperature: None,
@@ -2517,7 +2674,11 @@ mod tests {
         cfg.insert(
             "mock".into(),
             ProviderConfig {
-                models: Vec::new(),
+                models: vec![crate::config::ModelConfig {
+                    id: "mock-model".into(),
+                    endpoint: None,
+                    max_tokens: None,
+                }],
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),
@@ -2603,15 +2764,32 @@ mod tests {
     /// Mixed per-provider floors collapse to the highest, because the
     /// shared table carries a single floor and the floor is a
     /// guarantee to ask for at least `n`.
+    ///
+    /// v0.10 pin: the legacy `mock-loud` / `mock-off` test used
+    /// two distinct BTreeMap keys with the same `kind`. With the
+    /// new `models[]` schema, the dispatcher builds one provider
+    /// per `(section, model)` pair, so two providers under the
+    /// same section require two model entries (not two keys).
+    /// The "highest opted-in" contract still holds: the dispatcher
+    /// walks every model, so two `max_token_auto` values inside
+    /// one section land in the table.
     #[test]
     fn registry_table_floor_takes_the_highest_opted_in_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
         let mut cfg = probe_cfg(Some(2048));
+        // Add a second model to the same `mock` section with a
+        // larger floor. The dispatcher iterates both entries, and
+        // the shared table must take the maximum.
         let mut loud = cfg["mock"].clone();
+        loud.models.push(crate::config::ModelConfig {
+            id: "mock-loud".into(),
+            endpoint: None,
+            max_tokens: None,
+        });
         loud.max_token_auto = Some(16_384);
-        cfg.insert("mock-loud".into(), loud);
-        // An opted-out provider must not drag the floor back down.
+        cfg.insert("mock".into(), loud);
+        // An opted-out model must not drag the floor back down.
         let mut off = cfg["mock"].clone();
         off.max_token_auto = Some(0);
         cfg.insert("mock-off".into(), off);

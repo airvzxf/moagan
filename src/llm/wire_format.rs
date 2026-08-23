@@ -284,7 +284,7 @@ impl WireFormat for CustomWire {
 /// providers get `response_format` set to `json_object` for these
 /// roles so the JSON parser in `parse_model_json` stops hitting
 /// the trailing-token / missing-brace pathologies.
-fn role_requires_json(role: Role) -> bool {
+pub(crate) fn role_requires_json(role: Role) -> bool {
     use Role::*;
     matches!(
         role,

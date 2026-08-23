@@ -608,32 +608,62 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
 fn build_provider_for_probe(
     spec: &crate::config::ProviderConfig,
 ) -> Result<Arc<dyn crate::llm::provider::Provider>> {
+    use crate::config::ModelConfig;
     use crate::llm::provider::Provider;
-    let provider: Arc<dyn Provider> = match spec.kind.as_str() {
-        "deepseek" => Arc::new(crate::llm::deepseek::DeepSeekProvider::from_config(spec)?),
-        "minimax" => Arc::new(crate::llm::minimax::MinimaxProvider::from_config(spec)?),
-        "opencode_go" => {
-            if crate::llm::opencode_go::OpenCodeGoProvider::is_blocked(&spec.model) {
-                return Err(Error::InvalidArgs(format!(
-                    "probe: model '{}' is blocked for opencode_go; use direct minimax provider instead",
-                    spec.model
-                )));
+    use crate::llm::wire_format::wire_format_from_url;
+    // v0.10: the dispatcher is gone. Build a `ResolvedModelConfig`
+    // from the spec and pick the concrete provider by wire format
+    // (URL path). Legacy `kind` strings still drive DeepSeek's
+    // wrapper so its `kind_hard_cap` stays in place.
+    let endpoint = {
+        let s = &spec.endpoint;
+        if s.is_empty() { None } else { Some(s.clone()) }
+    }
+    .ok_or_else(|| {
+        Error::InvalidArgs(format!(
+            "probe: provider '{}' has no endpoint configured",
+            spec.kind
+        ))
+    })?;
+    let models: Vec<ModelConfig> = if spec.models.is_empty() {
+        vec![ModelConfig {
+            id: spec.model.clone(),
+            endpoint: None,
+            max_tokens: spec.max_tokens,
+        }]
+    } else {
+        spec.models.clone()
+    };
+    let first = models.into_iter().next().ok_or_else(|| {
+        Error::InvalidArgs(format!(
+            "probe: provider '{}' has no models configured",
+            spec.kind
+        ))
+    })?;
+    let resolved = crate::config::ResolvedModelConfig {
+        section: spec.kind.clone(),
+        id: first.id.clone(),
+        endpoint: endpoint.clone(),
+        max_tokens: first.max_tokens.or(spec.max_tokens),
+        temperature: spec.temperature,
+        top_p: spec.top_p,
+    };
+    let wire_format = wire_format_from_url(&endpoint)?;
+    let provider: Arc<dyn Provider> = if spec.kind == "deepseek" {
+        Arc::new(crate::llm::deepseek::DeepSeekProvider::from_resolved(
+            &resolved,
+        )?)
+    } else {
+        match wire_format {
+            crate::llm::wire_format::WireFormatId::Anthropic => Arc::new(
+                crate::llm::anthropic_compat::AnthropicCompatProvider::from_resolved(&resolved)?,
+            ),
+            crate::llm::wire_format::WireFormatId::OpenAI => {
+                Arc::new(crate::llm::openai_compat::OpenAICompatProvider::from_resolved(&resolved)?)
             }
-            Arc::new(crate::llm::opencode_go::OpenCodeGoProvider::from_config(
-                spec,
-            )?)
-        }
-        "opencode_go_anthropic" => Arc::new(
-            crate::llm::opencode_go_anthropic::OpenCodeGoAnthropicProvider::from_config(spec)?,
-        ),
-        "opencode_go_responses" => Arc::new(
-            crate::llm::opencode_go_responses::OpenCodeGoResponsesProvider::from_config(spec)?,
-        ),
-        other => {
-            return Err(Error::InvalidArgs(format!(
-                "probe: provider kind '{other}' is not supported by `moagan probe max_tokens`; \
-                 supported kinds: minimax, deepseek, opencode_go, opencode_go_anthropic, opencode_go_responses"
-            )));
+            crate::llm::wire_format::WireFormatId::OpenAICompatible => Arc::new(
+                crate::llm::openai_compatible::OpenAICompatibleProvider::from_resolved(&resolved)?,
+            ),
         }
     };
     Ok(provider)
@@ -708,7 +738,7 @@ mod tests {
                 outcome: ProbeOutcome::Discovered(131_072),
             },
             ProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: ProbeOutcome::Discovered(8_192),
             },
@@ -720,7 +750,7 @@ mod tests {
         ];
         let mins = compute_min_per_provider(&results);
         assert_eq!(mins.get("minimax"), Some(&131_072));
-        assert_eq!(mins.get("opencode_go"), Some(&8_192));
+        assert_eq!(mins.get("kimi-k3"), Some(&8_192));
     }
 
     /// `--persist-min` aggregation: skipped and failed probes do
@@ -889,7 +919,7 @@ mod tests {
                 outcome: TemperatureProbeOutcome::Discovered(vec![0.0, 0.5]),
             },
             TemperatureProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: TemperatureProbeOutcome::Discovered(vec![0.5, 1.0]),
             },
@@ -903,7 +933,7 @@ mod tests {
         ];
         let map = union_per_provider(&results);
         assert_eq!(map.get("minimax"), Some(&vec![0.0, 0.3, 0.5]));
-        assert_eq!(map.get("opencode_go"), Some(&vec![0.5, 1.0]));
+        assert_eq!(map.get("kimi-k3"), Some(&vec![0.5, 1.0]));
         assert_eq!(map.len(), 2);
     }
 
@@ -925,7 +955,7 @@ mod tests {
                 outcome: TemperatureProbeOutcome::SkippedMock,
             },
             TemperatureProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: TemperatureProbeOutcome::DryRun,
             },
@@ -1034,7 +1064,7 @@ mod tests {
             },
             // A different provider must stay independent.
             TemperatureProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: TemperatureProbeOutcome::Discovered(vec![0.5, 1.0]),
             },
@@ -1053,10 +1083,7 @@ mod tests {
         let minimax_cap = file.operator_caps.get("minimax").expect("minimax cap");
         assert_eq!(minimax_cap.temperatures, vec![0.0, 0.5, 0.7, 1.0]);
         assert!(!minimax_cap.auto);
-        let opencode_cap = file
-            .operator_caps
-            .get("opencode_go")
-            .expect("opencode_go cap");
+        let opencode_cap = file.operator_caps.get("kimi-k3").expect("kimi-k3 cap");
         assert_eq!(opencode_cap.temperatures, vec![0.5, 1.0]);
         assert!(!opencode_cap.auto);
     }

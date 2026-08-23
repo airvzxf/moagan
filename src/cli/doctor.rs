@@ -365,7 +365,7 @@ fn capabilities_for_kind(kind: &str) -> crate::llm::capabilities::ProviderCapabi
     match kind {
         "minimax" => ProviderCapabilities::for_minimax(),
         "opencode_go" => ProviderCapabilities::for_opencode_go(),
-        "opencode_go_anthropic" => ProviderCapabilities::for_opencode_go_anthropic(),
+        "opencode_go_anthropic" => ProviderCapabilities::for_anthropic_compat(),
         "opencode_go_responses" => ProviderCapabilities::for_opencode_go_responses(),
         "deepseek" => ProviderCapabilities::for_deepseek(),
         "mock" => ProviderCapabilities::for_mock(),

@@ -166,7 +166,7 @@ impl ProviderCapabilities {
 
     /// OpenCode Go routed through the Anthropic-compatible
     /// `/v1/messages` endpoint.
-    pub fn for_opencode_go_anthropic() -> Self {
+    pub fn for_anthropic_compat() -> Self {
         Self {
             supports_system_field: true,
             supports_response_format: false,

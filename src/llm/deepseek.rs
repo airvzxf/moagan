@@ -1,7 +1,7 @@
 //! `deepseek` provider — DeepSeek's OpenAI-compat API at
 //! `https://api.deepseek.com/v1/chat/completions`.
 //!
-//! This is a thin wrapper around `OpenAiCompatProvider` that pre-fills
+//! This is a thin wrapper around `OpenAICompatibleProvider` that pre-fills
 //! the DeepSeek-specific defaults (endpoint, model, API key env).
 
 use async_trait::async_trait;
@@ -11,19 +11,19 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::{DEEPSEEK_MAX_TOKENS_CAP, ProviderCapabilities};
-use super::openai_compat::OpenAiCompatProvider;
+use super::openai_compatible::OpenAICompatibleProvider;
 use super::provider::Provider;
 use super::wire::{Request, Response};
 
 /// DeepSeek provider backed by the generic OpenAI-compat implementation.
 #[derive(Debug, Clone)]
-pub struct DeepSeekProvider(OpenAiCompatProvider);
+pub struct DeepSeekProvider(OpenAICompatibleProvider);
 
 impl DeepSeekProvider {
     /// Build from a DeepSeek provider config and a resolved API key.
     ///
     /// Wires `DEEPSEEK_MAX_TOKENS_CAP = 393_216` as the
-    /// `kind_hard_cap` via [`OpenAiCompatProvider::new_with_kind_cap`]
+    /// `kind_hard_cap` via [`OpenAICompatibleProvider::new_with_kind_cap`]
     /// so every wire body carries the per-provider ceiling even
     /// when the operator's TOML leaves `max_tokens` unset
     /// (`DEFAULT_MAX_TOKENS = 1_000_000`). Without this cap the
@@ -43,7 +43,7 @@ impl DeepSeekProvider {
                 spec.kind
             )));
         }
-        Ok(Self(OpenAiCompatProvider::new_with_kind_cap(
+        Ok(Self(OpenAICompatibleProvider::new_with_kind_cap(
             spec,
             api_key,
             Some(DEEPSEEK_MAX_TOKENS_CAP),
@@ -72,12 +72,67 @@ impl DeepSeekProvider {
             })?;
         Self::new(spec, SecretString::new(key))
     }
+
+    /// v0.10 dispatcher entry point. Builds a `DeepSeekProvider` from
+    /// a `ResolvedModelConfig`, wrapping an `OpenAICompatibleProvider`
+    /// with `DEEPSEEK_MAX_TOKENS_CAP` as the `kind_hard_cap`. The
+    /// dispatcher routes DeepSeek's `/v1/chat/completions` URL to this
+    /// constructor directly so the cap is wired at construction time.
+    pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        Self::from_resolved_with_kind(resolved, &resolved.section)
+    }
+
+    /// Like [`Self::from_resolved`] but takes the API-key lookup
+    /// kind explicitly. The dispatcher passes the legacy `kind`
+    /// field so the lookup matches the canonical env var even when
+    /// the section name is more specific (e.g. `deepseek`).
+    pub fn from_resolved_with_kind(
+        resolved: &crate::config::ResolvedModelConfig,
+        kind: &str,
+    ) -> Result<Self> {
+        let key = super::api_keys::lookup_key(kind, None)
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: format!(
+                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                    kind.to_ascii_uppercase()
+                ),
+                http_status: None,
+            })?
+            .map_err(|e| match e {
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "{}: {message}; check api_keys.toml and the env var fallback",
+                        kind
+                    ),
+                    http_status: None,
+                },
+                other => other,
+            })?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|e| Error::Provider {
+                message: format!("build http client: {e}"),
+                http_status: None,
+            })?;
+        Ok(Self(OpenAICompatibleProvider {
+            name: resolved.section.clone(),
+            model: resolved.id.clone(),
+            endpoint: resolved.endpoint.clone(),
+            api_key: SecretString::new(key),
+            client,
+            max_retries: 3,
+            provider_max_tokens: resolved.max_tokens,
+            kind_hard_cap: Some(DEEPSEEK_MAX_TOKENS_CAP),
+            max_tokens_table: None,
+        }))
+    }
 }
 
 impl std::ops::Deref for DeepSeekProvider {
-    type Target = OpenAiCompatProvider;
+    type Target = OpenAICompatibleProvider;
 
-    fn deref(&self) -> &OpenAiCompatProvider {
+    fn deref(&self) -> &OpenAICompatibleProvider {
         &self.0
     }
 }
@@ -119,7 +174,7 @@ impl Provider for DeepSeekProvider {
         self.0.effective_max_tokens(req)
     }
 
-    /// Delegate to the wrapped `OpenAiCompatProvider` so the probe
+    /// Delegate to the wrapped `OpenAICompatibleProvider` so the probe
     /// ceiling matches the per-provider hard cap wired at
     /// construction time. With the default wiring (this provider
     /// built via [`Self::new`]) the inner `kind_hard_cap` is
