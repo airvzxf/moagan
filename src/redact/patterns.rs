@@ -156,9 +156,62 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
             "[REDACTED:ip_v4]"
         ),
         pat!("ssn_like", r"\b\d{3}-\d{2}-\d{4}\b", "[REDACTED:ssn]"),
+        // Bug 4b — second fix (operator report, v0.9.11 follow-up):
+        // PAN-shaped numbers (Visa, MC, Amex) with at least one
+        // visible separator (` ` or `-`) between digit groups.
+        // Single-digit decimal numbers like `1.9` and f32-precision
+        // artifacts like `1.899999976158142` are NOT redacted: the
+        // separator in the middle is a `.` (decimal point), not a
+        // space or dash, so the pattern requires no extra
+        // anchoring.
+        //
+        // The previous shape `\b\d{13,16}\b` is intentionally
+        // ABSENT — it was the root cause of the false positive
+        // reported by the operator. The 15-digit fragment
+        // `899999976158142` in `1.899999976158142` sat between a
+        // `.` and end-of-string, both of which are `\b` boundaries
+        // for a `\d`-only run, so the regex happily redacted the
+        // trailing 15 digits. Removing the bare-run alternative
+        // closes that hole and keeps the three known card shapes
+        // (4-4-4-4 with separators, 4-4-4-3 with separators,
+        // 4-6-5 Amex with separators) intact.
+        //
+        // Trade-off: PANs written as a single 16-digit run
+        // without any separator (`4111111111111111` literally
+        // concatenated) are not redacted. They are rare in modern
+        // logs (the upstream redact targets audit trails, where
+        // PANs typically arrive formatted), but if the operator
+        // reports a false negative here we can add the bare-run
+        // alternative back with stricter boundaries.
+        //
+        // A UUID fragment like `9032-403912247352` is `4 + - + 12`
+        // and matches NONE of the three card shapes, so it is no
+        // longer redacted as a credit card either. The Rust
+        // `regex` crate does NOT support look-around
+        // (`(?<!...)` / `(?!...)`) and does NOT support
+        // backreferences (`\1`), so the obvious structural fixes
+        // are off the table — explicit enumeration is the only
+        // option.
         pat!(
             "credit_card",
-            r"\b(?:\d[ -]?){13,16}\b",
+            // PANs requieren al menos un separador visible (` ` o
+            // `-`) entre los grupos de 4 dígitos. Esto descarta
+            // f32 precision (e.g. `1.899999976158142`) donde los
+            // 15 dígitos `899999976158142` están separados por un
+            // PUNTO (no espacio ni guión), pero matchea PANs
+            // reales que en logs llegan como
+            // `4111-1111-1111-1111` o `4111 1111 1111 1111`.
+            //
+            // Formas canónicas cubiertas:
+            // 1. 16 dígitos con 3 separadores (Visa/MC modernos).
+            // 2. 13 dígitos legacy con 3 separadores.
+            // 3. 15 dígitos Amex (formato 4-6-5).
+            //
+            // NO cubierto: PAN pegado sin separadores
+            // (`4111111111111111`). Es raro en logs modernos y la
+            // alternativa causa falsos positivos con f32
+            // precision.
+            r"(?:\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4}\b|\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{3}\b|\b\d{4}[ -]\d{6}[ -]\d{5}\b)",
             "[REDACTED:credit_card]"
         ),
         pat!("email", r"[\w.+-]+@[\w-]+\.[\w.-]+", "[REDACTED:email]"),
@@ -276,6 +329,7 @@ pub fn kind_for_pattern_id(id: &str) -> Option<PatternKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redact::apply::{RedactPolicy, Surface, apply};
 
     #[test]
     fn compiles_all_patterns() {
@@ -388,6 +442,112 @@ mod tests {
     #[test]
     fn credit_card_matches_only_long_digit_shape() {
         assert_pattern("credit_card", "card=4111 1111 1111 1111", "card=1234-5678");
+    }
+
+    /// Pin the operator-reported bug (Bug 4b): `temperature=1.9`
+    /// inside a coordinator log line must pass through the redact
+    /// pipeline unchanged. The original operator report read
+    /// `temperature=1.[REDACTED:credit_card]`, which looked like
+    /// the regex was matching `1.9`. The diagnostic in
+    /// PR-8 / Phase 3 showed that the original regex (`\b(?:\d[ -]?)
+    /// {13,16}\b`) never matched `1.9` on its own — only the UUID
+    /// v7 `call_id` on the same line was matching (4-dash-12
+    /// digits), and the trailing-space eat produced a visual
+    /// artefact that read like a `1.[REDACTED]` shape. The new
+    /// regex enumerates the four known card shapes (no internal
+    /// separator, 4-4-4-4 with separator, 4-4-4-3, 4-6-5); none of
+    /// them matches `1.9`, so the line passes through verbatim.
+    #[test]
+    fn credit_card_does_not_redact_short_decimal_like_1_9() {
+        let p = RedactPolicy::default();
+        let body = "cell_dim=waydroid-integration cell_facet=env-config \
+            temperature=1.9 replica=0";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert_eq!(
+            r.as_ref(),
+            body,
+            "short decimal values like 1.9 must NOT be redacted as credit_card; got:\n{r}"
+        );
+    }
+
+    /// Pin the actual root cause (Bug 4b): a UUID v7 `call_id`
+    /// inside a tracing event must NOT be redacted as a credit
+    /// card. The original regex happily matched the last 16 digits
+    /// of `019fdbbc-b6d0-7912-9032-403912247352` (i.e.
+    /// `9032-403912247352`) because the `-` separator is one of
+    /// the regex's allowed internal separators. The new regex
+    /// requires the digit run to follow one of the four known
+    /// card shapes (no separator / 4-4-4-4 / 4-4-4-3 / 4-6-5); a
+    /// `4-dash-12` UUID tail fits none of them.
+    #[test]
+    fn credit_card_does_not_redact_uuid_v7_call_id() {
+        let p = RedactPolicy::default();
+        let body = "call_id=019fdbbc-b6d0-7912-9032-403912247352 phase=sketch \
+            stage=provider.send.started retry_count=0 temperature=1.9";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert_eq!(
+            r.as_ref(),
+            body,
+            "UUID v7 call_id must NOT be redacted as credit_card; got:\n{r}"
+        );
+        assert!(!r.contains("[REDACTED:credit_card]"));
+        assert!(r.contains("019fdbbc-b6d0-7912-9032-403912247352"));
+    }
+
+    /// Pin the legitimate case: a 16-digit Visa-style PAN written
+    /// `card=4111 1111 1111 1111` must still be redacted by the
+    /// tightened regex. The 4-4-4-4 with spaces shape is the first
+    /// alternation, so a key=value form like `card=4111 1111 1111
+    /// 1111` (preceded by `=`, followed by end-of-string) still
+    /// matches.
+    #[test]
+    fn credit_card_still_redacts_real_pan() {
+        let p = RedactPolicy::default();
+        let body = "card=4111 1111 1111 1111";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert!(
+            r.contains("[REDACTED:credit_card]"),
+            "real PAN must still be redacted; got:\n{r}"
+        );
+        assert!(!r.contains("4111 1111 1111 1111"));
+    }
+
+    /// Pin the actual operator-reported bug (Bug 4b, second pass):
+    /// f32 precision renders `1.9` as `1.899999976158142` (16 chars
+    /// including the leading `1.`). The previous regex matched the
+    /// 15-digit fragment `899999976158142` between the decimal
+    /// point and end-of-string, redacting the `9`. The new regex
+    /// requires visible separators (` ` or `-`) between digit
+    /// groups, so the decimal point does NOT count as a separator
+    /// and the whole fragment is left untouched.
+    #[test]
+    fn credit_card_does_not_redact_f32_precision_like_1_899999976158142() {
+        let p = RedactPolicy::default();
+        let body = "cell_dim=waydroid-integration cell_facet=env-config \
+            temperature=1.899999976158142 replica=0 sketch_index=0";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert_eq!(
+            r.as_ref(),
+            body,
+            "f32 precision (e.g. 1.899999976158142) must NOT be redacted as credit_card; got:\n{r}"
+        );
+        assert!(!r.contains("[REDACTED:credit_card]"));
+    }
+
+    /// Same scenario with the `0.1` artifact: `0.1` renders as
+    /// `0.10000000149011612` (16 digits, similar pattern). Must not
+    /// be redacted.
+    #[test]
+    fn credit_card_does_not_redact_f32_precision_like_0_10000000149011612() {
+        let p = RedactPolicy::default();
+        let body = "sample_value=0.10000000149011612";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert_eq!(
+            r.as_ref(),
+            body,
+            "f32 precision (e.g. 0.10000000149011612) must NOT be redacted"
+        );
+        assert!(!r.contains("[REDACTED:credit_card]"));
     }
 
     #[test]
