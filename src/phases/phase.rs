@@ -1098,16 +1098,31 @@ impl RunContext {
         if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref())
             && let Some(clamped) =
                 table.nearest_supported(&self.default_provider, &self.default_model, t)
-            && (clamped - t).abs() > f32::EPSILON
         {
-            tracing::warn!(
-                provider = %self.default_provider,
-                model = %self.default_model,
-                role = %req.role.as_str(),
-                requested = %t,
-                clamped_to = %clamped,
-                "temperature outside supported set; clamped at dispatch (safety net)"
-            );
+            if (clamped - t).abs() > f32::EPSILON {
+                tracing::warn!(
+                    provider = %self.default_provider,
+                    model = %self.default_model,
+                    role = %req.role.as_str(),
+                    requested = %t,
+                    clamped_to = %clamped,
+                    "temperature outside supported set; clamped at dispatch (safety net)"
+                );
+            } else {
+                // PR-7 (operator-visibility): the operator wants to confirm
+                // that the temperature they declared in the matrix profile
+                // is the temperature the runtime actually sends. Trace-level
+                // so it stays silent at INFO; operators that want to
+                // validate the clamp end-to-end set
+                // `RUST_LOG=moagan::phases::phase=trace`.
+                tracing::trace!(
+                    provider = %self.default_provider,
+                    model = %self.default_model,
+                    role = %req.role.as_str(),
+                    temperature = %t,
+                    "temperature in supported set; no clamp"
+                );
+            }
             req.temperature = Some(clamped);
         }
         // PR-3: gate the request through the capability resolver so

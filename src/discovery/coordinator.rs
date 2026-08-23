@@ -812,12 +812,22 @@ impl DiscoveryCoordinator {
                         let cancel_for_task = cancel.clone();
 
                         if n < 5 || n.is_multiple_of(100) {
+                            // PR-7 (operator-visibility): the field is renamed
+                            // from `temperature` to `temperature_profile` so the
+                            // operator can tell at a glance that the value
+                            // shown here is the post-rewrite matrix profile
+                            // temperature, not necessarily the value the
+                            // runtime ends up sending. The actual sent value
+                            // is logged separately at dispatch time by
+                            // `RunContext::dispatch_to_provider` (look for
+                            // `requested` / `clamped_to` /
+                            // `temperature in supported set; no clamp`).
                             tracing::trace!(
                                 n = n,
                                 total = total,
                                 cell_dim = %cell.dimension_id,
                                 cell_facet = %cell.facet_id,
-                                temperature = temperature,
+                                temperature_profile = temperature,
                                 replica = replica,
                                 sketch_index = sketch_index,
                                 "discovery: iteration start"
