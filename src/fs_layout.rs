@@ -175,6 +175,17 @@ impl MoaganHome {
         self.root.join("max_tokens_auto.toml")
     }
 
+    /// Path of the auto-discovered supported-temperatures table.
+    /// Mirrors the `max_tokens_auto.toml` convention so
+    /// config-style files stay co-located. Schema version 1.
+    /// Read at startup by
+    /// [`crate::llm::temperature_probe::TemperatureTable::from_home`]
+    /// and re-written when the temperature probe discovers a new
+    /// supported set for a `(provider, model)` pair.
+    pub fn temperatures_auto_path(&self) -> PathBuf {
+        self.root.join("temperatures_auto.toml")
+    }
+
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(self.runs_dir())?;

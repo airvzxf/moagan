@@ -58,6 +58,7 @@ use super::circuit_breaker::CircuitBreaker;
 use super::probe_table::MaxTokensTable;
 use super::provider_pool::{ProviderPool, ProviderPoolEntry};
 use super::rate_limiter::RateLimiter;
+use super::temperature_probe::{TEMPERATURE_PROBE_BATCH_SIZE, TemperatureTable};
 use super::wire::{Request, Response};
 
 /// A provider can take a `Request` and produce a `Response`. Providers
@@ -203,6 +204,18 @@ pub struct ProviderRegistry {
     /// `(provider, model)`. `None` when auto-probe is disabled
     /// (`max_token_auto = None`/`Some(0)` for every provider).
     max_tokens_table: Option<Arc<MaxTokensTable>>,
+    /// Optional table of auto-discovered supported sampling
+    /// temperatures per `(provider, model)`. Built from
+    /// `<MOAGAN_HOME>/temperatures_auto.toml` by
+    /// [`registry_from_config_with_home_and_sink`] and consulted by
+    /// [`crate::phases::phase::RunContext::dispatch_to_provider`] on
+    /// every LLM call so a temperature outside the discovered set is
+    /// clamped to the nearest valid value (with a `tracing::warn!`).
+    /// `None` disables the clamp and the per-cell rewrite path; the
+    /// discovery fan-out then relies on the operator's profile
+    /// temperatures being upstream-acceptable (a global cap, not
+    /// per-model reality).
+    temperature_table: Option<Arc<TemperatureTable>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -218,6 +231,14 @@ impl std::fmt::Debug for ProviderRegistry {
             .field(
                 "max_tokens_table",
                 &if self.max_tokens_table.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+            )
+            .field(
+                "temperature_table",
+                &if self.temperature_table.is_some() {
                     "present"
                 } else {
                     "absent"
@@ -268,6 +289,7 @@ impl ProviderRegistry {
             pool,
             pool_names,
             max_tokens_table: None,
+            temperature_table: None,
         }
     }
 
@@ -286,6 +308,27 @@ impl ProviderRegistry {
     /// `ProviderConfig::max_tokens` knob.
     pub fn max_tokens_table(&self) -> Option<&Arc<MaxTokensTable>> {
         self.max_tokens_table.as_ref()
+    }
+
+    /// Attach an auto-discovered supported-temperatures table to the
+    /// registry. Mirrors [`Self::with_max_tokens_table`] — the
+    /// consuming-builder form lets `registry_from_config_with_home_and_sink`
+    /// chain it onto a freshly built registry, and hand-rolled test
+    /// paths can opt in with one call.
+    pub fn with_temperature_table(mut self, table: Arc<TemperatureTable>) -> Self {
+        self.temperature_table = Some(table);
+        self
+    }
+
+    /// The auto-discovered supported-temperatures table, when the
+    /// home directory was resolvable and
+    /// `temperatures_auto.toml` was loadable. `None` disables the
+    /// temperature clamp and the per-cell rewrite — every call falls
+    /// back to the operator's raw temperature value, so a hand-rolled
+    /// test path keeps the legacy "send whatever you asked for"
+    /// behaviour.
+    pub fn temperature_table(&self) -> Option<&Arc<TemperatureTable>> {
+        self.temperature_table.as_ref()
     }
 
     /// Look up a provider by name.
@@ -1082,15 +1125,16 @@ pub fn registry_from_config_with_home_and_sink(
         wrapped_entries.push((name.clone(), entry));
     }
     let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
-    let registry = ProviderRegistry {
+    let mut registry = ProviderRegistry {
         by_name,
         wrapped,
         pool,
         pool_names,
         max_tokens_table: None,
+        temperature_table: None,
     };
-    match (home, probe_settings(cfg)) {
-        (Some(home), Some(settings)) => {
+    if let Some(home) = home {
+        if let Some(settings) = probe_settings(cfg) {
             tracing::info!(
                 providers = cfg.len(),
                 floor = settings.floor,
@@ -1100,13 +1144,43 @@ pub fn registry_from_config_with_home_and_sink(
             let table = MaxTokensTable::from_home(home, settings.floor, settings.save)?;
             let table = Arc::new(table);
             spawn_pending_probes(&wrapped_entries, cfg, Arc::clone(&table));
-            Ok(registry.with_max_tokens_table(table))
-        }
-        _ => {
+            registry = registry.with_max_tokens_table(table);
+        } else {
             tracing::info!("max_tokens_auto: no provider enabled the probe");
-            Ok(registry)
         }
+        // PR-7: build the supported-temperatures table regardless
+        // of whether the max_tokens probe is enabled. The
+        // temperature probe is opt-out per (provider, model) (it
+        // fires for every non-mock provider) because a stale or
+        // empty supported set is strictly safer than the legacy
+        // "send whatever the operator asked for" path — every
+        // out-of-range temperature gets clamped to the nearest
+        // supported value rather than producing an HTTP 400.
+        match TemperatureTable::from_home(home, /* save= */ true) {
+            Ok(table) => {
+                let table = Arc::new(table);
+                spawn_pending_temperature_probes(&wrapped_entries, Arc::clone(&table));
+                tracing::info!(
+                    providers = cfg.len(),
+                    "temperature_probe: registry carrying the supported-set table; firing background probes"
+                );
+                registry = registry.with_temperature_table(table);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "temperature_probe: failed to build the supported-set table; \
+                     every LLM call will skip the temperature clamp"
+                );
+            }
+        }
+    } else {
+        tracing::info!(
+            "auto-probe tables: no MOAGAN_HOME resolved; \
+             building without max_tokens / temperature auto-probe tables"
+        );
     }
+    Ok(registry)
 }
 
 /// Attach a per-provider `RateLimiter` to every wrapper inside
@@ -1304,6 +1378,113 @@ fn spawn_pending_probes(
             }
         });
         table.record_probe_join_handle(provider_name_for_handle, model_name_for_handle, handle);
+    }
+}
+
+/// PR-7: fire one background temperature probe per `(provider,
+/// model)` pair not already cached on the [`TemperatureTable`].
+///
+/// The temperature probe is opt-out (every non-mock provider is
+/// probed automatically) because an empty or stale supported-set
+/// table degrades safely — the runtime clamps every out-of-range
+/// temperature to the nearest cached value, so a slow probe on
+/// first run is strictly less harmful than not probing at all. The
+/// `mock` provider is skipped because it has no real upstream to
+/// answer the probe. Each `tokio::spawn` task first verifies the
+/// cached entry (single-probe, cheap) and only runs the full
+/// 21-point fan-out when the cache is missing or rejected.
+///
+/// The probe deliberately bypasses the [`BreakeredProvider`]
+/// wrapper (a failing probe must not poison the steady-state
+/// circuit) and runs against the inner [`Provider`] via
+/// [`super::temperature_probe::ProviderTemperatureProbeTransport`].
+/// Per-call work is bounded by
+/// [`super::temperature_probe::PROBE_TIMEOUT`] (5 s) and the
+/// fan-out is batched at
+/// [`super::temperature_probe::TEMPERATURE_PROBE_BATCH_SIZE`] (3).
+fn spawn_pending_temperature_probes(
+    wrapped_entries: &[(String, Arc<BreakeredProvider>)],
+    table: Arc<TemperatureTable>,
+) {
+    for (name, wrapped) in wrapped_entries {
+        let inner = wrapped.inner();
+        if inner.name() == "mock" {
+            continue;
+        }
+        // Skip pairs already cached: a fresh probe on every run
+        // would burn 21 HTTP calls per provider per run against
+        // sets the operator has already verified. A stale entry
+        // survives until the verify step rejects it, at which
+        // point the full probe replaces it.
+        if table.get(name, inner.model()).is_some() {
+            continue;
+        }
+        let transport = match super::temperature_probe::ProviderTemperatureProbeTransport::new(
+            Arc::clone(inner),
+        ) {
+            Ok(t) => Arc::new(t) as Arc<dyn super::temperature_probe::TemperatureProbeTransport>,
+            Err(e) => {
+                tracing::warn!(
+                    provider = %name,
+                    model = %inner.model(),
+                    error = %e,
+                    "temperature_probe: failed to build probe transport; skipping"
+                );
+                continue;
+            }
+        };
+        let table_for_task = Arc::clone(&table);
+        let provider_name = name.clone();
+        let model_name = inner.model().to_owned();
+        let handle = tokio::spawn(async move {
+            tracing::info!(
+                provider = %provider_name,
+                model = %model_name,
+                "temperature_probe: probe task spawned; verifying cached entry"
+            );
+            let verified = table_for_task
+                .verify(&provider_name, &model_name, Arc::clone(&transport))
+                .await
+                .unwrap_or(false);
+            if !verified {
+                tracing::info!(
+                    provider = %provider_name,
+                    model = %model_name,
+                    "temperature_probe: no usable cached entry; running full probe"
+                );
+                match table_for_task
+                    .probe_and_store(
+                        &provider_name,
+                        &model_name,
+                        transport,
+                        TEMPERATURE_PROBE_BATCH_SIZE,
+                    )
+                    .await
+                {
+                    Ok(value) => tracing::info!(
+                        provider = %provider_name,
+                        model = %model_name,
+                        discovered = ?value,
+                        "temperature_probe: discovered supported set"
+                    ),
+                    Err(e) => tracing::warn!(
+                        provider = %provider_name,
+                        model = %model_name,
+                        error = %e,
+                        "temperature_probe: probe failed; provider will skip the \
+                         supported-set clamp and the runtime will fall back to the \
+                         operator's raw temperature value"
+                    ),
+                }
+            } else {
+                tracing::info!(
+                    provider = %provider_name,
+                    model = %model_name,
+                    "temperature_probe: cached entry verified"
+                );
+            }
+        });
+        table.record_probe_join_handle(handle);
     }
 }
 
