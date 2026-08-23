@@ -44,6 +44,40 @@ use crate::llm::provider::Provider;
 use crate::llm::role::Role;
 use crate::llm::wire::Request;
 
+/// Post-process the body emitted by `toml::to_string_pretty` so every
+/// key under the `[providers.<name>.<model>]` headers is
+/// double-quoted. The `toml` crate only quotes a key when its
+/// contents contain a character that requires it (e.g. a `.` inside
+/// `mimo-v2.5`); bare keys like `kimi-k3` come out unquoted, which
+/// makes a TOML diff between providers with similar names hard to
+/// read. We normalise the output here so every key under
+/// `[providers.*.*]` matches the form `provider."<name>"."<model>"`
+/// that the operator expects (mirrors the style in
+/// `~/.config/moagan/config.toml`).
+///
+/// The regex is intentionally conservative: it only matches keys
+/// consisting of `[A-Za-z0-9_-]+` (the bare-key character class in
+/// TOML). Keys with special characters (which the `toml` crate
+/// already quotes) are left untouched.
+///
+/// The helper is duplicated from [`crate::llm::temperature_probe`]
+/// rather than moved to a shared module because the fix is a small
+/// cosmetic normalisation specific to the sidecar format and
+/// keeping it local to each writer makes the surrounding code
+/// self-contained.
+fn quote_provider_model_keys(body: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"\[providers\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\]")
+            .expect("quote_provider_model_keys regex compiles")
+    });
+    re.replace_all(body, |caps: &regex::Captures<'_>| {
+        format!("[providers.\"{}\".\"{}\"]", &caps[1], &caps[2])
+    })
+    .into_owned()
+}
+
 /// Maximum exponent used by the exponential probe. With `k <= 30` the
 /// value `2^k` always fits in `u32`, so `1u32 << k` cannot overflow
 /// and we do not need `checked_shl` on the hot path.
@@ -522,6 +556,7 @@ impl MaxTokensTableFile {
             message: format!("encode max_tokens_auto.toml: {e}"),
             http_status: None,
         })?;
+        let body = quote_provider_model_keys(&body);
         let tmp = tempfile::Builder::new()
             .suffix(".toml.tmp")
             .tempfile_in(path.parent().unwrap_or(std::path::Path::new(".")))
@@ -1055,6 +1090,62 @@ mod tests {
         assert_eq!(
             got, 8192,
             "ceiling above the boundary must not constrain discovery"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `quote_provider_model_keys` — cosmetic normalisation of the
+    // sidecar so every `[providers.*.*]` header uses double-quoted
+    // keys regardless of whether the underlying name contains a
+    // bare-key-disqualifying character (e.g. `.` inside
+    // `mimo-v2.5`). Pinning the shape here keeps the operator's
+    // expectation stable across `toml` crate upgrades. Mirrors the
+    // same set of tests in
+    // [`crate::llm::temperature_probe::tests`] so both sidecars
+    // share the same quoting contract.
+    // -----------------------------------------------------------------
+    #[test]
+    fn quote_provider_model_keys_quotes_bare_keys() {
+        let input = "\
+schema_version = 1\n\
+[providers.kimi-k3.kimi-k3]\n\
+max_tokens = 524288\n\
+";
+        let out = quote_provider_model_keys(input);
+        assert!(
+            out.contains(r#"[providers."kimi-k3"."kimi-k3"]"#),
+            "bare keys must be quoted; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn quote_provider_model_keys_idempotent_on_already_quoted_keys() {
+        let input = r#"[providers."glm-5.1"."glm-5.1"]
+max_tokens = 524288
+"#;
+        let out = quote_provider_model_keys(input);
+        assert_eq!(out, input, "already-quoted keys must be left untouched");
+    }
+
+    #[test]
+    fn quote_provider_model_keys_ignores_non_provider_headers() {
+        // The regex only matches `[providers.X.Y]`. Other tables
+        // (e.g. `[operator_caps]`, `[some_other_table]`) are
+        // untouched even if their keys are bare.
+        let input = "\
+[operator_caps.minimax]\n\
+min = 524288\n\
+[providers.kimi-k3.kimi-k3]\n\
+max_tokens = 524288\n\
+";
+        let out = quote_provider_model_keys(input);
+        assert!(
+            out.contains(r#"[providers."kimi-k3"."kimi-k3"]"#),
+            "providers header must be quoted; got:\n{out}"
+        );
+        assert!(
+            out.contains("[operator_caps.minimax]"),
+            "non-provider headers must be untouched; got:\n{out}"
         );
     }
 }
