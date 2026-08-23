@@ -5,6 +5,16 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] - 2026-08-23
+
+### Fixed
+
+- **TOML quoting inconsistente en `temperatures_auto.toml` y `max_tokens_auto.toml`**: el crate `toml` no envuelve keys en comillas cuando son bare (e.g. `kimi-k3`). Nuevo helper `quote_provider_model_keys` post-procesa el output de `toml::to_string_pretty` para que las keys `[providers."X"."Y"]` se serialicen siempre entre comillas, consistente con `config.toml`. (PR #587)
+
+- **Visibilidad del clamp de temperatura en logs**: el coordinator del discovery mode ahora emite `temperature_profile` (no `temperature`) en el log de iteración, dejando claro que es el valor del profile post-rewrite, no el valor enviado. `RunContext::dispatch_to_provider` añade un `tracing::trace!` (`RUST_LOG=moagan::phases::phase=trace`) cuando el gate encuentra que la temperatura ya está en el set soportado. (PR #587)
+
+- **Regex `credit_card` matcheaba f32 precision**: la regex original `\b(?:\d[ -]?){13,16}\b` matcheaba los 15 dígitos de `1.899999976158142` (f32 precision de `1.9`), redactando el `9` en logs como `temperature=1.[REDACTED:credit_card]`. La nueva regex requiere separadores visibles (` ` o `-`) entre grupos de 4 dígitos y descarta secuencias largas sin separadores. Trade-off documentado en el doc-comment del patrón. (PR #587)
+
 ## [0.9.11] - 2026-08-23
 
 ### Added
