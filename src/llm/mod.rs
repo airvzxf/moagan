@@ -36,6 +36,7 @@ pub mod retry_budget;
 pub mod role;
 pub mod size_limits;
 pub mod sse_parser;
+pub mod temperature_probe;
 pub mod wire;
 pub mod wire_format;
 
