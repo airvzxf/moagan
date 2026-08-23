@@ -549,6 +549,7 @@ mod tests {
                 .await;
             let p = OpenCodeGoAnthropicProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),
@@ -604,6 +605,7 @@ mod tests {
     fn messages_url_handles_known_suffixes() {
         let p = OpenCodeGoAnthropicProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "qwen3.7-max".into(),
@@ -626,6 +628,7 @@ mod tests {
     fn messages_url_handles_messages_suffix() {
         let p = OpenCodeGoAnthropicProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
                 model: "minimax-m3".into(),
@@ -648,6 +651,7 @@ mod tests {
     fn from_config_errors_when_kind_mismatch() {
         let result = OpenCodeGoAnthropicProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "x".into(),
@@ -671,6 +675,7 @@ mod tests {
             std::env::remove_var("OPENCODE_GO_API_KEY");
         }
         let result = OpenCodeGoAnthropicProvider::from_config(&ProviderConfig {
+            models: Vec::new(),
             kind: "opencode_go".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             model: "x".into(),
@@ -714,6 +719,7 @@ mod tests {
                 .await;
             let p = OpenCodeGoAnthropicProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),
@@ -793,6 +799,7 @@ mod tests {
                 .await;
             let p = OpenCodeGoAnthropicProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),
@@ -914,6 +921,7 @@ mod tests {
 
             let p = OpenCodeGoAnthropicProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),

@@ -50,6 +50,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 /// rather than minutes.
 fn build_provider(server_uri: String) -> Arc<MinimaxProvider> {
     let cfg = ProviderConfig {
+        models: Vec::new(),
         kind: "minimax".to_owned(),
         endpoint: server_uri,
         model: "MiniMax-M3".to_owned(),

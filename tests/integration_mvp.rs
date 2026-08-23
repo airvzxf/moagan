@@ -1516,6 +1516,7 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         .await;
 
     let spec = ProviderConfig {
+        models: Vec::new(),
         kind: "minimax".into(),
         endpoint: format!("{}/anthropic/v1", server.uri()),
         model: "MiniMax-M3".into(),

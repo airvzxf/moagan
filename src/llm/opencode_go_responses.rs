@@ -677,6 +677,7 @@ mod tests {
     fn responses_url_handles_known_suffixes() {
         let p = OpenCodeGoResponsesProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "gpt-5.6-luna".into(),
@@ -699,6 +700,7 @@ mod tests {
     fn responses_url_handles_responses_suffix() {
         let p = OpenCodeGoResponsesProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
                 model: "gpt-5.6-luna".into(),
@@ -723,6 +725,7 @@ mod tests {
             std::env::remove_var("OPENCODE_GO_API_KEY");
         }
         let result = OpenCodeGoResponsesProvider::from_config(&ProviderConfig {
+            models: Vec::new(),
             kind: "opencode_go".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             model: "gpt-5.6-luna".into(),
@@ -762,6 +765,7 @@ data: [DONE]\n\n";
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -825,6 +829,7 @@ data: {not json}\n\n";
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -887,6 +892,7 @@ data: {not json}\n\n";
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -967,6 +973,7 @@ data: [DONE]\n\n";
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1027,7 +1034,8 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
+
+            models: Vec::new(),kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
                     max_tokens: Some(8192),
@@ -1090,6 +1098,7 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1157,6 +1166,7 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1235,6 +1245,7 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1309,7 +1320,8 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
+
+            models: Vec::new(),kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
                     max_tokens: None,
@@ -1530,6 +1542,7 @@ data: [DONE]\n\n",
 
             let p = OpenCodeGoResponsesProvider::new(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),

@@ -144,6 +144,7 @@ fn build_context(
     cfg.providers.insert(
         "recording".to_owned(),
         ProviderConfig {
+            models: Vec::new(),
             kind: "mock".to_owned(),
             endpoint: "mock://recording".to_owned(),
             model: "recording-model".to_owned(),

@@ -137,6 +137,7 @@ impl OpenCodeGoProvider {
         // OpenCodeGoResponses, OpenAiCompat) all have url helpers that
         // handle the `base + path` join themselves.
         let routed_spec = ProviderConfig {
+            models: Vec::new(),
             endpoint: spec.endpoint.trim_end_matches('/').to_owned(),
             ..spec.clone()
         };
@@ -289,6 +290,7 @@ mod tests {
 
     fn config() -> ProviderConfig {
         ProviderConfig {
+            models: Vec::new(),
             kind: "opencode_go".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             model: "kimi-k2.7-code".into(),
@@ -334,6 +336,7 @@ mod tests {
     #[test]
     fn new_errors_when_model_is_blocked() {
         let cfg = ProviderConfig {
+            models: Vec::new(),
             model: "minimax-m3".into(),
             ..config()
         };
@@ -344,6 +347,7 @@ mod tests {
     #[test]
     fn new_errors_when_kind_mismatch() {
         let cfg = ProviderConfig {
+            models: Vec::new(),
             kind: "minimax".into(),
             ..config()
         };
@@ -400,6 +404,7 @@ mod tests {
     #[test]
     fn provider_routes_to_anthropic_for_messages_model() {
         let cfg = ProviderConfig {
+            models: Vec::new(),
             model: "qwen3.7-max".into(),
             ..config()
         };
@@ -411,6 +416,7 @@ mod tests {
     #[test]
     fn provider_routes_to_responses_for_responses_model() {
         let cfg = ProviderConfig {
+            models: Vec::new(),
             model: "gpt-5.6-luna".into(),
             ..config()
         };
@@ -422,6 +428,7 @@ mod tests {
     #[test]
     fn provider_routes_to_chat_completions_for_chat_model() {
         let cfg = ProviderConfig {
+            models: Vec::new(),
             model: "mimo-v2.5".into(),
             ..config()
         };
@@ -441,6 +448,7 @@ mod tests {
         // `/v1/messages/v1/messages`. The base must stay as the base;
         // the routed path must appear exactly once in `url()`.
         let cfg = ProviderConfig {
+            models: Vec::new(),
             model: "qwen3.7-max".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             ..config()
@@ -460,6 +468,7 @@ mod tests {
     #[test]
     fn provider_rejects_model_not_on_roster() {
         let cfg = ProviderConfig {
+            models: Vec::new(),
             model: "unsupported-model".into(),
             ..config()
         };
@@ -485,40 +494,59 @@ mod tests {
         assert_eq!(endpoint_path_for("unknown"), None);
     }
 
-    /// Track A.4 contract pin: every default `ProviderConfig` for an
-    /// OpenCode Go model registered in `src/config.rs::default_providers`
-    /// carries the stable base URL — never the routed path. The path
-    /// (`/v1/messages`, `/v1/responses`, `/v1/chat/completions`) is
-    /// selected by the dispatcher at construction time, not stored on
-    /// the config. The URL builders in `opencode_go_anthropic`,
-    /// `opencode_go_responses`, and `openai_compat` already accept both
-    /// forms, so this test pins the contract on the config side.
+    /// Track A.4 contract pin (v0.10 update): every default
+    /// `ProviderConfig` for an OpenCode Go model registered in
+    /// `src/config/mod.rs::default_providers` now carries the
+    /// fully-qualified URL (including the wire-format path), not the
+    /// legacy base URL. The dispatcher (Phase 3) detects the wire
+    /// format from the path. The legacy `opencode_go` umbrella alias
+    /// is gone; each model is its own single-model section.
     #[test]
-    fn registry_default_endpoints_are_bases() {
+    fn registry_default_endpoints_are_full_urls() {
         use crate::config::Config;
         let cfg = Config::default();
-        let oc_base = "https://opencode.ai/zen/go/v1";
-        // One representative model from each wire-format group.
+        // One representative model per wire-format group, with the
+        // expected full URL the dispatcher will route on.
         let representatives = [
-            ("opencode_go", "deepseek-v4-flash"), // /v1/chat/completions
-            ("minimax-m3", "minimax-m3"),         // /v1/messages
-            ("qwen3.7-max", "qwen3.7-max"),       // /v1/messages
-            ("qwen3.7-plus", "qwen3.7-plus"),     // /v1/messages
-            ("gpt-5.6-luna", "gpt-5.6-luna"),     // /v1/responses
+            (
+                "kimi-k3",
+                "kimi-k3",
+                "https://opencode.ai/zen/go/v1/chat/completions",
+            ),
+            (
+                "minimax-m3",
+                "minimax-m3",
+                "https://opencode.ai/zen/go/v1/messages",
+            ),
+            (
+                "qwen3.7-max",
+                "qwen3.7-max",
+                "https://opencode.ai/zen/go/v1/messages",
+            ),
+            (
+                "qwen3.7-plus",
+                "qwen3.7-plus",
+                "https://opencode.ai/zen/go/v1/messages",
+            ),
+            (
+                "gpt-5.6-luna",
+                "gpt-5.6-luna",
+                "https://opencode.ai/zen/go/v1/responses",
+            ),
         ];
-        for (alias, expected_model) in representatives {
+        for (alias, expected_model, expected_endpoint) in representatives {
             let spec = cfg
                 .providers
                 .get(alias)
                 .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
             assert_eq!(
-                spec.endpoint, oc_base,
-                "OpenCode Go default for {alias} must be the base URL, got: {}",
+                spec.endpoint, expected_endpoint,
+                "OpenCode default for {alias} must carry the full URL, got: {}",
                 spec.endpoint
             );
             assert_eq!(
                 spec.model, expected_model,
-                "OpenCode Go default for {alias} must carry model {expected_model}"
+                "OpenCode default for {alias} must carry model {expected_model}"
             );
         }
     }

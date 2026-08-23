@@ -409,6 +409,7 @@ fn registry_from_config_with_sink_attaches_sink_at_construction() -> Result<()> 
         cfg.insert(
             "mock-sat".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "mock".into(),
                 endpoint: "mock://sat".into(),
                 model: "mock-model".into(),

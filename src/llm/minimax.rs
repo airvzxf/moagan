@@ -381,6 +381,7 @@ mod tests {
     fn messages_url_handles_known_suffixes() {
         let p = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -406,6 +407,7 @@ mod tests {
     fn messages_url_handles_anthropic_suffix() {
         let p = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic".into(),
                 model: "MiniMax-M3".into(),
@@ -433,6 +435,7 @@ mod tests {
             std::env::remove_var("MINIMAX_API_KEY");
         }
         let cfg = ProviderConfig {
+            models: Vec::new(),
             kind: "minimax".into(),
             endpoint: "https://api.minimax.io/anthropic/v1".into(),
             model: "MiniMax-M3".into(),
@@ -452,6 +455,7 @@ mod tests {
     fn test_provider(endpoint: String) -> MinimaxProvider {
         MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint,
                 model: "MiniMax-M3".into(),
@@ -582,6 +586,7 @@ mod tests {
         ];
         for model in canonical {
             let cfg = ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: model.into(),
@@ -646,6 +651,7 @@ mod tests {
 
         let provider = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -758,6 +764,7 @@ mod tests {
 
         let provider = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -848,6 +855,7 @@ mod tests {
 
         let provider = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -970,6 +978,7 @@ mod tests {
 
         let provider = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -1044,6 +1053,7 @@ mod tests {
         // the proxy sees `max_tokens = 524_288`.
         let p = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -1081,6 +1091,7 @@ mod tests {
         // Operator override wins over the requested value.
         let p_op = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -1110,6 +1121,7 @@ mod tests {
         // `max_tokens > 524_288` with HTTP 400).
         let p_above = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -1165,6 +1177,7 @@ mod tests {
             .expect("probe_and_store");
         let p_table = MinimaxProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),

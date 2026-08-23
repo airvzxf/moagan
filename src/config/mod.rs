@@ -1020,154 +1020,174 @@ impl Default for Config {
 
 fn default_providers() -> BTreeMap<String, ProviderConfig> {
     let mut m = BTreeMap::new();
-    let make_minimax = |model: &str| ProviderConfig {
-        kind: "minimax".to_owned(),
-        endpoint: "https://api.minimax.io/anthropic/v1".to_owned(),
-        model: model.to_owned(),
-        // Start from `DEFAULT_MAX_TOKENS` (1,000,000) and let the
-        // startup auto-probe discover the real ceiling per
-        // `(provider, model)`. A hardcoded cap is brittle: the real
-        // limit differs per model and per relay (see the module docs
-        // in `src/llm/probe.rs`). Two layers still protect a fresh
-        // run from HTTP 400 before the probe lands: the wire body in
-        // `MinimaxProvider::send` clamps to `MINIMAX_MAX_TOKENS_CAP`,
-        // and `max_token_auto` below enables the probe.
-        max_tokens: Some(DEFAULT_MAX_TOKENS),
-        temperature: Some(0.6),
-        top_p: Some(0.95),
-        hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
-        omit_max_tokens: false,
-        max_token_auto: Some(1024),
-        max_token_auto_save: true,
-        plan: None,
+
+    // ----------------------------------------------------------------
+    // minimax (Anthropic-compatible direct)
+    // ----------------------------------------------------------------
+    // Each alias maps to a single-model section. The wire format
+    // (`/v1/messages`) is detected from the URL by the dispatcher
+    // (Phase 3); the config only carries the full URL.
+    let minimax_endpoint = "https://api.minimax.io/anthropic/v1/messages";
+    let minimax_aliases = [
+        ("minimax", "MiniMax-M3"),
+        ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed"),
+    ];
+    for (alias, model) in minimax_aliases {
+        let models = vec![ModelConfig {
+            id: model.to_owned(),
+            endpoint: None,
+            // Start from `DEFAULT_MAX_TOKENS` (1,000,000) and let
+            // the startup auto-probe discover the real ceiling per
+            // `(provider, model)`. The wire body in
+            // `MinimaxProvider::send` clamps to
+            // `MINIMAX_MAX_TOKENS_CAP`; `max_token_auto` below
+            // enables the probe.
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        }];
+        m.insert(
+            alias.to_owned(),
+            ProviderConfig {
+                models,
+                kind: "minimax".to_owned(),
+                endpoint: minimax_endpoint.to_owned(),
+                model: model.to_owned(),
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                temperature: Some(0.6),
+                top_p: Some(0.95),
+                hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
+                omit_max_tokens: false,
+                max_token_auto: Some(1024),
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // deepseek (OpenAI-compatible direct)
+    // ----------------------------------------------------------------
+    let deepseek_endpoint = "https://api.deepseek.com/v1/chat/completions";
+    let deepseek_models = [("deepseek", "deepseek-v4-flash")];
+    for (alias, model) in deepseek_models {
+        let models = vec![ModelConfig {
+            id: model.to_owned(),
+            endpoint: None,
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        }];
+        m.insert(
+            alias.to_owned(),
+            ProviderConfig {
+                models,
+                kind: "deepseek".to_owned(),
+                endpoint: deepseek_endpoint.to_owned(),
+                model: model.to_owned(),
+                max_tokens: Some(DEFAULT_MAX_TOKENS),
+                temperature: Some(0.6),
+                top_p: Some(0.95),
+                hard_incompatibilities: vec![],
+                omit_max_tokens: false,
+                max_token_auto: Some(1024),
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // opencode (one section, multiple models, mixed wire formats)
+    // ----------------------------------------------------------------
+    // The new schema exposes every OpenCode model under the single
+    // `opencode` section. Each model carries its own endpoint URL
+    // (the dispatcher picks the wire format from the path):
+    //
+    // * `/v1/chat/completions` (OpenAI-compatible) — 10 models
+    // * `/v1/messages` (Anthropic-compatible) — 7 models
+    // * `/v1/responses` (OpenAI Responses) — 1 model
+    //
+    // The aliases (`kimi-k3`, `minimax-m3`, `gpt-5.6-luna`, …) each
+    // become a one-model section that mirrors the v0.9 behavior so
+    // the `--provider kimi-k3` shorthand still works.
+    let oc_chat = "https://opencode.ai/zen/go/v1/chat/completions";
+    let oc_anthropic = "https://opencode.ai/zen/go/v1/messages";
+    let oc_responses = "https://opencode.ai/zen/go/v1/responses";
+    let make_oc = |kind: &str, model: &str, endpoint: &str| {
+        let models = vec![ModelConfig {
+            id: model.to_owned(),
+            endpoint: None,
+            // OpenCode Go upstreams have heterogeneous `max_tokens`
+            // ceilings (kimi-k* at 8192, qwen3.x and gpt-5.6-luna at
+            // 16_384 in practice) and they drift as the relay roster
+            // changes, so no single hardcoded constant is right.
+            // Start from `DEFAULT_MAX_TOKENS` (1,000,000) and let
+            // the startup auto-probe discover the real ceiling per
+            // `(provider, model)`. Until the probe lands, the wire
+            // body in each of the three OpenCode providers
+            // (Anthropic, Responses, Chat) clamps to
+            // `OPENCODE_GO_MAX_TOKENS_CAP`.
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        }];
+        ProviderConfig {
+            models,
+            kind: kind.to_owned(),
+            endpoint: endpoint.to_owned(),
+            model: model.to_owned(),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+            temperature: Some(1.0),
+            top_p: Some(0.95),
+            hard_incompatibilities: vec![],
+            omit_max_tokens: false,
+            max_token_auto: Some(1024),
+            max_token_auto_save: true,
+            plan: None,
+        }
     };
-    m.insert("minimax".to_owned(), make_minimax("MiniMax-M3"));
-    m.insert("minimax-m3".to_owned(), make_minimax("MiniMax-M3"));
-    m.insert("minimax-m2.7".to_owned(), make_minimax("MiniMax-M2.7"));
-    m.insert(
-        "minimax-m2.7-highspeed".to_owned(),
-        make_minimax("MiniMax-M2.7-highspeed"),
-    );
-    m.insert("minimax-m2.5".to_owned(), make_minimax("MiniMax-M2.5"));
-    let make_deepseek = |model: &str| ProviderConfig {
-        kind: "deepseek".to_owned(),
-        endpoint: "https://api.deepseek.com/v1".to_owned(),
-        model: model.to_owned(),
-        max_tokens: Some(DEFAULT_MAX_TOKENS),
-        temperature: Some(0.6),
-        top_p: Some(0.95),
-        hard_incompatibilities: vec![],
-        omit_max_tokens: false,
-        max_token_auto: Some(1024),
-        max_token_auto_save: true,
-        plan: None,
-    };
-    m.insert("deepseek".to_owned(), make_deepseek("deepseek-v4-flash"));
-    // OpenCode Go models per the 2026-08-04 operator roster. The
-    // dispatcher in `src/llm/opencode_go.rs` selects the right wire
-    // format based on the model name (`endpoint_path_for`) and appends
-    // the model-specific path to the stable base URL stored here. The
-    // default temperature is 1.0 because the operator's primary kimi
-    // family (kimi-k2.7-code) only accepts that value on this
-    // subscription; per-model overrides live in
-    // `MODEL_TEMPERATURE_OVERRIDES` for the rare model that requires a
-    // different value.
-    let make_opencode_go = |model: &str, endpoint: &str| ProviderConfig {
-        kind: "opencode_go".to_owned(),
-        endpoint: endpoint.to_owned(),
-        model: model.to_owned(),
-        // OpenCode Go upstreams have heterogeneous `max_tokens`
-        // ceilings (kimi-k* at 8192, qwen3.x and gpt-5.6-luna at
-        // 16_384 in practice) and they drift as the relay roster
-        // changes, so no single hardcoded constant is right. Start
-        // from `DEFAULT_MAX_TOKENS` (1,000,000) and let the startup
-        // auto-probe discover the real ceiling per
-        // `(provider, model)`. Until the probe lands, the wire body
-        // in each of the three opencode_go providers (anthropic,
-        // responses, chat) still clamps to
-        // `OPENCODE_GO_MAX_TOKENS_CAP`.
-        max_tokens: Some(DEFAULT_MAX_TOKENS),
-        temperature: Some(1.0),
-        top_p: Some(0.95),
-        hard_incompatibilities: vec![],
-        omit_max_tokens: false,
-        max_token_auto: Some(1024),
-        max_token_auto_save: true,
-        plan: None,
-    };
-    // All 18 OpenCode Go providers share the same base URL. The
-    // dispatcher (`OpenCodeGoProvider::new`) appends the model-specific
-    // path (`/v1/chat/completions`, `/v1/messages`, or `/v1/responses`)
-    // at construction time via the concrete provider's URL builder.
-    // Storing the base URL keeps the `Provider::endpoint()` contract
-    // stable across the three wire formats.
-    let oc_base = "https://opencode.ai/zen/go/v1";
-    // `/v1/chat/completions` (OpenAI-compatible) — 10 models.
-    m.insert(
-        "opencode_go".to_owned(),
-        make_opencode_go("deepseek-v4-flash", oc_base),
-    );
-    m.insert("kimi-k3".to_owned(), make_opencode_go("kimi-k3", oc_base));
-    m.insert(
-        "kimi-k2.6".to_owned(),
-        make_opencode_go("kimi-k2.6", oc_base),
-    );
-    m.insert("glm-5.1".to_owned(), make_opencode_go("glm-5.1", oc_base));
-    m.insert("glm-5.2".to_owned(), make_opencode_go("glm-5.2", oc_base));
-    m.insert(
-        "deepseek-v4-pro".to_owned(),
-        make_opencode_go("deepseek-v4-pro", oc_base),
-    );
-    m.insert(
-        "deepseek-v4-flash".to_owned(),
-        make_opencode_go("deepseek-v4-flash", oc_base),
-    );
-    m.insert(
-        "mimo-v2.5".to_owned(),
-        make_opencode_go("mimo-v2.5", oc_base),
-    );
-    m.insert(
-        "mimo-v2.5-pro".to_owned(),
-        make_opencode_go("mimo-v2.5-pro", oc_base),
-    );
-    m.insert("hy3".to_owned(), make_opencode_go("hy3", oc_base));
-    // `/v1/messages` (Anthropic-compatible) — 7 models.
-    m.insert(
-        "minimax-m3".to_owned(),
-        make_opencode_go("minimax-m3", oc_base),
-    );
-    m.insert(
-        "minimax-m2.7".to_owned(),
-        make_opencode_go("minimax-m2.7", oc_base),
-    );
-    m.insert(
-        "minimax-m2.5".to_owned(),
-        make_opencode_go("minimax-m2.5", oc_base),
-    );
-    m.insert(
-        "qwen3.8-max".to_owned(),
-        make_opencode_go("qwen3.8-max", oc_base),
-    );
-    m.insert(
-        "qwen3.7-max".to_owned(),
-        make_opencode_go("qwen3.7-max", oc_base),
-    );
-    m.insert(
-        "qwen3.7-plus".to_owned(),
-        make_opencode_go("qwen3.7-plus", oc_base),
-    );
-    m.insert(
-        "qwen3.6-plus".to_owned(),
-        make_opencode_go("qwen3.6-plus", oc_base),
-    );
-    // `/v1/responses` (OpenAI Responses) — 1 model.
-    m.insert(
-        "gpt-5.6-luna".to_owned(),
-        make_opencode_go("gpt-5.6-luna", oc_base),
-    );
+    // `/v1/chat/completions` (OpenAI-compatible).
+    let oc_chat_models = [
+        "kimi-k3",
+        "kimi-k2.6",
+        "glm-5.1",
+        "glm-5.2",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "hy3",
+    ];
+    for model in oc_chat_models {
+        m.insert(model.to_owned(), make_oc("opencode_go", model, oc_chat));
+    }
+    // `/v1/messages` (Anthropic-compatible).
+    let oc_anthropic_models = [
+        "minimax-m3",
+        "minimax-m2.7",
+        "minimax-m2.5",
+        "qwen3.8-max",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-plus",
+    ];
+    for model in oc_anthropic_models {
+        m.insert(
+            model.to_owned(),
+            make_oc("opencode_go", model, oc_anthropic),
+        );
+    }
+    // `/v1/responses` (OpenAI Responses).
+    let oc_responses_models = ["gpt-5.6-luna"];
+    for model in oc_responses_models {
+        m.insert(
+            model.to_owned(),
+            make_oc("opencode_go", model, oc_responses),
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // mock
+    // ----------------------------------------------------------------
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
+            models: Vec::new(),
             kind: "mock".to_owned(),
             endpoint: "mock://local".to_owned(),
             model: "mock-model".to_owned(),
@@ -1251,23 +1271,71 @@ impl Default for RetentionConfig {
 }
 
 /// Per-provider configuration.
+///
+/// A `[providers.<name>]` section groups every model that shares the
+/// same upstream relay (MiniMax, OpenCode, DeepSeek, …). The new
+/// schema (v0.10) carries the model list as
+/// `[providers.<name>].models[]`; each model carries its own id,
+/// optional endpoint override, and optional `max_tokens` ceiling.
+///
+/// The legacy fields (`kind`, `model`, `hard_incompatibilities`)
+/// remain on the struct as deprecated aliases so the construction
+/// code in `src/llm/{minimax,deepseek,opencode_go*}.rs` keeps
+/// compiling while the dispatcher refactor lands in Phase 3.
+/// `default_providers()` populates both the new `models[]` list and
+/// the deprecated singletons (derived from the first model); after
+/// Phase 3 lands the deprecated fields are dropped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
     /// Provider implementation name (e.g. `"minimax"`, `"mock"`).
+    ///
+    /// Deprecated as of v0.10: the wire format is detected from the
+    /// endpoint URL, not from a kind tag. Kept as a serde-defaulted
+    /// string until the dispatcher refactor lands in Phase 3.
     pub kind: String,
-    /// HTTP endpoint (Anthropic-compatible for kind `minimax`).
+    /// HTTP endpoint. For new configs this is the **base** URL the
+    /// model-level entries inherit when their own `endpoint` is
+    /// `None`. For legacy configs this stays as the per-section
+    /// base (e.g. `https://opencode.ai/zen/go/v1`).
+    ///
+    /// Deprecated as of v0.10: the new schema carries the *full*
+    /// URL — including the wire-format path (`/messages`,
+    /// `/responses`, `/chat/completions`) — verbatim on each
+    /// `models[]` entry. Kept as `Option`-equivalent (empty string
+    /// when absent) until Phase 3 drops the field.
     pub endpoint: String,
     /// Default model name.
+    ///
+    /// Deprecated as of v0.10: the model id lives on `models[].id`.
+    /// Kept populated from `models[0].id` until Phase 3.
     pub model: String,
+    /// Models this section exposes. Empty list → the section is
+    /// effectively inactive (a warning, not an error — the operator
+    /// may comment out a section to disable a relay temporarily).
+    ///
+    /// The registry (Phase 3) iterates this list and constructs one
+    /// `Provider` per `(section_name, model_id)` pair, deriving the
+    /// wire format from the per-model endpoint URL.
+    pub models: Vec<ModelConfig>,
     /// Default max tokens per call.
+    ///
+    /// Deprecated as of v0.10: lives on `models[].max_tokens` per
+    /// model. Kept populated from `models[0].max_tokens` until
+    /// Phase 3.
     pub max_tokens: Option<u32>,
     /// Default sampling temperature.
     pub temperature: Option<f32>,
     /// Default top-p.
     pub top_p: Option<f32>,
-    /// Crate names that must never appear in `Cargo.toml` together with
-    /// this provider — runtime vs static guard.
+    /// Crate names that must never appear in `Cargo.toml` together
+    /// with this provider — runtime vs static guard.
+    ///
+    /// Deprecated as of v0.10: only ever printed by `moagan
+    /// telemetry plan`; no runtime code reads the field. Kept on
+    /// the struct for binary-compat with old `config.toml` files
+    /// but new configs should not populate it. Display callers
+    /// (`cli::telemetry_cmd`) no longer read it.
     pub hard_incompatibilities: Vec<String>,
     /// When `true`, omit the `max_tokens` field from the wire body
     /// entirely. Required for providers whose wire format rejects the
@@ -1302,6 +1370,63 @@ pub struct ProviderConfig {
     /// when the operator leaves the global default untouched.
     #[serde(default)]
     pub plan: Option<PlanConfig>,
+}
+
+/// One entry in `[providers.<name>].models[]`.
+///
+/// Each entry carries the model id (the value that becomes
+/// `Provider::model()` at runtime), an optional endpoint override
+/// (per-model URLs land on the same `models[]` list as the section
+/// default), and an optional `max_tokens` ceiling. The runtime
+/// dispatcher iterates the list and constructs one `Provider` per
+/// entry, picking the wire format from the URL path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ModelConfig {
+    /// Model identifier the upstream recognises (e.g.
+    /// `"MiniMax-M3"`, `"kimi-k3"`). Becomes the runtime
+    /// `Provider::model()` value.
+    pub id: String,
+
+    /// Optional override for the section's `endpoint`. When
+    /// `None`, the model inherits the section's default. The full
+    /// URL — including the wire-format path
+    /// (`/messages`, `/responses`, `/chat/completions`) — is
+    /// supplied verbatim by the operator; the code never
+    /// appends a path.
+    pub endpoint: Option<String>,
+
+    /// Operator-supplied `max_tokens` ceiling. Becomes the
+    /// per-model default; the startup auto-probe may discover a
+    /// lower value (and will persist it to
+    /// `<MOAGAN_HOME>/max_tokens_auto.toml`).
+    pub max_tokens: Option<u32>,
+}
+
+/// Resolved spec for one `(section, model)` pair.
+///
+/// Built by the dispatcher at construction time (Phase 3) from the
+/// per-section `ProviderConfig` plus one `ModelConfig` entry. Holds
+/// the values the runtime needs without re-resolving defaults on
+/// every call. The `wire_format` field is added in Phase 3 once
+/// the `WireFormatId` enum lands; until then the dispatcher fills
+/// it in by matching the endpoint path.
+#[derive(Debug, Clone)]
+pub struct ResolvedModelConfig {
+    /// Section name from `[providers.<name>]` (e.g. `"minimax"`,
+    /// `"opencode"`). Becomes `Provider::name()`.
+    pub section: String,
+    /// Model id from `models[].id`. Becomes `Provider::model()`.
+    pub id: String,
+    /// Fully-qualified endpoint URL (section default overridden
+    /// by `models[].endpoint` when present).
+    pub endpoint: String,
+    /// Effective `max_tokens` (per-model, falls back to section).
+    pub max_tokens: Option<u32>,
+    /// Section-level default sampling temperature.
+    pub temperature: Option<f32>,
+    /// Section-level default top-p.
+    pub top_p: Option<f32>,
 }
 
 /// Token-plan declaration attached to a [`ProviderConfig`]. Powers the
@@ -1339,6 +1464,7 @@ impl Default for ProviderConfig {
             kind: "mock".to_owned(),
             endpoint: "mock://local".to_owned(),
             model: "mock-model".to_owned(),
+            models: Vec::new(),
             max_tokens: None,
             temperature: None,
             top_p: None,
@@ -1417,6 +1543,7 @@ impl Config {
             "kind",
             "endpoint",
             "model",
+            "models",
             "max_tokens",
             "temperature",
             "top_p",
@@ -2352,7 +2479,7 @@ mod tests {
         // Default config has the hardcoded production endpoint.
         let mut cfg = Config::default();
         let baseline = cfg.providers.get("minimax").unwrap().endpoint.clone();
-        assert_eq!(baseline, "https://api.minimax.io/anthropic/v1");
+        assert_eq!(baseline, "https://api.minimax.io/anthropic/v1/messages");
 
         // With the env var set, apply_env_overrides rewrites every
         // provider whose kind is "minimax" but leaves other providers
@@ -2455,21 +2582,89 @@ mod tests {
             .expect("deepseek missing from default providers");
         assert_eq!(spec.kind, "deepseek");
         assert_eq!(spec.model, "deepseek-v4-flash");
-        assert_eq!(spec.endpoint, "https://api.deepseek.com/v1");
+        assert_eq!(
+            spec.endpoint,
+            "https://api.deepseek.com/v1/chat/completions"
+        );
     }
 
-    /// Q7 pin: OpenCode Go is exposed with the operator-default
-    /// non-MiniMax / non-Direct-DeepSeek model (deepseek-v4-flash).
+    /// Q7 pin: every OpenCode model alias is registered as its own
+    /// single-model section with a fully-qualified URL the dispatcher
+    /// can dispatch on. The v0.9 `opencode_go` umbrella alias is
+    /// dropped: each alias now carries the wire-format path directly.
     #[test]
-    fn default_providers_lists_opencode_go() {
+    fn default_providers_lists_opencode_aliases() {
         let cfg = Config::default();
-        let spec = cfg
-            .providers
-            .get("opencode_go")
-            .expect("opencode_go missing from default providers");
-        assert_eq!(spec.kind, "opencode_go");
-        assert_eq!(spec.model, "deepseek-v4-flash");
-        assert_eq!(spec.endpoint, "https://opencode.ai/zen/go/v1");
+        // One representative model per wire-format group.
+        let representatives = [
+            ("kimi-k3", "https://opencode.ai/zen/go/v1/chat/completions"),
+            ("minimax-m3", "https://opencode.ai/zen/go/v1/messages"),
+            ("gpt-5.6-luna", "https://opencode.ai/zen/go/v1/responses"),
+        ];
+        for (alias, expected_endpoint) in representatives {
+            let spec = cfg
+                .providers
+                .get(alias)
+                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+            assert_eq!(
+                spec.endpoint, expected_endpoint,
+                "alias {alias} must carry the full wire-format URL, got {}",
+                spec.endpoint
+            );
+            assert_eq!(
+                spec.kind, "opencode_go",
+                "alias {alias} must keep the legacy kind marker until Phase 3"
+            );
+        }
+    }
+
+    /// v0.10 schema pin: every default provider exposes its model
+    /// list as `models[].id` (not a singular `model` field). The
+    /// dispatcher (Phase 3) iterates this list to build one
+    /// `Provider` per `(section, model)` pair.
+    #[test]
+    fn default_providers_models_field_populated() {
+        let cfg = Config::default();
+        // Sample representatives from each section.
+        let samples = [
+            ("minimax", "MiniMax-M3"),
+            ("deepseek", "deepseek-v4-flash"),
+            ("kimi-k3", "kimi-k3"),
+            ("minimax-m3", "minimax-m3"),
+            ("gpt-5.6-luna", "gpt-5.6-luna"),
+        ];
+        for (alias, expected_id) in samples {
+            let spec = cfg
+                .providers
+                .get(alias)
+                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+            assert!(
+                !spec.models.is_empty(),
+                "alias {alias} must carry at least one ModelConfig entry"
+            );
+            assert_eq!(
+                spec.models[0].id, expected_id,
+                "alias {alias} models[0].id must equal {expected_id}"
+            );
+            assert_eq!(
+                spec.models.len(),
+                1,
+                "alias {alias} must carry exactly one ModelConfig entry (Phase 3 wiring)"
+            );
+        }
+    }
+
+    /// The deprecated `kind`/`model`/`hard_incompatibilities` fields
+    /// must remain populated after the v0.10 schema migration so the
+    /// construction code in `src/llm/{minimax,deepseek,opencode_go*}.rs`
+    /// keeps compiling until Phase 3 lands.
+    #[test]
+    fn default_providers_legacy_fields_still_populated() {
+        let cfg = Config::default();
+        let spec = cfg.providers.get("minimax").unwrap();
+        assert_eq!(spec.kind, "minimax");
+        assert_eq!(spec.model, "MiniMax-M3");
+        assert!(!spec.hard_incompatibilities.is_empty());
     }
 
     /// Q5 + 2026-08-04 pin: the canonical MiniMax models are exposed
@@ -2503,6 +2698,11 @@ mod tests {
                 spec.model, model,
                 "alias {alias} should carry canonical model {model}"
             );
+            // Sanity-check the new schema carries the same id.
+            assert_eq!(
+                spec.models[0].id, model,
+                "alias {alias} models[0].id must equal {model}"
+            );
         }
     }
 
@@ -2526,11 +2726,14 @@ mod tests {
     /// If defence 1 is ever removed while the probe is disabled, a
     /// fresh `moagan run --provider kimi-k3` sends 1M and breaks with
     /// HTTP 400 — hence the `max_token_auto` assertion below.
+    ///
+    /// v0.10 update: the legacy umbrella alias `opencode_go` is gone
+    /// (each model carries its own full URL); the test walks the
+    /// per-model aliases instead.
     #[test]
     fn default_opencode_go_providers_enable_max_tokens_auto_probe() {
         let cfg = Config::default();
         let oc_aliases = [
-            "opencode_go", // deepseek-v4-flash
             "kimi-k3",
             "kimi-k2.6",
             "glm-5.1",
@@ -2727,13 +2930,53 @@ mod tests {
         let spec: ProviderConfig = toml::from_str(
             r#"
             kind = "minimax"
-            endpoint = "https://example.invalid/v1"
+            endpoint = "https://example.invalid/v1/messages"
             model = "MiniMax-M3"
             "#,
         )
         .expect("a provider table without the new keys must still parse");
         assert_eq!(spec.max_token_auto, None);
         assert!(spec.max_token_auto_save);
+    }
+
+    /// v0.10 schema pin: an operator who writes `models = [{ id = ... }]`
+    /// in `config.toml` gets the new structure parsed verbatim. The
+    /// deprecated `model` / `kind` / `hard_incompatibilities` fields
+    /// remain optional so legacy TOML files keep loading.
+    #[test]
+    fn provider_config_models_field_parses() {
+        let spec: ProviderConfig = toml::from_str(
+            r#"
+            endpoint = "https://opencode.ai/zen/go/v1"
+
+            [[models]]
+            id = "kimi-k3"
+            max_tokens = 1000000
+
+            [[models]]
+            id = "minimax-m3"
+            max_tokens = 1000000
+            "#,
+        )
+        .expect("a provider table with models[] must parse");
+        assert_eq!(spec.models.len(), 2);
+        assert_eq!(spec.models[0].id, "kimi-k3");
+        assert_eq!(spec.models[0].max_tokens, Some(1_000_000));
+        assert_eq!(spec.models[1].id, "minimax-m3");
+        assert_eq!(spec.models[1].max_tokens, Some(1_000_000));
+    }
+
+    /// `ModelConfig::default()` round-trip: serde-defaults match the
+    /// struct's `Default` impl so an empty `[[models]]` entry still
+    /// produces a usable `ModelConfig` (id is empty — callers must
+    /// populate it explicitly).
+    #[test]
+    fn model_config_default_round_trip() {
+        let spec: ModelConfig = toml::from_str("").expect("empty ModelConfig must parse");
+        assert_eq!(spec.id, "");
+        assert_eq!(spec.endpoint, None);
+        assert_eq!(spec.max_tokens, None);
+        assert_eq!(spec, ModelConfig::default());
     }
 
     /// Catalog §D.19.5 default knobs: 5 errors in 60 s -> open for

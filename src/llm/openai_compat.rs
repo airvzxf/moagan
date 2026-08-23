@@ -529,6 +529,7 @@ mod tests {
     fn provider(endpoint: &str) -> OpenAiCompatProvider {
         OpenAiCompatProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "deepseek".into(),
                 endpoint: endpoint.into(),
                 model: "deepseek-v4-flash".into(),
@@ -569,6 +570,7 @@ mod tests {
         // doesn't reject the request with 400.
         let p = OpenAiCompatProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -626,6 +628,7 @@ mod tests {
     fn provider_with_model(kind: &str, endpoint: &str, model: &str) -> OpenAiCompatProvider {
         OpenAiCompatProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: kind.into(),
                 endpoint: endpoint.into(),
                 model: model.into(),
@@ -933,7 +936,8 @@ mod tests {
                 .await;
             let p = OpenAiCompatProvider::new_with_kind_cap(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
+
+            models: Vec::new(),kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "kimi-k2.7-code".into(),
                     // None on purpose: only the kind-level cap
@@ -1017,6 +1021,7 @@ mod tests {
             // `kind_hard_cap` the production constructor installs.
             let p = OpenAiCompatProvider::new_with_kind_cap(
                 &ProviderConfig {
+                    models: Vec::new(),
                     kind: "deepseek".into(),
                     endpoint: server.uri(),
                     model: "deepseek-v4-flash".into(),
@@ -1079,6 +1084,7 @@ mod tests {
     fn deepseek_direct_provider_probe_ceiling_is_deepseek_max_tokens_cap() {
         let p = OpenAiCompatProvider::new_with_kind_cap(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -1105,6 +1111,7 @@ mod tests {
         // permissive limits) keep working unchanged.
         let p_no_cap = OpenAiCompatProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -1136,6 +1143,7 @@ mod tests {
     fn deepseek_direct_provider_uses_no_kind_cap() {
         let p = OpenAiCompatProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -1163,6 +1171,7 @@ mod tests {
     fn new_with_kind_cap_stores_cap_in_field() {
         let p = OpenAiCompatProvider::new_with_kind_cap(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "kimi-k3".into(),
@@ -1251,6 +1260,7 @@ mod tests {
 
         let p = OpenAiCompatProvider::new(
             &ProviderConfig {
+                models: Vec::new(),
                 kind: "deepseek".into(),
                 endpoint: server.uri(),
                 model: "deepseek-v4-flash".into(),

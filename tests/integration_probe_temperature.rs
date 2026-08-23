@@ -39,6 +39,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 /// because a rejection IS the signal, not a transient blip.
 fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
     let cfg = ProviderConfig {
+        models: Vec::new(),
         kind: "minimax".to_owned(),
         endpoint: server_uri,
         model: "MiniMax-M3".to_owned(),

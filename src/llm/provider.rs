@@ -1542,6 +1542,7 @@ mod tests {
         cfg.insert(
             "mock-a".into(),
             crate::config::ProviderConfig {
+                models: Vec::new(),
                 kind: "mock".into(),
                 endpoint: "mock://a".into(),
                 model: "mock-model".into(),
@@ -1558,6 +1559,7 @@ mod tests {
         cfg.insert(
             "mock-b".into(),
             crate::config::ProviderConfig {
+                models: Vec::new(),
                 kind: "mock".into(),
                 endpoint: "mock://b".into(),
                 model: "mock-model".into(),
@@ -1588,6 +1590,7 @@ mod tests {
         cfg.insert(
             "mock".into(),
             crate::config::ProviderConfig {
+                models: Vec::new(),
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),
@@ -1689,6 +1692,7 @@ mod tests {
         cfg.insert(
             "opencode_go".into(),
             crate::config::ProviderConfig {
+                models: Vec::new(),
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "minimax-m3".into(),
@@ -1847,6 +1851,7 @@ mod tests {
         // per-provider breaker stays at zero; the per-(provider,
         // role) breaker is what would trip.
         let spec = ProviderConfig {
+            models: Vec::new(),
             kind: "minimax".into(),
             endpoint: "http://127.0.0.1:1".into(),
             model: "MiniMax-M3".into(),
@@ -2084,6 +2089,7 @@ mod tests {
     #[test]
     fn provider_capabilities_for_each_provider() {
         let cfg = crate::config::ProviderConfig {
+            models: Vec::new(),
             kind: "minimax".into(),
             endpoint: "https://api.minimax.io/anthropic/v1".into(),
             model: "MiniMax-M3".into(),
@@ -2104,6 +2110,7 @@ mod tests {
         assert!(!cap.supports_response_format);
 
         let cfg_d = crate::config::ProviderConfig {
+            models: Vec::new(),
             kind: "deepseek".into(),
             endpoint: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),
@@ -2125,6 +2132,7 @@ mod tests {
         assert!(cap.supports_response_format);
 
         let cfg_oc = crate::config::ProviderConfig {
+            models: Vec::new(),
             kind: "opencode_go".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             model: "qwen3.7-max".into(), // Anthropic-compat path
@@ -2145,6 +2153,7 @@ mod tests {
         assert_eq!(oc_a.capabilities().wire_format_id(), "anthropic");
 
         let cfg_ocr = crate::config::ProviderConfig {
+            models: Vec::new(),
             model: "gpt-5.6-luna".into(),
             ..cfg_oc.clone()
         };
@@ -2156,6 +2165,7 @@ mod tests {
         assert_eq!(oc_r.capabilities().wire_format_id(), "responses");
 
         let cfg_occ = crate::config::ProviderConfig {
+            models: Vec::new(),
             model: "kimi-k2.7-code".into(),
             ..cfg_oc.clone()
         };
@@ -2168,6 +2178,7 @@ mod tests {
         assert_eq!(oc.capabilities().wire_format_id(), "openai");
 
         let cfg_dispatcher = crate::config::ProviderConfig {
+            models: Vec::new(),
             model: "qwen3.7-max".into(),
             ..cfg_oc.clone()
         };
@@ -2180,6 +2191,7 @@ mod tests {
         assert_eq!(oc_d_anthropic.capabilities().wire_format_id(), "anthropic");
 
         let cfg_dispatcher_r = crate::config::ProviderConfig {
+            models: Vec::new(),
             model: "gpt-5.6-luna".into(),
             ..cfg_oc.clone()
         };
@@ -2207,6 +2219,7 @@ mod tests {
         let inner_oai: Arc<dyn Provider> = Arc::new(
             OpenAiCompatProvider::new(
                 &crate::config::ProviderConfig {
+                    models: Vec::new(),
                     kind: "deepseek".into(),
                     endpoint: "https://api.deepseek.com/v1".into(),
                     model: "deepseek-v4-flash".into(),
@@ -2232,6 +2245,7 @@ mod tests {
         let inner_anth: Arc<dyn Provider> = Arc::new(
             MinimaxProvider::new(
                 &crate::config::ProviderConfig {
+                    models: Vec::new(),
                     kind: "minimax".into(),
                     endpoint: "https://api.minimax.io/anthropic/v1".into(),
                     model: "MiniMax-M3".into(),
@@ -2257,6 +2271,7 @@ mod tests {
         let inner_resp: Arc<dyn Provider> = Arc::new(
             OpenCodeGoResponsesProvider::new(
                 &crate::config::ProviderConfig {
+                    models: Vec::new(),
                     kind: "opencode_go".into(),
                     endpoint: "https://opencode.ai/zen/go/v1".into(),
                     model: "gpt-5.6-luna".into(),
@@ -2502,6 +2517,7 @@ mod tests {
         cfg.insert(
             "mock".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),

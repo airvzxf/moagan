@@ -410,6 +410,7 @@ mod tests {
         providers.insert(
             "minimax".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -419,6 +420,7 @@ mod tests {
         providers.insert(
             "minimax-m2.7".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M2.7".into(),
@@ -428,6 +430,7 @@ mod tests {
         providers.insert(
             "minimax-dup".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -437,6 +440,7 @@ mod tests {
         providers.insert(
             "mock".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),
@@ -534,6 +538,7 @@ mod tests {
         providers.insert(
             "minimax".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -543,6 +548,7 @@ mod tests {
         providers.insert(
             "deepseek".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -552,6 +558,7 @@ mod tests {
         providers.insert(
             "opencode_go".into(),
             ProviderConfig {
+                models: Vec::new(),
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "kimi-k2.7-code".into(),
@@ -673,6 +680,7 @@ mod tests {
             providers: std::collections::BTreeMap::from([(
                 "mock".to_owned(),
                 ProviderConfig {
+                    models: Vec::new(),
                     kind: "mock".to_owned(),
                     endpoint: "mock://local".to_owned(),
                     model: "mock-model".to_owned(),
@@ -784,6 +792,7 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         providers.insert(
             "minimax".into(),
             crate::config::ProviderConfig {
+                models: Vec::new(),
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
