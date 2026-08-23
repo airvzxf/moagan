@@ -8,7 +8,7 @@ return HTTP 400 + `temperature must be between 0 and 1` otherwise. Hard-coding
 a global cap is the same brittleness the [`max_tokens` auto-probe](max-tokens-auto.md)
 removes — a relay can tighten the cap without warning and the next run breaks.
 
-`moagan` (v0.9.10+) probes each `(provider, model)` pair at first startup
+`moagan` (v0.9.11+) probes each `(provider, model)` pair at first startup
 to discover the discrete set of supported sampling temperatures. The result
 is cached at `~/.local/share/moagan/temperatures_auto.toml` and consulted on
 every subsequent call: out-of-range requests are rewritten to the nearest
@@ -96,7 +96,7 @@ entry with `auto = false`.
 
 Every LLM dispatch goes through `RunContext::dispatch_to_provider`
 (`src/phases/phase.rs:1016`). When the runtime carries a
-`TemperatureTable` (it always does after the v0.9.10 wiring), the gate
+`TemperatureTable` (it always does after the v0.9.11 wiring), the gate
 runs **before** the capability resolver:
 
 ```rust

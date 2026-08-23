@@ -5,12 +5,12 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.11] - 2026-08-23
 
 ### Added
 
 - **Auto-detection of supported sampling temperatures per `(provider, model)`**
-  (PR #XXX — pending). New module `src/llm::temperature_probe` that mirrors the
+  (PR #585). New module `src/llm::temperature_probe` that mirrors the
   `max_tokens` auto-probe pattern: discover the discrete set of temperatures each
   upstream accepts and persist it so the runtime can rewrite user-requested
   values without re-running the pipeline. The canonical candidate set is

@@ -55,7 +55,7 @@ algorithm and tuning knobs.
 
 ### Auto-detected `temperatures`
 
-Since v0.9.10, Moagan also auto-detects the supported
+Since v0.9.11, Moagan also auto-detects the supported
 sampling-temperature set per `(provider, model)` and persists it at
 `~/.local/share/moagan/temperatures_auto.toml`. The probe runs once
 per fresh model on first startup in the background; the runtime
