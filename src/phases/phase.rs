@@ -34,6 +34,7 @@ use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::llm::response_format_opt_out::render_system_prompt_with_prefix;
+use crate::llm::temperature_probe::TemperatureTable;
 use crate::llm::{ProviderRegistry, Request, Response, Role};
 use crate::telemetry::{Telemetry, WarningContext};
 
@@ -157,6 +158,17 @@ pub struct RunContext {
     /// paths and tests); in that case the clamp reduces to the
     /// per-provider TOML value alone.
     pub max_tokens_table: Option<Arc<MaxTokensTable>>,
+    /// PR-7: shared handle into the auto-probe supported-temperatures
+    /// table. When `Some`, [`Self::dispatch_to_provider`] consults the
+    /// table on every LLM call and clamps `req.temperature` to the
+    /// nearest value in the discovered set, emitting a
+    /// `tracing::warn!` when the operator's requested temperature
+    /// was out of range. `None` disables the clamp so legacy
+    /// hand-rolled paths keep the "send whatever the caller asked
+    /// for" behaviour. The CLI boundary (`cli::run`) and the
+    /// integration tests populate this field; unit tests that
+    /// exercise the pre-clamp behaviour leave it as `None`.
+    pub temperature_table: Option<Arc<TemperatureTable>>,
     /// PR-3: capability resolver consulted on every LLM call so the
     /// models.dev catalog can drop fields the upstream would reject
     /// (e.g. `temperature` on `kimi-k3`). `None` disables every
@@ -279,6 +291,7 @@ impl RunContext {
             heartbeat_holder: "heartbeat".to_owned(),
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
             max_tokens_table: None,
+            temperature_table: None,
             capability_resolver: None,
             models_dev_catalog: None,
         }
@@ -422,6 +435,30 @@ impl RunContext {
     pub fn with_max_tokens_table_opt(mut self, table: Option<Arc<MaxTokensTable>>) -> Self {
         if let Some(t) = table {
             self.max_tokens_table = Some(t);
+        }
+        self
+    }
+
+    /// PR-7: attach the auto-probe supported-temperatures table so
+    /// [`Self::dispatch_to_provider`] can consult it on every LLM
+    /// call and clamp `req.temperature` to the nearest value in the
+    /// discovered set. The CLI boundary (`cli::run`) and the
+    /// integration tests call this once after `registry_from_config`
+    /// has built the table; tests that exercise the pre-clamp
+    /// behaviour leave the field as `None` so the legacy "send
+    /// whatever the operator asked for" path stays bit-for-bit.
+    pub fn with_temperature_table(mut self, table: Arc<TemperatureTable>) -> Self {
+        self.temperature_table = Some(table);
+        self
+    }
+
+    /// PR-7: optional variant of [`Self::with_temperature_table`]
+    /// for the `Option<Arc<TemperatureTable>>` carried by
+    /// [`ProviderRegistry`]. No-op when the table is `None`
+    /// (mock-only registries and tests that bypass the probe).
+    pub fn with_temperature_table_opt(mut self, table: Option<Arc<TemperatureTable>>) -> Self {
+        if let Some(t) = table {
+            self.temperature_table = Some(t);
         }
         self
     }
@@ -780,7 +817,16 @@ impl RunContext {
     /// consulted when the matrix's profile defaults to a single-shot
     /// `[1.0] × 1`, but the explicit `temperature` parameter always
     /// wins — there is no upstream indirection.
-    pub(crate) async fn call_with_retry_at_temp(
+    ///
+    /// `pub` (not `pub(crate)`) so the integration tests in
+    /// `tests/integration_temperature_clamp.rs` can drive the
+    /// dispatch gate end-to-end without a hand-rolled wrapper.
+    /// The method is already consumed by `discover_matrix.rs` and
+    /// `coordinator.rs` as part of the matrix fan-out; widening
+    /// the visibility is the minimum-surface change that
+    /// preserves the production contract while exposing the seam
+    /// the regression tests need.
+    pub async fn call_with_retry_at_temp(
         &self,
         role: Role,
         system: String,
@@ -1036,6 +1082,33 @@ impl RunContext {
                 );
                 return Err(e);
             }
+        }
+        // PR-7: clamp `req.temperature` to the nearest value in
+        // the operator's auto-discovered supported set for
+        // `(default_provider, default_model)`. The CLI boundary
+        // already rewrote the matrix profile for the discovery
+        // path (`discovery::coordinator`); this gate is the safety
+        // net for every other path (per-role default, profile
+        // override, legacy callers that pass `req.temperature =
+        // Some(_)` directly). Runs BEFORE the capability resolver
+        // because the resolver drops `temperature` outright on
+        // models that don't support it (e.g. `kimi-k3`) — clamping
+        // first means we still log the out-of-range value when it
+        // happens, even though the wire body will drop the field.
+        if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref())
+            && let Some(clamped) =
+                table.nearest_supported(&self.default_provider, &self.default_model, t)
+            && (clamped - t).abs() > f32::EPSILON
+        {
+            tracing::warn!(
+                provider = %self.default_provider,
+                model = %self.default_model,
+                role = %req.role.as_str(),
+                requested = %t,
+                clamped_to = %clamped,
+                "temperature outside supported set; clamped at dispatch (safety net)"
+            );
+            req.temperature = Some(clamped);
         }
         // PR-3: gate the request through the capability resolver so
         // models whose catalog says `temperature: false` (e.g.
@@ -3513,5 +3586,208 @@ mod tests {
             "PromptPrefill must fire exactly one prefill retry"
         );
         let _ = temp;
+    }
+
+    // ===========================================================
+    // PR-7: temperature clamp in `dispatch_to_provider`
+    //
+    // The gate at the top of `dispatch_to_provider` consults
+    // `RunContext::temperature_table` and snaps `req.temperature`
+    // to the nearest value in the auto-discovered supported set
+    // for `(default_provider, default_model)`. The four tests
+    // below pin the contract:
+    //
+    // 1. `None` table → no clamp (legacy behaviour).
+    // 2. Empty set → no clamp (the gate does not interfere with
+    //    providers that have not been probed yet).
+    // 3. Requested value already in the set → no clamp, no warning.
+    // 4. Requested value outside the set → snap to the nearest
+    //    value, captured request reflects the snapped value.
+    // ===========================================================
+
+    /// Build a `TemperatureTable` from a hand-written TOML
+    /// sidecar. The sidecar carries a single entry whose
+    /// `temperatures` is exactly the supplied set; `from_path`
+    /// hydrates the in-memory table from the file. `save=false`
+    /// keeps the test from trying to rewrite the file on
+    /// subsequent probes.
+    fn temperature_table_for_test(
+        provider: &str,
+        model: &str,
+        temps: &[f32],
+    ) -> Arc<crate::llm::temperature_probe::TemperatureTable> {
+        use crate::llm::temperature_probe::{Entry, TemperatureTableFile};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("temperatures_auto.toml");
+        let mut file = TemperatureTableFile::new_empty();
+        file.providers
+            .entry(provider.to_owned())
+            .or_default()
+            .insert(
+                model.to_owned(),
+                Entry {
+                    temperatures: temps.to_vec(),
+                    detected_at: "2026-08-22T00:00:00Z".to_owned(),
+                    verified_at: "2026-08-22T00:00:00Z".to_owned(),
+                    auto: true,
+                    attempts: 1,
+                },
+            );
+        file.save(&path).expect("save temperatures_auto.toml");
+        let table = crate::llm::temperature_probe::TemperatureTable::from_path(&path, false)
+            .expect("from_path");
+        Arc::new(table)
+    }
+
+    /// Build a `RunContext` whose default provider is a
+    /// freshly-constructed `RecordingProvider` named
+    /// `"recording"`. The returned `Arc<Mutex<Option<Request>>>`
+    /// is the slot the provider writes into on every `send`,
+    /// so each test can read the request body that the dispatch
+    /// gate actually transmitted.
+    fn temperature_gate_context(
+        table: Option<Arc<crate::llm::temperature_probe::TemperatureTable>>,
+    ) -> (
+        tempfile::TempDir,
+        RunContext,
+        Arc<parking_lot::Mutex<Option<crate::llm::Request>>>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::open(
+            run_id,
+            &home.run_dir(run_id),
+            crate::redact::RedactPolicy::default(),
+            None,
+        )
+        .expect("Telemetry::open");
+
+        let captured = Arc::new(parking_lot::Mutex::new(None));
+        let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
+            captured: Arc::clone(&captured),
+        });
+        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let mut registry = ProviderRegistry::default();
+        registry.insert("recording".into(), provider_dyn);
+
+        // Per-provider temperature stays None so the per-role
+        // default (1.0 for `Role::Sketch`) does not contaminate
+        // the assertion. `call_with_retry_at_temp` stamps the
+        // explicit `temperature` parameter straight onto
+        // `Request.temperature`, so the gate sees the test's
+        // chosen value verbatim.
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "recording".to_owned(),
+            ProviderConfig {
+                kind: "mock".to_owned(),
+                endpoint: "mock://recording".to_owned(),
+                model: "recording-model".to_owned(),
+                max_tokens: Some(1024),
+                temperature: None,
+                top_p: None,
+                ..ProviderConfig::default()
+            },
+        );
+
+        let ctx = RunContext::new_with_config(
+            run_id,
+            home,
+            Arc::new(registry),
+            "recording".into(),
+            "recording-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "standard".into(),
+            Arc::new(cfg),
+        )
+        .with_temperature_table_opt(table);
+
+        (temp, ctx, captured)
+    }
+
+    /// PR-7: `dispatch_to_provider` does not clamp when the
+    /// run context has no `temperature_table` — the legacy
+    /// "send whatever the caller asked for" behaviour stays
+    /// bit-for-bit. A request at `temperature = 2.5` reaches
+    /// the provider untouched.
+    #[tokio::test]
+    async fn temperature_gate_passes_when_table_is_none() {
+        let (_temp, ctx, captured) = temperature_gate_context(None);
+        let _ = ctx
+            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 2.5)
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.temperature,
+            Some(2.5),
+            "without a temperature_table the gate must leave the request untouched"
+        );
+    }
+
+    /// PR-7: when the table is wired but the supported set is
+    /// empty (no entry for `(default_provider, default_model)`),
+    /// the gate stays silent and the request reaches the
+    /// provider with its original temperature.
+    #[tokio::test]
+    async fn temperature_gate_passes_when_set_is_empty() {
+        // Entry under (other-provider, other-model) — the
+        // (recording, recording-model) lookup returns an empty
+        // set so the gate short-circuits without warning.
+        let table = temperature_table_for_test("other-provider", "other-model", &[0.0, 0.5, 1.0]);
+        let (_temp, ctx, captured) = temperature_gate_context(Some(table));
+        let _ = ctx
+            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 1.7)
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.temperature,
+            Some(1.7),
+            "empty supported set (entry under different provider/model) → no clamp"
+        );
+    }
+
+    /// PR-7: when the requested temperature is already a member
+    /// of the supported set, the gate is a no-op. The provider
+    /// sees the value verbatim and no warning is emitted.
+    #[tokio::test]
+    async fn temperature_gate_passes_when_temperature_is_in_set() {
+        let table = temperature_table_for_test("recording", "recording-model", &[0.0, 0.5, 1.0]);
+        let (_temp, ctx, captured) = temperature_gate_context(Some(table));
+        let _ = ctx
+            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.5)
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.temperature,
+            Some(0.5),
+            "value already in the set must reach the provider verbatim"
+        );
+    }
+
+    /// PR-7: when the requested temperature is outside the
+    /// supported set, the gate snaps it to the nearest
+    /// supported value. The captured request reflects the
+    /// snapped value (`0.7 → 0.5` here).
+    #[tokio::test]
+    async fn temperature_gate_clamps_to_nearest_with_warning() {
+        let table = temperature_table_for_test("recording", "recording-model", &[0.0, 0.5, 1.0]);
+        let (_temp, ctx, captured) = temperature_gate_context(Some(table));
+        let _ = ctx
+            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.7)
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.temperature,
+            Some(0.5),
+            "out-of-range 0.7 must snap to the nearest supported value (0.5)"
+        );
     }
 }
