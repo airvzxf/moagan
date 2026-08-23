@@ -567,13 +567,13 @@ pub enum Cmd {
     /// `moagan probe <verb>` — operator-driven diagnostics for
     /// the LLM transport layer. Verb-first naming per the
     /// operator-facing convention (the `moagan <verb> <noun>`
-    /// order reads naturally in a shell). Today the only
-    /// sub-command is `moagan probe max_tokens`, which is the
-    /// on-demand counterpart to the startup auto-probe and is
-    /// the manual pin the operator can set when the auto-probe
-    /// misfires.
+    /// order reads naturally in a shell). The sub-commands are
+    /// the on-demand counterparts to the startup auto-probes
+    /// and the manual pins the operator can set when an
+    /// auto-probe misfires. Today: `max_tokens` and
+    /// `temperature`.
     Probe {
-        /// Probe sub-command (`max_tokens` today).
+        /// Probe sub-command (`max_tokens`, `temperature`).
         #[command(subcommand)]
         sub: probe::ProbeCmd,
     },
@@ -916,7 +916,9 @@ impl Cmd {
             Self::Refine { .. } => "Re-run the deliver phase for one proposal",
             Self::Rerank { .. } => "Re-run the rank phase on existing evaluations",
             Self::Doctor { .. } => "Check the local environment",
-            Self::Probe { .. } => "Operator-driven diagnostics (probe max_tokens, ...)",
+            Self::Probe { .. } => {
+                "Operator-driven diagnostics (probe max_tokens, probe temperature)"
+            }
             Self::Audit { .. } => "External, transparent audit trail",
             Self::Discover { .. } => "Discovery mode (knowledge base by category)",
             Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
