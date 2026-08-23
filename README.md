@@ -53,6 +53,22 @@ verified on every subsequent run. Disable with
 [`docs/max-tokens-auto.md`](docs/max-tokens-auto.md) for the full
 algorithm and tuning knobs.
 
+### Auto-detected `temperatures`
+
+Since v0.9.10, Moagan also auto-detects the supported
+sampling-temperature set per `(provider, model)` and persists it at
+`~/.local/share/moagan/temperatures_auto.toml`. The probe runs once
+per fresh model on first startup in the background; the runtime
+rewrites out-of-range requests to the nearest valid value via
+`TemperatureTable::nearest_supported(...)` and emits a
+`tracing::warn!` so the operator can see when a clamp fires. The
+operator-driven counterpart is
+`moagan probe temperature --provider PROVIDER:MODEL [--persist-union]
+[--batch-size N] [--dry-run]`. See
+[`docs/temperatures-auto.md`](docs/temperatures-auto.md) for the
+algorithm, the sidecar format, and the `--persist-union` operator
+cap.
+
 ## Architecture
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module layout, persistence model, and provider/prompt contracts.

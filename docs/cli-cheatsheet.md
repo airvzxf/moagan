@@ -1240,7 +1240,86 @@ algorithm and the cache-file format.
 
 ---
 
-## 20. `moagan coverage show <run_id>`
+## 20. `moagan probe temperature`
+
+**👁 What it is** — Bulk-probe the supported sampling-temperature set for one or more `(provider, model)` pairs in a single invocation and persist the discovered set to `<MOAGAN_HOME>/temperatures_auto.toml`. Sibling of the runtime auto-probe documented in [`docs/temperatures-auto.md`](temperatures-auto.md): the runtime probe fires once per fresh model on first startup, while `moagan probe temperature` is the explicit operator-driven equivalent for "I added a new provider, probe its temperature set now". Reuses the canonical `detect_supported_temperatures` algorithm (21 candidate values `0.0, 0.1, ..., 2.0` fanned out in groups of 3) and writes through the same sidecar the startup auto-probe uses. Supports up to N providers in one call so a multi-provider rollout needs only one CLI invocation.
+
+**🧩 Flag matrix**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--provider PROVIDER:MODEL` | required | Probe this pair; repeat the flag once per pair to bulk-probe. |
+| `--persist-union` | `false` | Take the UNION across every probed model under the same provider and write the cap into `temperatures_auto.toml` (`auto = false`). Union (not intersection) preserves the principle of "do not restrict what a model already demonstrated it accepts". |
+| `--batch-size N` | `3` | Parallel fan-out size within a probe batch; the default matches the runtime constant `TEMPERATURE_PROBE_BATCH_SIZE` so the CLI never exceeds the auto-probe's own concurrency envelope. `0` fans out every candidate in parallel. |
+| `--dry-run` | `false` | Validate the `provider:model` pairs and print the plan; exit 0 without HTTP traffic or disk writes. Useful for CI / dry-run scripts. |
+
+**⚙️ Internal flow**
+
+```
+cli::dispatch → Cmd::Probe → probe::dispatch_temperature(ProbeTemperatureCmd { providers, persist_union, batch_size, dry_run })
+  → parse_provider_model(...) for every --provider value (rejects missing/empty halves and extra ':')
+  → Config::load() → MoaganHome::resolve() + ensure
+  → println "PROBE TEMPERATURE"
+  → println "--batch-size: <batch> (runtime default: 3)"
+  → for each (kind, model) in pairs:
+       spec = cfg.providers.get(kind) — error out on unknown kind
+       spec.model = model   // operator override
+       if spec.kind == "mock": skipped (no upstream), continue
+       if dry_run:           DryRun outcome (no HTTP, no disk), continue
+       provider  = build_provider_for_probe(&spec)
+       transport = ProviderTemperatureProbeTransport::new(provider)
+       table     = TemperatureTable::from_home(&home, persist=true)
+       accepted  = table.probe_and_store(kind, model, transport, batch_size).await
+       println "  Probing {kind}:{model} ... accepted set: {accepted:?}"
+  → if persist_union:
+       map = union_per_provider(results)   // BTreeMap<provider, sorted-deduped Vec<f32>>
+       for (provider, temps) in map:
+         table.set_operator_cap(provider, temps)   // auto = false
+  → exit 0
+```
+
+```bash
+$ moagan probe temperature \
+    --provider minimax:MiniMax-M3 \
+    --provider opencode_go:kimi-k3 \
+    --persist-union \
+    --batch-size 3
+
+PROBE TEMPERATURE
+--batch-size: 3 (runtime default: 3)
+  Probing minimax:MiniMax-M3 ... accepted set: [0.0, 0.1, ..., 1.0]
+  Probing opencode_go:kimi-k3 ... accepted set: [1.0]
+
+--persist-union: operator caps written to temperatures_auto.toml:
+  minimax:     UNION [0.0, 0.1, 0.2, ..., 1.0]  (auto=false)
+  opencode_go: UNION [1.0]  (auto=false)
+```
+
+The probe sends a tiny deterministic payload
+(`"Reply with the single character: 1"`, `max_tokens = 16`, 5 s
+per-probe HTTP timeout) and classifies each candidate by HTTP status
+plus body fingerprint; no upstream tokens are billable for any
+accepted response. The mock provider is a no-op (the dispatcher
+prints `skipped (mock has no upstream)` and the result is recorded
+as `SkippedMock`). See [`docs/temperatures-auto.md`](temperatures-auto.md)
+for the full probe algorithm, the sidecar format, and the runtime
+clamp policy (`TemperatureTable::nearest_supported(...)`).
+
+**❌ Errors / exit codes**
+
+| Case | Error | Exit |
+|---|---|---|
+| `--provider` absent | `InvalidArgs` ("missing --provider") | 2 |
+| `--provider <kind>` unknown or not in `config.toml` | `InvalidArgs` | 2 |
+| `provider:model` malformed (missing colon, empty half, extra colon) | `InvalidArgs` | 2 |
+| every probed pair failed | (none — empty result printed) | 1 |
+| some probed pairs failed | (none — partial result printed) | 0 |
+| cache write fails | `Io` | 8 |
+| `--persist-union` with no successful probes | (none — "nothing to pin" printed) | 0 |
+
+---
+
+## 21. `moagan coverage show <run_id>`
 
 **👁 What it is** — Renders the SanCov runtime coverage report for one run. ADR-0002. Layer B of the design (enriched `tracing` JSONL with `file:line:column` metadata) is always on; layer A (the `*.profraw` files this command reads) only exists when the binary was built with the `coverage` Cargo feature AND `RUSTFLAGS="-Cinstrument-coverage"`. The text view always works (it just prints a "not instrumented" hint when no `profraw` is on disk); the HTML view shells out to `grcov` and fails with a clear error when `grcov` is not on `PATH`.
 
@@ -1429,4 +1508,5 @@ run 01a0178c  coverage report
 | `moagan list` | Enumerate runs with `paused.json` |
 | `moagan rate` | Manually rate a proposal (preference cache) |
 | `moagan probe max_tokens` | Bulk-probe `(provider, model)` ceilings and persist (§19) |
-| `moagan coverage show` | Render the SanCov runtime coverage report for one run (ADR-0002) |
+| `moagan probe temperature` | Bulk-probe supported temperature sets and persist (§20) |
+| `moagan coverage show` | Render the SanCov runtime coverage report for one run (§21, ADR-0002) |

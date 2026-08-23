@@ -5,6 +5,45 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Auto-detection of supported sampling temperatures per `(provider, model)`**
+  (PR #XXX — pending). New module `src/llm::temperature_probe` that mirrors the
+  `max_tokens` auto-probe pattern: discover the discrete set of temperatures each
+  upstream accepts and persist it so the runtime can rewrite user-requested
+  values without re-running the pipeline. The canonical candidate set is
+  `[0.0, 0.1, ..., 2.0]` (21 values, `0.1` step); the probe fans out in groups
+  of 3 so it never saturates the upstream, and persists the result in
+  `<MOAGAN_HOME>/temperatures_auto.toml`. The runtime table
+  (`TemperatureTable`) exposes `nearest_supported(...)`, which
+  `RunContext::dispatch_to_provider` queries: when the temperature resolved by
+  the per-role default / profile / matrix-profile falls outside the
+  discovered set, it is clamped to the nearest neighbour and a
+  `tracing::warn!` is emitted. The operator-supplied matrix profile is
+  rewritten to the boundary in `coordinator.rs` (nearest-neighbour per
+  `provider_model`), preserving the declared cardinality.
+
+  CLI: new subcommand
+  `moagan probe temperature --provider PROVIDER:MODEL [--persist-union]
+  [--batch-size N] [--dry-run]`. `--persist-union` takes the union (not
+  intersection) of the discovered sets across every model of the same
+  provider and writes the resulting set into the sidecar as the operator
+  cap (`auto = false`). The default `--batch-size = 3` matches the runtime
+  constant `TEMPERATURE_PROBE_BATCH_SIZE` so the CLI never exceeds the
+  auto-probe's own concurrency envelope at startup. Tests: 23 unit
+  (`temperature_probe.rs`) + 5 CLI (`cli/probe.rs`) + 9 integration
+  (`tests/integration_*_temperature_*.rs`). New docs:
+  [`docs/temperatures-auto.md`](docs/temperatures-auto.md) (algorithm,
+  sidecar format, troubleshooting).
+
+### Changed
+
+- **`moagan probe` now lists `max-tokens` and `temperature`** as
+  verb-first subcommands. The dispatch lives in
+  `src/cli/probe.rs::ProbeCmd`. Cheatsheet: §20.
+
 ## [0.9.6] - 2026-08-21
 
 ### Fixed
