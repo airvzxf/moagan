@@ -53,7 +53,7 @@ pub use error::{Error, ExitCode, Result, exit_code};
 pub static TEST_MOAGAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serialises every test that mutates `MINIMAX_API_KEY` /
-/// `DEEPSEEK_API_KEY` / `OPENCODE_GO_API_KEY` process-wide. Shared
+/// `DEEPSEEK_API_KEY` / `OPENCODE_API_KEY` process-wide. Shared
 /// across the LLM provider tests (`llm::api_keys::tests`),
 /// `cli::doctor::tests`, and any future caller that touches those
 /// env vars — without it, parallel `cargo test` runs observe

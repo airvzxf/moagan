@@ -1840,7 +1840,7 @@ mod tests {
     #[tokio::test]
     async fn registry_from_config_accepts_minimax_m3_no_blocked_gate() {
         unsafe {
-            std::env::set_var("OPENCODE_GO_API_KEY", "dummy-for-test");
+            std::env::set_var("OPENCODE_API_KEY", "dummy-for-test");
         }
         let mut cfg = std::collections::BTreeMap::new();
         cfg.insert(
@@ -1851,7 +1851,7 @@ mod tests {
                     endpoint: None,
                     max_tokens: Some(8192),
                 }],
-                kind: "opencode_go".into(),
+                kind: "opencode".into(),
                 endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
                 model: "minimax-m3".into(),
                 max_tokens: Some(8192),
@@ -1866,7 +1866,7 @@ mod tests {
         );
         let registry = registry_from_config(&cfg, &CircuitBreakerConfig::default());
         unsafe {
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
         }
         // v0.10: the registry builds without rejecting any alias.
         // The minimax-m3 entry routes through AnthropicCompatProvider
@@ -2291,7 +2291,7 @@ mod tests {
 
         let cfg_oc = crate::config::ProviderConfig {
             models: Vec::new(),
-            kind: "opencode_go".into(),
+            kind: "opencode".into(),
             endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
             model: "qwen3.7-max".into(), // Anthropic-compat path
             max_tokens: None,
@@ -2429,7 +2429,7 @@ mod tests {
             OpenAICompatProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
-                    kind: "opencode_go".into(),
+                    kind: "opencode".into(),
                     endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
                     model: "gpt-5.6-luna".into(),
                     max_tokens: None,

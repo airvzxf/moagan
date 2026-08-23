@@ -90,13 +90,13 @@ impl AnthropicCompatProvider {
         self
     }
 
-    /// Build from config using `OPENCODE_GO_API_KEY`.
+    /// Build from config using `OPENCODE_API_KEY`.
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
-        let key = std::env::var("OPENCODE_GO_API_KEY")
+        let key = std::env::var("OPENCODE_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| Error::InvalidApiKey {
-                message: "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
+                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or config file"
                     .into(),
                 http_status: None,
             })?;
@@ -117,7 +117,7 @@ impl AnthropicCompatProvider {
     /// kind explicitly. The dispatcher uses the legacy `kind` field
     /// (still populated from `models[0].id` for backward compat) so
     /// an OpenCode alias like `minimax-m3` (section `minimax-m3`,
-    /// kind `opencode_go`) resolves via `OPENCODE_GO_API_KEY` instead
+    /// kind `opencode_go`) resolves via `OPENCODE_API_KEY` instead
     /// of looking up the unknown `minimax-m3` env var. The
     /// provider's runtime `name()` stays `resolved.section` so
     /// `Provider::name()` returns the section name as documented.
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn from_config_errors_when_key_missing() {
         unsafe {
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
         }
         let result = AnthropicCompatProvider::from_config(&ProviderConfig {
             models: Vec::new(),

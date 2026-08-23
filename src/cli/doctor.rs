@@ -486,7 +486,7 @@ mod tests {
     struct ApiKeyEnvGuard {
         minimax: Option<String>,
         deepseek: Option<String>,
-        opencode_go: Option<String>,
+        opencode: Option<String>,
         moagan_home: Option<std::ffi::OsString>,
     }
 
@@ -495,7 +495,7 @@ mod tests {
             Self {
                 minimax: std::env::var("MINIMAX_API_KEY").ok(),
                 deepseek: std::env::var("DEEPSEEK_API_KEY").ok(),
-                opencode_go: std::env::var("OPENCODE_GO_API_KEY").ok(),
+                opencode: std::env::var("OPENCODE_API_KEY").ok(),
                 moagan_home: std::env::var_os("MOAGAN_HOME"),
             }
         }
@@ -505,7 +505,7 @@ mod tests {
         fn drop(&mut self) {
             restore_or_remove("MINIMAX_API_KEY", self.minimax.as_deref());
             restore_or_remove("DEEPSEEK_API_KEY", self.deepseek.as_deref());
-            restore_or_remove("OPENCODE_GO_API_KEY", self.opencode_go.as_deref());
+            restore_or_remove("OPENCODE_API_KEY", self.opencode.as_deref());
             if let Some(v) = &self.moagan_home {
                 unsafe {
                     std::env::set_var("MOAGAN_HOME", v);
@@ -559,7 +559,7 @@ mod tests {
             "opencode_go".into(),
             ProviderConfig {
                 models: Vec::new(),
-                kind: "opencode_go".into(),
+                kind: "opencode".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "kimi-k2.7-code".into(),
                 ..ProviderConfig::default()
@@ -584,7 +584,7 @@ mod tests {
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
-            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
             std::env::remove_var("MOAGAN_HOME");
         }
         let check = check_api_key(&three_kind_config());
@@ -616,7 +616,7 @@ mod tests {
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
             std::env::remove_var("MOAGAN_HOME");
         }
         let check = check_api_key(&three_kind_config());
@@ -646,7 +646,7 @@ mod tests {
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
             std::env::remove_var("MOAGAN_HOME");
         }
         let check = check_api_key(&three_kind_config());
@@ -671,7 +671,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
             std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
             std::env::remove_var("MOAGAN_HOME");
         }
         // A mock-only config requires no keys; the check must
@@ -720,7 +720,7 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
             std::env::set_var("DOCTOR_TEST_DEEPSEEK_KEY_B2", "sk-from-file");
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
         }
         let check = check_api_key(&three_kind_config());
         assert_eq!(

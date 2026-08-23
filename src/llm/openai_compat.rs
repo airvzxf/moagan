@@ -75,15 +75,9 @@ pub struct OpenAICompatProvider {
 impl OpenAICompatProvider {
     /// Build from a provider config and a resolved API key.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        if spec.kind != "opencode_go" {
-            return Err(Error::InvalidArgs(format!(
-                "openai_compat provider got kind '{}'",
-                spec.kind
-            )));
-        }
         let client = build_client()?;
         Ok(Self {
-            name: "opencode_go".to_owned(),
+            name: spec.kind.clone(),
             model: spec.model.clone(),
             endpoint: spec.endpoint.clone(),
             api_key,
@@ -103,13 +97,13 @@ impl OpenAICompatProvider {
         self
     }
 
-    /// Build from config using `OPENCODE_GO_API_KEY`.
+    /// Build from config using `OPENCODE_API_KEY`.
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
-        let key = std::env::var("OPENCODE_GO_API_KEY")
+        let key = std::env::var("OPENCODE_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| Error::InvalidApiKey {
-                message: "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
+                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or config file"
                     .into(),
                 http_status: None,
             })?;
@@ -129,7 +123,7 @@ impl OpenAICompatProvider {
     /// Like [`Self::from_resolved`] but takes the API-key lookup
     /// kind explicitly. The dispatcher uses the legacy `kind` field
     /// so an OpenCode alias like `minimax-m3` (section `minimax-m3`,
-    /// kind `opencode_go`) resolves via `OPENCODE_GO_API_KEY`
+    /// kind `opencode_go`) resolves via `OPENCODE_API_KEY`
     /// instead of looking up the unknown `minimax-m3` env var.
     pub fn from_resolved_with_kind(
         resolved: &crate::config::ResolvedModelConfig,
@@ -793,7 +787,7 @@ mod tests {
     #[test]
     fn from_config_errors_when_key_missing() {
         unsafe {
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
         }
         let result = OpenAICompatProvider::from_config(&ProviderConfig {
             models: Vec::new(),

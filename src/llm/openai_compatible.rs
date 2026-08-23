@@ -125,7 +125,7 @@ impl OpenAICompatibleProvider {
     /// Like [`Self::from_resolved`] but takes the API-key lookup
     /// kind explicitly. The dispatcher uses the legacy `kind` field
     /// so an OpenCode alias like `minimax-m3` (section `minimax-m3`,
-    /// kind `opencode_go`) resolves via `OPENCODE_GO_API_KEY`
+    /// kind `opencode_go`) resolves via `OPENCODE_API_KEY`
     /// instead of looking up the unknown `minimax-m3` env var.
     pub fn from_resolved_with_kind(
         resolved: &crate::config::ResolvedModelConfig,
