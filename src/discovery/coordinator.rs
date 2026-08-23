@@ -508,6 +508,35 @@ impl DiscoveryCoordinator {
         let mut matrix = matrix;
         matrix.temperature_profiles = temperature_profiles;
         matrix.default_profile = default_profile;
+        // PR-7: rewrite every per-provider temperature profile
+        // against the auto-discovered supported set. The runtime
+        // gate in `RunContext::dispatch_to_provider` is the safety
+        // net for per-role defaults and direct callers; this
+        // boundary rewriter reshapes the operator's matrix profile
+        // so the per-cell fan-out and the cache-key cardinality
+        // reflect the post-clamp reality (a `0.7` that gets clamped
+        // to `0.5` no longer counts as a distinct cell from the
+        // explicit `0.5` in the same profile).
+        if let Some(table) = ctx.temperature_table.as_ref() {
+            let mut supported_sets: std::collections::HashMap<String, Vec<f32>> =
+                std::collections::HashMap::new();
+            for model in matrix.temperature_profiles.keys() {
+                let set = table.supported_for(&ctx.default_provider, model);
+                if !set.is_empty() {
+                    supported_sets.insert(model.clone(), set);
+                }
+            }
+            let events = matrix.rewrite_temperatures_to_supported(&supported_sets);
+            for e in events {
+                tracing::warn!(
+                    provider_model = %e.provider_model,
+                    n_clamped = e.n_clamped,
+                    requested = ?e.requested,
+                    clamped_to = ?e.clamped_to,
+                    "temperature profile rewritten to nearest supported values"
+                );
+            }
+        }
         // F2: the loop target is the matrix's cardinality (cells ×
         // sketches_per_cell × profile_total). This replaces the v0.5
         // `Cardinality::for_mode_default(mode).soft` derivation

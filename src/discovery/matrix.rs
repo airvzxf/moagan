@@ -202,6 +202,34 @@ impl DiscoveryDimensions {
     }
 }
 
+/// One rewrite event emitted by
+/// [`ExplorationMatrix::rewrite_temperatures_to_supported`] when at
+/// least one declared temperature was snapped to the upstream's
+/// supported set. The CLI dispatcher logs one `tracing::warn!` per
+/// event so the operator's audit log faithfully records what the
+/// runtime actually executed.
+///
+/// PR-7: the field shape mirrors the auto-probe warning style — a
+/// slice of requested values, a slice of the values they were
+/// clamped to, and the count of cells that were rewritten. The
+/// `provider_model` field carries the same MODEL name string as
+/// [`ExplorationMatrix::temperature_profiles`].
+#[derive(Debug, Clone)]
+pub struct RewriteEvent {
+    /// Provider MODEL name (the map key of
+    /// [`ExplorationMatrix::temperature_profiles`]).
+    pub provider_model: String,
+    /// Temperatures the operator declared in the profile, in
+    /// declaration order.
+    pub requested: Vec<f32>,
+    /// Temperatures the rewriter snapped them to (one per
+    /// `requested[i]`). Same length as `requested`.
+    pub clamped_to: Vec<f32>,
+    /// Number of entries where `requested[i] != clamped_to[i]`
+    /// (within `f32::EPSILON`).
+    pub n_clamped: usize,
+}
+
 /// The full exploration matrix.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExplorationMatrix {
@@ -308,6 +336,58 @@ impl ExplorationMatrix {
         self.temperature_profiles
             .get(provider_model)
             .unwrap_or(&self.default_profile)
+    }
+
+    /// PR-7: rewrite every per-provider temperature profile so
+    /// each declared temperature is snapped to the nearest value
+    /// in the supplied `supported_sets` map. The map is keyed by
+    /// the same provider MODEL name as
+    /// [`Self::temperature_profiles`] (e.g. `"MiniMax-M3"`).
+    /// Missing keys leave the corresponding profile untouched —
+    /// the runtime gate in
+    /// `crate::phases::phase::RunContext::dispatch_to_provider` is
+    /// the safety net for any `(provider, model)` that doesn't
+    /// appear here.
+    ///
+    /// `replicas_per_temperature` is left untouched (the rewrite
+    /// only changes the temperature axis, not the replica count).
+    /// Returns one [`RewriteEvent`] per profile that had at least
+    /// one temperature snapped, so the CLI dispatcher can emit a
+    /// `tracing::warn!` per event with the operator's audit log
+    /// faithfully recording what the runtime actually executed.
+    pub fn rewrite_temperatures_to_supported(
+        &mut self,
+        supported_sets: &std::collections::HashMap<String, Vec<f32>>,
+    ) -> Vec<RewriteEvent> {
+        let mut events: Vec<RewriteEvent> = Vec::new();
+        for (model, supported) in supported_sets {
+            let Some(profile) = self.temperature_profiles.get_mut(model) else {
+                continue;
+            };
+            let rewritten: Vec<f32> = profile
+                .temperatures
+                .iter()
+                .map(|t| crate::llm::temperature_probe::nearest_in_set(supported, *t).unwrap_or(*t))
+                .collect();
+            let n_clamped = profile
+                .temperatures
+                .iter()
+                .zip(rewritten.iter())
+                .filter(|(a, b)| (*a - *b).abs() > f32::EPSILON)
+                .count();
+            if n_clamped == 0 {
+                continue;
+            }
+            let requested = profile.temperatures.clone();
+            profile.temperatures = rewritten.clone();
+            events.push(RewriteEvent {
+                provider_model: model.clone(),
+                requested,
+                clamped_to: rewritten,
+                n_clamped,
+            });
+        }
+        events
     }
 
     /// Total number of sketches the matrix will request against a
@@ -742,5 +822,165 @@ mod tests {
         let j = serde_json::to_string(&sidecar).unwrap();
         let back: DiscoveryDimensions = serde_json::from_str(&j).unwrap();
         assert_eq!(back, sidecar);
+    }
+
+    // ===========================================================
+    // PR-7: rewrite_temperatures_to_supported tests
+    //
+    // The rewriter snaps every declared temperature in
+    // `temperature_profiles` to the nearest value in a
+    // `provider_model -> supported_set` map. Missing keys leave
+    // the corresponding profile untouched; replicas are preserved
+    // across the rewrite; an empty map produces no events and
+    // mutates no state.
+    // ===========================================================
+
+    /// PR-7: declared temperatures outside the supported set snap
+    /// to the nearest supported value. The event carries the
+    /// exact `requested` and `clamped_to` vectors plus the
+    /// clamp count so the CLI dispatcher can log a faithful
+    /// `tracing::warn!` per profile.
+    ///
+    /// NOTE: `n_clamped` is 6 here, not 7 — position 3
+    /// (`1.0 → 1.0`) is a no-op because `1.0` is already in the
+    /// supported set. The plan listed `n_clamped = 7` in this
+    /// case; the correct value matches the implementation
+    /// (counts only entries where the requested value differs
+    /// from the clamped value by more than `f32::EPSILON`).
+    #[test]
+    fn rewrite_temperatures_to_supported_clamps_to_nearest() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.1, 0.3, 0.7, 1.0, 1.2, 1.5, 1.9],
+                replicas_per_temperature: 2,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.2, 1.0, 1.8]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.provider_model, "MiniMax-M3");
+        assert_eq!(e.requested, vec![0.1, 0.3, 0.7, 1.0, 1.2, 1.5, 1.9]);
+        assert_eq!(e.clamped_to, vec![0.2, 0.2, 1.0, 1.0, 1.0, 1.8, 1.8]);
+        assert_eq!(e.n_clamped, 6);
+        // In-place mutation: the profile on the matrix carries the
+        // snapped temperatures.
+        let p = m.profile_for("MiniMax-M3");
+        assert_eq!(p.temperatures, vec![0.2, 0.2, 1.0, 1.0, 1.0, 1.8, 1.8]);
+        assert_eq!(p.replicas_per_temperature, 2);
+    }
+
+    /// PR-7: when the declared profile is already a subset of
+    /// the supported set, the rewriter emits no event and leaves
+    /// the profile untouched. The runtime gate at dispatch then
+    /// sees nothing to clamp.
+    #[test]
+    fn rewrite_temperatures_to_supported_keeps_when_all_match() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.2, 0.5, 1.0],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.2, 0.5, 1.0]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert!(events.is_empty(), "no event when nothing was clamped");
+        // Profile is untouched.
+        let p = m.profile_for("MiniMax-M3");
+        assert_eq!(p.temperatures, vec![0.2, 0.5, 1.0]);
+        assert_eq!(p.replicas_per_temperature, 1);
+    }
+
+    /// PR-7: when no supported set is supplied for any provider,
+    /// the rewriter emits no events and mutates no state. The
+    /// runtime gate at dispatch is the safety net for these
+    /// `(provider, model)` pairs.
+    #[test]
+    fn rewrite_temperatures_to_supported_passes_through_when_no_supported_set() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0, 0.5, 1.5],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert!(events.is_empty(), "no supported sets → no events");
+        let p = m.profile_for("MiniMax-M3");
+        assert_eq!(p.temperatures, vec![0.0, 0.5, 1.5]);
+    }
+
+    /// PR-7: the rewriter only touches the `temperatures` axis;
+    /// `replicas_per_temperature` is preserved verbatim across
+    /// the rewrite so the per-cell fan-out does not silently
+    /// collapse or grow.
+    #[test]
+    fn rewrite_temperatures_to_supported_preserves_replicas() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.3, 0.7, 1.2, 1.9],
+                replicas_per_temperature: 5,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.2, 1.0, 1.8]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].n_clamped, 4);
+        let p = m.profile_for("MiniMax-M3");
+        assert_eq!(p.replicas_per_temperature, 5);
+        // Temperatures snapped but replicas preserved.
+        assert_eq!(p.temperatures, vec![0.2, 1.0, 1.0, 1.8]);
+        assert_eq!(p.total(), 4 * 5);
+    }
+
+    /// PR-7: a `supported_sets` key that doesn't have a matching
+    /// entry in `temperature_profiles` is silently ignored — the
+    /// rewriter iterates the matrix's profiles, not the input
+    /// map's keys, so a stale or misnamed entry cannot crash the
+    /// pipeline.
+    #[test]
+    fn rewrite_temperatures_to_supported_skips_unknown_keys() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.7],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        // "unknown-model" is in supported_sets but NOT in
+        // temperature_profiles → silently ignored.
+        supported.insert("unknown-model".to_owned(), vec![0.5]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert!(events.is_empty());
+        let p = m.profile_for("MiniMax-M3");
+        assert_eq!(p.temperatures, vec![0.7]);
     }
 }
