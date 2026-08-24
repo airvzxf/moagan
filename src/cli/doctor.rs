@@ -52,30 +52,27 @@ fn emit(check: Check, any_fail: &mut bool, any_warn: &mut bool) {
 fn check_api_key(cfg: &Config) -> Check {
     use crate::llm::api_keys::lookup_key;
     let mut missing: Vec<String> = Vec::new();
-    let mut seen_kinds: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (name, spec) in &cfg.providers {
-        // `mock` does not need an API key. Every other kind goes
-        // through the unified lookup (api_keys.toml > env var).
-        if spec.kind == "mock" {
+    let mut seen_sections: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (name, _spec) in &cfg.providers {
+        // v0.10: API-key lookup keys on the section name (the
+        // `[providers.<name>]` key in `config.toml`). The
+        // `mock` section does not need an API key.
+        if name == "mock" {
             continue;
         }
-        if !seen_kinds.insert(spec.kind.clone()) {
-            // Skip duplicate kinds; one env var / api_keys.toml entry
-            // services every provider alias of the same kind. The
-            // first iteration reports it; subsequent iterations
-            // (e.g. `minimax` + `minimax-m2.7`) just re-confirm.
+        if !seen_sections.insert(name.clone()) {
+            // Skip duplicates; one env var / api_keys.toml entry
+            // services every provider alias of the same kind.
             continue;
         }
-        match lookup_key(&spec.kind, None) {
+        match lookup_key(name, None) {
             Some(Ok(_)) => {}
             Some(Err(_)) => {
-                let kind = spec.kind.clone();
-                missing.push(format!("{name} ({kind}: api_keys.toml spec unresolvable)"));
+                missing.push(format!("{name} (api_keys.toml spec unresolvable)"));
             }
             None => {
-                let kind = spec.kind.clone();
                 missing.push(format!(
-                    "{name} ({kind}: env var unset and no api_keys.toml entry)"
+                    "{name} (env var unset and no api_keys.toml entry)"
                 ));
             }
         }
@@ -175,29 +172,30 @@ fn check_provider_config(cfg: &Config) -> Check {
     }
 }
 
-/// Build the per-kind model summary. Returns a vector of
-/// `(label, models)` pairs in stable (alphabetical) order; the caller
-/// prints them with the standard check-line format. Q5: surfaces the
-/// canonical MiniMax models (M3, M2.7, M2.7-highspeed, M2.5) so
-/// operators know what `--provider minimax-m2.5` resolves to without
-/// grepping the source. `kind` is the implementation name (e.g.
-/// `minimax`, `mock`); `models` is the sorted list of distinct
-/// `model` values across every provider entry of that kind.
+/// Build the per-section model summary. Returns a vector of
+/// `(label, models)` pairs in stable (alphabetical) order; the
+/// caller prints them with the standard check-line format.
+/// v0.10: the section name (the `[providers.<name>]` key in
+/// `config.toml`) replaces the deprecated `kind` field. The
+/// `models[]` list under each section is the per-model inventory
+/// the operator sees in the doctor output.
 fn models_per_provider(cfg: &Config) -> Vec<(String, Vec<String>)> {
     use std::collections::BTreeMap;
-    let mut by_kind: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for spec in cfg.providers.values() {
-        by_kind
-            .entry(spec.kind.clone())
-            .or_default()
-            .push(spec.model.clone());
+    let mut by_section: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (section, spec) in &cfg.providers {
+        for m in &spec.models {
+            by_section
+                .entry(section.clone())
+                .or_default()
+                .push(m.id.clone());
+        }
     }
-    by_kind
+    by_section
         .into_iter()
-        .map(|(kind, mut models)| {
+        .map(|(section, mut models)| {
             models.sort();
             models.dedup();
-            (format!("models for provider '{kind}'"), models)
+            (format!("models for provider '{section}'"), models)
         })
         .collect()
 }
@@ -298,49 +296,53 @@ fn run_capabilities() -> Result<i32> {
     println!("{}", "-".repeat(header.len()));
 
     // Iterate the configured providers in sorted order so the
-    // output is stable across runs.
+    // output is stable across runs. v0.10: each row carries the
+    // section name plus every model id registered under it; the
+    // catalog lookup still uses the section + model pair.
     for (name, spec) in &cfg.providers {
-        let caps = capabilities_for_kind(&spec.kind);
-        let entry = catalog
-            .as_ref()
-            .and_then(|c| crate::llm::models_dev::lookup(c, name, &spec.model));
-        // The catalog is the canonical source for `temperature`,
-        // `reasoning`, and `attachment` (the `models.dev` rows are
-        // the only place these booleans live; `ProviderCapabilities`
-        // covers wire-format knobs instead). When the catalog is
-        // missing we fall back to the static capability matrix for
-        // `tools` (the only column that lives on both sides), and
-        // print `-` everywhere else.
-        let temperature_honoured = entry.as_ref().map(|e| e.temperature);
-        let reasoning = entry.as_ref().map(|e| e.reasoning);
-        let attachment = entry.as_ref().map(|e| e.attachment);
-        let max_in = entry
-            .as_ref()
-            .map(|e| e.limit.context.to_string())
-            .or_else(|| caps.max_input_tokens.map(|n| n.to_string()))
-            .unwrap_or_else(|| "-".to_owned());
-        let max_out = entry
-            .as_ref()
-            .map(|e| e.limit.output.to_string())
-            .unwrap_or_else(|| "-".to_owned());
-        let cost = entry
-            .as_ref()
-            .map(|e| format!("{:.2} / {:.2}", e.cost.input, e.cost.output))
-            .unwrap_or_else(|| "-".to_owned());
-        println!(
-            "{:<22}  {:<22}  {:<5}  {:<6}  {:<5}  {:<6}  {:<10}  {:<10}  {}",
-            truncate(name, 22),
-            truncate(&spec.model, 22),
-            temperature_honoured.map(yes_no).unwrap_or("-"),
-            reasoning.map(yes_no).unwrap_or("-"),
-            yes_no(caps.supports_tools),
-            attachment.map(yes_no).unwrap_or("-"),
-            max_in,
-            max_out,
-            cost,
-        );
-        if entry.is_none() {
-            any_warn = true;
+        let caps = capabilities_for_section(name);
+        for model in &spec.models {
+            let entry = catalog
+                .as_ref()
+                .and_then(|c| crate::llm::models_dev::lookup(c, name, &model.id));
+            // The catalog is the canonical source for `temperature`,
+            // `reasoning`, and `attachment` (the `models.dev` rows are
+            // the only place these booleans live; `ProviderCapabilities`
+            // covers wire-format knobs instead). When the catalog is
+            // missing we fall back to the static capability matrix for
+            // `tools` (the only column that lives on both sides), and
+            // print `-` everywhere else.
+            let temperature_honoured = entry.as_ref().map(|e| e.temperature);
+            let reasoning = entry.as_ref().map(|e| e.reasoning);
+            let attachment = entry.as_ref().map(|e| e.attachment);
+            let max_in = entry
+                .as_ref()
+                .map(|e| e.limit.context.to_string())
+                .or_else(|| caps.max_input_tokens.map(|n| n.to_string()))
+                .unwrap_or_else(|| "-".to_owned());
+            let max_out = entry
+                .as_ref()
+                .map(|e| e.limit.output.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            let cost = entry
+                .as_ref()
+                .map(|e| format!("{:.2} / {:.2}", e.cost.input, e.cost.output))
+                .unwrap_or_else(|| "-".to_owned());
+            println!(
+                "{:<22}  {:<22}  {:<5}  {:<6}  {:<5}  {:<6}  {:<10}  {:<10}  {}",
+                truncate(name, 22),
+                truncate(&model.id, 22),
+                temperature_honoured.map(yes_no).unwrap_or("-"),
+                reasoning.map(yes_no).unwrap_or("-"),
+                yes_no(caps.supports_tools),
+                attachment.map(yes_no).unwrap_or("-"),
+                max_in,
+                max_out,
+                cost,
+            );
+            if entry.is_none() {
+                any_warn = true;
+            }
         }
     }
     if any_warn {
@@ -352,21 +354,17 @@ fn run_capabilities() -> Result<i32> {
     }
 }
 
-/// Static capability matrix for a kind. Mirrors the
+/// Static capability matrix for a section. Mirrors the
 /// `for_<kind>` constructors on [`ProviderCapabilities`] so the
 /// doctor view can answer "is the `temperature` knob honoured
 /// for this provider?" without instantiating a real
-/// `Provider` (which would require an API key). Falls back to
-/// the OpenAI-compat baseline for unknown kinds so a future
-/// provider that is configured but not yet wired into the
-/// capability module does not crash the command.
-fn capabilities_for_kind(kind: &str) -> crate::llm::capabilities::ProviderCapabilities {
+/// `Provider` (which would require an API key). v0.10: the
+/// section name replaces the deprecated `kind` tag.
+fn capabilities_for_section(section: &str) -> crate::llm::capabilities::ProviderCapabilities {
     use crate::llm::capabilities::ProviderCapabilities;
-    match kind {
+    match section {
         "minimax" => ProviderCapabilities::for_minimax(),
-        "opencode_go" => ProviderCapabilities::for_opencode_go(),
-        "opencode_go_anthropic" => ProviderCapabilities::for_anthropic_compat(),
-        "opencode_go_responses" => ProviderCapabilities::for_opencode_go_responses(),
+        "opencode" => ProviderCapabilities::for_opencode_go(),
         "deepseek" => ProviderCapabilities::for_deepseek(),
         "mock" => ProviderCapabilities::for_mock(),
         _ => ProviderCapabilities::default(),

@@ -51,31 +51,40 @@ pub struct MinimaxProvider {
 
 impl MinimaxProvider {
     /// Build a provider from a config and a resolved API key.
+    /// Kept for backwards compatibility with hand-rolled callers
+    /// (legacy test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        if spec.kind != "minimax" {
-            return Err(Error::InvalidArgs(format!(
-                "minimax provider got kind '{}'",
-                spec.kind
-            )));
-        }
         let client = build_client()?;
+        let first = spec.models.first().cloned().ok_or_else(|| {
+            Error::InvalidArgs("minimax provider has no models configured".into())
+        })?;
         Ok(Self {
             name: "minimax".to_owned(),
-            model: spec.model.clone(),
-            endpoint: spec.endpoint.clone(),
+            model: first.id.clone(),
+            endpoint: first
+                .endpoint
+                .clone()
+                .or_else(|| {
+                    if spec.endpoint.is_empty() {
+                        None
+                    } else {
+                        Some(spec.endpoint.clone())
+                    }
+                })
+                .unwrap_or_else(|| "https://api.minimax.io/anthropic/v1/messages".to_owned()),
             api_key,
             client,
             max_retries: 3,
             breaker: CircuitBreaker::default(),
-            provider_max_tokens: spec.max_tokens,
+            provider_max_tokens: first.max_tokens,
             max_tokens_table: None,
         })
     }
 
     /// Build from config, resolving the API key via the unified
-    /// helper (PR-B2). The helper honours `<MOAGAN_HOME>/api_keys.toml`
-    /// first, then falls back to the direct `MINIMAX_API_KEY` env var
-    /// so existing CI / shell setups keep working untouched.
+    /// helper. Kept for backwards compatibility; new dispatcher
+    /// code goes through [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
         let key = super::api_keys::lookup_key("minimax", None)
             .ok_or_else(|| Error::InvalidApiKey {
@@ -93,6 +102,46 @@ impl MinimaxProvider {
                 other => other,
             })?;
         Self::new(spec, SecretString::new(key))
+    }
+
+    /// v0.10 dispatcher entry point. Builds a `MinimaxProvider`
+    /// from a `ResolvedModelConfig` and resolves the API key via
+    /// the unified helper. The dispatcher routes the canonical
+    /// MiniMax section to this constructor; the per-model URL is
+    /// the same for every MiniMax model so the dispatcher does not
+    /// have to inspect the URL.
+    pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        let kind = &resolved.section;
+        let key = super::api_keys::lookup_key(kind, None)
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: format!(
+                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                    kind.to_ascii_uppercase()
+                ),
+                http_status: None,
+            })?
+            .map_err(|e| match e {
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "{}: {message}; check api_keys.toml and the env var fallback",
+                        kind
+                    ),
+                    http_status: None,
+                },
+                other => other,
+            })?;
+        let client = build_client()?;
+        Ok(Self {
+            name: resolved.section.clone(),
+            model: resolved.id.clone(),
+            endpoint: resolved.endpoint.clone(),
+            api_key: SecretString::new(key),
+            client,
+            max_retries: 3,
+            breaker: CircuitBreaker::default(),
+            provider_max_tokens: resolved.max_tokens,
+            max_tokens_table: None,
+        })
     }
 
     /// Set the maximum number of retries (default 3).

@@ -21,39 +21,53 @@ pub struct DeepSeekProvider(OpenAICompatibleProvider);
 
 impl DeepSeekProvider {
     /// Build from a DeepSeek provider config and a resolved API key.
-    ///
-    /// Wires `DEEPSEEK_MAX_TOKENS_CAP = 393_216` as the
-    /// `kind_hard_cap` via [`OpenAICompatibleProvider::new_with_kind_cap`]
-    /// so every wire body carries the per-provider ceiling even
-    /// when the operator's TOML leaves `max_tokens` unset
-    /// (`DEFAULT_MAX_TOKENS = 1_000_000`). Without this cap the
-    /// upstream returns HTTP 400 `invalid_request_error` with the
-    /// body `{"message":"Invalid max_tokens value, the valid
-    /// range of max_tokens is [1, 393216]"}`. The same value is
-    /// returned by [`Self::max_tokens_probe_ceiling`] so the
-    /// auto-probe short-circuits at `2^19 = 524_288` (the first
-    /// `2^k > 393_216`) instead of probing values the upstream
-    /// will never accept. Mirrors the
-    /// `OPENCODE_GO_MAX_TOKENS_CAP` wiring on the opencode_go
-    /// chat-completions path (`opencode_go.rs:152`).
+    /// Kept for backwards compatibility with hand-rolled callers
+    /// (legacy test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        if spec.kind != "deepseek" {
+        if !spec.endpoint.contains("deepseek") {
             return Err(Error::InvalidArgs(format!(
-                "deepseek provider got kind '{}'",
-                spec.kind
+                "deepseek provider requires an endpoint containing 'deepseek', got {:?}",
+                spec.endpoint
             )));
         }
-        Ok(Self(OpenAICompatibleProvider::new_with_kind_cap(
-            spec,
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|e| Error::Provider {
+                message: format!("build http client: {e}"),
+                http_status: None,
+            })?;
+        let first = spec.models.first().cloned().ok_or_else(|| {
+            Error::InvalidArgs("deepseek provider has no models configured".into())
+        })?;
+        let name = "deepseek".to_owned();
+        Ok(Self(OpenAICompatibleProvider {
+            name: name.clone(),
+            model: first.id.clone(),
+            endpoint: first
+                .endpoint
+                .clone()
+                .or_else(|| {
+                    if spec.endpoint.is_empty() {
+                        None
+                    } else {
+                        Some(spec.endpoint.clone())
+                    }
+                })
+                .unwrap_or_else(|| "https://api.deepseek.com/v1/chat/completions".to_owned()),
             api_key,
-            Some(DEEPSEEK_MAX_TOKENS_CAP),
-        )?))
+            client,
+            max_retries: 3,
+            provider_max_tokens: first.max_tokens,
+            kind_hard_cap: Some(DEEPSEEK_MAX_TOKENS_CAP),
+            max_tokens_table: None,
+        }))
     }
 
     /// Build from config, resolving the API key via the unified
-    /// helper (PR-B2). The helper honours `<MOAGAN_HOME>/api_keys.toml`
-    /// first, then falls back to the direct `DEEPSEEK_API_KEY` env var
-    /// so existing CI / shell setups keep working untouched.
+    /// helper. Kept for backwards compatibility; new dispatcher
+    /// code goes through [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
         let key = super::api_keys::lookup_key("deepseek", None)
             .ok_or_else(|| Error::InvalidApiKey {
@@ -79,17 +93,7 @@ impl DeepSeekProvider {
     /// dispatcher routes DeepSeek's `/v1/chat/completions` URL to this
     /// constructor directly so the cap is wired at construction time.
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
-        Self::from_resolved_with_kind(resolved, &resolved.section)
-    }
-
-    /// Like [`Self::from_resolved`] but takes the API-key lookup
-    /// kind explicitly. The dispatcher passes the legacy `kind`
-    /// field so the lookup matches the canonical env var even when
-    /// the section name is more specific (e.g. `deepseek`).
-    pub fn from_resolved_with_kind(
-        resolved: &crate::config::ResolvedModelConfig,
-        kind: &str,
-    ) -> Result<Self> {
+        let kind = &resolved.section;
         let key = super::api_keys::lookup_key(kind, None)
             .ok_or_else(|| Error::InvalidApiKey {
                 message: format!(

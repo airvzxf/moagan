@@ -192,14 +192,23 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
                  register it under [providers.{provider}] in config.toml first"
             ))
         })?;
-        // The user asked for a specific model override; the spec
-        // is the template we copy from. The override lets the
-        // operator point the probe at an alias the config has not
-        // been updated for.
-        let mut spec = spec;
-        spec.model = model.clone();
+        // v0.10: the model id is required and the spec is the
+        // template we copy from. Reject mismatched model ids so
+        // the operator cannot probe a model that isn't actually
+        // configured for that section.
+        if !spec.models.iter().any(|m| m.id == *model) {
+            return Err(Error::InvalidArgs(format!(
+                "probe: provider '{provider}' has no model '{model}'; \
+                 registered models: [{}]",
+                spec.models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
 
-        if spec.kind == "mock" {
+        if provider == "mock" {
             println!("  Probing {provider}:{model} ... skipped (mock has no upstream)");
             results.push(ProbeResult {
                 provider: provider.clone(),
@@ -224,7 +233,7 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         // the same `from_config` path the registry uses, so the
         // probe observes the same wire behaviour a real run would
         // see (auth header, endpoint, rate-limit knobs).
-        let provider_arc = build_provider_for_probe(&spec)?;
+        let provider_arc = build_provider_for_probe(&spec, model)?;
         // Query the per-provider probe ceiling so the exponential
         // phase short-circuits at the upstream's hard cap rather
         // than walking `2^1..2^30` against values the upstream
@@ -353,12 +362,21 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
                  register it under [providers.{provider}] in config.toml first"
             ))
         })?;
-        // The user asked for a specific model override; the spec
-        // is the template we copy from.
-        let mut spec = spec;
-        spec.model = model.clone();
+        // v0.10: the model id is required and the spec is the
+        // template we copy from. Reject mismatched model ids.
+        if !spec.models.iter().any(|m| m.id == *model) {
+            return Err(Error::InvalidArgs(format!(
+                "probe: provider '{provider}' has no model '{model}'; \
+                 registered models: [{}]",
+                spec.models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
 
-        if spec.kind == "mock" {
+        if provider == "mock" {
             println!("  Probing {provider}:{model} ... skipped (mock has no upstream)");
             results.push(TemperatureProbeResult {
                 provider: provider.clone(),
@@ -384,7 +402,7 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
         // the registry uses, so the probe observes the same
         // wire behaviour a real run would see (auth header,
         // endpoint, rate-limit knobs).
-        let provider_arc = build_provider_for_probe(&spec)?;
+        let provider_arc = build_provider_for_probe(&spec, model)?;
         let transport =
             ProviderTemperatureProbeTransport::new(provider_arc).map_err(|e| Error::Provider {
                 message: format!("probe: build temperature transport: {e}"),
@@ -601,55 +619,59 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
 }
 
 /// Build a [`Provider`](crate::llm::provider::Provider) from a spec
-/// with a model override. Mirrors the dispatch in
+/// for a specific model id. Mirrors the dispatch in
 /// [`crate::llm::provider::registry_from_config_with_home`] but
 /// skips the registry wrapping (the probe only needs a transport,
 /// not a pool or a breaker).
 fn build_provider_for_probe(
     spec: &crate::config::ProviderConfig,
+    model_id: &str,
 ) -> Result<Arc<dyn crate::llm::provider::Provider>> {
-    use crate::config::ModelConfig;
     use crate::llm::provider::Provider;
     use crate::llm::wire_format::wire_format_from_url;
-    // v0.10: the dispatcher is gone. Build a `ResolvedModelConfig`
-    // from the spec and pick the concrete provider by wire format
-    // (URL path). Legacy `kind` strings still drive DeepSeek's
-    // wrapper so its `kind_hard_cap` stays in place.
-    let endpoint = {
-        let s = &spec.endpoint;
-        if s.is_empty() { None } else { Some(s.clone()) }
-    }
-    .ok_or_else(|| {
-        Error::InvalidArgs(format!(
-            "probe: provider '{}' has no endpoint configured",
-            spec.kind
-        ))
-    })?;
-    let models: Vec<ModelConfig> = if spec.models.is_empty() {
-        vec![ModelConfig {
-            id: spec.model.clone(),
-            endpoint: None,
-            max_tokens: spec.max_tokens,
-        }]
-    } else {
-        spec.models.clone()
-    };
-    let first = models.into_iter().next().ok_or_else(|| {
-        Error::InvalidArgs(format!(
-            "probe: provider '{}' has no models configured",
-            spec.kind
-        ))
-    })?;
+    // v0.10: build a `ResolvedModelConfig` from the spec + the
+    // operator-supplied model id, then pick the concrete provider
+    // by wire format (URL path). The `deepseek` section is the
+    // only one that needs a per-section wrapper so its
+    // `kind_hard_cap` stays in place.
+    let model_cfg = spec
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "probe: provider '{}' has no model '{model_id}'",
+                spec.endpoint_str()
+            ))
+        })?;
+    let endpoint = model_cfg
+        .endpoint
+        .clone()
+        .or_else(|| {
+            if spec.endpoint.is_empty() {
+                None
+            } else {
+                Some(spec.endpoint.clone())
+            }
+        })
+        .ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "probe: provider '{model_id}' has no endpoint configured"
+            ))
+        })?;
+    let wire_format = wire_format_from_url(&endpoint)?;
     let resolved = crate::config::ResolvedModelConfig {
-        section: spec.kind.clone(),
-        id: first.id.clone(),
+        section: spec.endpoint_str().to_owned(),
+        id: model_id.to_owned(),
         endpoint: endpoint.clone(),
-        max_tokens: first.max_tokens.or(spec.max_tokens),
+        max_tokens: model_cfg.max_tokens,
         temperature: spec.temperature,
         top_p: spec.top_p,
+        wire_format,
+        omit_max_tokens: spec.omit_max_tokens,
     };
-    let wire_format = wire_format_from_url(&endpoint)?;
-    let provider: Arc<dyn Provider> = if spec.kind == "deepseek" {
+    let provider: Arc<dyn Provider> = if spec.endpoint_str() == "deepseek" {
         Arc::new(crate::llm::deepseek::DeepSeekProvider::from_resolved(
             &resolved,
         )?)

@@ -62,22 +62,34 @@ pub struct AnthropicCompatProvider {
 }
 
 impl AnthropicCompatProvider {
-    /// Build from a provider config and a resolved API key.
-    ///
-    /// `spec.kind` was the v0.9 discriminator; the v0.10 dispatcher
-    /// picks the wire format from the URL instead. We still accept
-    /// a `spec` for backward-compat callers (test fixtures, the
-    /// legacy `from_config` helper) but no longer check `spec.kind`.
+    /// Build from a `ProviderConfig` and a resolved API key.
+    /// Kept for backwards compatibility with hand-rolled callers
+    /// (legacy test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
         let client = build_client()?;
+        let name = spec.models.first().map(|m| m.id.clone()).unwrap_or_else(|| {
+            if spec.endpoint.is_empty() {
+                "anthropic_compat".to_owned()
+            } else {
+                spec.endpoint.clone()
+            }
+        });
+        let model = name.clone();
+        let endpoint = if spec.endpoint.is_empty() {
+            "http://localhost".to_owned()
+        } else {
+            spec.endpoint.clone()
+        };
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         Ok(Self {
-            name: spec.kind.clone(),
-            model: spec.model.clone(),
-            endpoint: spec.endpoint.clone(),
+            name,
+            model,
+            endpoint,
             api_key,
             client,
             max_retries: 3,
-            provider_max_tokens: spec.max_tokens,
+            provider_max_tokens,
             max_tokens_table: None,
         })
     }
@@ -90,19 +102,6 @@ impl AnthropicCompatProvider {
         self
     }
 
-    /// Build from config using `OPENCODE_API_KEY`.
-    pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
-        let key = std::env::var("OPENCODE_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or config file"
-                    .into(),
-                http_status: None,
-            })?;
-        Self::new(spec, SecretString::new(key))
-    }
-
     /// v0.10 dispatcher entry point. Builds an `AnthropicCompatProvider`
     /// from a `ResolvedModelConfig` (one `(section, model_id)` pair),
     /// resolving the API key via the unified
@@ -110,21 +109,7 @@ impl AnthropicCompatProvider {
     /// name. The dispatcher picks this constructor for endpoints
     /// whose path resolves to [`super::wire_format::WireFormatId::Anthropic`].
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
-        Self::from_resolved_with_kind(resolved, &resolved.section)
-    }
-
-    /// Like [`Self::from_resolved`] but takes the API-key lookup
-    /// kind explicitly. The dispatcher uses the legacy `kind` field
-    /// (still populated from `models[0].id` for backward compat) so
-    /// an OpenCode alias like `minimax-m3` (section `minimax-m3`,
-    /// kind `opencode_go`) resolves via `OPENCODE_API_KEY` instead
-    /// of looking up the unknown `minimax-m3` env var. The
-    /// provider's runtime `name()` stays `resolved.section` so
-    /// `Provider::name()` returns the section name as documented.
-    pub fn from_resolved_with_kind(
-        resolved: &crate::config::ResolvedModelConfig,
-        kind: &str,
-    ) -> Result<Self> {
+        let kind = &resolved.section;
         let key = super::api_keys::lookup_key(kind, None)
             .ok_or_else(|| Error::InvalidApiKey {
                 message: format!(

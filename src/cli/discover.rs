@@ -468,7 +468,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         &default_provider,
         opts.mock_dir.as_deref(),
     )?);
-    let default_model = cfg.provider(&default_provider)?.model.clone();
+    let default_model = cfg.provider(&default_provider)?.model_str().to_owned();
 
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;
@@ -936,7 +936,7 @@ pub async fn run_resume(
     )?);
     let default_model = cfg
         .provider(&default_provider)
-        .map(|spec| spec.model.clone())
+        .map(|spec| spec.model_str().to_owned())
         .unwrap_or_else(|_| "unknown".to_string());
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;

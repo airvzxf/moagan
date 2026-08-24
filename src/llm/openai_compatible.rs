@@ -67,11 +67,44 @@ pub struct OpenAICompatibleProvider {
 
 impl OpenAICompatibleProvider {
     /// Build from a `ProviderConfig` and a resolved API key.
-    /// Equivalent to [`OpenAICompatibleProvider::new_with_kind_cap`]
-    /// with `cap = None`. Use that constructor instead when the
-    /// provider is routed through OpenCode Go.
+    /// Kept for backwards compatibility with hand-rolled callers
+    /// (legacy test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        Self::new_with_kind_cap(spec, api_key, None)
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .map_err(|e| Error::Provider {
+                message: format!("build http client: {e}"),
+                http_status: None,
+            })?;
+        let name = if let Some(first) = spec.models.first() {
+            first.id.clone()
+        } else {
+            if spec.endpoint.is_empty() {
+                "openai_compat".to_owned()
+            } else {
+                spec.endpoint.clone()
+            }
+        };
+        let model = name.clone();
+        let endpoint = if spec.endpoint.is_empty() {
+            "http://localhost".to_owned()
+        } else {
+            spec.endpoint.clone()
+        };
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
+        Ok(Self {
+            name,
+            model,
+            endpoint,
+            api_key,
+            client,
+            max_retries: 3,
+            provider_max_tokens,
+            kind_hard_cap: None,
+            max_tokens_table: None,
+        })
     }
 
     /// Build from a `ProviderConfig`, a resolved API key, and an
@@ -94,14 +127,30 @@ impl OpenAICompatibleProvider {
                 message: format!("build http client: {e}"),
                 http_status: None,
             })?;
+        let name = if let Some(first) = spec.models.first() {
+            first.id.clone()
+        } else {
+            if spec.endpoint.is_empty() {
+                "openai_compat".to_owned()
+            } else {
+                spec.endpoint.clone()
+            }
+        };
+        let model = name.clone();
+        let endpoint = if spec.endpoint.is_empty() {
+            "http://localhost".to_owned()
+        } else {
+            spec.endpoint.clone()
+        };
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         Ok(Self {
-            name: spec.kind.clone(),
-            model: spec.model.clone(),
-            endpoint: spec.endpoint.clone(),
+            name,
+            model,
+            endpoint,
             api_key,
             client,
             max_retries: 3,
-            provider_max_tokens: spec.max_tokens,
+            provider_max_tokens,
             kind_hard_cap: cap,
             max_tokens_table: None,
         })
@@ -119,18 +168,7 @@ impl OpenAICompatibleProvider {
     /// section-specific wrapper (see
     /// [`super::deepseek::DeepSeekProvider::from_resolved`]).
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
-        Self::from_resolved_with_kind(resolved, &resolved.section)
-    }
-
-    /// Like [`Self::from_resolved`] but takes the API-key lookup
-    /// kind explicitly. The dispatcher uses the legacy `kind` field
-    /// so an OpenCode alias like `minimax-m3` (section `minimax-m3`,
-    /// kind `opencode_go`) resolves via `OPENCODE_API_KEY`
-    /// instead of looking up the unknown `minimax-m3` env var.
-    pub fn from_resolved_with_kind(
-        resolved: &crate::config::ResolvedModelConfig,
-        kind: &str,
-    ) -> Result<Self> {
+        let kind = &resolved.section;
         let key = super::api_keys::lookup_key(kind, None)
             .ok_or_else(|| Error::InvalidApiKey {
                 message: format!(

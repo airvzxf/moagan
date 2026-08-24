@@ -331,12 +331,46 @@ impl ProviderRegistry {
         self.temperature_table.as_ref()
     }
 
-    /// Look up a provider by name.
+    /// Look up a provider by registry key (section name or
+    /// `"section::model_id"` for the v0.10 multi-model sections).
+    /// Returns `None` when the key is not registered. Use
+    /// [`Self::get_model`] to look up a specific `(section, model_id)`
+    /// pair explicitly; the legacy single-string `get(section)` is
+    /// retained as a thin shim for callers that operate on a single
+    /// model per section (mock, deepseek-direct, …).
     pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
         self.by_name.get(name).cloned()
     }
 
-    /// Insert a provider by name. Stores the provider as-is
+    /// Look up a specific `(section, model_id)` pair.
+    ///
+    /// Returns `None` when either the section or the model id is
+    /// missing. The pair-keyed form is the v0.10 lookup signature
+    /// — the dispatcher writes one entry per `(section, model_id)`
+    /// into the registry and every LLM call site asks for the
+    /// pair by name. The legacy `get(section)` shortcut stays as a
+    /// backwards-compat shim for sections that only register a
+    /// single model.
+    pub fn get_model(&self, section: &str, model_id: &str) -> Option<Arc<dyn Provider>> {
+        let key = Self::registry_key(section, model_id);
+        self.by_name.get(&key).cloned()
+    }
+
+    /// Canonical registry key for a `(section, model_id)` pair.
+    /// The legacy single-model sections (mock, deepseek-direct,
+    /// minimax direct aliases) keep their plain section name as
+    /// the key so old lookup code keeps working; multi-model
+    /// sections register every model under
+    /// `"{section}::{model_id}"`.
+    pub fn registry_key(section: &str, model_id: &str) -> String {
+        if section == model_id || model_id.is_empty() {
+            section.to_owned()
+        } else {
+            format!("{section}::{model_id}")
+        }
+    }
+
+    /// Insert a provider by registry key. Stores the provider as-is
     /// without re-wrapping. The per-call-site breaker fix lives in
     /// [`Self::new`] (the constructor used by production
     /// registries) and in
@@ -1090,133 +1124,62 @@ pub fn registry_from_config_with_home_and_sink(
     let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
 
     for (section_name, spec) in cfg {
-        // Mock sections (any section name whose endpoint starts with
+        // Mock sections (any section whose endpoint starts with
         // `mock://`, or the canonical `mock` alias) have no upstream;
-        // build one canned placeholder. The match covers both the
-        // canonical alias and the v0.10 `mock-a` / `mock-b`
-        // multi-instance test entries.
+        // build one canned placeholder per registered model so the
+        // pool can group identical `Provider::name()` entries.
         let is_mock = section_name == "mock"
-            || spec.endpoint.starts_with("mock://")
-            || spec.endpoint.is_empty() && section_name.starts_with("mock");
+            || spec
+                .endpoint_new
+                .as_deref()
+                .is_some_and(|e| e.starts_with("mock://"))
+            || spec.endpoint_new.is_none() && section_name.starts_with("mock");
         if is_mock {
-            let provider: Arc<dyn Provider> = Arc::new(super::mock::MockProvider::empty());
-            let breaker = Arc::new(CircuitBreaker::new(
-                breaker_cfg.threshold,
-                std::time::Duration::from_secs(breaker_cfg.window_secs),
-                std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
-            ));
-            let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(provider, breaker));
-            if let Some(s) = sink.as_ref() {
-                entry.set_saturation_sink(s.clone());
-            }
-            // The v0.10 schema allows multiple `models[]` per
-            // section; iterate them so each model becomes its own
-            // provider (and the pool can group them by shared
-            // `name()`).
             let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
+                // Backwards-compat: synthesize one entry from the
+                // section's `endpoint`. New configs carry the model
+                // list explicitly so this branch is only hit by
+                // legacy / hand-rolled callers.
                 vec![crate::config::ModelConfig {
-                    id: spec.model.clone(),
-                    endpoint: None,
-                    max_tokens: spec.max_tokens,
-                }]
-            } else {
-                spec.models.clone()
-            };
-            for _model_cfg in models {
-                let breaker2 = Arc::new(CircuitBreaker::new(
-                    breaker_cfg.threshold,
-                    std::time::Duration::from_secs(breaker_cfg.window_secs),
-                    std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
-                ));
-                let entry2: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(
-                    Arc::new(super::mock::MockProvider::empty()),
-                    breaker2,
-                ));
-                if let Some(s) = sink.as_ref() {
-                    entry2.set_saturation_sink(s.clone());
-                }
-                wrapped.insert(section_name.clone(), entry2.clone());
-                by_name.insert(section_name.clone(), entry2.clone() as Arc<dyn Provider>);
-                wrapped_entries.push((section_name.clone(), entry2));
-            }
-            continue;
-        }
-
-        // DeepSeek-direct is the one section that needs a
-        // per-section wrapper (`DeepSeekProvider` enforces the
-        // `DEEPSEEK_MAX_TOKENS_CAP` kind-level cap). The wire-format
-        // detection alone routes to `OpenAICompatibleProvider`
-        // without the cap, which would break the upstream's
-        // 393_216 ceiling on direct DeepSeek. Keep the special
-        // case here; other chat-completions sections (opencode)
-        // intentionally skip the cap.
-        if section_name == "deepseek" {
-            let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
-                vec![crate::config::ModelConfig {
-                    id: spec.model.clone(),
-                    endpoint: None,
-                    max_tokens: spec.max_tokens,
+                    id: section_name.clone(),
+                    endpoint: spec.endpoint_new.clone(),
+                    max_tokens: None,
                 }]
             } else {
                 spec.models.clone()
             };
             for model_cfg in models {
-                let endpoint = model_cfg
-                    .endpoint
-                    .as_ref()
-                    .cloned()
-                    .or_else(|| {
-                        let s = &spec.endpoint;
-                        if s.is_empty() { None } else { Some(s.clone()) }
-                    })
-                    .ok_or_else(|| {
-                        crate::Error::InvalidArgs(format!(
-                            "provider '{section_name}' model '{}' has no endpoint",
-                            model_cfg.id
-                        ))
-                    })?;
-                let resolved = ResolvedModelConfig {
-                    section: section_name.clone(),
-                    id: model_cfg.id.clone(),
-                    endpoint,
-                    max_tokens: model_cfg.max_tokens.or(spec.max_tokens),
-                    temperature: spec.temperature,
-                    top_p: spec.top_p,
-                };
-                let provider: Arc<dyn Provider> =
-                    Arc::new(super::deepseek::DeepSeekProvider::from_resolved_with_kind(
-                        &resolved, &spec.kind,
-                    )?);
+                let key = ProviderRegistry::registry_key(section_name, &model_cfg.id);
                 let breaker = Arc::new(CircuitBreaker::new(
                     breaker_cfg.threshold,
                     std::time::Duration::from_secs(breaker_cfg.window_secs),
                     std::time::Duration::from_secs(breaker_cfg.cooldown_secs),
                 ));
-                let entry: Arc<BreakeredProvider> =
-                    Arc::new(BreakeredProvider::new(provider, breaker));
+                let entry: Arc<BreakeredProvider> = Arc::new(BreakeredProvider::new(
+                    Arc::new(super::mock::MockProvider::empty()),
+                    breaker,
+                ));
                 if let Some(s) = sink.as_ref() {
                     entry.set_saturation_sink(s.clone());
                 }
-                wrapped.insert(section_name.clone(), entry.clone());
-                by_name.insert(section_name.clone(), entry.clone() as Arc<dyn Provider>);
-                wrapped_entries.push((section_name.clone(), entry));
+                wrapped.insert(key.clone(), entry.clone());
+                by_name.insert(key.clone(), entry.clone() as Arc<dyn Provider>);
+                wrapped_entries.push((key, entry));
             }
             continue;
         }
 
-        // Otherwise, resolve every model under this section.
-        // v0.10: each model carries its own endpoint URL. The
-        // dispatcher picks the wire format from the URL path. The
-        // pre-v0.10 dispatch by `spec.kind` is gone.
+        // Every non-mock section produces one `Provider` per
+        // `models[]` entry. The wire format comes from the URL
+        // path; the section name (and only the section name)
+        // drives API-key lookup. DeepSeek-direct keeps the
+        // per-section wrapper so its `DEEPSEEK_MAX_TOKENS_CAP`
+        // kind-level cap stays in place.
         let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
-            // Backwards-compat fall-back: an operator who wrote
-            // the legacy flat schema (single `model` field, no
-            // `models[]`) gets a synthetic ModelConfig from the
-            // section's `endpoint`.
             vec![crate::config::ModelConfig {
-                id: spec.model.clone(),
-                endpoint: None,
-                max_tokens: spec.max_tokens,
+                id: section_name.clone(),
+                endpoint: spec.endpoint_new.clone(),
+                max_tokens: None,
             }]
         } else {
             spec.models.clone()
@@ -1225,16 +1188,12 @@ pub fn registry_from_config_with_home_and_sink(
         for model_cfg in models {
             let endpoint = model_cfg
                 .endpoint
-                .as_ref()
-                .cloned()
-                .or_else(|| {
-                    let s = &spec.endpoint;
-                    if s.is_empty() { None } else { Some(s.clone()) }
-                })
+                .clone()
+                .or_else(|| spec.endpoint_new.clone())
                 .ok_or_else(|| {
                     crate::Error::InvalidArgs(format!(
                         "provider '{section_name}' model '{}' has no endpoint \
-                     (neither section nor model specifies one)",
+                         (neither section nor model specifies one)",
                         model_cfg.id
                     ))
                 })?;
@@ -1243,21 +1202,27 @@ pub fn registry_from_config_with_home_and_sink(
                 section: section_name.clone(),
                 id: model_cfg.id.clone(),
                 endpoint: endpoint.clone(),
-                max_tokens: model_cfg.max_tokens.or(spec.max_tokens),
+                max_tokens: model_cfg.max_tokens,
                 temperature: spec.temperature,
                 top_p: spec.top_p,
+                wire_format,
+                omit_max_tokens: spec.omit_max_tokens,
             };
 
-            let provider: Arc<dyn Provider> = match wire_format {
-                super::wire_format::WireFormatId::Anthropic => Arc::new(
-                    AnthropicCompatProvider::from_resolved_with_kind(&resolved, &spec.kind)?,
-                ),
-                super::wire_format::WireFormatId::OpenAI => Arc::new(
-                    OpenAICompatProvider::from_resolved_with_kind(&resolved, &spec.kind)?,
-                ),
-                super::wire_format::WireFormatId::OpenAICompatible => Arc::new(
-                    OpenAICompatibleProvider::from_resolved_with_kind(&resolved, &spec.kind)?,
-                ),
+            let provider: Arc<dyn Provider> = if section_name == "deepseek" {
+                Arc::new(super::deepseek::DeepSeekProvider::from_resolved(&resolved)?)
+            } else {
+                match wire_format {
+                    super::wire_format::WireFormatId::Anthropic => {
+                        Arc::new(AnthropicCompatProvider::from_resolved(&resolved)?)
+                    }
+                    super::wire_format::WireFormatId::OpenAI => {
+                        Arc::new(OpenAICompatProvider::from_resolved(&resolved)?)
+                    }
+                    super::wire_format::WireFormatId::OpenAICompatible => {
+                        Arc::new(OpenAICompatibleProvider::from_resolved(&resolved)?)
+                    }
+                }
             };
 
             let breaker = Arc::new(CircuitBreaker::new(
@@ -1269,9 +1234,10 @@ pub fn registry_from_config_with_home_and_sink(
             if let Some(s) = sink.as_ref() {
                 entry.set_saturation_sink(s.clone());
             }
-            wrapped.insert(section_name.clone(), entry.clone());
-            by_name.insert(section_name.clone(), entry.clone() as Arc<dyn Provider>);
-            wrapped_entries.push((section_name.clone(), entry));
+            let key = ProviderRegistry::registry_key(section_name, &model_cfg.id);
+            wrapped.insert(key.clone(), entry.clone());
+            by_name.insert(key.clone(), entry.clone() as Arc<dyn Provider>);
+            wrapped_entries.push((key, entry));
         }
     }
     let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);

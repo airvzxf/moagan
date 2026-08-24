@@ -987,11 +987,58 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             context,
             context_summary,
             context_full,
-            model,
+            model: _model,
             allow_injection,
             profile,
             hash_algo,
         } => {
+            // v0.10 (Phase 5): the `--model` flag is gone. The
+            // operator must now pass `--provider PROVIDER:MODEL`
+            // (or `--provider PROVIDER --model MODEL`). The flag
+            // is kept on the struct for backwards-compat parsing
+            // (so old scripts fail with a clear error message)
+            // but ignored here.
+            if let Some(m) = _model.as_deref()
+                && !m.trim().is_empty()
+            {
+                return Err(Error::InvalidArgs(
+                    "--model is no longer a separate flag; pass the model id as part of \
+                     --provider (e.g. --provider opencode:kimi-k3 or \
+                     --provider opencode --model kimi-k3)"
+                        .into(),
+                ));
+            }
+            // v0.10: validate `--provider` is in the new
+            // PROVIDER:MODEL shape so the operator sees a
+            // friendly error before any I/O happens. The
+            // dispatcher still uses `provider` as a String so
+            // the legacy `--provider minimax --model M3` pair
+            // is also accepted.
+            if !provider.is_empty()
+                && !provider.contains(':')
+            {
+                // Either it is the legacy `--provider <section>`
+                // (the CLI accepts it but the section must be a
+                // one-model alias) or it is a typo. We surface
+                // a clear message so the operator knows what
+                // shape we expect.
+                let cfg_early = Config::load().unwrap_or_default();
+                if let Some(spec) = cfg_early.providers.get(&provider)
+                    && spec.models.len() > 1
+                {
+                    return Err(Error::InvalidArgs(format!(
+                        "--provider '{provider}' now requires a model id (this section has \
+                         {} models); pass `--provider {provider}:MODEL` instead, or pick a \
+                         single-model alias (one of [{}])",
+                        spec.models.len(),
+                        spec.models
+                            .iter()
+                            .map(|m| m.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )));
+                }
+            }
             // Phase J: validate the `--context-{summary,full}` flags
             // are only useful with `--context`. Setting them without
             // `--context` is a silent no-op today; we surface the
@@ -1059,53 +1106,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // and `RunContext::default_model`) sees the new value
             // without any further plumbing.
             //
-            // Validation-2026-08-04 fix #2: `--model` accepts the
-            // canonical model name (`MiniMax-M3`) AND the lowercase
-            // provider-alias form (`minimax-m3`). The alias form
-            // resolves to the canonical config.provider entry's
-            // model so the upstream API receives a valid model id
-            // instead of the alias string verbatim (which causes
-            // upstream 4xx errors).
-            if let Some(m) = model.as_deref()
-                && !m.trim().is_empty()
-            {
-                let selected = if provider.is_empty() {
-                    cfg.default_provider.clone()
-                } else {
-                    provider.clone()
-                };
-                let raw = m.trim();
-                // Validation-2026-08-04 fix #2 (alias resolution):
-                // when `--model` matches a registered provider name AND
-                // the resolved provider is the same as the user's
-                // selected provider, translate the lowercase alias
-                // (`minimax-m3`) to the canonical model (`MiniMax-M3`).
-                // When the user explicitly targets a different provider
-                // (e.g. `--provider opencode_go --model minimax-m3`),
-                // the alias is NOT translated because `minimax-m3` is
-                // the legitimate OpenCode Go model id on the /messages
-                // endpoint (see Fix #4).
-                let resolved = if cfg.providers.contains_key(raw)
-                    && (raw == selected
-                        || cfg.providers.get(raw).map(|s| s.kind.as_str())
-                            == Some(
-                                cfg.providers
-                                    .get(&selected)
-                                    .map(|s| s.kind.as_str())
-                                    .unwrap_or(""),
-                            )) {
-                    cfg.providers
-                        .get(raw)
-                        .map(|s| s.model.clone())
-                        .unwrap_or_else(|| raw.to_owned())
-                } else {
-                    raw.to_owned()
-                };
-                let spec = cfg.providers.get_mut(&selected).ok_or_else(|| {
-                    Error::InvalidArgs(format!("--model: provider '{selected}' is not in config"))
-                })?;
-                spec.model = resolved;
-            }
+            // v0.10: `--model` is now part of `--provider PROVIDER:MODEL`.
+            // The flag is still parsed for backwards compatibility
+            // (the error above surfaces a friendly message), but
+            // no alias-resolution happens here.
             // D.14.7: `--prompt -` reads the prompt body from stdin
             // instead of treating the literal string as the prompt.
             // The substitution happens here, BEFORE `RunOptions` is

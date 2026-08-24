@@ -1025,9 +1025,9 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // minimax (Anthropic-compatible direct)
     // ----------------------------------------------------------------
     // Each alias maps to a single-model section. The wire format
-    // (`/v1/messages`) is detected from the URL by the dispatcher
-    // (Phase 3); the config only carries the full URL.
-    let minimax_endpoint = "https://api.minimax.io/anthropic/v1/messages";
+    // (`/v1/messages`) is detected from the URL by the dispatcher;
+    // the config only carries the full URL.
+    let minimax_endpoint = Some("https://api.minimax.io/anthropic/v1/messages".to_owned());
     let minimax_aliases = [
         ("minimax", "MiniMax-M3"),
         ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed"),
@@ -1047,14 +1047,18 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         m.insert(
             alias.to_owned(),
             ProviderConfig {
-                models,
                 kind: "minimax".to_owned(),
-                endpoint: minimax_endpoint.to_owned(),
+                endpoint: minimax_endpoint.clone().unwrap_or_default(),
                 model: model.to_owned(),
                 max_tokens: Some(DEFAULT_MAX_TOKENS),
+                hard_incompatibilities: vec![
+                    "anthropic-sdk".to_owned(),
+                    "claude-sdk".to_owned(),
+                ],
+                endpoint_new: minimax_endpoint.clone(),
+                models,
                 temperature: Some(0.6),
                 top_p: Some(0.95),
-                hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
                 omit_max_tokens: false,
                 max_token_auto: Some(1024),
                 max_token_auto_save: true,
@@ -1066,7 +1070,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // ----------------------------------------------------------------
     // deepseek (OpenAI-compatible direct)
     // ----------------------------------------------------------------
-    let deepseek_endpoint = "https://api.deepseek.com/v1/chat/completions";
+    let deepseek_endpoint = Some("https://api.deepseek.com/v1/chat/completions".to_owned());
     let deepseek_models = [("deepseek", "deepseek-v4-flash")];
     for (alias, model) in deepseek_models {
         let models = vec![ModelConfig {
@@ -1077,14 +1081,15 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         m.insert(
             alias.to_owned(),
             ProviderConfig {
-                models,
                 kind: "deepseek".to_owned(),
-                endpoint: deepseek_endpoint.to_owned(),
+                endpoint: deepseek_endpoint.clone().unwrap_or_default(),
                 model: model.to_owned(),
                 max_tokens: Some(DEFAULT_MAX_TOKENS),
+                hard_incompatibilities: vec![],
+                endpoint_new: deepseek_endpoint.clone(),
+                models,
                 temperature: Some(0.6),
                 top_p: Some(0.95),
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: Some(1024),
                 max_token_auto_save: true,
@@ -1096,7 +1101,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // ----------------------------------------------------------------
     // opencode (one section, multiple models, mixed wire formats)
     // ----------------------------------------------------------------
-    // The new schema exposes every OpenCode model under the single
+    // The v0.10 schema exposes every OpenCode model under the single
     // `opencode` section. Each model carries its own endpoint URL
     // (the dispatcher picks the wire format from the path):
     //
@@ -1107,13 +1112,10 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // The aliases (`kimi-k3`, `minimax-m3`, `gpt-5.6-luna`, …) each
     // become a one-model section that mirrors the v0.9 behavior so
     // the `--provider kimi-k3` shorthand still works.
-    let oc_chat = "https://opencode.ai/zen/go/v1/chat/completions";
-    let oc_anthropic = "https://opencode.ai/zen/go/v1/messages";
-    let oc_responses = "https://opencode.ai/zen/go/v1/responses";
-    let make_oc = |kind: &str, model: &str, endpoint: &str| {
+    let make_oc = |model: &str, endpoint: &str| {
         let models = vec![ModelConfig {
             id: model.to_owned(),
-            endpoint: None,
+            endpoint: Some(endpoint.to_owned()),
             // OpenCode Go upstreams have heterogeneous `max_tokens`
             // ceilings (kimi-k* at 8192, qwen3.x and gpt-5.6-luna at
             // 16_384 in practice) and they drift as the relay roster
@@ -1127,14 +1129,15 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             max_tokens: Some(DEFAULT_MAX_TOKENS),
         }];
         ProviderConfig {
-            models,
-            kind: kind.to_owned(),
+            kind: "opencode".to_owned(),
             endpoint: endpoint.to_owned(),
             model: model.to_owned(),
             max_tokens: Some(DEFAULT_MAX_TOKENS),
+            hard_incompatibilities: vec![],
+            endpoint_new: None,
+            models,
             temperature: Some(1.0),
             top_p: Some(0.95),
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: Some(1024),
             max_token_auto_save: true,
@@ -1142,6 +1145,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         }
     };
     // `/v1/chat/completions` (OpenAI-compatible).
+    let oc_chat = "https://opencode.ai/zen/go/v1/chat/completions";
     let oc_chat_models = [
         "kimi-k3",
         "kimi-k2.6",
@@ -1154,9 +1158,10 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         "hy3",
     ];
     for model in oc_chat_models {
-        m.insert(model.to_owned(), make_oc("opencode_go", model, oc_chat));
+        m.insert(model.to_owned(), make_oc(model, oc_chat));
     }
     // `/v1/messages` (Anthropic-compatible).
+    let oc_anthropic = "https://opencode.ai/zen/go/v1/messages";
     let oc_anthropic_models = [
         "minimax-m3",
         "minimax-m2.7",
@@ -1167,18 +1172,13 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         "qwen3.6-plus",
     ];
     for model in oc_anthropic_models {
-        m.insert(
-            model.to_owned(),
-            make_oc("opencode_go", model, oc_anthropic),
-        );
+        m.insert(model.to_owned(), make_oc(model, oc_anthropic));
     }
     // `/v1/responses` (OpenAI Responses).
+    let oc_responses = "https://opencode.ai/zen/go/v1/responses";
     let oc_responses_models = ["gpt-5.6-luna"];
     for model in oc_responses_models {
-        m.insert(
-            model.to_owned(),
-            make_oc("opencode_go", model, oc_responses),
-        );
+        m.insert(model.to_owned(), make_oc(model, oc_responses));
     }
 
     // ----------------------------------------------------------------
@@ -1187,14 +1187,15 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
-            models: Vec::new(),
             kind: "mock".to_owned(),
             endpoint: "mock://local".to_owned(),
             model: "mock-model".to_owned(),
             max_tokens: None,
+            hard_incompatibilities: vec![],
+            endpoint_new: Some("mock://local".to_owned()),
+            models: Vec::new(),
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             // The mock provider has no upstream to probe.
             max_token_auto: None,
@@ -1273,70 +1274,74 @@ impl Default for RetentionConfig {
 /// Per-provider configuration.
 ///
 /// A `[providers.<name>]` section groups every model that shares the
-/// same upstream relay (MiniMax, OpenCode, DeepSeek, …). The new
-/// schema (v0.10) carries the model list as
-/// `[providers.<name>].models[]`; each model carries its own id,
-/// optional endpoint override, and optional `max_tokens` ceiling.
+/// same upstream relay (MiniMax, OpenCode, DeepSeek, …). The v0.10
+/// schema carries the model list as `[providers.<name>].models[]`;
+/// each model carries its own id, optional endpoint override, and
+/// optional `max_tokens` ceiling. The wire format (Anthropic /
+/// OpenAI / OpenAI-compatible) is detected from the per-model URL
+/// path, not from a kind tag on the section.
 ///
-/// The legacy fields (`kind`, `model`, `hard_incompatibilities`)
-/// remain on the struct as deprecated aliases so the construction
-/// code in `src/llm/{minimax,deepseek,opencode_go*}.rs` keeps
-/// compiling while the dispatcher refactor lands in Phase 3.
-/// `default_providers()` populates both the new `models[]` list and
-/// the deprecated singletons (derived from the first model); after
-/// Phase 3 lands the deprecated fields are dropped.
+/// Phase 5 (CLI mandatory) updates the registry and the CLI to
+/// require `--provider PROVIDER:MODEL` for every LLM-touching
+/// command (`run`, `discover`, `probe`, `continue`, …). The
+/// `ProviderConfig` no longer carries the deprecated `kind`,
+/// `model`, or `hard_incompatibilities` singletons — the
+/// dispatcher picks the wire format from `models[].endpoint` and
+/// the runtime model id from `models[].id`.
+///
+/// The deprecated singletons are still on the struct (with
+/// `#[serde(skip)]` and private visibility) so test fixtures and
+/// legacy TOML files continue to compile / parse without forcing a
+/// rewrite of every test. Phase 6 (unit-test cleanup) drops the
+/// private fields and migrates the test fixtures to the new shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
-    /// Provider implementation name (e.g. `"minimax"`, `"mock"`).
-    ///
-    /// Deprecated as of v0.10: the wire format is detected from the
-    /// endpoint URL, not from a kind tag. Kept as a serde-defaulted
-    /// string until the dispatcher refactor lands in Phase 3.
+    /// Deprecated v0.9 singleton. Kept on the struct (skipped on
+    /// serialise) so legacy test fixtures and pre-v0.10 TOML files
+    /// parse without forcing a global rewrite. Phase 6 drops the
+    /// field entirely; production code never reads it (the
+    /// dispatcher picks the wire format from the URL path).
+    #[serde(skip)]
     pub kind: String,
-    /// HTTP endpoint. For new configs this is the **base** URL the
-    /// model-level entries inherit when their own `endpoint` is
-    /// `None`. For legacy configs this stays as the per-section
-    /// base (e.g. `https://opencode.ai/zen/go/v1`).
-    ///
-    /// Deprecated as of v0.10: the new schema carries the *full*
-    /// URL — including the wire-format path (`/messages`,
-    /// `/responses`, `/chat/completions`) — verbatim on each
-    /// `models[]` entry. Kept as `Option`-equivalent (empty string
-    /// when absent) until Phase 3 drops the field.
+    /// Deprecated v0.9 singleton URL string. Kept as `String` for
+    /// test-fixture compatibility; new code should use
+    /// `endpoint_new: Option<String>` and read `endpoint_str()` instead.
+    #[serde(skip)]
     pub endpoint: String,
-    /// Default model name.
-    ///
-    /// Deprecated as of v0.10: the model id lives on `models[].id`.
-    /// Kept populated from `models[0].id` until Phase 3.
+    /// Deprecated v0.9 singleton model. Kept as `String` for
+    /// test-fixture compatibility; production code reads the
+    /// model id from `models[].id`.
+    #[serde(skip)]
     pub model: String,
     /// Models this section exposes. Empty list → the section is
     /// effectively inactive (a warning, not an error — the operator
     /// may comment out a section to disable a relay temporarily).
     ///
-    /// The registry (Phase 3) iterates this list and constructs one
+    /// The registry iterates this list and constructs one
     /// `Provider` per `(section_name, model_id)` pair, deriving the
     /// wire format from the per-model endpoint URL.
     pub models: Vec<ModelConfig>,
-    /// Default max tokens per call.
-    ///
-    /// Deprecated as of v0.10: lives on `models[].max_tokens` per
-    /// model. Kept populated from `models[0].max_tokens` until
-    /// Phase 3.
+    /// Deprecated v0.9 per-section `max_tokens`. Kept as
+    /// `Option<u32>` for test-fixture compatibility.
+    #[serde(skip)]
     pub max_tokens: Option<u32>,
-    /// Default sampling temperature.
+    /// Default sampling temperature for every model in the
+    /// section. Overridden by per-role defaults in
+    /// `phase.rs::resolve_temperature`. Most operators leave
+    /// this at the per-role default.
     pub temperature: Option<f32>,
-    /// Default top-p.
     pub top_p: Option<f32>,
-    /// Crate names that must never appear in `Cargo.toml` together
-    /// with this provider — runtime vs static guard.
-    ///
-    /// Deprecated as of v0.10: only ever printed by `moagan
-    /// telemetry plan`; no runtime code reads the field. Kept on
-    /// the struct for binary-compat with old `config.toml` files
-    /// but new configs should not populate it. Display callers
-    /// (`cli::telemetry_cmd`) no longer read it.
+    /// Deprecated v0.9 hard-incompat list. Kept for test-fixture
+    /// compatibility; production code never reads the field (it
+    /// only ever powered `moagan telemetry plan`).
+    #[serde(skip, default)]
     pub hard_incompatibilities: Vec<String>,
+    /// v0.10 (canonical): section-level default endpoint. The
+    /// full URL — including the wire-format path (`/messages`,
+    /// `/responses`, `/chat/completions`) — is supplied verbatim
+    /// by the operator; the code never appends a path.
+    pub endpoint_new: Option<String>,
     /// When `true`, omit the `max_tokens` field from the wire body
     /// entirely. Required for providers whose wire format rejects the
     /// *presence* of the field (e.g. OpenAI Responses when the upstream
@@ -1427,6 +1432,15 @@ pub struct ResolvedModelConfig {
     pub temperature: Option<f32>,
     /// Section-level default top-p.
     pub top_p: Option<f32>,
+    /// Wire format the dispatcher picked from the endpoint path.
+    /// Computed once at construction so the runtime never has to
+    /// re-parse the URL.
+    pub wire_format: crate::llm::wire_format::WireFormatId,
+    /// Section-level `omit_max_tokens` flag. Carried through so
+    /// the per-model providers that need to drop the field from
+    /// the wire body (e.g. OpenAI Responses for `gpt-5.6-luna`)
+    /// can read it from the same struct.
+    pub omit_max_tokens: bool,
 }
 
 /// Token-plan declaration attached to a [`ProviderConfig`]. Powers the
@@ -1461,19 +1475,40 @@ pub fn default_max_token_auto_save() -> bool {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            kind: "mock".to_owned(),
-            endpoint: "mock://local".to_owned(),
-            model: "mock-model".to_owned(),
+            kind: String::new(),
+            endpoint: String::new(),
+            model: String::new(),
             models: Vec::new(),
             max_tokens: None,
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
+            hard_incompatibilities: Vec::new(),
+            endpoint_new: None,
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: default_max_token_auto_save(),
             plan: None,
         }
+    }
+}
+
+impl ProviderConfig {
+    /// Backwards-compat accessor: returns the canonical
+    /// (v0.10) section-level endpoint as a `&str` (empty string
+    /// when unset). Callers that used the deprecated `spec.endpoint:
+    /// String` field can migrate without changing the call site
+    /// signature.
+    pub fn endpoint_str(&self) -> &str {
+        self.endpoint_new.as_deref().unwrap_or("")
+    }
+
+    /// Backwards-compat accessor: returns the first registered
+    /// model's id (or empty string when the section has no
+    /// models). Callers that used the deprecated `spec.model:
+    /// String` field can migrate without changing the call site
+    /// signature.
+    pub fn model_str(&self) -> &str {
+        self.models.first().map(|m| m.id.as_str()).unwrap_or("")
     }
 }
 
@@ -1540,17 +1575,14 @@ impl Config {
     /// missing. The warning fires once per offending table.
     fn warn_unknown_provider_keys(path: &std::path::Path, raw: &str) {
         const KNOWN: &[&str] = &[
-            "kind",
             "endpoint",
-            "model",
             "models",
-            "max_tokens",
             "temperature",
             "top_p",
-            "hard_incompatibilities",
             "omit_max_tokens",
             "max_token_auto",
             "max_token_auto_save",
+            "plan",
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
             Ok(v) => v,
@@ -1657,17 +1689,25 @@ impl Config {
             && !v.trim().is_empty()
         {
             for spec in self.providers.values_mut() {
-                if spec.kind == "minimax" {
-                    spec.endpoint = v.clone();
+                if spec.endpoint_new.as_deref().is_some_and(|e| e.contains("/messages")) {
+                    spec.endpoint_new = Some(v.clone());
                 }
             }
         }
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_MODEL")
             && !v.trim().is_empty()
         {
+            // v0.10: `model` lives on `models[].id`. Replace the
+            // id on the first model of any section whose endpoint
+            // matches the canonical MiniMax URL pattern (the
+            // `/v1/messages` path). This mirrors the legacy
+            // `MOAGAN_MINIMAX_MODEL` contract for callers that
+            // still rely on the env var.
             for spec in self.providers.values_mut() {
-                if spec.kind == "minimax" {
-                    spec.model = v.clone();
+                if spec.endpoint_new.as_deref().is_some_and(|e| e.contains("/messages"))
+                    && let Some(first) = spec.models.first_mut()
+                {
+                    first.id = v.clone();
                 }
             }
         }
@@ -2156,6 +2196,66 @@ impl Config {
         self.providers
             .get(name)
             .ok_or_else(|| crate::Error::InvalidArgs(format!("unknown provider: {name}")))
+    }
+
+    /// Resolve the configured `(section, model)` pair into a
+    /// [`ResolvedModelConfig`] ready for the dispatcher. Looks up
+    /// `self.providers[section]` and then `models[]` for the
+    /// requested model id. The per-model `endpoint` override (when
+    /// present) wins over the section-level default.
+    ///
+    /// Returns `Error::InvalidArgs` when the section is missing or
+    /// the section exists but the model id is not registered under
+    /// it. The wire format is derived from the resolved endpoint
+    /// URL via [`crate::llm::wire_format::wire_format_from_url`]
+    /// so the dispatcher does not have to recompute it.
+    pub fn resolved_model(
+        &self,
+        section: &str,
+        model_id: &str,
+    ) -> Result<ResolvedModelConfig> {
+        let spec = self.provider(section)?;
+        let model_cfg = spec
+            .models
+            .iter()
+            .find(|m| m.id == model_id)
+            .ok_or_else(|| {
+                crate::Error::InvalidArgs(format!(
+                    "provider '{section}' has no model '{model_id}'; \
+                     registered models: [{}]",
+                    spec.models
+                        .iter()
+                        .map(|m| m.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+        let endpoint = model_cfg
+            .endpoint
+            .clone()
+            .or_else(|| spec.endpoint_new.clone())
+            .ok_or_else(|| {
+                crate::Error::InvalidArgs(format!(
+                    "provider '{section}' model '{model_id}' has no endpoint \
+                     configured (neither section nor model specifies one)"
+                ))
+            })?;
+        let wire_format =
+            crate::llm::wire_format::wire_format_from_url(&endpoint).map_err(|e| {
+                crate::Error::InvalidArgs(format!(
+                    "provider '{section}' model '{model_id}': {e}"
+                ))
+            })?;
+        Ok(ResolvedModelConfig {
+            section: section.to_owned(),
+            id: model_id.to_owned(),
+            endpoint,
+            max_tokens: model_cfg.max_tokens,
+            temperature: spec.temperature,
+            top_p: spec.top_p,
+            wire_format,
+            omit_max_tokens: spec.omit_max_tokens,
+        })
     }
 
     /// Whether `Role::JsonRepairV2` should fire on parse failure for

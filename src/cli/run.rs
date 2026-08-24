@@ -201,7 +201,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // (the helper rebuilds it from telemetry after the pipeline
     // finishes; the stub just carries the fields used by the
     // lineage block).
-    let default_model = cfg.provider(&default_provider)?.model.clone();
+    let default_model = cfg.provider(&default_provider)?.model_str().to_owned();
 
     let stub = Manifest {
         schema_version: Manifest::schema_version_string(),
@@ -321,7 +321,7 @@ pub async fn run_full_pipeline(
     // until they have all landed.
     let max_tokens_table = providers.max_tokens_table().cloned();
     let temperature_table = providers.temperature_table().cloned();
-    let default_model = cfg.provider(&default_provider)?.model.clone();
+    let default_model = cfg.provider(&default_provider)?.model_str().to_owned();
 
     // Wire-the-gates plan: refresh the on-disk `models.dev` catalog
     // so the modality gate (`ModalityGate::apply`) and the cost
@@ -612,31 +612,53 @@ pub(crate) fn build_registry_for_with_api_key(
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
 ) -> Result<ProviderRegistry> {
+    let (section, model_id) = super::probe::parse_provider_model(selected).map_err(
+        |e| match e {
+            Error::InvalidArgs(msg) => Error::InvalidArgs(format!(
+                "build_registry_for: {msg} (--provider expects 'PROVIDER:MODEL')"
+            )),
+            other => other,
+        },
+    )?;
     let spec = cfg
         .providers
-        .get(selected)
-        .ok_or_else(|| Error::InvalidArgs(format!("provider '{selected}' is not in config")))?
+        .get(&section)
+        .ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "provider '{section}' is not in config (known sections: [{}])",
+                cfg.providers.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))
+        })?
         .clone();
-    if spec.kind == "mock"
+    // Mock short-circuit: load canned responses from disk and
+    // register them under the requested `(section, model_id)` key.
+    // The legacy `mock` section has no upstream.
+    if section == "mock"
         && let Some(dir) = mock_dir
     {
         let mock = crate::llm::MockProvider::from_dir(dir)?;
         let mut reg = ProviderRegistry::default();
-        reg.insert(selected.to_owned(), Arc::new(mock));
+        let key = ProviderRegistry::registry_key(&section, &model_id);
+        reg.insert(key, Arc::new(mock));
         return Ok(reg);
     }
-    if spec.kind == "minimax"
+    // Minimax API-key short-circuit: the `--api-key` flag
+    // overrides the env lookup. Wire the section into the
+    // dispatcher with the operator-supplied key.
+    if section == "minimax"
         && let Some(key) = api_key
     {
-        let provider =
-            crate::llm::minimax::MinimaxProvider::new(&spec, SecretString::new(key.to_owned()))?;
+        let resolved = cfg.resolved_model(&section, &model_id)?;
+        let provider = crate::llm::minimax::MinimaxProvider::from_resolved(&resolved)?;
         let mut reg = ProviderRegistry::default();
-        reg.insert(selected.to_owned(), Arc::new(provider));
+        let key = ProviderRegistry::registry_key(&section, &model_id);
+        reg.insert(key, Arc::new(provider) as Arc<dyn crate::llm::provider::Provider>);
         return Ok(reg);
     }
     let mut spec_map = std::collections::BTreeMap::new();
-    spec_map.insert(selected.to_owned(), spec);
-    registry_from_config(&spec_map, &cfg.circuit_breaker)
+    spec_map.insert(section.clone(), spec);
+    let reg = registry_from_config(&spec_map, &cfg.circuit_breaker)?;
+    Ok(reg)
 }
 
 /// Cardinality knobs for a single pipeline run. Returned by
