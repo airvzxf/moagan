@@ -309,8 +309,25 @@ pub async fn detect_max_tokens(
         match retry_once_on_indeterminate(transport.as_ref(), n).await {
             ProbeOutcome::Accepted => lo = n,
             _ => {
-                hi = n;
-                break;
+                // PR-x23: do NOT commit `hi = n; break` until we
+                // have observed at least one Accepted value. Some
+                // upstreams reject small `max_tokens` values with
+                // the same HTTP 400 + `max_tokens` body signature
+                // they use for the upper bound (the upstream's
+                // valid range starts above 2). Breaking on the
+                // first non-Accepted would collapse Phase 1 to
+                // `lo = 0, hi = 2` and Phase 2 has no room to
+                // search, surfacing the misleading "rejected
+                // every probe" error. Keep walking upward until
+                // either we see an Accepted (the valid range is
+                // above us) or we exhaust the `n > ceiling`
+                // short-circuit (every probed value was
+                // rejected — `discovered = 0` and the existing
+                // error message still fires).
+                if lo > 0 {
+                    hi = n;
+                    break;
+                }
             }
         }
     }
@@ -1090,6 +1107,55 @@ mod tests {
         assert_eq!(
             got, 8192,
             "ceiling above the boundary must not constrain discovery"
+        );
+    }
+
+    /// PR-x23 regression pin: when the upstream rejects the smallest
+    /// probe value with the same HTTP 400 + `max_tokens` body it
+    /// uses for the upper bound (some relays require
+    /// `max_tokens >= N` and surface that requirement with the
+    /// standard rejection signature), Phase 1 must keep walking
+    /// upward until it finds an Accepted value. Without the fix
+    /// (`if lo > 0 { break }`), the algorithm collapses to
+    /// `lo = 0, hi = 2` and surfaces the misleading "rejected every
+    /// probe" error even though the upstream's true ceiling is
+    /// well above `MIN_AUTOPROBE_FLOOR`.
+    #[derive(Clone)]
+    struct MinFloorTransport {
+        min_accepted: u32,
+        max_accepted: u32,
+    }
+
+    #[async_trait]
+    impl ProbeTransport for MinFloorTransport {
+        async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
+            if max_tokens < self.min_accepted || max_tokens > self.max_accepted {
+                ProbeOutcome::Rejected
+            } else {
+                ProbeOutcome::Accepted
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn phase1_first_probe_rejected_advances_upward() {
+        // Upstream requires max_tokens >= 1024 and rejects anything
+        // > 4096. Without the Phase 1 robustness fix the algorithm
+        // would conclude `lo = 0` after the first probe at n=2 is
+        // rejected and fail with "got 0". With the fix, Phase 1
+        // walks n=2..512 (all rejected), then accepts n=1024,
+        // then breaks at n=2048 (rejected), and Phase 2 narrows
+        // between [1024, 2048].
+        let t: Arc<dyn ProbeTransport> = Arc::new(MinFloorTransport {
+            min_accepted: 1024,
+            max_accepted: 4096,
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .expect("algorithm must converge when upstream has a min floor");
+        assert!(
+            (1024..=4096).contains(&got),
+            "discovered value ({got}) must land inside the upstream valid range [1024, 4096]"
         );
     }
 

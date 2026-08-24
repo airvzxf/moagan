@@ -53,8 +53,6 @@ use crate::telemetry::Telemetry;
 use crate::cli::continue_cmd::load_manifest;
 use crate::domain::Manifest;
 
-use super::run::build_registry_for;
-
 /// F2 (Track G.2) default `sketches_per_cell`. The matrix's
 /// per-cell fan-out is `cells() * sketches_per_cell`. F2 lowers
 /// the v0.5 floor from `cardinality = 80` to
@@ -470,11 +468,38 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     let default_provider_section = crate::cli::probe::parse_provider_model(&default_provider)
         .map(|(s, _)| s)
         .unwrap_or_else(|_| default_provider.clone());
-    let providers = Arc::new(build_registry_for(
+    // PR-x23: thread `active_pairs = Some(&[(section, model)])`
+    // through the registry build so the max_tokens probe fans out
+    // only for the `(provider, model)` pair the operator asked
+    // for. The pre-v0.10 `build_registry_for` shim drops
+    // `active_pairs` on the floor (it threads `None` into
+    // `build_registry_for_with_active`), which forces a
+    // multi-model `minimax` section to probe every model in
+    // parallel and races 8 sequential Phase-1 walks against the
+    // pipeline's first LLM call. The `build_registry_for_with_active`
+    // variant honours the filter.
+    let active_pairs: Vec<(String, String)> = vec![(
+        default_provider_section.clone(),
+        if default_provider.contains(':') {
+            crate::cli::probe::parse_provider_model(&default_provider)
+                .map(|(_, m)| m)
+                .unwrap_or_default()
+        } else {
+            default_provider.clone()
+        },
+    )];
+    let providers = Arc::new(super::run::build_registry_for_with_active(
         cfg,
         &default_provider,
         opts.mock_dir.as_deref(),
+        None,
+        Some(&active_pairs),
     )?);
+    // PR-x23: pull the auto-probe tables off the registry so the
+    // `RunContext` (and the pre-pipeline `await_ready` gate below)
+    // sees the same handles the registry fired.
+    let max_tokens_table = providers.max_tokens_table().cloned();
+    let temperature_table = providers.temperature_table().cloned();
     let default_model = if default_provider.contains(':') {
         crate::cli::probe::parse_provider_model(&default_provider)
             .map(|(_, m)| m)
@@ -623,6 +648,8 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         effective_cfg.phase_timeout_secs,
         effective_cfg.total_timeout_secs,
     )
+    .with_max_tokens_table_opt(max_tokens_table)
+    .with_temperature_table_opt(temperature_table)
     .with_interactive(!opts.non_interactive)
     // Per-role rate-limit (catalog §D.19.6): wire each
     // `[rate_limit_per_role]` entry into a `RateLimiter` keyed by
@@ -686,6 +713,20 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     });
 
     let pipeline = build_pre_matrix_pipeline(&opts, &effective_cfg);
+    // PR-x23: gate the first LLM call behind the max_tokens probe.
+    // Without this wait, the pipeline's `intake` call fires while
+    // the single-model probe (now scoped to the active pair by the
+    // discover-path registry build) is still walking Phase 1
+    // (19 sequential `2^k` values). The intake call then uses the
+    // static `max_tokens` knob (524288) and the upstream returns
+    // HTTP 400 before the probe ever gets to write 196608 into the
+    // table — a self-inflicted race that masks the auto-probe fix.
+    // `await_ready` joins every probe task spawned by the registry
+    // build (just the one, in the active-pair case) and is a no-op
+    // for registries without a max_tokens table.
+    if let Some(table) = ctx.max_tokens_table.as_ref() {
+        table.await_ready().await;
+    }
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
     let _outputs = tokio::select! {
