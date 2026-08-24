@@ -57,6 +57,7 @@ fn build_provider(server_uri: String) -> Arc<MinimaxProvider> {
         omit_max_tokens: false,
         plan: None,
         max_token_auto: None,
+        max_token_auto_enabled: None,
         max_token_auto_save: true,
     };
     Arc::new(

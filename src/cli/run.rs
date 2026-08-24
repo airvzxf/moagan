@@ -14,8 +14,8 @@ use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::{MoaganHome, RunDir, RunPaths};
 use crate::ids::RunId;
+use crate::llm::ProviderRegistry;
 use crate::llm::capability::CapabilityResolver;
-use crate::llm::{ProviderRegistry, registry_from_config};
 use crate::phases::{
     AdversaryPhase, ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DecomposePhase,
     DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline, ProposePhase, RankPhase,
@@ -387,11 +387,26 @@ pub async fn run_full_pipeline(
              'first model' fallback in v0.10+."
         )));
     };
-    let providers = Arc::new(build_registry_for(
-        cfg,
-        &default_provider,
-        mock_dir.as_deref(),
-    )?);
+    let providers = Arc::new({
+        // Scope the temperature probe fan-out to the resolved
+        // `--provider SECTION:MODEL` pair so a future
+        // multi-section CLI does not silently burn HTTP calls
+        // against upstreams the run is not going to touch. The
+        // current CLI only exposes one `--provider` value, so the
+        // list is a singleton today; the construction path is
+        // written for the day a multi-section registry is added.
+        let active_pairs: Vec<(String, String)> = vec![(
+            resolved_default_model_section.clone(),
+            default_model.clone(),
+        )];
+        build_registry_for_with_active(
+            cfg,
+            &default_provider,
+            mock_dir.as_deref(),
+            None,
+            Some(&active_pairs),
+        )?
+    });
     // Pull the auto-probe table off the registry so the pipeline can
     // consult it on every LLM call. `registry_from_config_with_home`
     // already fired background probes when the table was built; the
@@ -571,6 +586,19 @@ pub async fn run_full_pipeline(
         table.await_ready().await;
     }
 
+    // Mirror the same gate for the temperature probe. Without
+    // this, the 8 background probes the registry fired at startup
+    // (one per configured non-mock provider/model pair) lose the
+    // race against the pipeline's `tokio::select!` and the run
+    // exits before `TemperatureTable::persist_to` runs, leaving
+    // `temperatures_auto.toml` empty even though the probes did
+    // land in memory. `await_ready` is a no-op for registries
+    // without a temperature table (mock-only configs) so this
+    // stays cheap for the fast-mode CI path.
+    if let Some(table) = ctx.temperature_table.as_ref() {
+        table.await_ready().await;
+    }
+
     // Flush telemetry before the manifest reads phases/calls.
     // Without this, the gzip stream is incomplete (no CRC/length
     // trailer) and `MultiGzDecoder` returns `UnexpectedEof`,
@@ -694,6 +722,23 @@ pub(crate) fn build_registry_for_with_api_key(
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
 ) -> Result<ProviderRegistry> {
+    build_registry_for_with_active(cfg, selected, mock_dir, api_key, None)
+}
+
+/// [`build_registry_for_with_api_key`] variant that also scopes the
+/// temperature probe fan-out to the listed `(provider, model)`
+/// pairs. `active_pairs = None` keeps the legacy "probe every
+/// registered pair" behaviour; the CLI plumbing computes the list
+/// from the resolved `--provider SECTION:MODEL` argument and
+/// passes it explicitly so a future multi-section CLI does not
+/// silently burn HTTP calls against unused upstreams.
+pub(crate) fn build_registry_for_with_active(
+    cfg: &Config,
+    selected: &str,
+    mock_dir: Option<&std::path::Path>,
+    api_key: Option<&str>,
+    active_pairs: Option<&[(String, String)]>,
+) -> Result<ProviderRegistry> {
     // v0.10 (Phase 5): the CLI requires `SECTION:MODEL` for every
     // selection. There is no implicit "first model" fallback for
     // bare `SECTION` — the operator must always pass the explicit
@@ -749,7 +794,12 @@ pub(crate) fn build_registry_for_with_api_key(
     }
     let mut spec_map = std::collections::BTreeMap::new();
     spec_map.insert(section.clone(), spec);
-    let reg = registry_from_config(&spec_map, &cfg.circuit_breaker)?;
+    let reg = crate::llm::provider::registry_from_config_with_sink_active(
+        &spec_map,
+        &cfg.circuit_breaker,
+        None,
+        active_pairs,
+    )?;
     Ok(reg)
 }
 

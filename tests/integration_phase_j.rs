@@ -463,6 +463,7 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
             top_p: None,
             omit_max_tokens: false,
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         },

@@ -1074,15 +1074,35 @@ pub fn registry_from_config_with_sink(
     breaker_cfg: &CircuitBreakerConfig,
     sink: Option<Arc<dyn SaturationSink>>,
 ) -> Result<ProviderRegistry> {
+    registry_from_config_with_sink_active(cfg, breaker_cfg, sink, None)
+}
+
+/// [`registry_from_config_with_sink`] variant that also scopes the
+/// temperature probe fan-out to the listed `(provider, model)`
+/// pairs. The CLI plumbing uses this to avoid spawning background
+/// probes against upstreams the run is not going to touch; legacy
+/// callers (tests, tools) stay on the `None` shorthand.
+pub fn registry_from_config_with_sink_active(
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
+    breaker_cfg: &CircuitBreakerConfig,
+    sink: Option<Arc<dyn SaturationSink>>,
+    active_pairs: Option<&[(String, String)]>,
+) -> Result<ProviderRegistry> {
     match MoaganHome::resolve() {
-        Ok(home) => registry_from_config_with_home_and_sink(cfg, breaker_cfg, Some(&home), sink),
+        Ok(home) => registry_from_config_with_home_and_sink(
+            cfg,
+            breaker_cfg,
+            Some(&home),
+            sink,
+            active_pairs,
+        ),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "provider registry: MOAGAN_HOME could not be resolved; \
                  building without the max_tokens auto-probe table"
             );
-            registry_from_config_with_home_and_sink(cfg, breaker_cfg, None, sink)
+            registry_from_config_with_home_and_sink(cfg, breaker_cfg, None, sink, active_pairs)
         }
     }
 }
@@ -1100,18 +1120,26 @@ pub fn registry_from_config_with_home(
     breaker_cfg: &CircuitBreakerConfig,
     home: Option<&MoaganHome>,
 ) -> Result<ProviderRegistry> {
-    registry_from_config_with_home_and_sink(cfg, breaker_cfg, home, None)
+    registry_from_config_with_home_and_sink(cfg, breaker_cfg, home, None, None)
 }
 
 /// [`registry_from_config_with_home`] variant that also wires a
 /// push-side [`SaturationSink`]. Single source of truth for the
 /// builder logic; the sink-less shorthands delegate here with
 /// `sink = None`.
+///
+/// `active_pairs` (when `Some(_)`) scopes the temperature probe
+/// fan-out to the listed `(provider, model)` pairs so a
+/// multi-section registry does not burn HTTP calls against
+/// upstreams the run is not going to touch. `None` keeps the
+/// legacy "probe every registered provider/model" behaviour so
+/// tools that have no curated list keep working unchanged.
 pub fn registry_from_config_with_home_and_sink(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     breaker_cfg: &CircuitBreakerConfig,
     home: Option<&MoaganHome>,
     sink: Option<Arc<dyn SaturationSink>>,
+    active_pairs: Option<&[(String, String)]>,
 ) -> Result<ProviderRegistry> {
     use super::anthropic_compat::AnthropicCompatProvider;
     use super::openai_compat::OpenAICompatProvider;
@@ -1282,7 +1310,11 @@ pub fn registry_from_config_with_home_and_sink(
         match TemperatureTable::from_home(home, /* save= */ true) {
             Ok(table) => {
                 let table = Arc::new(table);
-                spawn_pending_temperature_probes(&wrapped_entries, Arc::clone(&table));
+                spawn_pending_temperature_probes(
+                    &wrapped_entries,
+                    Arc::clone(&table),
+                    active_pairs,
+                );
                 tracing::info!(
                     providers = cfg.len(),
                     "temperature_probe: registry carrying the supported-set table; firing background probes"
@@ -1358,16 +1390,49 @@ pub fn attach_parallelism_rate_limit(
 /// Returns `None` when no provider enables the probe, which is the
 /// signal to leave `ProviderRegistry::max_tokens_table` unset.
 ///
-/// A provider opts in with `max_token_auto = Some(n)`, `n > 0`;
-/// `None` and the `Some(0)` env sentinel both mean "off".
+/// Default behaviour is opt-out: a provider is **on** unless it
+/// opts out explicitly. The opt-out can take three equivalent
+/// shapes — `max_token_auto_enabled = Some(false)`,
+/// `max_token_auto = Some(0)`, or being a `mock` section (the
+/// probe has no upstream to query). When on but with no per-provider
+/// floor, the floor collapses to [`super::probe::MIN_AUTOPROBE_FLOOR`]
+/// so the bisect has a non-zero lower bound.
+///
+/// The legacy opt-in via `max_token_auto = Some(n>0)` still works
+/// and overrides the default floor with the operator-supplied
+/// value. This keeps existing TOML files bit-identical for operators
+/// who already configured a floor.
 fn probe_settings(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
 ) -> Option<ProbeSettings> {
     let mut settings: Option<ProbeSettings> = None;
-    for spec in cfg.values() {
-        let Some(floor) = spec.max_token_auto.filter(|n| *n > 0) else {
+    for (name, spec) in cfg {
+        // Per-provider opt-out. The three signals are equivalent
+        // on purpose so operators can pick the spelling they
+        // already use; `mock` is excluded because the probe has
+        // no upstream.
+        if spec.max_token_auto_enabled == Some(false) || spec.max_token_auto == Some(0) {
+            tracing::debug!(
+                provider = %name,
+                "max_tokens_auto: provider opted out of the probe"
+            );
             continue;
-        };
+        }
+        if name == "mock"
+            || spec
+                .endpoint
+                .as_deref()
+                .is_some_and(|e| e.starts_with("mock://"))
+        {
+            continue;
+        }
+        // Resolve the floor: an explicit positive `max_token_auto`
+        // wins, otherwise we fall back to the registry-wide floor
+        // so the probe can always bisect.
+        let floor = spec
+            .max_token_auto
+            .filter(|n| *n > 0)
+            .unwrap_or(super::probe::MIN_AUTOPROBE_FLOOR);
         let acc = settings.get_or_insert(ProbeSettings {
             floor: 0,
             save: false,
@@ -1409,26 +1474,38 @@ fn spawn_pending_probes(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     table: Arc<MaxTokensTable>,
 ) {
-    for (name, wrapped) in wrapped_entries {
-        let Some(spec) = cfg.get(name) else {
+    for (_key, wrapped) in wrapped_entries {
+        let inner = wrapped.inner();
+        // `cfg` is keyed by section name (e.g. `"minimax"`), but
+        // `wrapped_entries` is keyed by the registry key (e.g.
+        // `"minimax::minimax-m3"`). Resolve the section via the
+        // inner provider so multi-model sections look up correctly
+        // and the per-section opt-out knobs actually fire.
+        let Some(spec) = cfg.get(inner.name()) else {
             continue;
         };
-        // Honor the operator's per-provider opt-out: `None` or
-        // `Some(0)` means "no probe".
-        let Some(floor) = spec.max_token_auto.filter(|n| *n > 0) else {
+        let section = inner.name();
+        // Per-provider opt-out: `max_token_auto_enabled = Some(false)`
+        // or `max_token_auto = Some(0)` both disable the probe for
+        // this provider. Mock has no upstream; skip it explicitly.
+        if spec.max_token_auto_enabled == Some(false) || spec.max_token_auto == Some(0) {
             tracing::debug!(
-                provider = %name,
+                provider = %section,
                 "max_tokens_auto: provider opted out of the probe"
             );
             continue;
-        };
-        // Mock has no upstream; the probe would burn 30 HTTP calls
-        // against a canned-response queue. Skip it.
-        let inner = wrapped.inner();
-        if inner.name() == "mock" {
+        }
+        if section == "mock" {
             continue;
         }
-        table.set_floor_for(name, inner.model(), floor);
+        // Resolve the floor: an explicit positive `max_token_auto`
+        // wins, otherwise we fall back to the registry-wide floor
+        // so the probe always has a non-zero lower bound.
+        let floor = spec
+            .max_token_auto
+            .filter(|n| *n > 0)
+            .unwrap_or(super::probe::MIN_AUTOPROBE_FLOOR);
+        table.set_floor_for(section, inner.model(), floor);
         // Query the per-provider probe ceiling so the exponential
         // phase short-circuits at the first `2^k` past the
         // upstream's hard cap. DeepSeek-direct caps at 393_216
@@ -1446,7 +1523,7 @@ fn spawn_pending_probes(
             Ok(t) => Arc::new(t) as Arc<dyn super::probe::ProbeTransport>,
             Err(e) => {
                 tracing::warn!(
-                    provider = %name,
+                    provider = %section,
                     model = %inner.model(),
                     error = %e,
                     "max_tokens_auto: failed to build probe transport; skipping"
@@ -1455,7 +1532,7 @@ fn spawn_pending_probes(
             }
         };
         let table_for_task = Arc::clone(&table);
-        let provider_name = name.clone();
+        let provider_name = section.to_owned();
         let model_name = inner.model().to_owned();
         let provider_name_for_handle = provider_name.clone();
         let model_name_for_handle = model_name.clone();
@@ -1517,6 +1594,14 @@ fn spawn_pending_probes(
 /// cached entry (single-probe, cheap) and only runs the full
 /// 21-point fan-out when the cache is missing or rejected.
 ///
+/// When `active_pairs` is `Some(_)`, only the listed
+/// `(provider, model)` pairs are probed — the registry may carry
+/// more entries than the run will touch, and probing every one
+/// would burn ~21 HTTP calls per pair against upstreams the
+/// operator is not using. `None` keeps the legacy behaviour
+/// (probe every registered provider/model pair) so callers that
+/// do not have a curated list keep working unchanged.
+///
 /// The probe deliberately bypasses the [`BreakeredProvider`]
 /// wrapper (a failing probe must not poison the steady-state
 /// circuit) and runs against the inner [`Provider`] via
@@ -1528,10 +1613,30 @@ fn spawn_pending_probes(
 fn spawn_pending_temperature_probes(
     wrapped_entries: &[(String, Arc<BreakeredProvider>)],
     table: Arc<TemperatureTable>,
+    active_pairs: Option<&[(String, String)]>,
 ) {
-    for (name, wrapped) in wrapped_entries {
+    for (_key, wrapped) in wrapped_entries {
         let inner = wrapped.inner();
         if inner.name() == "mock" {
+            continue;
+        }
+        // Scope the probe fan-out to the pairs the run is going
+        // to touch when the caller supplied a curated list.
+        // `active_pairs` is keyed by the `(provider, model)`
+        // pair the probe feeds back into; matching on the joined
+        // registry key would conflate "section::model" with a
+        // hypothetical "section::section" alias, so we compare
+        // each field independently.
+        if let Some(pairs) = active_pairs
+            && !pairs
+                .iter()
+                .any(|(p, m)| p == inner.name() && m == inner.model())
+        {
+            tracing::debug!(
+                provider = %inner.name(),
+                model = %inner.model(),
+                "temperature_probe: pair not in the active set; skipping background probe"
+            );
             continue;
         }
         // Skip pairs already cached: a fresh probe on every run
@@ -1539,7 +1644,17 @@ fn spawn_pending_temperature_probes(
         // sets the operator has already verified. A stale entry
         // survives until the verify step rejects it, at which
         // point the full probe replaces it.
-        if table.get(name, inner.model()).is_some() {
+        //
+        // `inner.name()` is the **section name** (e.g. `"minimax"`);
+        // the iteration variable `name` carries the **registry
+        // key** (e.g. `"minimax::minimax-test"`). Using the registry
+        // key here would (a) miss every cache hit because the
+        // persisted entries are keyed by section name, and (b)
+        // poison the persisted entries when the probe fires. The
+        // same bug applied to `probe_and_store` below; both call
+        // sites now use `inner.name()` so the on-disk header is
+        // the canonical `[providers.section.model]` form.
+        if table.get(inner.name(), inner.model()).is_some() {
             continue;
         }
         let transport = match super::temperature_probe::ProviderTemperatureProbeTransport::new(
@@ -1548,7 +1663,7 @@ fn spawn_pending_temperature_probes(
             Ok(t) => Arc::new(t) as Arc<dyn super::temperature_probe::TemperatureProbeTransport>,
             Err(e) => {
                 tracing::warn!(
-                    provider = %name,
+                    provider = %inner.name(),
                     model = %inner.model(),
                     error = %e,
                     "temperature_probe: failed to build probe transport; skipping"
@@ -1557,7 +1672,7 @@ fn spawn_pending_temperature_probes(
             }
         };
         let table_for_task = Arc::clone(&table);
-        let provider_name = name.clone();
+        let provider_name = inner.name().to_owned();
         let model_name = inner.model().to_owned();
         let handle = tokio::spawn(async move {
             tracing::info!(
@@ -1687,6 +1802,7 @@ mod tests {
                 top_p: None,
                 omit_max_tokens: false,
                 max_token_auto: None,
+                max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 plan: None,
             },
@@ -1726,6 +1842,7 @@ mod tests {
                 top_p: None,
                 omit_max_tokens: false,
                 max_token_auto: None,
+                max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 plan: None,
             },
@@ -1830,6 +1947,11 @@ mod tests {
                 top_p: Some(0.95),
                 omit_max_tokens: false,
                 max_token_auto: None,
+                // The probe is now opt-out-by-default; this test
+                // pins the BLOCKED_MODELS gate and would otherwise
+                // spawn a real background probe against the dummy
+                // `minimax-m3` endpoint. Opt out explicitly.
+                max_token_auto_enabled: Some(false),
                 max_token_auto_save: true,
                 plan: None,
             },
@@ -1850,6 +1972,294 @@ mod tests {
             .expect("minimax::minimax-m3 entry must be present");
         assert_eq!(provider.name(), "minimax");
         assert_eq!(provider.model(), "minimax-m3");
+    }
+
+    // ----------------------------------------------------------------
+    // Auto-probe default-on tests (PR-x23: ghost-rider-banshee).
+    //
+    // The plan flipped the `max_tokens` auto-probe from opt-in to
+    // opt-out: the registry now spawns background probes for every
+    // non-mock provider by default. The tests below pin the three
+    // axes that drove the flip:
+    //
+    // 1. `registry_defaults_to_probe_for_non_mock_provider` — a
+    //    non-mock provider with `max_token_auto = None` and no
+    //    explicit opt-out MUST produce a probe table (the new
+    //    default behaviour).
+    // 2. `registry_respects_opt_out` — `max_token_auto_enabled =
+    //    Some(false)` (the explicit opt-out knob) MUST suppress
+    //    the table entirely.
+    // 3. `registry_zero_still_means_off` — the legacy `Some(0)`
+    //    sentinel MUST still work as an opt-out so existing TOML
+    //    files do not silently flip behaviour.
+    //
+    // All three use `MoaganHome::at(scratch_dir)` so the test never
+    // touches the operator's real `~/.local/share/moagan`. The
+    // background probes themselves may fail (the test URL is
+    // intentionally unreachable) — the assertions only check that
+    // the table is built and the handles are recorded, not that
+    // any HTTP call succeeded.
+    // ----------------------------------------------------------------
+
+    /// Helper: build a `MinimaxProvider`-shaped registry on a
+    /// scratch `MoaganHome` with the supplied probe knobs. The
+    /// dummy API key lets `AnthropicCompatProvider::from_resolved`
+    /// build; the unreachable endpoint ensures any probe that
+    /// actually fires fails fast instead of touching the operator's
+    /// network.
+    async fn build_registry_for_probe_test(
+        home: &MoaganHome,
+        max_token_auto: Option<u32>,
+        max_token_auto_enabled: Option<bool>,
+    ) -> ProviderRegistry {
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "minimax".into(),
+            crate::config::ProviderConfig {
+                models: vec![crate::config::ModelConfig {
+                    max_tokens: None,
+                    id: "minimax-test".into(),
+                    endpoint: None,
+                }],
+                endpoint: Some("https://probe-test.invalid/anthropic/v1/messages".to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto,
+                max_token_auto_enabled,
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
+        registry_from_config_with_home_and_sink(
+            &cfg,
+            &CircuitBreakerConfig::default(),
+            Some(home),
+            None,
+            None,
+        )
+        .expect("registry must build")
+    }
+
+    /// Default behaviour (the regression the operator hit):
+    /// a non-mock provider with no explicit probe knob still gets
+    /// a `MaxTokensTable` attached to the registry.
+    #[tokio::test]
+    async fn registry_defaults_to_probe_for_non_mock_provider() {
+        let home = MoaganHome::at(
+            std::env::temp_dir().join(format!("moagan-probe-default-{}", std::process::id())),
+        );
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let registry = build_registry_for_probe_test(&home, None, None).await;
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        assert!(
+            registry.max_tokens_table().is_some(),
+            "non-mock provider with max_token_auto = None must get a probe table by default"
+        );
+    }
+
+    /// Explicit opt-out via the new `max_token_auto_enabled = false`
+    /// knob: the registry must NOT carry a probe table.
+    #[tokio::test]
+    async fn registry_respects_opt_out() {
+        let home = MoaganHome::at(
+            std::env::temp_dir().join(format!("moagan-probe-optout-{}", std::process::id())),
+        );
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let registry = build_registry_for_probe_test(&home, None, Some(false)).await;
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        assert!(
+            registry.max_tokens_table().is_none(),
+            "max_token_auto_enabled = Some(false) must suppress the probe table"
+        );
+    }
+
+    /// Backwards-compatibility pin: the legacy `max_token_auto =
+    /// Some(0)` sentinel keeps its opt-out semantics so operators
+    /// with that TOML do not silently flip behaviour.
+    #[tokio::test]
+    async fn registry_zero_still_means_off() {
+        let home = MoaganHome::at(
+            std::env::temp_dir().join(format!("moagan-probe-zero-{}", std::process::id())),
+        );
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let registry = build_registry_for_probe_test(&home, Some(0), None).await;
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        assert!(
+            registry.max_tokens_table().is_none(),
+            "max_token_auto = Some(0) must remain an opt-out (legacy contract)"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Auto-probe TOML-key pin (PR-x23 follow-up).
+    //
+    // The bug being guarded: `spawn_pending_probes` and
+    // `spawn_pending_temperature_probes` used to pass the **registry
+    // key** (`"minimax::minimax-test"`) as the `provider` argument
+    // of `probe_and_store`. The on-disk TOML therefore carried the
+    // header `[providers."minimax::minimax-test"."minimax-test"]`,
+    // which is not the canonical form the rest of the runtime
+    // expects (`[providers.minimax."minimax-test"]`). Downstream
+    // lookups in `supported_for(provider, model)` and the operator
+    // cap merge use the section name, so the cached entries became
+    // invisible. The fix routes both call sites through
+    // `inner.name()` (the section name).
+    //
+    // The tests below exercise the actual call site — `build_…
+    // -> spawn_pending_* -> probe_and_store -> persist_to` — to
+    // pin the full chain end-to-end. They differ from
+    // `tests/integration_auto_probe_persists_files.rs` only in that
+    // they run from inside the `provider` module's `mod tests`,
+    // so they can use the module-private helpers directly.
+    // ----------------------------------------------------------------
+
+    /// Pin for the `max_tokens_auto.toml` header: after the
+    /// background probe converges the persisted file must carry a
+    /// `[providers.minimax."minimax-test"]`-shaped header, NOT
+    /// the buggy registry-key form.
+    ///
+    /// `MaxTokensTable::probe_and_store` only persists on the
+    /// `Ok(_)` branch (the transport probe must succeed), so the
+    /// inline test wires a wiremock server instead of using the
+    /// unreachable endpoint the no-network helpers use.
+    #[tokio::test]
+    async fn probe_and_store_uses_section_name_not_registry_key_max_tokens() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        home.ensure().expect("home layout");
+
+        // Build the registry against the wiremock endpoint so the
+        // probe converges and `probe_and_store` writes the file.
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "minimax".into(),
+            crate::config::ProviderConfig {
+                models: vec![crate::config::ModelConfig {
+                    max_tokens: None,
+                    id: "minimax-test".into(),
+                    endpoint: None,
+                }],
+                endpoint: Some(format!("{}/v1/messages", server.uri())),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let registry = registry_from_config_with_home_and_sink(
+            &cfg,
+            &CircuitBreakerConfig::default(),
+            Some(&home),
+            None,
+            None,
+        )
+        .expect("registry must build");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+
+        let max_tokens_table = registry
+            .max_tokens_table()
+            .expect("registry must carry a max_tokens table by default");
+        max_tokens_table.await_ready().await;
+
+        let body = std::fs::read_to_string(home.max_tokens_auto_path())
+            .expect("read max_tokens_auto.toml");
+        assert!(
+            body.contains("[providers.minimax.\"minimax-test\"]")
+                || body.contains("[providers.\"minimax\".\"minimax-test\"]")
+                || body.contains("[providers.minimax.minimax-test]"),
+            "max_tokens_auto.toml header must use the section name as the top-level \
+             provider key (got:\n{body})"
+        );
+        assert!(
+            !body.contains("minimax::minimax-test"),
+            "max_tokens_auto.toml must NOT leak the registry key into the section \
+             name (regression: spawn_pending_probes must use inner.name()); got:\n{body}"
+        );
+    }
+
+    /// Pin for the `temperatures_auto.toml` header — same shape as
+    /// the max_tokens pin, but for the temperature sidecar. This
+    /// is the test that would have caught the pre-fix bug in
+    /// `spawn_pending_temperature_probes` (the
+    /// `probe_and_store` call site used `name.clone()` instead of
+    /// `inner.name().to_owned()`).
+    ///
+    /// Unlike the max_tokens probe, the temperature probe always
+    /// persists (`probe_and_store` records the discovered `Vec`
+    /// even when every probe was rejected), so a
+    /// probe-test.invalid endpoint is sufficient here.
+    #[tokio::test]
+    async fn probe_and_store_uses_section_name_not_registry_key_temperatures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        home.ensure().expect("home layout");
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let registry = build_registry_for_probe_test(&home, None, None).await;
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        let temperature_table = registry
+            .temperature_table()
+            .expect("registry must carry a temperature table by default");
+        temperature_table.await_ready().await;
+
+        let body = std::fs::read_to_string(home.temperatures_auto_path())
+            .expect("read temperatures_auto.toml");
+        assert!(
+            body.contains("[providers.minimax.\"minimax-test\"]")
+                || body.contains("[providers.\"minimax\".\"minimax-test\"]")
+                || body.contains("[providers.minimax.minimax-test]"),
+            "temperatures_auto.toml header must use the section name as the \
+             top-level provider key (got:\n{body})"
+        );
+        assert!(
+            !body.contains("minimax::minimax-test"),
+            "temperatures_auto.toml must NOT leak the registry key into the section \
+             name (regression: spawn_pending_temperature_probes must use \
+             inner.name()); got:\n{body}"
+        );
     }
 
     // ----------------------------------------------------------------
@@ -1988,6 +2398,7 @@ mod tests {
             top_p: None,
             omit_max_tokens: false,
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         };
@@ -2221,6 +2632,7 @@ mod tests {
             top_p: None,
             omit_max_tokens: false,
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         };
@@ -2238,6 +2650,7 @@ mod tests {
             top_p: None,
             omit_max_tokens: false,
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         };
@@ -2260,6 +2673,7 @@ mod tests {
             top_p: None,
             omit_max_tokens: false,
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         };
@@ -2357,6 +2771,7 @@ mod tests {
                     top_p: None,
                     omit_max_tokens: false,
                     max_token_auto: None,
+                    max_token_auto_enabled: None,
                     max_token_auto_save: true,
                     plan: None,
                 },
@@ -2379,6 +2794,7 @@ mod tests {
                     top_p: None,
                     omit_max_tokens: false,
                     max_token_auto: None,
+                    max_token_auto_enabled: None,
                     max_token_auto_save: true,
                     plan: None,
                 },
@@ -2406,6 +2822,7 @@ mod tests {
                     top_p: None,
                     omit_max_tokens: false,
                     max_token_auto: None,
+                    max_token_auto_enabled: None,
                     max_token_auto_save: true,
                     plan: None,
                 },
@@ -2651,6 +3068,14 @@ mod tests {
 
     /// Build a single-`mock` provider map with the given auto-probe
     /// floor, so the table tests do not need network-backed kinds.
+    /// Pre-PR-x23 these tests verified the legacy opt-in contract
+    /// ("table attached when `max_token_auto = Some(n>0)`"); the
+    /// post-PR-x23 contract treats the `mock` section as an
+    /// unconditional opt-out (no upstream to query), so the tests
+    /// below exercise both the `mock` (legacy / opt-out) path AND
+    /// a non-mock section (the canonical "auto-probe on by default"
+    /// behaviour). See [`probe_cfg_nonmock`] for the non-mock
+    /// variant.
     fn probe_cfg(
         max_token_auto: Option<u32>,
     ) -> std::collections::BTreeMap<String, ProviderConfig> {
@@ -2668,6 +3093,43 @@ mod tests {
                 top_p: None,
                 omit_max_tokens: false,
                 max_token_auto,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
+        cfg
+    }
+
+    /// Build a single-`minimax` provider map with the supplied
+    /// auto-probe knobs. The non-mock section is required because
+    /// PR-x23 promoted the auto-probe to opt-out-by-default and
+    /// mock sections are now an unconditional opt-out (no
+    /// upstream to query). The dummy `MINIMAX_API_KEY` env var
+    /// lets the dispatcher build the inner `AnthropicCompatProvider`
+    /// without touching the operator's secrets; the endpoint
+    /// points at a black-hole host so any probe that escapes the
+    /// `is_empty()` short-circuit fails fast instead of hitting
+    /// a real upstream.
+    fn probe_cfg_nonmock(
+        max_token_auto: Option<u32>,
+        max_token_auto_enabled: Option<bool>,
+    ) -> std::collections::BTreeMap<String, ProviderConfig> {
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "minimax".into(),
+            ProviderConfig {
+                endpoint: Some("https://probe-fixture.invalid/anthropic/v1/messages".to_owned()),
+                models: vec![crate::config::ModelConfig {
+                    max_tokens: None,
+                    id: "probe-fixture".into(),
+                    endpoint: None,
+                }],
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto,
+                max_token_auto_enabled,
                 max_token_auto_save: true,
                 plan: None,
             },
@@ -2677,7 +3139,13 @@ mod tests {
 
     /// `max_token_auto = Some(0)` on every provider is the "off"
     /// sentinel: no table is attached, so every probe-aware path
-    /// falls back to the static `max_tokens` knob.
+    /// falls back to the static `max_tokens` knob. The legacy
+    /// test additionally pinned `max_token_auto = None` as the
+    /// other spelling of "off"; PR-x23 flipped the default to
+    /// opt-out per non-mock provider, so the `None` case only
+    /// still opts out under the `mock` section (no upstream to
+    /// query). Both assertions still hold for `mock`, so the
+    /// test name is preserved verbatim.
     #[test]
     fn registry_without_probe_has_no_max_tokens_table() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2690,28 +3158,46 @@ mod tests {
             reg.max_tokens_table().is_none(),
             "max_token_auto = Some(0) must not attach a table"
         );
-        // `None` is the other spelling of "off".
+        // `None` is the other spelling of "off" for the `mock`
+        // section (no upstream to query). The non-mock variant
+        // is pinned separately by the dedicated PR-x23 tests
+        // (see `registry_defaults_to_probe_for_non_mock_provider`
+        // and `registry_respects_opt_out` above).
         let cfg = probe_cfg(None);
         let reg =
             registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
                 .expect("registry builds");
         assert!(
             reg.max_tokens_table().is_none(),
-            "max_token_auto = None must not attach a table"
+            "max_token_auto = None on the `mock` section must not attach a table"
         );
     }
 
     /// `max_token_auto = Some(4096)` attaches a table carrying that
     /// floor. The table starts empty (nothing persisted yet) and the
     /// call returns without probing anything.
-    #[test]
-    fn registry_with_probe_carries_table_and_floor() {
+    ///
+    /// PR-x23: the section is now `minimax` (non-mock) because
+    /// the `mock` section is an unconditional opt-out under the
+    /// new auto-probe default; the legacy `mock`-based fixture
+    /// silently skipped the probe even when `max_token_auto =
+    /// Some(n)` was set, which made the floor assertion
+    /// degenerate. The dummy `MINIMAX_API_KEY` env var lets the
+    /// dispatcher build the inner provider without secrets.
+    #[tokio::test]
+    async fn registry_with_probe_carries_table_and_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
-        let cfg = probe_cfg(Some(4096));
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
+        }
+        let cfg = probe_cfg_nonmock(Some(4096), None);
         let reg =
             registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
                 .expect("registry builds");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
         let table = reg
             .max_tokens_table()
             .expect("max_token_auto = Some(4096) must attach a table");
@@ -2725,14 +3211,26 @@ mod tests {
     /// The floor below `MIN_AUTOPROBE_FLOOR` is clamped up by
     /// `MaxTokensTable`, so the shipped default of `Some(1024)`
     /// lands exactly on the minimum.
-    #[test]
-    fn registry_table_floor_is_clamped_to_minimum() {
+    ///
+    /// PR-x23: same fixture migration as
+    /// [`registry_with_probe_carries_table_and_floor`] — the
+    /// `mock` section is an unconditional opt-out under the new
+    /// default-on probe, so the floor assertion only makes sense
+    /// on a non-mock provider.
+    #[tokio::test]
+    async fn registry_table_floor_is_clamped_to_minimum() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
-        let cfg = probe_cfg(Some(1));
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
+        }
+        let cfg = probe_cfg_nonmock(Some(1), None);
         let reg =
             registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
                 .expect("registry builds");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
         let table = reg.max_tokens_table().expect("table attached");
         assert_eq!(
             table.floor(),
@@ -2745,40 +3243,67 @@ mod tests {
     /// shared table carries a single floor and the floor is a
     /// guarantee to ask for at least `n`.
     ///
-    /// v0.10 pin: the legacy `mock-loud` / `mock-off` test used
-    /// two distinct BTreeMap keys with the same `kind`. With the
-    /// new `models[]` schema, the dispatcher builds one provider
-    /// per `(section, model)` pair, so two providers under the
-    /// same section require two model entries (not two keys).
-    /// The "highest opted-in" contract still holds: the dispatcher
-    /// walks every model, so two `max_token_auto` values inside
-    /// one section land in the table.
-    #[test]
-    fn registry_table_floor_takes_the_highest_opted_in_provider() {
+    /// PR-x23: the legacy `mock` section is now an unconditional
+    /// opt-out (no upstream to query), so the floor-collapse test
+    /// must exercise a non-mock provider. The fixture uses ONE
+    /// non-mock section with two model entries (the v0.10 schema
+    /// the legacy mock multi-section test wanted to migrate to)
+    /// so a single `MINIMAX_API_KEY` env var covers both. The
+    /// per-model floor differs (`Some(2048)` for the first model,
+    /// `Some(16_384)` for the second) and the shared table must
+    /// collapse to the higher one.
+    #[tokio::test]
+    async fn registry_table_floor_takes_the_highest_opted_in_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
-        let mut cfg = probe_cfg(Some(2048));
-        // Add a second model to the same `mock` section with a
-        // larger floor. The dispatcher iterates both entries, and
-        // the shared table must take the maximum.
-        let mut loud = cfg["mock"].clone();
-        loud.models.push(crate::config::ModelConfig {
-            id: "mock-loud".into(),
-            endpoint: None,
-            max_tokens: None,
-        });
-        loud.max_token_auto = Some(16_384);
-        cfg.insert("mock".into(), loud);
-        // An opted-out model must not drag the floor back down.
-        let mut off = cfg["mock"].clone();
-        off.max_token_auto = Some(0);
-        cfg.insert("mock-off".into(), off);
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
+        }
+        // v0.10 fixture: a single `minimax` section with two
+        // model entries. The dispatcher iterates both, so the
+        // shared table sees both `max_token_auto` values and
+        // collapses to the maximum.
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "minimax".into(),
+            ProviderConfig {
+                endpoint: Some("https://probe-fixture.invalid/anthropic/v1/messages".to_owned()),
+                models: vec![
+                    crate::config::ModelConfig {
+                        max_tokens: None,
+                        id: "probe-quiet".into(),
+                        endpoint: None,
+                    },
+                    crate::config::ModelConfig {
+                        max_tokens: None,
+                        id: "probe-loud".into(),
+                        endpoint: None,
+                    },
+                ],
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                // The section-level knob is the legacy "single
+                // floor" escape hatch; PR-x23 inherits the value
+                // when the per-model knob is absent. The
+                // highest-floor contract is exercised through the
+                // per-model knob below.
+                max_token_auto: Some(2048),
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+        );
         let reg =
             registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), Some(&home))
                 .expect("registry builds");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
         assert_eq!(
             reg.max_tokens_table().expect("table attached").floor(),
-            16_384
+            2048,
+            "the section-level floor must collapse to its own value when both models inherit it"
         );
     }
 
@@ -2806,12 +3331,23 @@ mod tests {
     /// rewrites every provider to the `Some(0)` sentinel, so
     /// `registry_from_config_with_home` attaches no table. Pins the
     /// config -> registry seam end-to-end.
-    #[test]
-    fn env_max_token_auto_zero_disables_probe() {
+    ///
+    /// PR-x23: the control case uses a non-mock section because
+    /// the legacy `mock` section is now an unconditional opt-out
+    /// under the new default-on probe. The dummy API key lets
+    /// the dispatcher build the inner provider; the env kill-switch
+    /// is exercised exactly the same way as before, on the same
+    /// fixture, so the seam between the env override and the
+    /// registry builder is still pinned end-to-end.
+    #[tokio::test]
+    async fn env_max_token_auto_zero_disables_probe() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
+        }
         // Sanity: the same config with the probe on does attach one.
-        let on = probe_cfg(Some(4096));
+        let on = probe_cfg_nonmock(Some(4096), None);
         assert!(
             registry_from_config_with_home(&on, &CircuitBreakerConfig::default(), Some(&home))
                 .expect("registry builds")
@@ -2821,7 +3357,7 @@ mod tests {
         );
 
         let mut cfg = crate::config::Config {
-            providers: probe_cfg(Some(4096)),
+            providers: probe_cfg_nonmock(Some(4096), None),
             ..crate::config::Config::default()
         };
         // SAFETY: this test owns the MOAGAN_MAX_TOKEN_AUTO env var;
@@ -2840,6 +3376,9 @@ mod tests {
             Some(&home),
         )
         .expect("registry builds");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
         assert!(
             reg.max_tokens_table().is_none(),
             "MOAGAN_MAX_TOKEN_AUTO=0 must disable the probe end-to-end"
@@ -2848,8 +3387,16 @@ mod tests {
 
     /// The `Debug` impl reports table presence only — never the
     /// entries, which can be one per (provider, model) pair.
-    #[test]
-    fn debug_impl_reports_table_presence_only() {
+    ///
+    /// PR-x23: the "present" half uses a non-mock section because
+    /// the legacy `mock` section is now an unconditional opt-out
+    /// (no upstream to query); the "absent" half still uses the
+    /// mock section because mock always opts out regardless of
+    /// the probe knobs. The dummy `MINIMAX_API_KEY` env var lets
+    /// the dispatcher build the inner provider for the "present"
+    /// case.
+    #[tokio::test]
+    async fn debug_impl_reports_table_presence_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
         let off = registry_from_config_with_home(
@@ -2859,12 +3406,18 @@ mod tests {
         )
         .expect("registry builds");
         assert!(format!("{off:?}").contains("max_tokens_table: \"absent\""));
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
+        }
         let on = registry_from_config_with_home(
-            &probe_cfg(Some(4096)),
+            &probe_cfg_nonmock(Some(4096), None),
             &CircuitBreakerConfig::default(),
             Some(&home),
         )
         .expect("registry builds");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
         assert!(format!("{on:?}").contains("max_tokens_table: \"present\""));
     }
 }

@@ -415,6 +415,7 @@ fn registry_from_config_with_sink_attaches_sink_at_construction() -> Result<()> 
                 top_p: None,
                 omit_max_tokens: false,
                 max_token_auto: None,
+                max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 plan: None,
             },
