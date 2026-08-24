@@ -72,6 +72,17 @@ pub static TEST_API_KEYS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub static TEST_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialises every test that mutates the
+/// `MOAGAN_MINIMAX_MODEL` / `MOAGAN_MINIMAX_ENDPOINT` env vars
+/// (the v0.10 config-override surface). `Config::apply_env_overrides`
+/// reads these once at the top of the call, so a parallel
+/// thread that flips the var between `set_var` and
+/// `apply_env_overrides` would race the override. Tests in
+/// `config::tests` and any future caller must acquire this lock
+/// for the duration of the mutation + the dispatch call.
+#[cfg(test)]
+pub static TEST_MINIMAX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Serialises every test that calls `std::env::set_current_dir`.
 /// Without it, parallel `cargo test` runs observe each other's
 /// cwd changes and report flakes. Used by the PR-B2 config-

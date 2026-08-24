@@ -208,11 +208,12 @@ fn locate(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serialises tests that mutate the `MOAGAN_HOME` env var so a
-    /// parallel run can't observe another test's empty/unset
-    /// home mid-write.
-    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::TEST_MOAGAN_HOME_LOCK;
+    // Cross-module serialisation: every test that mutates the
+    // `MOAGAN_HOME` env var (including ones in `config::profile`,
+    // `reconcile`, and `fs_layout`) shares the crate-wide
+    // `TEST_MOAGAN_HOME_LOCK` so a parallel test on another thread
+    // cannot observe a half-applied home.
 
     #[test]
     fn profile_default_is_empty() {
@@ -225,7 +226,9 @@ mod tests {
 
     #[test]
     fn profile_load_returns_not_found_for_missing_name() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("MOAGAN_HOME");
         }
@@ -290,7 +293,9 @@ mod tests {
 
     #[test]
     fn profile_inherits_from_parent_via_extends() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe {
             std::env::set_var("MOAGAN_HOME", dir.path());
@@ -329,7 +334,9 @@ mod tests {
 
     #[test]
     fn profile_detects_circular_extends_chain() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe {
             std::env::set_var("MOAGAN_HOME", dir.path());

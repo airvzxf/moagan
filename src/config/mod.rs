@@ -2570,6 +2570,15 @@ mod tests {
 
     #[test]
     fn env_overrides_minimax_endpoint() {
+        // Serialised against every other test in this module that
+        // mutates the `MOAGAN_MINIMAX_*` env vars (and against any
+        // out-of-module test that touches them). Without the lock,
+        // a parallel test flipping the var between `set_var` and
+        // `apply_env_overrides` would race the override.
+        let _lock = crate::TEST_MINIMAX_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
         // Default config has the hardcoded production endpoint.
         let mut cfg = Config::default();
         let baseline = cfg
@@ -2611,11 +2620,13 @@ mod tests {
     /// different default).
     #[test]
     fn env_overrides_minimax_model() {
-        // Serialised against `env_overrides_minimax_model_ignores_blank`
-        // and every other test in this module that mutates process-wide
-        // env vars. Without the lock, parallel test threads race on the
-        // shared `MOAGAN_MINIMAX_MODEL` value.
-        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Serialised against `env_overrides_minimax_model_ignores_blank`,
+        // `env_overrides_minimax_endpoint`, and any out-of-module test
+        // that touches the same env vars. Without the lock, parallel
+        // test threads race on the shared `MOAGAN_MINIMAX_MODEL` value.
+        let _lock = crate::TEST_MINIMAX_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         let mut cfg = Config::default();
         // Baseline: every direct-minimax provider carries its canonical
@@ -2629,12 +2640,22 @@ mod tests {
             "MiniMax-M2.7-highspeed"
         );
 
+        // Set, exercise, restore — every step inside the lock so
+        // a parallel test on another thread cannot see a half-applied
+        // state. Drop order guarantees the env var is restored even
+        // when an assertion panics.
+        let prev = std::env::var("MOAGAN_MINIMAX_MODEL").ok();
         unsafe {
             std::env::set_var("MOAGAN_MINIMAX_MODEL", "MiniMax-M2.5");
         }
         cfg.apply_env_overrides();
-        unsafe {
-            std::env::remove_var("MOAGAN_MINIMAX_MODEL");
+        match prev {
+            Some(v) => unsafe {
+                std::env::set_var("MOAGAN_MINIMAX_MODEL", v);
+            },
+            None => unsafe {
+                std::env::remove_var("MOAGAN_MINIMAX_MODEL");
+            },
         }
 
         // Only direct-minimax providers (kind="minimax") reflect the env
@@ -2668,10 +2689,12 @@ mod tests {
     /// `MOAGAN_MINIMAX_ENDPOINT` handling.
     #[test]
     fn env_overrides_minimax_model_ignores_blank() {
-        // Serialised against `env_overrides_minimax_model`; both tests
-        // mutate the shared `MOAGAN_MINIMAX_MODEL` env var, so they
-        // must not run in parallel.
-        let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Serialised against `env_overrides_minimax_model` and every
+        // other test that touches the shared `MOAGAN_MINIMAX_*` env
+        // vars.
+        let _lock = crate::TEST_MINIMAX_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         let mut cfg = Config::default();
         unsafe {
