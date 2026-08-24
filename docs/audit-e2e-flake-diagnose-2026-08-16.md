@@ -22,7 +22,7 @@
 a 5 ms artificial delay, spawns a `moagan audit proxy` sidecar in
 a child process, parses the `proxy listening on http://...` line
 from stderr to discover the bound port, then spawns a
-`moagan run --mode deep --provider minimax --prompt "List the seven
+`moagan run --mode deep --provider minimax:MiniMax-M3 --prompt "List the seven
 rainbow colors in order"` child process that points at the proxy
 via `MOAGAN_MINIMAX_ENDPOINT`. The test waits for the `run` to
 exit, SIGTERMs the proxy, waits for the proxy's stderr drain to

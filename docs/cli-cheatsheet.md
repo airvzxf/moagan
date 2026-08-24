@@ -155,7 +155,7 @@ Every OpenCode Go provider entry — `opencode_go_anthropic`, `opencode_go_respo
 | `--no-replace-sources` | only applies in modes with `SynthesizePhase` (`standard`/`deep`/`batch`) |
 | `--context-summary` or `--context-full` without `--context` | **error** → exit 2 (`InvalidArgs`) |
 | `--context <uuid>` | must be a valid UUID v7 or a path to a `.md` file or directory |
-| `--provider mock` + `--mock-dir` | loads JSON fixtures; without `--mock-dir` the mock exhausts immediately |
+| `--provider mock:mock-model` + `--mock-dir` | loads JSON fixtures; without `--mock-dir` the mock exhausts immediately |
 | `--profile <name>` | looks up `<name>.toml` under `$MOAGAN_HOME/profiles/` or `~/.config/moagan/profiles/` |
 | `--hash-algo <x>` | only `sha256` or `blake3`; anything else → exit 2 |
 | `--hash-algo` absent | default `blake3` (`Config::export.hash_algo::default()` = `Blake3`, even though the bare `HashAlgo` enum default is `Sha256` — see `src/config/mod.rs:294`) |
@@ -810,7 +810,7 @@ cli::dispatch → Cmd::Audit::Verify → audit::verify_cmd(VerifyArgs)
 | `--cache-facets` | cross-run cache keyed by `sha256(brief + category_id)`, TTL `MOAGAN_FACET_CACHE_TTL_SECS` |
 | `--temperature-profile <SPEC>` (repeatable) | per-provider sampling-temperature profile (PR-D1); grammar `provider=<model>;temperatures=<csv>;replicas=<n>` (see §14.1). Multiple `--temperature-profile` flags for the same provider are allowed; **last wins**. Providers without a spec fall back to the matrix's `default_profile` (`[1.0] × 1`) so the v0.5 single-shot contract is preserved |
 | `--non-interactive` | intake without TTY → every checkpoint becomes skipped |
-| `--provider mock` + `--mock-dir` | loads JSON fixtures |
+| `--provider mock:mock-model` + `--mock-dir` | loads JSON fixtures |
 | `--mode`-style flag | n/a; discovery is its own subcommand |
 
 **⚙️ Internal flow**

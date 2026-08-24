@@ -44,9 +44,9 @@ API key vía `OPENCODE_GO_API_KEY` (env o `api_keys.toml`). Hard-cap compartido 
 
 ## §4. Tests de discovery existentes
 
-**Provider real:** ninguno contra `opencode_go`. El único test e2e discovery con provider real está en `scripts/e2e_audit_proxy.sh` (sub-bloque `card80`) y usa `--provider minimax` con sidecar proxy.
+**Provider real:** ninguno contra `opencode_go`. El único test e2e discovery con provider real está en `scripts/e2e_audit_proxy.sh` (sub-bloque `card80`) y usa `--provider minimax:MiniMax-M3` con sidecar proxy.
 
-**Provider mock:** `tests/integration_discovery.rs` (~30 tests con `MockProvider`), `tests/integration_pr17_coordinator_wire.rs`, `scripts/smoke_discovery.sh` (120 tests grep-based, todos con `--provider mock`).
+**Provider mock:** `tests/integration_discovery.rs` (~30 tests con `MockProvider`), `tests/integration_pr17_coordinator_wire.rs`, `scripts/smoke_discovery.sh` (120 tests grep-based, todos con `--provider mock:mock-model`).
 
 **`opencode_go` sólo aparece en `tests/integration_q3_dotenv.rs`** (verifica carga de key desde `.env` — no toca discovery).
 

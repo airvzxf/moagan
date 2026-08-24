@@ -73,9 +73,9 @@ that touches a single module.
 
 ## Smoke gates (must pass before handing back)
 
-1. `moagan run --mode fast --provider mock` produces
+1. `moagan run --mode fast --provider mock:mock-model` produces
    `final/portfolio.md` and `rankings/ranking.json`.
-2. `moagan run --mode fast --provider minimax` with a valid
+2. `moagan run --mode fast --provider minimax:MiniMax-M3` with a valid
    `MINIMAX_API_KEY` produces the same artifacts and writes to
    `telemetry/calls.jsonl.gz`.
 

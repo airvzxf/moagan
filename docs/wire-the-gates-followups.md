@@ -77,13 +77,13 @@ No test was modified by this branch.
 
 ## §3. End-to-end smoke checklist
 
-After these four commits, a `moagan run --mode fast --provider mock`
+After these four commits, a `moagan run --mode fast --provider mock:mock-model`
 run still produces `final/portfolio.md` and `rankings/ranking.json`
 (no behaviour change for the mock path — `RunContext::provider()`
 returns the mock and the catalog gates are no-ops because every
 mock call has empty attachments and no `tool_choice`).
 
-A `moagan run --mode fast --provider minimax` run with a valid
+A `moagan run --mode fast --provider minimax:MiniMax-M3` run with a valid
 `MINIMAX_API_KEY` and a populated `<MOAGAN_HOME>/models_dev.json`:
 
 - on cache miss: `load_or_fetch` fetches and persists the catalog.
