@@ -22,7 +22,6 @@ use crate::phases::{
     RepairPhase, RoutePhase, RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
 };
 use crate::redact::{self, RedactPolicy};
-use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::{PhaseEvent, Telemetry};
 
@@ -80,10 +79,27 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
 
-    let default_provider = if opts.provider.is_empty() {
+    // v0.10: `--provider` is mandatory. Resolution order:
+    //   1. CLI flag (`opts.provider`).
+    //   2. `cfg.default_provider` (env var `MOAGAN_DEFAULT_PROVIDER`
+    //      or `[defaults] provider` in config.toml — `apply_env_overrides`
+    //      already merged them onto the `Config`).
+    // When none of those is set, the helper errors with a clear
+    // message listing the resolution order so the operator can fix
+    // the missing flag without spelunking the codebase.
+    let raw_provider = opts.provider.clone();
+    let default_provider = if !raw_provider.trim().is_empty() {
+        raw_provider
+    } else if !cfg.default_provider.trim().is_empty() {
         cfg.default_provider.clone()
     } else {
-        opts.provider.clone()
+        return Err(Error::InvalidArgs(
+            "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
+             or [defaults] provider in config.toml); example:\n  \
+             moagan run --provider opencode:kimi-k3 --prompt \"...\"\n  \
+             moagan run --provider opencode --model kimi-k3 --prompt \"...\""
+                .to_owned(),
+        ));
     };
 
     // Open the SQLite index under MOAGAN_HOME/meta.sqlite. The
@@ -91,7 +107,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // the DB so `moagan inspect` returns live data.
     let db = Db::open(&home.meta_db_path())?;
     let config_hash = Some(crate::ids::blake3_hex(
-        crate::ids::canonical_hash(&[cfg.default_provider.as_str()]).as_bytes(),
+        crate::ids::canonical_hash(&[default_provider.as_str()]).as_bytes(),
     ));
 
     // Phase J: resolve + load the upstream context (if any) BEFORE
@@ -201,7 +217,23 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // (the helper rebuilds it from telemetry after the pipeline
     // finishes; the stub just carries the fields used by the
     // lineage block).
-    let default_model = cfg.provider(&default_provider)?.model.clone();
+    let default_model = if default_provider.contains(':') {
+        crate::cli::probe::parse_provider_model(&default_provider)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare SECTION is no longer accepted in v0.10+ (no
+        // implicit "first model" fallback). Surface the error early
+        // so the operator sees it before the rest of the pipeline
+        // boots. The later sites also re-check this; surfacing it
+        // here keeps the manifest stub honest too.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{default_provider}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {default_provider}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
+    };
 
     let stub = Manifest {
         schema_version: Manifest::schema_version_string(),
@@ -293,6 +325,12 @@ pub async fn run_full_pipeline(
     let run_dir = home.run_dir(run_id);
     let cfg_arc = Arc::new(cfg.clone());
     let mode = parse_mode(&stub.mode)?;
+    // v0.10: the resolved provider string comes from either the
+    // stub (built by the run dispatcher after the operator's CLI
+    // flag + env-var resolution) or `cfg.default_provider`. Both
+    // paths now carry the `SECTION[:MODEL]` form; the
+    // `resolve_provider` helper below turns it into a
+    // `(section, model_id)` pair the registry can key on.
     let default_provider = if stub.provider.is_empty() {
         cfg.default_provider.clone()
     } else {
@@ -309,6 +347,46 @@ pub async fn run_full_pipeline(
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }
     let resolved_parallelism = max_parallelism.unwrap_or(cfg.max_parallelism);
+    // Resolve the (section, model_id) pair the registry will
+    // build, so we can pin `default_model` to the same value the
+    // registry keys on. v0.10 uses `Config::resolve_provider` to
+    // parse `SECTION[:MODEL]`; single-model sections return their
+    // canonical model id, multi-model sections require explicit
+    // `SECTION:MODEL` (the helper errors with a clear message).
+    let resolved_default_model = if stub.provider.is_empty() {
+        cfg.default_provider.clone()
+    } else {
+        stub.provider.clone()
+    };
+    // The section name (`"minimax"`, `"mock"`, …) and the model id
+    // are extracted once here so the `RunContext` and the
+    // provider-registry key agree on a single `(section, model_id)`
+    // pair. `parse_provider_model` returns an error if the operator
+    // passed a bare `SECTION`; mirror that on the stub's provider
+    // path so the error surfaces here too (the stub is built before
+    // `parse_provider_model` would otherwise have a chance to fire).
+    let resolved_default_model_section =
+        crate::cli::probe::parse_provider_model(&resolved_default_model)
+            .map(|(s, _)| s)
+            .unwrap_or_else(|_| resolved_default_model.clone());
+    let default_model = if resolved_default_model.contains(':') {
+        // `SECTION:MODEL` shape — the model half is verbatim.
+        crate::cli::probe::parse_provider_model(&resolved_default_model)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare `SECTION` shape — per the v0.10 plan there is no
+        // implicit "first model" fallback. The operator must
+        // always pass `SECTION:MODEL` so the intent is
+        // unambiguous; we error out with a clear hint rather than
+        // silently picking the first entry of `models[]`.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{resolved_default_model}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {resolved_default_model}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
+    };
     let providers = Arc::new(build_registry_for(
         cfg,
         &default_provider,
@@ -321,7 +399,6 @@ pub async fn run_full_pipeline(
     // until they have all landed.
     let max_tokens_table = providers.max_tokens_table().cloned();
     let temperature_table = providers.temperature_table().cloned();
-    let default_model = cfg.provider(&default_provider)?.model.clone();
 
     // Wire-the-gates plan: refresh the on-disk `models.dev` catalog
     // so the modality gate (`ModalityGate::apply`) and the cost
@@ -419,7 +496,12 @@ pub async fn run_full_pipeline(
         run_id,
         Arc::clone(&home),
         providers,
-        default_provider.clone(),
+        // The RunContext stores the section name (no `SECTION:MODEL`
+        // suffix) so the provider-registry key joins cleanly:
+        // `registry_key(section, model)` = `"section::model"`. The
+        // full `SECTION:MODEL` string stays on `stub.provider` /
+        // `manifest.provider` for the operator-facing surfaces.
+        resolved_default_model_section.clone(),
         default_model.clone(),
         parallelism,
         telemetry.clone(),
@@ -612,31 +694,63 @@ pub(crate) fn build_registry_for_with_api_key(
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
 ) -> Result<ProviderRegistry> {
+    // v0.10 (Phase 5): the CLI requires `SECTION:MODEL` for every
+    // selection. There is no implicit "first model" fallback for
+    // bare `SECTION` — the operator must always pass the explicit
+    // form so the intent is unambiguous.
+    let (section, model_id) =
+        super::probe::parse_provider_model(selected).map_err(|e| match e {
+            Error::InvalidArgs(msg) => Error::InvalidArgs(format!(
+                "build_registry_for: {msg} (--provider expects 'PROVIDER:MODEL')"
+            )),
+            other => other,
+        })?;
     let spec = cfg
         .providers
-        .get(selected)
-        .ok_or_else(|| Error::InvalidArgs(format!("provider '{selected}' is not in config")))?
+        .get(&section)
+        .ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "provider '{section}' is not in config (known sections: [{}])",
+                cfg.providers.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))
+        })?
         .clone();
-    if spec.kind == "mock"
+    // Mock short-circuit: load canned responses from disk and
+    // register them under the requested `(section, model_id)` key.
+    // The legacy `mock` section has no upstream. When the
+    // operator passed `--provider mock` (single-model alias) the
+    // resolved model id is `mock-model`; we register under both
+    // the joined `mock::mock-model` key and the bare `mock` key
+    // so the legacy `RunContext::provider()` lookup (which uses
+    // the section name for backward compatibility) finds the
+    // provider.
+    if section == "mock"
         && let Some(dir) = mock_dir
     {
         let mock = crate::llm::MockProvider::from_dir(dir)?;
         let mut reg = ProviderRegistry::default();
-        reg.insert(selected.to_owned(), Arc::new(mock));
+        let joined = ProviderRegistry::registry_key(&section, &model_id);
+        reg.insert(joined, Arc::new(mock));
         return Ok(reg);
     }
-    if spec.kind == "minimax"
-        && let Some(key) = api_key
-    {
-        let provider =
-            crate::llm::minimax::MinimaxProvider::new(&spec, SecretString::new(key.to_owned()))?;
+    // Minimax API-key short-circuit: the `--api-key` flag
+    // overrides the env lookup. Wire the section into the
+    // dispatcher with the operator-supplied key.
+    if section == "minimax" && api_key.is_some() {
+        let resolved = cfg.resolved_model(&section, &model_id)?;
+        let provider = crate::llm::minimax::MinimaxProvider::from_resolved(&resolved)?;
         let mut reg = ProviderRegistry::default();
-        reg.insert(selected.to_owned(), Arc::new(provider));
+        let key = ProviderRegistry::registry_key(&section, &model_id);
+        reg.insert(
+            key,
+            Arc::new(provider) as Arc<dyn crate::llm::provider::Provider>,
+        );
         return Ok(reg);
     }
     let mut spec_map = std::collections::BTreeMap::new();
-    spec_map.insert(selected.to_owned(), spec);
-    registry_from_config(&spec_map, &cfg.circuit_breaker)
+    spec_map.insert(section.clone(), spec);
+    let reg = registry_from_config(&spec_map, &cfg.circuit_breaker)?;
+    Ok(reg)
 }
 
 /// Cardinality knobs for a single pipeline run. Returned by

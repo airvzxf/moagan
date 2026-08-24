@@ -53,7 +53,7 @@ pub use error::{Error, ExitCode, Result, exit_code};
 pub static TEST_MOAGAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serialises every test that mutates `MINIMAX_API_KEY` /
-/// `DEEPSEEK_API_KEY` / `OPENCODE_GO_API_KEY` process-wide. Shared
+/// `DEEPSEEK_API_KEY` / `OPENCODE_API_KEY` process-wide. Shared
 /// across the LLM provider tests (`llm::api_keys::tests`),
 /// `cli::doctor::tests`, and any future caller that touches those
 /// env vars — without it, parallel `cargo test` runs observe
@@ -71,6 +71,17 @@ pub static TEST_API_KEYS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// concern and any concurrent mutation would race.
 #[cfg(test)]
 pub static TEST_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serialises every test that mutates the
+/// `MOAGAN_MINIMAX_MODEL` / `MOAGAN_MINIMAX_ENDPOINT` env vars
+/// (the v0.10 config-override surface). `Config::apply_env_overrides`
+/// reads these once at the top of the call, so a parallel
+/// thread that flips the var between `set_var` and
+/// `apply_env_overrides` would race the override. Tests in
+/// `config::tests` and any future caller must acquire this lock
+/// for the duration of the mutation + the dispatch call.
+#[cfg(test)]
+pub static TEST_MINIMAX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serialises every test that calls `std::env::set_current_dir`.
 /// Without it, parallel `cargo test` runs observe each other's
@@ -126,7 +137,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(mode, cli::Mode::Fast);
-                assert_eq!(provider, "mock");
+                assert_eq!(provider.as_deref(), Some("mock"));
                 assert_eq!(prompt, "hello");
             }
             _ => panic!("expected Run"),

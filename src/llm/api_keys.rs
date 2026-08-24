@@ -1,7 +1,7 @@
 //! Unified API-key resolution with `api_keys.toml` precedence.
 //!
 //! Lookup order per provider kind (`"minimax"`, `"deepseek"`,
-//! `"opencode_go"`):
+//! `"opencode"`):
 //!
 //! 1. `<MOAGAN_HOME>/api_keys.toml` entry for the kind, parsed by
 //!    [`super::api_keys_file::ApiKeysFile`]. The spec string is one
@@ -13,7 +13,7 @@
 //! 2. Direct env var fallback (today's behaviour):
 //!      - `minimax`         → `MINIMAX_API_KEY`
 //!      - `deepseek`        → `DEEPSEEK_API_KEY`
-//!      - `opencode_go`     → `OPENCODE_GO_API_KEY`
+//!      - `opencode`        → `OPENCODE_API_KEY`
 //!
 //! If both (1) and (2) are present, the `api_keys.toml` value wins
 //! — the file is the operator's explicit override. A spec that
@@ -37,7 +37,7 @@ fn env_var_for(kind: &str) -> Option<&'static str> {
     match kind {
         "minimax" => Some("MINIMAX_API_KEY"),
         "deepseek" => Some("DEEPSEEK_API_KEY"),
-        "opencode_go" => Some("OPENCODE_GO_API_KEY"),
+        "opencode" => Some("OPENCODE_API_KEY"),
         _ => None,
     }
 }
@@ -132,6 +132,19 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
     }
 }
 
+/// Resolve the api-keys table key for a `ResolvedModelConfig`.
+///
+/// v0.10 (post-Phase 8 cleanup): the section name IS the canonical
+/// provider-family key — the v0.9 / Phase 1 `kind` tag is gone.
+/// `api_keys.toml` is keyed on the same name the operator passes
+/// to `--provider` (e.g. `minimax`, `opencode`, `deepseek`), and
+/// the env-var fallback (`MINIMAX_API_KEY` / `OPENCODE_API_KEY` /
+/// `DEEPSEEK_API_KEY`) is the uppercased `_API_KEY`-suffixed
+/// version of that name.
+pub(crate) fn lookup_kind_for_resolved(resolved: &crate::config::ResolvedModelConfig) -> String {
+    resolved.section.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,7 +156,7 @@ mod tests {
     struct EnvGuard {
         minimax: Option<String>,
         deepseek: Option<String>,
-        opencode_go: Option<String>,
+        opencode: Option<String>,
     }
 
     impl EnvGuard {
@@ -151,7 +164,7 @@ mod tests {
             Self {
                 minimax: std::env::var("MINIMAX_API_KEY").ok(),
                 deepseek: std::env::var("DEEPSEEK_API_KEY").ok(),
-                opencode_go: std::env::var("OPENCODE_GO_API_KEY").ok(),
+                opencode: std::env::var("OPENCODE_API_KEY").ok(),
             }
         }
     }
@@ -160,7 +173,7 @@ mod tests {
         fn drop(&mut self) {
             restore_or_remove("MINIMAX_API_KEY", self.minimax.as_deref());
             restore_or_remove("DEEPSEEK_API_KEY", self.deepseek.as_deref());
-            restore_or_remove("OPENCODE_GO_API_KEY", self.opencode_go.as_deref());
+            restore_or_remove("OPENCODE_API_KEY", self.opencode.as_deref());
         }
     }
 

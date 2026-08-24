@@ -184,7 +184,7 @@ run_test "disagreement_score_single_sample_is_none_unit_test" \
 # ---------------------------------------------------------------------
 
 TMPHOME_ADV=$(mkhome)
-"$BIN" run --mode standard --provider mock --prompt "Build adversarial e2e" --max-parallelism 2 --runs-dir "$TMPHOME_ADV" --mock-dir "$MOCK_DIR" --non-interactive > "$TMPHOME_ADV/run.out" 2>&1 || true
+"$BIN" run --mode standard --provider mock:mock-model --prompt "Build adversarial e2e" --max-parallelism 2 --runs-dir "$TMPHOME_ADV" --mock-dir "$MOCK_DIR" --non-interactive > "$TMPHOME_ADV/run.out" 2>&1 || true
 ADV_RID=$(ls "$TMPHOME_ADV/.runs/" 2>/dev/null | sort -r | head -1)
 ADV_DIR="$TMPHOME_ADV/.runs/$ADV_RID"
 

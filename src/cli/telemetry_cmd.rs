@@ -780,18 +780,26 @@ mod provider {
             entry.1 += r.input_tokens;
             entry.2 += r.output_tokens;
         }
-        for (name, provider) in &cfg.providers {
-            let key = (provider.kind.clone(), provider.model.clone());
-            let stats = by_key.get(&key).copied().unwrap_or((0, 0, 0));
-            println!(
-                "{:<14}  {:<24}  {:<14}  {:<10}  {:<10}  {}",
-                name,
-                trim(&provider.endpoint, 24),
-                trim(&provider.model, 14),
-                stats.1,
-                stats.2,
-                stats.0
-            );
+        for (name, provider_cfg) in &cfg.providers {
+            // v0.10: each row in `models[]` is a distinct
+            // `(provider, model)` pair the upstream sees; the
+            // SQLite join keys on the same pair. The section-level
+            // `endpoint` is `Option<String>`; per-model endpoints
+            // live on the model itself.
+            for model in &provider_cfg.models {
+                let key = (name.clone(), model.id.clone());
+                let stats = by_key.get(&key).copied().unwrap_or((0, 0, 0));
+                let endpoint_str = provider_cfg.endpoint.as_deref().unwrap_or("");
+                println!(
+                    "{:<14}  {:<24}  {:<14}  {:<10}  {:<10}  {}",
+                    name,
+                    trim(endpoint_str, 24),
+                    trim(&model.id, 14),
+                    stats.1,
+                    stats.2,
+                    stats.0
+                );
+            }
         }
     }
 
@@ -801,11 +809,25 @@ mod provider {
             .get(name)
             .ok_or_else(|| Error::InvalidArgs(format!("unknown provider plan '{name}'")))?;
         println!("Provider: {}", name);
-        println!("Kind: {}", provider.kind);
-        println!("Endpoint: {}", provider.endpoint);
-        println!("Model: {}", provider.model);
-        if let Some(max) = provider.max_tokens {
-            println!("Max tokens: {max}");
+        // v0.10: the section name doubles as the kind tag for API-
+        // key lookup; the deprecated `provider.kind` field is gone.
+        println!("Kind: {name}");
+        println!(
+            "Endpoint: {}",
+            provider.endpoint.as_deref().unwrap_or("<none>")
+        );
+        // Each registered model gets its own block so the
+        // operator can read `max_tokens`, `endpoint` (per-model
+        // override), and the section-level temperature / top-p
+        // without scrolling through a single-line dump.
+        for model in &provider.models {
+            println!("Model: {}", model.id);
+            if let Some(max) = model.max_tokens {
+                println!("  Max tokens: {max}");
+            }
+            if let Some(endpoint) = &model.endpoint {
+                println!("  Endpoint: {endpoint}");
+            }
         }
         if let Some(t) = provider.temperature {
             println!("Temperature: {t}");
@@ -813,15 +835,9 @@ mod provider {
         if let Some(p) = provider.top_p {
             println!("Top-p: {p}");
         }
-        if !provider.hard_incompatibilities.is_empty() {
-            println!(
-                "Hard incompatibilities: {}",
-                provider.hard_incompatibilities.join(", ")
-            );
-        }
         println!();
         println!("Recent usage (last 20 runs):");
-        let rows = db.recent_runs_for_provider(&provider.kind, 20)?;
+        let rows = db.recent_runs_for_provider(name, 20)?;
         if rows.is_empty() {
             println!("  (no recorded usage)");
             return Ok(());
@@ -841,7 +857,7 @@ mod provider {
             println!(
                 "  {:<14}  {:<24}  calls={:<5}  in={:<8}  out={:<6}  last_call_unix={}",
                 trim(&r.model, 14),
-                trim(&provider.endpoint, 24),
+                trim(provider.endpoint.as_deref().unwrap_or(""), 24),
                 r.calls,
                 r.input_tokens,
                 r.output_tokens,
@@ -1225,10 +1241,16 @@ mod config {
                 .providers
                 .get(name)
                 .expect("provider present in same map we just iterated");
-            println!(
-                "{name:20} kind={:10} model={:24} endpoint={}",
-                spec.kind, spec.model, spec.endpoint,
-            );
+            // v0.10: model id is sourced from the section's first
+            // `models[]` entry (no more legacy `spec.model`); the
+            // section-level `endpoint` is `Option<String>`.
+            let model_str = spec
+                .models
+                .first()
+                .map(|m| m.id.clone())
+                .unwrap_or_default();
+            let endpoint_str = spec.endpoint.as_deref().unwrap_or("");
+            println!("{name:20} model={:24} endpoint={}", model_str, endpoint_str,);
         }
         println!();
         println!("=== parallelism ===");
@@ -1378,7 +1400,35 @@ mod plan {
                 .and_then(|c| {
                     c.providers
                         .values()
-                        .find(|spec| spec.kind == provider && spec.model == model)
+                        .find(|spec| {
+                            // v0.10: the lookup uses the section name
+                            // (which doubles as the model id when the
+                            // section only registers one model); the
+                            // legacy `spec.model` singleton is gone.
+                            let section_first_model = spec
+                                .models
+                                .first()
+                                .map(|m| m.id.clone())
+                                .unwrap_or_default();
+                            spec.models.iter().any(|m| m.id == model)
+                                && provider == section_first_model
+                                || (provider == section_first_model && model == section_first_model)
+                        })
+                        .or_else(|| {
+                            // The `provider` field in the call log is
+                            // the registry key the call landed under;
+                            // it may be either the section name or the
+                            // model id when the section only registers
+                            // one model. Look up by either.
+                            c.providers.values().find(|spec| {
+                                let section_first_model = spec
+                                    .models
+                                    .first()
+                                    .map(|m| m.id.clone())
+                                    .unwrap_or_default();
+                                section_first_model == provider
+                            })
+                        })
                 })
                 .and_then(|spec| spec.plan.clone())
         };

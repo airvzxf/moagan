@@ -92,12 +92,12 @@ run_pipeline() {
   local home="$4"
   local stdin_input="${5:-}"
   if [[ -n "$stdin_input" ]]; then
-    printf "%s\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider mock \
+    printf "%s\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider mock:mock-model \
       --prompt "$prompt" --max-parallelism 2 --runs-dir "$home" \
       --mock-dir "$MOCK_DIR" \
       $extra_flags > "$home/run.out" 2>&1 || true
   else
-    "$BIN" run --mode "$mode" --provider mock \
+    "$BIN" run --mode "$mode" --provider mock:mock-model \
       --prompt "$prompt" --max-parallelism 2 --runs-dir "$home" \
       --mock-dir "$MOCK_DIR" \
       $extra_flags > "$home/run.out" 2>&1 || true
@@ -124,7 +124,7 @@ section "SECTION 1 — Schema inspection (15 tests)"
 run_test "s6_schema_user_version_is_19_after_open" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
 test "$v" = "19" || { echo "user_version=$v"; exit 1; }
@@ -144,7 +144,7 @@ run_test "s6_schema_run_migrations_lists_19_versions" "awk '/Run pending migrati
 run_test "s6_schema_checkpoints_table_has_12_columns" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 n=$(sqlite3 "$TMP/meta.sqlite" "SELECT COUNT(*) FROM pragma_table_info('checkpoints')")
 test "$n" = "12" || { echo "got $n columns"; exit 1; }
@@ -154,7 +154,7 @@ EOF
 run_test "s6_schema_checkpoints_table_has_content_columns" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 for col in ckp_id question response accepted_default at_unix; do
   found=$(sqlite3 "$TMP/meta.sqlite" "SELECT name FROM pragma_table_info('checkpoints') WHERE name='$col'")
@@ -166,7 +166,7 @@ EOF
 run_test "s6_schema_checkpoints_table_has_legacy_columns" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 for col in seq resolved note created_unix resolved_unix; do
   found=$(sqlite3 "$TMP/meta.sqlite" "SELECT name FROM pragma_table_info('checkpoints') WHERE name='$col'")
@@ -178,7 +178,7 @@ EOF
 run_test "s6_schema_pkey_is_run_id_ckp_id" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 pkey_csv=$(sqlite3 "$TMP/meta.sqlite" "SELECT name FROM pragma_table_info('checkpoints') WHERE pk > 0 ORDER BY pk" | tr '\n' ',')
 # Strip trailing comma, then anchor with leading/trailing commas so the
@@ -196,7 +196,7 @@ EOF
 run_test "s6_schema_foreign_key_to_runs_preserved" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 sqlite3 "$TMP/meta.sqlite" 'PRAGMA foreign_key_list(checkpoints)' | grep -q runs || { echo "no FK to runs"; exit 1; }
 EOF
@@ -205,7 +205,7 @@ EOF
 run_test "s6_schema_has_idx_checkpoints_kind" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 sqlite3 "$TMP/meta.sqlite" "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'" | grep -q idx_checkpoints_kind || exit 1
 EOF
@@ -214,7 +214,7 @@ EOF
 run_test "s6_schema_has_idx_checkpoints_at_unix" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 sqlite3 "$TMP/meta.sqlite" "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'" | grep -q idx_checkpoints_at_unix || exit 1
 EOF
@@ -223,7 +223,7 @@ EOF
 run_test "s6_schema_accepted_default_is_not_null" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 # PRAGMA table_info columns: cid|name|type|notnull|dflt_value|pk
 # notnull=1 means the column has NOT NULL.
@@ -236,7 +236,7 @@ EOF
 run_test "s6_schema_legacy_columns_have_defaults" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 # PRAGMA table_info columns: cid|name|type|notnull|dflt_value|pk
 # dflt_value (field 5) holds the default literal (e.g. "0").
@@ -252,10 +252,10 @@ EOF
 run_test "s6_schema_v005_migration_is_idempotent_over_reopen" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v1=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v2=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
 test "$v1" = "$v2" && test "$v1" = "19" || { echo "v1=$v1 v2=$v2"; exit 1; }
@@ -317,7 +317,7 @@ EOF
 )"
 
 # Trigger v5 migration by opening the DB through moagan.
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" \
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$LEGACY_TMP" --non-interactive > /dev/null 2>&1 || true
 
 run_test "s6_mig_post_user_version_is_5" "test \$(sqlite3 $LEGACY_DB 'PRAGMA user_version') -ge 5"
@@ -543,7 +543,7 @@ EOF
 run_test "s6_idem_two_separate_runs_distinct" "$(cat <<EOF
 set -e
 IEDGE2=\$(mktemp -d)
-"$BIN" run --mode standard --provider mock --prompt "Edge run 2" --mock-dir "$MOCK_DIR" --runs-dir "\$IEDGE2" --non-interactive >/dev/null 2>&1
+"$BIN" run --mode standard --provider mock:mock-model --prompt "Edge run 2" --mock-dir "$MOCK_DIR" --runs-dir "\$IEDGE2" --non-interactive >/dev/null 2>&1
 r1=\$(sqlite3 $IEDGE_HOME/meta.sqlite "SELECT COUNT(*) FROM checkpoints WHERE run_id='$IEDGE_RID'")
 r2=\$(sqlite3 "\$IEDGE2/meta.sqlite" "SELECT COUNT(*) FROM checkpoints WHERE run_id != '$IEDGE_RID'")
 test "\$r1" -ge 1 && test "\$r2" -ge 1 || { echo "r1=\$r1 r2=\$r2"; exit 1; }
@@ -555,7 +555,7 @@ set -e
 # Two runs of the same prompt share a cache (LLM responses) but
 # each run still has its own (run_id, ckp_id) row.
 IEDGE3=\$(mktemp -d)
-printf 'y\\n' | "$BIN" run --mode standard --provider mock --prompt "Idem check" --mock-dir "$MOCK_DIR" --runs-dir "\$IEDGE3" >/dev/null 2>&1
+printf 'y\\n' | "$BIN" run --mode standard --provider mock:mock-model --prompt "Idem check" --mock-dir "$MOCK_DIR" --runs-dir "\$IEDGE3" >/dev/null 2>&1
 iedge3_runs=\$(ls "\$IEDGE3/.runs/" | wc -l)
 iedge3_kinds=\$(sqlite3 "\$IEDGE3/meta.sqlite" "SELECT COUNT(DISTINCT kind) FROM checkpoints")
 test "\$iedge3_runs" -ge 1 && test "\$iedge3_kinds" -ge 1 || { echo "runs=\$iedge3_runs kinds=\$iedge3_kinds"; exit 1; }
@@ -640,7 +640,7 @@ run_test "s6_skip_calls_persist_with_telemetry" \
 section "SECTION 12 — Telemetry redaction (10 tests)"
 
 RED_TMP=$(mkhome)
-"$BIN" run --mode fast --provider mock --prompt q --mock-dir "$MOCK_DIR" --runs-dir "$RED_TMP" --non-interactive >/dev/null 2>&1
+"$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" --runs-dir "$RED_TMP" --non-interactive >/dev/null 2>&1
 RED_RID=$(ls "$RED_TMP/.runs/" | sort -r | head -1)
 RED_DIR="$RED_TMP/.runs/$RED_RID"
 
@@ -656,7 +656,7 @@ run_test "s6_redact_checkpoints_no_secrets_in_real_response" \
   "# Run an interactive pass with a normal response — no secret should
    # ever land on disk because redaction strips MiniMax tokens first.
    RED2=\$(mktemp -d)
-   printf 'no-secrets-here\\n' | \"\$BIN\" run --mode standard --provider mock --prompt 'redact test' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$RED2\" >/dev/null 2>&1
+   printf 'no-secrets-here\\n' | \"\$BIN\" run --mode standard --provider mock:mock-model --prompt 'redact test' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$RED2\" >/dev/null 2>&1
    rid=\$(ls \"\$RED2/.runs/\" | sort -r | head -1)
    ! grep -qE 'sk-cp-' \"\$RED2/.runs/\$rid/telemetry/checkpoints.jsonl\"
    ! grep -qE 'sk-cp-' \"\$RED2/.runs/\$rid/checkpoints/\"/*.json
@@ -669,7 +669,7 @@ run_test "s6_redact_jsonl_redacts_minimax_key" \
    # intentionally keeps the raw value for auditability — only the
    # telemetry stream is redacted.
    RED3=\$(mktemp -d)
-   printf 'leak sk-cp-aaaaaaaaaaaaaaaaaaaa\\n' | \"\$BIN\" run --mode standard --provider mock --prompt 'redact jsonl' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$RED3\" >/dev/null 2>&1
+   printf 'leak sk-cp-aaaaaaaaaaaaaaaaaaaa\\n' | \"\$BIN\" run --mode standard --provider mock:mock-model --prompt 'redact jsonl' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$RED3\" >/dev/null 2>&1
    rid=\$(ls \"\$RED3/.runs/\" | sort -r | head -1)
    if grep -q 'aaaaaaaaaaaaaaaaaaaa' \"\$RED3/.runs/\$rid/telemetry/checkpoints.jsonl\"; then
      echo 'minimax key leaked into redacted telemetry JSONL'
@@ -718,7 +718,7 @@ run_test "s6_audit_verify_subcommand_listed" \
 run_test "s6_audit_proxy_does_not_modify_checkpoints_table" \
   "AUDIT_TMP=\$(mktemp -d)
    # Capture row count BEFORE.
-   \"\$BIN\" run --mode fast --provider mock --prompt 'q' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$AUDIT_TMP\" --non-interactive >/dev/null 2>&1
+   \"\$BIN\" run --mode fast --provider mock:mock-model --prompt 'q' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$AUDIT_TMP\" --non-interactive >/dev/null 2>&1
    before=\$(sqlite3 \"\$AUDIT_TMP/meta.sqlite\" \"SELECT COUNT(*) FROM checkpoints\")
    # Run audit proxy briefly (without upstream traffic) and verify
    # row count unchanged.
@@ -742,7 +742,7 @@ run_test "s6_audit_subcommand_runs_under_proxy_compatible_modes" \
 
 run_test "s6_audit_proxy_record_doesnt_corrupt_checkpoints" \
   "AUDIT2=\$(mktemp -d)
-   \"\$BIN\" run --mode standard --provider mock --prompt 'q' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$AUDIT2\" --non-interactive >/dev/null 2>&1
+   \"\$BIN\" run --mode standard --provider mock:mock-model --prompt 'q' --mock-dir \"\$MOCK_DIR\" --runs-dir \"\$AUDIT2\" --non-interactive >/dev/null 2>&1
    # All checkpoint rows should have valid schema (no corrupted data).
    bad=\$(sqlite3 \"\$AUDIT2/meta.sqlite\" \"SELECT COUNT(*) FROM checkpoints WHERE ckp_id IS NULL OR kind IS NULL OR question IS NULL\")
    test \$bad -eq 0"

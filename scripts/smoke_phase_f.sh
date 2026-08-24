@@ -85,7 +85,7 @@ run_test "run_help_short_h_also_lists_flag" \
   "$BIN run -h 2>&1 | grep -q 'no-replace-sources'"
 
 run_test "run_rejects_unknown_flag" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN run --provider mock --prompt x --this-flag-does-not-exist 2>&1 | grep -qE 'unexpected|unknown|accepts'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN run --provider mock:mock-model --prompt x --this-flag-does-not-exist 2>&1 | grep -qE 'unexpected|unknown|accepts'"
 
 run_test "non_interactive_flag_still_works" \
   "$BIN run --help 2>&1 | grep -q -- '--non-interactive'"
@@ -280,7 +280,7 @@ run_test "QualityVector_has_correctness_field" \
 echo "Section 5: Pipeline integration with mock"
 
 TMPHOME_F1=$(mkhome)
-"$BIN" run --mode standard --provider mock --prompt "Build a Phase F smoke run" \
+"$BIN" run --mode standard --provider mock:mock-model --prompt "Build a Phase F smoke run" \
   --max-parallelism 2 --runs-dir "$TMPHOME_F1" --mock-dir \
   "${ROOT}/tests/fixtures/mock_provider" --non-interactive > "$TMPHOME_F1/run.out" 2>&1 || true
 F1_RID=$(ls "$TMPHOME_F1/.runs/" 2>/dev/null | sort -r | head -1)
@@ -311,7 +311,7 @@ run_test "phase_f_standard_run_ranking_has_representatives" \
   "jq -e '.representatives | length > 0' $F1_DIR/rankings/ranking.json 2>/dev/null"
 
 TMPHOME_F2=$(mkhome)
-"$BIN" run --mode standard --provider mock --prompt "Build a Phase F smoke run no-op" \
+"$BIN" run --mode standard --provider mock:mock-model --prompt "Build a Phase F smoke run no-op" \
   --max-parallelism 2 --runs-dir "$TMPHOME_F2" --mock-dir \
   "${ROOT}/tests/fixtures/mock_provider" --non-interactive --no-replace-sources > "$TMPHOME_F2/run.out" 2>&1 || true
 F2_RID=$(ls "$TMPHOME_F2/.runs/" 2>/dev/null | sort -r | head -1)
@@ -327,13 +327,13 @@ run_test "phase_f_no_replace_flag_have_more_or_equal_ranked" \
   "F1_LEN=\$(jq '.ranked | length' $F1_DIR/rankings/ranking.json 2>/dev/null || echo 0); F2_LEN=\$(jq '.ranked | length' $F2_DIR/rankings/ranking.json 2>/dev/null || echo 0); [[ \${F2_LEN:-0} -ge \${F1_LEN:-0} ]]"
 
 run_test "phase_f_fast_mode_synthesized_dir_empty" \
-  "TMPHOME_F3=\$(mktemp -d); $BIN run --mode fast --provider mock --prompt 'fast' --runs-dir \$TMPHOME_F3 --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true; F3_RID=\$(ls \$TMPHOME_F3/.runs/ 2>/dev/null | sort -r | head -1); SYNTH_FILES=\$(ls \$TMPHOME_F3/.runs/\$F3_RID/synthesized/ 2>/dev/null | grep -c '\\.json$' || true); [[ \${SYNTH_FILES:-0} -eq 0 ]]"
+  "TMPHOME_F3=\$(mktemp -d); $BIN run --mode fast --provider mock:mock-model --prompt 'fast' --runs-dir \$TMPHOME_F3 --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true; F3_RID=\$(ls \$TMPHOME_F3/.runs/ 2>/dev/null | sort -r | head -1); SYNTH_FILES=\$(ls \$TMPHOME_F3/.runs/\$F3_RID/synthesized/ 2>/dev/null | grep -c '\\.json$' || true); [[ \${SYNTH_FILES:-0} -eq 0 ]]"
 
 run_test "phase_f_deep_mode_completes" \
-  "TMPHOME_F4=\$(mktemp -d); $BIN run --mode deep --provider mock --prompt 'deep' --runs-dir \$TMPHOME_F4 --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true; F4_RID=\$(ls \$TMPHOME_F4/.runs/ 2>/dev/null | sort -r | head -1); [[ -f \$TMPHOME_F4/.runs/\$F4_RID/rankings/ranking.json ]]"
+  "TMPHOME_F4=\$(mktemp -d); $BIN run --mode deep --provider mock:mock-model --prompt 'deep' --runs-dir \$TMPHOME_F4 --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true; F4_RID=\$(ls \$TMPHOME_F4/.runs/ 2>/dev/null | sort -r | head -1); [[ -f \$TMPHOME_F4/.runs/\$F4_RID/rankings/ranking.json ]]"
 
 run_test "phase_f_batch_mode_completes" \
-  "TMPHOME_F5=\$(mktemp -d); $BIN run --mode batch --provider mock --prompt 'batch' --runs-dir \$TMPHOME_F5 --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true; F5_RID=\$(ls \$TMPHOME_F5/.runs/ 2>/dev/null | sort -r | head -1); [[ -f \$TMPHOME_F5/.runs/\$F5_RID/rankings/ranking.json ]]"
+  "TMPHOME_F5=\$(mktemp -d); $BIN run --mode batch --provider mock:mock-model --prompt 'batch' --runs-dir \$TMPHOME_F5 --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true; F5_RID=\$(ls \$TMPHOME_F5/.runs/ 2>/dev/null | sort -r | head -1); [[ -f \$TMPHOME_F5/.runs/\$F5_RID/rankings/ranking.json ]]"
 
 # ---------------------------------------------------------------------
 # SECTION 6 — Audit proxy (10 tests)
@@ -501,19 +501,19 @@ run_test "f_cargo_test_no_panics" \
 echo "Section 10: argv parsing"
 
 run_test "f_argv_no_replace_long_form" \
-  "$BIN run --no-replace-sources --provider mock --prompt x --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --no-replace-sources --provider mock:mock-model --prompt x --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_no_replace_after_mode" \
-  "$BIN run --mode standard --no-replace-sources --provider mock --prompt x --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --mode standard --no-replace-sources --provider mock:mock-model --prompt x --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_no_replace_after_prompt" \
-  "$BIN run --mode standard --provider mock --prompt x --no-replace-sources --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --mode standard --provider mock:mock-model --prompt x --no-replace-sources --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_no_replace_at_end" \
-  "$BIN run --mode standard --provider mock --prompt x --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive --no-replace-sources > /dev/null 2>&1 || true"
+  "$BIN run --mode standard --provider mock:mock-model --prompt x --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive --no-replace-sources > /dev/null 2>&1 || true"
 
 run_test "f_argv_with_other_flags" \
-  "$BIN run --mode standard --no-replace-sources --max-parallelism 1 --provider mock --prompt 'mix' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --mode standard --no-replace-sources --max-parallelism 1 --provider mock:mock-model --prompt 'mix' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_no_replace_help_only" \
   "$BIN run --no-replace-sources --help 2>&1 | head -3"
@@ -522,28 +522,28 @@ run_test "f_argv_no_replace_help_short" \
   "$BIN run --no-replace-sources -h 2>&1 | head -3"
 
 run_test "f_argv_mode_fast_no_replace" \
-  "$BIN run --mode fast --no-replace-sources --provider mock --prompt 'fast' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --mode fast --no-replace-sources --provider mock:mock-model --prompt 'fast' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_mode_deep_no_replace" \
-  "$BIN run --mode deep --no-replace-sources --provider mock --prompt 'deep' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --mode deep --no-replace-sources --provider mock:mock-model --prompt 'deep' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_mode_batch_no_replace" \
-  "$BIN run --mode batch --no-replace-sources --provider mock --prompt 'batch' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --mode batch --no-replace-sources --provider mock:mock-model --prompt 'batch' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_no_replace_does_not_crash_with_help" \
   "$BIN run --no-replace-sources -h 2>&1 | grep -q 'no-replace-sources'"
 
 run_test "f_argv_no_replace_value_does_not_work" \
-  "! $BIN run --no-replace-sources=true --provider mock --prompt x --runs-dir \$(mktemp -d) 2>&1 | grep -q 'InvalidArgs'"
+  "! $BIN run --no-replace-sources=true --provider mock:mock-model --prompt x --runs-dir \$(mktemp -d) 2>&1 | grep -q 'InvalidArgs'"
 
 run_test "f_argv_no_replace_skip_value_does_not_work" \
-  "$BIN run --no-replace-sources= --provider mock --prompt x --runs-dir \$(mktemp -d) > /dev/null 2>&1 || true"
+  "$BIN run --no-replace-sources= --provider mock:mock-model --prompt x --runs-dir \$(mktemp -d) > /dev/null 2>&1 || true"
 
 run_test "f_argv_no_replace_with_negation" \
-  "$BIN run --mode standard --provider mock --prompt 'test' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
+  "$BIN run --mode standard --provider mock:mock-model --prompt 'test' --runs-dir \$(mktemp -d) --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > /dev/null 2>&1 || true"
 
 run_test "f_argv_valid_run_with_no_replace" \
-  "[[ -f \$(mktemp -d)/x ]] || true; TMPHOME_X=\$(mktemp -d); $BIN run --mode standard --no-replace-sources --provider mock --prompt 'ok' --runs-dir \$TMPHOME_X --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > \$TMPHOME_X/run.out 2>&1; X_RID=\$(ls \$TMPHOME_X/.runs/ 2>/dev/null | sort -r | head -1); [[ -f \$TMPHOME_X/.runs/\$X_RID/manifest.json ]]"
+  "[[ -f \$(mktemp -d)/x ]] || true; TMPHOME_X=\$(mktemp -d); $BIN run --mode standard --no-replace-sources --provider mock:mock-model --prompt 'ok' --runs-dir \$TMPHOME_X --mock-dir ${ROOT}/tests/fixtures/mock_provider --non-interactive > \$TMPHOME_X/run.out 2>&1; X_RID=\$(ls \$TMPHOME_X/.runs/ 2>/dev/null | sort -r | head -1); [[ -f \$TMPHOME_X/.runs/\$X_RID/manifest.json ]]"
 
 # ---------------------------------------------------------------------
 # SECTION 11 — Domain & library exports (15 tests)

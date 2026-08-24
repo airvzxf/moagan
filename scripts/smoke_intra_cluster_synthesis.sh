@@ -222,7 +222,7 @@ run_test "synthesize_handles_empty_cluster_list" \
 # ---------------------------------------------------------------------
 
 TMPHOME_S=$(mkhome)
-OUT_S="$(run_pipeline standard mock "Build a REST API for tracking library books" "--non-interactive" "$TMPHOME_S")"
+OUT_S="$(run_pipeline standard mock:mock-model "Build a REST API for tracking library books" "--non-interactive" "$TMPHOME_S")"
 RUN_ID_S="${OUT_S%%|*}"
 RUN_DIR_S="${OUT_S##*|}"
 

@@ -67,7 +67,10 @@ fn seed_manifest(home: &MoaganHome, run_id: RunId, mode: &str, parent: Option<Ru
         client_version: env!("CARGO_PKG_VERSION").into(),
         brief_sha256: "deadbeef".into(),
         brief_blake3: "deadbeef".into(),
-        provider: "mock".into(),
+        // v0.10 dispatcher requires `SECTION:MODEL` (post-`88bcd9c`).
+        // The rerun pipeline reads `manifest.provider` straight into
+        // the dispatcher, so the seed must carry the explicit form.
+        provider: "mock:mock-model".into(),
         model: "mock-model".into(),
         phases: vec![ManifestPhase {
             phase: "intake".into(),
@@ -440,7 +443,30 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
         .join("tests")
         .join("fixtures")
         .join("mock_provider");
-    let cfg = Config::default();
+    // `Config::default()` ships the `[providers.mock]` section
+    // already populated with `mock-model` (see `default_providers()`).
+    // The injection below is defensive in case a future change
+    // removes that default; it keeps the pipeline helper happy
+    // (`default_model` = first `models[].id`) and the `mock_dir`
+    // wires through to the canned-response fixtures.
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "mock".to_owned(),
+        moagan::config::ProviderConfig {
+            models: vec![moagan::config::ModelConfig {
+                id: "mock-model".to_owned(),
+                endpoint: None,
+                max_tokens: None,
+            }],
+            endpoint: Some("mock://local".to_owned()),
+            temperature: None,
+            top_p: None,
+            omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
+            plan: None,
+        },
+    );
     // `run_full_pipeline` uses `tokio::select!` (the shutdown-signal
     // branch), so it needs a tokio runtime. `pollster::block_on` is
     // not enough — `tokio::test` provides the proper runtime.

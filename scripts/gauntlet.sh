@@ -123,7 +123,7 @@ echo
 # 6. Smoke gates
 echo "${BOLD}Smoke gates${RESET}"
 if [[ "$SKIP_SMOKE" == "1" ]]; then
-  skip_gate "moagan run --mode fast --provider mock" "flag --skip-smoke"
+  skip_gate "moagan run --mode fast --provider mock:mock-model" "flag --skip-smoke"
   skip_gate "moagan run --mode fast --provider minimax" "flag --skip-smoke"
 else
   # Build the debug binary once so smoke gates share it.
@@ -136,17 +136,17 @@ else
   # Mock smoke — needs no API key, uses mock provider
   MOCK_DIR="$(mktemp -d -t moagan-mock-XXXXXX)"
   trap 'rm -rf "$MOCK_DIR"' EXIT
-  run_gate "moagan run --mode fast --provider mock --mock-dir $MOCK_DIR" \
-    bash -c "$BIN run --mode fast --provider mock --mock-dir $MOCK_DIR --non-interactive 2>&1 | tail -10"
+  run_gate "moagan run --mode fast --provider mock:mock-model --mock-dir $MOCK_DIR" \
+    bash -c "$BIN run --mode fast --provider mock:mock-model --mock-dir $MOCK_DIR --non-interactive 2>&1 | tail -10"
 
   # MiniMax smoke — requires MINIMAX_API_KEY
   if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     MINI_DIR="$(mktemp -d -t moagan-mini-XXXXXX)"
     trap 'rm -rf "$MOCK_DIR" "$MINI_DIR"' EXIT
-    run_gate "moagan run --mode fast --provider minimax" \
-      bash -c "$BIN run --mode fast --provider minimax --non-interactive --prompt 'simple test' 2>&1 | tail -10"
+    run_gate "moagan run --mode fast --provider minimax:MiniMax-M3" \
+      bash -c "$BIN run --mode fast --provider minimax:MiniMax-M3 --non-interactive --prompt 'simple test' 2>&1 | tail -10"
   else
-    skip_gate "moagan run --mode fast --provider minimax" "MINIMAX_API_KEY not set"
+    skip_gate "moagan run --mode fast --provider minimax:MiniMax-M3" "MINIMAX_API_KEY not set"
   fi
 fi
 echo

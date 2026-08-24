@@ -77,7 +77,7 @@ fn discover_minimax_writes_four_subdirs() {
         .args([
             "discover",
             "--provider",
-            "minimax",
+            "minimax:MiniMax-M3",
             "--prompt",
             PROMPT,
             "--sketches-per-cell",

@@ -27,12 +27,30 @@ fn mock_run_writes_dashboard_html() {
 
     let tmp = tempfile::TempDir::new().expect("tmpdir");
 
+    // v0.10 dispatcher requires the `--provider SECTION` shorthand
+    // to resolve to a configured model id; `Config::default()` ships
+    // `[providers.mock]` with an empty `models[]` list. Drop a
+    // one-line config onto disk that registers `mock-model` under
+    // the `mock` section so the dispatcher finds it. The
+    // `MOAGAN_CONFIG` env var overrides the user-level config
+    // lookup (`src/config/mod.rs:2361`).
+    let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
+    let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
+    std::fs::write(
+        &mock_cfg_path,
+        "[providers.mock]\n\
+         endpoint = \"mock://local\"\n\
+         mock_dir = \"tests/fixtures/mock_provider\"\n\
+         models = [{ id = \"mock-model\" }]\n",
+    )
+    .expect("write mock config");
+
     let out = Command::new(&bin)
         .arg("run")
         .arg("--mode")
         .arg("fast")
         .arg("--provider")
-        .arg("mock")
+        .arg("mock:mock-model")
         .arg("--mock-dir")
         .arg("tests/fixtures/mock_provider")
         .arg("--prompt")
@@ -41,6 +59,7 @@ fn mock_run_writes_dashboard_html() {
         .arg("--runs-dir")
         .arg(tmp.path())
         .env_remove("MINIMAX_API_KEY")
+        .env("MOAGAN_CONFIG", &mock_cfg_path)
         .output()
         .expect("moagan run");
 

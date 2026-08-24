@@ -463,12 +463,34 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     } else {
         opts.provider.clone()
     };
+    // Same as `run_full_pipeline`: the section name (no `SECTION:MODEL`
+    // suffix) is what `provider_registry_key(section, model)` joins on.
+    // Extract it once so the `RunContext` and the registry agree on
+    // the same `(section, model_id)` pair.
+    let default_provider_section = crate::cli::probe::parse_provider_model(&default_provider)
+        .map(|(s, _)| s)
+        .unwrap_or_else(|_| default_provider.clone());
     let providers = Arc::new(build_registry_for(
         cfg,
         &default_provider,
         opts.mock_dir.as_deref(),
     )?);
-    let default_model = cfg.provider(&default_provider)?.model.clone();
+    let default_model = if default_provider.contains(':') {
+        crate::cli::probe::parse_provider_model(&default_provider)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare SECTION is no longer accepted in v0.10+ (no
+        // implicit "first model" fallback). Surface the error
+        // early so the operator sees it before the rest of the
+        // pipeline boots.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{default_provider}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {default_provider}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
+    };
 
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;
@@ -589,7 +611,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         run_id,
         Arc::clone(&home),
         Arc::clone(&providers),
-        default_provider.clone(),
+        default_provider_section.clone(),
         default_model,
         parallelism,
         telemetry.clone(),
@@ -934,10 +956,22 @@ pub async fn run_resume(
         None,
         api_key,
     )?);
-    let default_model = cfg
-        .provider(&default_provider)
-        .map(|spec| spec.model.clone())
-        .unwrap_or_else(|_| "unknown".to_string());
+    let default_model = if default_provider.contains(':') {
+        crate::cli::probe::parse_provider_model(&default_provider)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare SECTION is no longer accepted in v0.10+ (no
+        // implicit "first model" fallback). Surface the error
+        // early so the operator sees it before the rest of the
+        // pipeline boots.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{default_provider}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {default_provider}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
+    };
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;

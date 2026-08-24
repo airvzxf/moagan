@@ -1,7 +1,7 @@
 //! Auto-detection of `max_tokens` per (provider, model) via runtime probes.
 //!
 //! Hardcoded caps (e.g. `MINIMAX_MAX_TOKENS_CAP = 524_288`,
-//! `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`) are brittle: third-party relays
+//! `u32::MAX = 16_384`) are brittle: third-party relays
 //! can lower the upstream's documented ceiling without warning, and a
 //! downstream provider that no longer matches the operator's documented
 //! cap becomes a regression that requires another code patch.

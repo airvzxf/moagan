@@ -162,7 +162,7 @@ async fn sidecar_survives_a_sigkill_of_moagan_run() {
             "--mode",
             "deep",
             "--provider",
-            "minimax",
+            "minimax:MiniMax-M3",
             "--prompt",
             "Crash durability probe",
             "--runs-dir",
@@ -171,7 +171,7 @@ async fn sidecar_survives_a_sigkill_of_moagan_run() {
         .args(["--max-parallelism", "4"])
         .env(
             "MOAGAN_MINIMAX_ENDPOINT",
-            format!("http://127.0.0.1:{port}/anthropic/v1"),
+            format!("http://127.0.0.1:{port}/anthropic/v1/messages"),
         )
         .env("MINIMAX_API_KEY", "test-key")
         .stdout(std::process::Stdio::null())
@@ -296,7 +296,7 @@ async fn audit_e2e_deep_run_has_exact_external_coverage() {
             "--mode",
             "deep",
             "--provider",
-            "minimax",
+            "minimax:MiniMax-M3",
             "--prompt",
             "List the seven rainbow colors in order",
             "--runs-dir",
@@ -305,7 +305,7 @@ async fn audit_e2e_deep_run_has_exact_external_coverage() {
         .args(["--max-parallelism", "4"])
         .env(
             "MOAGAN_MINIMAX_ENDPOINT",
-            format!("http://127.0.0.1:{port}/anthropic/v1"),
+            format!("http://127.0.0.1:{port}/anthropic/v1/messages"),
         )
         .env("MINIMAX_API_KEY", "test-key")
         .env("RUST_LOG", "info,moagan=error")

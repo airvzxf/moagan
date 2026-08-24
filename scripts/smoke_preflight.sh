@@ -57,7 +57,7 @@ run_test "preflight_two_run_ids_printed" "
   export MOAGAN_HOME=\$HOME_DIR
   export MOAGAN_QUIET=1
   output=\$($BIN preflight \
-    --provider mock \
+    --provider mock:mock-model \
     --prompt 'demo prompt' \
     --runs-dir \$HOME_DIR/.runs \
     --mock-dir tests/fixtures/mock_provider \
@@ -95,7 +95,7 @@ run_test "preflight_mock_creates_discover_sketches" "
   export MOAGAN_QUIET=1
   export 
   $BIN preflight \
-    --provider mock \
+    --provider mock:mock-model \
     --prompt 'demo prompt' \
     --runs-dir \$HOME_DIR/.runs \
     --mock-dir tests/fixtures/mock_provider \
@@ -129,7 +129,7 @@ run_test "preflight_non_interactive_no_prompts" "
   export MOAGAN_QUIET=1
   export 
   echo n | $BIN preflight \
-    --provider mock \
+    --provider mock:mock-model \
     --prompt 'demo prompt' \
     --runs-dir \$HOME_DIR/.runs \
     --mock-dir tests/fixtures/mock_provider \

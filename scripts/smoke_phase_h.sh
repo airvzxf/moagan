@@ -154,7 +154,7 @@ MOCK_DIR="${ROOT}/tests/fixtures/mock_provider"
 run_test "cli_standard_writes_ranking_with_stability_fields" '
   export MOAGAN_HOME="'"$TMPDIR_H"'/standard"
   mkdir -p "$MOAGAN_HOME"
-  "'"$BIN"'" run --mode standard --provider mock \
+  "'"$BIN"'" run --mode standard --provider mock:mock-model \
     --mock-dir "'"$MOCK_DIR"'" \
     --prompt "Enumera los 7 colores del arcoiris en orden" \
     --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
@@ -171,7 +171,7 @@ run_test "cli_standard_writes_ranking_with_stability_fields" '
 run_test "cli_fast_writes_ranking_with_stability_fields" '
   export MOAGAN_HOME="'"$TMPDIR_H"'/fast"
   mkdir -p "$MOAGAN_HOME"
-  "'"$BIN"'" run --mode fast --provider mock \
+  "'"$BIN"'" run --mode fast --provider mock:mock-model \
     --mock-dir "'"$MOCK_DIR"'" \
     --prompt "Enumera los 7 colores del arcoiris en orden" \
     --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true

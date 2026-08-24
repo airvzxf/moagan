@@ -278,7 +278,7 @@ impl MessagesResponseBody {
 /// `crate::phases::util::repair_stray_comma_after_key` covers the
 /// cases the prefill does not.
 pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
-    use crate::llm::openai_compat::role_requires_json;
+    use crate::llm::wire_format::role_requires_json;
     let mut messages: Vec<MessagesMessage> = vec![MessagesMessage {
         role: "user",
         content: req.user.clone(),

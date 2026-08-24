@@ -123,34 +123,34 @@ run_test "cli_no_mode_discovery_in_run" \
 # ---------------------------------------------------------------------
 
 run_test "sketches_per_cell_below_floor_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 5 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 5 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_zero_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_one_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 1 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 1 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_nine_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 9 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 9 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_10_floor_ok" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_25_accepted" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_100_accepted" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_legacy_cardinality_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --cardinality 80 2>&1 | grep -q 'was renamed to --sketches-per-cell'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --cardinality 80 2>&1 | grep -q 'was renamed to --sketches-per-cell'"
 
 run_test "sketches_per_cell_invalid_value" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
 
 run_test "sketches_per_cell_missing_value" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
 
 # ---------------------------------------------------------------------
 # 3. Role inventory (10 tests)

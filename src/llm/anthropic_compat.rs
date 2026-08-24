@@ -1,23 +1,19 @@
-//! `opencode_go_anthropic` provider — Anthropic-compatible wire format
-//! served by OpenCode Go at `https://opencode.ai/zen/go/v1/messages`.
+//! `anthropic_compat` provider — Anthropic-compatible wire format
+//! served at `/v1/messages`.
 //!
-//! Models served at this endpoint (per the operator's 2026-08-04 model
-//! roster) are:
-//!
-//! - `minimax-m3`, `minimax-m2.7`, `minimax-m2.5` (Anthropic SDK)
-//! - `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus` (Anthropic SDK)
+//! v0.10: the v0.9 `opencode_go` dispatcher is gone. The provider
+//! is generic over its section name — the dispatcher routes any
+//! section whose endpoint URL ends with `/v1/messages` to this
+//! provider. That covers direct MiniMax
+//! (`https://api.minimax.io/anthropic/v1/messages`) and the OpenCode
+//! models that share the Anthropic SDK
+//! (`minimax-m3`, `qwen3.8-max`, `qwen3.7-max`, etc.).
 //!
 //! The wire format is identical to the `minimax` provider so the
 //! request body (MessagesRequestBody) and response decoder
-//! (MessagesResponseBody) are shared via `super::http`. The differences
-//! are limited to the `name` field, the BLOCKED_MODELS gate, and the
-//! API key env var (`OPENCODE_GO_API_KEY`).
-//!
-//! Per-model temperature overrides (Fix #5, B + A) live in
-//! `super::opencode_go::MODEL_TEMPERATURE_OVERRIDES`. Unknown models
-//! fall back to the per-role temperature; if the upstream rejects
-//! with a 400, the retry path in `phase.rs::call_with_retry_parse`
-//! surfaces the error so the operator can extend the map.
+//! (MessagesResponseBody) are shared via `super::http`. The API key
+//! comes from `api_keys.toml` keyed by the section name (or the
+//! matching env var fallback).
 
 use std::sync::Arc;
 
@@ -28,27 +24,26 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
-use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
+use super::capabilities::ProviderCapabilities;
 use super::http::{body_from_request, build_client, build_headers, classify_status, retry_after};
-use super::opencode_go::OpenCodeGoDispatch;
 use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
 use super::wire::{Request, Response, Usage};
 
-/// OpenCode Go provider routed through the Anthropic-compatible
-/// `/v1/messages` endpoint. Distinct from the `minimax` provider so
-/// that future behavior changes (e.g. response_format, custom
-/// headers) don't leak across backends.
+/// Anthropic-compat provider routed through the
+/// `/v1/messages` endpoint. Distinct from the legacy `minimax`
+/// provider so future behavior changes (e.g. response_format,
+/// custom headers) don't leak across backends.
 #[derive(Clone)]
-pub struct OpenCodeGoAnthropicProvider {
-    name: String,
-    model: String,
-    endpoint: String,
-    api_key: SecretString,
-    client: reqwest::Client,
-    max_retries: u32,
+pub struct AnthropicCompatProvider {
+    pub(crate) name: String,
+    pub(crate) model: String,
+    pub(crate) endpoint: String,
+    pub(crate) api_key: SecretString,
+    pub(crate) client: reqwest::Client,
+    pub(crate) max_retries: u32,
     /// Per-provider hard cap on `max_tokens` (set from
     /// `ProviderConfig::max_tokens`). The default is
     /// `DEFAULT_MAX_TOKENS` (1,000,000), so the per-role runtime
@@ -56,36 +51,53 @@ pub struct OpenCodeGoAnthropicProvider {
     /// for the rare cases where a TOML override sets a smaller
     /// provider-specific limit, so the upstream never rejects the
     /// request with 400.
-    provider_max_tokens: Option<u32>,
+    pub(crate) provider_max_tokens: Option<u32>,
     /// Auto-probed `max_tokens` table. When `Some` the
     /// `resolve_cached(self.name(), self.model())` value joins the
     /// clamp chain as the third-highest layer (kind-level cap >
     /// operator override > table). `None` when the provider was
     /// built without going through `registry_from_config` — unit
     /// tests and legacy call paths.
-    max_tokens_table: Option<Arc<MaxTokensTable>>,
+    pub(crate) max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
-impl OpenCodeGoAnthropicProvider {
-    /// Build from a provider config and a resolved API key. The
-    /// `spec.kind` must be `"opencode_go"` and the endpoint must end
-    /// in `/v1/messages` (or `/v1` so we can append).
+impl AnthropicCompatProvider {
+    /// Build from a `ProviderConfig` and a resolved API key.
+    /// Kept for backwards compatibility with hand-rolled callers
+    /// (legacy test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
+    ///
+    /// When `spec.models` is empty (the v0.9 fixture shape) the
+    /// constructor falls back to the section name for the lookup,
+    /// the first model id for the model id, and the section-level
+    /// `endpoint` for the URL.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        if spec.kind != "opencode_go" {
-            return Err(Error::InvalidArgs(format!(
-                "opencode_go_anthropic provider got kind '{}'",
-                spec.kind
-            )));
-        }
         let client = build_client()?;
+        let name = spec
+            .models
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| "anthropic_compat".to_owned());
+        let model = spec
+            .models
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        let endpoint = spec
+            .models
+            .first()
+            .and_then(|m| m.endpoint.clone())
+            .or_else(|| spec.endpoint.clone())
+            .unwrap_or_else(|| "http://localhost".to_owned());
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         Ok(Self {
-            name: "opencode_go".to_owned(),
-            model: spec.model.clone(),
-            endpoint: spec.endpoint.clone(),
+            name,
+            model,
+            endpoint,
             api_key,
             client,
             max_retries: 3,
-            provider_max_tokens: spec.max_tokens,
+            provider_max_tokens,
             max_tokens_table: None,
         })
     }
@@ -98,17 +110,63 @@ impl OpenCodeGoAnthropicProvider {
         self
     }
 
-    /// Build from config using `OPENCODE_GO_API_KEY`.
+    /// Build from config, resolving the API key via the unified
+    /// helper. Kept for backwards compatibility with hand-rolled
+    /// callers (test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
-        let key = std::env::var("OPENCODE_GO_API_KEY")
+        let key = std::env::var("OPENCODE_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| Error::InvalidApiKey {
-                message: "OPENCODE_GO_API_KEY not set; provide via env, --api-key, or config file"
+                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
                     .into(),
                 http_status: None,
             })?;
         Self::new(spec, SecretString::new(key))
+    }
+
+    /// v0.10 dispatcher entry point. Builds an `AnthropicCompatProvider`
+    /// from a `ResolvedModelConfig` (one `(section, model_id)` pair),
+    /// resolving the API key via the unified
+    /// [`super::api_keys::lookup_key`] helper. The key lookup falls
+    /// back from the section name to the canonical `kind` so a
+    /// per-model alias like `minimax-m3` (kind=`"opencode"`)
+    /// resolves against the `OPENCODE_API_KEY` env var rather than
+    /// the non-existent `MINIMAX-M3_API_KEY`. The dispatcher picks
+    /// this constructor for endpoints whose path resolves to
+    /// [`super::wire_format::WireFormatId::Anthropic`].
+    pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        let kind = super::api_keys::lookup_kind_for_resolved(resolved);
+        let key = super::api_keys::lookup_key(&kind, None)
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: format!(
+                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                    kind.to_ascii_uppercase()
+                ),
+                http_status: None,
+            })?
+            .map_err(|e| match e {
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "{}: {message}; check api_keys.toml and the env var fallback",
+                        kind
+                    ),
+                    http_status: None,
+                },
+                other => other,
+            })?;
+        let client = build_client()?;
+        Ok(Self {
+            name: resolved.section.clone(),
+            model: resolved.id.clone(),
+            endpoint: resolved.endpoint.clone(),
+            api_key: SecretString::new(key),
+            client,
+            max_retries: 3,
+            provider_max_tokens: resolved.max_tokens,
+            max_tokens_table: None,
+        })
     }
 
     /// Compute the URL for the messages endpoint.
@@ -145,9 +203,9 @@ impl OpenCodeGoAnthropicProvider {
 /// does not implement `Debug` (that lives in `probe_table.rs`,
 /// outside this provider's owned files). The table is a shared
 /// `Arc`, so emitting `<shared>` is enough to identify the instance.
-impl std::fmt::Debug for OpenCodeGoAnthropicProvider {
+impl std::fmt::Debug for AnthropicCompatProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpenCodeGoAnthropicProvider")
+        f.debug_struct("AnthropicCompatProvider")
             .field("name", &self.name)
             .field("model", &self.model)
             .field("endpoint", &self.endpoint)
@@ -158,7 +216,7 @@ impl std::fmt::Debug for OpenCodeGoAnthropicProvider {
 }
 
 #[async_trait]
-impl Provider for OpenCodeGoAnthropicProvider {
+impl Provider for AnthropicCompatProvider {
     fn name(&self) -> &str {
         &self.name
     }
@@ -172,7 +230,7 @@ impl Provider for OpenCodeGoAnthropicProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::for_opencode_go_anthropic()
+        ProviderCapabilities::for_anthropic_compat()
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
@@ -184,7 +242,7 @@ impl Provider for OpenCodeGoAnthropicProvider {
         // `send_with_safety_clamp(_, true)` so the audit-log hash is
         // byte-for-byte identical to the wire body. Same ordering as
         // `send`:
-        //   1. `OPENCODE_GO_MAX_TOKENS_CAP` (16_384 for the
+        //   1. `u32::MAX` (16_384 for the
         //      2026-08-04 model roster).
         //   2. `provider_max_tokens` (operator TOML override).
         //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
@@ -194,14 +252,11 @@ impl Provider for OpenCodeGoAnthropicProvider {
             .as_ref()
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
-        req.max_tokens
-            .min(operator_cap)
-            .min(table_cap)
-            .min(OPENCODE_GO_MAX_TOKENS_CAP)
+        req.max_tokens.min(operator_cap).min(table_cap)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
-    /// (operator override, table, OPENCODE_GO_MAX_TOKENS_CAP) so
+    /// (operator override, table, u32::MAX) so
     /// the algorithm sees the upstream's real boundary. The
     /// regular `send` keeps every cap so a stale or empty table
     /// cannot leak an unbounded value into the wire body.
@@ -209,7 +264,7 @@ impl Provider for OpenCodeGoAnthropicProvider {
         self.send_with_safety_clamp(req, false).await
     }
 
-    /// Cap the exponential probe at `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// Cap the exponential probe at `u32::MAX`
     /// (16_384 for the 2026-08-04 model roster). Several upstreams
     /// (qwen3.x, gpt-5.6-luna, etc.) reject values above this
     /// with HTTP 400, so the probe must short-circuit at the
@@ -218,14 +273,14 @@ impl Provider for OpenCodeGoAnthropicProvider {
     /// Mirrors the wiring on `OpenAiCompatProvider` /
     /// `MinimaxProvider`.
     fn max_tokens_probe_ceiling(&self) -> u32 {
-        OPENCODE_GO_MAX_TOKENS_CAP
+        u32::MAX
     }
 }
 
-impl OpenCodeGoAnthropicProvider {
+impl AnthropicCompatProvider {
     /// Shared HTTP body between `send` and `send_probe`. When
     /// `safety_clamp = true` the wire body is capped by every layer
-    /// (operator override + table + `OPENCODE_GO_MAX_TOKENS_CAP`);
+    /// (operator override + table + `u32::MAX`);
     /// when `false` the wire body carries `req.max_tokens` verbatim
     /// subject only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
     async fn send_with_safety_clamp(
@@ -243,7 +298,7 @@ impl OpenCodeGoAnthropicProvider {
         let max_retries = if safety_clamp { self.max_retries } else { 0 };
         if safety_clamp {
             // Three-layer cap. Highest priority (smallest wins) to lowest:
-            //   1. OPENCODE_GO_MAX_TOKENS_CAP — documented hard ceiling
+            //   1. u32::MAX — documented hard ceiling
             //      for the 2026-08-04 model roster.
             //   2. provider_max_tokens — operator TOML override.
             //   3. MaxTokensTable::resolve_cached — auto-probed value.
@@ -253,7 +308,7 @@ impl OpenCodeGoAnthropicProvider {
                 .as_ref()
                 .and_then(|t| t.resolve_cached(self.name(), self.model()))
                 .unwrap_or(u32::MAX);
-            let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
+            let cap = operator_cap.min(table_cap);
             req.max_tokens = req.max_tokens.min(cap);
         } else {
             // Probe path: bypass every cap. Floor ensures we
@@ -345,8 +400,13 @@ impl OpenCodeGoAnthropicProvider {
     }
 }
 
-impl OpenCodeGoDispatch for OpenCodeGoAnthropicProvider {
-    fn url(&self) -> String {
+impl AnthropicCompatProvider {
+    /// Public URL the provider POSTs to. The legacy
+    /// `OpenCodeGoDispatch::url` accessor lived on the v0.9
+    /// dispatcher; v0.10 keeps the URL builder as a plain method
+    /// so external callers / tests can still inspect the routed
+    /// URL.
+    pub fn url(&self) -> String {
         self.messages_url()
     }
 }
@@ -547,15 +607,12 @@ mod tests {
                 .expect(1)
                 .mount(&server)
                 .await;
-            let p = OpenCodeGoAnthropicProvider::new(
+            let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
-                    endpoint: server.uri(),
-                    model: "minimax-m3".into(),
-                    max_tokens: None,
+                    models: Vec::new(),
+                    endpoint: Some(server.uri()),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -602,15 +659,16 @@ mod tests {
 
     #[test]
     fn messages_url_handles_known_suffixes() {
-        let p = OpenCodeGoAnthropicProvider::new(
+        // v0.10: the constructor reads `endpoint` (section-level
+        // default) verbatim; provide a URL ending in `/v1/messages`
+        // so the test exercises the "already-suffixed" branch of
+        // `messages_url()`.
+        let p = AnthropicCompatProvider::new(
             &ProviderConfig {
-                kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1".into(),
-                model: "qwen3.7-max".into(),
-                max_tokens: None,
+                endpoint: Some("https://opencode.ai/zen/go/v1/messages".into()),
+                models: Vec::new(),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -624,15 +682,16 @@ mod tests {
 
     #[test]
     fn messages_url_handles_messages_suffix() {
-        let p = OpenCodeGoAnthropicProvider::new(
+        // v0.10: same as above — provide the section-level endpoint
+        // so the constructor picks it up. The fixture mirrors a
+        // production `[providers.opencode]` block whose `endpoint`
+        // field already names the messages path.
+        let p = AnthropicCompatProvider::new(
             &ProviderConfig {
-                kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
-                model: "minimax-m3".into(),
-                max_tokens: None,
+                endpoint: Some("https://opencode.ai/zen/go/v1/messages".into()),
+                models: Vec::new(),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -645,39 +704,45 @@ mod tests {
     }
 
     #[test]
-    fn from_config_errors_when_kind_mismatch() {
-        let result = OpenCodeGoAnthropicProvider::new(
+    fn new_accepts_any_kind_v0_10_dispatcher_decides_wire() {
+        // v0.10: the kind check is gone — the dispatcher picks
+        // the wire format from the URL, not from a `kind` tag.
+        // Verify `AnthropicCompatProvider::new` accepts any
+        // canonical schema and the model id round-trips through
+        // `Provider::model()`. The fixture uses a single
+        // `models[]` entry named `x` so the constructor picks the
+        // id up verbatim.
+        let p = AnthropicCompatProvider::new(
             &ProviderConfig {
-                kind: "minimax".into(),
-                endpoint: "https://opencode.ai/zen/go/v1".into(),
-                model: "x".into(),
-                max_tokens: None,
+                endpoint: None,
+                models: vec![crate::config::ModelConfig {
+                    id: "x".into(),
+                    endpoint: None,
+                    max_tokens: None,
+                }],
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
                 plan: None,
             },
             SecretString::new("dummy".into()),
-        );
-        assert!(matches!(result, Err(Error::InvalidArgs(_))));
+        )
+        .expect("v0.10: kind check removed; new() must accept any kind");
+        assert_eq!(p.model(), "x");
     }
 
     #[test]
     fn from_config_errors_when_key_missing() {
         unsafe {
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
         }
-        let result = OpenCodeGoAnthropicProvider::from_config(&ProviderConfig {
-            kind: "opencode_go".into(),
-            endpoint: "https://opencode.ai/zen/go/v1".into(),
-            model: "x".into(),
-            max_tokens: None,
+        let result = AnthropicCompatProvider::from_config(&ProviderConfig {
+            endpoint: None,
+            models: Vec::new(),
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -712,15 +777,16 @@ mod tests {
                 .expect(1)
                 .mount(&server)
                 .await;
-            let p = OpenCodeGoAnthropicProvider::new(
+            let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
-                    endpoint: server.uri(),
-                    model: "minimax-m3".into(),
-                    max_tokens: Some(8192),
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: Some(8192),
+                    }],
+                    endpoint: Some(server.uri()),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -764,14 +830,16 @@ mod tests {
         });
     }
 
-    /// OpenCode Go hard cap (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`)
-    /// must clamp the wire body BEFORE the upstream sees it. This
-    /// test is the regression guard for the original bug: when the
-    /// per-provider `max_tokens` is unset (or explicitly raised
-    /// above the hard cap) the upstream still receives 16_384 and
-    /// never returns HTTP 400.
+    /// v0.10 (post Phase 8): the legacy `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// global clamp is gone. With no probe result and no operator
+    /// override, the wire body carries the request's raw
+    /// `max_tokens` unchanged. The auto-probe discovers the real
+    /// upstream boundary per `(provider, model)` and caches it
+    /// in `max_tokens_auto.toml`; this regression guard pins
+    /// that the Anthropic-compat path no longer applies a 16_384
+    /// ceiling to OpenCode Go calls.
     #[test]
-    fn send_clamps_max_tokens_to_opencode_go_hard_cap() {
+    fn send_does_not_clamp_max_tokens_when_no_probe_or_override() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -791,18 +859,15 @@ mod tests {
                 .expect(1)
                 .mount(&server)
                 .await;
-            let p = OpenCodeGoAnthropicProvider::new(
+            let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
-                    endpoint: server.uri(),
-                    model: "minimax-m3".into(),
+                    models: Vec::new(),
+                    endpoint: Some(server.uri()),
                     // Deliberately None to exercise the
                     // "TOML override unset, only the hard cap
                     // applies" branch.
-                    max_tokens: None,
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -839,8 +904,9 @@ mod tests {
                 .expect("mock server received a JSON body");
             assert_eq!(
                 body["max_tokens"],
-                serde_json::json!(super::super::capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
-                "opencode_go hard cap must clamp 1_000_000 → 16_384, got body: {body}"
+                serde_json::json!(1_000_000),
+                "Anthropic-compat path must NOT clamp 1_000_000 → 16_384 anymore; \
+                 the OPENCODE_GO_MAX_TOKENS_CAP global cap is gone. Got body: {body}"
             );
         });
     }
@@ -850,7 +916,7 @@ mod tests {
     /// discovered value smaller than the requested `max_tokens`
     /// AND smaller than the documented hard cap, the wire body
     /// must carry the discovered value. Pins the v0.7 precedence
-    /// order: `OPENCODE_GO_MAX_TOKENS_CAP` > operator > table > req.
+    /// order: `u32::MAX` > operator > table > req.
     #[test]
     fn send_clamps_max_tokens_to_table_value() {
         use std::sync::Arc;
@@ -895,9 +961,15 @@ mod tests {
 
             let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 5_000 });
             let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+            // v0.10: the legacy constructor reads `(name, model)`
+            // from `models[0].id` for both slots, so the table key
+            // has to match. The dispatched path (`from_resolved`)
+            // uses `(section_name, model_id)`; this test exercises
+            // the hand-rolled constructor path so we mirror that
+            // — provider name == model id == "minimax-m3".
             let discovered = table
                 .probe_and_store(
-                    "opencode_go",
+                    "minimax-m3",
                     "minimax-m3",
                     transport,
                     crate::llm::probe::MAX_AUTOPROBE_CEILING,
@@ -912,15 +984,23 @@ mod tests {
             // boundaries (see pre-existing
             // `probe::tests::detect_finds_cap_at_8k`).
 
-            let p = OpenCodeGoAnthropicProvider::new(
+            let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
-                    endpoint: server.uri(),
-                    model: "minimax-m3".into(),
-                    max_tokens: None,
+                    // v0.10 canonical schema: one `models[]` entry
+                    // whose `id` drives both `name` and `model`
+                    // (the legacy constructor reads them from
+                    // `models.first()`). `max_tokens: None` leaves
+                    // `provider_max_tokens = None` so the operator
+                    // cap chain stays at `u32::MAX` and the table
+                    // value is the only clamp the wire body sees.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
+                    endpoint: Some(server.uri()),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     plan: None,
                     max_token_auto: None,

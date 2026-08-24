@@ -191,7 +191,7 @@ run_test "run_with_context_summary_flag_needs_context" '
   HOME=$(mktemp -d)
   export MOAGAN_HOME="$HOME"
   trap "rm -rf $HOME" EXIT
-  out=$("'"$BIN"'" run --mode fast --provider mock --prompt "x" --context-summary 2>&1)
+  out=$("'"$BIN"'" run --mode fast --provider mock:mock-model --prompt "x" --context-summary 2>&1)
   [[ "$out" == *"--context-summary / --context-full require --context"* ]]
 '
 
@@ -199,7 +199,7 @@ run_test "run_with_context_full_flag_needs_context" '
   HOME=$(mktemp -d)
   export MOAGAN_HOME="$HOME"
   trap "rm -rf $HOME" EXIT
-  out=$("'"$BIN"'" run --mode fast --provider mock --prompt "x" --context-full 2>&1)
+  out=$("'"$BIN"'" run --mode fast --provider mock:mock-model --prompt "x" --context-full 2>&1)
   [[ "$out" == *"--context-summary / --context-full require --context"* ]]
 '
 
@@ -321,7 +321,7 @@ run_test "rerun_runs_full_pipeline_e2e" '
   HOME=$(mktemp -d)
   trap "rm -rf $HOME" EXIT
   FIXDIR='"$ROOT"'/tests/fixtures/mock_provider
-  out=$("'"$BIN"'" --runs-dir "$HOME" run --mode fast --provider mock --prompt "test" --non-interactive --mock-dir "$FIXDIR" 2>&1)
+  out=$("'"$BIN"'" --runs-dir "$HOME" run --mode fast --provider mock:mock-model --prompt "test" --non-interactive --mock-dir "$FIXDIR" 2>&1)
   echo "$out" | grep -q "moagan run"
   RID=$(basename $(ls -d "$HOME/.runs"/*/ | head -1))
   # continuation: nothing left to do after deliver.

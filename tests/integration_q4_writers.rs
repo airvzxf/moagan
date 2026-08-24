@@ -8,10 +8,10 @@
 //! regressions where any writer silently stops emitting rows or the
 //! rank phase stops mirroring the stability verdict into SQLite.
 //!
-//! Single `moagan run --mode fast --provider mock` invocation — the
-//! mock fixture exercises intake + clarify + route + propose x3 +
-//! critique x6 + judge x9 + deliver = 22 calls; outbox_events should
-//! see one `call.completed` per real (non-cache-hit) call.
+//! Single `moagan run --mode fast --provider mock` invocation —
+//! the mock fixture exercises intake + clarify + route + propose
+//! x3 + critique x6 + judge x9 + deliver = 22 calls; outbox_events
+//! should see one `call.completed` per real (non-cache-hit) call.
 
 use std::process::Command;
 
@@ -25,12 +25,30 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
     // guaranteed cache miss.
     let tmp = tempfile::TempDir::new().expect("tmpdir");
 
+    // v0.10 dispatcher requires the explicit `SECTION:MODEL`
+    // shape (`88bcd9c` removed the bare-section fallback). The
+    // custom `MOAGAN_CONFIG` below only adds the `mock_dir` so the
+    // canned fixtures load from `tests/fixtures/mock_provider`;
+    // the default `Config::default()` already registers
+    // `[providers.mock] models = [{ id = "mock-model" }]` in
+    // `default_providers()`.
+    let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
+    let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
+    std::fs::write(
+        &mock_cfg_path,
+        "[providers.mock]\n\
+         endpoint = \"mock://local\"\n\
+         mock_dir = \"tests/fixtures/mock_provider\"\n\
+         models = [{ id = \"mock-model\" }]\n",
+    )
+    .expect("write mock config");
+
     let out = Command::new(&bin)
         .arg("run")
         .arg("--mode")
         .arg("fast")
         .arg("--provider")
-        .arg("mock")
+        .arg("mock:mock-model")
         .arg("--mock-dir")
         .arg("tests/fixtures/mock_provider")
         .arg("--prompt")
@@ -39,6 +57,7 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
         .arg("--runs-dir")
         .arg(tmp.path())
         .env_remove("MINIMAX_API_KEY")
+        .env("MOAGAN_CONFIG", &mock_cfg_path)
         .output()
         .expect("moagan run");
 
@@ -237,12 +256,29 @@ fn mock_run_prompt_dash_reads_from_stdin() {
 
     let tmp = tempfile::TempDir::new().expect("tmpdir");
 
+    // Mirror the `MOAGAN_CONFIG` shim from
+    // `mock_run_writes_all_v008_tables_and_v009_columns` above —
+    // the only thing it adds beyond `Config::default()` is the
+    // `mock_dir` so the canned fixtures load from
+    // `tests/fixtures/mock_provider`. The `--provider
+    // mock:mock-model` shape is the post-`88bcd9c` mandatory form.
+    let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
+    let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
+    std::fs::write(
+        &mock_cfg_path,
+        "[providers.mock]\n\
+         endpoint = \"mock://local\"\n\
+         mock_dir = \"tests/fixtures/mock_provider\"\n\
+         models = [{ id = \"mock-model\" }]\n",
+    )
+    .expect("write mock config");
+
     let mut child = Command::new(&bin)
         .arg("run")
         .arg("--mode")
         .arg("fast")
         .arg("--provider")
-        .arg("mock")
+        .arg("mock:mock-model")
         .arg("--mock-dir")
         .arg("tests/fixtures/mock_provider")
         .arg("--prompt")
@@ -251,6 +287,7 @@ fn mock_run_prompt_dash_reads_from_stdin() {
         .arg("--runs-dir")
         .arg(tmp.path())
         .env_remove("MINIMAX_API_KEY")
+        .env("MOAGAN_CONFIG", &mock_cfg_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

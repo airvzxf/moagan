@@ -1,39 +1,54 @@
-//! Generic OpenAI Chat Completions provider.
+//! `openai_compat` provider — OpenAI Responses API at
+//! `https://opencode.ai/zen/go/v1/responses`.
 //!
-//! Used by any backend whose API is OpenAI-compatible: DeepSeek
-//! (`https://api.deepseek.com/v1`), OpenCode Go
-//! (`https://opencode.ai/zen/go/v1`), and any future provider that
-//! speaks the same wire format. The provider name (`fn name()`) is
-//! configurable so the same code can serve multiple backends.
+//! This is currently the only model the operator exposes on this
+//! endpoint (per the 2026-08-04 model roster):
+//!
+//! - `gpt-5.6-luna` (OpenAI SDK, `@ai-sdk/openai`)
+//!
+//! The Responses API differs from Chat Completions in two ways:
+//!
+//! - The request body uses `input` (a string or array of messages)
+//!   instead of `messages`. We pass the user prompt as a single string.
+//! - The response body is `{"output": [{"content": [{"type":
+//!   "output_text", "text": "..."}]}], "usage": {...}}` instead of
+//!   `{"choices": [{"message": {"content": "..."}}]}`.
+//!
+//! No conversation history is kept; the pipeline sends one user turn
+//! at a time and the system prompt is embedded in the `instructions`
+//! field (Responses API convention).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
 
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
-use super::opencode_go::OpenCodeGoDispatch;
+use super::wire_format::role_requires_json;
+// The legacy `OpenCodeGoDispatch` sub-trait (formerly in
+// `super::opencode_go`) was the dispatcher's handle for routing by
+// URL. The v0.10 dispatcher picks the concrete provider from the
+// wire format, not from a boxed trait object — the URL builder is now
+// a public method on each provider (e.g. `OpenAICompatProvider::url`).
 use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
-use super::response_format_opt_out;
+use super::response_format_opt_out::model_skips_response_format;
 use super::size_limits::{MAX_RESPONSE_BYTES, check_size};
+use super::sse_parser::{SseError, SseParser};
 use super::wire::{Request, Response, Usage};
 
-/// Generic OpenAI-compat provider.
+/// OpenCode Go provider routed through the OpenAI Responses API.
 #[derive(Clone)]
-pub struct OpenAiCompatProvider {
+pub struct OpenAICompatProvider {
     name: String,
     model: String,
     endpoint: String,
     api_key: SecretString,
-    client: Client,
+    client: reqwest::Client,
     max_retries: u32,
     /// Per-provider hard cap on `max_tokens` (set from
     /// `ProviderConfig::max_tokens`). The default is
@@ -41,17 +56,13 @@ pub struct OpenAiCompatProvider {
     /// value normally fits under the cap. The clamp below exists
     /// for the rare cases where a TOML override sets a smaller
     /// provider-specific limit, so the upstream never rejects the
-    /// request with 400.
+    /// request.
     provider_max_tokens: Option<u32>,
-    /// Kind-level hard cap on `max_tokens`, applied as a second
-    /// layer on top of `provider_max_tokens`. `None` means no
-    /// kind-level cap (DeepSeek-direct uses this; DeepSeek accepts
-    /// up to 8192 per its docs and the per-provider TOML knob is
-    /// enough). `Some(16_384)` is wired by the OpenCode Go
-    /// dispatcher so the upstream never returns HTTP 400 for
-    /// kimi-k*, qwen3.x, gpt-5.6-luna, etc. — see
-    /// `capabilities::OPENCODE_GO_MAX_TOKENS_CAP`.
-    kind_hard_cap: Option<u32>,
+    /// When `true`, omit the `max_tokens` field from the wire body
+    /// entirely. Required for upstream models that reject the
+    /// *presence* of the field (e.g. `gpt-5.6-luna`). Set from
+    /// `ProviderConfig::omit_max_tokens`.
+    omit_max_tokens: bool,
     /// Auto-probed `max_tokens` table. When `Some` the
     /// `resolve_cached(self.name(), self.model())` value joins the
     /// clamp chain as the third-highest layer (kind-level cap >
@@ -61,44 +72,44 @@ pub struct OpenAiCompatProvider {
     max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
-impl OpenAiCompatProvider {
+impl OpenAICompatProvider {
     /// Build from a `ProviderConfig` and a resolved API key.
-    /// Equivalent to [`OpenAiCompatProvider::new_with_kind_cap`]
-    /// with `cap = None`. Use that constructor instead when the
-    /// provider is routed through OpenCode Go.
+    /// Kept for backwards compatibility with hand-rolled callers
+    /// (legacy test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
+    ///
+    /// When `spec.models` is empty (the v0.9 fixture shape) the
+    /// constructor falls back to the first model id (or
+    /// `"openai_compat"` as a placeholder) and the section-level
+    /// `endpoint` (or `"http://localhost"` as a placeholder).
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        Self::new_with_kind_cap(spec, api_key, None)
-    }
-
-    /// Build from a `ProviderConfig`, a resolved API key, and an
-    /// optional kind-level hard cap on `max_tokens`. The
-    /// dispatcher (`super::opencode_go`) passes
-    /// `Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP)` so
-    /// every OpenCode Go model respects the upstream's
-    /// heterogeneous `max_tokens` ceiling; DeepSeek-direct passes
-    /// `None` because the direct upstream's 8192 limit is already
-    /// covered by `ProviderConfig::max_tokens`.
-    pub fn new_with_kind_cap(
-        spec: &ProviderConfig,
-        api_key: SecretString,
-        cap: Option<u32>,
-    ) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
-            .build()
-            .map_err(|e| Error::Provider {
-                message: format!("build http client: {e}"),
-                http_status: None,
-            })?;
+        let client = build_client()?;
+        let name = spec
+            .models
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| "openai_compat".to_owned());
+        let model = spec
+            .models
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        let endpoint = spec
+            .models
+            .first()
+            .and_then(|m| m.endpoint.clone())
+            .or_else(|| spec.endpoint.clone())
+            .unwrap_or_else(|| "http://localhost".to_owned());
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         Ok(Self {
-            name: spec.kind.clone(),
-            model: spec.model.clone(),
-            endpoint: spec.endpoint.clone(),
+            name,
+            model,
+            endpoint,
             api_key,
             client,
             max_retries: 3,
-            provider_max_tokens: spec.max_tokens,
-            kind_hard_cap: cap,
+            provider_max_tokens,
+            omit_max_tokens: spec.omit_max_tokens,
             max_tokens_table: None,
         })
     }
@@ -111,193 +122,209 @@ impl OpenAiCompatProvider {
         self
     }
 
-    /// Compute the URL for chat completions.
-    fn chat_url(&self) -> String {
+    /// Build from config, resolving the API key via the unified
+    /// helper. Kept for backwards compatibility with hand-rolled
+    /// callers (test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
+    pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
+        let key = std::env::var("OPENCODE_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                    .into(),
+                http_status: None,
+            })?;
+        Self::new(spec, SecretString::new(key))
+    }
+
+    /// v0.10 dispatcher entry point. Builds an `OpenAICompatProvider`
+    /// from a `ResolvedModelConfig` (one `(section, model_id)` pair),
+    /// resolving the API key via the unified
+    /// [`super::api_keys::lookup_key`] helper. The key lookup falls
+    /// back from the section name to the canonical `kind` so a
+    /// per-model alias like `gpt-5.6-luna` (kind=`"opencode"`)
+    /// resolves against the `OPENCODE_API_KEY` env var rather than
+    /// the non-existent `GPT-5.6-LUNA_API_KEY`. The dispatcher
+    /// picks this constructor for endpoints whose path resolves to
+    /// [`super::wire_format::WireFormatId::OpenAI`].
+    pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        let kind = super::api_keys::lookup_kind_for_resolved(resolved);
+        let key = super::api_keys::lookup_key(&kind, None)
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: format!(
+                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                    kind.to_ascii_uppercase()
+                ),
+                http_status: None,
+            })?
+            .map_err(|e| match e {
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "{}: {message}; check api_keys.toml and the env var fallback",
+                        kind
+                    ),
+                    http_status: None,
+                },
+                other => other,
+            })?;
+        let client = build_client()?;
+        Ok(Self {
+            name: resolved.section.clone(),
+            model: resolved.id.clone(),
+            endpoint: resolved.endpoint.clone(),
+            api_key: SecretString::new(key),
+            client,
+            max_retries: 3,
+            provider_max_tokens: resolved.max_tokens,
+            omit_max_tokens: resolved.omit_max_tokens,
+            max_tokens_table: None,
+        })
+    }
+
+    /// Compute the URL for the responses endpoint.
+    fn responses_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
-        if base.ends_with("/chat/completions") {
+        if base.ends_with("/responses") {
             base.to_owned()
         } else if base.ends_with("/v1") {
-            format!("{base}/chat/completions")
+            format!("{base}/responses")
         } else {
-            format!("{base}/v1/chat/completions")
+            format!("{base}/v1/responses")
         }
     }
 
-    /// Build the chat-completions request body for a given provider
-    /// request, applying the role-based JSON output mode and the
-    /// per-model opt-out from `response_format_opt_out`. Extracted so
-    /// tests can assert on the wire shape without a live HTTP call.
-    ///
-    /// For models whose [`crate::llm::json_strategy::JsonRecoveryStrategy`]
-    /// is `PromptPrefill` (e.g. `deepseek-v4-pro`,
-    /// `deepseek-v4-flash`), this function also appends an
-    /// assistant prefill message of `{` after the user turn so the
-    /// model continues with a JSON object body. The prefill is a
-    /// response-side hint; the cross-run cache key
-    /// ([`crate::llm::wire::build_cache_key`]) deliberately
-    /// IGNORES the equivalent `Request::extra_messages` field so
-    /// the steady-state cache stays valid when the prefill retry
-    /// fires.
-    fn build_chat_request(&self, req: &Request) -> ChatRequest<'_> {
-        let strategy = crate::llm::json_strategy::strategy_for(&self.model, None);
-        let mut messages: Vec<ChatMessage> = vec![
-            ChatMessage {
-                role: "system".into(),
-                content: req.system.clone(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: req.user.clone(),
-            },
-        ];
-        // PR-C5 (PromptPrefill): the caller may have supplied
-        // `extra_messages` directly (e.g. the dispatcher
-        // builds a fresh Request on the prefill retry with
-        // `extra_messages = [{assistant, "{"}]`). Push those
-        // verbatim so the wire shape mirrors what the caller
-        // asked for. When the caller did not supply any
-        // `extra_messages` and the per-model default strategy
-        // is `PromptPrefill`, auto-inject the `{` prefill so
-        // callers who never set `extra_messages` still get
-        // the response-side hint on the steady-state path.
-        for m in &req.extra_messages {
-            messages.push(ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            });
-        }
-        if req.extra_messages.is_empty()
-            && crate::llm::json_strategy::needs_assistant_prefill(strategy)
-        {
-            messages.push(ChatMessage {
-                role: "assistant".into(),
-                content: "{".into(),
-            });
-        }
-        ChatRequest {
-            model: &self.model,
-            messages,
-            max_tokens: req.max_tokens,
-            temperature: req.temperature,
-            top_p: req.top_p,
-            stream: false,
-            response_format: if role_requires_json(req.role)
-                && !response_format_opt_out::model_skips_response_format(&self.model)
-            {
-                Some(ResponseFormat {
-                    kind: "json_object",
-                })
-            } else {
-                None
-            },
+    async fn sleep_with_jitter(attempt: u32, suggested: Option<std::time::Duration>) {
+        let base = suggested.unwrap_or(std::time::Duration::from_millis(500));
+        let jitter = (fastrand::u64(..) % 250) + 1;
+        let total = base + std::time::Duration::from_millis(jitter);
+        let half = total / 2;
+        let low = total.saturating_sub(half);
+        let high = total + half;
+        let span = high.as_millis().saturating_sub(low.as_millis()) as u64;
+        let chosen = if span == 0 {
+            low
+        } else {
+            low + std::time::Duration::from_millis(fastrand::u64(..) % span)
+        };
+        tokio::time::sleep(chosen).await;
+        let _ = attempt;
+    }
+
+    /// Returns `None` when `omit_max_tokens` is set (so the field is
+    /// dropped from the wire body), otherwise the request's max_tokens.
+    fn effective_max_tokens(&self, requested: u32) -> Option<u32> {
+        if self.omit_max_tokens {
+            None
+        } else {
+            Some(requested)
         }
     }
 }
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Serialize)]
-struct ChatRequest<'a> {
+struct ResponsesRequest<'a> {
     model: &'a str,
-    messages: Vec<ChatMessage>,
-    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
+    input: &'a str,
+    /// Output token ceiling. `None` serializes as field-absent (via
+    /// `skip_serializing_if`), required for providers that reject
+    /// the presence of the field (e.g. `gpt-5.6-luna`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
-    stream: bool,
-    /// OpenAI-style JSON output mode. Sent only when the role
-    /// requires machine-readable JSON (Route, Propose, Judge, etc.)
-    /// so the upstream API returns a parseable object instead of
-    /// free-form text. Optional so non-JSON roles (e.g. proposals
-    /// that produce markdown) skip the field entirely.
+    /// OpenAI-style JSON output mode. Mirrors the OpenAI-compat
+    /// gating: omitted for free-text roles (`Sketch`, `FinalReport`,
+    /// etc.) and for models on the `response_format_opt_out` list.
+    /// `Capabilities::for_openai_compat` advertises
+    /// `supports_response_format: true` because the Responses API
+    /// still honours the field, so a JSON role on a non-opted-out
+    /// model must send it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
+    response_format: Option<ResponsesResponseFormat>,
+    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
-struct ResponseFormat {
+struct ResponsesResponseFormat {
     #[serde(rename = "type")]
     kind: &'static str,
 }
 
-/// Roles that produce structured JSON output. The OpenAI-compat
-/// providers (DeepSeek, OpenCode Go) get `response_format` set to
-/// `json_object` for these roles so the JSON parser in `parse_model_json`
-/// stops hitting the trailing-token / missing-brace pathologies
-/// reported by the Q8 multi-model benchmark. Markdown-only roles
-/// (Propose delivers markdown but parses a JSON header; the
-/// actual markdown body is not autostructured) and free-text roles
-/// (Sketch, FinalReport) are NOT in this list.
-pub(crate) fn role_requires_json(role: crate::llm::Role) -> bool {
-    use crate::llm::Role::*;
-    matches!(
-        role,
-        Intake
-            | Clarify
-            | Route
-            | Gate
-            | Critique
-            | Repair
-            | Rank
-            | Synthesizer
-            | Adversary
-            | Decomposer
-            | MergeSynthesizer
-    )
-}
-
-#[derive(Debug, Serialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
+/// Compute the gate the OpenAI-compat path uses to decide whether
+/// to send `response_format: { type: "json_object" }`. Kept local
+/// so the wire builder can stay a free function and so the
+/// `#[cfg(test)]` block can drive it directly.
+fn wants_response_format(role: crate::llm::Role, model: &str) -> bool {
+    role_requires_json(role) && !model_skips_response_format(model)
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<ChatChoice>,
+struct ResponsesBody {
     #[serde(default)]
-    usage: Option<ChatUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatMessageOut,
+    output: Vec<ResponsesOutput>,
     #[serde(default)]
-    finish_reason: Option<String>,
+    usage: Option<ResponsesUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatMessageOut {
-    content: String,
+struct ResponsesOutput {
+    #[serde(default)]
+    content: Vec<ResponsesContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesContent {
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct ChatUsage {
+struct ResponsesUsage {
     #[serde(default)]
-    prompt_tokens: u64,
+    input_tokens: u64,
     #[serde(default)]
-    completion_tokens: u64,
+    output_tokens: u64,
+}
+
+fn build_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| Error::Provider {
+            message: format!("build reqwest client: {e}"),
+            http_status: None,
+        })
 }
 
 /// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
 /// does not implement `Debug` (that lives in `probe_table.rs`,
-/// outside this provider's owned files) and the table is a shared
-/// `Arc`, so emitting `<shared>` keeps the dump informative without
-/// forcing a cross-file change.
-impl std::fmt::Debug for OpenAiCompatProvider {
+/// outside this provider's owned files). The table is a shared
+/// `Arc`, so emitting `<shared>` keeps the dump informative.
+impl std::fmt::Debug for OpenAICompatProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpenAiCompatProvider")
+        f.debug_struct("OpenAICompatProvider")
             .field("name", &self.name)
             .field("model", &self.model)
             .field("endpoint", &self.endpoint)
             .field("provider_max_tokens", &self.provider_max_tokens)
-            .field("kind_hard_cap", &self.kind_hard_cap)
+            .field("omit_max_tokens", &self.omit_max_tokens)
             .field("max_tokens_table", &"<shared>")
             .finish()
     }
 }
 
 #[async_trait]
-impl Provider for OpenAiCompatProvider {
+impl Provider for OpenAICompatProvider {
     fn name(&self) -> &str {
         &self.name
     }
@@ -311,147 +338,222 @@ impl Provider for OpenAiCompatProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        // Dispatcher lookup by `kind`: direct DeepSeek config
-        // gets the deepseek variant; everything else (the
-        // OpenCode Go chat-completions path) stays on the
-        // generic baseline.
-        if self.name == "deepseek" {
-            ProviderCapabilities::for_deepseek()
+        // v0.10: the wire format is detected from the endpoint URL
+        // (the dispatcher did this at construction time). For
+        // `OpenAICompatProvider`, two wire formats share the
+        // `/v1/responses` (Responses API) and the chat-completions
+        // path — but `OpenAICompatProvider` only handles the
+        // Responses path. Anything else (e.g. legacy callers that
+        // constructed this provider directly) falls back to the
+        // generic OpenAI-compat capability.
+        if self.endpoint.ends_with("/responses") {
+            ProviderCapabilities::for_opencode_go_responses()
         } else {
             ProviderCapabilities::for_openai_compat()
         }
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+        // The regular `send` keeps every cap (operator override,
+        // table, u32::MAX) so a stale or empty
+        // table cannot leak an unbounded value into the wire body.
+        // The probe path uses `send_probe` instead, which skips the
+        // u32::MAX so the algorithm sees the
+        // upstream's real boundary.
         self.send_with_safety_clamp(req, true).await
     }
 
     fn effective_max_tokens(&self, req: &Request) -> u32 {
         // Mirror of the clamp chain in
-        // `send_with_safety_clamp(_, true)` so the audit-log hash is
-        // byte-for-byte identical to the wire body. Same ordering as
-        // `send`:
-        //   1. `kind_hard_cap` (dispatcher-set, e.g.
-        //      `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` for OpenCode
-        //      Go routes; `None` for DeepSeek-direct).
+        // `send_with_safety_clamp(_, true)` (and `send_streaming`,
+        // which applies the same chain) so the audit-log hash is
+        // byte-for-byte identical to the wire body. Same ordering
+        // as `send`:
+        //   1. `u32::MAX` (16_384 for the
+        //      2026-08-04 model roster).
         //   2. `provider_max_tokens` (operator TOML override).
         //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
+        // `omit_max_tokens` does NOT affect this value — it only
+        // drops the field from the wire body; when the field is
+        // present the value is the same clamped `u32`.
         let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
         let table_cap = self
             .max_tokens_table
             .as_ref()
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
-        req.max_tokens
-            .min(operator_cap)
-            .min(kind_cap)
-            .min(table_cap)
+        req.max_tokens.min(operator_cap).min(table_cap)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
-    /// (operator override, kind_hard_cap, table) so the algorithm
-    /// sees the upstream's real boundary. The regular `send` keeps
-    /// every cap so a stale or empty table cannot leak an
-    /// unbounded value into the wire body.
-    ///
-    /// Same rationale as `minimax::send_probe`: when the operator's
-    /// TOML pins `max_tokens = 8192` (DeepSeek-direct's historical
-    /// cap) and the upstream actually accepts up to 32K, every
-    /// probe lands on 8192 and the algorithm concludes "accepts
-    /// everything". To discover the real boundary, the probe must
-    /// send `req.max_tokens` verbatim, subject only to the floor.
+    /// (operator override, table, u32::MAX) so
+    /// the algorithm sees the upstream's real boundary.
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
         self.send_with_safety_clamp(req, false).await
     }
 
-    /// Cap the exponential probe at the `kind_hard_cap` so the
-    /// algorithm does not burn 30 sequential HTTP round-trips
-    /// probing values the upstream will never accept. DeepSeek-direct
-    /// (`DEEPSEEK_MAX_TOKENS_CAP = 393_216`) and OpenCode Go's
-    /// chat-completions path (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`)
-    /// both reach this method via `new_with_kind_cap`, so the probe
-    /// observes the upstream's real bound without first tripping
-    /// the upstream's HTTP 400 `max_tokens` rejection (which would
-    /// yield `Indeterminate` per the v0.7.1 contract and collapse
-    /// the discovered ceiling). Other OpenAI-compat backends (with
-    /// no `kind_hard_cap`) keep the default
-    /// [`super::probe::MAX_AUTOPROBE_CEILING`].
+    /// Cap the exponential probe at `u32::MAX`
+    /// (16_384 for the 2026-08-04 model roster). `gpt-5.6-luna`
+    /// rejects values above this with HTTP 400, so the probe must
+    /// short-circuit at the smallest `2^k > 16_384` (k=15 →
+    /// 32_768) rather than spend a round-trip on a value the
+    /// upstream will never accept. Mirrors the wiring on
+    /// `OpenAiCompatProvider` / `MinimaxProvider`.
     fn max_tokens_probe_ceiling(&self) -> u32 {
-        self.kind_hard_cap
-            .unwrap_or(super::probe::MAX_AUTOPROBE_CEILING)
+        u32::MAX
     }
 }
 
-impl OpenCodeGoDispatch for OpenAiCompatProvider {
-    fn url(&self) -> String {
-        self.chat_url()
+/// Build the wire-level request body used by `send`.
+fn build_responses_body<'a>(
+    req: &'a Request,
+    model: &'a str,
+    stream: bool,
+    omit_max_tokens: bool,
+) -> ResponsesRequest<'a> {
+    ResponsesRequest {
+        model,
+        instructions: Some(&req.system),
+        input: &req.user,
+        max_tokens: if omit_max_tokens {
+            None
+        } else {
+            Some(req.max_tokens)
+        },
+        temperature: req.temperature,
+        top_p: req.top_p,
+        response_format: if wants_response_format(req.role, model) {
+            Some(ResponsesResponseFormat {
+                kind: "json_object",
+            })
+        } else {
+            None
+        },
+        stream,
     }
 }
 
-impl OpenAiCompatProvider {
+/// Consume an OpenAI Responses SSE wire body and return the
+/// accumulated text plus the most-recent usage block.
+///
+/// Each `data:` payload is expected to carry a partial Responses
+/// shape (`{"output": [{"content": [{"type": "output_text",
+/// "text": "..."}]}]}`) plus an optional `usage` block that
+/// may arrive on the terminal event. The function walks every
+/// payload, concatenates `output_text` blocks in arrival order,
+/// and replaces the cached usage with the most recent observation
+/// (the terminal event typically carries the authoritative
+/// counts).
+///
+/// Visible to tests so they can exercise the SSE consumer
+/// without having to spin up a wiremock server.
+fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
+    let mut parser = SseParser::new(body);
+    let mut text = String::new();
+    let mut usage = ResponsesUsage::default();
+    loop {
+        match parser.next_data::<ResponsesBody>() {
+            Ok(Some(delta)) => {
+                for out in delta.output {
+                    for c in out.content {
+                        if c.kind == "output_text"
+                            && let Some(t) = c.text
+                        {
+                            text.push_str(&t);
+                        }
+                    }
+                }
+                if let Some(u) = delta.usage {
+                    usage = u;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(match e {
+                    SseError::Io(err) => Error::Provider {
+                        message: format!("sse io: {err}"),
+                        http_status: None,
+                    },
+                    SseError::Parse(err) => Error::Provider {
+                        message: format!("sse parse: {err}"),
+                        http_status: None,
+                    },
+                });
+            }
+        }
+    }
+    Ok((text, usage))
+}
+
+impl OpenAICompatProvider {
     /// Shared HTTP body between `send` and `send_probe`. When
     /// `safety_clamp = true` the wire body is capped by every layer
-    /// (operator override + `kind_hard_cap` + table); when `false`
-    /// the wire body carries `req.max_tokens` verbatim subject only
-    /// to the [`MIN_AUTOPROBE_FLOOR`] minimum.
+    /// (operator override + table + `u32::MAX`);
+    /// when `false` the wire body carries `req.max_tokens` verbatim
+    /// subject only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
     async fn send_with_safety_clamp(
         &self,
         req: &Request,
         safety_clamp: bool,
     ) -> Result<(u16, Response)> {
-        let url = self.chat_url();
+        let url = self.responses_url();
+        if req.stream {
+            return self.send_streaming(req, &url).await;
+        }
         // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
         // signal (max-tokens rejection), retrying it wastes the 5s
         // probe timeout and risks masking the boundary if a retry
         // happens to succeed. Production path keeps the existing
         // self.max_retries (3) for transient 5xx storms.
         let max_retries = if safety_clamp { self.max_retries } else { 0 };
+        let mut req = req.clone();
+        if safety_clamp {
+            // Three-layer cap. Highest priority (smallest wins) to lowest:
+            //   1. u32::MAX — documented hard ceiling
+            //      for the 2026-08-04 roster (kimi-k* / gpt-5.6-luna).
+            //   2. provider_max_tokens — operator TOML override.
+            //   3. MaxTokensTable::resolve_cached — auto-probed value.
+            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+            let table_cap = self
+                .max_tokens_table
+                .as_ref()
+                .and_then(|t| t.resolve_cached(self.name(), self.model()))
+                .unwrap_or(u32::MAX);
+            let cap = operator_cap.min(table_cap);
+            req.max_tokens = req.max_tokens.min(cap);
+        } else {
+            // Probe path: bypass every cap. Floor ensures we
+            // never ask for `max_tokens < 1024` (some upstreams
+            // reject the request outright below that minimum).
+            req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
+        }
+        let max_tokens = self.effective_max_tokens(req.max_tokens);
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
-            let body = self.build_chat_request(req);
-            let body = if safety_clamp {
-                // Apply three-layer max_tokens cap. Highest priority
-                // (smallest wins) to lowest:
-                //   1. `kind_hard_cap` — set by the OpenCode Go
-                //      dispatcher to `OPENCODE_GO_MAX_TOKENS_CAP =
-                //      16_384`. DeepSeek-direct leaves `None` (the
-                //      direct upstream's 8192 limit is covered by
-                //      the operator override).
-                //   2. `provider_max_tokens` — operator TOML override.
-                //   3. `MaxTokensTable::resolve_cached` — auto-probed
-                //      per-(provider, model) value; primary source of
-                //      truth when present.
-                let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-                let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
-                let table_cap = self
-                    .max_tokens_table
-                    .as_ref()
-                    .and_then(|t| t.resolve_cached(self.name(), self.model()))
-                    .unwrap_or(u32::MAX);
-                let cap = operator_cap.min(kind_cap).min(table_cap);
-                if body.max_tokens > cap {
-                    ChatRequest {
-                        max_tokens: cap,
-                        ..body
-                    }
+            let body = ResponsesRequest {
+                model: &self.model,
+                instructions: Some(&req.system),
+                input: &req.user,
+                max_tokens,
+                temperature: req.temperature,
+                top_p: req.top_p,
+                response_format: if wants_response_format(req.role, &self.model) {
+                    Some(ResponsesResponseFormat {
+                        kind: "json_object",
+                    })
                 } else {
-                    body
-                }
-            } else {
-                // Probe path: bypass every cap. Floor ensures we
-                // never ask for `max_tokens < 1024` (some upstreams
-                // reject the request outright below that minimum).
-                if body.max_tokens < MIN_AUTOPROBE_FLOOR {
-                    ChatRequest {
-                        max_tokens: MIN_AUTOPROBE_FLOOR,
-                        ..body
-                    }
-                } else {
-                    body
-                }
+                    None
+                },
+                stream: false,
             };
+            let request_started = std::time::Instant::now();
+            tracing::debug!(
+                provider = self.name,
+                attempt,
+                stage = "http.request.started",
+                "Provider HTTP stage"
+            );
             let result = self
                 .client
                 .post(&url)
@@ -462,120 +564,210 @@ impl OpenAiCompatProvider {
             match result {
                 Ok(resp) => {
                     let status = resp.status();
-                    let code = status.as_u16();
+                    let status_code = status.as_u16();
+                    tracing::debug!(
+                        provider = self.name,
+                        attempt,
+                        stage = "http.headers.received",
+                        status = status_code,
+                        elapsed_ms = request_started.elapsed().as_millis(),
+                        "Provider HTTP stage"
+                    );
                     if status.is_success() {
-                        let parsed: ChatResponse =
+                        let decode_started = std::time::Instant::now();
+                        let parsed: ResponsesBody =
                             resp.json().await.map_err(|e| Error::Provider {
                                 message: format!("decode: {e}"),
                                 http_status: None,
                             })?;
-                        let choice =
-                            parsed
-                                .choices
-                                .into_iter()
-                                .next()
-                                .ok_or_else(|| Error::Provider {
-                                    message: "openai-compat: empty choices array".into(),
-                                    http_status: None,
-                                })?;
-                        let finish_reason = choice.finish_reason;
-                        let truncated = finish_reason.as_deref() == Some("length");
+                        tracing::debug!(
+                            provider = self.name,
+                            attempt,
+                            stage = "http.body.decoded",
+                            status = status_code,
+                            elapsed_ms = decode_started.elapsed().as_millis(),
+                            "Provider HTTP stage"
+                        );
+                        let mut text = String::new();
+                        for out in parsed.output {
+                            for c in out.content {
+                                if c.kind == "output_text"
+                                    && let Some(t) = c.text
+                                {
+                                    text.push_str(&t);
+                                }
+                            }
+                        }
                         let usage = parsed.usage.unwrap_or_default();
-                        let text = choice.message.content;
                         check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
                         let response = Response {
                             text,
-                            finish_reason,
-                            truncated,
+                            finish_reason: None,
+                            truncated: false,
                             usage: Usage {
-                                input_tokens: usage.prompt_tokens,
-                                output_tokens: usage.completion_tokens,
+                                input_tokens: usage.input_tokens,
+                                output_tokens: usage.output_tokens,
                                 cache_read: 0,
                                 cache_creation: 0,
                             },
                         };
-                        return Ok((code, response));
+                        return Ok((status_code, response));
                     }
                     let body = resp.text().await.unwrap_or_default();
-                    if attempt >= max_retries {
-                        return Err(Error::Provider {
-                            message: format!(
-                                "openai-compat: HTTP {code} after {attempt} attempts: {body}"
-                            ),
-                            http_status: Some(code),
-                        });
+                    let err = match status_code {
+                        401 | 403 => Error::InvalidApiKey {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
+                        429 => Error::PlanExhausted {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
+                        408 | 504 | 524 => Error::Timeout {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
+                        _ => Error::Provider {
+                            message: format!("http {status_code}: {body}"),
+                            http_status: Some(status_code),
+                        },
+                    };
+                    let retryable = matches!(
+                        err,
+                        Error::Timeout { .. }
+                            | Error::PlanExhausted { .. }
+                            | Error::Provider { .. }
+                    );
+                    if !retryable || attempt >= max_retries {
+                        return Err(err);
                     }
-                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                    Self::sleep_with_jitter(attempt, None).await;
                 }
                 Err(e) => {
                     if attempt >= max_retries {
                         return Err(Error::Provider {
-                            message: format!("openai-compat: network: {e}"),
+                            message: format!("network: {e}"),
                             http_status: None,
                         });
                     }
-                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                    Self::sleep_with_jitter(attempt, None).await;
                 }
             }
         }
+    }
+
+    /// Streaming variant of [`Provider::send`]: sets
+    /// `stream=true` on the wire body, reads the entire SSE
+    /// response, and returns a single aggregated `Response` with
+    /// the joined text and the terminal usage block.
+    async fn send_streaming(&self, req: &Request, url: &str) -> Result<(u16, Response)> {
+        // Apply three-layer max_tokens cap (same as the non-streaming
+        // path and as `OpenAiCompatProvider` / `MinimaxProvider`).
+        // Clamping here as well so the SSE wire body carries the same
+        // value the upstream would see on the non-streaming path.
+        let mut req = req.clone();
+        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
+        let table_cap = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(self.name(), self.model()))
+            .unwrap_or(u32::MAX);
+        let cap = operator_cap.min(table_cap);
+        req.max_tokens = req.max_tokens.min(cap);
+        let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
+        let request_started = std::time::Instant::now();
+        let resp = self
+            .client
+            .post(url)
+            .bearer_auth(self.api_key.expose())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Provider {
+                message: format!("network: {e}"),
+                http_status: None,
+            })?;
+        let status = resp.status();
+        let status_code = status.as_u16();
+        if !status.is_success() {
+            let raw = resp.text().await.unwrap_or_default();
+            let err = match status_code {
+                401 | 403 => Error::InvalidApiKey {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
+                429 => Error::PlanExhausted {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
+                408 | 504 | 524 => Error::Timeout {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
+                _ => Error::Provider {
+                    message: format!("http {status_code}: {raw}"),
+                    http_status: Some(status_code),
+                },
+            };
+            return Err(err);
+        }
+        let bytes = resp.bytes().await.map_err(|e| Error::Provider {
+            message: format!("stream body read: {e}"),
+            http_status: None,
+        })?;
+        tracing::debug!(
+            provider = self.name,
+            status = status_code,
+            elapsed_ms = request_started.elapsed().as_millis(),
+            "Provider HTTP stage (sse)"
+        );
+        let (text, usage) = accumulate_sse_responses(&bytes)?;
+        // D.29.2: enforce the centralised response cap (10 MiB)
+        // on the SSE-accumulated text. SSE streams can grow
+        // indefinitely if a misconfigured model keeps emitting
+        // tokens; the cap turns that into a hard error.
+        check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
+        let response = Response {
+            text,
+            finish_reason: None,
+            truncated: false,
+            usage: Usage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read: 0,
+                cache_creation: 0,
+            },
+        };
+        Ok((status_code, response))
+    }
+}
+
+impl OpenAICompatProvider {
+    /// Compute the URL the provider POSTs to (mirrors the old
+    /// `OpenCodeGoDispatch::url` accessor that the v0.9 dispatcher
+    /// used). Kept as a public method so external callers / tests can
+    /// still inspect the routed URL.
+    pub fn url(&self) -> String {
+        self.responses_url()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::capabilities;
-
-    fn provider(endpoint: &str) -> OpenAiCompatProvider {
-        OpenAiCompatProvider::new(
-            &ProviderConfig {
-                kind: "deepseek".into(),
-                endpoint: endpoint.into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                hard_incompatibilities: vec![],
-                omit_max_tokens: false,
-                max_token_auto: None,
-                max_token_auto_save: true,
-                plan: None,
-            },
-            SecretString::new("dummy".into()),
-        )
-        .unwrap()
-    }
 
     #[test]
-    fn chat_url_handles_known_suffixes() {
-        assert_eq!(
-            provider("https://api.deepseek.com/v1").chat_url(),
-            "https://api.deepseek.com/v1/chat/completions"
-        );
-        assert_eq!(
-            provider("https://api.deepseek.com/v1/chat/completions").chat_url(),
-            "https://api.deepseek.com/v1/chat/completions"
-        );
-        assert_eq!(
-            provider("https://api.deepseek.com").chat_url(),
-            "https://api.deepseek.com/v1/chat/completions"
-        );
-    }
-
-    #[test]
-    fn serializes_chat_request_with_provider_cap() {
-        // DeepSeek caps at 8192. The propose role asks for 32768
-        // tokens; the provider must clamp to 8192 so the upstream
-        // doesn't reject the request with 400.
-        let p = OpenAiCompatProvider::new(
+    fn responses_url_handles_known_suffixes() {
+        // v0.10: the constructor reads `endpoint` (section-level
+        // default) verbatim; provide a URL ending in `/v1/responses`
+        // so the test exercises the "already-suffixed" branch of
+        // `responses_url()`.
+        let p = OpenAICompatProvider::new(
             &ProviderConfig {
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: Some(8192),
+                endpoint: Some("https://opencode.ai/zen/go/v1/responses".into()),
+                models: Vec::new(),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -584,55 +776,21 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .unwrap();
-        assert_eq!(p.provider_max_tokens, Some(8192));
+        assert_eq!(p.responses_url(), "https://opencode.ai/zen/go/v1/responses");
     }
 
     #[test]
-    fn serializes_chat_request_correctly() {
-        let request = ChatRequest {
-            model: "deepseek-v4-flash",
-            messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: "system".into(),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: "user".into(),
-                },
-            ],
-            max_tokens: 128,
-            temperature: None,
-            top_p: None,
-            stream: false,
-            response_format: None,
-        };
-        assert_eq!(
-            serde_json::to_value(request).unwrap(),
-            serde_json::json!({
-                "model": "deepseek-v4-flash",
-                "messages": [
-                    {"role": "system", "content": "system"},
-                    {"role": "user", "content": "user"}
-                ],
-                "max_tokens": 128,
-                "stream": false
-            })
-        );
-    }
-
-    /// Build an `OpenAiCompatProvider` with a fully-specified config
-    /// so the per-test `model` overrides the default in `provider()`.
-    fn provider_with_model(kind: &str, endpoint: &str, model: &str) -> OpenAiCompatProvider {
-        OpenAiCompatProvider::new(
+    fn responses_url_handles_responses_suffix() {
+        // v0.10: same as above — provide the section-level endpoint
+        // so the constructor picks it up. The fixture mirrors a
+        // production `[providers.opencode]` block whose `endpoint`
+        // field already names the responses path.
+        let p = OpenAICompatProvider::new(
             &ProviderConfig {
-                kind: kind.into(),
-                endpoint: endpoint.into(),
-                model: model.into(),
-                max_tokens: None,
+                endpoint: Some("https://opencode.ai/zen/go/v1/responses".into()),
+                models: Vec::new(),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -640,320 +798,271 @@ mod tests {
             },
             SecretString::new("dummy".into()),
         )
-        .unwrap()
+        .unwrap();
+        assert_eq!(p.responses_url(), "https://opencode.ai/zen/go/v1/responses");
     }
 
-    fn json_request(role: crate::llm::Role, model: &str) -> Request {
-        Request {
-            role,
-            model: model.into(),
-            system: "system".into(),
-            user: "user".into(),
-            max_tokens: 128,
+    #[test]
+    fn from_config_errors_when_key_missing() {
+        unsafe {
+            std::env::remove_var("OPENCODE_API_KEY");
+        }
+        let result = OpenAICompatProvider::from_config(&ProviderConfig {
+            endpoint: None,
+            models: Vec::new(),
             temperature: None,
             top_p: None,
-            response_schema: None,
-            stream: false,
-            extra_messages: vec![],
-            attachments: vec![],
-            tool_choice: None,
-        }
+            omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
+            plan: None,
+        });
+        assert!(matches!(result, Err(Error::InvalidApiKey { .. })));
     }
 
     #[test]
-    fn openai_compat_request_includes_response_format_for_normal_models() {
-        let p = provider_with_model(
-            "deepseek",
-            "https://api.deepseek.com/v1",
-            "deepseek-v4-flash",
-        );
-        let body =
-            p.build_chat_request(&json_request(crate::llm::Role::Route, "deepseek-v4-flash"));
-        let value = serde_json::to_value(&body).unwrap();
-        assert_eq!(
-            value.get("response_format"),
-            Some(&serde_json::json!({"type": "json_object"}))
-        );
-    }
-
-    #[test]
-    fn openai_compat_request_omits_response_format_for_opted_out_models() {
-        // glm-5.1 routes through OpenCode Go's
-        // /v1/chat/completions endpoint, which is built on this
-        // OpenAiCompatProvider. Same code path as DeepSeek — the
-        // opt-out must trigger purely from the model name.
-        for model in [
-            "glm-5.1",
-            "glm-5.2",
-            "kimi-k2.6",
-            "kimi-k2.7-code",
-            "deepseek-v4-pro",
-            "kimi-k3",
-        ] {
-            let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", model);
-            let body = p.build_chat_request(&json_request(crate::llm::Role::Route, model));
-            let value = serde_json::to_value(&body).unwrap();
-            assert!(
-                value.get("response_format").is_none(),
-                "opted-out model {model} must omit response_format from the body, got: {value}"
-            );
-        }
-    }
-
-    #[test]
-    fn openai_compat_request_omits_response_format_for_non_json_role() {
-        // Markdown / free-text roles must not get response_format
-        // either, regardless of model.
-        let p = provider_with_model(
-            "deepseek",
-            "https://api.deepseek.com/v1",
-            "deepseek-v4-flash",
-        );
-        let body = p.build_chat_request(&json_request(
-            crate::llm::Role::Propose,
-            "deepseek-v4-flash",
-        ));
-        let value = serde_json::to_value(&body).unwrap();
-        assert!(value.get("response_format").is_none());
-    }
-
-    #[test]
-    fn opencode_go_request_omits_response_format_for_opted_out_models() {
-        // Pin the OpenCode Go contract: even when role_requires_json
-        // is true (Route), the chat-completions body for an opted-out
-        // model must NOT carry the `response_format` field so the
-        // upstream doesn't return prose-prefixed content.
-        let p = provider_with_model(
-            "opencode_go",
-            "https://opencode.ai/zen/go/v1",
-            "kimi-k2.7-code",
-        );
-        let body = p.build_chat_request(&json_request(crate::llm::Role::Route, "kimi-k2.7-code"));
-        let value = serde_json::to_value(&body).unwrap();
-        assert_eq!(value["model"], serde_json::json!("kimi-k2.7-code"));
-        assert!(
-            value.get("response_format").is_none(),
-            "OpenCode Go request for opted-out model must omit response_format, got: {value}"
-        );
-        // Sanity: the role_requires_json path was actually exercised
-        // — without the opt-out check the field WOULD be present.
-        assert!(super::role_requires_json(crate::llm::Role::Route));
-    }
-
-    /// Issue #558 regression: the `e2e-network` auto runs (fast +
-    /// explore against the MiniMax upstream) emit Intake-shaped
-    /// JSON (`{problem, objectives[], ...}`). The MiniMax model
-    /// still produces malformed payloads ~1% of the time at high
-    /// temperature, so the Anthropic-compat provider relies on the
-    /// assistant prefill of `{` to bias the first emitted token
-    /// toward a clean JSON-object start. The prefill fires for
-    /// every role returned by `role_requires_json`, so we pin the
-    /// Intake contract here: a future edit that drops Intake from
-    /// the `matches!` list must fail this test, so the regression
-    /// cannot silently land.
-    ///
-    /// The companion parse-side fix lives in
-    /// `crate::phases::util::repair_stray_comma_after_key` (same
-    /// PR). The two together cover both halves of the issue: the
-    /// prefill eliminates the unescaped-quote / bracket pathology
-    /// for most calls, and the new repair pass strips the
-    /// `",:` shape that slips through when the prefill isn't
-    /// enough.
-    #[test]
-    fn intake_role_is_in_role_requires_json_for_prefill() {
-        use crate::llm::Role;
-        assert!(
-            super::role_requires_json(Role::Intake),
-            "Intake must remain in role_requires_json so the Anthropic-compat \
-             body builder emits the assistant prefill of `{{` (issue #558)"
-        );
-        // Pin the JSON-required role set as a whole so the contract
-        // is grep-able from the test alone. Each entry here matches
-        // a `Role` variant that the dispatcher expects to emit
-        // structured JSON for. Adding a new variant without adding
-        // it here will fail the test.
-        for role in [
-            Role::Intake,
-            Role::Clarify,
-            Role::Route,
-            Role::Gate,
-            Role::Critique,
-            Role::Repair,
-            Role::Rank,
-            Role::Synthesizer,
-            Role::Adversary,
-            Role::Decomposer,
-            Role::MergeSynthesizer,
-        ] {
-            assert!(
-                super::role_requires_json(role),
-                "{role:?} must remain a JSON-required role (the Anthropic-compat \
-                 prefill fires for it)"
-            );
-        }
-        // And the inverse: free-text / prose roles must NOT be on
-        // the list, otherwise the prefill would corrupt non-JSON
-        // outputs (Sketch writes prose, Deliver writes markdown).
-        for role in [Role::Sketch, Role::Deliver] {
-            assert!(
-                !super::role_requires_json(role),
-                "{role:?} must NOT be on role_requires_json — the prefill would \
-                 inject `{{` into a prose-shaped response"
-            );
-        }
-    }
-
-    #[test]
-    fn opencode_go_request_keeps_response_format_for_non_opted_out_models() {
-        // The flip side of the previous test: an OpenCode Go model
-        // NOT on the opt-out list (mimo-v2.5, deepseek-v4-flash, hy3)
-        // still gets response_format = json_object for JSON roles.
-        for model in ["mimo-v2.5", "deepseek-v4-flash", "hy3"] {
-            let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", model);
-            let body = p.build_chat_request(&json_request(crate::llm::Role::Route, model));
-            let value = serde_json::to_value(&body).unwrap();
-            assert_eq!(
-                value.get("response_format"),
-                Some(&serde_json::json!({"type": "json_object"})),
-                "non-opted-out model {model} must keep response_format: json_object, got: {value}"
-            );
-        }
-    }
-
-    /// PR-C5: the `PromptPrefill` strategy injects an assistant
-    /// prefill of `{` for `deepseek-v4-pro` / `deepseek-v4-flash`
-    /// so the model continues with a JSON object body. The prefill
-    /// appears as the LAST message in the messages array (after
-    /// the user turn) so the model sees
-    /// `[system, user, assistant:]` and continues the JSON.
-    #[test]
-    fn prompt_prefill_appends_assistant_brace_message() {
-        let p = provider_with_model(
-            "deepseek",
-            "https://api.deepseek.com/v1",
-            "deepseek-v4-flash",
-        );
-        let body =
-            p.build_chat_request(&json_request(crate::llm::Role::Route, "deepseek-v4-flash"));
-        let value = serde_json::to_value(&body).unwrap();
-        let messages = value
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .expect("body must carry a messages array");
-        assert_eq!(
-            messages.len(),
-            3,
-            "PromptPrefill must append a third message, got: {value}"
-        );
-        assert_eq!(messages[2]["role"], "assistant");
-        assert_eq!(messages[2]["content"], "{");
-    }
-
-    /// PR-C5: the `PromptPrefill` strategy does NOT inject the
-    /// prefill for non-prefill models (e.g. `kimi-k3`). The wire
-    /// shape stays at two messages (system + user) so today's
-    /// behaviour for non-deepseek models is bit-identical.
-    #[test]
-    fn non_prefill_models_skip_assistant_message() {
-        let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", "kimi-k3");
-        let body = p.build_chat_request(&json_request(crate::llm::Role::Route, "kimi-k3"));
-        let value = serde_json::to_value(&body).unwrap();
-        let messages = value
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .expect("body must carry a messages array");
-        assert_eq!(
-            messages.len(),
-            2,
-            "non-prefill models must NOT append a third message, got: {value}"
-        );
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "user");
-    }
-
-    /// PR-C5: when the caller already populated
-    /// `Request::extra_messages` (e.g. a phase-layer override
-    /// that wants bespoke extra messages) the per-model prefill
-    /// must NOT clobber it. The caller-supplied messages win.
-    #[test]
-    fn prompt_prefill_does_not_overwrite_existing_extra_messages() {
-        let p = provider_with_model(
-            "deepseek",
-            "https://api.deepseek.com/v1",
-            "deepseek-v4-flash",
-        );
-        let mut req = json_request(crate::llm::Role::Route, "deepseek-v4-flash");
-        req.extra_messages = vec![crate::llm::wire::Message {
-            role: "assistant".into(),
-            content: "[CUSTOM]".into(),
-        }];
-        let body = p.build_chat_request(&req);
-        let value = serde_json::to_value(&body).unwrap();
-        let messages = value
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .expect("body must carry a messages array");
-        // Exactly the caller's two extra messages are present,
-        // NOT the per-model default `{` prefill.
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[2]["role"], "assistant");
-        assert_eq!(
-            messages[2]["content"], "[CUSTOM]",
-            "caller-supplied extra_messages must win over the per-model prefill"
-        );
-    }
-
-    /// PR-fix (opencode_go hard cap): when the dispatcher wires an
-    /// `OpenAiCompatProvider` for an OpenCode Go model
-    /// (`new_with_kind_cap(_, _, Some(OPENCODE_GO_MAX_TOKENS_CAP))`)
-    /// the wire body must clamp `request.max_tokens` to 16_384 even
-    /// if `ProviderConfig::max_tokens` is unset. Without the clamp
-    /// the upstream returns HTTP 400 because the per-role default
-    /// `DEFAULT_MAX_TOKENS = 1_000_000` flows through. Pins the
-    /// defence at the integration boundary (`send` + recorded
-    /// request body).
-    #[test]
-    fn opencode_go_backed_provider_clamps_max_tokens_to_hard_cap() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+    fn openai_compat_streaming_consumes_sse_data_lines() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
             let server = MockServer::start().await;
+            let body = "\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"Hello \"}]}]}\n\n\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"world\"}]}]}\n\n\
+data: {\"output\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":34}}\n\n\
+data: [DONE]\n\n";
             Mock::given(method("POST"))
-                .and(path("/v1/chat/completions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "choices": [{
-                        "message": {"role": "assistant", "content": "ok"},
-                        "finish_reason": "stop",
-                    }],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 2}
-                })))
+                .and(path("/v1/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(body),
+                )
                 .expect(1)
                 .mount(&server)
                 .await;
-            let p = OpenAiCompatProvider::new_with_kind_cap(
+            let p = OpenAICompatProvider::new(
                 &ProviderConfig {
-                    kind: "opencode_go".into(),
-                    endpoint: server.uri(),
-                    model: "kimi-k2.7-code".into(),
-                    // None on purpose: only the kind-level cap
-                    // applies.
-                    max_tokens: None,
+                    models: Vec::new(),
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
                     plan: None,
                 },
                 SecretString::new("dummy".into()),
-                Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
             )
             .unwrap();
             let req = Request {
-                role: crate::llm::Role::Route,
-                model: "kimi-k2.7-code".into(),
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 256,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: true,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            assert_eq!(response.text, "Hello world");
+            assert_eq!(response.usage.input_tokens, 12);
+            assert_eq!(response.usage.output_tokens, 34);
+            assert!(!response.truncated);
+            assert!(response.finish_reason.is_none());
+        });
+    }
+
+    #[test]
+    fn openai_compat_streaming_returns_error_on_mid_stream_failure() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            // First delta is well-formed; the second is intentionally
+            // malformed so the SseParser surfaces a parse error.
+            let body = "\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}\n\n\
+data: {not json}\n\n";
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(body),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    models: Vec::new(),
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 64,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: true,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let err = p.send(&req).await.unwrap_err();
+            match err {
+                Error::Provider { message, .. } => assert!(
+                    message.contains("sse parse"),
+                    "expected sse parse error, got {message:?}"
+                ),
+                other => panic!("expected Error::Provider, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn openai_compat_non_streaming_still_works() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "plain"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 7, "output_tokens": 11}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    models: Vec::new(),
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 64,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            assert_eq!(response.text, "plain");
+            assert_eq!(response.usage.input_tokens, 7);
+            assert_eq!(response.usage.output_tokens, 11);
+        });
+    }
+
+    #[test]
+    fn accumulate_sse_responses_joins_text_and_picks_last_usage() {
+        let body = b"\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"Hello \"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n\
+data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"world\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}\n\n\
+data: [DONE]\n\n";
+        let (text, usage) = accumulate_sse_responses(body).unwrap();
+        assert_eq!(text, "Hello world");
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 4);
+    }
+
+    #[test]
+    fn send_clamps_max_tokens_to_provider_cap() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{body_partial_json, method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            // body_partial_json only matches when the outbound
+            // request body literally carries max_tokens:8192; if the
+            // clamp regresses the upstream would see 1_000_000 and
+            // wiremock would fall through to its default 404, which
+            // the provider turns into an Error::Provider — failing
+            // the test.
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .and(body_partial_json(serde_json::json!({
+                    "max_tokens": 8192,
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    // v0.10: the operator `max_tokens` cap lives on
+                    // the per-model `ModelConfig`. Set it explicitly
+                    // so the constructor sees `provider_max_tokens =
+                    // Some(8192)` and the wire body is clamped.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: Some(8192),
+                    }],
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -962,8 +1071,152 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                    attachments: vec![],
-                    tool_choice: None,
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+        });
+    }
+
+    #[test]
+    fn send_streaming_clamps_max_tokens_to_provider_cap() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{body_partial_json, method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .and(body_partial_json(serde_json::json!({
+                    "max_tokens": 8192,
+                    "stream": true,
+                })))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            "data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n\
+data: [DONE]\n\n",
+                        ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    // v0.10: set the operator cap on the per-model
+                    // `ModelConfig` so the constructor wires
+                    // `provider_max_tokens = Some(8192)` and the SSE
+                    // body is clamped to that value.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: Some(8192),
+                    }],
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: true,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+        });
+    }
+
+    #[test]
+    fn send_omits_max_tokens_when_omit_flag_set() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{body_partial_json, method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            // Use a matcher that does NOT constrain max_tokens so the
+            // mock accepts the request regardless of whether the field
+            // is present. The actual assertion is on the recorded
+            // body below.
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .and(body_partial_json(serde_json::json!({
+                    // v0.10: the wire body carries whatever
+                    // `req.model` the dispatcher resolved. The
+                    // v0.9 fixture used `"gpt-5.6-luna"` because
+                    // the per-model alias section was the
+                    // canonical model; today the canonical
+                    // `opencode` section hosts that model id and
+                    // the dispatcher's section-name resolution
+                    // passes it through verbatim.
+                    "model": "minimax-m3",
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    // v0.10: provide a per-model `id` so the
+                    // constructor wires `self.model = "minimax-m3"`
+                    // and the wire body carries the model id
+                    // verbatim. Without it the legacy constructor
+                    // leaves `self.model = ""` and the body never
+                    // matches the wiremock's `body_partial_json`
+                    // constraint.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: true,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -971,71 +1224,137 @@ mod tests {
                 .received_requests()
                 .await
                 .expect("recording must be enabled by default");
-            assert_eq!(received.len(), 1);
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
-            assert_eq!(
-                body["max_tokens"],
-                serde_json::json!(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
-                "opencode_go chat-completions hard cap must clamp 1_000_000 → 16_384, got body: {body}"
+            assert!(
+                body.get("max_tokens").is_none(),
+                "max_tokens must be absent when omit_max_tokens=true, got body={body}"
             );
         });
     }
 
-    /// DEEPSEEK_MAX_TOKENS_CAP clamp contract (PR-473 --ignored CI
-    /// regression): the direct DeepSeek OpenAI-compat upstream
-    /// rejects any `max_tokens > 393_216` with HTTP 400
-    /// `invalid_request_error`. The dispatcher wires
-    /// `DeepSeekProvider::new` to call
-    /// `OpenAiCompatProvider::new_with_kind_cap(_, _,
-    /// Some(DEEPSEEK_MAX_TOKENS_CAP))`, so the wire body must
-    /// carry `max_tokens = 393_216` even when the operator's TOML
-    /// leaves `max_tokens = None` (per-role default 1_000_000).
-    /// Without the cap the upstream returns HTTP 400 — exactly the
-    /// failure mode the --ignored CI job surfaced.
     #[test]
-    fn deepseek_direct_provider_clamps_to_deepseek_max_tokens_cap() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+    fn send_includes_max_tokens_when_omit_flag_unset() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
             let server = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/v1/chat/completions"))
+                .and(path("/v1/responses"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "choices": [{
-                        "message": {"role": "assistant", "content": "ok"},
-                        "finish_reason": "stop",
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
                     }],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 2}
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
                 })))
                 .expect(1)
                 .mount(&server)
                 .await;
-            // Mirror the `DeepSeekProvider::new` wiring at the
-            // inner-provider level so the test exercises the same
-            // `kind_hard_cap` the production constructor installs.
-            let p = OpenAiCompatProvider::new_with_kind_cap(
+            let p = OpenAICompatProvider::new(
                 &ProviderConfig {
-                    kind: "deepseek".into(),
-                    endpoint: server.uri(),
-                    model: "deepseek-v4-flash".into(),
-                    max_tokens: None,
+                    models: Vec::new(),
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
                     plan: None,
                 },
                 SecretString::new("dummy".into()),
-                Some(capabilities::DEEPSEEK_MAX_TOKENS_CAP),
             )
             .unwrap();
             let req = Request {
-                role: crate::llm::Role::Route,
-                model: "deepseek-v4-flash".into(),
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                // 1024 is well below u32::MAX
+                // (16_384) so the cap does not engage and the
+                // assertion about the field surviving the wire
+                // builder stays meaningful.
+                max_tokens: 1024,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(1024),
+                "max_tokens must be present with the requested value, got body={body}"
+            );
+        });
+    }
+
+    /// v0.10 (post Phase 8): the legacy `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// global clamp is gone. The OpenCode Go relay on the chat-
+    /// completions path no longer has a per-kind ceiling baked
+    /// into the wire layer — the auto-probe discovers the real
+    /// upstream boundary per `(provider, model)` and caches it in
+    /// `max_tokens_auto.toml`. With no probe result and no
+    /// operator override, the wire body carries the request's
+    /// raw `max_tokens` unchanged. This regression guard pins
+    /// that the clamp chain no longer applies a 16_384 ceiling
+    /// to OpenCode Go chat-completions calls.
+    #[test]
+    fn send_does_not_clamp_max_tokens_when_no_probe_or_override() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    models: Vec::new(),
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    // None on purpose — exercise the "no TOML
+                    // override, no table" path. v0.10 removed the
+                    // global `OPENCODE_GO_MAX_TOKENS_CAP`; with
+                    // nothing in the chain the wire body carries
+                    // the REQUESTED value unchanged.
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1056,145 +1375,221 @@ mod tests {
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
+            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`
+            // global ceiling is gone. Without an operator override
+            // or a table entry, the wire body carries the requested
+            // value verbatim — the only layers left in the clamp
+            // chain are `u32::MAX` (operator cap, default) and
+            // `u32::MAX` (table, missing).
             assert_eq!(
-                body["max_tokens"],
-                serde_json::json!(capabilities::DEEPSEEK_MAX_TOKENS_CAP),
-                "deepseek direct hard cap must clamp 1_000_000 → {}, got body: {body}",
-                capabilities::DEEPSEEK_MAX_TOKENS_CAP
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(1_000_000),
+                "with no operator cap and no table, body must carry the requested value, got body: {body}"
             );
         });
     }
 
-    /// `max_tokens_probe_ceiling` propagates the per-provider
-    /// `kind_hard_cap` so the auto-probe short-circuits at the
-    /// first `2^k > DEEPSEEK_MAX_TOKENS_CAP` (k=19 → 524_288)
-    /// instead of walking the full `2^1..2^30` exponential phase
-    /// against a bound that DeepSeek rejects with HTTP 400.
-    /// Without this override the probe would burn 30 sequential
-    /// HTTP round-trips on values the upstream will never accept
-    /// — and the rejections would classify as `Indeterminate`
-    /// per the v0.7.1 contract, collapsing the discovered
-    /// ceiling to the last accepted probe.
+    /// Regression guard for the streaming Responses path
+    /// (`send_streaming`): with no operator cap and no table entry,
+    /// the SSE wire body must carry the REQUESTED `max_tokens`
+    /// unchanged — the v0.10 schema removed the global
+    /// `OPENCODE_GO_MAX_TOKENS_CAP` so there is no implicit
+    /// ceiling. The v0.9 name "opencode_go_hard_cap" is kept
+    /// only as a documentation breadcrumb.
     #[test]
-    fn deepseek_direct_provider_probe_ceiling_is_deepseek_max_tokens_cap() {
-        let p = OpenAiCompatProvider::new_with_kind_cap(
-            &ProviderConfig {
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
+    fn send_streaming_clamps_max_tokens_to_opencode_go_hard_cap() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            "data: {\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n\
+data: [DONE]\n\n",
+                        ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    // v0.10: no operator cap and no table — the
+                    // request must reach the SSE path unchanged.
+                    models: Vec::new(),
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                    plan: None,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
-                omit_max_tokens: false,
-                max_token_auto: None,
-                max_token_auto_save: true,
-                plan: None,
-            },
-            SecretString::new("dummy".into()),
-            Some(capabilities::DEEPSEEK_MAX_TOKENS_CAP),
-        )
-        .unwrap();
+                response_schema: None,
+                stream: true,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1);
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`
+            // global ceiling is gone. With no operator override and
+            // no table entry, the SSE wire body carries the requested
+            // value verbatim — same contract as the non-streaming
+            // path so a `stream: true` flip cannot introduce a
+            // regression.
+            assert_eq!(
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(1_000_000),
+                "with no operator cap and no table, SSE body must carry the requested value, got body: {body}"
+            );
+        });
+    }
+
+    fn json_request(role: crate::llm::Role, model: &str) -> Request {
+        Request {
+            role,
+            model: model.into(),
+            system: "system".into(),
+            user: "user".into(),
+            max_tokens: 128,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        }
+    }
+
+    /// JSON role + non-opted-out model → `response_format` must be
+    /// serialised as `{"type":"json_object"}`. Pins the contract
+    /// the capability matrix advertises
+    /// (`supports_response_format: true`).
+    #[test]
+    fn responses_wire_sets_response_format_when_role_requires_json_and_model_is_not_opted_out() {
+        let req = json_request(crate::llm::Role::Intake, "gpt-5.6-luna");
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
         assert_eq!(
-            p.max_tokens_probe_ceiling(),
-            capabilities::DEEPSEEK_MAX_TOKENS_CAP
-        );
-        // The default (no `kind_hard_cap`) keeps the trait
-        // default of MAX_AUTOPROBE_CEILING so providers without a
-        // documented ceiling (mock, third-party relays with
-        // permissive limits) keep working unchanged.
-        let p_no_cap = OpenAiCompatProvider::new(
-            &ProviderConfig {
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                hard_incompatibilities: vec![],
-                omit_max_tokens: false,
-                max_token_auto: None,
-                max_token_auto_save: true,
-                plan: None,
-            },
-            SecretString::new("dummy".into()),
-        )
-        .unwrap();
-        assert_eq!(
-            p_no_cap.max_tokens_probe_ceiling(),
-            crate::llm::probe::MAX_AUTOPROBE_CEILING
+            value.get("response_format"),
+            Some(&serde_json::json!({"type": "json_object"})),
+            "Intake role + gpt-5.6-luna must include response_format, got: {value}"
         );
     }
 
-    /// `new` (no kind cap) preserves the existing DeepSeek-direct
-    /// behaviour: when the operator sets `max_tokens = None` in
-    /// TOML the wire body carries whatever `request.max_tokens`
-    /// says, because DeepSeek-direct has no kind-level cap. Pins
-    /// the asymmetry between `new` (no cap) and `new_with_kind_cap`
-    /// (cap wired by the dispatcher).
+    /// `Sketch` is a free-text role and is NOT in `role_requires_json`,
+    /// so the field must stay absent even on a non-opted-out model.
     #[test]
-    fn deepseek_direct_provider_uses_no_kind_cap() {
-        let p = OpenAiCompatProvider::new(
-            &ProviderConfig {
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                hard_incompatibilities: vec![],
-                omit_max_tokens: false,
-                max_token_auto: None,
-                max_token_auto_save: true,
-                plan: None,
-            },
-            SecretString::new("dummy".into()),
-        )
-        .unwrap();
-        assert_eq!(p.kind_hard_cap, None);
+    fn responses_wire_omits_response_format_for_role_sketch() {
+        let req = json_request(crate::llm::Role::Sketch, "gpt-5.6-luna");
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert!(
+            value.get("response_format").is_none(),
+            "Sketch role must drop response_format, got: {value}"
+        );
     }
 
-    /// `new_with_kind_cap` propagates the cap from the dispatcher
-    /// (an operator who constructs it manually — e.g. a test rig —
-    /// observes the same value the dispatcher would). Pins the
-    /// surface so a future refactor cannot accidentally drop the
-    /// wiring.
+    /// Model on the opt-out list + JSON role → field must stay
+    /// absent so the upstream returns raw markdown instead of
+    /// prose-prefixed JSON.
     #[test]
-    fn new_with_kind_cap_stores_cap_in_field() {
-        let p = OpenAiCompatProvider::new_with_kind_cap(
-            &ProviderConfig {
-                kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1".into(),
-                model: "kimi-k3".into(),
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                hard_incompatibilities: vec![],
-                omit_max_tokens: false,
-                max_token_auto: None,
-                max_token_auto_save: true,
-                plan: None,
-            },
-            SecretString::new("dummy".into()),
-            Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
-        )
-        .unwrap();
+    fn responses_wire_omits_response_format_for_opted_out_model() {
+        let req = json_request(crate::llm::Role::Intake, "kimi-k3");
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert!(
+            value.get("response_format").is_none(),
+            "opted-out model kimi-k3 must drop response_format, got: {value}"
+        );
+    }
+
+    /// The pre-existing fields (`model`, `instructions`, `input`,
+    /// `max_tokens`, `temperature`, `top_p`, `stream`) are untouched
+    /// regardless of the gate. Guards against a regression that
+    /// would re-shape the body when adding the new field.
+    #[test]
+    fn responses_wire_includes_other_fields_unaffected() {
+        let req = Request {
+            model: "minimax-m3".into(),
+            role: crate::llm::Role::Route,
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: 256,
+            temperature: Some(0.4),
+            top_p: Some(0.9),
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        let body = build_responses_body(&req, &req.model, false, false);
+        let value: serde_json::Value = serde_json::to_value(&body).unwrap();
+        // The body carries whichever model id the caller passes
+        // (the dispatcher resolves it from the section's
+        // `models[].id`). The pre-existing comment referenced
+        // `gpt-5.6-luna` from the v0.9 fixture shape; the v0.10
+        // schema passes `req.model` through verbatim.
+        assert_eq!(value["model"], "minimax-m3");
+        assert_eq!(value["instructions"], "sys");
+        assert_eq!(value["input"], "user");
+        assert_eq!(value["max_tokens"], 256);
+        let temp = value["temperature"].as_f64().unwrap();
+        assert!(
+            (temp - 0.4).abs() < 1e-6,
+            "temperature must round-trip, got {temp} in {value}"
+        );
+        let top_p = value["top_p"].as_f64().unwrap();
+        assert!(
+            (top_p - 0.9).abs() < 1e-6,
+            "top_p must round-trip, got {top_p} in {value}"
+        );
+        assert_eq!(value["stream"], false);
+        // Gate was true (Route + gpt-5.6-luna), so the new field
+        // is also present.
         assert_eq!(
-            p.kind_hard_cap,
-            Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP)
+            value["response_format"],
+            serde_json::json!({"type": "json_object"})
         );
     }
 
     /// Auto-probe table clamp contract: when
     /// `with_max_tokens_table` attaches a table carrying a
-    /// discovered value smaller than the requested `max_tokens`,
-    /// the wire body must carry the discovered value. DeepSeek-
-    /// direct has `kind_hard_cap = None`, so the table value flows
-    /// through unchanged (no other clamp layers apply when both
-    /// `kind_hard_cap` and `provider_max_tokens` are absent). Pins
-    /// the v0.7 precedence order: kind > operator > table > requested.
-    #[tokio::test]
-    async fn openai_compat_clamps_max_tokens_to_table_value() {
+    /// discovered value smaller than the requested `max_tokens`
+    /// AND smaller than the documented hard cap, the wire body
+    /// must carry the discovered value on the non-streaming
+    /// Responses path. Pins the v0.7 precedence order:
+    /// `u32::MAX` > operator > table > req.
+    #[test]
+    fn send_clamps_max_tokens_to_table_value() {
+        use std::sync::Arc;
+
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1216,85 +1611,104 @@ mod tests {
             }
         }
 
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "ok"},
-                    "finish_reason": "stop",
-                }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 2}
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
 
-        let transport: std::sync::Arc<dyn ProbeTransport> =
-            std::sync::Arc::new(CappedTransport { cap: 6_000 });
-        let table = std::sync::Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
-        let discovered = table
-            .probe_and_store(
-                "deepseek",
-                "deepseek-v4-flash",
-                transport,
-                crate::llm::probe::MAX_AUTOPROBE_CEILING,
+            let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 10_000 });
+            let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+            // v0.10: the legacy `new()` constructor reads both
+            // `name` and `model` from `models[0].id`, so the table
+            // key has to match that pair. The dispatched path
+            // (`from_resolved`) uses `(section_name, model_id)`;
+            // this test exercises the hand-rolled constructor path
+            // so we mirror that — provider name == model id ==
+            // "gpt-5.6-luna".
+            let discovered = table
+                .probe_and_store(
+                    "gpt-5.6-luna",
+                    "gpt-5.6-luna",
+                    transport,
+                    crate::llm::probe::MAX_AUTOPROBE_CEILING,
+                )
+                .await
+                .expect("probe_and_store");
+            // The wire-body assertion below uses `discovered`
+            // directly: this test pins the wiring contract
+            // (table value honoured on the wire) without depending
+            // on the probe algorithm's exact convergence — that
+            // algorithm has a known ±N imprecision at non-trivial
+            // boundaries (see pre-existing
+            // `probe::tests::detect_finds_cap_at_8k`).
+
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    // v0.10 canonical schema: one `models[]` entry
+                    // whose `id` drives both `name` and `model`
+                    // (the legacy constructor reads them from
+                    // `models.first()`). `max_tokens: None` leaves
+                    // `provider_max_tokens = None` so the operator
+                    // cap chain stays at `u32::MAX` and the table
+                    // value is the only clamp the wire body sees.
+                    models: vec![crate::config::ModelConfig {
+                        id: "gpt-5.6-luna".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    plan: None,
+                    max_token_auto: None,
+                    max_token_auto_save: true,
+                },
+                SecretString::new("dummy".into()),
             )
-            .await
-            .expect("probe_and_store");
-        // The wire-body assertion below uses `discovered`
-        // directly: this test pins the wiring contract (table
-        // value honoured on the wire) without depending on the
-        // probe algorithm's exact convergence — that algorithm
-        // has a known ±N imprecision at non-trivial boundaries
-        // (see pre-existing `probe::tests::detect_finds_cap_at_8k`).
+            .unwrap()
+            .with_max_tokens_table(table);
 
-        let p = OpenAiCompatProvider::new(
-            &ProviderConfig {
-                kind: "deepseek".into(),
-                endpoint: server.uri(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
+            let req = Request {
+                model: "minimax-m3".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: 1_000_000,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
-                omit_max_tokens: false,
-                plan: None,
-                max_token_auto: None,
-                max_token_auto_save: true,
-            },
-            SecretString::new("dummy".into()),
-        )
-        .unwrap()
-        .with_max_tokens_table(table);
-
-        let req = Request {
-            role: crate::llm::Role::Route,
-            model: "deepseek-v4-flash".into(),
-            system: "sys".into(),
-            user: "user".into(),
-            max_tokens: 1_000_000,
-            temperature: None,
-            top_p: None,
-            response_schema: None,
-            stream: false,
-            extra_messages: vec![],
-            attachments: vec![],
-            tool_choice: None,
-        };
-        let (status, _response) = p.send(&req).await.unwrap();
-        assert_eq!(status, 200);
-        let received = server
-            .received_requests()
-            .await
-            .expect("recording must be enabled by default");
-        assert_eq!(received.len(), 1, "exactly one request must be sent");
-        let body: serde_json::Value =
-            serde_json::from_slice(&received[0].body).expect("mock server received a JSON body");
-        assert_eq!(
-            body["max_tokens"],
-            serde_json::json!(discovered),
-            "wire body must carry the table-resolved value ({discovered}), got body: {body}"
-        );
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert_eq!(
+                body.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(discovered as u64),
+                "wire body must carry the table-resolved value ({discovered}), got body: {body}"
+            );
+        });
     }
 }

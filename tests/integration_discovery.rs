@@ -222,7 +222,7 @@ async fn discovery_pipeline_persists_exploration_matrix() {
     let mock = build_cycle_mock();
     let registry = Arc::new(build_registry_with_mock(mock.clone()));
     let cfg = Config::default();
-    let _registry = build_registry_for(&cfg, "mock", None).unwrap();
+    let _registry = build_registry_for(&cfg, "mock:mock-model", None).unwrap();
 
     let parallelism = Parallelism::new(2);
     let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).unwrap();
@@ -849,7 +849,7 @@ async fn discovery_pipeline_with_mock_emits_lifecycle() {
     let mock = build_cycle_mock();
     let registry = Arc::new(build_registry_with_mock(mock));
     let cfg = Config::default();
-    let _registry_real = build_registry_for(&cfg, "mock", None).unwrap();
+    let _registry_real = build_registry_for(&cfg, "mock:mock-model", None).unwrap();
 
     let parallelism = Parallelism::new(2);
     let telemetry = Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).unwrap();

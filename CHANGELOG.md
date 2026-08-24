@@ -5,6 +5,127 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-24
+
+### Breaking
+
+- **`config.toml` schema v0.10 — per-model endpoints, no more singletons**.
+  The v0.9 `[providers.<name>]` shape with `kind` / `endpoint` /
+  `model` / `max_tokens` / `hard_incompatibilities` singletons is gone.
+  The canonical schema is:
+
+  ```toml
+  [providers.minimax]
+  endpoint = "https://api.minimax.io/anthropic/v1/messages"
+  models = [
+    { id = "MiniMax-M3",         max_tokens = 1000000 },
+    { id = "MiniMax-M2.7",       max_tokens = 1000000 },
+    { id = "MiniMax-M2.7-highspeed", max_tokens = 1000000 },
+    { id = "MiniMax-M2.5",       max_tokens = 1000000 },
+  ]
+
+  [providers.opencode]
+  models = [
+    { id = "kimi-k3",   endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+    { id = "minimax-m3", endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+    { id = "gpt-5.6-luna", endpoint = "https://opencode.ai/zen/go/v1/responses",    max_tokens = 1000000 },
+    # …other OpenCode models…
+  ]
+
+  [providers.deepseek]
+  endpoint = "https://api.deepseek.com/v1/chat/completions"
+  models = [
+    { id = "deepseek-chat",    max_tokens = 1000000 },
+    { id = "deepseek-reasoner", max_tokens = 1000000 },
+  ]
+  ```
+
+  * `endpoint` is now `Option<String>` (rename of the intermediate
+    `endpoint_new`). Per-model `endpoint` overrides the section
+    default; this is how a single `[providers.opencode]` section
+    groups the chat-completions, Anthropic, and Responses paths.
+  * `models[].endpoint` overrides the section-level `endpoint`
+    when set, so a single canonical section can host every
+    wire-format variant the upstream exposes.
+  * `kind` / `model` / `max_tokens` / `hard_incompatibilities`
+    fields on the section are gone — they only powered legacy
+    code paths that are no longer in the tree.
+
+- **`**OPENCODE_GO_MAX_TOKENS_CAP** global constant removed**. The wire
+  layer no longer applies a 16 384 ceiling to every OpenCode Go
+  call. The auto-probe (`max_token_auto`) discovers the real
+  upstream boundary per `(provider, model)` and persists it to
+  `<MOAGAN_HOME>/max_tokens_auto.toml`. With no probe result and
+  no operator override, the wire body carries the request's
+  `max_tokens` unchanged.
+
+- **`minimax` routed through its own provider** (not through
+  `AnthropicCompatProvider`). Before v0.10, every `minimax` call
+  was clamped to `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` even though
+  MiniMax's real ceiling is `MINIMAX_MAX_TOKENS_CAP = 524_288`.
+  v0.10 dispatches `[providers.minimax]` to `MinimaxProvider`,
+  which clamps at the wire body to the real MiniMax boundary.
+
+- **Per-model alias sections collapsed into canonical
+  families**. `[providers.kimi-k3]`, `[providers.minimax-m3]`,
+  etc. no longer exist as separate sections. The operator
+  reaches every model via `--provider SECTION:MODEL`
+  (`--provider opencode:kimi-k3`).
+
+- **`--provider PROVIDER[:MODEL]` is mandatory** on every
+  LLM-touching command (`run`, `discover`, `preflight`).
+  Resolution order (highest first):
+  1. CLI flag.
+  2. `MOAGAN_DEFAULT_PROVIDER` env var.
+  3. `[defaults] provider` in `~/.config/moagan/config.toml`.
+
+  When none is set the command exits with:
+
+  ```
+  --provider is required (or set MOAGAN_DEFAULT_PROVIDER, or
+  [defaults] provider in config.toml); example:
+    moagan run --provider opencode:kimi-k3 --prompt "..."
+    moagan run --provider opencode --model kimi-k3 --prompt "..."
+  ```
+
+- **`--model <name>` removed**. The model id is the second
+  half of `--provider SECTION:MODEL`. The CLI still parses
+  `--model` to surface a friendly error so legacy scripts do
+  not silently break.
+
+- **`api_keys.toml` / `<NAME>_API_KEY` env-var names**: the
+  canonical provider-family key is the **section name** —
+  no more `kind` indirection. `OPENCODE_API_KEY` (was
+  `OPENCODE_GO_API_KEY`), `MINIMAX_API_KEY`, `DEEPSEEK_API_KEY`
+  stay unchanged; legacy `OPENCODE_GO_API_KEY` exports are
+  no longer consulted.
+
+### Changed
+
+- **`ProviderCapabilities::wire_format_id()` returns `"anthropic"`
+  / `"openai"` / `"openai_compatible"`** to match the serde
+  renames on `WireFormatId`. Log lines, JSON serialisation, and
+  the in-memory capability matrix all agree.
+- **`Config::default_provider`** is `Option<String>` (was
+  `String`). The empty-string check stays as the canonical
+  "no default" sentinel so v0.9 `default_provider = ""` keeps
+  parsing cleanly.
+- **`Config::resolve_provider(raw) -> Result<(section, model)>`**
+  is the new helper every CLI dispatcher uses to parse the
+  `--provider` value. Validates the section exists, that the
+  requested model id is registered under it, and that
+  multi-model sections reject the bare `SECTION` form.
+
+### Removed
+
+- `OPENCODE_GO_MAX_TOKENS_CAP` global constant.
+- `ProviderConfig::endpoint_str()` / `model_str()` accessors.
+- `ProviderConfig::kind`, `::model`, `::hard_incompatibilities`,
+  and `::max_tokens: Option<u32>` fields (v0.9 singletons).
+- `BLOCKED_MODELS` list in `opencode_go.rs` (deprecated; the
+  operator now decides which models route through OpenCode via
+  their `config.toml`).
+
 ## [0.9.12] - 2026-08-23
 
 ### Fixed

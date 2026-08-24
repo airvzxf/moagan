@@ -673,6 +673,18 @@ impl RunContext {
         {
             return picked;
         }
+        // v0.10: the registry keys every (section, model_id) pair
+        // under `"{section}::{model_id}"` unless section ==
+        // model_id. Look up the joined key from `(default_provider,
+        // default_model)` first; fall back to the bare section name
+        // for legacy single-instance callers (hand-rolled test
+        // fixtures that register the mock under `"mock"` directly
+        // instead of `"mock::mock-model"`).
+        let joined =
+            crate::llm::ProviderRegistry::registry_key(&self.default_provider, &self.default_model);
+        if let Some(p) = self.providers.get(&joined) {
+            return p;
+        }
         self.providers
             .get(&self.default_provider)
             .expect("default provider must be registered")
@@ -3261,10 +3273,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
+                endpoint: None,
+                models: Vec::new(),
                 temperature: Some(0.42),
                 top_p: Some(0.5),
                 ..ProviderConfig::default()
@@ -3339,10 +3349,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
+                endpoint: None,
+                models: Vec::new(),
                 temperature: None,
                 top_p: None,
                 ..ProviderConfig::default()
@@ -3423,10 +3431,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
+                endpoint: None,
+                models: Vec::new(),
                 temperature: Some(0.99),
                 top_p: Some(0.5),
                 ..ProviderConfig::default()
@@ -3697,10 +3703,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
+                endpoint: None,
+                models: Vec::new(),
                 temperature: None,
                 top_p: None,
                 ..ProviderConfig::default()

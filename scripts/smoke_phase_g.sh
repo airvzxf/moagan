@@ -143,7 +143,7 @@ MOCK_DIR="${ROOT}/tests/fixtures/mock_provider"
 run_test "cli_deep_simple_brief_short_circuits" '
   export MOAGAN_HOME="'"$TMPDIR_G"'/simple"
   mkdir -p "$MOAGAN_HOME"
-  "'"$BIN"'" run --mode deep --provider mock --mock-dir "'"$MOCK_DIR"'" --prompt "Enumera los 7 colores del arcoiris en orden" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
+  "'"$BIN"'" run --mode deep --provider mock:mock-model --mock-dir "'"$MOCK_DIR"'" --prompt "Enumera los 7 colores del arcoiris en orden" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
   [[ -d "$MOAGAN_HOME/.runs" ]] || { echo "no runs dir" >&2; exit 1; }
   run_dir=$(ls -1 "$MOAGAN_HOME/.runs" | head -1)
   [[ -n "$run_dir" ]] || { echo "no run dir" >&2; exit 1; }
@@ -163,7 +163,7 @@ run_test "cli_deep_simple_brief_short_circuits" '
 run_test "cli_deep_complex_brief_does_not_panic" '
   export MOAGAN_HOME="'"$TMPDIR_G"'/complex"
   mkdir -p "$MOAGAN_HOME"
-  out=$("'"$BIN"'" run --mode deep --provider mock \
+  out=$("'"$BIN"'" run --mode deep --provider mock:mock-model \
     --prompt "Build a system with 3 deliverables and 3 constraints" \
     --non-interactive --max-parallelism 2 2>&1)
   echo "$out"
@@ -184,7 +184,7 @@ run_test "cli_deep_complex_brief_does_not_panic" '
 run_test "fast_mode_does_not_write_problem_graph" '
   export MOAGAN_HOME="'"$TMPDIR_G"'/fast"
   mkdir -p "$MOAGAN_HOME"
-  "'"$BIN"'" run --mode fast --provider mock --prompt "x" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
+  "'"$BIN"'" run --mode fast --provider mock:mock-model --prompt "x" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
   run_dir=$(ls -1 "$MOAGAN_HOME/.runs" 2>/dev/null | head -1)
   [[ -z "$run_dir" ]] && return 0
   pg="$MOAGAN_HOME/.runs/$run_dir/problem_graph.json"
@@ -194,7 +194,7 @@ run_test "fast_mode_does_not_write_problem_graph" '
 run_test "standard_mode_does_not_write_problem_graph" '
   export MOAGAN_HOME="'"$TMPDIR_G"'/standard"
   mkdir -p "$MOAGAN_HOME"
-  "'"$BIN"'" run --mode standard --provider mock --prompt "x" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
+  "'"$BIN"'" run --mode standard --provider mock:mock-model --prompt "x" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
   run_dir=$(ls -1 "$MOAGAN_HOME/.runs" 2>/dev/null | head -1)
   [[ -z "$run_dir" ]] && return 0
   pg="$MOAGAN_HOME/.runs/$run_dir/problem_graph.json"
@@ -211,7 +211,7 @@ run_test "v006_migration_applies_on_fresh_db" '
   db="$MOAGAN_HOME/meta.sqlite"
   # Touch the DB by running any moagan command so the migration
   # runner fires. The mock run is harmless.
-  "'"$BIN"'" run --mode fast --provider mock --prompt "warm" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
+  "'"$BIN"'" run --mode fast --provider mock:mock-model --prompt "warm" --non-interactive --max-parallelism 2 >/dev/null 2>&1 || true
   [[ -f "$db" ]]
   version=$(sqlite3 "$db" "PRAGMA user_version;" 2>/dev/null)
   [[ "$version" == "6" ]]

@@ -2,8 +2,15 @@
 //! providers that share a protocol (e.g. Anthropic-compatible, OpenAI).
 //!
 //! Compliance: 10-integrada-v0 §D.1.2 (WireFormat).
+//!
+//! The file also defines [`WireFormatId`], a small enum that names the
+//! three wire formats the dispatcher recognises at construction time.
+//! The dispatcher detects the format from the endpoint URL the operator
+//! declared in `config.toml` (no more `kind` tag). See
+//! [`wire_format_from_url`].
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
@@ -277,7 +284,7 @@ impl WireFormat for CustomWire {
 /// providers get `response_format` set to `json_object` for these
 /// roles so the JSON parser in `parse_model_json` stops hitting
 /// the trailing-token / missing-brace pathologies.
-fn role_requires_json(role: Role) -> bool {
+pub(crate) fn role_requires_json(role: Role) -> bool {
     use Role::*;
     matches!(
         role,
@@ -379,6 +386,85 @@ struct ResponsesUsage {
     input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+}
+
+// -------------------------------------------------------------------------
+// Wire-format identification (v0.10 Phase 2)
+// -------------------------------------------------------------------------
+//
+// The dispatcher no longer reads a `kind` tag from the operator's
+// `config.toml`. Instead, the operator supplies the **full** endpoint
+// URL (including the wire-format path), and the dispatcher picks the
+// concrete provider based on the path:
+//
+// * `/v1/messages`          → `Anthropic` (`@ai-sdk/anthropic`)
+// * `/v1/chat/completions`  → `OpenAICompatible`
+//                             (`@ai-sdk/openai-compatible`)
+// * `/v1/responses`         → `OpenAI` (`@ai-sdk/openai`)
+//
+// Mapping validated against https://opencode.ai/docs/es/go (table
+// "AI SDK"). All three paths live behind the same relay
+// (`opencode.ai/zen/go/v1`), so the runtime picks the wire format from
+// the endpoint the operator declared.
+
+/// Stable identifier for the three wire formats the v0.10 dispatcher
+/// recognises. Distinct from the [`WireFormat`] trait (which describes
+/// encode/decode behaviour) — `WireFormatId` is the *routing* identity
+/// the dispatcher consults at construction time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WireFormatId {
+    /// Anthropic Messages API (`@ai-sdk/anthropic`).
+    /// Stable serde name: `"anthropic"`.
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// OpenAI-compatible Chat Completions
+    /// (`@ai-sdk/openai-compatible`). Stable serde name:
+    /// `"openai_compatible"`.
+    #[serde(rename = "openai_compatible")]
+    OpenAICompatible,
+    /// OpenAI Responses API (`@ai-sdk/openai`).
+    /// Stable serde name: `"openai"`.
+    #[serde(rename = "openai")]
+    OpenAI,
+}
+
+impl WireFormatId {
+    /// Stable lowercase string the telemetry / dashboards can pin to.
+    /// Mirrors the serde rename so log lines and the JSON serialisation
+    /// always agree.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAICompatible => "openai_compatible",
+            Self::OpenAI => "openai",
+        }
+    }
+}
+
+/// Detect the wire format from the endpoint URL the operator declared
+/// in `config.toml`. Strips the query string and a trailing `/`, then
+/// matches the path suffix:
+///
+/// * `…/messages`          → [`WireFormatId::Anthropic`]
+/// * `…/chat/completions`  → [`WireFormatId::OpenAICompatible`]
+/// * `…/responses`         → [`WireFormatId::OpenAI`]
+///
+/// Anything else returns [`Error::InvalidArgs`] so the operator gets a
+/// clear error at startup (no silent fallback to a wrong wire format).
+pub fn wire_format_from_url(url: &str) -> Result<WireFormatId> {
+    let path = url.split('?').next().unwrap_or(url).trim_end_matches('/');
+    if path.ends_with("/messages") {
+        Ok(WireFormatId::Anthropic)
+    } else if path.ends_with("/chat/completions") {
+        Ok(WireFormatId::OpenAICompatible)
+    } else if path.ends_with("/responses") {
+        Ok(WireFormatId::OpenAI)
+    } else {
+        Err(Error::InvalidArgs(format!(
+            "endpoint '{url}' has no recognised wire-format suffix \
+             (/messages, /chat/completions, /responses)"
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -667,5 +753,97 @@ mod tests {
             .decode(200, b"{}")
             .expect_err("custom wire must surface unconfigured decoder");
         assert!(matches!(err, Error::Provider { .. }));
+    }
+
+    // ---- v0.10 Phase 2: WireFormatId + wire_format_from_url ----
+
+    /// `/v1/messages` is the Anthropic Messages API path.
+    #[test]
+    fn wire_format_from_url_anthropic() {
+        let got = wire_format_from_url("https://api.minimax.io/anthropic/v1/messages")
+            .expect("anthropic path must resolve");
+        assert_eq!(got, WireFormatId::Anthropic);
+        assert_eq!(got.as_str(), "anthropic");
+    }
+
+    /// `/v1/chat/completions` is the OpenAI-compatible Chat
+    /// Completions path.
+    #[test]
+    fn wire_format_from_url_openai_compatible() {
+        let got = wire_format_from_url("https://opencode.ai/zen/go/v1/chat/completions")
+            .expect("chat/completions path must resolve");
+        assert_eq!(got, WireFormatId::OpenAICompatible);
+        assert_eq!(got.as_str(), "openai_compatible");
+    }
+
+    /// `/v1/responses` is the OpenAI Responses API path.
+    #[test]
+    fn wire_format_from_url_openai() {
+        let got = wire_format_from_url("https://opencode.ai/zen/go/v1/responses")
+            .expect("responses path must resolve");
+        assert_eq!(got, WireFormatId::OpenAI);
+        assert_eq!(got.as_str(), "openai");
+    }
+
+    /// An unknown suffix (no `/messages`, `/chat/completions`, or
+    /// `/responses`) returns `InvalidArgs` so the operator gets a
+    /// clear error at startup rather than a silent wrong-wire-format
+    /// fallback.
+    #[test]
+    fn wire_format_from_url_rejects_unknown_path() {
+        let err = wire_format_from_url("https://example.invalid/v1/foo")
+            .expect_err("unknown path must error");
+        match err {
+            Error::InvalidArgs(msg) => {
+                assert!(
+                    msg.contains("/messages"),
+                    "error message must list recognised suffixes, got {msg:?}"
+                );
+                assert!(
+                    msg.contains("/chat/completions"),
+                    "error message must list recognised suffixes, got {msg:?}"
+                );
+                assert!(
+                    msg.contains("/responses"),
+                    "error message must list recognised suffixes, got {msg:?}"
+                );
+            }
+            other => panic!("expected InvalidArgs, got {other:?}"),
+        }
+    }
+
+    /// A trailing `/` and a query string must not trip the suffix
+    /// matcher.
+    #[test]
+    fn wire_format_from_url_strips_trailing_slash_and_query() {
+        let got = wire_format_from_url(
+            "https://api.minimax.io/anthropic/v1/messages?api-version=2023-06-01",
+        )
+        .expect("trailing query must be tolerated");
+        assert_eq!(got, WireFormatId::Anthropic);
+        let got = wire_format_from_url("https://opencode.ai/zen/go/v1/chat/completions/")
+            .expect("trailing slash must be tolerated");
+        assert_eq!(got, WireFormatId::OpenAICompatible);
+    }
+
+    /// Stable serde rename: the dispatcher relies on the
+    /// `"openai_compatible"` / `"openai"` / `"anthropic"` spellings
+    /// for log keys and audit-sidecar fields.
+    #[test]
+    fn wire_format_id_serde_rename() {
+        let cases = [
+            (WireFormatId::Anthropic, "\"anthropic\""),
+            (WireFormatId::OpenAICompatible, "\"openai_compatible\""),
+            (WireFormatId::OpenAI, "\"openai\""),
+        ];
+        for (id, expected_json) in cases {
+            let encoded = serde_json::to_string(&id).unwrap();
+            assert_eq!(
+                encoded, expected_json,
+                "id {id:?} must serialize as {expected_json}"
+            );
+            let decoded: WireFormatId = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, id);
+        }
     }
 }

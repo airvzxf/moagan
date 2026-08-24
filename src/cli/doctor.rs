@@ -52,31 +52,27 @@ fn emit(check: Check, any_fail: &mut bool, any_warn: &mut bool) {
 fn check_api_key(cfg: &Config) -> Check {
     use crate::llm::api_keys::lookup_key;
     let mut missing: Vec<String> = Vec::new();
-    let mut seen_kinds: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (name, spec) in &cfg.providers {
-        // `mock` does not need an API key. Every other kind goes
-        // through the unified lookup (api_keys.toml > env var).
-        if spec.kind == "mock" {
+    let mut seen_sections: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for name in cfg.providers.keys() {
+        // v0.10 (post-Phase 8 cleanup): the section name IS the
+        // canonical provider-family key for `api_keys.toml` and the
+        // `<NAME>_API_KEY` env-var fallback. The deprecated `kind`
+        // tag is gone. The `mock` section does not need an API key.
+        if name == "mock" {
             continue;
         }
-        if !seen_kinds.insert(spec.kind.clone()) {
-            // Skip duplicate kinds; one env var / api_keys.toml entry
-            // services every provider alias of the same kind. The
-            // first iteration reports it; subsequent iterations
-            // (e.g. `minimax` + `minimax-m2.7`) just re-confirm.
+        if !seen_sections.insert(name.clone()) {
+            // Skip duplicates; one env var / api_keys.toml entry
+            // services every section of the same name.
             continue;
         }
-        match lookup_key(&spec.kind, None) {
+        match lookup_key(name, None) {
             Some(Ok(_)) => {}
             Some(Err(_)) => {
-                let kind = spec.kind.clone();
-                missing.push(format!("{name} ({kind}: api_keys.toml spec unresolvable)"));
+                missing.push(format!("{name} (api_keys.toml spec unresolvable)"));
             }
             None => {
-                let kind = spec.kind.clone();
-                missing.push(format!(
-                    "{name} ({kind}: env var unset and no api_keys.toml entry)"
-                ));
+                missing.push(format!("{name} (env var unset and no api_keys.toml entry)"));
             }
         }
     }
@@ -175,29 +171,32 @@ fn check_provider_config(cfg: &Config) -> Check {
     }
 }
 
-/// Build the per-kind model summary. Returns a vector of
-/// `(label, models)` pairs in stable (alphabetical) order; the caller
-/// prints them with the standard check-line format. Q5: surfaces the
-/// canonical MiniMax models (M3, M2.7, M2.7-highspeed, M2.5) so
-/// operators know what `--provider minimax-m2.5` resolves to without
-/// grepping the source. `kind` is the implementation name (e.g.
-/// `minimax`, `mock`); `models` is the sorted list of distinct
-/// `model` values across every provider entry of that kind.
+/// Build the per-section model summary. Returns a vector of
+/// `(label, models)` pairs in stable (alphabetical) order; the
+/// caller prints them with the standard check-line format.
+/// v0.10 (post-Phase 8 cleanup): one `(label, models)` pair per
+/// `[providers.<name>]` section; the model id list comes from the
+/// section's `models[]` (the v0.9 deprecated `spec.model` singleton
+/// is gone). Aliases (the old per-model sections like `kimi-k3`)
+/// were collapsed into the canonical section in Phase 8 — callers
+/// reach them via `--provider opencode:kimi-k3`.
 fn models_per_provider(cfg: &Config) -> Vec<(String, Vec<String>)> {
     use std::collections::BTreeMap;
-    let mut by_kind: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for spec in cfg.providers.values() {
-        by_kind
-            .entry(spec.kind.clone())
-            .or_default()
-            .push(spec.model.clone());
+    let mut by_section: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (section, spec) in &cfg.providers {
+        for m in &spec.models {
+            by_section
+                .entry(section.clone())
+                .or_default()
+                .push(m.id.clone());
+        }
     }
-    by_kind
+    by_section
         .into_iter()
-        .map(|(kind, mut models)| {
+        .map(|(section, mut models)| {
             models.sort();
             models.dedup();
-            (format!("models for provider '{kind}'"), models)
+            (format!("models for provider '{section}'"), models)
         })
         .collect()
 }
@@ -298,49 +297,53 @@ fn run_capabilities() -> Result<i32> {
     println!("{}", "-".repeat(header.len()));
 
     // Iterate the configured providers in sorted order so the
-    // output is stable across runs.
+    // output is stable across runs. v0.10: each row carries the
+    // section name plus every model id registered under it; the
+    // catalog lookup still uses the section + model pair.
     for (name, spec) in &cfg.providers {
-        let caps = capabilities_for_kind(&spec.kind);
-        let entry = catalog
-            .as_ref()
-            .and_then(|c| crate::llm::models_dev::lookup(c, name, &spec.model));
-        // The catalog is the canonical source for `temperature`,
-        // `reasoning`, and `attachment` (the `models.dev` rows are
-        // the only place these booleans live; `ProviderCapabilities`
-        // covers wire-format knobs instead). When the catalog is
-        // missing we fall back to the static capability matrix for
-        // `tools` (the only column that lives on both sides), and
-        // print `-` everywhere else.
-        let temperature_honoured = entry.as_ref().map(|e| e.temperature);
-        let reasoning = entry.as_ref().map(|e| e.reasoning);
-        let attachment = entry.as_ref().map(|e| e.attachment);
-        let max_in = entry
-            .as_ref()
-            .map(|e| e.limit.context.to_string())
-            .or_else(|| caps.max_input_tokens.map(|n| n.to_string()))
-            .unwrap_or_else(|| "-".to_owned());
-        let max_out = entry
-            .as_ref()
-            .map(|e| e.limit.output.to_string())
-            .unwrap_or_else(|| "-".to_owned());
-        let cost = entry
-            .as_ref()
-            .map(|e| format!("{:.2} / {:.2}", e.cost.input, e.cost.output))
-            .unwrap_or_else(|| "-".to_owned());
-        println!(
-            "{:<22}  {:<22}  {:<5}  {:<6}  {:<5}  {:<6}  {:<10}  {:<10}  {}",
-            truncate(name, 22),
-            truncate(&spec.model, 22),
-            temperature_honoured.map(yes_no).unwrap_or("-"),
-            reasoning.map(yes_no).unwrap_or("-"),
-            yes_no(caps.supports_tools),
-            attachment.map(yes_no).unwrap_or("-"),
-            max_in,
-            max_out,
-            cost,
-        );
-        if entry.is_none() {
-            any_warn = true;
+        let caps = capabilities_for_section(name);
+        for model in &spec.models {
+            let entry = catalog
+                .as_ref()
+                .and_then(|c| crate::llm::models_dev::lookup(c, name, &model.id));
+            // The catalog is the canonical source for `temperature`,
+            // `reasoning`, and `attachment` (the `models.dev` rows are
+            // the only place these booleans live; `ProviderCapabilities`
+            // covers wire-format knobs instead). When the catalog is
+            // missing we fall back to the static capability matrix for
+            // `tools` (the only column that lives on both sides), and
+            // print `-` everywhere else.
+            let temperature_honoured = entry.as_ref().map(|e| e.temperature);
+            let reasoning = entry.as_ref().map(|e| e.reasoning);
+            let attachment = entry.as_ref().map(|e| e.attachment);
+            let max_in = entry
+                .as_ref()
+                .map(|e| e.limit.context.to_string())
+                .or_else(|| caps.max_input_tokens.map(|n| n.to_string()))
+                .unwrap_or_else(|| "-".to_owned());
+            let max_out = entry
+                .as_ref()
+                .map(|e| e.limit.output.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            let cost = entry
+                .as_ref()
+                .map(|e| format!("{:.2} / {:.2}", e.cost.input, e.cost.output))
+                .unwrap_or_else(|| "-".to_owned());
+            println!(
+                "{:<22}  {:<22}  {:<5}  {:<6}  {:<5}  {:<6}  {:<10}  {:<10}  {}",
+                truncate(name, 22),
+                truncate(&model.id, 22),
+                temperature_honoured.map(yes_no).unwrap_or("-"),
+                reasoning.map(yes_no).unwrap_or("-"),
+                yes_no(caps.supports_tools),
+                attachment.map(yes_no).unwrap_or("-"),
+                max_in,
+                max_out,
+                cost,
+            );
+            if entry.is_none() {
+                any_warn = true;
+            }
         }
     }
     if any_warn {
@@ -352,21 +355,30 @@ fn run_capabilities() -> Result<i32> {
     }
 }
 
-/// Static capability matrix for a kind. Mirrors the
+/// PR-7 (deprecated alias): the per-kind static lookup is now
+/// `capabilities_for_section` (Phase 5 renamed the kind tag to
+/// the section name). Kept as `pub(crate) fn
+/// capabilities_for_kind` so existing tests / callers continue
+/// to compile; Phase 6 migrates them.
+#[doc(hidden)]
+#[allow(dead_code)]
+pub(crate) fn capabilities_for_kind(
+    section: &str,
+) -> crate::llm::capabilities::ProviderCapabilities {
+    capabilities_for_section(section)
+}
+
+/// Static capability matrix for a section. Mirrors the
 /// `for_<kind>` constructors on [`ProviderCapabilities`] so the
 /// doctor view can answer "is the `temperature` knob honoured
 /// for this provider?" without instantiating a real
-/// `Provider` (which would require an API key). Falls back to
-/// the OpenAI-compat baseline for unknown kinds so a future
-/// provider that is configured but not yet wired into the
-/// capability module does not crash the command.
-fn capabilities_for_kind(kind: &str) -> crate::llm::capabilities::ProviderCapabilities {
+/// `Provider` (which would require an API key). v0.10: the
+/// section name replaces the deprecated `kind` tag.
+fn capabilities_for_section(section: &str) -> crate::llm::capabilities::ProviderCapabilities {
     use crate::llm::capabilities::ProviderCapabilities;
-    match kind {
+    match section {
         "minimax" => ProviderCapabilities::for_minimax(),
-        "opencode_go" => ProviderCapabilities::for_opencode_go(),
-        "opencode_go_anthropic" => ProviderCapabilities::for_opencode_go_anthropic(),
-        "opencode_go_responses" => ProviderCapabilities::for_opencode_go_responses(),
+        "opencode" => ProviderCapabilities::for_opencode_go(),
         "deepseek" => ProviderCapabilities::for_deepseek(),
         "mock" => ProviderCapabilities::for_mock(),
         _ => ProviderCapabilities::default(),
@@ -400,46 +412,39 @@ mod tests {
     }
 
     /// Q5: `models_per_provider` returns one (label, models) pair per
-    /// distinct provider kind, with the model list sorted /
+    /// distinct provider section, with the model list sorted /
     /// deduplicated. The label follows the `models for provider
-    /// '<kind>'` contract that operators grep against in the doctor
-    /// output.
+    /// '<section>'` contract that operators grep against in the
+    /// doctor output.
     #[test]
-    fn models_per_provider_groups_by_kind_and_dedupes() {
+    fn models_per_provider_groups_by_section_and_dedupes() {
         let mut providers = std::collections::BTreeMap::new();
         providers.insert(
             "minimax".into(),
             ProviderConfig {
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
-                ..ProviderConfig::default()
-            },
-        );
-        providers.insert(
-            "minimax-m2.7".into(),
-            ProviderConfig {
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M2.7".into(),
-                ..ProviderConfig::default()
-            },
-        );
-        providers.insert(
-            "minimax-dup".into(),
-            ProviderConfig {
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
+                models: vec![
+                    crate::config::ModelConfig {
+                        id: "MiniMax-M3".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    },
+                    crate::config::ModelConfig {
+                        id: "MiniMax-M2.7".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    },
+                ],
                 ..ProviderConfig::default()
             },
         );
         providers.insert(
             "mock".into(),
             ProviderConfig {
-                kind: "mock".into(),
-                endpoint: "mock://local".into(),
-                model: "mock-model".into(),
+                models: vec![crate::config::ModelConfig {
+                    id: "mock-model".into(),
+                    endpoint: None,
+                    max_tokens: None,
+                }],
                 ..ProviderConfig::default()
             },
         );
@@ -449,7 +454,7 @@ mod tests {
         };
 
         let entries = models_per_provider(&cfg);
-        // Alphabetical by kind: minimax before mock.
+        // Alphabetical by section: minimax before mock.
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, "models for provider 'minimax'");
         assert_eq!(
@@ -482,7 +487,7 @@ mod tests {
     struct ApiKeyEnvGuard {
         minimax: Option<String>,
         deepseek: Option<String>,
-        opencode_go: Option<String>,
+        opencode: Option<String>,
         moagan_home: Option<std::ffi::OsString>,
     }
 
@@ -491,7 +496,7 @@ mod tests {
             Self {
                 minimax: std::env::var("MINIMAX_API_KEY").ok(),
                 deepseek: std::env::var("DEEPSEEK_API_KEY").ok(),
-                opencode_go: std::env::var("OPENCODE_GO_API_KEY").ok(),
+                opencode: std::env::var("OPENCODE_API_KEY").ok(),
                 moagan_home: std::env::var_os("MOAGAN_HOME"),
             }
         }
@@ -501,7 +506,7 @@ mod tests {
         fn drop(&mut self) {
             restore_or_remove("MINIMAX_API_KEY", self.minimax.as_deref());
             restore_or_remove("DEEPSEEK_API_KEY", self.deepseek.as_deref());
-            restore_or_remove("OPENCODE_GO_API_KEY", self.opencode_go.as_deref());
+            restore_or_remove("OPENCODE_API_KEY", self.opencode.as_deref());
             if let Some(v) = &self.moagan_home {
                 unsafe {
                     std::env::set_var("MOAGAN_HOME", v);
@@ -534,27 +539,21 @@ mod tests {
         providers.insert(
             "minimax".into(),
             ProviderConfig {
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
+                models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
         providers.insert(
             "deepseek".into(),
             ProviderConfig {
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
+                models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
         providers.insert(
-            "opencode_go".into(),
+            "opencode".into(),
             ProviderConfig {
-                kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1".into(),
-                model: "kimi-k2.7-code".into(),
+                models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
@@ -577,7 +576,7 @@ mod tests {
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
-            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
             std::env::remove_var("MOAGAN_HOME");
         }
         let check = check_api_key(&three_kind_config());
@@ -609,7 +608,7 @@ mod tests {
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
             std::env::remove_var("MOAGAN_HOME");
         }
         let check = check_api_key(&three_kind_config());
@@ -639,13 +638,17 @@ mod tests {
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
             std::env::remove_var("MOAGAN_HOME");
         }
         let check = check_api_key(&three_kind_config());
         assert_eq!(check.status, Status::Fail);
+        // v0.10: the section name IS the canonical provider-family
+        // key (no `kind` indirection). The legacy `opencode_go`
+        // alias was collapsed into the canonical `opencode` section
+        // in Phase 8, so the missing-key detail names `opencode`.
         assert!(
-            check.detail.contains("opencode_go"),
+            check.detail.contains("opencode"),
             "Fail detail must name the missing kind; got: {}",
             check.detail
         );
@@ -664,7 +667,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
             std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::remove_var("OPENCODE_GO_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
             std::env::remove_var("MOAGAN_HOME");
         }
         // A mock-only config requires no keys; the check must
@@ -673,9 +676,7 @@ mod tests {
             providers: std::collections::BTreeMap::from([(
                 "mock".to_owned(),
                 ProviderConfig {
-                    kind: "mock".to_owned(),
-                    endpoint: "mock://local".to_owned(),
-                    model: "mock-model".to_owned(),
+                    models: Vec::new(),
                     ..ProviderConfig::default()
                 },
             )]),
@@ -712,7 +713,7 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
             std::env::set_var("DOCTOR_TEST_DEEPSEEK_KEY_B2", "sk-from-file");
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::set_var("OPENCODE_GO_API_KEY", "sk-opencode");
+            std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
         }
         let check = check_api_key(&three_kind_config());
         assert_eq!(
@@ -730,9 +731,11 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
     /// the `--capabilities` view uses to fill the wire-format
     /// columns when the catalog cache is missing. The
     /// `for_minimax` constructor flips the wire preference to
-    /// Anthropic and downgrades `supports_response_format`; the
-    /// `for_opencode_go_responses` constructor flips the wire
-    /// preference to the Responses API. The test pins both so a
+    /// Anthropic and downgrades `supports_response_format`. The
+    /// `for_opencode_go` (the renamed v0.10 opencode kind)
+    /// constructor defaults to the OpenAI-compat chat-completions
+    /// wire — the inner provider has already routed the model
+    /// to the right wire format by URL. The test pins both so a
     /// future refactor cannot silently break the matrix.
     #[test]
     fn capabilities_for_kind_picks_correct_static_matrix() {
@@ -740,9 +743,21 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         let m = super::capabilities_for_kind("minimax");
         assert!(m.prefers_anthropic_wire);
         assert_eq!(m.wire_format_id(), "anthropic");
-        let r = super::capabilities_for_kind("opencode_go_responses");
-        assert!(r.prefers_responses_wire);
-        assert_eq!(r.wire_format_id(), "responses");
+        let r = super::capabilities_for_kind("opencode");
+        // v0.10: the `opencode` kind defaults to the
+        // chat-completions wire (the inner provider dispatches
+        // by URL). The legacy `for_opencode_go_responses`
+        // constructor still exists for back-compat callers that
+        // key on the wire id explicitly.
+        assert!(r.prefers_openai_wire);
+        assert_eq!(r.wire_format_id(), "openai_compatible");
+        let resp = ProviderCapabilities::for_opencode_go_responses();
+        assert!(resp.prefers_responses_wire);
+        // v0.10 (Phase 2 wire-format rename): the OpenAI Responses
+        // wire reports its serde id as `"openai"`. The legacy
+        // `"responses"` spelling is gone; tests pin the canonical
+        // value the dispatcher and telemetry agree on.
+        assert_eq!(resp.wire_format_id(), "openai");
         let mock = super::capabilities_for_kind("mock");
         assert!(mock.supports_tools);
         assert!(mock.supports_streaming);
@@ -784,21 +799,19 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         providers.insert(
             "minimax".into(),
             crate::config::ProviderConfig {
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
+                models: Vec::new(),
                 ..crate::config::ProviderConfig::default()
             },
         );
-        let cfg = Config {
+        let _cfg = Config {
             providers,
             ..Config::default()
         };
-        // The capability table prints a per-kind static matrix
-        // for every provider; the test pins the per-kind lookup
+        // The capability table prints a per-section static matrix
+        // for every provider; the test pins the per-section lookup
         // (the actual stdout print is exercised by the
         // integration-test surface in `moagan doctor`).
-        let caps = super::capabilities_for_kind(&cfg.providers["minimax"].kind);
+        let caps = super::capabilities_for_section("minimax");
         assert!(
             caps.prefers_anthropic_wire,
             "minimax prefers the Anthropic wire"

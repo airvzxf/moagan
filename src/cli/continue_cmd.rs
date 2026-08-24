@@ -492,8 +492,8 @@ pub async fn run_refine(
     let default_model = cfg
         .provider(&default_provider)
         .map_err(|e| Error::InvalidState(format!("refine: {e}")))?
-        .model
-        .clone();
+        .first_model_id()
+        .to_owned();
     let ctx = RunContext::new(
         run_id,
         Arc::clone(home),
@@ -709,8 +709,8 @@ pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> 
     let default_model = cfg
         .provider(&default_provider)
         .map_err(|e| Error::InvalidState(format!("rerank: {e}")))?
-        .model
-        .clone();
+        .first_model_id()
+        .to_owned();
     let ctx = RunContext::new(
         run_id,
         Arc::clone(home),
@@ -946,7 +946,7 @@ pub(crate) async fn resume_pipeline(
     )?);
     let default_model = cfg
         .provider(&default_provider)
-        .map(|spec| spec.model.clone())
+        .map(|spec| spec.first_model_id().to_owned())
         .unwrap_or_else(|_| "unknown".to_string());
     let policy = crate::redact::RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;

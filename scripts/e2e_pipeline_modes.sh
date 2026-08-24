@@ -98,7 +98,7 @@ run_pipeline() {
 run_pipeline_into() {
   local mode="$1"
   local home="$2"
-  "$BIN" run --mode "$mode" --provider mock \
+  "$BIN" run --mode "$mode" --provider mock:mock-model \
     --prompt "Different prompt $mode" \
     --max-parallelism 2 --runs-dir "$home" --mock-dir "$MOCK_DIR" \
     --non-interactive > "$home/run.out" 2>&1 || true
@@ -133,7 +133,7 @@ declare -a RUN_DIRS_A=()
 
 for i in "${!PROMPTS[@]}"; do
   H=$(mkhome)
-  OUT=$(run_pipeline standard mock "${PROMPTS[$i]}" "--non-interactive" "$H")
+  OUT=$(run_pipeline standard mock:mock-model "${PROMPTS[$i]}" "--non-interactive" "$H")
   RUN_DIRS_A+=("${OUT##*|}")
 done
 

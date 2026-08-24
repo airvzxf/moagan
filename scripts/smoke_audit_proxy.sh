@@ -157,37 +157,37 @@ run_test "cli_audit_help_mentions_verify" \
 # ---------------------------------------------------------------------
 
 run_test "sketches_per_cell_5_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 5 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 5 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_0_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_1_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 1 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 1 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_9_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 9 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 9 2>&1 | grep -q 'below the minimum of 10'"
 
 run_test "sketches_per_cell_10_floor_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_25_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_100_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "legacy_cardinality_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --cardinality 80 2>&1 | grep -q 'was renamed to --sketches-per-cell'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --cardinality 80 2>&1 | grep -q 'was renamed to --sketches-per-cell'"
 
 run_test "sketches_per_cell_invalid_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
 
 run_test "sketches_per_cell_missing_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
 
 run_test "sketches_per_cell_zero_dimensions_rejected_or_warns" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'; test \$? -le 1"
 
 # ---------------------------------------------------------------------
 # SECTION 3 — Role inventory (14 tests)
@@ -1065,52 +1065,52 @@ run_test "fixture_mock_dir_total_over_30" \
 
 WORK_A=$(mkhome)
 run_test "mock_run_with_cardinality_8_inspects_pipeline_names" \
-  "MOAGAN_HOME=$WORK_A $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_A/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
+  "MOAGAN_HOME=$WORK_A $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_A/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
 rm -rf "$WORK_A"
 
 WORK_B=$(mkhome)
 run_test "mock_run_creates_manifest" \
-  "MOAGAN_HOME=$WORK_B $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_B/.runs/*/manifest.json 2>/dev/null | grep -q manifest.json"
+  "MOAGAN_HOME=$WORK_B $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_B/.runs/*/manifest.json 2>/dev/null | grep -q manifest.json"
 rm -rf "$WORK_B"
 
 WORK_C=$(mkhome)
 run_test "mock_run_creates_brief" \
-  "MOAGAN_HOME=$WORK_C $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_C/.runs/*/brief.json 2>/dev/null | grep -q brief.json"
+  "MOAGAN_HOME=$WORK_C $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_C/.runs/*/brief.json 2>/dev/null | grep -q brief.json"
 rm -rf "$WORK_C"
 
 WORK_D=$(mkhome)
 run_test "mock_run_creates_sketches" \
-  "MOAGAN_HOME=$WORK_D $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_D/.runs/*/sketches/*.json 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
+  "MOAGAN_HOME=$WORK_D $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_D/.runs/*/sketches/*.json 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
 rm -rf "$WORK_D"
 
 WORK_E=$(mkhome)
 run_test "mock_run_creates_calls_telemetry" \
-  "MOAGAN_HOME=$WORK_E $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_E/.runs/*/telemetry/calls.jsonl.gz 2>/dev/null | grep -q calls.jsonl.gz"
+  "MOAGAN_HOME=$WORK_E $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_E/.runs/*/telemetry/calls.jsonl.gz 2>/dev/null | grep -q calls.jsonl.gz"
 rm -rf "$WORK_E"
 
 WORK_F=$(mkhome)
 run_test "mock_run_creates_phases_telemetry" \
-  "MOAGAN_HOME=$WORK_F $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_F/.runs/*/telemetry/phases.jsonl.gz 2>/dev/null | grep -q phases.jsonl.gz"
+  "MOAGAN_HOME=$WORK_F $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_F/.runs/*/telemetry/phases.jsonl.gz 2>/dev/null | grep -q phases.jsonl.gz"
 rm -rf "$WORK_F"
 
 WORK_G=$(mkhome)
 run_test "mock_run_creates_proposals" \
-  "MOAGAN_HOME=$WORK_G $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_G/.runs/*/proposals/*.json 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
+  "MOAGAN_HOME=$WORK_G $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_G/.runs/*/proposals/*.json 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
 rm -rf "$WORK_G"
 
 WORK_H=$(mkhome)
 run_test "mock_run_creates_ranking" \
-  "MOAGAN_HOME=$WORK_H $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_H/.runs/*/rankings/ 2>/dev/null | grep -q ranking.json"
+  "MOAGAN_HOME=$WORK_H $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_H/.runs/*/rankings/ 2>/dev/null | grep -q ranking.json"
 rm -rf "$WORK_H"
 
 WORK_I=$(mkhome)
 run_test "mock_run_creates_portfolio" \
-  "MOAGAN_HOME=$WORK_I $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_I/.runs/*/final/portfolio.md 2>/dev/null | grep -q portfolio.md"
+  "MOAGAN_HOME=$WORK_I $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_I/.runs/*/final/portfolio.md 2>/dev/null | grep -q portfolio.md"
 rm -rf "$WORK_I"
 
 WORK_J=$(mkhome)
 run_test "mock_run_creates_recommendation" \
-  "MOAGAN_HOME=$WORK_J $BIN run --mode deep --provider mock --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_J/.runs/*/final/ 2>/dev/null | head -10 | grep -qE 'recommendation|portfolio'"
+  "MOAGAN_HOME=$WORK_J $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_J/.runs/*/final/ 2>/dev/null | head -10 | grep -qE 'recommendation|portfolio'"
 rm -rf "$WORK_J"
 
 # ---------------------------------------------------------------------
@@ -1122,37 +1122,37 @@ rm -rf "$WORK_J"
 
 WORK_K=$(mkhome)
 run_test "discover_run_creates_run_root" \
-  "MOAGAN_HOME=$WORK_K $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_K/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
+  "MOAGAN_HOME=$WORK_K $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_K/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
 rm -rf "$WORK_K"
 
 WORK_L=$(mkhome)
 run_test "discover_run_creates_tags_dir" \
-  "MOAGAN_HOME=$WORK_L $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_L/.runs/*/tags/ 2>/dev/null | head -1 | grep -qE '/tags/$'"
+  "MOAGAN_HOME=$WORK_L $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_L/.runs/*/tags/ 2>/dev/null | head -1 | grep -qE '/tags/$'"
 rm -rf "$WORK_L"
 
 WORK_M=$(mkhome)
 run_test "discover_run_creates_clusters_dir" \
-  "MOAGAN_HOME=$WORK_M $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_M/.runs/*/clusters/ 2>/dev/null | head -1 | grep -qE '/clusters/$'"
+  "MOAGAN_HOME=$WORK_M $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_M/.runs/*/clusters/ 2>/dev/null | head -1 | grep -qE '/clusters/$'"
 rm -rf "$WORK_M"
 
 WORK_N=$(mkhome)
 run_test "discover_run_creates_facets_dir" \
-  "MOAGAN_HOME=$WORK_N $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_N/.runs/*/facets/ 2>/dev/null | head -1 | grep -qE '/facets/$'"
+  "MOAGAN_HOME=$WORK_N $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_N/.runs/*/facets/ 2>/dev/null | head -1 | grep -qE '/facets/$'"
 rm -rf "$WORK_N"
 
 WORK_O=$(mkhome)
 run_test "discover_run_creates_extractions_dir" \
-  "MOAGAN_HOME=$WORK_O $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_O/.runs/*/extractions/ 2>/dev/null | head -1 | grep -qE '/extractions/$'"
+  "MOAGAN_HOME=$WORK_O $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_O/.runs/*/extractions/ 2>/dev/null | head -1 | grep -qE '/extractions/$'"
 rm -rf "$WORK_O"
 
 WORK_P=$(mkhome)
 run_test "discover_run_creates_contradictions_dir" \
-  "MOAGAN_HOME=$WORK_P $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_P/.runs/*/contradictions/ 2>/dev/null | head -1 | grep -qE '/contradictions/$'"
+  "MOAGAN_HOME=$WORK_P $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_P/.runs/*/contradictions/ 2>/dev/null | head -1 | grep -qE '/contradictions/$'"
 rm -rf "$WORK_P"
 
 WORK_Q=$(mkhome)
 run_test "discover_run_creates_drafts_dir" \
-  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/drafts/ 2>/dev/null | head -1 | grep -qE '/drafts/$'"
+  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/drafts/ 2>/dev/null | head -1 | grep -qE '/drafts/$'"
 rm -rf "$WORK_Q"
 
 # The remaining tests need content; mock provider cycles so these
@@ -1160,12 +1160,12 @@ rm -rf "$WORK_Q"
 
 WORK_T=$(mkhome)
 run_test "discover_run_creates_summary_md" \
-  "MOAGAN_HOME=$WORK_T $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/summary.md 2>/dev/null | head -1 | grep -q summary.md; test \$? -le 1"
+  "MOAGAN_HOME=$WORK_T $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/summary.md 2>/dev/null | head -1 | grep -q summary.md; test \$? -le 1"
 rm -rf "$WORK_T"
 
 WORK_U=$(mkhome)
 run_test "discover_run_creates_summary_json" \
-  "MOAGAN_HOME=$WORK_U $BIN discover --provider mock --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/summary.json 2>/dev/null | head -1 | grep -q summary.json; test \$? -le 1"
+  "MOAGAN_HOME=$WORK_U $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/summary.json 2>/dev/null | head -1 | grep -q summary.json; test \$? -le 1"
 rm -rf "$WORK_U"
 
 # ---------------------------------------------------------------------

@@ -24,24 +24,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Hard cap on `max_tokens` for every request routed through an
-/// OpenCode Go upstream, regardless of which of the three wire
-/// shapes is selected (`/v1/messages`, `/v1/responses`,
-/// `/v1/chat/completions`).
-///
-/// OpenCode Go proxies calls to heterogeneous backends whose valid
-/// `max_tokens` range is not uniform: the documented ceiling for the
-/// OpenAI-compat chat path is 8192 for kimi-k*, the Anthropic-compat
-/// path on qwen3.x returns HTTP 400 above ~16_384 in practice, and
-/// `gpt-5.6-luna` (Responses) caps at 16_384 as well. 16_384 is the
-/// smallest of these observed caps and works for every model on the
-/// 2026-08-04 operator roster; raising it requires re-verifying each
-/// upstream, hence the constant lives next to the capability matrix
-/// so the per-kind constraints stay co-located. If a future model
-/// requires a higher value, bump this constant in one place rather
-/// than threading a new field through every provider.
-pub const OPENCODE_GO_MAX_TOKENS_CAP: u32 = 16_384;
-
 /// Hard cap on `max_tokens` for minimax (Anthropic-compatible wire).
 ///
 /// Probe at upstream: MiniMax-M3 rejects anything `> 524288` with
@@ -63,7 +45,7 @@ pub const MINIMAX_MAX_TOKENS_CAP: u32 = 524_288;
 /// (`fix/tier-a-e2e-coverage-2026-08-13`, PR-473 --ignored job) —
 ///// it is what the API contract enforces, regardless of what the
 /// marketing docs say (which claim `[1, 8192]` for some models).
-/// Mirrors `MINIMAX_MAX_TOKENS_CAP` and `OPENCODE_GO_MAX_TOKENS_CAP`:
+/// Mirrors `MINIMAX_MAX_TOKENS_CAP`:
 /// the value lives next to the capability matrix so per-kind
 /// constraints stay co-located. Bumping this requires re-verifying
 /// DeepSeek's API contract; if a future model needs a higher value,
@@ -166,7 +148,7 @@ impl ProviderCapabilities {
 
     /// OpenCode Go routed through the Anthropic-compatible
     /// `/v1/messages` endpoint.
-    pub fn for_opencode_go_anthropic() -> Self {
+    pub fn for_anthropic_compat() -> Self {
         Self {
             supports_system_field: true,
             supports_response_format: false,
@@ -211,16 +193,26 @@ impl ProviderCapabilities {
     }
 
     /// Resolve a static wire-format identifier from the
-    /// preference flags. Used by the dispatcher to log which
-    /// protocol was selected without forcing every caller to
-    /// pattern-match on the booleans.
+    /// preference flags. Mirrors the serde rename on
+    /// [`crate::llm::wire_format::WireFormatId`] so log lines and
+    /// the JSON serialisation always agree:
+    ///
+    /// * `prefers_anthropic_wire` → `"anthropic"` (`/v1/messages`)
+    /// * `prefers_responses_wire` → `"openai"` (`/v1/responses`,
+    ///   the OpenAI Responses API)
+    /// * fallback                 → `"openai_compatible"`
+    ///   (`/v1/chat/completions`, the OpenAI-compatible Chat API)
+    ///
+    /// The dispatcher reads the same id from
+    /// `WireFormatId::as_str()` so a future refactor cannot
+    /// silently diverge the two surfaces.
     pub fn wire_format_id(&self) -> &'static str {
         if self.prefers_anthropic_wire {
             "anthropic"
         } else if self.prefers_responses_wire {
-            "responses"
-        } else {
             "openai"
+        } else {
+            "openai_compatible"
         }
     }
 }
@@ -243,7 +235,7 @@ mod tests {
         assert!(cap.supports_system_field);
         assert!(cap.supports_response_format);
         assert_eq!(cap.max_input_tokens, Some(8192));
-        assert_eq!(cap.wire_format_id(), "openai");
+        assert_eq!(cap.wire_format_id(), "openai_compatible");
     }
 
     /// Direct MiniMax flips the wire preference to Anthropic and
@@ -271,7 +263,11 @@ mod tests {
         assert!(cap.prefers_responses_wire);
         assert!(!cap.prefers_anthropic_wire);
         assert!(!cap.prefers_openai_wire);
-        assert_eq!(cap.wire_format_id(), "responses");
+        // v0.10 (Phase 2 wire-format rename): the OpenAI Responses
+        // wire reports its serde id as `"openai"`. The legacy
+        // `"responses"` spelling is gone; tests pin the canonical
+        // value the dispatcher and telemetry agree on.
+        assert_eq!(cap.wire_format_id(), "openai");
     }
 
     /// Mock provider is the test-time escape hatch — streaming
@@ -292,15 +288,6 @@ mod tests {
         let json = serde_json::to_string(&cap).unwrap();
         let back: ProviderCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(cap, back);
-    }
-
-    /// Pin the OpenCode Go hard cap to 16_384. Bumping this constant
-    /// requires re-verifying every upstream (kimi-k*, qwen3.x,
-    /// gpt-5.6-luna, etc.) — the test forces a re-think before the
-    /// change can land.
-    #[test]
-    fn opencode_go_max_tokens_cap_is_16_384() {
-        assert_eq!(OPENCODE_GO_MAX_TOKENS_CAP, 16_384);
     }
 
     /// Pin the minimax hard cap to 524_288 — the exact boundary the

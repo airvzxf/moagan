@@ -180,7 +180,7 @@ run_test "ckpt_resolve_helper_basic_compiles" \
 # ---------------------------------------------------------------------
 
 TMPHOME_CK=$(mkhome)
-OUT_CK=$(run_pipeline standard mock "Checkpoint test question" "--non-interactive" "$TMPHOME_CK")
+OUT_CK=$(run_pipeline standard mock:mock-model "Checkpoint test question" "--non-interactive" "$TMPHOME_CK")
 CKPT_FILE="$(ls $TMPHOME_CK/.runs/$(ls $TMPHOME_CK/.runs/)/checkpoints/h_*.json 2>/dev/null | grep -v meta.json | head -1)"
 
 if [[ -n "$CKPT_FILE" ]]; then

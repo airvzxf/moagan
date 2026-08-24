@@ -1,4 +1,4 @@
-# Example user-level config for `moagan`.
+# Example user-level config for `moagan` (v0.10 schema).
 #
 # This file is documentation. `moagan` does NOT read it; copies of it live at
 # `~/.config/moagan/config.toml` (the XDG-compliant home for moagan).
@@ -39,9 +39,65 @@ cooldown_secs = 180
 # [rate_limit_per_role]
 # tagger = { capacity = 30, refill_per_sec = 2 }
 
-# Provider overrides (DO NOT put real API keys here — use `.env` + MoaganHome):
+# ---------------------------------------------------------------------------
+# v0.10 provider schema
+# ---------------------------------------------------------------------------
 #
+# Each `[providers.<section>]` section groups every model that shares the
+# same upstream relay. The wire format (`/v1/messages`,
+# `/v1/chat/completions`, `/v1/responses`) is detected from the
+# per-model URL by the dispatcher; the section name is the canonical
+# key for `api_keys.toml` and the `<NAME>_API_KEY` env-var fallback.
+#
+# DO NOT put real API keys here — use `~/.config/moagan/api_keys.toml`
+# or the `MOAGAN_DEFAULT_PROVIDER` env var.
+
+# [defaults]
+# provider = "opencode:kimi-k3"
+
 # [providers.minimax]
-# kind = "minimax"
-# endpoint = "http://localhost:8086/anthropic/v1"
-# model = "MiniMax-M3"
+# endpoint = "https://api.minimax.io/anthropic/v1/messages"
+# models = [
+#   { id = "MiniMax-M3",            max_tokens = 1000000 },
+#   { id = "MiniMax-M2.7",          max_tokens = 1000000 },
+#   { id = "MiniMax-M2.7-highspeed", max_tokens = 1000000 },
+#   { id = "MiniMax-M2.5",          max_tokens = 1000000 },
+# ]
+# temperature = 0.6
+# top_p = 0.95
+
+# [providers.opencode]
+# models = [
+#   { id = "kimi-k3",       endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "kimi-k2.6",     endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "glm-5.1",       endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "glm-5.2",       endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "deepseek-v4-pro",   endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "deepseek-v4-flash", endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "mimo-v2.5",     endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "mimo-v2.5-pro", endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "hy3",          endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
+#   { id = "minimax-m3",    endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+#   { id = "minimax-m2.7",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+#   { id = "minimax-m2.5",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+#   { id = "qwen3.8-max",   endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+#   { id = "qwen3.7-max",   endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+#   { id = "qwen3.7-plus",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+#   { id = "qwen3.6-plus",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
+#   { id = "gpt-5.6-luna",  endpoint = "https://opencode.ai/zen/go/v1/responses",       max_tokens = 1000000 },
+# ]
+# temperature = 1.0
+# top_p = 0.95
+
+# [providers.deepseek]
+# endpoint = "https://api.deepseek.com/v1/chat/completions"
+# models = [
+#   { id = "deepseek-chat",    max_tokens = 1000000 },
+#   { id = "deepseek-reasoner", max_tokens = 1000000 },
+# ]
+# temperature = 0.6
+# top_p = 0.95
+
+# [providers.mock]
+# endpoint = "mock://local"
+# mock_dir = "/path/to/canned/responses"

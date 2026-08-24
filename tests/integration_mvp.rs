@@ -305,7 +305,7 @@ fn cli_parses_run_subcommand() {
             ..
         } => {
             assert_eq!(mode, moagan::cli::Mode::Fast);
-            assert_eq!(provider, "mock");
+            assert_eq!(provider.as_deref(), Some("mock"));
             assert_eq!(prompt, "Enumera los 7 colores del arcoíris en orden");
         }
         _ => panic!("expected Run"),
@@ -385,7 +385,12 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
     );
     let providers = Arc::new(reg);
     let config = Config::load()?;
-    let default_model = config.provider("mock")?.model.clone();
+    let default_model = config
+        .provider("mock")?
+        .models
+        .first()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
     let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
@@ -461,7 +466,12 @@ fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
     );
     let providers = Arc::new(reg);
     let config = Config::load()?;
-    let default_model = config.provider("mock")?.model.clone();
+    let default_model = config
+        .provider("mock")?
+        .models
+        .first()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
     let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
@@ -1516,13 +1526,19 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         .await;
 
     let spec = ProviderConfig {
-        kind: "minimax".into(),
-        endpoint: format!("{}/anthropic/v1", server.uri()),
-        model: "MiniMax-M3".into(),
-        max_tokens: None,
+        models: vec![moagan::config::ModelConfig {
+            id: "MiniMax-M3".to_owned(),
+            // v0.10 schema: the dispatcher picks the wire endpoint
+            // off `models[].endpoint`, not the section-level
+            // `endpoint`. The wiremock URL has to live on the
+            // model entry so `MinimaxProvider::new` picks it up
+            // when it reads `first.endpoint`.
+            endpoint: Some(format!("{}/anthropic/v1", server.uri())),
+            max_tokens: None,
+        }],
+        endpoint: None,
         temperature: None,
         top_p: None,
-        hard_incompatibilities: vec![],
         omit_max_tokens: false,
         max_token_auto: None,
         max_token_auto_save: true,

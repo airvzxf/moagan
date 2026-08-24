@@ -1,7 +1,7 @@
 //! `deepseek` provider — DeepSeek's OpenAI-compat API at
 //! `https://api.deepseek.com/v1/chat/completions`.
 //!
-//! This is a thin wrapper around `OpenAiCompatProvider` that pre-fills
+//! This is a thin wrapper around `OpenAICompatibleProvider` that pre-fills
 //! the DeepSeek-specific defaults (endpoint, model, API key env).
 
 use async_trait::async_trait;
@@ -11,49 +11,69 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::{DEEPSEEK_MAX_TOKENS_CAP, ProviderCapabilities};
-use super::openai_compat::OpenAiCompatProvider;
+use super::openai_compatible::OpenAICompatibleProvider;
 use super::provider::Provider;
 use super::wire::{Request, Response};
 
 /// DeepSeek provider backed by the generic OpenAI-compat implementation.
 #[derive(Debug, Clone)]
-pub struct DeepSeekProvider(OpenAiCompatProvider);
+pub struct DeepSeekProvider(OpenAICompatibleProvider);
 
 impl DeepSeekProvider {
     /// Build from a DeepSeek provider config and a resolved API key.
+    /// Kept for backwards compatibility with hand-rolled callers
+    /// (legacy test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
     ///
-    /// Wires `DEEPSEEK_MAX_TOKENS_CAP = 393_216` as the
-    /// `kind_hard_cap` via [`OpenAiCompatProvider::new_with_kind_cap`]
-    /// so every wire body carries the per-provider ceiling even
-    /// when the operator's TOML leaves `max_tokens` unset
-    /// (`DEFAULT_MAX_TOKENS = 1_000_000`). Without this cap the
-    /// upstream returns HTTP 400 `invalid_request_error` with the
-    /// body `{"message":"Invalid max_tokens value, the valid
-    /// range of max_tokens is [1, 393216]"}`. The same value is
-    /// returned by [`Self::max_tokens_probe_ceiling`] so the
-    /// auto-probe short-circuits at `2^19 = 524_288` (the first
-    /// `2^k > 393_216`) instead of probing values the upstream
-    /// will never accept. Mirrors the
-    /// `OPENCODE_GO_MAX_TOKENS_CAP` wiring on the opencode_go
-    /// chat-completions path (`opencode_go.rs:152`).
+    /// When `spec.models` is empty (the v0.9 fixture shape) the
+    /// section-level `endpoint` is reused for a synthetic
+    /// `ModelConfig` so the rest of the constructor (URL builder,
+    /// clamp chain, `max_tokens_table` lookup by `(name, model)`)
+    /// sees the same shape the v0.10 dispatcher passes in.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        if spec.kind != "deepseek" {
+        if let Some(ep) = spec.endpoint.as_deref()
+            && !ep.contains("deepseek")
+        {
             return Err(Error::InvalidArgs(format!(
-                "deepseek provider got kind '{}'",
-                spec.kind
+                "deepseek provider requires an endpoint containing 'deepseek', got {ep:?}"
             )));
         }
-        Ok(Self(OpenAiCompatProvider::new_with_kind_cap(
-            spec,
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|e| Error::Provider {
+                message: format!("build http client: {e}"),
+                http_status: None,
+            })?;
+        let first = spec
+            .models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| crate::config::ModelConfig {
+                id: "deepseek-v4-flash".to_owned(),
+                endpoint: spec.endpoint.clone(),
+                max_tokens: None,
+            });
+        let name = "deepseek".to_owned();
+        Ok(Self(OpenAICompatibleProvider {
+            name: name.clone(),
+            model: first.id.clone(),
+            endpoint: first
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| "https://api.deepseek.com/v1/chat/completions".to_owned()),
             api_key,
-            Some(DEEPSEEK_MAX_TOKENS_CAP),
-        )?))
+            client,
+            max_retries: 3,
+            provider_max_tokens: first.max_tokens,
+            kind_hard_cap: Some(DEEPSEEK_MAX_TOKENS_CAP),
+            max_tokens_table: None,
+        }))
     }
 
     /// Build from config, resolving the API key via the unified
-    /// helper (PR-B2). The helper honours `<MOAGAN_HOME>/api_keys.toml`
-    /// first, then falls back to the direct `DEEPSEEK_API_KEY` env var
-    /// so existing CI / shell setups keep working untouched.
+    /// helper. Kept for backwards compatibility; new dispatcher
+    /// code goes through [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
         let key = super::api_keys::lookup_key("deepseek", None)
             .ok_or_else(|| Error::InvalidApiKey {
@@ -72,12 +92,62 @@ impl DeepSeekProvider {
             })?;
         Self::new(spec, SecretString::new(key))
     }
+
+    /// v0.10 dispatcher entry point. Builds a `DeepSeekProvider` from
+    /// a `ResolvedModelConfig`, wrapping an `OpenAICompatibleProvider`
+    /// with `DEEPSEEK_MAX_TOKENS_CAP` as the `kind_hard_cap`. The
+    /// key lookup falls back from the section name to the canonical
+    /// `kind` so a per-model alias like `deepseek-v4-flash`
+    /// (kind=`"deepseek"`) resolves against `DEEPSEEK_API_KEY`
+    /// rather than the non-existent `DEEPSEEK-V4-FLASH_API_KEY`.
+    /// The dispatcher routes DeepSeek's `/v1/chat/completions`
+    /// URL to this constructor directly so the cap is wired at
+    /// construction time.
+    pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        let kind = super::api_keys::lookup_kind_for_resolved(resolved);
+        let key = super::api_keys::lookup_key(&kind, None)
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: format!(
+                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                    kind.to_ascii_uppercase()
+                ),
+                http_status: None,
+            })?
+            .map_err(|e| match e {
+                Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                    message: format!(
+                        "{}: {message}; check api_keys.toml and the env var fallback",
+                        kind
+                    ),
+                    http_status: None,
+                },
+                other => other,
+            })?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|e| Error::Provider {
+                message: format!("build http client: {e}"),
+                http_status: None,
+            })?;
+        Ok(Self(OpenAICompatibleProvider {
+            name: resolved.section.clone(),
+            model: resolved.id.clone(),
+            endpoint: resolved.endpoint.clone(),
+            api_key: SecretString::new(key),
+            client,
+            max_retries: 3,
+            provider_max_tokens: resolved.max_tokens,
+            kind_hard_cap: Some(DEEPSEEK_MAX_TOKENS_CAP),
+            max_tokens_table: None,
+        }))
+    }
 }
 
 impl std::ops::Deref for DeepSeekProvider {
-    type Target = OpenAiCompatProvider;
+    type Target = OpenAICompatibleProvider;
 
-    fn deref(&self) -> &OpenAiCompatProvider {
+    fn deref(&self) -> &OpenAICompatibleProvider {
         &self.0
     }
 }
@@ -114,18 +184,18 @@ impl Provider for DeepSeekProvider {
         // `kind_hard_cap = Some(DEEPSEEK_MAX_TOKENS_CAP)` at
         // construction time via [`Self::new`] so the per-provider
         // hard cap is honoured at every layer (audit-log hash
-        // included). Mirrors the `OPENCODE_GO_MAX_TOKENS_CAP`
+        // included). Mirrors the `u32::MAX`
         // wiring on the opencode_go chat-completions path.
         self.0.effective_max_tokens(req)
     }
 
-    /// Delegate to the wrapped `OpenAiCompatProvider` so the probe
+    /// Delegate to the wrapped `OpenAICompatibleProvider` so the probe
     /// ceiling matches the per-provider hard cap wired at
     /// construction time. With the default wiring (this provider
     /// built via [`Self::new`]) the inner `kind_hard_cap` is
     /// `Some(DEEPSEEK_MAX_TOKENS_CAP)`, so the probe short-circuits
     /// at `2^19 = 524_288` instead of probing values DeepSeek
-    /// rejects with HTTP 400. Mirrors the `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// rejects with HTTP 400. Mirrors the `u32::MAX`
     /// delegation on `OpenCodeGoProvider`.
     fn max_tokens_probe_ceiling(&self) -> u32 {
         self.0.max_tokens_probe_ceiling()
@@ -138,13 +208,10 @@ mod tests {
 
     fn config() -> ProviderConfig {
         ProviderConfig {
-            kind: "deepseek".into(),
-            endpoint: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-v4-flash".into(),
-            max_tokens: Some(8192),
+            endpoint: None,
+            models: Vec::new(),
             temperature: Some(0.6),
             top_p: Some(0.95),
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -187,13 +254,10 @@ mod tests {
         // DeepSeek-direct cap from pre-PR-473); we want to pin
         // the new wiring in isolation, so build a separate spec.
         let spec = ProviderConfig {
-            kind: "deepseek".into(),
-            endpoint: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-v4-flash".into(),
-            max_tokens: None,
+            endpoint: None,
+            models: Vec::new(),
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -210,8 +274,8 @@ mod tests {
         // accepts. The audit hash stays in sync with the wire
         // body because both call the same clamp chain.
         let req = Request {
-            role: crate::llm::Role::Route,
             model: "deepseek-v4-flash".into(),
+            role: crate::llm::Role::Route,
             system: String::new(),
             user: String::new(),
             max_tokens: 1_000_000,

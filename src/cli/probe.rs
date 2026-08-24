@@ -192,14 +192,23 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
                  register it under [providers.{provider}] in config.toml first"
             ))
         })?;
-        // The user asked for a specific model override; the spec
-        // is the template we copy from. The override lets the
-        // operator point the probe at an alias the config has not
-        // been updated for.
-        let mut spec = spec;
-        spec.model = model.clone();
+        // v0.10: the model id is required and the spec is the
+        // template we copy from. Reject mismatched model ids so
+        // the operator cannot probe a model that isn't actually
+        // configured for that section.
+        if !spec.models.iter().any(|m| m.id == *model) {
+            return Err(Error::InvalidArgs(format!(
+                "probe: provider '{provider}' has no model '{model}'; \
+                 registered models: [{}]",
+                spec.models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
 
-        if spec.kind == "mock" {
+        if provider == "mock" {
             println!("  Probing {provider}:{model} ... skipped (mock has no upstream)");
             results.push(ProbeResult {
                 provider: provider.clone(),
@@ -224,7 +233,7 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         // the same `from_config` path the registry uses, so the
         // probe observes the same wire behaviour a real run would
         // see (auth header, endpoint, rate-limit knobs).
-        let provider_arc = build_provider_for_probe(&spec)?;
+        let provider_arc = build_provider_for_probe(&spec, model)?;
         // Query the per-provider probe ceiling so the exponential
         // phase short-circuits at the upstream's hard cap rather
         // than walking `2^1..2^30` against values the upstream
@@ -353,12 +362,21 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
                  register it under [providers.{provider}] in config.toml first"
             ))
         })?;
-        // The user asked for a specific model override; the spec
-        // is the template we copy from.
-        let mut spec = spec;
-        spec.model = model.clone();
+        // v0.10: the model id is required and the spec is the
+        // template we copy from. Reject mismatched model ids.
+        if !spec.models.iter().any(|m| m.id == *model) {
+            return Err(Error::InvalidArgs(format!(
+                "probe: provider '{provider}' has no model '{model}'; \
+                 registered models: [{}]",
+                spec.models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
 
-        if spec.kind == "mock" {
+        if provider == "mock" {
             println!("  Probing {provider}:{model} ... skipped (mock has no upstream)");
             results.push(TemperatureProbeResult {
                 provider: provider.clone(),
@@ -384,7 +402,7 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
         // the registry uses, so the probe observes the same
         // wire behaviour a real run would see (auth header,
         // endpoint, rate-limit knobs).
-        let provider_arc = build_provider_for_probe(&spec)?;
+        let provider_arc = build_provider_for_probe(&spec, model)?;
         let transport =
             ProviderTemperatureProbeTransport::new(provider_arc).map_err(|e| Error::Provider {
                 message: format!("probe: build temperature transport: {e}"),
@@ -601,39 +619,71 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
 }
 
 /// Build a [`Provider`](crate::llm::provider::Provider) from a spec
-/// with a model override. Mirrors the dispatch in
+/// for a specific model id. Mirrors the dispatch in
 /// [`crate::llm::provider::registry_from_config_with_home`] but
 /// skips the registry wrapping (the probe only needs a transport,
 /// not a pool or a breaker).
 fn build_provider_for_probe(
     spec: &crate::config::ProviderConfig,
+    model_id: &str,
 ) -> Result<Arc<dyn crate::llm::provider::Provider>> {
     use crate::llm::provider::Provider;
-    let provider: Arc<dyn Provider> = match spec.kind.as_str() {
-        "deepseek" => Arc::new(crate::llm::deepseek::DeepSeekProvider::from_config(spec)?),
-        "minimax" => Arc::new(crate::llm::minimax::MinimaxProvider::from_config(spec)?),
-        "opencode_go" => {
-            if crate::llm::opencode_go::OpenCodeGoProvider::is_blocked(&spec.model) {
-                return Err(Error::InvalidArgs(format!(
-                    "probe: model '{}' is blocked for opencode_go; use direct minimax provider instead",
-                    spec.model
-                )));
+    use crate::llm::wire_format::wire_format_from_url;
+    // v0.10: build a `ResolvedModelConfig` from the spec + the
+    // operator-supplied model id, then pick the concrete provider
+    // by wire format (URL path). Two sections need a per-section
+    // wrapper so their kind-level cap stays in place:
+    // `minimax` (`MINIMAX_MAX_TOKENS_CAP`) and `deepseek`
+    // (`DEEPSEEK_MAX_TOKENS_CAP`).
+    let model_cfg = spec
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "probe: provider '{model_id}' is not in this section's models[]"
+            ))
+        })?;
+    let endpoint = model_cfg
+        .endpoint
+        .clone()
+        .or_else(|| spec.endpoint.clone())
+        .ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "probe: provider '{model_id}' has no endpoint configured"
+            ))
+        })?;
+    let wire_format = wire_format_from_url(&endpoint)?;
+    let resolved = crate::config::ResolvedModelConfig {
+        section: model_id.to_owned(),
+        id: model_id.to_owned(),
+        endpoint: endpoint.clone(),
+        max_tokens: model_cfg.max_tokens,
+        temperature: spec.temperature,
+        top_p: spec.top_p,
+        wire_format,
+        omit_max_tokens: spec.omit_max_tokens,
+    };
+    let provider: Arc<dyn Provider> = if model_id == "deepseek" || endpoint.contains("deepseek") {
+        Arc::new(crate::llm::deepseek::DeepSeekProvider::from_resolved(
+            &resolved,
+        )?)
+    } else if model_id == "minimax" || endpoint.contains("minimax") {
+        Arc::new(crate::llm::minimax::MinimaxProvider::from_resolved(
+            &resolved,
+        )?)
+    } else {
+        match wire_format {
+            crate::llm::wire_format::WireFormatId::Anthropic => Arc::new(
+                crate::llm::anthropic_compat::AnthropicCompatProvider::from_resolved(&resolved)?,
+            ),
+            crate::llm::wire_format::WireFormatId::OpenAI => {
+                Arc::new(crate::llm::openai_compat::OpenAICompatProvider::from_resolved(&resolved)?)
             }
-            Arc::new(crate::llm::opencode_go::OpenCodeGoProvider::from_config(
-                spec,
-            )?)
-        }
-        "opencode_go_anthropic" => Arc::new(
-            crate::llm::opencode_go_anthropic::OpenCodeGoAnthropicProvider::from_config(spec)?,
-        ),
-        "opencode_go_responses" => Arc::new(
-            crate::llm::opencode_go_responses::OpenCodeGoResponsesProvider::from_config(spec)?,
-        ),
-        other => {
-            return Err(Error::InvalidArgs(format!(
-                "probe: provider kind '{other}' is not supported by `moagan probe max_tokens`; \
-                 supported kinds: minimax, deepseek, opencode_go, opencode_go_anthropic, opencode_go_responses"
-            )));
+            crate::llm::wire_format::WireFormatId::OpenAICompatible => Arc::new(
+                crate::llm::openai_compatible::OpenAICompatibleProvider::from_resolved(&resolved)?,
+            ),
         }
     };
     Ok(provider)
@@ -708,7 +758,7 @@ mod tests {
                 outcome: ProbeOutcome::Discovered(131_072),
             },
             ProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: ProbeOutcome::Discovered(8_192),
             },
@@ -720,7 +770,7 @@ mod tests {
         ];
         let mins = compute_min_per_provider(&results);
         assert_eq!(mins.get("minimax"), Some(&131_072));
-        assert_eq!(mins.get("opencode_go"), Some(&8_192));
+        assert_eq!(mins.get("kimi-k3"), Some(&8_192));
     }
 
     /// `--persist-min` aggregation: skipped and failed probes do
@@ -889,7 +939,7 @@ mod tests {
                 outcome: TemperatureProbeOutcome::Discovered(vec![0.0, 0.5]),
             },
             TemperatureProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: TemperatureProbeOutcome::Discovered(vec![0.5, 1.0]),
             },
@@ -903,7 +953,7 @@ mod tests {
         ];
         let map = union_per_provider(&results);
         assert_eq!(map.get("minimax"), Some(&vec![0.0, 0.3, 0.5]));
-        assert_eq!(map.get("opencode_go"), Some(&vec![0.5, 1.0]));
+        assert_eq!(map.get("kimi-k3"), Some(&vec![0.5, 1.0]));
         assert_eq!(map.len(), 2);
     }
 
@@ -925,7 +975,7 @@ mod tests {
                 outcome: TemperatureProbeOutcome::SkippedMock,
             },
             TemperatureProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: TemperatureProbeOutcome::DryRun,
             },
@@ -1034,7 +1084,7 @@ mod tests {
             },
             // A different provider must stay independent.
             TemperatureProbeResult {
-                provider: "opencode_go".into(),
+                provider: "kimi-k3".into(),
                 model: "kimi-k3".into(),
                 outcome: TemperatureProbeOutcome::Discovered(vec![0.5, 1.0]),
             },
@@ -1053,10 +1103,7 @@ mod tests {
         let minimax_cap = file.operator_caps.get("minimax").expect("minimax cap");
         assert_eq!(minimax_cap.temperatures, vec![0.0, 0.5, 0.7, 1.0]);
         assert!(!minimax_cap.auto);
-        let opencode_cap = file
-            .operator_caps
-            .get("opencode_go")
-            .expect("opencode_go cap");
+        let opencode_cap = file.operator_caps.get("kimi-k3").expect("kimi-k3 cap");
         assert_eq!(opencode_cap.temperatures, vec![0.5, 1.0]);
         assert!(!opencode_cap.auto);
     }
