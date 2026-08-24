@@ -358,6 +358,17 @@ pub async fn run_full_pipeline(
     } else {
         stub.provider.clone()
     };
+    // The section name (`"minimax"`, `"mock"`, …) and the model id
+    // are extracted once here so the `RunContext` and the
+    // provider-registry key agree on a single `(section, model_id)`
+    // pair. `parse_provider_model` returns an error if the operator
+    // passed a bare `SECTION`; mirror that on the stub's provider
+    // path so the error surfaces here too (the stub is built before
+    // `parse_provider_model` would otherwise have a chance to fire).
+    let resolved_default_model_section =
+        crate::cli::probe::parse_provider_model(&resolved_default_model)
+            .map(|(s, _)| s)
+            .unwrap_or_else(|_| resolved_default_model.clone());
     let default_model = if resolved_default_model.contains(':') {
         // `SECTION:MODEL` shape — the model half is verbatim.
         crate::cli::probe::parse_provider_model(&resolved_default_model)
@@ -485,7 +496,12 @@ pub async fn run_full_pipeline(
         run_id,
         Arc::clone(&home),
         providers,
-        default_provider.clone(),
+        // The RunContext stores the section name (no `SECTION:MODEL`
+        // suffix) so the provider-registry key joins cleanly:
+        // `registry_key(section, model)` = `"section::model"`. The
+        // full `SECTION:MODEL` string stays on `stub.provider` /
+        // `manifest.provider` for the operator-facing surfaces.
+        resolved_default_model_section.clone(),
         default_model.clone(),
         parallelism,
         telemetry.clone(),

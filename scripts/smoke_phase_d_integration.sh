@@ -152,7 +152,7 @@ run_test "int_wiring_run_default_interactive_true" \
 # ---------------------------------------------------------------------
 
 TMPHOME_S=$(mkhome)
-OUT_S="$(run_pipeline standard mock "Build a REST API for tracking library books" "--non-interactive" "$TMPHOME_S")"
+OUT_S="$(run_pipeline standard mock:mock-model "Build a REST API for tracking library books" "--non-interactive" "$TMPHOME_S")"
 RUN_DIR_S="${OUT_S##*|}"
 
 run_test "int_e2e_standard_run_completes" \
@@ -196,7 +196,7 @@ run_test "int_e2e_standard_produces_rankings" \
 # ---------------------------------------------------------------------
 
 TMPHOME_F=$(mkhome)
-OUT_F="$(run_pipeline fast mock "Build a CLI for batch CSV processing" "--non-interactive" "$TMPHOME_F")"
+OUT_F="$(run_pipeline fast mock:mock-model "Build a CLI for batch CSV processing" "--non-interactive" "$TMPHOME_F")"
 RUN_DIR_F="${OUT_F##*|}"
 
 run_test "int_e2e_fast_mode_runs" \
@@ -220,7 +220,7 @@ run_test "int_e2e_fast_mode_has_rankings" \
 # Deep mode
 
 TMPHOME_D=$(mkhome)
-OUT_D="$(run_pipeline deep mock "Design a distributed message queue" "--non-interactive" "$TMPHOME_D")"
+OUT_D="$(run_pipeline deep mock:mock-model "Design a distributed message queue" "--non-interactive" "$TMPHOME_D")"
 RUN_DIR_D="${OUT_D##*|}"
 
 run_test "int_e2e_deep_mode_runs" \
@@ -238,7 +238,7 @@ run_test "int_e2e_deep_mode_creates_adversaries_dir" \
 # Batch mode
 
 TMPHOME_B=$(mkhome)
-OUT_B="$(run_pipeline batch mock "Build a CI pipeline for Rust services" "--non-interactive" "$TMPHOME_B")"
+OUT_B="$(run_pipeline batch mock:mock-model "Build a CI pipeline for Rust services" "--non-interactive" "$TMPHOME_B")"
 RUN_DIR_B="${OUT_B##*|}"
 
 run_test "int_e2e_batch_mode_runs" \
@@ -527,7 +527,7 @@ run_test "I10_meta_sidecar_has_sealed_at_unix" \
 # ---------------------------------------------------------------------
 
 TMPHOME_JJ=$(mkhome)
-"$BIN" run --mode standard --provider mock --prompt "Idempotent run" --max-parallelism 2 --runs-dir "$TMPHOME_JJ" --mock-dir "$MOCK_DIR" --non-interactive > /dev/null 2>&1 || true
+"$BIN" run --mode standard --provider mock:mock-model --prompt "Idempotent run" --max-parallelism 2 --runs-dir "$TMPHOME_JJ" --mock-dir "$MOCK_DIR" --non-interactive > /dev/null 2>&1 || true
 JJ_RID=$(ls "$TMPHOME_JJ/.runs/" 2>/dev/null | sort -r | head -1)
 JJ_DIR="$TMPHOME_JJ/.runs/$JJ_RID"
 
@@ -553,7 +553,7 @@ run_test "J7_cache_dir_was_populated" \
   "[[ -d $ROOT/.local/share/moagan/cache/llm ]] || [[ -d ~/.local/share/moagan/cache/llm ]] || true"
 
 run_test "J9_second_run_creates_more_runs" \
-  "TMPHOME_JJ2=\$(mktemp -d); \"\$BIN\" run --mode standard --provider mock --prompt 'Idempotent run 2' --max-parallelism 2 --runs-dir \"\$TMPHOME_JJ2\" --mock-dir \"\$MOCK_DIR\" --non-interactive > /dev/null 2>&1 || true; n=\$(ls \$TMPHOME_JJ2/.runs/ 2>/dev/null | wc -l); test \$n -ge 1"
+  "TMPHOME_JJ2=\$(mktemp -d); \"\$BIN\" run --mode standard --provider mock:mock-model --prompt 'Idempotent run 2' --max-parallelism 2 --runs-dir \"\$TMPHOME_JJ2\" --mock-dir \"\$MOCK_DIR\" --non-interactive > /dev/null 2>&1 || true; n=\$(ls \$TMPHOME_JJ2/.runs/ 2>/dev/null | wc -l); test \$n -ge 1"
 
 run_test "J10_idempotent_prompt_produces_same_synth_strategy_or_empty" \
   "true || true"

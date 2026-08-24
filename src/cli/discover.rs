@@ -463,6 +463,14 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     } else {
         opts.provider.clone()
     };
+    // Same as `run_full_pipeline`: the section name (no `SECTION:MODEL`
+    // suffix) is what `provider_registry_key(section, model)` joins on.
+    // Extract it once so the `RunContext` and the registry agree on
+    // the same `(section, model_id)` pair.
+    let default_provider_section =
+        crate::cli::probe::parse_provider_model(&default_provider)
+            .map(|(s, _)| s)
+            .unwrap_or_else(|_| default_provider.clone());
     let providers = Arc::new(build_registry_for(
         cfg,
         &default_provider,
@@ -604,7 +612,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         run_id,
         Arc::clone(&home),
         Arc::clone(&providers),
-        default_provider.clone(),
+        default_provider_section.clone(),
         default_model,
         parallelism,
         telemetry.clone(),

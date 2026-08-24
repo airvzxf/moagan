@@ -1228,10 +1228,22 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // ----------------------------------------------------------------
     // mock
     // ----------------------------------------------------------------
+    // The mock provider has no upstream; it loads canned JSON
+    // fixtures via `--mock-dir`. The dispatcher still requires the
+    // canonical `SECTION:MODEL` form (post-`88bcd9c`); the test
+    // suite and the smoke scripts pass `--provider mock:mock-model`.
+    // Registering `mock-model` here is the single source of truth
+    // so the binary accepts `--provider mock:mock-model` from the
+    // default config without needing a per-call MOAGAN_CONFIG
+    // workaround.
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
-            models: Vec::new(),
+            models: vec![ModelConfig {
+                id: "mock-model".to_owned(),
+                endpoint: None,
+                max_tokens: None,
+            }],
             endpoint: Some("mock://local".to_owned()),
             temperature: None,
             top_p: None,
@@ -2738,10 +2750,18 @@ mod tests {
                 "opencode model {model_id} must NOT pick up MOAGAN_MINIMAX_MODEL"
             );
         }
-        // The mock provider must not be touched.
+        // The mock provider must not be touched. v0.10 ships
+        // `[providers.mock] models = [{ id = "mock-model" }]` from
+        // `default_providers()` so the dispatcher accepts
+        // `--provider mock:mock-model` without a per-test
+        // `MOAGAN_CONFIG` workaround.
         assert_eq!(
             cfg.providers.get("mock").unwrap().models,
-            Vec::new(),
+            vec![ModelConfig {
+                id: "mock-model".to_owned(),
+                endpoint: None,
+                max_tokens: None,
+            }],
             "mock provider must not be touched by MOAGAN_MINIMAX_MODEL"
         );
     }

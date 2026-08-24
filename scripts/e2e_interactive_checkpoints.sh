@@ -97,12 +97,12 @@ run_pipeline() {
   local home="$4"
   local stdin_input="${5:-}"
   if [[ -n "$stdin_input" ]]; then
-    printf "%s\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider mock \
+    printf "%s\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider mock:mock-model \
       --prompt "$prompt" --max-parallelism 2 --runs-dir "$home" \
       --mock-dir "$MOCK_DIR" \
       $extra_flags > "$home/run.out" 2>&1 || true
   else
-    "$BIN" run --mode "$mode" --provider mock \
+    "$BIN" run --mode "$mode" --provider mock:mock-model \
       --prompt "$prompt" --max-parallelism 2 --runs-dir "$home" \
       --mock-dir "$MOCK_DIR" \
       $extra_flags > "$home/run.out" 2>&1 || true
@@ -248,7 +248,7 @@ run_pipeline_into() {
   local mode="$1"
   local prompt="$2"
   local home="$3"
-  "$BIN" run --mode "$mode" --provider mock --prompt "$prompt" \
+  "$BIN" run --mode "$mode" --provider mock:mock-model --prompt "$prompt" \
     --max-parallelism 2 --runs-dir "$home" --mock-dir "$MOCK_DIR" \
     --non-interactive > "$home/run.out" 2>&1 || true
   local rid
@@ -330,9 +330,9 @@ run_test "s6_mode_batch_no_deliver_in_non_interactive" \
 ISO_TMP_A=$(mkhome)
 ISO_TMP_B=$(mkhome)
 
-"$BIN" run --mode standard --provider mock --prompt "ISO A" --mock-dir "$MOCK_DIR" --runs-dir "$ISO_TMP_A" --non-interactive >/dev/null 2>&1 &
+"$BIN" run --mode standard --provider mock:mock-model --prompt "ISO A" --mock-dir "$MOCK_DIR" --runs-dir "$ISO_TMP_A" --non-interactive >/dev/null 2>&1 &
 PID_A=$!
-"$BIN" run --mode standard --provider mock --prompt "ISO B" --mock-dir "$MOCK_DIR" --runs-dir "$ISO_TMP_B" --non-interactive >/dev/null 2>&1 &
+"$BIN" run --mode standard --provider mock:mock-model --prompt "ISO B" --mock-dir "$MOCK_DIR" --runs-dir "$ISO_TMP_B" --non-interactive >/dev/null 2>&1 &
 PID_B=$!
 wait $PID_A $PID_B 2>/dev/null || true
 ISO_RA=$(ls "$ISO_TMP_A/.runs/" 2>/dev/null | sort -r | head -1)

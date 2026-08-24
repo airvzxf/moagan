@@ -214,7 +214,7 @@ run_test "fast_mock_run_emits_lineage_paths_in_manifest" '
   HOME=$(mktemp -d)
   export MOAGAN_HOME="$HOME"
   trap "rm -rf $HOME" EXIT
-  '"${BIN}"' run --mode fast --provider mock --mock-dir '"$ROOT"'/tests/fixtures/mock_provider \
+  '"${BIN}"' run --mode fast --provider mock:mock-model --mock-dir '"$ROOT"'/tests/fixtures/mock_provider \
     --prompt "smoke phase M" --non-interactive --runs-dir "${HOME}" >/dev/null 2>&1 \
     || { echo "run failed"; exit 1; }
   # Find the run dir.

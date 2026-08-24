@@ -50,7 +50,7 @@ fn mock_run_writes_dashboard_html() {
         .arg("--mode")
         .arg("fast")
         .arg("--provider")
-        .arg("mock")
+        .arg("mock:mock-model")
         .arg("--mock-dir")
         .arg("tests/fixtures/mock_provider")
         .arg("--prompt")

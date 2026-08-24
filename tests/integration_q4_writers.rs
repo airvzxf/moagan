@@ -25,13 +25,13 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
     // guaranteed cache miss.
     let tmp = tempfile::TempDir::new().expect("tmpdir");
 
-    // v0.10 dispatcher requires the `--provider SECTION` shorthand
-    // to resolve to a configured model id; `Config::default()`
-    // ships `[providers.mock]` with an empty `models[]` list. Drop
-    // a one-line config onto disk that registers `mock-model`
-    // under the `mock` section so the dispatcher finds it. The
-    // `MOAGAN_CONFIG` env var overrides the user-level config
-    // lookup (`src/config/mod.rs:2361`).
+    // v0.10 dispatcher requires the explicit `SECTION:MODEL`
+    // shape (`88bcd9c` removed the bare-section fallback). The
+    // custom `MOAGAN_CONFIG` below only adds the `mock_dir` so the
+    // canned fixtures load from `tests/fixtures/mock_provider`;
+    // the default `Config::default()` already registers
+    // `[providers.mock] models = [{ id = "mock-model" }]` in
+    // `default_providers()`.
     let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
     let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
     std::fs::write(
@@ -48,7 +48,7 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
         .arg("--mode")
         .arg("fast")
         .arg("--provider")
-        .arg("mock")
+        .arg("mock:mock-model")
         .arg("--mock-dir")
         .arg("tests/fixtures/mock_provider")
         .arg("--prompt")
@@ -256,10 +256,12 @@ fn mock_run_prompt_dash_reads_from_stdin() {
 
     let tmp = tempfile::TempDir::new().expect("tmpdir");
 
-    // Mirror the `--provider mock` config shim from
-    // `mock_run_writes_all_v008_tables_and_v009_columns` above — the
-    // v0.10 dispatcher needs the `mock-model` entry registered under
-    // `[providers.mock]` for the bare-section shorthand to resolve.
+    // Mirror the `MOAGAN_CONFIG` shim from
+    // `mock_run_writes_all_v008_tables_and_v009_columns` above —
+    // the only thing it adds beyond `Config::default()` is the
+    // `mock_dir` so the canned fixtures load from
+    // `tests/fixtures/mock_provider`. The `--provider
+    // mock:mock-model` shape is the post-`88bcd9c` mandatory form.
     let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
     let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
     std::fs::write(
@@ -276,7 +278,7 @@ fn mock_run_prompt_dash_reads_from_stdin() {
         .arg("--mode")
         .arg("fast")
         .arg("--provider")
-        .arg("mock")
+        .arg("mock:mock-model")
         .arg("--mock-dir")
         .arg("tests/fixtures/mock_provider")
         .arg("--prompt")
