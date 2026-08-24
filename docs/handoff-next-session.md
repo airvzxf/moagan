@@ -202,8 +202,8 @@ cargo build                                         # exit 0
 ### 4.4 Smoke gates
 
 ```bash
-moagan run --mode fast --provider mock              # produce final/portfolio.md + rankings/ranking.json
-moagan run --mode fast --provider minimax with MINIMAX_API_KEY  # +telemetry/calls.jsonl.gz
+moagan run --mode fast --provider mock:mock-model              # produce final/portfolio.md + rankings/ranking.json
+moagan run --mode fast --provider minimax:MiniMax-M3 with MINIMAX_API_KEY  # +telemetry/calls.jsonl.gz
 ```
 
 ## 5. PR protocol 10-step

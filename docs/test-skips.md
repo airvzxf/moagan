@@ -237,17 +237,17 @@ fi
 
 ```bash
 if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
-  run_gate "moagan run --mode fast --provider minimax" \
-    bash -c "$BIN run --mode fast --provider minimax ..."
+  run_gate "moagan run --mode fast --provider minimax:MiniMax-M3" \
+    bash -c "$BIN run --mode fast --provider minimax:MiniMax-M3 ..."
 else
-  skip_gate "moagan run --mode fast --provider minimax" "MINIMAX_API_KEY not set"
+  skip_gate "moagan run --mode fast --provider minimax:MiniMax-M3" "MINIMAX_API_KEY not set"
 fi
 ```
 
 - **Location:** `scripts/gauntlet.sh:143` (one `run_gate` invocation
   wrapped in an `MINIMAX_API_KEY` check; the same `if/else` at
   line 149 prints a `skip_gate` line with that label).
-- **Tests:** 1 (`moagan run --mode fast --provider minimax`).
+- **Tests:** 1 (`moagan run --mode fast --provider minimax:MiniMax-M3`).
 - **CI behaviour:** the key is registered as `secrets.MINIMAX_API_KEY`
   on the runner, so this branch normally fires; the `else` only
   triggers for local developer runs without a key. Distinct from

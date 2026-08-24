@@ -31,13 +31,13 @@ cargo build --release
 # Smoke (mock provider, no API key)
 ./target/release/moagan run --mode fast \
     --prompt "List the seven colors of the rainbow in order" \
-    --provider mock
+    --provider mock:mock-model
 
 # Live run (requires MINIMAX_API_KEY)
 export MINIMAX_API_KEY=sk-cp-...
 ./target/release/moagan run --mode fast \
     --prompt "List the seven colors of the rainbow in order" \
-    --provider minimax
+    --provider minimax:MiniMax-M3
 ```
 
 At startup, Moagan best-effort loads the first `.env` found from the current working directory upward. Existing environment variables are never overwritten, so values explicitly set in the shell take precedence over `.env`. A successful load reports the file path on stderr; set `MOAGAN_QUIET=1` to suppress that notice without disabling loading. A missing `.env` is silently ignored.
