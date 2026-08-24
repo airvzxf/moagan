@@ -468,7 +468,22 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         &default_provider,
         opts.mock_dir.as_deref(),
     )?);
-    let default_model = cfg.provider(&default_provider)?.first_model_id().to_owned();
+    let default_model = if default_provider.contains(':') {
+        crate::cli::probe::parse_provider_model(&default_provider)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare SECTION is no longer accepted in v0.10+ (no
+        // implicit "first model" fallback). Surface the error
+        // early so the operator sees it before the rest of the
+        // pipeline boots.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{default_provider}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {default_provider}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
+    };
 
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;
@@ -934,10 +949,22 @@ pub async fn run_resume(
         None,
         api_key,
     )?);
-    let default_model = cfg
-        .provider(&default_provider)
-        .map(|spec| spec.first_model_id().to_owned())
-        .unwrap_or_else(|_| "unknown".to_string());
+    let default_model = if default_provider.contains(':') {
+        crate::cli::probe::parse_provider_model(&default_provider)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare SECTION is no longer accepted in v0.10+ (no
+        // implicit "first model" fallback). Surface the error
+        // early so the operator sees it before the rest of the
+        // pipeline boots.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{default_provider}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {default_provider}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
+    };
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;

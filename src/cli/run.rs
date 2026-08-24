@@ -217,12 +217,23 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // (the helper rebuilds it from telemetry after the pipeline
     // finishes; the stub just carries the fields used by the
     // lineage block).
-    let default_model = cfg
-        .provider(&default_provider)?
-        .models
-        .first()
-        .map(|m| m.id.clone())
-        .unwrap_or_default();
+    let default_model = if default_provider.contains(':') {
+        crate::cli::probe::parse_provider_model(&default_provider)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare SECTION is no longer accepted in v0.10+ (no
+        // implicit "first model" fallback). Surface the error early
+        // so the operator sees it before the rest of the pipeline
+        // boots. The later sites also re-check this; surfacing it
+        // here keeps the manifest stub honest too.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{default_provider}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {default_provider}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
+    };
 
     let stub = Manifest {
         schema_version: Manifest::schema_version_string(),
@@ -353,13 +364,17 @@ pub async fn run_full_pipeline(
             .map(|(_, m)| m)
             .unwrap_or_default()
     } else {
-        // Bare `SECTION` shape — synthesise the canonical model id
-        // from the section's first registered `models[]` entry.
-        let spec = cfg.provider(&resolved_default_model)?;
-        spec.models
-            .first()
-            .map(|m| m.id.clone())
-            .unwrap_or_default()
+        // Bare `SECTION` shape — per the v0.10 plan there is no
+        // implicit "first model" fallback. The operator must
+        // always pass `SECTION:MODEL` so the intent is
+        // unambiguous; we error out with a clear hint rather than
+        // silently picking the first entry of `models[]`.
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{resolved_default_model}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {resolved_default_model}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
     };
     let providers = Arc::new(build_registry_for(
         cfg,
@@ -663,40 +678,17 @@ pub(crate) fn build_registry_for_with_api_key(
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
 ) -> Result<ProviderRegistry> {
-    // v0.10 (Phase 5): the CLI accepts `--provider SECTION` for
-    // single-model sections (the `--provider SECTION:MODEL`
-    // shape is required for multi-model sections). When the
-    // operator passes a bare section name, resolve it to the
-    // section's first (or only) model id so the legacy
-    // `--provider mock` / `--provider minimax` shorthand keeps
-    // working. The error path mirrors the canonical shape.
-    let (section, model_id) = if selected.contains(':') {
+    // v0.10 (Phase 5): the CLI requires `SECTION:MODEL` for every
+    // selection. There is no implicit "first model" fallback for
+    // bare `SECTION` — the operator must always pass the explicit
+    // form so the intent is unambiguous.
+    let (section, model_id) =
         super::probe::parse_provider_model(selected).map_err(|e| match e {
             Error::InvalidArgs(msg) => Error::InvalidArgs(format!(
                 "build_registry_for: {msg} (--provider expects 'PROVIDER:MODEL')"
             )),
             other => other,
-        })?
-    } else {
-        let spec = cfg.providers.get(selected).ok_or_else(|| {
-            Error::InvalidArgs(format!(
-                "provider '{selected}' is not in config (known sections: [{}])",
-                cfg.providers.keys().cloned().collect::<Vec<_>>().join(", ")
-            ))
         })?;
-        let model_id = spec
-            .models
-            .first()
-            .map(|m| m.id.clone())
-            .unwrap_or_default();
-        if model_id.is_empty() {
-            return Err(Error::InvalidArgs(format!(
-                "--provider '{selected}' is a single-model alias but the section has \
-                 no model id configured; pass --provider {selected}:MODEL explicitly"
-            )));
-        }
-        (selected.to_owned(), model_id)
-    };
     let spec = cfg
         .providers
         .get(&section)
