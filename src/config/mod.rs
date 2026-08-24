@@ -2013,7 +2013,7 @@ impl Config {
         // form `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true|false`. The provider
         // name is uppercased and both dots and hyphens are rewritten to
         // underscores so `gpt-5.6-luna` becomes
-        // `MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS`. Garbage values are
+        // `MOAGAN_OPENCODE_OMIT_MAX_TOKENS`. Garbage values are
         // silently ignored so a stale export does not silently flip
         // the flag.
         //
@@ -3898,49 +3898,52 @@ mod tests {
 
     /// Per-provider `omit_max_tokens` env override:
     /// `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true` flips the flag for the
-    /// named provider. Dots and hyphens in the provider name are
-    /// rewritten to underscores, so `gpt-5.6-luna` becomes
-    /// `MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS`. Other providers are
-    /// untouched so the env var stays scoped. Locked against the
-    /// `_false_resets` and `_garbage_is_ignored` tests because they
-    /// all touch the same env var.
+    /// named provider section. Dots and hyphens in the section name
+    /// are rewritten to underscores, so `opencode` becomes
+    /// `MOAGAN_OPENCODE_OMIT_MAX_TOKENS`. Other sections are
+    /// untouched so the env var stays scoped. v0.10 update: the
+    /// override targets the canonical section (`opencode`),
+    /// not the v0.9 per-model alias `gpt-5.6-luna` (which is now
+    /// a model on the opencode section's `models[]` list). Locked
+    /// against the `_false_resets` and `_garbage_is_ignored` tests
+    /// because they all touch the same env var.
     #[test]
     fn apply_env_overrides_sets_omit_max_tokens_per_provider() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Snapshot any pre-existing env value so the test is
         // independent of the operator's shell. Restore on the way
         // out, regardless of panics below.
-        let prior = std::env::var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS").ok();
+        let prior = std::env::var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS").ok();
         unsafe {
-            std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", "true");
+            std::env::set_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS", "true");
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         unsafe {
-            std::env::remove_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS");
+            std::env::remove_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS");
         }
         // Restore prior value if there was one.
         if let Some(v) = prior {
             unsafe {
-                std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", v);
+                std::env::set_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS", v);
             }
         }
-        let gpt = cfg
+        let oc = cfg
             .providers
-            .get("gpt-5.6-luna")
-            .expect("gpt-5.6-luna must be in default providers");
+            .get("opencode")
+            .expect("opencode must be in default providers");
         assert!(
-            gpt.omit_max_tokens,
-            "MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS=true must opt in"
+            oc.omit_max_tokens,
+            "MOAGAN_OPENCODE_OMIT_MAX_TOKENS=true must opt in"
         );
-        // Untouched provider must remain `false`.
+        // Untouched section must remain `false`.
         let minimax = cfg
             .providers
             .get("minimax")
             .expect("minimax must be in default providers");
         assert!(
             !minimax.omit_max_tokens,
-            "other providers must NOT inherit the env override"
+            "other sections must NOT inherit the env override"
         );
     }
 
@@ -3950,31 +3953,31 @@ mod tests {
     #[test]
     fn apply_env_overrides_omit_max_tokens_false_resets() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS").ok();
+        let prior = std::env::var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS").ok();
         let mut cfg = Config::default();
         // Pretend the TOML flipped the bit on.
-        if let Some(spec) = cfg.providers.get_mut("gpt-5.6-luna") {
+        if let Some(spec) = cfg.providers.get_mut("opencode") {
             spec.omit_max_tokens = true;
         }
         unsafe {
-            std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", "false");
+            std::env::set_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS", "false");
         }
         cfg.apply_env_overrides();
         unsafe {
-            std::env::remove_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS");
+            std::env::remove_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS");
         }
         if let Some(v) = prior {
             unsafe {
-                std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", v);
+                std::env::set_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS", v);
             }
         }
-        let gpt = cfg
+        let oc = cfg
             .providers
-            .get("gpt-5.6-luna")
-            .expect("gpt-5.6-luna must be in default providers");
+            .get("opencode")
+            .expect("opencode must be in default providers");
         assert!(
-            !gpt.omit_max_tokens,
-            "MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS=false must opt out"
+            !oc.omit_max_tokens,
+            "MOAGAN_OPENCODE_OMIT_MAX_TOKENS=false must opt out"
         );
     }
 
@@ -3983,49 +3986,59 @@ mod tests {
     #[test]
     fn apply_env_overrides_omit_max_tokens_garbage_is_ignored() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS").ok();
+        let prior = std::env::var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS").ok();
         unsafe {
-            std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", "   ");
+            std::env::set_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS", "   ");
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         unsafe {
-            std::env::remove_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS");
+            std::env::remove_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS");
         }
         if let Some(v) = prior {
             unsafe {
-                std::env::set_var("MOAGAN_GPT_5_6_LUNA_OMIT_MAX_TOKENS", v);
+                std::env::set_var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS", v);
             }
         }
-        let gpt = cfg
+        let oc = cfg
             .providers
-            .get("gpt-5.6-luna")
-            .expect("gpt-5.6-luna must be in default providers");
+            .get("opencode")
+            .expect("opencode must be in default providers");
         assert!(
-            !gpt.omit_max_tokens,
+            !oc.omit_max_tokens,
             "garbage env must not flip the default false, got {}",
-            gpt.omit_max_tokens
+            oc.omit_max_tokens
         );
     }
 
     /// `ProviderConfig::omit_max_tokens` survives a TOML round-trip so
     /// operators can pin their choice in `~/.config/moagan/config.toml`
-    /// via `[providers.<name>]\nomit_max_tokens = true`.
+    /// via `[providers.<name>]\nomit_max_tokens = true`. v0.10
+    /// update: `gpt-5.6-luna` is a model on the canonical `opencode`
+    /// section (the per-model alias sections were collapsed); the
+    /// round-trip flips the flag on the opencode section and the
+    /// assertion checks the model survives under the canonical name.
     #[test]
     fn provider_config_omit_max_tokens_toml_round_trip() {
         let mut cfg = Config::default();
-        if let Some(spec) = cfg.providers.get_mut("gpt-5.6-luna") {
+        if let Some(spec) = cfg.providers.get_mut("opencode") {
             spec.omit_max_tokens = true;
         }
         let raw = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
-        let gpt = back
+        let oc = back
             .providers
-            .get("gpt-5.6-luna")
-            .expect("gpt-5.6-luna must survive TOML round-trip");
+            .get("opencode")
+            .expect("opencode section must survive TOML round-trip");
         assert!(
-            gpt.omit_max_tokens,
+            oc.omit_max_tokens,
             "TOML round-trip must preserve omit_max_tokens"
+        );
+        // Pin the v0.10 canonical schema: gpt-5.6-luna is a model on
+        // the opencode section, NOT a top-level section.
+        assert!(
+            oc.models.iter().any(|m| m.id == "gpt-5.6-luna"),
+            "opencode section must carry gpt-5.6-luna on models[]"
         );
     }
 

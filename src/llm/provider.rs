@@ -2276,7 +2276,13 @@ mod tests {
         let oc_r =
             OpenAICompatProvider::new(&cfg_ocr, crate::secret::SecretString::new("dummy".into()))
                 .unwrap();
-        assert_eq!(oc_r.capabilities().wire_format_id(), "responses");
+        // v0.10 (post Phase 8): wire-format serde names are
+        // "anthropic" / "openai" / "openai_compatible". The Responses
+        // wire (OpenAI Responses API at `/v1/responses`) maps to
+        // "openai" because the dispatcher treats the Responses path
+        // as a separate wire shape from the chat-completions
+        // OpenAI-compatible path. Pin the contract.
+        assert_eq!(oc_r.capabilities().wire_format_id(), "openai");
 
         let cfg_occ = crate::config::ProviderConfig {
             endpoint: None,
