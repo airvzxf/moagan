@@ -411,11 +411,22 @@ impl Provider for MinimaxProvider {
     /// though the upstream rejects `max_tokens=524289`. To discover
     /// the real boundary, the probe must send whatever value the
     /// algorithm chose, unmodified.
+    ///
+    /// **Why `probe_max_retries = 0`**: a 4xx IS the algorithm's
+    /// signal — the upstream's `max_tokens` rejection is exactly what
+    /// the boundary search is looking for. Retrying on transient
+    /// network blips is the algorithm's job (`retry_once_on_indeterminate`);
+    /// letting `send_http` retry inside the transport confuses the
+    /// signal and burns wall-clock on jitter sleeps. The previous
+    /// implementation reused `self.max_retries = 3` via `send_http`
+    /// and added 3–4.5 s of jitter per probe, which made the
+    /// auto-probe wall-clock several times longer than the upstream
+    /// itself needed.
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
         // M1: the floor on the returned value is applied by
         // `detect_max_tokens` itself; raising the requested value
         // here would mask boundaries below MIN_AUTOPROBE_FLOOR.
-        self.send_http(req.clone()).await
+        self.send_http_with_retries(req.clone(), 0).await
     }
 
     /// Cap the exponential probe at `MINIMAX_MAX_TOKENS_CAP`. The
@@ -1244,6 +1255,102 @@ mod tests {
             }),
             discovered,
             "table value ({discovered}) must win when below operator cap and MINIMAX_MAX_TOKENS_CAP"
+        );
+    }
+
+    /// `send_probe` must NOT retry: the auto-probe algorithm
+    /// treats every 4xx as data (the boundary signature) and
+    /// every 5xx as `Indeterminate` (which the algorithm's own
+    /// `retry_once_on_indeterminate` handles). Letting the
+    /// transport retry inside `send_probe` would (a) burn
+    /// wall-clock on jitter sleeps (3-4.5 s per probe), (b)
+    /// confuse the signal — a 4xx followed by a 5xx on retry
+    /// surfaces as `Err(...)` instead of `Rejected`, and (c)
+    /// trip the circuit breaker on transient blips the
+    /// algorithm was designed to ride through.
+    ///
+    /// This test mounts a wiremock that returns HTTP 503 (a
+    /// retryable error per the comment in
+    /// `send_http_with_retries`) and asserts `send_probe` makes
+    /// exactly ONE request. With the pre-fix `send_http`
+    /// (which delegated to `send_http_with_retries(_, 3)`) the
+    /// test would observe three requests.
+    #[tokio::test]
+    async fn send_probe_uses_zero_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_responder = calls.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |_: &wiremock::Request| {
+                calls_for_responder.fetch_add(1, Ordering::SeqCst);
+                // HTTP 503 is retryable per the
+                // `send_http_with_retries` classifier. Before the
+                // fix, `send_probe` re-issued the request up to
+                // `self.max_retries` (=3) times; after the fix it
+                // issues exactly one request and surfaces the
+                // error to the caller.
+                ResponseTemplate::new(503).set_body_string("upstream unavailable")
+            })
+            .mount(&server)
+            .await;
+
+        let provider = MinimaxProvider::new(
+            &ProviderConfig {
+                endpoint: Some(server.uri()),
+                models: Vec::new(),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                plan: None,
+            },
+            SecretString::new("dummy".into()),
+        )
+        .expect("MinimaxProvider::new should accept the test config")
+        // Default `max_retries = 3` — the value the production
+        // `send` path uses. If `send_probe` honoured it, the
+        // wiremock would see three requests.
+        .with_max_retries(3);
+
+        let req = Request {
+            model: "MiniMax-M3".into(),
+            role: crate::llm::role::Role::Intake,
+            system: String::new(),
+            user: "Reply with the single character: 1".into(),
+            max_tokens: 1024,
+            temperature: Some(0.5),
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+
+        let result = provider
+            .send_probe(&req)
+            .await
+            .expect_err("send_probe must surface the 503 unchanged");
+
+        match result {
+            Error::Provider { .. } => {}
+            other => panic!("expected Error::Provider from the 503, got {other:?}"),
+        }
+        // The critical assertion: exactly one HTTP round-trip,
+        // regardless of the configured `max_retries = 3`. The
+        // pre-fix implementation would have produced 3 calls.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "send_probe must NOT retry; expected exactly 1 HTTP request, got {}",
+            calls.load(Ordering::SeqCst),
         );
     }
 }

@@ -1548,7 +1548,7 @@ fn probe_settings(
 /// (a failing probe must not poison the steady-state circuit) and
 /// runs against the inner [`Provider`] via
 /// [`ProviderProbeTransport`]. Per-call work is bounded by
-/// [`super::probe::PROBE_TIMEOUT`] (5 s).
+/// [`super::probe::PROBE_TIMEOUT`] (15 s).
 fn spawn_pending_probes(
     wrapped_entries: &[(String, Arc<BreakeredProvider>)],
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
@@ -1712,7 +1712,7 @@ fn spawn_pending_probes(
 /// circuit) and runs against the inner [`Provider`] via
 /// [`super::temperature_probe::ProviderTemperatureProbeTransport`].
 /// Per-call work is bounded by
-/// [`super::temperature_probe::PROBE_TIMEOUT`] (5 s) and the
+/// [`super::temperature_probe::PROBE_TIMEOUT`] (15 s) and the
 /// fan-out is batched at
 /// [`super::temperature_probe::TEMPERATURE_PROBE_BATCH_SIZE`] (3).
 fn spawn_pending_temperature_probes(

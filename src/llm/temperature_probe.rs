@@ -98,20 +98,28 @@ pub const TEMPERATURE_PROBE_VALUES: &[f32] = &[
 /// refactor can tune one without touching the other.
 pub const TEMPERATURE_PROBE_BATCH_SIZE: usize = 3;
 
-/// HTTP timeout for a single temperature probe. Mirrors the
-/// `max_tokens` probe — 5s is enough for a healthy upstream to
-/// answer the tiny `"Reply with the single character: 1"`
-/// payload; anything longer means the upstream is in trouble and
-/// the probe should fall through to `Indeterminate` so the
-/// algorithm does not block the batch.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// HTTP timeout for a single probe. Mirrors the `max_tokens`
+/// probe — 15 s is enough for a healthy upstream to answer the
+/// tiny `"Reply with the single character: 1"` payload even
+/// when the model spends a few seconds on a thinking pass.
+/// Anything longer means the upstream is in trouble and the
+/// probe should fall through to `Indeterminate` so the algorithm
+/// does not block the batch.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Minimum number of output tokens the probe request asks for.
 /// Some providers reject requests with `max_tokens = 0` (or
-/// clamp it to `1`) so the probe picks `16` — small enough to
-/// stay well below any per-call cap, large enough that the
-/// upstream does not treat the request as "no work".
-const PROBE_MIN_OUTPUT_TOKENS: u32 = 16;
+/// clamp it to `1`); others (the MiniMax M-series, OpenCode Go /
+/// MiMo, etc.) spend the budget on a thinking pass and never
+/// emit text when the cap is below the model's thinking
+/// footprint, returning HTTP 200 with `content: null`. 1024 is
+/// large enough to cover the thinking footprint of every model
+/// the runtime currently targets while staying well below every
+/// probe's per-request cap (MiniMax-M2.5 caps at 196_608,
+/// MiMo-v2.5 caps at 131_072, OpenCode Go proxies inherit the
+/// upstream cap). The value matches [`crate::llm::probe::MIN_AUTOPROBE_FLOOR`]
+/// so the two auto-probes share a single minimum-viable budget.
+const PROBE_MIN_OUTPUT_TOKENS: u32 = 1024;
 
 /// Probe request body. Tiny, deterministic, fits in any model
 /// window. The model is asked to reply with the literal `1`; the
@@ -146,7 +154,7 @@ pub enum TemperatureProbeOutcome {
     ///   output budget before emitting the trailing tokens;
     ///   classifying the truncated probe as `Accepted` is what
     ///   lets the probe survive the
-    ///   `PROBE_MIN_OUTPUT_TOKENS = 16` budget.
+    ///   `PROBE_MIN_OUTPUT_TOKENS = 1024` budget.
     Accepted,
     /// Provider rejected the temperature. Triggers: HTTP 2xx/3xx
     /// with a non-empty body that carries the rejection
@@ -1873,6 +1881,50 @@ mod tests {
         assert!(TEMPERATURE_PROBE_VALUES.contains(&0.0));
         assert!(TEMPERATURE_PROBE_VALUES.contains(&1.0));
         assert!(TEMPERATURE_PROBE_VALUES.contains(&2.0));
+    }
+
+    /// Pin `PROBE_MIN_OUTPUT_TOKENS >= MIN_AUTOPROBE_FLOOR`. The
+    /// probe body builder uses this constant to set
+    /// `Request::max_tokens`, and the field is also what the
+    /// upstream sees in the wire body. A regression to a small
+    /// value (e.g. 16) would re-introduce the M-series / MiMo
+    /// "thinks too hard and exhausts the output budget before
+    /// emitting text" shape, surfacing as `content: null` and
+    /// collapsing the discovered set to empty. The
+    /// `MIN_AUTOPROBE_FLOOR` bound comes from
+    /// [`crate::llm::probe`] and is the documented
+    /// minimum-viable budget for the max-tokens probe.
+    #[test]
+    fn probe_min_output_tokens_is_at_least_min_autoprobe_floor() {
+        const {
+            assert!(
+                PROBE_MIN_OUTPUT_TOKENS >= crate::llm::probe::MIN_AUTOPROBE_FLOOR,
+                "PROBE_MIN_OUTPUT_TOKENS must be >= MIN_AUTOPROBE_FLOOR so the \
+                 thinking footprint of any model the runtime targets fits \
+                 inside the probe budget",
+            );
+        }
+    }
+
+    /// Pin `PROBE_TIMEOUT >= 10s`. The probe budget covers the
+    /// upstream's thinking pass as well as the network
+    /// round-trip. The M-series / MiMo fleet typically answers
+    /// the 1-token payload in ~1.4 s; 10 s leaves generous
+    /// headroom for an upstream that occasionally takes longer,
+    /// while still falling through to `Indeterminate` quickly
+    /// when the upstream is genuinely broken.
+    #[test]
+    fn probe_timeout_is_long_enough_for_thinking_models() {
+        // `Duration`'s `PartialOrd` is not `const`-stable, so we
+        // compare via the `const fn` `as_secs` instead of `>=`.
+        const {
+            assert!(
+                PROBE_TIMEOUT.as_secs() >= 10,
+                "PROBE_TIMEOUT must be >= 10s so the upstream has time to \
+                 complete a thinking pass before the probe falls through to \
+                 Indeterminate",
+            );
+        }
     }
 
     #[test]

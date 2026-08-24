@@ -100,11 +100,12 @@ pub const MAX_AUTOPROBE_CEILING: u32 = 1u32 << MAX_PROBE_SHIFT;
 /// keeping the floor well above any accidental `1` or `2` value.
 pub const MIN_AUTOPROBE_FLOOR: u32 = 1024;
 
-/// HTTP timeout for a single probe. 5s is enough for a healthy
-/// upstream to answer an empty-payload `1`-token request; anything
-/// longer means the provider is in trouble and we should fall
-/// through to the next probe rather than block the loop.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// HTTP timeout for a single probe. 15 s is enough for a healthy
+/// upstream to answer the tiny `1`-token request even when the
+/// model spends a few seconds on a thinking pass; anything longer
+/// means the provider is in trouble and we should fall through to
+/// the next probe rather than block the loop.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Probe request body. Tiny, deterministic, fits in any model
 /// window. The model is asked to reply with the literal `1`; the
