@@ -758,9 +758,13 @@ mod tests {
 
     #[test]
     fn responses_url_handles_known_suffixes() {
+        // v0.10: the constructor reads `endpoint` (section-level
+        // default) verbatim; provide a URL ending in `/v1/responses`
+        // so the test exercises the "already-suffixed" branch of
+        // `responses_url()`.
         let p = OpenAICompatProvider::new(
             &ProviderConfig {
-                endpoint: None,
+                endpoint: Some("https://opencode.ai/zen/go/v1/responses".into()),
                 models: Vec::new(),
                 temperature: None,
                 top_p: None,
@@ -777,9 +781,13 @@ mod tests {
 
     #[test]
     fn responses_url_handles_responses_suffix() {
+        // v0.10: same as above — provide the section-level endpoint
+        // so the constructor picks it up. The fixture mirrors a
+        // production `[providers.opencode]` block whose `endpoint`
+        // field already names the responses path.
         let p = OpenAICompatProvider::new(
             &ProviderConfig {
-                endpoint: None,
+                endpoint: Some("https://opencode.ai/zen/go/v1/responses".into()),
                 models: Vec::new(),
                 temperature: None,
                 top_p: None,
@@ -1032,7 +1040,15 @@ data: [DONE]\n\n";
                 .await;
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
-                    models: Vec::new(),
+                    // v0.10: the operator `max_tokens` cap lives on
+                    // the per-model `ModelConfig`. Set it explicitly
+                    // so the constructor sees `provider_max_tokens =
+                    // Some(8192)` and the wire body is clamped.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: Some(8192),
+                    }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
@@ -1089,8 +1105,15 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
-
-            models: Vec::new(),
+                    // v0.10: set the operator cap on the per-model
+                    // `ModelConfig` so the constructor wires
+                    // `provider_max_tokens = Some(8192)` and the SSE
+                    // body is clamped to that value.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: Some(8192),
+                    }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
@@ -1113,8 +1136,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
-                    attachments: vec![],
-                    tool_choice: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1135,7 +1158,15 @@ data: [DONE]\n\n",
             Mock::given(method("POST"))
                 .and(path("/v1/responses"))
                 .and(body_partial_json(serde_json::json!({
-                    "model": "gpt-5.6-luna",
+                    // v0.10: the wire body carries whatever
+                    // `req.model` the dispatcher resolved. The
+                    // v0.9 fixture used `"gpt-5.6-luna"` because
+                    // the per-model alias section was the
+                    // canonical model; today the canonical
+                    // `opencode` section hosts that model id and
+                    // the dispatcher's section-name resolution
+                    // passes it through verbatim.
+                    "model": "minimax-m3",
                 })))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "output": [{
@@ -1150,7 +1181,18 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
-                    models: Vec::new(),
+                    // v0.10: provide a per-model `id` so the
+                    // constructor wires `self.model = "minimax-m3"`
+                    // and the wire body carries the model id
+                    // verbatim. Without it the legacy constructor
+                    // leaves `self.model = ""` and the body never
+                    // matches the wiremock's `body_partial_json`
+                    // constraint.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
@@ -1296,7 +1338,10 @@ data: [DONE]\n\n",
                     models: Vec::new(),
                     endpoint: Some(format!("{}/v1", server.uri())),
                     // None on purpose — exercise the "no TOML
-                    // override, only the hard cap applies" branch.
+                    // override, no table" path. v0.10 removed the
+                    // global `OPENCODE_GO_MAX_TOKENS_CAP`; with
+                    // nothing in the chain the wire body carries
+                    // the REQUESTED value unchanged.
                     temperature: None,
                     top_p: None,
                     omit_max_tokens: false,
@@ -1330,18 +1375,27 @@ data: [DONE]\n\n",
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
+            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`
+            // global ceiling is gone. Without an operator override
+            // or a table entry, the wire body carries the requested
+            // value verbatim — the only layers left in the clamp
+            // chain are `u32::MAX` (operator cap, default) and
+            // `u32::MAX` (table, missing).
             assert_eq!(
                 body.get("max_tokens").and_then(|v| v.as_u64()),
-                Some(u32::MAX as u64),
-                "opencode_go hard cap must clamp 1_000_000 → 16_384, got body: {body}"
+                Some(1_000_000),
+                "with no operator cap and no table, body must carry the requested value, got body: {body}"
             );
         });
     }
 
-    /// Same regression guard for the streaming Responses path
-    /// (`send_streaming`). The clamp must apply on both paths so
-    /// operators who flip the wire to `stream=true` (e.g. for the
-    /// long-context roles) do not reintroduce the HTTP 400.
+    /// Regression guard for the streaming Responses path
+    /// (`send_streaming`): with no operator cap and no table entry,
+    /// the SSE wire body must carry the REQUESTED `max_tokens`
+    /// unchanged — the v0.10 schema removed the global
+    /// `OPENCODE_GO_MAX_TOKENS_CAP` so there is no implicit
+    /// ceiling. The v0.9 name "opencode_go_hard_cap" is kept
+    /// only as a documentation breadcrumb.
     #[test]
     fn send_streaming_clamps_max_tokens_to_opencode_go_hard_cap() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1364,8 +1418,9 @@ data: [DONE]\n\n",
                 .await;
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
-
-            models: Vec::new(),
+                    // v0.10: no operator cap and no table — the
+                    // request must reach the SSE path unchanged.
+                    models: Vec::new(),
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
@@ -1388,8 +1443,8 @@ data: [DONE]\n\n",
                 response_schema: None,
                 stream: true,
                 extra_messages: vec![],
-                    attachments: vec![],
-                    tool_choice: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1400,10 +1455,16 @@ data: [DONE]\n\n",
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
+            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`
+            // global ceiling is gone. With no operator override and
+            // no table entry, the SSE wire body carries the requested
+            // value verbatim — same contract as the non-streaming
+            // path so a `stream: true` flip cannot introduce a
+            // regression.
             assert_eq!(
                 body.get("max_tokens").and_then(|v| v.as_u64()),
-                Some(u32::MAX as u64),
-                "opencode_go hard cap must clamp 1_000_000 → 16_384 on the SSE path too, got body: {body}"
+                Some(1_000_000),
+                "with no operator cap and no table, SSE body must carry the requested value, got body: {body}"
             );
         });
     }
@@ -1490,7 +1551,12 @@ data: [DONE]\n\n",
         };
         let body = build_responses_body(&req, &req.model, false, false);
         let value: serde_json::Value = serde_json::to_value(&body).unwrap();
-        assert_eq!(value["model"], "gpt-5.6-luna");
+        // The body carries whichever model id the caller passes
+        // (the dispatcher resolves it from the section's
+        // `models[].id`). The pre-existing comment referenced
+        // `gpt-5.6-luna` from the v0.9 fixture shape; the v0.10
+        // schema passes `req.model` through verbatim.
+        assert_eq!(value["model"], "minimax-m3");
         assert_eq!(value["instructions"], "sys");
         assert_eq!(value["input"], "user");
         assert_eq!(value["max_tokens"], 256);
@@ -1564,9 +1630,16 @@ data: [DONE]\n\n",
 
             let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 10_000 });
             let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+            // v0.10: the legacy `new()` constructor reads both
+            // `name` and `model` from `models[0].id`, so the table
+            // key has to match that pair. The dispatched path
+            // (`from_resolved`) uses `(section_name, model_id)`;
+            // this test exercises the hand-rolled constructor path
+            // so we mirror that — provider name == model id ==
+            // "gpt-5.6-luna".
             let discovered = table
                 .probe_and_store(
-                    "opencode_go",
+                    "gpt-5.6-luna",
                     "gpt-5.6-luna",
                     transport,
                     crate::llm::probe::MAX_AUTOPROBE_CEILING,
@@ -1583,7 +1656,18 @@ data: [DONE]\n\n",
 
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
-                    models: Vec::new(),
+                    // v0.10 canonical schema: one `models[]` entry
+                    // whose `id` drives both `name` and `model`
+                    // (the legacy constructor reads them from
+                    // `models.first()`). `max_tokens: None` leaves
+                    // `provider_max_tokens = None` so the operator
+                    // cap chain stays at `u32::MAX` and the table
+                    // value is the only clamp the wire body sees.
+                    models: vec![crate::config::ModelConfig {
+                        id: "gpt-5.6-luna".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,

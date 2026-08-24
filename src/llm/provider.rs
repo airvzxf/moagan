@@ -2269,7 +2269,12 @@ mod tests {
         assert_eq!(oc_a.capabilities().wire_format_id(), "anthropic");
 
         let cfg_ocr = crate::config::ProviderConfig {
-            endpoint: None,
+            // v0.10: the constructor reads `endpoint` and uses it
+            // verbatim. Set a URL ending in `/responses` so
+            // `OpenAICompatProvider::capabilities()` flips to the
+            // Responses branch (the chat-completions baseline
+            // otherwise engages on the bare endpoint).
+            endpoint: Some("https://opencode.ai/zen/go/v1/responses".into()),
             models: Vec::new(),
             ..cfg_oc.clone()
         };
@@ -2311,7 +2316,12 @@ mod tests {
         assert_eq!(oc_d_anthropic.capabilities().wire_format_id(), "anthropic");
 
         let cfg_dispatcher_r = crate::config::ProviderConfig {
-            endpoint: None,
+            // v0.10: the constructor reads `endpoint` and uses it
+            // verbatim; the capability gate checks for a
+            // `/responses` suffix. Set a URL ending in
+            // `/responses` so `capabilities()` flips to the
+            // Responses branch.
+            endpoint: Some("https://opencode.ai/zen/go/v1/responses".into()),
             models: Vec::new(),
             ..cfg_oc.clone()
         };
@@ -2320,8 +2330,10 @@ mod tests {
             crate::secret::SecretString::new("dummy".into()),
         )
         .unwrap();
-        // Responses-routed provider reports `responses`.
-        assert_eq!(oc_d_responses.capabilities().wire_format_id(), "responses");
+        // Responses-routed provider reports `"openai"` (v0.10
+        // Phase 2 wire-format rename; the legacy `"responses"`
+        // spelling is gone).
+        assert_eq!(oc_d_responses.capabilities().wire_format_id(), "openai");
 
         let mock_cap = MockProvider::empty().capabilities();
         assert_eq!(mock_cap.wire_format_id(), "openai_compatible");
@@ -2383,7 +2395,12 @@ mod tests {
         let inner_resp: Arc<dyn Provider> = Arc::new(
             OpenAICompatProvider::new(
                 &crate::config::ProviderConfig {
-                    endpoint: None,
+                    // v0.10: the constructor reads `endpoint` and
+                    // uses it verbatim; the capability gate checks
+                    // for a `/responses` suffix. Set a URL ending
+                    // in `/responses` so `capabilities()` flips to
+                    // the Responses branch.
+                    endpoint: Some("https://opencode.ai/zen/go/v1/responses".into()),
                     models: Vec::new(),
                     temperature: None,
                     top_p: None,
@@ -2397,8 +2414,12 @@ mod tests {
             .unwrap(),
         );
         let wrapped = BreakeredProvider::new(inner_resp, Arc::new(CircuitBreaker::default()));
-        assert_eq!(wrapped.capabilities().wire_format_id(), "responses");
-        assert_eq!(wrapped.wire_format_id(), "responses");
+        // v0.10 (post Phase 8): wire-format serde name is `"openai"`,
+        // not the legacy `"responses"` spelling. The dispatcher
+        // distinguishes the Responses API from the chat-completions
+        // path; both surfaces report the same id here.
+        assert_eq!(wrapped.capabilities().wire_format_id(), "openai");
+        assert_eq!(wrapped.wire_format_id(), "openai");
     }
 
     /// AnthropicWire is the round-trip pair used by the
@@ -2426,7 +2447,13 @@ mod tests {
         let wire = AnthropicWire;
         let body = wire.encode_body(&req).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["model"], "qwen3.7-max");
+        // v0.10: the wire body carries `req.model` verbatim
+        // (the dispatcher resolves the model id from the
+        // section's `models[].id`). The pre-existing v0.9
+        // assertion checked for `"qwen3.7-max"` because the
+        // legacy `AnthropicCompatProvider` reshaped the body
+        // when constructed against that model.
+        assert_eq!(parsed["model"], "MiniMax-M3");
         assert_eq!(parsed["system"], "sys");
         assert_eq!(parsed["messages"][0]["content"], "u");
 
@@ -2465,7 +2492,13 @@ mod tests {
         let wire = ResponsesWire;
         let body = wire.encode_body(&req).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["model"], "gpt-5.6-luna");
+        // v0.10: the wire body carries `req.model` verbatim
+        // (the dispatcher resolves the model id from the
+        // section's `models[].id`). The pre-existing v0.9
+        // assertion checked for `"gpt-5.6-luna"` because the
+        // legacy Responses provider reshaped the body when
+        // constructed against that model.
+        assert_eq!(parsed["model"], "MiniMax-M3");
         assert_eq!(parsed["instructions"], "instructions");
         assert_eq!(parsed["input"], "the user prompt");
         assert_eq!(parsed["max_tokens"], 32);

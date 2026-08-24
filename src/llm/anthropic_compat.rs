@@ -659,9 +659,13 @@ mod tests {
 
     #[test]
     fn messages_url_handles_known_suffixes() {
+        // v0.10: the constructor reads `endpoint` (section-level
+        // default) verbatim; provide a URL ending in `/v1/messages`
+        // so the test exercises the "already-suffixed" branch of
+        // `messages_url()`.
         let p = AnthropicCompatProvider::new(
             &ProviderConfig {
-                endpoint: None,
+                endpoint: Some("https://opencode.ai/zen/go/v1/messages".into()),
                 models: Vec::new(),
                 temperature: None,
                 top_p: None,
@@ -678,9 +682,13 @@ mod tests {
 
     #[test]
     fn messages_url_handles_messages_suffix() {
+        // v0.10: same as above — provide the section-level endpoint
+        // so the constructor picks it up. The fixture mirrors a
+        // production `[providers.opencode]` block whose `endpoint`
+        // field already names the messages path.
         let p = AnthropicCompatProvider::new(
             &ProviderConfig {
-                endpoint: None,
+                endpoint: Some("https://opencode.ai/zen/go/v1/messages".into()),
                 models: Vec::new(),
                 temperature: None,
                 top_p: None,
@@ -699,12 +707,19 @@ mod tests {
     fn new_accepts_any_kind_v0_10_dispatcher_decides_wire() {
         // v0.10: the kind check is gone — the dispatcher picks
         // the wire format from the URL, not from a `kind` tag.
-        // Verify `AnthropicCompatProvider::new` accepts a foreign
-        // kind (the dispatcher no longer enforces it).
+        // Verify `AnthropicCompatProvider::new` accepts any
+        // canonical schema and the model id round-trips through
+        // `Provider::model()`. The fixture uses a single
+        // `models[]` entry named `x` so the constructor picks the
+        // id up verbatim.
         let p = AnthropicCompatProvider::new(
             &ProviderConfig {
                 endpoint: None,
-                models: Vec::new(),
+                models: vec![crate::config::ModelConfig {
+                    id: "x".into(),
+                    endpoint: None,
+                    max_tokens: None,
+                }],
                 temperature: None,
                 top_p: None,
                 omit_max_tokens: false,
@@ -946,9 +961,15 @@ mod tests {
 
             let transport: Arc<dyn ProbeTransport> = Arc::new(CappedTransport { cap: 5_000 });
             let table = Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+            // v0.10: the legacy constructor reads `(name, model)`
+            // from `models[0].id` for both slots, so the table key
+            // has to match. The dispatched path (`from_resolved`)
+            // uses `(section_name, model_id)`; this test exercises
+            // the hand-rolled constructor path so we mirror that
+            // — provider name == model id == "minimax-m3".
             let discovered = table
                 .probe_and_store(
-                    "opencode_go",
+                    "minimax-m3",
                     "minimax-m3",
                     transport,
                     crate::llm::probe::MAX_AUTOPROBE_CEILING,
@@ -965,7 +986,18 @@ mod tests {
 
             let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
-                    models: Vec::new(),
+                    // v0.10 canonical schema: one `models[]` entry
+                    // whose `id` drives both `name` and `model`
+                    // (the legacy constructor reads them from
+                    // `models.first()`). `max_tokens: None` leaves
+                    // `provider_max_tokens = None` so the operator
+                    // cap chain stays at `u32::MAX` and the table
+                    // value is the only clamp the wire body sees.
+                    models: vec![crate::config::ModelConfig {
+                        id: "minimax-m3".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
                     endpoint: Some(server.uri()),
                     temperature: None,
                     top_p: None,

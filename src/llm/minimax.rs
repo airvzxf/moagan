@@ -645,7 +645,10 @@ mod tests {
                 .expect("MinimaxProvider::new should accept every canonical model");
             assert_eq!(p.model(), model, "model name did not round-trip");
             assert_eq!(p.name(), "minimax");
-            assert_eq!(p.endpoint(), "https://api.minimax.io/anthropic/v1");
+            // v0.10: the canonical `endpoint` carries the full URL
+            // (including the wire-format path); the constructor
+            // passes it through unchanged.
+            assert_eq!(p.endpoint(), "https://api.minimax.io/anthropic/v1/messages");
         }
     }
 
@@ -804,10 +807,15 @@ mod tests {
             &ProviderConfig {
                 models: vec![crate::config::ModelConfig {
                     id: "MiniMax-M3".into(),
-                    endpoint: None,
+                    // v0.10: the constructor reads `endpoint` from
+                    // the per-model `ModelConfig`, not the section
+                    // level. Point the per-model entry at the mock
+                    // server so `messages_url()` appends `/v1/messages`
+                    // to the mock base instead of the real MiniMax URL.
+                    endpoint: Some(server.uri()),
                     max_tokens: Some(8192),
                 }],
-                endpoint: Some(server.uri()),
+                endpoint: None,
                 temperature: None,
                 top_p: None,
                 omit_max_tokens: false,
@@ -1118,7 +1126,15 @@ mod tests {
         let p_op = MinimaxProvider::new(
             &ProviderConfig {
                 endpoint: None,
-                models: Vec::new(),
+                // v0.10: the operator `max_tokens` cap lives on the
+                // per-model `ModelConfig`, not as a section-level
+                // field. Provide an explicit entry so the constructor
+                // sees `provider_max_tokens = Some(8192)`.
+                models: vec![crate::config::ModelConfig {
+                    id: "MiniMax-M3".into(),
+                    endpoint: None,
+                    max_tokens: Some(8192),
+                }],
                 temperature: None,
                 top_p: None,
                 omit_max_tokens: false,

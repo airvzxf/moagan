@@ -643,8 +643,12 @@ mod tests {
         }
         let check = check_api_key(&three_kind_config());
         assert_eq!(check.status, Status::Fail);
+        // v0.10: the section name IS the canonical provider-family
+        // key (no `kind` indirection). The legacy `opencode_go`
+        // alias was collapsed into the canonical `opencode` section
+        // in Phase 8, so the missing-key detail names `opencode`.
         assert!(
-            check.detail.contains("opencode_go"),
+            check.detail.contains("opencode"),
             "Fail detail must name the missing kind; got: {}",
             check.detail
         );
@@ -749,7 +753,11 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         assert_eq!(r.wire_format_id(), "openai_compatible");
         let resp = ProviderCapabilities::for_opencode_go_responses();
         assert!(resp.prefers_responses_wire);
-        assert_eq!(resp.wire_format_id(), "responses");
+        // v0.10 (Phase 2 wire-format rename): the OpenAI Responses
+        // wire reports its serde id as `"openai"`. The legacy
+        // `"responses"` spelling is gone; tests pin the canonical
+        // value the dispatcher and telemetry agree on.
+        assert_eq!(resp.wire_format_id(), "openai");
         let mock = super::capabilities_for_kind("mock");
         assert!(mock.supports_tools);
         assert!(mock.supports_streaming);

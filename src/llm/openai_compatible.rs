@@ -1055,8 +1055,16 @@ mod tests {
                 .await;
             let p = OpenAICompatibleProvider::new_with_kind_cap(
                 &ProviderConfig {
-
-            models: Vec::new(),
+                    // v0.10: provide a per-model `id` so the
+                    // constructor wires `self.model = "kimi-k3"`
+                    // and the wire body carries the model id
+                    // verbatim. Without it the legacy constructor
+                    // leaves `self.model = ""`.
+                    models: vec![crate::config::ModelConfig {
+                        id: "kimi-k3".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
                     endpoint: Some(server.uri()),
                     // None on purpose: only the kind-level cap
                     // applies.
@@ -1082,8 +1090,8 @@ mod tests {
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
-                    attachments: vec![],
-                    tool_choice: None,
+                attachments: vec![],
+                tool_choice: None,
             };
             let (status, _response) = p.send(&req).await.unwrap();
             assert_eq!(status, 200);
@@ -1094,10 +1102,18 @@ mod tests {
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
+            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`
+            // global ceiling is gone. The kind cap wired here is
+            // `u32::MAX` (the opencode chat-completions path has
+            // no kind-level ceiling — the auto-probe discovers
+            // the real boundary per `(provider, model)` and
+            // caches it in `max_tokens_auto.toml`). With nothing
+            // in the clamp chain, the wire body carries the
+            // requested value unchanged.
             assert_eq!(
                 body["max_tokens"],
-                serde_json::json!(u32::MAX),
-                "opencode_go chat-completions hard cap must clamp 1_000_000 → 16_384, got body: {body}"
+                serde_json::json!(1_000_000),
+                "with no operator cap, no table, and kind cap = u32::MAX, body must carry the requested value, got body: {body}"
             );
         });
     }
@@ -1335,9 +1351,16 @@ mod tests {
         let transport: std::sync::Arc<dyn ProbeTransport> =
             std::sync::Arc::new(CappedTransport { cap: 6_000 });
         let table = std::sync::Arc::new(MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR));
+        // v0.10: the legacy `new()` constructor reads both
+        // `name` and `model` from `models[0].id`, so the table
+        // key has to match that pair. The dispatched path
+        // (`from_resolved`) uses `(section_name, model_id)`;
+        // this test exercises the hand-rolled constructor path
+        // so we mirror that — provider name == model id ==
+        // "deepseek-v4-flash".
         let discovered = table
             .probe_and_store(
-                "deepseek",
+                "deepseek-v4-flash",
                 "deepseek-v4-flash",
                 transport,
                 crate::llm::probe::MAX_AUTOPROBE_CEILING,
@@ -1353,7 +1376,18 @@ mod tests {
 
         let p = OpenAICompatibleProvider::new(
             &ProviderConfig {
-                models: Vec::new(),
+                // v0.10 canonical schema: one `models[]` entry
+                // whose `id` drives both `name` and `model`
+                // (the legacy constructor reads them from
+                // `models.first()`). `max_tokens: None` leaves
+                // `provider_max_tokens = None` so the operator
+                // cap chain stays at `u32::MAX` and the table
+                // value is the only clamp the wire body sees.
+                models: vec![crate::config::ModelConfig {
+                    id: "deepseek-v4-flash".into(),
+                    endpoint: None,
+                    max_tokens: None,
+                }],
                 endpoint: Some(server.uri()),
                 temperature: None,
                 top_p: None,

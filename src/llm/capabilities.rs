@@ -263,7 +263,11 @@ mod tests {
         assert!(cap.prefers_responses_wire);
         assert!(!cap.prefers_anthropic_wire);
         assert!(!cap.prefers_openai_wire);
-        assert_eq!(cap.wire_format_id(), "responses");
+        // v0.10 (Phase 2 wire-format rename): the OpenAI Responses
+        // wire reports its serde id as `"openai"`. The legacy
+        // `"responses"` spelling is gone; tests pin the canonical
+        // value the dispatcher and telemetry agree on.
+        assert_eq!(cap.wire_format_id(), "openai");
     }
 
     /// Mock provider is the test-time escape hatch — streaming
