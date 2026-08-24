@@ -214,6 +214,7 @@ mod tests {
             top_p: Some(0.95),
             omit_max_tokens: false,
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         }
@@ -260,6 +261,7 @@ mod tests {
             top_p: None,
             omit_max_tokens: false,
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         };

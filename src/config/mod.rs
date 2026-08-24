@@ -1066,6 +1066,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             top_p: Some(0.95),
             omit_max_tokens: false,
             max_token_auto: Some(1024),
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         },
@@ -1093,6 +1094,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             top_p: Some(0.95),
             omit_max_tokens: false,
             max_token_auto: Some(1024),
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         },
@@ -1220,6 +1222,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             top_p: Some(0.95),
             omit_max_tokens: false,
             max_token_auto: Some(1024),
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         },
@@ -1250,6 +1253,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             omit_max_tokens: false,
             // The mock provider has no upstream to probe.
             max_token_auto: None,
+            max_token_auto_enabled: None,
             max_token_auto_save: true,
             plan: None,
         },
@@ -1387,6 +1391,22 @@ pub struct ProviderConfig {
     /// only raise the floor, never lower it).
     #[serde(default)]
     pub max_token_auto: Option<u32>,
+    /// Explicit opt-out for the `max_tokens` auto-probe. The
+    /// default (`None`) follows the registry-wide behaviour
+    /// (the probe fires for every non-mock provider, with
+    /// `MIN_AUTOPROBE_FLOOR` as the floor when no per-provider
+    /// floor is set). Set `Some(false)` to opt a specific
+    /// provider out of the probe while keeping the probe
+    /// enabled globally for the rest of the registry. Set
+    /// `Some(true)` to force-enable the probe even when other
+    /// per-provider opt-outs would suppress it (currently a
+    /// no-op for `max_token_auto`, but reserved for future
+    /// matrix-level suppression switches). Operators can
+    /// still use the legacy `max_token_auto = Some(0)` sentinel
+    /// for the same effect — both forms are accepted as
+    /// opt-out signals so existing TOML files keep working.
+    #[serde(default)]
+    pub max_token_auto_enabled: Option<bool>,
     /// When `true` (default), the auto-probe persists discovered values
     /// to `<MOAGAN_HOME>/max_tokens_auto.toml` so subsequent runs do not
     /// re-probe. `false` keeps the table in-memory only.
@@ -1586,6 +1606,7 @@ impl Config {
             "top_p",
             "omit_max_tokens",
             "max_token_auto",
+            "max_token_auto_enabled",
             "max_token_auto_save",
             "plan",
         ];

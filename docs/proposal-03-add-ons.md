@@ -4276,6 +4276,34 @@ shrinks the discovered value below 1024. Persistence is
 controlled by `ProviderConfig::max_token_auto_save: bool`
 (default `true`).
 
+**v0.10.x (PR-x23 `ghost-rider-banshee`)** — default flipped from
+opt-in to opt-out per non-mock provider: a non-mock section with
+`max_token_auto = None` and `max_token_auto_enabled = None` now
+spawns the probe automatically with floor
+[`MIN_AUTOPROBE_FLOOR`](src/llm/probe.rs). Three equivalent
+opt-out signals:
+
+- `max_token_auto_enabled = Some(false)` — explicit knob, the
+  recommended spelling for new TOML files.
+- `max_token_auto = Some(0)` — legacy sentinel, kept verbatim for
+  backwards compatibility with operators who already use it.
+- Section is a `mock` variant (any name starting with `mock` or
+  any endpoint starting with `mock://`) — no upstream to query,
+  the probe is meaningless.
+
+Per-provider positive `max_token_auto = Some(N > 0)` keeps its
+legacy semantics (probe on with floor `N`) so existing operator
+TOMLs do not silently flip behaviour. The temperature probe was
+already opt-out-by-default; the matching gate
+(`if let Some(table) = ctx.temperature_table.as_ref() {
+table.await_ready().await; }`) is now applied symmetrically in
+`src/cli/run.rs` after the pipeline exits, so both
+`<MOAGAN_HOME>/max_tokens_auto.toml` AND
+`<MOAGAN_HOME>/temperatures_auto.toml` land on disk before the
+run terminates (the previous code only awaited the max-tokens
+table, so temperature probes silently lost the race against the
+pipeline's `tokio::select!` and `persist_to` never ran).
+
 Algorithm:
 
 1. Phase 1 — exponential search 2^1..2^30 (30 sequential probes,
