@@ -1675,6 +1675,7 @@ mod tests {
                         max_tokens: None,
                     },
                 ],
+                endpoint_new: None,
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),
@@ -1709,6 +1710,7 @@ mod tests {
             "mock".into(),
             crate::config::ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),
@@ -1817,6 +1819,7 @@ mod tests {
                     endpoint: None,
                     max_tokens: Some(8192),
                 }],
+                endpoint_new: None,
                 kind: "opencode".into(),
                 endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
                 model: "minimax-m3".into(),
@@ -1977,6 +1980,7 @@ mod tests {
         // role) breaker is what would trip.
         let spec = ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "minimax".into(),
             endpoint: "http://127.0.0.1:1".into(),
             model: "MiniMax-M3".into(),
@@ -2214,6 +2218,7 @@ mod tests {
     fn provider_capabilities_for_each_provider() {
         let cfg = crate::config::ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "minimax".into(),
             endpoint: "https://api.minimax.io/anthropic/v1".into(),
             model: "MiniMax-M3".into(),
@@ -2235,6 +2240,7 @@ mod tests {
 
         let cfg_d = crate::config::ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "deepseek".into(),
             endpoint: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),
@@ -2257,6 +2263,7 @@ mod tests {
 
         let cfg_oc = crate::config::ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "opencode".into(),
             endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
             model: "qwen3.7-max".into(), // Anthropic-compat path
@@ -2276,6 +2283,7 @@ mod tests {
 
         let cfg_ocr = crate::config::ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             model: "gpt-5.6-luna".into(),
             endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
@@ -2287,6 +2295,7 @@ mod tests {
 
         let cfg_occ = crate::config::ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             model: "kimi-k2.7-code".into(),
             endpoint: "https://opencode.ai/zen/go/v1/chat/completions".into(),
             ..cfg_oc.clone()
@@ -2301,6 +2310,7 @@ mod tests {
 
         let cfg_dispatcher = crate::config::ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             model: "qwen3.7-max".into(),
             ..cfg_oc.clone()
         };
@@ -2314,6 +2324,7 @@ mod tests {
 
         let cfg_dispatcher_r = crate::config::ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             model: "gpt-5.6-luna".into(),
             endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
@@ -2343,6 +2354,7 @@ mod tests {
             OpenAICompatibleProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "deepseek".into(),
                     endpoint: "https://api.deepseek.com/v1".into(),
                     model: "deepseek-v4-flash".into(),
@@ -2369,6 +2381,7 @@ mod tests {
             MinimaxProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "minimax".into(),
                     endpoint: "https://api.minimax.io/anthropic/v1".into(),
                     model: "MiniMax-M3".into(),
@@ -2395,6 +2408,7 @@ mod tests {
             OpenAICompatProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode".into(),
                     endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
                     model: "gpt-5.6-luna".into(),
@@ -2645,6 +2659,7 @@ mod tests {
                     endpoint: None,
                     max_tokens: None,
                 }],
+                endpoint_new: None,
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),

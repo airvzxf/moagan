@@ -198,6 +198,7 @@ mod tests {
     fn config() -> ProviderConfig {
         ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "deepseek".into(),
             endpoint: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),
@@ -248,6 +249,7 @@ mod tests {
         // the new wiring in isolation, so build a separate spec.
         let spec = ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "deepseek".into(),
             endpoint: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),

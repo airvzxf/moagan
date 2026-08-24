@@ -114,6 +114,22 @@ impl OpenAICompatProvider {
         self
     }
 
+    /// Build from config, resolving the API key via the unified
+    /// helper. Kept for backwards compatibility with hand-rolled
+    /// callers (test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
+    pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
+        let key = std::env::var("OPENCODE_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                    .into(),
+                http_status: None,
+            })?;
+        Self::new(spec, SecretString::new(key))
+    }
+
     /// v0.10 dispatcher entry point. Builds an `OpenAICompatProvider`
     /// from a `ResolvedModelConfig` (one `(section, model_id)` pair),
     /// resolving the API key via the unified
@@ -736,6 +752,7 @@ mod tests {
         let p = OpenAICompatProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "gpt-5.6-luna".into(),
@@ -759,6 +776,7 @@ mod tests {
         let p = OpenAICompatProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
                 model: "gpt-5.6-luna".into(),
@@ -784,6 +802,7 @@ mod tests {
         }
         let result = OpenAICompatProvider::from_config(&ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "opencode_go".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             model: "gpt-5.6-luna".into(),
@@ -824,6 +843,7 @@ data: [DONE]\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -888,6 +908,7 @@ data: {not json}\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -951,6 +972,7 @@ data: {not json}\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1032,6 +1054,7 @@ data: [DONE]\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1093,7 +1116,9 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
 
-            models: Vec::new(),kind: "opencode_go".into(),
+            models: Vec::new(),
+                endpoint_new: None,
+                kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
                     max_tokens: Some(8192),
@@ -1157,6 +1182,7 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1225,6 +1251,7 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1304,6 +1331,7 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
@@ -1379,7 +1407,9 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
 
-            models: Vec::new(),kind: "opencode_go".into(),
+            models: Vec::new(),
+                endpoint_new: None,
+                kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),
                     max_tokens: None,
@@ -1601,6 +1631,7 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: format!("{}/v1", server.uri()),
                     model: "gpt-5.6-luna".into(),

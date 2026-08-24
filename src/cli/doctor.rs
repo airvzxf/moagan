@@ -354,6 +354,17 @@ fn run_capabilities() -> Result<i32> {
     }
 }
 
+/// PR-7 (deprecated alias): the per-kind static lookup is now
+/// `capabilities_for_section` (Phase 5 renamed the kind tag to
+/// the section name). Kept as `pub(crate) fn
+/// capabilities_for_kind` so existing tests / callers continue
+/// to compile; Phase 6 migrates them.
+#[doc(hidden)]
+#[allow(dead_code)]
+pub(crate) fn capabilities_for_kind(section: &str) -> crate::llm::capabilities::ProviderCapabilities {
+    capabilities_for_section(section)
+}
+
 /// Static capability matrix for a section. Mirrors the
 /// `for_<kind>` constructors on [`ProviderCapabilities`] so the
 /// doctor view can answer "is the `temperature` knob honoured
@@ -409,6 +420,7 @@ mod tests {
             "minimax".into(),
             ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -419,6 +431,7 @@ mod tests {
             "minimax-m2.7".into(),
             ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M2.7".into(),
@@ -429,6 +442,7 @@ mod tests {
             "minimax-dup".into(),
             ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -439,6 +453,7 @@ mod tests {
             "mock".into(),
             ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "mock".into(),
                 endpoint: "mock://local".into(),
                 model: "mock-model".into(),
@@ -537,6 +552,7 @@ mod tests {
             "minimax".into(),
             ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -547,6 +563,7 @@ mod tests {
             "deepseek".into(),
             ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -557,6 +574,7 @@ mod tests {
             "opencode_go".into(),
             ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "opencode".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "kimi-k2.7-code".into(),
@@ -679,6 +697,7 @@ mod tests {
                 "mock".to_owned(),
                 ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "mock".to_owned(),
                     endpoint: "mock://local".to_owned(),
                     model: "mock-model".to_owned(),
@@ -791,6 +810,7 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
             "minimax".into(),
             crate::config::ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),

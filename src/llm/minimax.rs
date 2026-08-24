@@ -431,6 +431,7 @@ mod tests {
         let p = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -457,6 +458,7 @@ mod tests {
         let p = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic".into(),
                 model: "MiniMax-M3".into(),
@@ -485,6 +487,7 @@ mod tests {
         }
         let cfg = ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "minimax".into(),
             endpoint: "https://api.minimax.io/anthropic/v1".into(),
             model: "MiniMax-M3".into(),
@@ -505,6 +508,7 @@ mod tests {
         MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint,
                 model: "MiniMax-M3".into(),
@@ -636,6 +640,7 @@ mod tests {
         for model in canonical {
             let cfg = ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: model.into(),
@@ -701,6 +706,7 @@ mod tests {
         let provider = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -814,6 +820,7 @@ mod tests {
         let provider = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -905,6 +912,7 @@ mod tests {
         let provider = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -1028,6 +1036,7 @@ mod tests {
         let provider = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: server.uri(),
                 model: "MiniMax-M3".into(),
@@ -1103,6 +1112,7 @@ mod tests {
         let p = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -1141,6 +1151,7 @@ mod tests {
         let p_op = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -1171,6 +1182,7 @@ mod tests {
         let p_above = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),
@@ -1227,6 +1239,7 @@ mod tests {
         let p_table = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://api.minimax.io/anthropic/v1".into(),
                 model: "MiniMax-M3".into(),

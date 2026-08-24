@@ -639,6 +639,7 @@ mod tests {
         OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "deepseek".into(),
                 endpoint: endpoint.into(),
                 model: "deepseek-v4-flash".into(),
@@ -680,6 +681,7 @@ mod tests {
         let p = OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -738,6 +740,7 @@ mod tests {
         OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: kind.into(),
                 endpoint: endpoint.into(),
                 model: model.into(),
@@ -1046,7 +1049,9 @@ mod tests {
             let p = OpenAICompatibleProvider::new_with_kind_cap(
                 &ProviderConfig {
 
-            models: Vec::new(),kind: "opencode_go".into(),
+            models: Vec::new(),
+                endpoint_new: None,
+                kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "kimi-k2.7-code".into(),
                     // None on purpose: only the kind-level cap
@@ -1131,6 +1136,7 @@ mod tests {
             let p = OpenAICompatibleProvider::new_with_kind_cap(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "deepseek".into(),
                     endpoint: server.uri(),
                     model: "deepseek-v4-flash".into(),
@@ -1194,6 +1200,7 @@ mod tests {
         let p = OpenAICompatibleProvider::new_with_kind_cap(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -1221,6 +1228,7 @@ mod tests {
         let p_no_cap = OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -1253,6 +1261,7 @@ mod tests {
         let p = OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "deepseek".into(),
                 endpoint: "https://api.deepseek.com/v1".into(),
                 model: "deepseek-v4-flash".into(),
@@ -1281,6 +1290,7 @@ mod tests {
         let p = OpenAICompatibleProvider::new_with_kind_cap(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "kimi-k3".into(),
@@ -1370,6 +1380,7 @@ mod tests {
         let p = OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "deepseek".into(),
                 endpoint: server.uri(),
                 model: "deepseek-v4-flash".into(),

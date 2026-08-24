@@ -1294,7 +1294,7 @@ impl Default for RetentionConfig {
 /// legacy TOML files continue to compile / parse without forcing a
 /// rewrite of every test. Phase 6 (unit-test cleanup) drops the
 /// private fields and migrates the test fixtures to the new shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
     /// Deprecated v0.9 singleton. Kept on the struct (skipped on
@@ -1472,25 +1472,8 @@ pub fn default_max_token_auto_save() -> bool {
     true
 }
 
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            kind: String::new(),
-            endpoint: String::new(),
-            model: String::new(),
-            models: Vec::new(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            hard_incompatibilities: Vec::new(),
-            endpoint_new: None,
-            omit_max_tokens: false,
-            max_token_auto: None,
-            max_token_auto_save: default_max_token_auto_save(),
-            plan: None,
-        }
-    }
-}
+// Default impl removed — derived from struct (Default) since
+// Phase 5 made all fields default-friendly.
 
 impl ProviderConfig {
     /// Backwards-compat accessor: returns the canonical

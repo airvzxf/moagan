@@ -102,6 +102,22 @@ impl AnthropicCompatProvider {
         self
     }
 
+    /// Build from config, resolving the API key via the unified
+    /// helper. Kept for backwards compatibility with hand-rolled
+    /// callers (test fixtures); new dispatcher code goes through
+    /// [`Self::from_resolved`].
+    pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
+        let key = std::env::var("OPENCODE_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| Error::InvalidApiKey {
+                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                    .into(),
+                http_status: None,
+            })?;
+        Self::new(spec, SecretString::new(key))
+    }
+
     /// v0.10 dispatcher entry point. Builds an `AnthropicCompatProvider`
     /// from a `ResolvedModelConfig` (one `(section, model_id)` pair),
     /// resolving the API key via the unified
@@ -585,6 +601,7 @@ mod tests {
             let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),
@@ -641,6 +658,7 @@ mod tests {
         let p = AnthropicCompatProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "qwen3.7-max".into(),
@@ -664,6 +682,7 @@ mod tests {
         let p = AnthropicCompatProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "opencode_go".into(),
                 endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
                 model: "minimax-m3".into(),
@@ -691,6 +710,7 @@ mod tests {
         let p = AnthropicCompatProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
+                endpoint_new: None,
                 kind: "minimax".into(),
                 endpoint: "https://opencode.ai/zen/go/v1".into(),
                 model: "x".into(),
@@ -716,6 +736,7 @@ mod tests {
         }
         let result = AnthropicCompatProvider::from_config(&ProviderConfig {
             models: Vec::new(),
+                endpoint_new: None,
             kind: "opencode_go".into(),
             endpoint: "https://opencode.ai/zen/go/v1".into(),
             model: "x".into(),
@@ -760,6 +781,7 @@ mod tests {
             let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),
@@ -840,6 +862,7 @@ mod tests {
             let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),
@@ -962,6 +985,7 @@ mod tests {
             let p = AnthropicCompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
+                endpoint_new: None,
                     kind: "opencode_go".into(),
                     endpoint: server.uri(),
                     model: "minimax-m3".into(),
