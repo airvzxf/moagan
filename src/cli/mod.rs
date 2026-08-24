@@ -186,9 +186,26 @@ pub enum Cmd {
         /// a clap parse error.
         #[arg(long, value_enum, default_value_t = Mode::Fast)]
         mode: Mode,
-        /// Provider name (must be in config).
-        #[arg(long, default_value = "minimax")]
-        provider: String,
+        /// Provider name (`SECTION` or `SECTION:MODEL`).
+        ///
+        /// Mandatory for every LLM-touching command in v0.10. The
+        /// dispatcher builds one `Provider` per `(section, model)`
+        /// pair, so a multi-model section like `[providers.opencode]`
+        /// requires `SECTION:MODEL` to disambiguate the target.
+        /// Single-model sections (`[providers.minimax]`,
+        /// `[providers.deepseek]`, `[providers.mock]`) accept the
+        /// bare `SECTION` form.
+        ///
+        /// Resolution order (highest first):
+        /// 1. CLI flag.
+        /// 2. `MOAGAN_DEFAULT_PROVIDER` env var (same `SECTION[:MODEL]`
+        ///    format).
+        /// 3. `[defaults] provider` in `~/.config/moagan/config.toml`.
+        ///
+        /// If none is set the command fails with a clear error
+        /// message listing the operator's options.
+        #[arg(long, value_name = "SECTION[:MODEL]")]
+        provider: Option<String>,
         /// User prompt.
         #[arg(long)]
         prompt: String,
@@ -591,9 +608,11 @@ pub enum Cmd {
     /// `docs/proposal-01-concept.md` §6 and `docs/v0.2-status.md`
     /// for the spec.
     Discover {
-        /// Provider name (must be in config).
-        #[arg(long, default_value = "minimax")]
-        provider: String,
+        /// Provider name (`SECTION` or `SECTION:MODEL`). See the
+        /// `run` command's `--provider` flag for the resolution
+        /// order and the v0.10 mandatory semantics.
+        #[arg(long, value_name = "SECTION[:MODEL]")]
+        provider: Option<String>,
         /// User prompt.
         #[arg(long)]
         prompt: String,
@@ -732,9 +751,11 @@ pub enum Cmd {
     /// `--context`, validating the cross-run plumbing AND the
     /// per-run planner.
     Preflight {
-        /// Provider name (must be in config).
-        #[arg(long, default_value = "minimax")]
-        provider: String,
+        /// Provider name (`SECTION` or `SECTION:MODEL`). See the
+        /// `run` command's `--provider` flag for the resolution
+        /// order and the v0.10 mandatory semantics.
+        #[arg(long, value_name = "SECTION[:MODEL]")]
+        provider: Option<String>,
         /// User prompt.
         #[arg(long)]
         prompt: String,
@@ -1010,18 +1031,18 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             }
             // v0.10: validate `--provider` is in the new
             // PROVIDER:MODEL shape so the operator sees a
-            // friendly error before any I/O happens. The
-            // dispatcher still uses `provider` as a String so
-            // the legacy `--provider minimax --model M3` pair
-            // is also accepted.
-            if !provider.is_empty() && !provider.contains(':') {
+            // friendly error before any I/O happens.
+            if let Some(provider) = provider.as_deref()
+                && !provider.is_empty()
+                && !provider.contains(':')
+            {
                 // Either it is the legacy `--provider <section>`
                 // (the CLI accepts it but the section must be a
                 // one-model alias) or it is a typo. We surface
                 // a clear message so the operator knows what
                 // shape we expect.
                 let cfg_early = Config::load().unwrap_or_default();
-                if let Some(spec) = cfg_early.providers.get(&provider)
+                if let Some(spec) = cfg_early.providers.get(provider)
                     && spec.models.len() > 1
                 {
                     return Err(Error::InvalidArgs(format!(
@@ -1118,6 +1139,28 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // up the same string.
             if flags_batch::prompt_is_stdin(&prompt) {
                 prompt = flags_batch::read_prompt_from_stdin()?;
+            }
+            // v0.10: `--provider` is optional at the clap level so we can
+            // produce a friendly error message that includes the
+            // resolution order. Resolve `Option<String> -> String`
+            // here so `RunOptions::provider` (still `String` for
+            // back-compat with the rest of the pipeline) gets the
+            // final value. The empty-string check below is a no-op
+            // for the operator — `--provider ""` is rejected at the
+            // `--model`-presence check above — but guards against a
+            // missing flag slipping through.
+            let provider = match provider.as_deref() {
+                Some(s) if !s.trim().is_empty() => s.to_owned(),
+                _ => cfg.default_provider.clone(),
+            };
+            if provider.trim().is_empty() {
+                return Err(Error::InvalidArgs(
+                    "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
+                     or [defaults] provider in config.toml); example:\n  \
+                     moagan run --provider opencode:kimi-k3 --prompt \"...\"\n  \
+                     moagan run --provider opencode --model kimi-k3 --prompt \"...\""
+                        .into(),
+                ));
             }
             let run_id = run::run(
                 run::RunOptions {
@@ -1439,8 +1482,22 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // short-circuiting here avoids printing a fake
             // `discovery run id: 00000000-...` placeholder).
             if explain {
+                // v0.10: --provider is mandatory; resolve the
+                // optional flag into a concrete value using the
+                // same precedence as `run`.
+                let explain_provider = match provider.as_deref() {
+                    Some(s) if !s.trim().is_empty() => s.to_owned(),
+                    _ => cfg.default_provider.clone(),
+                };
+                if explain_provider.trim().is_empty() {
+                    return Err(Error::InvalidArgs(
+                        "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
+                         or [defaults] provider in config.toml)"
+                            .into(),
+                    ));
+                }
                 let explain_opts = discover::DiscoverOptions {
-                    provider: provider.clone(),
+                    provider: explain_provider,
                     prompt: prompt.clone(),
                     home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir: mock_dir.clone(),
@@ -1460,6 +1517,20 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 let rendered = discover_explain::build_and_format(&explain_opts, &cfg)?;
                 println!("{rendered}");
                 return Ok(0);
+            }
+            // v0.10: --provider is mandatory; resolve it through
+            // the same precedence as `run` so the operator sees
+            // one canonical error message.
+            let provider = match provider.as_deref() {
+                Some(s) if !s.trim().is_empty() => s.to_owned(),
+                _ => cfg.default_provider.clone(),
+            };
+            if provider.trim().is_empty() {
+                return Err(Error::InvalidArgs(
+                    "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
+                     or [defaults] provider in config.toml)"
+                        .into(),
+                ));
             }
             let run_id = discover::run(
                 discover::DiscoverOptions {
@@ -1603,6 +1674,19 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     }
                 })
                 .unwrap_or_else(|| global_home.root().to_path_buf());
+            // v0.10: --provider is mandatory; resolve it through
+            // the same precedence as `run`.
+            let provider = match provider.as_deref() {
+                Some(s) if !s.trim().is_empty() => s.to_owned(),
+                _ => cfg.default_provider.clone(),
+            };
+            if provider.trim().is_empty() {
+                return Err(Error::InvalidArgs(
+                    "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
+                     or [defaults] provider in config.toml)"
+                        .into(),
+                ));
+            }
             let discover_run_id = discover::run(
                 discover::DiscoverOptions {
                     provider: provider.clone(),
@@ -1634,7 +1718,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             let fast_run_id = run::run(
                 run::RunOptions {
                     mode: Mode::Fast,
-                    provider: provider.clone(),
+                    provider,
                     prompt: prompt.clone(),
                     home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),

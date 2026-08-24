@@ -37,7 +37,12 @@ pub struct Config {
     pub token_budget: Option<u64>,
     /// Named providers the user can select with `--provider`.
     pub providers: BTreeMap<String, ProviderConfig>,
-    /// Default provider name when `--provider` is omitted.
+    /// Default provider name (`SECTION[:MODEL]`) when the operator
+    /// omits `--provider`. Empty string = "no default"; the CLI
+    /// falls back to `MOAGAN_DEFAULT_PROVIDER` then to a clear
+    /// error message. v0.10 keeps the field as `String` for
+    /// backwards compatibility with v0.9 TOML files; the `Option`
+    /// shape is encoded as `""` (empty) for the missing case.
     pub default_provider: String,
     /// Default export format. `tar.gz` or `zip`.
     pub export_format: String,
@@ -975,7 +980,7 @@ impl Default for Config {
             total_timeout_secs: 0,
             token_budget: None,
             providers: default_providers(),
-            default_provider: "minimax".to_owned(),
+            default_provider: String::new(),
             export_format: "tar.gz".to_owned(),
             export_compression: 6,
             redact_in_telemetry: true,
@@ -1671,7 +1676,10 @@ impl Config {
             self.total_timeout_secs = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_DEFAULT_PROVIDER") {
-            self.default_provider = v;
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.default_provider = trimmed.to_owned();
+            }
         }
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_ENDPOINT")
             && !v.trim().is_empty()
@@ -2191,6 +2199,64 @@ impl Config {
         self.providers
             .get(name)
             .ok_or_else(|| crate::Error::InvalidArgs(format!("unknown provider: {name}")))
+    }
+
+    /// Resolve the operator-supplied `--provider` value (or its
+    /// default-source equivalent) into a `(section, model_id)` pair.
+    ///
+    /// `raw` accepts two shapes:
+    ///
+    /// * `SECTION` (e.g. `"minimax"`) — the section name itself.
+    ///   When the section exposes exactly one model, that model is
+    ///   picked; otherwise the helper errors with a clear message
+    ///   asking the operator to disambiguate via `SECTION:MODEL`.
+    /// * `SECTION:MODEL` (e.g. `"opencode:kimi-k3"`) — both halves
+    ///   are explicit.
+    ///
+    /// Empty halves and extra colons are rejected with
+    /// `Error::InvalidArgs` so the CLI surface stays unambiguous.
+    pub fn resolve_provider(&self, raw: &str) -> Result<(String, String)> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(crate::Error::InvalidArgs(
+                "--provider is empty; pass SECTION[:MODEL]".into(),
+            ));
+        }
+        if let Some((section, model)) = trimmed.split_once(':') {
+            if section.is_empty() || model.is_empty() {
+                return Err(crate::Error::InvalidArgs(format!(
+                    "--provider '{trimmed}' has an empty section or model half"
+                )));
+            }
+            if model.contains(':') {
+                return Err(crate::Error::InvalidArgs(format!(
+                    "--provider '{trimmed}' has more than one ':'; expected exactly one separator"
+                )));
+            }
+            return Ok((section.to_owned(), model.to_owned()));
+        }
+        // Bare SECTION: pick the section's first model (single-model
+        // alias sections like `minimax` / `deepseek` expose exactly
+        // one; multi-model sections like `opencode` reject the bare
+        // form so the operator picks a model explicitly).
+        let spec = self.provider(trimmed)?;
+        if spec.models.is_empty() {
+            return Err(crate::Error::InvalidArgs(format!(
+                "--provider '{trimmed}' has no model configured; pass --provider {trimmed}:MODEL explicitly"
+            )));
+        }
+        if spec.models.len() > 1 {
+            return Err(crate::Error::InvalidArgs(format!(
+                "--provider '{trimmed}' exposes {} models; pass --provider {trimmed}:MODEL explicitly (one of: {})",
+                spec.models.len(),
+                spec.models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok((trimmed.to_owned(), spec.models[0].id.clone()))
     }
 
     /// Resolve the configured `(section, model)` pair into a

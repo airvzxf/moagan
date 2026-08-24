@@ -79,10 +79,27 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
 
-    let default_provider = if opts.provider.is_empty() {
+    // v0.10: `--provider` is mandatory. Resolution order:
+    //   1. CLI flag (`opts.provider`).
+    //   2. `cfg.default_provider` (env var `MOAGAN_DEFAULT_PROVIDER`
+    //      or `[defaults] provider` in config.toml — `apply_env_overrides`
+    //      already merged them onto the `Config`).
+    // When none of those is set, the helper errors with a clear
+    // message listing the resolution order so the operator can fix
+    // the missing flag without spelunking the codebase.
+    let raw_provider = opts.provider.clone();
+    let default_provider = if !raw_provider.trim().is_empty() {
+        raw_provider
+    } else if !cfg.default_provider.trim().is_empty() {
         cfg.default_provider.clone()
     } else {
-        opts.provider.clone()
+        return Err(Error::InvalidArgs(
+            "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
+             or [defaults] provider in config.toml); example:\n  \
+             moagan run --provider opencode:kimi-k3 --prompt \"...\"\n  \
+             moagan run --provider opencode --model kimi-k3 --prompt \"...\""
+                .to_owned(),
+        ));
     };
 
     // Open the SQLite index under MOAGAN_HOME/meta.sqlite. The
@@ -90,7 +107,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // the DB so `moagan inspect` returns live data.
     let db = Db::open(&home.meta_db_path())?;
     let config_hash = Some(crate::ids::blake3_hex(
-        crate::ids::canonical_hash(&[cfg.default_provider.as_str()]).as_bytes(),
+        crate::ids::canonical_hash(&[default_provider.as_str()]).as_bytes(),
     ));
 
     // Phase J: resolve + load the upstream context (if any) BEFORE
@@ -297,6 +314,12 @@ pub async fn run_full_pipeline(
     let run_dir = home.run_dir(run_id);
     let cfg_arc = Arc::new(cfg.clone());
     let mode = parse_mode(&stub.mode)?;
+    // v0.10: the resolved provider string comes from either the
+    // stub (built by the run dispatcher after the operator's CLI
+    // flag + env-var resolution) or `cfg.default_provider`. Both
+    // paths now carry the `SECTION[:MODEL]` form; the
+    // `resolve_provider` helper below turns it into a
+    // `(section, model_id)` pair the registry can key on.
     let default_provider = if stub.provider.is_empty() {
         cfg.default_provider.clone()
     } else {
@@ -315,24 +338,23 @@ pub async fn run_full_pipeline(
     let resolved_parallelism = max_parallelism.unwrap_or(cfg.max_parallelism);
     // Resolve the (section, model_id) pair the registry will
     // build, so we can pin `default_model` to the same value the
-    // registry keys on. The legacy `--provider SECTION` shorthand
-    // synthesises a model id from the section's first registered
-    // model (or `"mock-model"` for the mock section); mirroring
-    // that here keeps the RunContext lookup in sync with the
-    // registry's joined-key layout.
+    // registry keys on. v0.10 uses `Config::resolve_provider` to
+    // parse `SECTION[:MODEL]`; single-model sections return their
+    // canonical model id, multi-model sections require explicit
+    // `SECTION:MODEL` (the helper errors with a clear message).
     let resolved_default_model = if stub.provider.is_empty() {
         cfg.default_provider.clone()
     } else {
         stub.provider.clone()
     };
     let default_model = if resolved_default_model.contains(':') {
+        // `SECTION:MODEL` shape — the model half is verbatim.
         crate::cli::probe::parse_provider_model(&resolved_default_model)
             .map(|(_, m)| m)
             .unwrap_or_default()
     } else {
-        // Bare `--provider SECTION` shorthand: synthesise the
-        // canonical model id from the section's first registered
-        // `models[]` entry.
+        // Bare `SECTION` shape — synthesise the canonical model id
+        // from the section's first registered `models[]` entry.
         let spec = cfg.provider(&resolved_default_model)?;
         spec.models
             .first()
