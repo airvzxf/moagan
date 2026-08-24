@@ -26,16 +26,16 @@ impl DeepSeekProvider {
     /// [`Self::from_resolved`].
     ///
     /// When `spec.models` is empty (the v0.9 fixture shape) the
-    /// legacy fields `model`, `endpoint`, and `max_tokens` are
-    /// synthesised into a single `ModelConfig` so the rest of the
-    /// constructor (URL builder, clamp chain, `max_tokens_table`
-    /// lookup by `(name, model)`) sees the same shape the v0.10
-    /// dispatcher passes in.
+    /// section-level `endpoint` is reused for a synthetic
+    /// `ModelConfig` so the rest of the constructor (URL builder,
+    /// clamp chain, `max_tokens_table` lookup by `(name, model)`)
+    /// sees the same shape the v0.10 dispatcher passes in.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
-        if !spec.endpoint.contains("deepseek") {
+        if let Some(ep) = spec.endpoint.as_deref()
+            && !ep.contains("deepseek")
+        {
             return Err(Error::InvalidArgs(format!(
-                "deepseek provider requires an endpoint containing 'deepseek', got {:?}",
-                spec.endpoint
+                "deepseek provider requires an endpoint containing 'deepseek', got {ep:?}"
             )));
         }
         let client = reqwest::Client::builder()
@@ -50,15 +50,9 @@ impl DeepSeekProvider {
             .first()
             .cloned()
             .unwrap_or_else(|| crate::config::ModelConfig {
-                id: spec.model.clone(),
-                endpoint: spec.endpoint_new.clone().or_else(|| {
-                    if spec.endpoint.is_empty() {
-                        None
-                    } else {
-                        Some(spec.endpoint.clone())
-                    }
-                }),
-                max_tokens: spec.max_tokens,
+                id: "deepseek-v4-flash".to_owned(),
+                endpoint: spec.endpoint.clone(),
+                max_tokens: None,
             });
         let name = "deepseek".to_owned();
         Ok(Self(OpenAICompatibleProvider {
@@ -67,18 +61,11 @@ impl DeepSeekProvider {
             endpoint: first
                 .endpoint
                 .clone()
-                .or_else(|| {
-                    if spec.endpoint.is_empty() {
-                        None
-                    } else {
-                        Some(spec.endpoint.clone())
-                    }
-                })
                 .unwrap_or_else(|| "https://api.deepseek.com/v1/chat/completions".to_owned()),
             api_key,
             client,
             max_retries: 3,
-            provider_max_tokens: first.max_tokens.or(spec.max_tokens),
+            provider_max_tokens: first.max_tokens,
             kind_hard_cap: Some(DEEPSEEK_MAX_TOKENS_CAP),
             max_tokens_table: None,
         }))
@@ -197,7 +184,7 @@ impl Provider for DeepSeekProvider {
         // `kind_hard_cap = Some(DEEPSEEK_MAX_TOKENS_CAP)` at
         // construction time via [`Self::new`] so the per-provider
         // hard cap is honoured at every layer (audit-log hash
-        // included). Mirrors the `OPENCODE_GO_MAX_TOKENS_CAP`
+        // included). Mirrors the `u32::MAX`
         // wiring on the opencode_go chat-completions path.
         self.0.effective_max_tokens(req)
     }
@@ -208,7 +195,7 @@ impl Provider for DeepSeekProvider {
     /// built via [`Self::new`]) the inner `kind_hard_cap` is
     /// `Some(DEEPSEEK_MAX_TOKENS_CAP)`, so the probe short-circuits
     /// at `2^19 = 524_288` instead of probing values DeepSeek
-    /// rejects with HTTP 400. Mirrors the `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// rejects with HTTP 400. Mirrors the `u32::MAX`
     /// delegation on `OpenCodeGoProvider`.
     fn max_tokens_probe_ceiling(&self) -> u32 {
         self.0.max_tokens_probe_ceiling()
@@ -221,15 +208,10 @@ mod tests {
 
     fn config() -> ProviderConfig {
         ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "deepseek".into(),
-            endpoint: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-v4-flash".into(),
-            max_tokens: Some(8192),
             temperature: Some(0.6),
             top_p: Some(0.95),
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -272,15 +254,10 @@ mod tests {
         // DeepSeek-direct cap from pre-PR-473); we want to pin
         // the new wiring in isolation, so build a separate spec.
         let spec = ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "deepseek".into(),
-            endpoint: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-v4-flash".into(),
-            max_tokens: None,
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -297,8 +274,8 @@ mod tests {
         // accepts. The audit hash stays in sync with the wire
         // body because both call the same clamp chain.
         let req = Request {
-            role: crate::llm::Role::Route,
             model: "deepseek-v4-flash".into(),
+            role: crate::llm::Role::Route,
             system: String::new(),
             user: String::new(),
             max_tokens: 1_000_000,

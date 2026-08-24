@@ -780,17 +780,20 @@ mod provider {
             entry.1 += r.input_tokens;
             entry.2 += r.output_tokens;
         }
-        for (name, provider) in &cfg.providers {
+        for (name, provider_cfg) in &cfg.providers {
             // v0.10: each row in `models[]` is a distinct
             // `(provider, model)` pair the upstream sees; the
-            // SQLite join keys on the same pair.
-            for model in &provider.models {
+            // SQLite join keys on the same pair. The section-level
+            // `endpoint` is `Option<String>`; per-model endpoints
+            // live on the model itself.
+            for model in &provider_cfg.models {
                 let key = (name.clone(), model.id.clone());
                 let stats = by_key.get(&key).copied().unwrap_or((0, 0, 0));
+                let endpoint_str = provider_cfg.endpoint.as_deref().unwrap_or("");
                 println!(
                     "{:<14}  {:<24}  {:<14}  {:<10}  {:<10}  {}",
                     name,
-                    trim(provider.endpoint_str(), 24),
+                    trim(endpoint_str, 24),
                     trim(&model.id, 14),
                     stats.1,
                     stats.2,
@@ -809,7 +812,10 @@ mod provider {
         // v0.10: the section name doubles as the kind tag for API-
         // key lookup; the deprecated `provider.kind` field is gone.
         println!("Kind: {name}");
-        println!("Endpoint: {}", provider.endpoint_str());
+        println!(
+            "Endpoint: {}",
+            provider.endpoint.as_deref().unwrap_or("<none>")
+        );
         // Each registered model gets its own block so the
         // operator can read `max_tokens`, `endpoint` (per-model
         // override), and the section-level temperature / top-p
@@ -851,7 +857,7 @@ mod provider {
             println!(
                 "  {:<14}  {:<24}  calls={:<5}  in={:<8}  out={:<6}  last_call_unix={}",
                 trim(&r.model, 14),
-                trim(provider.endpoint_str(), 24),
+                trim(provider.endpoint.as_deref().unwrap_or(""), 24),
                 r.calls,
                 r.input_tokens,
                 r.output_tokens,
@@ -1235,11 +1241,16 @@ mod config {
                 .providers
                 .get(name)
                 .expect("provider present in same map we just iterated");
-            println!(
-                "{name:20} model={:24} endpoint={}",
-                spec.model_str(),
-                spec.endpoint_str(),
-            );
+            // v0.10: model id is sourced from the section's first
+            // `models[]` entry (no more legacy `spec.model`); the
+            // section-level `endpoint` is `Option<String>`.
+            let model_str = spec
+                .models
+                .first()
+                .map(|m| m.id.clone())
+                .unwrap_or_default();
+            let endpoint_str = spec.endpoint.as_deref().unwrap_or("");
+            println!("{name:20} model={:24} endpoint={}", model_str, endpoint_str,);
         }
         println!();
         println!("=== parallelism ===");
@@ -1390,9 +1401,18 @@ mod plan {
                     c.providers
                         .values()
                         .find(|spec| {
+                            // v0.10: the lookup uses the section name
+                            // (which doubles as the model id when the
+                            // section only registers one model); the
+                            // legacy `spec.model` singleton is gone.
+                            let section_first_model = spec
+                                .models
+                                .first()
+                                .map(|m| m.id.clone())
+                                .unwrap_or_default();
                             spec.models.iter().any(|m| m.id == model)
-                                && provider == spec.model_str()
-                                || (provider == spec.model_str() && model == spec.model_str())
+                                && provider == section_first_model
+                                || (provider == section_first_model && model == section_first_model)
                         })
                         .or_else(|| {
                             // The `provider` field in the call log is
@@ -1401,7 +1421,12 @@ mod plan {
                             // model id when the section only registers
                             // one model. Look up by either.
                             c.providers.values().find(|spec| {
-                                spec.model_str() == provider || provider == spec.model_str()
+                                let section_first_model = spec
+                                    .models
+                                    .first()
+                                    .map(|m| m.id.clone())
+                                    .unwrap_or_default();
+                                section_first_model == provider
                             })
                         })
                 })

@@ -1024,17 +1024,24 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // ----------------------------------------------------------------
     // minimax (Anthropic-compatible direct)
     // ----------------------------------------------------------------
-    // Each alias maps to a single-model section. The wire format
-    // (`/v1/messages`) is detected from the URL by the dispatcher;
-    // the config only carries the full URL.
+    // One section per canonical provider family. The section name
+    // (`minimax`) is the `api_keys.toml` key and the
+    // `MINIMAX_API_KEY` env-var suffix — no more `kind` tag.
+    // Every model the MiniMax upstream exposes lives under
+    // `models[]`. The wire format (`/v1/messages`) is detected
+    // from the URL by the dispatcher; the config only carries
+    // the full URL.
     let minimax_endpoint = Some("https://api.minimax.io/anthropic/v1/messages".to_owned());
-    let minimax_aliases = [
-        ("minimax", "MiniMax-M3"),
-        ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed"),
+    let minimax_models = [
+        "MiniMax-M3",
+        "MiniMax-M2.7",
+        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5",
     ];
-    for (alias, model) in minimax_aliases {
-        let models = vec![ModelConfig {
-            id: model.to_owned(),
+    let models = minimax_models
+        .iter()
+        .map(|model| ModelConfig {
+            id: (*model).to_owned(),
             endpoint: None,
             // Start from `DEFAULT_MAX_TOKENS` (1,000,000) and let
             // the startup auto-probe discover the real ceiling per
@@ -1043,140 +1050,175 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             // `MINIMAX_MAX_TOKENS_CAP`; `max_token_auto` below
             // enables the probe.
             max_tokens: Some(DEFAULT_MAX_TOKENS),
-        }];
-        m.insert(
-            alias.to_owned(),
-            ProviderConfig {
-                kind: "minimax".to_owned(),
-                endpoint: minimax_endpoint.clone().unwrap_or_default(),
-                model: model.to_owned(),
-                max_tokens: Some(DEFAULT_MAX_TOKENS),
-                hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
-                endpoint_new: minimax_endpoint.clone(),
-                models,
-                temperature: Some(0.6),
-                top_p: Some(0.95),
-                omit_max_tokens: false,
-                max_token_auto: Some(1024),
-                max_token_auto_save: true,
-                plan: None,
-            },
-        );
-    }
+        })
+        .collect();
+    m.insert(
+        "minimax".to_owned(),
+        ProviderConfig {
+            models,
+            endpoint: minimax_endpoint,
+            temperature: Some(0.6),
+            top_p: Some(0.95),
+            omit_max_tokens: false,
+            max_token_auto: Some(1024),
+            max_token_auto_save: true,
+            plan: None,
+        },
+    );
 
     // ----------------------------------------------------------------
     // deepseek (OpenAI-compatible direct)
     // ----------------------------------------------------------------
     let deepseek_endpoint = Some("https://api.deepseek.com/v1/chat/completions".to_owned());
-    let deepseek_models = [("deepseek", "deepseek-v4-flash")];
-    for (alias, model) in deepseek_models {
-        let models = vec![ModelConfig {
-            id: model.to_owned(),
+    let deepseek_model_ids = ["deepseek-chat", "deepseek-reasoner"];
+    let models = deepseek_model_ids
+        .iter()
+        .map(|model| ModelConfig {
+            id: (*model).to_owned(),
             endpoint: None,
             max_tokens: Some(DEFAULT_MAX_TOKENS),
-        }];
-        m.insert(
-            alias.to_owned(),
-            ProviderConfig {
-                kind: "deepseek".to_owned(),
-                endpoint: deepseek_endpoint.clone().unwrap_or_default(),
-                model: model.to_owned(),
-                max_tokens: Some(DEFAULT_MAX_TOKENS),
-                hard_incompatibilities: vec![],
-                endpoint_new: deepseek_endpoint.clone(),
-                models,
-                temperature: Some(0.6),
-                top_p: Some(0.95),
-                omit_max_tokens: false,
-                max_token_auto: Some(1024),
-                max_token_auto_save: true,
-                plan: None,
-            },
-        );
-    }
+        })
+        .collect();
+    m.insert(
+        "deepseek".to_owned(),
+        ProviderConfig {
+            models,
+            endpoint: deepseek_endpoint,
+            temperature: Some(0.6),
+            top_p: Some(0.95),
+            omit_max_tokens: false,
+            max_token_auto: Some(1024),
+            max_token_auto_save: true,
+            plan: None,
+        },
+    );
 
     // ----------------------------------------------------------------
     // opencode (one section, multiple models, mixed wire formats)
     // ----------------------------------------------------------------
-    // The v0.10 schema exposes every OpenCode model under the single
-    // `opencode` section. Each model carries its own endpoint URL
-    // (the dispatcher picks the wire format from the path):
+    // The v0.10 schema exposes every OpenCode model under the
+    // single `opencode` section. Each model carries its own
+    // endpoint URL (the dispatcher picks the wire format from the
+    // path):
     //
     // * `/v1/chat/completions` (OpenAI-compatible) — 10 models
     // * `/v1/messages` (Anthropic-compatible) — 7 models
     // * `/v1/responses` (OpenAI Responses) — 1 model
     //
-    // The aliases (`kimi-k3`, `minimax-m3`, `gpt-5.6-luna`, …) each
-    // become a one-model section that mirrors the v0.9 behavior so
-    // the `--provider kimi-k3` shorthand still works.
-    let make_oc = |model: &str, endpoint: &str| {
-        let models = vec![ModelConfig {
-            id: model.to_owned(),
-            endpoint: Some(endpoint.to_owned()),
-            // OpenCode Go upstreams have heterogeneous `max_tokens`
-            // ceilings (kimi-k* at 8192, qwen3.x and gpt-5.6-luna at
-            // 16_384 in practice) and they drift as the relay roster
-            // changes, so no single hardcoded constant is right.
-            // Start from `DEFAULT_MAX_TOKENS` (1,000,000) and let
-            // the startup auto-probe discover the real ceiling per
-            // `(provider, model)`. Until the probe lands, the wire
-            // body in each of the three OpenCode providers
-            // (Anthropic, Responses, Chat) clamps to
-            // `OPENCODE_GO_MAX_TOKENS_CAP`.
+    // Per-model aliases (the v0.9 single-model section shape) are
+    // gone: callers reach every model via
+    // `--provider opencode:MODEL`.
+    let oc_chat = "https://opencode.ai/zen/go/v1/chat/completions";
+    let oc_anthropic = "https://opencode.ai/zen/go/v1/messages";
+    let oc_responses = "https://opencode.ai/zen/go/v1/responses";
+    let oc_models = vec![
+        // `/v1/chat/completions` (OpenAI-compatible).
+        ModelConfig {
+            id: "kimi-k3".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
             max_tokens: Some(DEFAULT_MAX_TOKENS),
-        }];
+        },
+        ModelConfig {
+            id: "kimi-k2.6".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "glm-5.1".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "glm-5.2".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "deepseek-v4-pro".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "deepseek-v4-flash".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "mimo-v2.5".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "mimo-v2.5-pro".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "hy3".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        // `/v1/messages` (Anthropic-compatible).
+        ModelConfig {
+            id: "minimax-m3".to_owned(),
+            endpoint: Some(oc_anthropic.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "minimax-m2.7".to_owned(),
+            endpoint: Some(oc_anthropic.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "minimax-m2.5".to_owned(),
+            endpoint: Some(oc_anthropic.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "qwen3.8-max".to_owned(),
+            endpoint: Some(oc_anthropic.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "qwen3.7-max".to_owned(),
+            endpoint: Some(oc_anthropic.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "qwen3.7-plus".to_owned(),
+            endpoint: Some(oc_anthropic.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        ModelConfig {
+            id: "qwen3.6-plus".to_owned(),
+            endpoint: Some(oc_anthropic.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        // `/v1/responses` (OpenAI Responses).
+        ModelConfig {
+            id: "gpt-5.6-luna".to_owned(),
+            endpoint: Some(oc_responses.to_owned()),
+            // gpt-5.6-luna rejects the *presence* of `max_tokens`,
+            // not just an oversized value — the section flag
+            // `omit_max_tokens = true` (applied to every model on
+            // this URL via the per-model wire body) signals the
+            // dispatcher to drop the field.
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+    ];
+    m.insert(
+        "opencode".to_owned(),
         ProviderConfig {
-            kind: "opencode".to_owned(),
-            endpoint: endpoint.to_owned(),
-            model: model.to_owned(),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-            hard_incompatibilities: vec![],
-            endpoint_new: None,
-            models,
+            models: oc_models,
+            endpoint: None,
             temperature: Some(1.0),
             top_p: Some(0.95),
             omit_max_tokens: false,
             max_token_auto: Some(1024),
             max_token_auto_save: true,
             plan: None,
-        }
-    };
-    // `/v1/chat/completions` (OpenAI-compatible).
-    let oc_chat = "https://opencode.ai/zen/go/v1/chat/completions";
-    let oc_chat_models = [
-        "kimi-k3",
-        "kimi-k2.6",
-        "glm-5.1",
-        "glm-5.2",
-        "deepseek-v4-pro",
-        "deepseek-v4-flash",
-        "mimo-v2.5",
-        "mimo-v2.5-pro",
-        "hy3",
-    ];
-    for model in oc_chat_models {
-        m.insert(model.to_owned(), make_oc(model, oc_chat));
-    }
-    // `/v1/messages` (Anthropic-compatible).
-    let oc_anthropic = "https://opencode.ai/zen/go/v1/messages";
-    let oc_anthropic_models = [
-        "minimax-m3",
-        "minimax-m2.7",
-        "minimax-m2.5",
-        "qwen3.8-max",
-        "qwen3.7-max",
-        "qwen3.7-plus",
-        "qwen3.6-plus",
-    ];
-    for model in oc_anthropic_models {
-        m.insert(model.to_owned(), make_oc(model, oc_anthropic));
-    }
-    // `/v1/responses` (OpenAI Responses).
-    let oc_responses = "https://opencode.ai/zen/go/v1/responses";
-    let oc_responses_models = ["gpt-5.6-luna"];
-    for model in oc_responses_models {
-        m.insert(model.to_owned(), make_oc(model, oc_responses));
-    }
+        },
+    );
 
     // ----------------------------------------------------------------
     // mock
@@ -1184,13 +1226,8 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     m.insert(
         "mock".to_owned(),
         ProviderConfig {
-            kind: "mock".to_owned(),
-            endpoint: "mock://local".to_owned(),
-            model: "mock-model".to_owned(),
-            max_tokens: None,
-            hard_incompatibilities: vec![],
-            endpoint_new: Some("mock://local".to_owned()),
             models: Vec::new(),
+            endpoint: Some("mock://local".to_owned()),
             temperature: None,
             top_p: None,
             omit_max_tokens: false,
@@ -1284,33 +1321,14 @@ impl Default for RetentionConfig {
 /// `ProviderConfig` no longer carries the deprecated `kind`,
 /// `model`, or `hard_incompatibilities` singletons — the
 /// dispatcher picks the wire format from `models[].endpoint` and
-/// the runtime model id from `models[].id`.
-///
-/// The deprecated singletons are still on the struct (with
-/// `#[serde(skip)]` and private visibility) so test fixtures and
-/// legacy TOML files continue to compile / parse without forcing a
-/// rewrite of every test. Phase 6 (unit-test cleanup) drops the
-/// private fields and migrates the test fixtures to the new shape.
+/// the runtime model id from `models[].id`. The section name is
+/// the canonical provider-family key: it matches the
+/// `api_keys.toml` `[providers]` lookup and the
+/// `OPENCODE_API_KEY` / `DEEPSEEK_API_KEY` / `MINIMAX_API_KEY`
+/// env-var suffix.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
-    /// Deprecated v0.9 singleton. Kept on the struct (skipped on
-    /// serialise) so legacy test fixtures and pre-v0.10 TOML files
-    /// parse without forcing a global rewrite. Phase 6 drops the
-    /// field entirely; production code never reads it (the
-    /// dispatcher picks the wire format from the URL path).
-    #[serde(skip)]
-    pub kind: String,
-    /// Deprecated v0.9 singleton URL string. Kept as `String` for
-    /// test-fixture compatibility; new code should use
-    /// `endpoint_new: Option<String>` and read `endpoint_str()` instead.
-    #[serde(skip)]
-    pub endpoint: String,
-    /// Deprecated v0.9 singleton model. Kept as `String` for
-    /// test-fixture compatibility; production code reads the
-    /// model id from `models[].id`.
-    #[serde(skip)]
-    pub model: String,
     /// Models this section exposes. Empty list → the section is
     /// effectively inactive (a warning, not an error — the operator
     /// may comment out a section to disable a relay temporarily).
@@ -1319,10 +1337,14 @@ pub struct ProviderConfig {
     /// `Provider` per `(section_name, model_id)` pair, deriving the
     /// wire format from the per-model endpoint URL.
     pub models: Vec<ModelConfig>,
-    /// Deprecated v0.9 per-section `max_tokens`. Kept as
-    /// `Option<u32>` for test-fixture compatibility.
-    #[serde(skip)]
-    pub max_tokens: Option<u32>,
+    /// v0.10 (canonical): section-level default endpoint. The
+    /// full URL — including the wire-format path (`/messages`,
+    /// `/responses`, `/chat/completions`) — is supplied verbatim
+    /// by the operator; the code never appends a path. Replaces
+    /// the v0.9 `endpoint: String` singleton AND the v0.10
+    /// intermediate `endpoint_new: Option<String>` so a single
+    /// field carries the v0.10 schema.
+    pub endpoint: Option<String>,
     /// Default sampling temperature for every model in the
     /// section. Overridden by per-role defaults in
     /// `phase.rs::resolve_temperature`. Most operators leave
@@ -1333,16 +1355,6 @@ pub struct ProviderConfig {
     /// `phase.rs::resolve_temperature`. Most operators leave this
     /// unset and rely on the per-role default.
     pub top_p: Option<f32>,
-    /// Deprecated v0.9 hard-incompat list. Kept for test-fixture
-    /// compatibility; production code never reads the field (it
-    /// only ever powered `moagan telemetry plan`).
-    #[serde(skip, default)]
-    pub hard_incompatibilities: Vec<String>,
-    /// v0.10 (canonical): section-level default endpoint. The
-    /// full URL — including the wire-format path (`/messages`,
-    /// `/responses`, `/chat/completions`) — is supplied verbatim
-    /// by the operator; the code never appends a path.
-    pub endpoint_new: Option<String>,
     /// When `true`, omit the `max_tokens` field from the wire body
     /// entirely. Required for providers whose wire format rejects the
     /// *presence* of the field (e.g. OpenAI Responses when the upstream
@@ -1442,14 +1454,6 @@ pub struct ResolvedModelConfig {
     /// the wire body (e.g. OpenAI Responses for `gpt-5.6-luna`)
     /// can read it from the same struct.
     pub omit_max_tokens: bool,
-    /// Canonical `kind` from `ProviderConfig::kind` (e.g.
-    /// `"opencode"`, `"minimax"`, `"deepseek"`). Distinct from
-    /// `section` (which is the per-model alias) and the
-    /// `api_keys.toml` lookup is keyed on this value. Carried
-    /// through `from_resolved` so each concrete provider can
-    /// resolve its API key against the canonical kind without
-    /// having to re-derive it from the section name.
-    pub kind: String,
 }
 
 /// Token-plan declaration attached to a [`ProviderConfig`]. Powers the
@@ -1485,21 +1489,13 @@ pub fn default_max_token_auto_save() -> bool {
 // Phase 5 made all fields default-friendly.
 
 impl ProviderConfig {
-    /// Backwards-compat accessor: returns the canonical
-    /// (v0.10) section-level endpoint as a `&str` (empty string
-    /// when unset). Callers that used the deprecated `spec.endpoint:
-    /// String` field can migrate without changing the call site
-    /// signature.
-    pub fn endpoint_str(&self) -> &str {
-        self.endpoint_new.as_deref().unwrap_or("")
-    }
-
-    /// Backwards-compat accessor: returns the first registered
-    /// model's id (or empty string when the section has no
-    /// models). Callers that used the deprecated `spec.model:
-    /// String` field can migrate without changing the call site
-    /// signature.
-    pub fn model_str(&self) -> &str {
+    /// First registered model's id, or empty string when the section
+    /// has no models. The v0.10 dispatcher picks a concrete
+    /// `(section, model_id)` pair, so callers that only know the
+    /// section (e.g. the bare `--provider SECTION` shorthand) fall
+    /// back to this. Pure helper — no allocation when the section
+    /// has at least one model.
+    pub fn first_model_id(&self) -> &str {
         self.models.first().map(|m| m.id.as_str()).unwrap_or("")
     }
 }
@@ -1682,11 +1678,11 @@ impl Config {
         {
             for spec in self.providers.values_mut() {
                 if spec
-                    .endpoint_new
+                    .endpoint
                     .as_deref()
                     .is_some_and(|e| e.contains("/messages"))
                 {
-                    spec.endpoint_new = Some(v.clone());
+                    spec.endpoint = Some(v.clone());
                 }
             }
         }
@@ -1701,7 +1697,7 @@ impl Config {
             // still rely on the env var.
             for spec in self.providers.values_mut() {
                 if spec
-                    .endpoint_new
+                    .endpoint
                     .as_deref()
                     .is_some_and(|e| e.contains("/messages"))
                     && let Some(first) = spec.models.first_mut()
@@ -2228,7 +2224,7 @@ impl Config {
         let endpoint = model_cfg
             .endpoint
             .clone()
-            .or_else(|| spec.endpoint_new.clone())
+            .or_else(|| spec.endpoint.clone())
             .ok_or_else(|| {
                 crate::Error::InvalidArgs(format!(
                     "provider '{section}' model '{model_id}' has no endpoint \
@@ -2248,7 +2244,6 @@ impl Config {
             top_p: spec.top_p,
             wire_format,
             omit_max_tokens: spec.omit_max_tokens,
-            kind: spec.kind.clone(),
         })
     }
 
@@ -2416,11 +2411,11 @@ mod tests {
         assert_eq!(cfg.phase_timeout_secs, 0);
         assert_eq!(cfg.total_timeout_secs, 0);
         assert!(cfg.redact_in_telemetry);
+        // v0.10 canonical sections (per-model aliases collapsed into
+        // the canonical provider family).
         assert!(cfg.providers.contains_key("minimax"));
-        assert!(cfg.providers.contains_key("minimax-m3"));
-        assert!(cfg.providers.contains_key("minimax-m2.7"));
-        assert!(cfg.providers.contains_key("minimax-m2.7-highspeed"));
-        assert!(cfg.providers.contains_key("minimax-m2.5"));
+        assert!(cfg.providers.contains_key("opencode"));
+        assert!(cfg.providers.contains_key("deepseek"));
         assert!(cfg.providers.contains_key("mock"));
     }
 
@@ -2585,14 +2580,15 @@ mod tests {
             .providers
             .get("minimax")
             .unwrap()
-            .endpoint_new
+            .endpoint
             .clone()
-            .expect("default minimax section must carry endpoint_new");
+            .expect("default minimax section must carry endpoint");
         assert_eq!(baseline, "https://api.minimax.io/anthropic/v1/messages");
 
-        // With the env var set, apply_env_overrides rewrites every
-        // provider whose kind is "minimax" but leaves other providers
-        // (e.g. "mock") alone.
+        // With the env var set, apply_env_overrides rewrites the
+        // minimax section (the only one whose endpoint matches the
+        // MiniMax /v1/messages URL pattern) but leaves other
+        // providers (e.g. "mock", "opencode") alone.
         unsafe {
             std::env::set_var("MOAGAN_MINIMAX_ENDPOINT", "http://localhost:8086/x");
         }
@@ -2601,11 +2597,11 @@ mod tests {
             std::env::remove_var("MOAGAN_MINIMAX_ENDPOINT");
         }
         assert_eq!(
-            cfg.providers.get("minimax").unwrap().endpoint_new,
+            cfg.providers.get("minimax").unwrap().endpoint,
             Some("http://localhost:8086/x".to_owned())
         );
         assert_eq!(
-            cfg.providers.get("mock").unwrap().endpoint_new,
+            cfg.providers.get("mock").unwrap().endpoint,
             Some("mock://local".to_owned()),
             "non-minimax providers must not be touched by MOAGAN_MINIMAX_ENDPOINT"
         );
@@ -2629,15 +2625,12 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
 
         let mut cfg = Config::default();
-        // Baseline: every direct-minimax provider carries its canonical
-        // model on `models[0].id` (the v0.10 canonical field).
+        // Baseline: the canonical `minimax` section carries the
+        // first model id on `models[0].id` (the v0.10 canonical
+        // field).
         assert_eq!(
             cfg.providers.get("minimax").unwrap().models[0].id,
             "MiniMax-M3"
-        );
-        assert_eq!(
-            cfg.providers.get("minimax-m2.7-highspeed").unwrap().models[0].id,
-            "MiniMax-M2.7-highspeed"
         );
 
         // Set, exercise, restore — every step inside the lock so
@@ -2658,22 +2651,25 @@ mod tests {
             },
         }
 
-        // Only direct-minimax providers (kind="minimax") reflect the env
-        // value. The opencode entries (minimax-m3/m2.7/m2.5) are
-        // routed through OpenCode and must NOT be touched by the
-        // MOAGAN_MINIMAX_MODEL env override.
-        for name in ["minimax", "minimax-m2.7-highspeed"] {
+        // Only the canonical `minimax` section reflects the env
+        // value. The opencode-routed `minimax-m3/m2.7/m2.5` are
+        // models on the `opencode` section now and must NOT be
+        // touched by the MOAGAN_MINIMAX_MODEL env override.
+        assert_eq!(
+            cfg.providers.get("minimax").unwrap().models[0].id,
+            "MiniMax-M2.5",
+            "minimax section should pick up MOAGAN_MINIMAX_MODEL"
+        );
+        let oc_spec = cfg.providers.get("opencode").unwrap();
+        for model_id in ["minimax-m3", "minimax-m2.7", "minimax-m2.5"] {
+            let entry = oc_spec
+                .models
+                .iter()
+                .find(|m| m.id == model_id)
+                .unwrap_or_else(|| panic!("opencode section must contain {model_id}"));
             assert_eq!(
-                cfg.providers.get(name).unwrap().models[0].id,
-                "MiniMax-M2.5",
-                "provider {name} should pick up MOAGAN_MINIMAX_MODEL"
-            );
-        }
-        for name in ["minimax-m3", "minimax-m2.7", "minimax-m2.5"] {
-            assert_eq!(
-                cfg.providers.get(name).unwrap().models[0].id,
-                name,
-                "opencode provider {name} must NOT pick up MOAGAN_MINIMAX_MODEL"
+                entry.id, model_id,
+                "opencode model {model_id} must NOT pick up MOAGAN_MINIMAX_MODEL"
             );
         }
         // The mock provider must not be touched.
@@ -2704,10 +2700,16 @@ mod tests {
         unsafe {
             std::env::remove_var("MOAGAN_MINIMAX_MODEL");
         }
-        assert_eq!(cfg.providers.get("minimax").unwrap().model, "MiniMax-M3");
+        // Blank value: the first model id stays at the canonical
+        // v0.10 default.
+        assert_eq!(
+            cfg.providers.get("minimax").unwrap().models[0].id,
+            "MiniMax-M3"
+        );
     }
 
-    /// Q6 pin: DeepSeek is exposed with its canonical default model.
+    /// Q6 pin: DeepSeek is exposed with its canonical default model
+    /// on the v0.10 schema (`models[0].id`).
     #[test]
     fn default_providers_lists_deepseek() {
         let cfg = Config::default();
@@ -2715,254 +2717,179 @@ mod tests {
             .providers
             .get("deepseek")
             .expect("deepseek missing from default providers");
-        assert_eq!(spec.kind, "deepseek");
-        assert_eq!(spec.model, "deepseek-v4-flash");
         assert_eq!(
-            spec.endpoint,
-            "https://api.deepseek.com/v1/chat/completions"
+            spec.endpoint.as_deref(),
+            Some("https://api.deepseek.com/v1/chat/completions")
+        );
+        assert!(
+            spec.models.iter().any(|m| m.id == "deepseek-chat"),
+            "deepseek section must list `deepseek-chat` in models[]"
         );
     }
 
-    /// Q7 pin: every OpenCode model alias is registered as its own
-    /// single-model section with a fully-qualified URL the dispatcher
-    /// can dispatch on. The v0.9 `opencode_go` umbrella alias is
-    /// dropped: each alias now carries the wire-format path
-    /// directly. v0.10 update: the `kind` marker is now the
-    /// renamed `"opencode"` (matches the renamed `OPENCODE_API_KEY`
-    /// env var the api_keys lookup keys on).
+    /// Q7 pin: the canonical `opencode` section groups every
+    /// OpenCode model under one roof. Each model carries its own
+    /// fully-qualified URL so the dispatcher can pick the wire
+    /// format from the path. The v0.9 per-model alias sections
+    /// (`kimi-k3`, `minimax-m3`, `gpt-5.6-luna`, …) are gone —
+    /// callers reach them via `--provider opencode:MODEL`.
     #[test]
     fn default_providers_lists_opencode_aliases() {
         let cfg = Config::default();
-        // One representative model per wire-format group.
+        let spec = cfg
+            .providers
+            .get("opencode")
+            .expect("opencode section missing from default providers");
+        // One representative model per wire-format group; the URL
+        // lives on the per-model `endpoint` field, NOT on the
+        // section (every model on this section has its own URL).
         let representatives = [
             ("kimi-k3", "https://opencode.ai/zen/go/v1/chat/completions"),
             ("minimax-m3", "https://opencode.ai/zen/go/v1/messages"),
             ("gpt-5.6-luna", "https://opencode.ai/zen/go/v1/responses"),
         ];
-        for (alias, expected_endpoint) in representatives {
-            let spec = cfg
-                .providers
-                .get(alias)
-                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+        for (model_id, expected_endpoint) in representatives {
+            let model = spec
+                .models
+                .iter()
+                .find(|m| m.id == model_id)
+                .unwrap_or_else(|| panic!("opencode section must contain model {model_id}"));
             assert_eq!(
-                spec.endpoint, expected_endpoint,
-                "alias {alias} must carry the full wire-format URL, got {}",
-                spec.endpoint
-            );
-            assert_eq!(
-                spec.kind, "opencode",
-                "alias {alias} must carry the renamed v0.10 kind marker"
+                model.endpoint.as_deref(),
+                Some(expected_endpoint),
+                "opencode model {model_id} must carry the full wire-format URL"
             );
         }
     }
 
     /// v0.10 schema pin: every default provider exposes its model
-    /// list as `models[].id` (not a singular `model` field). The
-    /// dispatcher (Phase 3) iterates this list to build one
-    /// `Provider` per `(section, model)` pair.
+    /// list as `models[].id`. The dispatcher iterates this list to
+    /// build one `Provider` per `(section, model)` pair.
     #[test]
     fn default_providers_models_field_populated() {
         let cfg = Config::default();
-        // Sample representatives from each section.
+        // Sample representatives from each canonical section.
         let samples = [
             ("minimax", "MiniMax-M3"),
-            ("deepseek", "deepseek-v4-flash"),
-            ("kimi-k3", "kimi-k3"),
-            ("minimax-m3", "minimax-m3"),
-            ("gpt-5.6-luna", "gpt-5.6-luna"),
+            ("deepseek", "deepseek-chat"),
+            ("opencode", "kimi-k3"),
         ];
-        for (alias, expected_id) in samples {
+        for (section, expected_id) in samples {
             let spec = cfg
                 .providers
-                .get(alias)
-                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+                .get(section)
+                .unwrap_or_else(|| panic!("section {section} missing from default providers"));
             assert!(
                 !spec.models.is_empty(),
-                "alias {alias} must carry at least one ModelConfig entry"
+                "section {section} must carry at least one ModelConfig entry"
             );
-            assert_eq!(
-                spec.models[0].id, expected_id,
-                "alias {alias} models[0].id must equal {expected_id}"
-            );
-            assert_eq!(
-                spec.models.len(),
-                1,
-                "alias {alias} must carry exactly one ModelConfig entry (Phase 3 wiring)"
+            assert!(
+                spec.models.iter().any(|m| m.id == expected_id),
+                "section {section} must carry {expected_id} in models[]"
             );
         }
     }
 
-    /// The deprecated `kind`/`model`/`hard_incompatibilities` fields
-    /// must remain populated after the v0.10 schema migration so the
-    /// construction code in `src/llm/{minimax,deepseek,opencode_go*}.rs`
-    /// keeps compiling until Phase 3 lands.
-    #[test]
-    fn default_providers_legacy_fields_still_populated() {
-        let cfg = Config::default();
-        let spec = cfg.providers.get("minimax").unwrap();
-        assert_eq!(spec.kind, "minimax");
-        assert_eq!(spec.model, "MiniMax-M3");
-        assert!(!spec.hard_incompatibilities.is_empty());
-    }
-
-    /// Q5 + 2026-08-04 pin: the canonical MiniMax models are exposed
-    /// as separate provider entries under `kind="minimax"` (direct)
-    /// or `kind="opencode"` (subscription, on the `/v1/messages`
-    /// endpoint). The split matches the operator's 2026-08-04 model
-    /// roster: minimax-m3/m2.7/m2.5 are routed through OpenCode.
-    /// v0.10 update: the subscription kind is the renamed
-    /// `"opencode"` (was `"opencode_go"`).
+    /// Q5 + 2026-08-04 pin: the canonical MiniMax models are
+    /// listed on the canonical `minimax` section (direct MiniMax)
+    /// AND on the `opencode` section (subscription, on the
+    /// `/v1/messages` endpoint, mirroring the v0.9 `minimax-m3`
+    /// alias). The split matches the operator's 2026-08-04 model
+    /// roster: `minimax-m3/m2.7/m2.5` are routed through
+    /// OpenCode.
     #[test]
     fn default_providers_lists_four_canonical_minimax_models() {
         let cfg = Config::default();
-        let canonical = [
-            // Direct MiniMax (kind="minimax")
-            ("minimax", "minimax", "MiniMax-M3"),
-            (
-                "minimax-m2.7-highspeed",
-                "minimax",
-                "MiniMax-M2.7-highspeed",
-            ),
-            // OpenCode subscription (kind="opencode")
-            ("minimax-m3", "opencode", "minimax-m3"),
-            ("minimax-m2.7", "opencode", "minimax-m2.7"),
-            ("minimax-m2.5", "opencode", "minimax-m2.5"),
+        let canonical_direct = [
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
         ];
-        for (alias, kind, model) in canonical {
-            let spec = cfg
-                .providers
-                .get(alias)
-                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
-            assert_eq!(spec.kind, kind, "alias {alias} should map to {kind}");
-            assert_eq!(
-                spec.model, model,
-                "alias {alias} should carry canonical model {model}"
+        let minimax_spec = cfg
+            .providers
+            .get("minimax")
+            .expect("minimax section missing from default providers");
+        for model_id in canonical_direct {
+            assert!(
+                minimax_spec.models.iter().any(|m| m.id == model_id),
+                "minimax section must carry {model_id} on models[]"
             );
-            // Sanity-check the new schema carries the same id.
-            assert_eq!(
-                spec.models[0].id, model,
-                "alias {alias} models[0].id must equal {model}"
+        }
+        let canonical_opencode = ["minimax-m3", "minimax-m2.7", "minimax-m2.5"];
+        let opencode_spec = cfg
+            .providers
+            .get("opencode")
+            .expect("opencode section missing from default providers");
+        for model_id in canonical_opencode {
+            assert!(
+                opencode_spec.models.iter().any(|m| m.id == model_id),
+                "opencode section must carry {model_id} on models[]"
             );
         }
     }
 
     /// Pin: every default `ProviderConfig` for an OpenCode model
-    /// registered in `default_providers()` starts at
-    /// `DEFAULT_MAX_TOKENS` and enables the auto-probe.
-    ///
-    /// This test used to assert `max_tokens <= OPENCODE_GO_MAX_TOKENS_CAP`
-    /// (16_384), because the per-provider TOML knob was the first line
-    /// of defence against the upstream's HTTP 400. The auto-probe
-    /// replaces that hardcoded cap: a single constant cannot describe
-    /// a roster whose real ceilings differ per model and drift per
-    /// relay. Two defences remain, and this test pins the second:
-    ///
-    /// 1. The wire body in each of the three opencode providers
-    ///    still clamps to `OPENCODE_GO_MAX_TOKENS_CAP` before the
-    ///    request leaves the process.
-    /// 2. `max_token_auto` is enabled here, so the probe discovers the
-    ///    real ceiling and caches it per `(provider, model)`.
-    ///
-    /// If defence 1 is ever removed while the probe is disabled, a
-    /// fresh `moagan run --provider kimi-k3` sends 1M and breaks with
-    /// HTTP 400 — hence the `max_token_auto` assertion below.
-    ///
-    /// v0.10 update: the legacy umbrella alias `opencode_go` is gone
-    /// (each model carries its own full URL) and the `kind` marker
-    /// is the renamed `"opencode"`. The test walks the per-model
-    /// aliases and pins the renamed kind.
+    /// registered in `default_providers()` enables the auto-probe.
+    /// The per-model `max_tokens` ceiling lives on
+    /// `models[].max_tokens` (v0.10 canonical); the probe narrows
+    /// it to the real upstream boundary.
     #[test]
     fn default_opencode_go_providers_enable_max_tokens_auto_probe() {
         let cfg = Config::default();
-        let oc_aliases = [
-            "kimi-k3",
-            "kimi-k2.6",
-            "glm-5.1",
-            "glm-5.2",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "mimo-v2.5",
-            "mimo-v2.5-pro",
-            "hy3",
-            "minimax-m3",
-            "minimax-m2.7",
-            "minimax-m2.5",
-            "qwen3.8-max",
-            "qwen3.7-max",
-            "qwen3.7-plus",
-            "qwen3.6-plus",
-            "gpt-5.6-luna",
-        ];
-        for alias in oc_aliases {
-            let spec = cfg
-                .providers
-                .get(alias)
-                .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
+        let oc_spec = cfg
+            .providers
+            .get("opencode")
+            .expect("opencode section missing from default providers");
+        // Section-level probe floor must be > 0 so the
+        // startup auto-probe fires.
+        let floor = oc_spec.max_token_auto.unwrap_or(0);
+        assert!(
+            floor > 0,
+            "opencode section must enable the max_tokens auto-probe \
+             (max_token_auto = Some(n), n > 0); with the probe off and \
+             max_tokens = 1M the upstream rejects with HTTP 400"
+        );
+        // Every opencode model starts at DEFAULT_MAX_TOKENS so
+        // the probe has a generous floor to work from.
+        for model in &oc_spec.models {
             assert_eq!(
-                spec.kind, "opencode",
-                "alias {alias} must map to kind=opencode (renamed from opencode_go)"
-            );
-            assert_eq!(
-                spec.max_tokens,
+                model.max_tokens,
                 Some(DEFAULT_MAX_TOKENS),
-                "opencode alias {alias} must start at DEFAULT_MAX_TOKENS; \
-                 the probe narrows it to the real ceiling"
-            );
-            let floor = spec.max_token_auto.unwrap_or(0);
-            assert!(
-                floor > 0,
-                "opencode alias {alias} must enable the max_tokens auto-probe \
-                 (max_token_auto = Some(n), n > 0); with the probe off and \
-                 max_tokens = 1M the upstream rejects with HTTP 400 unless the \
-                 wire-layer clamp catches it"
+                "opencode model {} must start at DEFAULT_MAX_TOKENS; \
+                 the probe narrows it to the real ceiling",
+                model.id
             );
         }
     }
 
-    /// Pin: every default `ProviderConfig` for a minimax model
-    /// registered in `default_providers()` starts at
+    /// Pin: the canonical `minimax` section starts at
     /// `DEFAULT_MAX_TOKENS` and enables the auto-probe.
     ///
     /// The MiniMax Anthropic-compatible upstream answers HTTP 400
     /// ("model[MiniMax-M3] does not support max tokens > 524288"), so
-    /// this test previously pinned `max_tokens <= MINIMAX_MAX_TOKENS_CAP`.
-    /// That cap now lives only in the wire layer
-    /// (`MinimaxProvider::send` clamps unconditionally); the config
+    /// the wire layer (`MinimaxProvider::send`) clamps
+    /// unconditionally to `MINIMAX_MAX_TOKENS_CAP`; the config
     /// default starts high and the probe discovers the real ceiling.
-    /// See the opencode_go sibling test for the full rationale.
     #[test]
     fn default_minimax_provider_enables_max_tokens_auto_probe() {
         let cfg = Config::default();
-        // Derive the alias set from the map rather than hardcoding it:
-        // several `minimax-*` aliases are deliberately re-inserted by
-        // the OpenCode Go block later in `default_providers()` (they
-        // are proxied, not direct), so only the entries that still
-        // carry `kind = "minimax"` hit the MiniMax upstream.
-        let minimax_aliases: Vec<&String> = cfg
+        let spec = cfg
             .providers
-            .iter()
-            .filter(|(_, spec)| spec.kind == "minimax")
-            .map(|(alias, _)| alias)
-            .collect();
-        assert!(
-            minimax_aliases.contains(&&"minimax".to_owned()),
-            "the canonical `minimax` alias must map to kind=minimax"
+            .get("minimax")
+            .expect("minimax section missing from default providers");
+        assert_eq!(
+            spec.models[0].max_tokens,
+            Some(DEFAULT_MAX_TOKENS),
+            "minimax section first model must start at DEFAULT_MAX_TOKENS; \
+             the probe narrows it to the real ceiling"
         );
-        for alias in minimax_aliases {
-            let spec = &cfg.providers[alias];
-            assert_eq!(
-                spec.max_tokens,
-                Some(DEFAULT_MAX_TOKENS),
-                "minimax alias {alias} must start at DEFAULT_MAX_TOKENS; \
-                 the probe narrows it to the real ceiling"
-            );
-            let floor = spec.max_token_auto.unwrap_or(0);
-            assert!(
-                floor > 0,
-                "minimax alias {alias} must enable the max_tokens auto-probe \
-                 (max_token_auto = Some(n), n > 0)"
-            );
-        }
+        let floor = spec.max_token_auto.unwrap_or(0);
+        assert!(
+            floor > 0,
+            "minimax section must enable the max_tokens auto-probe \
+             (max_token_auto = Some(n), n > 0)"
+        );
     }
 
     /// `MOAGAN_MAX_TOKEN_AUTO=0` is the operator kill-switch: it maps

@@ -90,7 +90,7 @@ impl SaturationSink for VecSink {
 fn dummy_request() -> Request {
     Request {
         role: Role::Intake,
-        model: "integration-model".into(),
+        model: "MiniMax-M3".into(),
         system: String::new(),
         user: "u".into(),
         max_tokens: 16,
@@ -409,15 +409,10 @@ fn registry_from_config_with_sink_attaches_sink_at_construction() -> Result<()> 
         cfg.insert(
             "mock-sat".into(),
             ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "mock".into(),
-                endpoint: "mock://sat".into(),
-                model: "mock-model".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,

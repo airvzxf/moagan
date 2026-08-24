@@ -331,17 +331,13 @@ pub async fn run_full_pipeline(
             .unwrap_or_default()
     } else {
         // Bare `--provider SECTION` shorthand: synthesise the
-        // canonical model id (`spec.model` falls back to
-        // `models[0].id` for legacy fixtures).
+        // canonical model id from the section's first registered
+        // `models[]` entry.
         let spec = cfg.provider(&resolved_default_model)?;
-        if !spec.model.is_empty() {
-            spec.model.clone()
-        } else {
-            spec.models
-                .first()
-                .map(|m| m.id.clone())
-                .unwrap_or_default()
-        }
+        spec.models
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_default()
     };
     let providers = Arc::new(build_registry_for(
         cfg,
@@ -670,7 +666,7 @@ pub(crate) fn build_registry_for_with_api_key(
             .models
             .first()
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| spec.model.clone());
+            .unwrap_or_default();
         if model_id.is_empty() {
             return Err(Error::InvalidArgs(format!(
                 "--provider '{selected}' is a single-model alias but the section has \

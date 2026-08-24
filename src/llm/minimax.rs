@@ -56,11 +56,10 @@ impl MinimaxProvider {
     /// [`Self::from_resolved`].
     ///
     /// When `spec.models` is empty (the v0.9 fixture shape) the
-    /// legacy fields `model`, `endpoint` / `endpoint_new`, and
-    /// `max_tokens` are synthesised into a single `ModelConfig`
-    /// so the rest of the constructor (URL builder, clamp chain,
-    /// `max_tokens_table` lookup by `(name, model)`) sees the same
-    /// shape the v0.10 dispatcher passes in.
+    /// section-level `endpoint` is reused for a synthetic
+    /// `ModelConfig` so the rest of the constructor (URL builder,
+    /// clamp chain, `max_tokens_table` lookup by `(name, model)`)
+    /// sees the same shape the v0.10 dispatcher passes in.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
         let client = build_client()?;
         let first = spec
@@ -68,15 +67,9 @@ impl MinimaxProvider {
             .first()
             .cloned()
             .unwrap_or_else(|| crate::config::ModelConfig {
-                id: spec.model.clone(),
-                endpoint: spec.endpoint_new.clone().or_else(|| {
-                    if spec.endpoint.is_empty() {
-                        None
-                    } else {
-                        Some(spec.endpoint.clone())
-                    }
-                }),
-                max_tokens: spec.max_tokens,
+                id: "MiniMax-M3".to_owned(),
+                endpoint: spec.endpoint.clone(),
+                max_tokens: None,
             });
         Ok(Self {
             name: "minimax".to_owned(),
@@ -84,13 +77,6 @@ impl MinimaxProvider {
             endpoint: first
                 .endpoint
                 .clone()
-                .or_else(|| {
-                    if spec.endpoint.is_empty() {
-                        None
-                    } else {
-                        Some(spec.endpoint.clone())
-                    }
-                })
                 .unwrap_or_else(|| "https://api.minimax.io/anthropic/v1/messages".to_owned()),
             api_key,
             client,
@@ -453,15 +439,10 @@ mod tests {
     fn messages_url_handles_known_suffixes() {
         let p = MinimaxProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -480,15 +461,10 @@ mod tests {
     fn messages_url_handles_anthropic_suffix() {
         let p = MinimaxProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic".into(),
-                model: "MiniMax-M3".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -509,15 +485,10 @@ mod tests {
             std::env::remove_var("MINIMAX_API_KEY");
         }
         let cfg = ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "minimax".into(),
-            endpoint: "https://api.minimax.io/anthropic/v1".into(),
-            model: "MiniMax-M3".into(),
-            max_tokens: None,
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -530,15 +501,10 @@ mod tests {
     fn test_provider(endpoint: String) -> MinimaxProvider {
         MinimaxProvider::new(
             &ProviderConfig {
+                endpoint: Some(endpoint),
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint,
-                model: "MiniMax-M3".into(),
-                max_tokens: Some(16),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -552,8 +518,8 @@ mod tests {
 
     fn test_request() -> Request {
         Request {
-            role: crate::llm::role::Role::Intake,
             model: "MiniMax-M3".into(),
+            role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "test".into(),
             max_tokens: 16,
@@ -662,15 +628,14 @@ mod tests {
         ];
         for model in canonical {
             let cfg = ProviderConfig {
-                models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: model.into(),
-                max_tokens: None,
+                models: vec![crate::config::ModelConfig {
+                    id: model.into(),
+                    endpoint: None,
+                    max_tokens: None,
+                }],
+                endpoint: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -729,14 +694,9 @@ mod tests {
         let provider = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: server.uri(),
-                model: "MiniMax-M3".into(),
-                max_tokens: None,
+                endpoint: Some(server.uri()),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -746,8 +706,8 @@ mod tests {
         )
         .expect("MinimaxProvider::new should accept the mock endpoint");
         let req = Request {
-            role: crate::llm::role::Role::Intake,
             model: "MiniMax-M3".into(),
+            role: crate::llm::role::Role::Intake,
             system: "you are minimax".into(),
             user: "hello upstream".into(),
             max_tokens: 32,
@@ -842,15 +802,14 @@ mod tests {
 
         let provider = MinimaxProvider::new(
             &ProviderConfig {
-                models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: server.uri(),
-                model: "MiniMax-M3".into(),
-                max_tokens: Some(8192),
+                models: vec![crate::config::ModelConfig {
+                    id: "MiniMax-M3".into(),
+                    endpoint: None,
+                    max_tokens: Some(8192),
+                }],
+                endpoint: Some(server.uri()),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -861,8 +820,8 @@ mod tests {
         .expect("MinimaxProvider::new should accept the cap");
 
         let req = Request {
-            role: crate::llm::role::Role::Intake,
             model: "MiniMax-M3".into(),
+            role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "hello".into(),
             max_tokens: 1_000_000,
@@ -935,15 +894,10 @@ mod tests {
         let provider = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: server.uri(),
-                model: "MiniMax-M3".into(),
+                endpoint: Some(server.uri()),
                 // Deliberately above the upstream ceiling.
-                max_tokens: Some(2_000_000),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -954,8 +908,8 @@ mod tests {
         .expect("MinimaxProvider::new should accept the oversized cap");
 
         let req = Request {
-            role: crate::llm::role::Role::Intake,
             model: "MiniMax-M3".into(),
+            role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "hello".into(),
             max_tokens: 1_000_000,
@@ -1059,14 +1013,9 @@ mod tests {
         let provider = MinimaxProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: server.uri(),
-                model: "MiniMax-M3".into(),
-                max_tokens: None,
+                endpoint: Some(server.uri()),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 plan: None,
                 max_token_auto: None,
@@ -1078,8 +1027,8 @@ mod tests {
         .with_max_tokens_table(table);
 
         let req = Request {
-            role: crate::llm::role::Role::Intake,
             model: "MiniMax-M3".into(),
+            role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "hello".into(),
             max_tokens: 1_000_000,
@@ -1134,15 +1083,10 @@ mod tests {
         // the proxy sees `max_tokens = 524_288`.
         let p = MinimaxProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1173,15 +1117,10 @@ mod tests {
         // Operator override wins over the requested value.
         let p_op = MinimaxProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
-                max_tokens: Some(8_192),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1204,15 +1143,10 @@ mod tests {
         // `max_tokens > 524_288` with HTTP 400).
         let p_above = MinimaxProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
-                max_tokens: Some(2_000_000),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1261,15 +1195,10 @@ mod tests {
             .expect("probe_and_store");
         let p_table = MinimaxProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "minimax".into(),
-                endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                model: "MiniMax-M3".into(),
-                max_tokens: Some(2_000_000),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,

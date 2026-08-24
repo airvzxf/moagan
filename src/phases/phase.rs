@@ -3273,12 +3273,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
                 temperature: Some(0.42),
                 top_p: Some(0.5),
                 ..ProviderConfig::default()
@@ -3353,12 +3349,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
                 temperature: None,
                 top_p: None,
                 ..ProviderConfig::default()
@@ -3439,12 +3431,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
                 temperature: Some(0.99),
                 top_p: Some(0.5),
                 ..ProviderConfig::default()
@@ -3715,12 +3703,8 @@ mod tests {
         cfg.providers.insert(
             "recording".to_owned(),
             ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "mock".to_owned(),
-                endpoint: "mock://recording".to_owned(),
-                model: "recording-model".to_owned(),
-                max_tokens: Some(1024),
                 temperature: None,
                 top_p: None,
                 ..ProviderConfig::default()

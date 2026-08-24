@@ -631,9 +631,10 @@ fn build_provider_for_probe(
     use crate::llm::wire_format::wire_format_from_url;
     // v0.10: build a `ResolvedModelConfig` from the spec + the
     // operator-supplied model id, then pick the concrete provider
-    // by wire format (URL path). The `deepseek` section is the
-    // only one that needs a per-section wrapper so its
-    // `kind_hard_cap` stays in place.
+    // by wire format (URL path). Two sections need a per-section
+    // wrapper so their kind-level cap stays in place:
+    // `minimax` (`MINIMAX_MAX_TOKENS_CAP`) and `deepseek`
+    // (`DEEPSEEK_MAX_TOKENS_CAP`).
     let model_cfg = spec
         .models
         .iter()
@@ -641,20 +642,13 @@ fn build_provider_for_probe(
         .cloned()
         .ok_or_else(|| {
             Error::InvalidArgs(format!(
-                "probe: provider '{}' has no model '{model_id}'",
-                spec.endpoint_str()
+                "probe: provider '{model_id}' is not in this section's models[]"
             ))
         })?;
     let endpoint = model_cfg
         .endpoint
         .clone()
-        .or_else(|| {
-            if spec.endpoint.is_empty() {
-                None
-            } else {
-                Some(spec.endpoint.clone())
-            }
-        })
+        .or_else(|| spec.endpoint.clone())
         .ok_or_else(|| {
             Error::InvalidArgs(format!(
                 "probe: provider '{model_id}' has no endpoint configured"
@@ -662,7 +656,7 @@ fn build_provider_for_probe(
         })?;
     let wire_format = wire_format_from_url(&endpoint)?;
     let resolved = crate::config::ResolvedModelConfig {
-        section: spec.endpoint_str().to_owned(),
+        section: model_id.to_owned(),
         id: model_id.to_owned(),
         endpoint: endpoint.clone(),
         max_tokens: model_cfg.max_tokens,
@@ -670,10 +664,13 @@ fn build_provider_for_probe(
         top_p: spec.top_p,
         wire_format,
         omit_max_tokens: spec.omit_max_tokens,
-        kind: spec.kind.clone(),
     };
-    let provider: Arc<dyn Provider> = if spec.endpoint_str() == "deepseek" {
+    let provider: Arc<dyn Provider> = if model_id == "deepseek" || endpoint.contains("deepseek") {
         Arc::new(crate::llm::deepseek::DeepSeekProvider::from_resolved(
+            &resolved,
+        )?)
+    } else if model_id == "minimax" || endpoint.contains("minimax") {
+        Arc::new(crate::llm::minimax::MinimaxProvider::from_resolved(
             &resolved,
         )?)
     } else {

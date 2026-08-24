@@ -144,15 +144,10 @@ fn build_context(
     cfg.providers.insert(
         "recording".to_owned(),
         ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "mock".to_owned(),
-            endpoint: "mock://recording".to_owned(),
-            model: "recording-model".to_owned(),
-            max_tokens: Some(1024),
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,

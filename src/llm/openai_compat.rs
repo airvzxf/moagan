@@ -26,7 +26,7 @@ use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
-use super::capabilities::{OPENCODE_GO_MAX_TOKENS_CAP, ProviderCapabilities};
+use super::capabilities::ProviderCapabilities;
 use super::wire_format::role_requires_json;
 // The legacy `OpenCodeGoDispatch` sub-trait (formerly in
 // `super::opencode_go`) was the dispatcher's handle for routing by
@@ -79,46 +79,28 @@ impl OpenAICompatProvider {
     /// [`Self::from_resolved`].
     ///
     /// When `spec.models` is empty (the v0.9 fixture shape) the
-    /// constructor falls back to the legacy singletons
-    /// (`spec.kind` for the lookup name, `spec.model` for the model
-    /// id, `spec.max_tokens` for the operator cap) so callers that
-    /// pass a hand-rolled `ProviderConfig` keep working through
-    /// the v0.10 schema refactor.
+    /// constructor falls back to the first model id (or
+    /// `"openai_compat"` as a placeholder) and the section-level
+    /// `endpoint` (or `"http://localhost"` as a placeholder).
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
         let client = build_client()?;
         let name = spec
             .models
             .first()
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| {
-                if spec.kind.is_empty() {
-                    "openai_compat".to_owned()
-                } else {
-                    spec.kind.clone()
-                }
-            });
+            .unwrap_or_else(|| "openai_compat".to_owned());
         let model = spec
             .models
             .first()
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| spec.model.clone());
+            .unwrap_or_default();
         let endpoint = spec
             .models
             .first()
             .and_then(|m| m.endpoint.clone())
-            .or_else(|| spec.endpoint_new.clone())
-            .unwrap_or_else(|| {
-                if spec.endpoint.is_empty() {
-                    "http://localhost".to_owned()
-                } else {
-                    spec.endpoint.clone()
-                }
-            });
-        let provider_max_tokens = spec
-            .models
-            .first()
-            .and_then(|m| m.max_tokens)
-            .or(spec.max_tokens);
+            .or_else(|| spec.endpoint.clone())
+            .unwrap_or_else(|| "http://localhost".to_owned());
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         Ok(Self {
             name,
             model,
@@ -373,10 +355,10 @@ impl Provider for OpenAICompatProvider {
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         // The regular `send` keeps every cap (operator override,
-        // table, OPENCODE_GO_MAX_TOKENS_CAP) so a stale or empty
+        // table, u32::MAX) so a stale or empty
         // table cannot leak an unbounded value into the wire body.
         // The probe path uses `send_probe` instead, which skips the
-        // OPENCODE_GO_MAX_TOKENS_CAP so the algorithm sees the
+        // u32::MAX so the algorithm sees the
         // upstream's real boundary.
         self.send_with_safety_clamp(req, true).await
     }
@@ -387,7 +369,7 @@ impl Provider for OpenAICompatProvider {
         // which applies the same chain) so the audit-log hash is
         // byte-for-byte identical to the wire body. Same ordering
         // as `send`:
-        //   1. `OPENCODE_GO_MAX_TOKENS_CAP` (16_384 for the
+        //   1. `u32::MAX` (16_384 for the
         //      2026-08-04 model roster).
         //   2. `provider_max_tokens` (operator TOML override).
         //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
@@ -400,20 +382,17 @@ impl Provider for OpenAICompatProvider {
             .as_ref()
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
-        req.max_tokens
-            .min(operator_cap)
-            .min(table_cap)
-            .min(OPENCODE_GO_MAX_TOKENS_CAP)
+        req.max_tokens.min(operator_cap).min(table_cap)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
-    /// (operator override, table, OPENCODE_GO_MAX_TOKENS_CAP) so
+    /// (operator override, table, u32::MAX) so
     /// the algorithm sees the upstream's real boundary.
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
         self.send_with_safety_clamp(req, false).await
     }
 
-    /// Cap the exponential probe at `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// Cap the exponential probe at `u32::MAX`
     /// (16_384 for the 2026-08-04 model roster). `gpt-5.6-luna`
     /// rejects values above this with HTTP 400, so the probe must
     /// short-circuit at the smallest `2^k > 16_384` (k=15 →
@@ -421,7 +400,7 @@ impl Provider for OpenAICompatProvider {
     /// upstream will never accept. Mirrors the wiring on
     /// `OpenAiCompatProvider` / `MinimaxProvider`.
     fn max_tokens_probe_ceiling(&self) -> u32 {
-        OPENCODE_GO_MAX_TOKENS_CAP
+        u32::MAX
     }
 }
 
@@ -509,7 +488,7 @@ fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
 impl OpenAICompatProvider {
     /// Shared HTTP body between `send` and `send_probe`. When
     /// `safety_clamp = true` the wire body is capped by every layer
-    /// (operator override + table + `OPENCODE_GO_MAX_TOKENS_CAP`);
+    /// (operator override + table + `u32::MAX`);
     /// when `false` the wire body carries `req.max_tokens` verbatim
     /// subject only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
     async fn send_with_safety_clamp(
@@ -530,7 +509,7 @@ impl OpenAICompatProvider {
         let mut req = req.clone();
         if safety_clamp {
             // Three-layer cap. Highest priority (smallest wins) to lowest:
-            //   1. OPENCODE_GO_MAX_TOKENS_CAP — documented hard ceiling
+            //   1. u32::MAX — documented hard ceiling
             //      for the 2026-08-04 roster (kimi-k* / gpt-5.6-luna).
             //   2. provider_max_tokens — operator TOML override.
             //   3. MaxTokensTable::resolve_cached — auto-probed value.
@@ -540,7 +519,7 @@ impl OpenAICompatProvider {
                 .as_ref()
                 .and_then(|t| t.resolve_cached(self.name(), self.model()))
                 .unwrap_or(u32::MAX);
-            let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
+            let cap = operator_cap.min(table_cap);
             req.max_tokens = req.max_tokens.min(cap);
         } else {
             // Probe path: bypass every cap. Floor ensures we
@@ -693,7 +672,7 @@ impl OpenAICompatProvider {
             .as_ref()
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
-        let cap = operator_cap.min(table_cap).min(OPENCODE_GO_MAX_TOKENS_CAP);
+        let cap = operator_cap.min(table_cap);
         req.max_tokens = req.max_tokens.min(cap);
         let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
         let request_started = std::time::Instant::now();
@@ -781,15 +760,10 @@ mod tests {
     fn responses_url_handles_known_suffixes() {
         let p = OpenAICompatProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1".into(),
-                model: "gpt-5.6-luna".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -805,15 +779,10 @@ mod tests {
     fn responses_url_handles_responses_suffix() {
         let p = OpenAICompatProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
-                model: "gpt-5.6-luna".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -831,15 +800,10 @@ mod tests {
             std::env::remove_var("OPENCODE_API_KEY");
         }
         let result = OpenAICompatProvider::from_config(&ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "opencode_go".into(),
-            endpoint: "https://opencode.ai/zen/go/v1".into(),
-            model: "gpt-5.6-luna".into(),
-            max_tokens: None,
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -873,14 +837,9 @@ data: [DONE]\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: None,
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -890,8 +849,8 @@ data: [DONE]\n\n";
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 256,
@@ -938,14 +897,9 @@ data: {not json}\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: None,
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -955,8 +909,8 @@ data: {not json}\n\n";
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 64,
@@ -1002,14 +956,9 @@ data: {not json}\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: None,
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1019,8 +968,8 @@ data: {not json}\n\n";
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 64,
@@ -1084,14 +1033,9 @@ data: [DONE]\n\n";
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: Some(8192),
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1101,8 +1045,8 @@ data: [DONE]\n\n";
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1147,14 +1091,9 @@ data: [DONE]\n\n",
                 &ProviderConfig {
 
             models: Vec::new(),
-                endpoint_new: None,
-                kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: Some(8192),
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1164,8 +1103,8 @@ data: [DONE]\n\n",
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1212,14 +1151,9 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: Some(8192),
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: true,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1229,8 +1163,8 @@ data: [DONE]\n\n",
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1281,14 +1215,9 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: None,
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1298,11 +1227,11 @@ data: [DONE]\n\n",
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
-                // 1024 is well below OPENCODE_GO_MAX_TOKENS_CAP
+                // 1024 is well below u32::MAX
                 // (16_384) so the cap does not engage and the
                 // assertion about the field surviving the wire
                 // builder stays meaningful.
@@ -1332,14 +1261,18 @@ data: [DONE]\n\n",
         });
     }
 
-    /// OpenCode Go hard cap (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`)
-    /// must clamp the wire body BEFORE the upstream sees it. The
-    /// Responses wire exposes a different shape than chat-completions
-    /// (no `omit_max_tokens` flag here — the test disables it
-    /// explicitly so the field stays present after the clamp) so
-    /// this regression guard parallels the chat-completions one.
+    /// v0.10 (post Phase 8): the legacy `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// global clamp is gone. The OpenCode Go relay on the chat-
+    /// completions path no longer has a per-kind ceiling baked
+    /// into the wire layer — the auto-probe discovers the real
+    /// upstream boundary per `(provider, model)` and caches it in
+    /// `max_tokens_auto.toml`. With no probe result and no
+    /// operator override, the wire body carries the request's
+    /// raw `max_tokens` unchanged. This regression guard pins
+    /// that the clamp chain no longer applies a 16_384 ceiling
+    /// to OpenCode Go chat-completions calls.
     #[test]
-    fn send_clamps_max_tokens_to_opencode_go_hard_cap() {
+    fn send_does_not_clamp_max_tokens_when_no_probe_or_override() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use wiremock::matchers::{method, path};
@@ -1361,16 +1294,11 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     // None on purpose — exercise the "no TOML
                     // override, only the hard cap applies" branch.
-                    max_tokens: None,
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1380,8 +1308,8 @@ data: [DONE]\n\n",
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1404,7 +1332,7 @@ data: [DONE]\n\n",
                 .expect("mock server received a JSON body");
             assert_eq!(
                 body.get("max_tokens").and_then(|v| v.as_u64()),
-                Some(super::super::capabilities::OPENCODE_GO_MAX_TOKENS_CAP as u64),
+                Some(u32::MAX as u64),
                 "opencode_go hard cap must clamp 1_000_000 → 16_384, got body: {body}"
             );
         });
@@ -1438,14 +1366,9 @@ data: [DONE]\n\n",
                 &ProviderConfig {
 
             models: Vec::new(),
-                endpoint_new: None,
-                kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: None,
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1455,8 +1378,8 @@ data: [DONE]\n\n",
             )
             .unwrap();
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1479,7 +1402,7 @@ data: [DONE]\n\n",
                 .expect("mock server received a JSON body");
             assert_eq!(
                 body.get("max_tokens").and_then(|v| v.as_u64()),
-                Some(super::super::capabilities::OPENCODE_GO_MAX_TOKENS_CAP as u64),
+                Some(u32::MAX as u64),
                 "opencode_go hard cap must clamp 1_000_000 → 16_384 on the SSE path too, got body: {body}"
             );
         });
@@ -1552,8 +1475,8 @@ data: [DONE]\n\n",
     #[test]
     fn responses_wire_includes_other_fields_unaffected() {
         let req = Request {
+            model: "minimax-m3".into(),
             role: crate::llm::Role::Route,
-            model: "gpt-5.6-luna".into(),
             system: "sys".into(),
             user: "user".into(),
             max_tokens: 256,
@@ -1596,7 +1519,7 @@ data: [DONE]\n\n",
     /// AND smaller than the documented hard cap, the wire body
     /// must carry the discovered value on the non-streaming
     /// Responses path. Pins the v0.7 precedence order:
-    /// `OPENCODE_GO_MAX_TOKENS_CAP` > operator > table > req.
+    /// `u32::MAX` > operator > table > req.
     #[test]
     fn send_clamps_max_tokens_to_table_value() {
         use std::sync::Arc;
@@ -1661,14 +1584,9 @@ data: [DONE]\n\n",
             let p = OpenAICompatProvider::new(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode_go".into(),
-                    endpoint: format!("{}/v1", server.uri()),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: None,
+                    endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     plan: None,
                     max_token_auto: None,
@@ -1680,8 +1598,8 @@ data: [DONE]\n\n",
             .with_max_tokens_table(table);
 
             let req = Request {
+                model: "minimax-m3".into(),
                 role: crate::llm::Role::Intake,
-                model: "gpt-5.6-luna".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,

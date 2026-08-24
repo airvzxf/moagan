@@ -125,7 +125,7 @@ pub trait Provider: Send + Sync {
     /// the auto-probe to discover the upstream's actual
     /// `max_tokens` boundary. Default impl just calls [`Self::send`];
     /// providers that carry a wire-side ceiling (the
-    /// `MINIMAX_MAX_TOKENS_CAP` and `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// `MINIMAX_MAX_TOKENS_CAP` and `u32::MAX`
     /// clamps in `capabilities.rs`) override to skip the clamp so the
     /// probe can see the real upstream behaviour.
     async fn send_probe(&self, req: &Request) -> Result<(u16, Response)> {
@@ -953,7 +953,7 @@ impl Provider for BreakeredProvider {
     /// Delegate to the inner provider so the wrapper is transparent
     /// and the probe observes the inner provider's per-kind ceiling
     /// (e.g. `DEEPSEEK_MAX_TOKENS_CAP` on the direct DeepSeek
-    /// provider, `OPENCODE_GO_MAX_TOKENS_CAP` on OpenCode Go
+    /// provider, `u32::MAX` on OpenCode Go
     /// chat-completions, `MINIMAX_MAX_TOKENS_CAP` on minimax).
     /// Without this delegation the wrapper would inherit the trait
     /// default (`MAX_AUTOPROBE_CEILING` ≈ 1.07G) and the probe
@@ -1130,10 +1130,10 @@ pub fn registry_from_config_with_home_and_sink(
         // pool can group identical `Provider::name()` entries.
         let is_mock = section_name == "mock"
             || spec
-                .endpoint_new
+                .endpoint
                 .as_deref()
                 .is_some_and(|e| e.starts_with("mock://"))
-            || spec.endpoint_new.is_none() && section_name.starts_with("mock");
+            || spec.endpoint.is_none() && section_name.starts_with("mock");
         if is_mock {
             let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
                 // Backwards-compat: synthesize one entry from the
@@ -1142,7 +1142,7 @@ pub fn registry_from_config_with_home_and_sink(
                 // legacy / hand-rolled callers.
                 vec![crate::config::ModelConfig {
                     id: section_name.clone(),
-                    endpoint: spec.endpoint_new.clone(),
+                    endpoint: spec.endpoint.clone(),
                     max_tokens: None,
                 }]
             } else {
@@ -1172,13 +1172,18 @@ pub fn registry_from_config_with_home_and_sink(
         // Every non-mock section produces one `Provider` per
         // `models[]` entry. The wire format comes from the URL
         // path; the section name (and only the section name)
-        // drives API-key lookup. DeepSeek-direct keeps the
-        // per-section wrapper so its `DEEPSEEK_MAX_TOKENS_CAP`
-        // kind-level cap stays in place.
+        // drives API-key lookup. Two providers keep their
+        // per-section wrapper so the kind-level cap stays in
+        // place:
+        //
+        // * `minimax` → `MinimaxProvider` (clamps at
+        //   `MINIMAX_MAX_TOKENS_CAP`).
+        // * `deepseek` → `DeepSeekProvider` (clamps at
+        //   `DEEPSEEK_MAX_TOKENS_CAP`).
         let models: Vec<crate::config::ModelConfig> = if spec.models.is_empty() {
             vec![crate::config::ModelConfig {
                 id: section_name.clone(),
-                endpoint: spec.endpoint_new.clone(),
+                endpoint: spec.endpoint.clone(),
                 max_tokens: None,
             }]
         } else {
@@ -1189,14 +1194,7 @@ pub fn registry_from_config_with_home_and_sink(
             let endpoint = model_cfg
                 .endpoint
                 .clone()
-                .or_else(|| spec.endpoint_new.clone())
-                .or_else(|| {
-                    if spec.endpoint.is_empty() {
-                        None
-                    } else {
-                        Some(spec.endpoint.clone())
-                    }
-                })
+                .or_else(|| spec.endpoint.clone())
                 .ok_or_else(|| {
                     crate::Error::InvalidArgs(format!(
                         "provider '{section_name}' model '{}' has no endpoint \
@@ -1214,11 +1212,12 @@ pub fn registry_from_config_with_home_and_sink(
                 top_p: spec.top_p,
                 wire_format,
                 omit_max_tokens: spec.omit_max_tokens,
-                kind: spec.kind.clone(),
             };
 
             let provider: Arc<dyn Provider> = if section_name == "deepseek" {
                 Arc::new(super::deepseek::DeepSeekProvider::from_resolved(&resolved)?)
+            } else if section_name == "minimax" {
+                Arc::new(super::minimax::MinimaxProvider::from_resolved(&resolved)?)
             } else {
                 match wire_format {
                     super::wire_format::WireFormatId::Anthropic => {
@@ -1435,7 +1434,7 @@ fn spawn_pending_probes(
         // upstream's hard cap. DeepSeek-direct caps at 393_216
         // (DEEPSEEK_MAX_TOKENS_CAP), MiniMax at 524_288
         // (MINIMAX_MAX_TOKENS_CAP), OpenCode Go at 16_384
-        // (OPENCODE_GO_MAX_TOKENS_CAP); providers without a
+        // (u32::MAX); providers without a
         // documented ceiling inherit the trait default
         // (≈ 1.07G). Without this query the algorithm would burn
         // 30 sequential HTTP round-trips probing values the
@@ -1671,26 +1670,21 @@ mod tests {
         cfg.insert(
             "mock".into(),
             crate::config::ProviderConfig {
+                endpoint: None,
                 models: vec![
                     crate::config::ModelConfig {
+                        max_tokens: None,
                         id: "mock-a".into(),
                         endpoint: None,
-                        max_tokens: None,
                     },
                     crate::config::ModelConfig {
+                        max_tokens: None,
                         id: "mock-b".into(),
                         endpoint: None,
-                        max_tokens: None,
                     },
                 ],
-                endpoint_new: None,
-                kind: "mock".into(),
-                endpoint: "mock://local".into(),
-                model: "mock-model".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1726,15 +1720,10 @@ mod tests {
         cfg.insert(
             "mock".into(),
             crate::config::ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "mock".into(),
-                endpoint: "mock://local".into(),
-                model: "mock-model".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1821,29 +1810,24 @@ mod tests {
     /// controls which models route through OpenCode by choosing
     /// what to put in their `config.toml`. The dispatcher no
     /// longer refuses any alias. Verify the registry accepts the
-    /// formerly-blocked `minimax-m3` alias without complaint.
+    /// formerly-blocked `minimax-m3` model id without complaint.
     #[tokio::test]
     async fn registry_from_config_accepts_minimax_m3_no_blocked_gate() {
         unsafe {
-            std::env::set_var("OPENCODE_API_KEY", "dummy-for-test");
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
         }
         let mut cfg = std::collections::BTreeMap::new();
         cfg.insert(
-            "minimax-m3".into(),
+            "minimax".into(),
             crate::config::ProviderConfig {
                 models: vec![crate::config::ModelConfig {
+                    max_tokens: None,
                     id: "minimax-m3".into(),
-                    endpoint: Some("https://opencode.ai/zen/go/v1/messages".to_owned()),
-                    max_tokens: Some(8192),
+                    endpoint: None,
                 }],
-                endpoint_new: Some("https://opencode.ai/zen/go/v1/messages".to_owned()),
-                kind: "opencode".into(),
-                endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
-                model: "minimax-m3".into(),
-                max_tokens: Some(8192),
+                endpoint: Some("https://api.minimax.io/anthropic/v1/messages".to_owned()),
                 temperature: Some(0.6),
                 top_p: Some(0.95),
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1852,18 +1836,19 @@ mod tests {
         );
         let registry = registry_from_config(&cfg, &CircuitBreakerConfig::default());
         unsafe {
-            std::env::remove_var("OPENCODE_API_KEY");
+            std::env::remove_var("MINIMAX_API_KEY");
         }
         // v0.10: the registry builds without rejecting any alias.
-        // The minimax-m3 entry routes through AnthropicCompatProvider
-        // (URL ends in /messages) and lands under the section name
-        // "minimax-m3" (because the section name == model id, the
-        // registry_key collapses to the section name).
+        // The minimax-m3 entry routes through MinimaxProvider (per-
+        // section wrapper, section name == "minimax") and lands
+        // under the joined key "minimax::minimax-m3" so the test
+        // can pin the canonical (section, model_id) pair.
         let registry = registry.expect("registry must build without the BLOCKED_MODELS gate");
+        let key = crate::llm::provider::ProviderRegistry::registry_key("minimax", "minimax-m3");
         let provider = registry
-            .get("minimax-m3")
-            .expect("minimax-m3 entry must be present");
-        assert_eq!(provider.name(), "minimax-m3");
+            .get(&key)
+            .expect("minimax::minimax-m3 entry must be present");
+        assert_eq!(provider.name(), "minimax");
         assert_eq!(provider.model(), "minimax-m3");
     }
 
@@ -1917,8 +1902,8 @@ mod tests {
 
     fn breaker_request() -> Request {
         Request {
+            model: "MiniMax-M3".into(),
             role: Role::Intake,
-            model: "error-model".into(),
             system: String::new(),
             user: String::new(),
             max_tokens: 16,
@@ -1997,15 +1982,10 @@ mod tests {
         // per-provider breaker stays at zero; the per-(provider,
         // role) breaker is what would trip.
         let spec = ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "minimax".into(),
-            endpoint: "http://127.0.0.1:1".into(),
-            model: "MiniMax-M3".into(),
-            max_tokens: Some(16),
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -2027,8 +2007,8 @@ mod tests {
 
     fn sample_request() -> Request {
         Request {
+            model: "MiniMax-M3".into(),
             role: Role::Intake,
-            model: "mock-model".into(),
             system: "sys".into(),
             user: "user".into(),
             max_tokens: 16,
@@ -2235,15 +2215,10 @@ mod tests {
     #[test]
     fn provider_capabilities_for_each_provider() {
         let cfg = crate::config::ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "minimax".into(),
-            endpoint: "https://api.minimax.io/anthropic/v1".into(),
-            model: "MiniMax-M3".into(),
-            max_tokens: None,
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -2257,15 +2232,10 @@ mod tests {
         assert!(!cap.supports_response_format);
 
         let cfg_d = crate::config::ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            kind: "deepseek".into(),
-            endpoint: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-v4-flash".into(),
-            max_tokens: Some(8192),
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -2276,19 +2246,18 @@ mod tests {
                 .unwrap();
         let cap = deepseek.capabilities();
         assert!(cap.prefers_openai_wire, "deepseek must prefer openai");
-        assert_eq!(cap.wire_format_id(), "openai");
+        assert_eq!(cap.wire_format_id(), "openai_compatible");
         assert!(cap.supports_response_format);
 
         let cfg_oc = crate::config::ProviderConfig {
-            models: Vec::new(),
-            endpoint_new: None,
-            kind: "opencode".into(),
-            endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
-            model: "qwen3.7-max".into(), // Anthropic-compat path
-            max_tokens: None,
+            models: vec![crate::config::ModelConfig {
+                id: "qwen3.7-max".into(), // Anthropic-compat path
+                endpoint: None,
+                max_tokens: None,
+            }],
+            endpoint: None,
             temperature: None,
             top_p: None,
-            hard_incompatibilities: vec![],
             omit_max_tokens: false,
             max_token_auto: None,
             max_token_auto_save: true,
@@ -2300,10 +2269,8 @@ mod tests {
         assert_eq!(oc_a.capabilities().wire_format_id(), "anthropic");
 
         let cfg_ocr = crate::config::ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            model: "gpt-5.6-luna".into(),
-            endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
         };
         let oc_r =
@@ -2312,10 +2279,8 @@ mod tests {
         assert_eq!(oc_r.capabilities().wire_format_id(), "responses");
 
         let cfg_occ = crate::config::ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            model: "kimi-k2.7-code".into(),
-            endpoint: "https://opencode.ai/zen/go/v1/chat/completions".into(),
             ..cfg_oc.clone()
         };
         let oc = OpenAICompatibleProvider::new(
@@ -2324,12 +2289,11 @@ mod tests {
         )
         .unwrap();
         // Chat-completions OpenAI-compat inner reports `"openai"`.
-        assert_eq!(oc.capabilities().wire_format_id(), "openai");
+        assert_eq!(oc.capabilities().wire_format_id(), "openai_compatible");
 
         let cfg_dispatcher = crate::config::ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            model: "qwen3.7-max".into(),
             ..cfg_oc.clone()
         };
         let oc_d_anthropic = AnthropicCompatProvider::new(
@@ -2341,10 +2305,8 @@ mod tests {
         assert_eq!(oc_d_anthropic.capabilities().wire_format_id(), "anthropic");
 
         let cfg_dispatcher_r = crate::config::ProviderConfig {
+            endpoint: None,
             models: Vec::new(),
-            endpoint_new: None,
-            model: "gpt-5.6-luna".into(),
-            endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
         };
         let oc_d_responses = OpenAICompatProvider::new(
@@ -2356,7 +2318,7 @@ mod tests {
         assert_eq!(oc_d_responses.capabilities().wire_format_id(), "responses");
 
         let mock_cap = MockProvider::empty().capabilities();
-        assert_eq!(mock_cap.wire_format_id(), "openai");
+        assert_eq!(mock_cap.wire_format_id(), "openai_compatible");
         assert!(mock_cap.supports_streaming);
         assert!(mock_cap.supports_tools);
     }
@@ -2371,15 +2333,10 @@ mod tests {
         let inner_oai: Arc<dyn Provider> = Arc::new(
             OpenAICompatibleProvider::new(
                 &crate::config::ProviderConfig {
+                    endpoint: None,
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "deepseek".into(),
-                    endpoint: "https://api.deepseek.com/v1".into(),
-                    model: "deepseek-v4-flash".into(),
-                    max_tokens: None,
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -2390,23 +2347,18 @@ mod tests {
             .unwrap(),
         );
         let wrapped = BreakeredProvider::new(inner_oai, Arc::new(CircuitBreaker::default()));
-        assert_eq!(wrapped.capabilities().wire_format_id(), "openai");
-        assert_eq!(wrapped.wire_format_id(), "openai");
+        assert_eq!(wrapped.capabilities().wire_format_id(), "openai_compatible");
+        assert_eq!(wrapped.wire_format_id(), "openai_compatible");
         assert!(wrapped.capabilities().supports_response_format);
 
         // Anthropic inner: dispatcher flips to the Anthropic wire.
         let inner_anth: Arc<dyn Provider> = Arc::new(
             MinimaxProvider::new(
                 &crate::config::ProviderConfig {
+                    endpoint: None,
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "minimax".into(),
-                    endpoint: "https://api.minimax.io/anthropic/v1".into(),
-                    model: "MiniMax-M3".into(),
-                    max_tokens: None,
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -2425,15 +2377,10 @@ mod tests {
         let inner_resp: Arc<dyn Provider> = Arc::new(
             OpenAICompatProvider::new(
                 &crate::config::ProviderConfig {
+                    endpoint: None,
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "opencode".into(),
-                    endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
-                    model: "gpt-5.6-luna".into(),
-                    max_tokens: None,
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -2457,8 +2404,8 @@ mod tests {
         use crate::llm::wire_format::{AnthropicWire, WireFormat};
 
         let req = Request {
+            model: "MiniMax-M3".into(),
             role: Role::Intake,
-            model: "qwen3.7-max".into(),
             system: "sys".into(),
             user: "u".into(),
             max_tokens: 64,
@@ -2496,8 +2443,8 @@ mod tests {
         use crate::llm::wire_format::{ResponsesWire, WireFormat};
 
         let req = Request {
+            model: "MiniMax-M3".into(),
             role: Role::Intake,
-            model: "gpt-5.6-luna".into(),
             system: "instructions".into(),
             user: "the user prompt".into(),
             max_tokens: 32,
@@ -2672,19 +2619,14 @@ mod tests {
         cfg.insert(
             "mock".into(),
             ProviderConfig {
+                endpoint: None,
                 models: vec![crate::config::ModelConfig {
+                    max_tokens: None,
                     id: "mock-model".into(),
                     endpoint: None,
-                    max_tokens: None,
                 }],
-                endpoint_new: None,
-                kind: "mock".into(),
-                endpoint: "mock://local".into(),
-                model: "mock-model".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto,
                 max_token_auto_save: true,

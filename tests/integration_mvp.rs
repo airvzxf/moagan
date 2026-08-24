@@ -385,7 +385,12 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
     );
     let providers = Arc::new(reg);
     let config = Config::load()?;
-    let default_model = config.provider("mock")?.model.clone();
+    let default_model = config
+        .provider("mock")?
+        .models
+        .first()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
     let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
@@ -461,7 +466,12 @@ fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
     );
     let providers = Arc::new(reg);
     let config = Config::load()?;
-    let default_model = config.provider("mock")?.model.clone();
+    let default_model = config
+        .provider("mock")?
+        .models
+        .first()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
     let db = moagan::storage::sqlite::Db::open(&home.meta_db_path())?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
@@ -1521,14 +1531,9 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
             endpoint: None,
             max_tokens: None,
         }],
-        endpoint_new: None,
-        kind: "minimax".into(),
-        endpoint: format!("{}/anthropic/v1", server.uri()),
-        model: "MiniMax-M3".into(),
-        max_tokens: None,
+        endpoint: Some(format!("{}/anthropic/v1", server.uri())),
         temperature: None,
         top_p: None,
-        hard_incompatibilities: vec![],
         omit_max_tokens: false,
         max_token_auto: None,
         max_token_auto_save: true,

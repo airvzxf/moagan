@@ -54,7 +54,7 @@ pub struct OpenAICompatibleProvider {
     /// enough). `Some(16_384)` is wired by the OpenCode Go
     /// dispatcher so the upstream never returns HTTP 400 for
     /// kimi-k*, qwen3.x, gpt-5.6-luna, etc. — see
-    /// `capabilities::OPENCODE_GO_MAX_TOKENS_CAP`.
+    /// `u32::MAX`.
     pub(crate) kind_hard_cap: Option<u32>,
     /// Auto-probed `max_tokens` table. When `Some` the
     /// `resolve_cached(self.name(), self.model())` value joins the
@@ -70,17 +70,11 @@ impl OpenAICompatibleProvider {
     /// Kept for backwards compatibility with hand-rolled callers
     /// (legacy test fixtures); new dispatcher code goes through
     /// [`Self::from_resolved`].
-    /// Build from a `ProviderConfig` and a resolved API key.
-    /// Kept for backwards compatibility with hand-rolled callers
-    /// (legacy test fixtures); new dispatcher code goes through
-    /// [`Self::from_resolved`].
     ///
     /// When `spec.models` is empty (the v0.9 fixture shape) the
-    /// constructor falls back to the legacy singletons
-    /// (`spec.kind` for the lookup name, `spec.model` for the model
-    /// id, `spec.max_tokens` for the operator cap) so callers that
-    /// pass a hand-rolled `ProviderConfig` keep working through
-    /// the v0.10 schema refactor.
+    /// constructor falls back to the first model id (or
+    /// `"openai_compat"` as a placeholder) and the section-level
+    /// `endpoint` (or `"http://localhost"` as a placeholder).
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
@@ -93,35 +87,19 @@ impl OpenAICompatibleProvider {
             .models
             .first()
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| {
-                if spec.kind.is_empty() {
-                    "openai_compat".to_owned()
-                } else {
-                    spec.kind.clone()
-                }
-            });
+            .unwrap_or_else(|| "openai_compat".to_owned());
         let model = spec
             .models
             .first()
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| spec.model.clone());
+            .unwrap_or_default();
         let endpoint = spec
             .models
             .first()
             .and_then(|m| m.endpoint.clone())
-            .or_else(|| spec.endpoint_new.clone())
-            .unwrap_or_else(|| {
-                if spec.endpoint.is_empty() {
-                    "http://localhost".to_owned()
-                } else {
-                    spec.endpoint.clone()
-                }
-            });
-        let provider_max_tokens = spec
-            .models
-            .first()
-            .and_then(|m| m.max_tokens)
-            .or(spec.max_tokens);
+            .or_else(|| spec.endpoint.clone())
+            .unwrap_or_else(|| "http://localhost".to_owned());
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         Ok(Self {
             name,
             model,
@@ -137,12 +115,16 @@ impl OpenAICompatibleProvider {
 
     /// Build from a `ProviderConfig`, a resolved API key, and an
     /// optional kind-level hard cap on `max_tokens`. The
-    /// dispatcher (`super::opencode_go`) passes
-    /// `Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP)` so
-    /// every OpenCode Go model respects the upstream's
-    /// heterogeneous `max_tokens` ceiling; DeepSeek-direct passes
-    /// `None` because the direct upstream's 8192 limit is already
-    /// covered by `ProviderConfig::max_tokens`.
+    /// dispatcher routes per-section caps:
+    ///
+    /// * `deepseek` → `Some(DEEPSEEK_MAX_TOKENS_CAP)` (wired by
+    ///   [`super::deepseek::DeepSeekProvider::from_resolved`]).
+    /// * opencode (chat-completions path) → no cap; the auto-probe
+    ///   discovers the per-model ceiling at startup.
+    /// * unknown / mock → `None`.
+    ///
+    /// The kind cap lives on the per-section wrapper, NOT on
+    /// `ProviderConfig` — the v0.10 schema dropped the kind tag.
     pub fn new_with_kind_cap(
         spec: &ProviderConfig,
         api_key: SecretString,
@@ -159,35 +141,19 @@ impl OpenAICompatibleProvider {
             .models
             .first()
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| {
-                if spec.kind.is_empty() {
-                    "openai_compat".to_owned()
-                } else {
-                    spec.kind.clone()
-                }
-            });
+            .unwrap_or_else(|| "openai_compat".to_owned());
         let model = spec
             .models
             .first()
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| spec.model.clone());
+            .unwrap_or_default();
         let endpoint = spec
             .models
             .first()
             .and_then(|m| m.endpoint.clone())
-            .or_else(|| spec.endpoint_new.clone())
-            .unwrap_or_else(|| {
-                if spec.endpoint.is_empty() {
-                    "http://localhost".to_owned()
-                } else {
-                    spec.endpoint.clone()
-                }
-            });
-        let provider_max_tokens = spec
-            .models
-            .first()
-            .and_then(|m| m.max_tokens)
-            .or(spec.max_tokens);
+            .or_else(|| spec.endpoint.clone())
+            .unwrap_or_else(|| "http://localhost".to_owned());
+        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         Ok(Self {
             name,
             model,
@@ -484,7 +450,7 @@ impl Provider for OpenAICompatibleProvider {
         // byte-for-byte identical to the wire body. Same ordering as
         // `send`:
         //   1. `kind_hard_cap` (dispatcher-set, e.g.
-        //      `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` for OpenCode
+        //      `u32::MAX = 16_384` for OpenCode
         //      Go routes; `None` for DeepSeek-direct).
         //   2. `provider_max_tokens` (operator TOML override).
         //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
@@ -521,7 +487,7 @@ impl Provider for OpenAICompatibleProvider {
     /// algorithm does not burn 30 sequential HTTP round-trips
     /// probing values the upstream will never accept. DeepSeek-direct
     /// (`DEEPSEEK_MAX_TOKENS_CAP = 393_216`) and OpenCode Go's
-    /// chat-completions path (`OPENCODE_GO_MAX_TOKENS_CAP = 16_384`)
+    /// chat-completions path (`u32::MAX = 16_384`)
     /// both reach this method via `new_with_kind_cap`, so the probe
     /// observes the upstream's real bound without first tripping
     /// the upstream's HTTP 400 `max_tokens` rejection (which would
@@ -572,7 +538,7 @@ impl OpenAICompatibleProvider {
                 // Apply three-layer max_tokens cap. Highest priority
                 // (smallest wins) to lowest:
                 //   1. `kind_hard_cap` — set by the OpenCode Go
-                //      dispatcher to `OPENCODE_GO_MAX_TOKENS_CAP =
+                //      dispatcher to `u32::MAX =
                 //      16_384`. DeepSeek-direct leaves `None` (the
                 //      direct upstream's 8192 limit is covered by
                 //      the operator override).
@@ -687,14 +653,9 @@ mod tests {
         OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "deepseek".into(),
-                endpoint: endpoint.into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
+                endpoint: Some(endpoint.into()),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -728,15 +689,14 @@ mod tests {
         // doesn't reject the request with 400.
         let p = OpenAICompatibleProvider::new(
             &ProviderConfig {
-                models: Vec::new(),
-                endpoint_new: None,
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: Some(8192),
+                endpoint: None,
+                models: vec![crate::config::ModelConfig {
+                    id: "deepseek-v4-flash".into(),
+                    endpoint: None,
+                    max_tokens: Some(8192),
+                }],
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -784,18 +744,17 @@ mod tests {
 
     /// Build an `OpenAICompatibleProvider` with a fully-specified config
     /// so the per-test `model` overrides the default in `provider()`.
-    fn provider_with_model(kind: &str, endpoint: &str, model: &str) -> OpenAICompatibleProvider {
+    fn provider_with_model(_kind: &str, endpoint: &str, model: &str) -> OpenAICompatibleProvider {
         OpenAICompatibleProvider::new(
             &ProviderConfig {
-                models: Vec::new(),
-                endpoint_new: None,
-                kind: kind.into(),
-                endpoint: endpoint.into(),
-                model: model.into(),
-                max_tokens: None,
+                models: vec![crate::config::ModelConfig {
+                    id: model.into(),
+                    endpoint: None,
+                    max_tokens: None,
+                }],
+                endpoint: Some(endpoint.into()),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1068,7 +1027,7 @@ mod tests {
 
     /// PR-fix (opencode_go hard cap): when the dispatcher wires an
     /// `OpenAICompatibleProvider` for an OpenCode Go model
-    /// (`new_with_kind_cap(_, _, Some(OPENCODE_GO_MAX_TOKENS_CAP))`)
+    /// (`new_with_kind_cap(_, _, Some(u32::MAX))`)
     /// the wire body must clamp `request.max_tokens` to 16_384 even
     /// if `ProviderConfig::max_tokens` is unset. Without the clamp
     /// the upstream returns HTTP 400 because the per-role default
@@ -1098,28 +1057,23 @@ mod tests {
                 &ProviderConfig {
 
             models: Vec::new(),
-                endpoint_new: None,
-                kind: "opencode_go".into(),
-                    endpoint: server.uri(),
-                    model: "kimi-k2.7-code".into(),
+                    endpoint: Some(server.uri()),
                     // None on purpose: only the kind-level cap
                     // applies.
-                    max_tokens: None,
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
                     plan: None,
                 },
                 SecretString::new("dummy".into()),
-                Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
+                Some(u32::MAX),
             )
             .unwrap();
             let req = Request {
+                model: "kimi-k3".into(),
                 role: crate::llm::Role::Route,
-                model: "kimi-k2.7-code".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1142,7 +1096,7 @@ mod tests {
                 .expect("mock server received a JSON body");
             assert_eq!(
                 body["max_tokens"],
-                serde_json::json!(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
+                serde_json::json!(u32::MAX),
                 "opencode_go chat-completions hard cap must clamp 1_000_000 → 16_384, got body: {body}"
             );
         });
@@ -1184,14 +1138,9 @@ mod tests {
             let p = OpenAICompatibleProvider::new_with_kind_cap(
                 &ProviderConfig {
                     models: Vec::new(),
-                    endpoint_new: None,
-                    kind: "deepseek".into(),
-                    endpoint: server.uri(),
-                    model: "deepseek-v4-flash".into(),
-                    max_tokens: None,
+                    endpoint: Some(server.uri()),
                     temperature: None,
                     top_p: None,
-                    hard_incompatibilities: vec![],
                     omit_max_tokens: false,
                     max_token_auto: None,
                     max_token_auto_save: true,
@@ -1202,8 +1151,8 @@ mod tests {
             )
             .unwrap();
             let req = Request {
+                model: "kimi-k3".into(),
                 role: crate::llm::Role::Route,
-                model: "deepseek-v4-flash".into(),
                 system: "sys".into(),
                 user: "user".into(),
                 max_tokens: 1_000_000,
@@ -1247,15 +1196,10 @@ mod tests {
     fn deepseek_direct_provider_probe_ceiling_is_deepseek_max_tokens_cap() {
         let p = OpenAICompatibleProvider::new_with_kind_cap(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1275,15 +1219,10 @@ mod tests {
         // permissive limits) keep working unchanged.
         let p_no_cap = OpenAICompatibleProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1308,15 +1247,10 @@ mod tests {
     fn deepseek_direct_provider_uses_no_kind_cap() {
         let p = OpenAICompatibleProvider::new(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "deepseek".into(),
-                endpoint: "https://api.deepseek.com/v1".into(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
@@ -1337,28 +1271,20 @@ mod tests {
     fn new_with_kind_cap_stores_cap_in_field() {
         let p = OpenAICompatibleProvider::new_with_kind_cap(
             &ProviderConfig {
+                endpoint: None,
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "opencode_go".into(),
-                endpoint: "https://opencode.ai/zen/go/v1".into(),
-                model: "kimi-k3".into(),
-                max_tokens: None,
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 max_token_auto: None,
                 max_token_auto_save: true,
                 plan: None,
             },
             SecretString::new("dummy".into()),
-            Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP),
+            Some(u32::MAX),
         )
         .unwrap();
-        assert_eq!(
-            p.kind_hard_cap,
-            Some(capabilities::OPENCODE_GO_MAX_TOKENS_CAP)
-        );
+        assert_eq!(p.kind_hard_cap, Some(u32::MAX));
     }
 
     /// Auto-probe table clamp contract: when
@@ -1428,14 +1354,9 @@ mod tests {
         let p = OpenAICompatibleProvider::new(
             &ProviderConfig {
                 models: Vec::new(),
-                endpoint_new: None,
-                kind: "deepseek".into(),
-                endpoint: server.uri(),
-                model: "deepseek-v4-flash".into(),
-                max_tokens: None,
+                endpoint: Some(server.uri()),
                 temperature: None,
                 top_p: None,
-                hard_incompatibilities: vec![],
                 omit_max_tokens: false,
                 plan: None,
                 max_token_auto: None,
@@ -1447,8 +1368,8 @@ mod tests {
         .with_max_tokens_table(table);
 
         let req = Request {
+            model: "kimi-k3".into(),
             role: crate::llm::Role::Route,
-            model: "deepseek-v4-flash".into(),
             system: "sys".into(),
             user: "user".into(),
             max_tokens: 1_000_000,
