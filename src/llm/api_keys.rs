@@ -132,6 +132,26 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
     }
 }
 
+/// Resolve the api-keys table key for a `ResolvedModelConfig`.
+///
+/// v0.10: the section name is the per-model alias (e.g.
+/// `minimax-m3`, `kimi-k3`), but the `api_keys.toml` `[providers]`
+/// table and the direct env-var fallback are keyed on the
+/// canonical `kind` (e.g. `opencode`) carried in
+/// `ResolvedModelConfig::kind`. When `kind` is empty (a legacy
+/// hand-rolled config that did not populate the field) the helper
+/// falls back to the section name verbatim so back-compat callers
+/// keep working as long as they also wrote a matching
+/// `api_keys.toml` entry.
+pub(crate) fn lookup_kind_for_resolved(resolved: &crate::config::ResolvedModelConfig) -> String {
+    let kind = resolved.kind.as_str();
+    if !kind.is_empty() {
+        kind.to_owned()
+    } else {
+        resolved.section.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

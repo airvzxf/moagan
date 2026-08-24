@@ -1014,9 +1014,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // dispatcher still uses `provider` as a String so
             // the legacy `--provider minimax --model M3` pair
             // is also accepted.
-            if !provider.is_empty()
-                && !provider.contains(':')
-            {
+            if !provider.is_empty() && !provider.contains(':') {
                 // Either it is the legacy `--provider <section>`
                 // (the CLI accepts it but the section must be a
                 // one-model alias) or it is a typo. We surface

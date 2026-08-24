@@ -1190,6 +1190,13 @@ pub fn registry_from_config_with_home_and_sink(
                 .endpoint
                 .clone()
                 .or_else(|| spec.endpoint_new.clone())
+                .or_else(|| {
+                    if spec.endpoint.is_empty() {
+                        None
+                    } else {
+                        Some(spec.endpoint.clone())
+                    }
+                })
                 .ok_or_else(|| {
                     crate::Error::InvalidArgs(format!(
                         "provider '{section_name}' model '{}' has no endpoint \
@@ -1207,6 +1214,7 @@ pub fn registry_from_config_with_home_and_sink(
                 top_p: spec.top_p,
                 wire_format,
                 omit_max_tokens: spec.omit_max_tokens,
+                kind: spec.kind.clone(),
             };
 
             let provider: Arc<dyn Provider> = if section_name == "deepseek" {
@@ -1690,15 +1698,24 @@ mod tests {
             },
         );
         let r = registry_from_config(&cfg, &CircuitBreakerConfig::default()).unwrap();
-        // v0.10: the registry still exposes the two providers under
-        // the section name; the pool groups them by `name()` so
+        // v0.10: the registry exposes every (section, model) pair
+        // under the joined `"{section}::{model_id}"` key so the
+        // pool can group identical `Provider::name()` entries.
         // `has_pool()` is true when more than one entry shares a
-        // name. The exact key is the section name.
+        // name; the pool key for the two mocks is
+        // `"mock::mock-a"` / `"mock::mock-b"`.
         assert!(
             r.has_pool(),
             "two mocks under one section must build a pool"
         );
-        assert!(r.iter().any(|(n, _)| n == "mock"));
+        assert!(
+            r.iter().any(|(n, _)| n == "mock::mock-a"),
+            "registry must register `mock::mock-a`"
+        );
+        assert!(
+            r.iter().any(|(n, _)| n == "mock::mock-b"),
+            "registry must register `mock::mock-b`"
+        );
     }
 
     /// Single-instance configs must NOT build a pool so the legacy
@@ -1816,10 +1833,10 @@ mod tests {
             crate::config::ProviderConfig {
                 models: vec![crate::config::ModelConfig {
                     id: "minimax-m3".into(),
-                    endpoint: None,
+                    endpoint: Some("https://opencode.ai/zen/go/v1/messages".to_owned()),
                     max_tokens: Some(8192),
                 }],
-                endpoint_new: None,
+                endpoint_new: Some("https://opencode.ai/zen/go/v1/messages".to_owned()),
                 kind: "opencode".into(),
                 endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
                 model: "minimax-m3".into(),
@@ -1840,7 +1857,8 @@ mod tests {
         // v0.10: the registry builds without rejecting any alias.
         // The minimax-m3 entry routes through AnthropicCompatProvider
         // (URL ends in /messages) and lands under the section name
-        // "minimax-m3".
+        // "minimax-m3" (because the section name == model id, the
+        // registry_key collapses to the section name).
         let registry = registry.expect("registry must build without the BLOCKED_MODELS gate");
         let provider = registry
             .get("minimax-m3")
@@ -1980,7 +1998,7 @@ mod tests {
         // role) breaker is what would trip.
         let spec = ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             kind: "minimax".into(),
             endpoint: "http://127.0.0.1:1".into(),
             model: "MiniMax-M3".into(),
@@ -2218,7 +2236,7 @@ mod tests {
     fn provider_capabilities_for_each_provider() {
         let cfg = crate::config::ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             kind: "minimax".into(),
             endpoint: "https://api.minimax.io/anthropic/v1".into(),
             model: "MiniMax-M3".into(),
@@ -2240,7 +2258,7 @@ mod tests {
 
         let cfg_d = crate::config::ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             kind: "deepseek".into(),
             endpoint: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),
@@ -2263,7 +2281,7 @@ mod tests {
 
         let cfg_oc = crate::config::ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             kind: "opencode".into(),
             endpoint: "https://opencode.ai/zen/go/v1/messages".into(),
             model: "qwen3.7-max".into(), // Anthropic-compat path
@@ -2283,7 +2301,7 @@ mod tests {
 
         let cfg_ocr = crate::config::ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             model: "gpt-5.6-luna".into(),
             endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
@@ -2295,7 +2313,7 @@ mod tests {
 
         let cfg_occ = crate::config::ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             model: "kimi-k2.7-code".into(),
             endpoint: "https://opencode.ai/zen/go/v1/chat/completions".into(),
             ..cfg_oc.clone()
@@ -2310,7 +2328,7 @@ mod tests {
 
         let cfg_dispatcher = crate::config::ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             model: "qwen3.7-max".into(),
             ..cfg_oc.clone()
         };
@@ -2324,7 +2342,7 @@ mod tests {
 
         let cfg_dispatcher_r = crate::config::ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             model: "gpt-5.6-luna".into(),
             endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
             ..cfg_oc.clone()
@@ -2354,7 +2372,7 @@ mod tests {
             OpenAICompatibleProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
-                endpoint_new: None,
+                    endpoint_new: None,
                     kind: "deepseek".into(),
                     endpoint: "https://api.deepseek.com/v1".into(),
                     model: "deepseek-v4-flash".into(),
@@ -2381,7 +2399,7 @@ mod tests {
             MinimaxProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
-                endpoint_new: None,
+                    endpoint_new: None,
                     kind: "minimax".into(),
                     endpoint: "https://api.minimax.io/anthropic/v1".into(),
                     model: "MiniMax-M3".into(),
@@ -2408,7 +2426,7 @@ mod tests {
             OpenAICompatProvider::new(
                 &crate::config::ProviderConfig {
                     models: Vec::new(),
-                endpoint_new: None,
+                    endpoint_new: None,
                     kind: "opencode".into(),
                     endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
                     model: "gpt-5.6-luna".into(),
@@ -2792,7 +2810,15 @@ mod tests {
         let reg = registry_from_config_with_home(&cfg, &CircuitBreakerConfig::default(), None)
             .expect("registry builds without a home");
         assert!(reg.max_tokens_table().is_none());
-        assert!(reg.get("mock").is_some(), "providers are still wired");
+        // v0.10: the registry keys mock entries under
+        // `"{section}::{model_id}"` when the two diverge, so the
+        // probe fixture's `mock-model` model id produces the key
+        // `"mock::mock-model"`. The section-name shortcut only
+        // applies when the section name equals the model id.
+        assert!(
+            reg.get("mock::mock-model").is_some(),
+            "providers are still wired"
+        );
     }
 
     /// The env kill-switch reaches the registry: `MOAGAN_MAX_TOKEN_AUTO=0`

@@ -1390,7 +1390,8 @@ mod plan {
                     c.providers
                         .values()
                         .find(|spec| {
-                            spec.models.iter().any(|m| m.id == model) && provider == spec.model_str()
+                            spec.models.iter().any(|m| m.id == model)
+                                && provider == spec.model_str()
                                 || (provider == spec.model_str() && model == spec.model_str())
                         })
                         .or_else(|| {
@@ -1399,9 +1400,9 @@ mod plan {
                             // it may be either the section name or the
                             // model id when the section only registers
                             // one model. Look up by either.
-                            c.providers
-                                .values()
-                                .find(|spec| spec.model_str() == provider || provider == spec.model_str())
+                            c.providers.values().find(|spec| {
+                                spec.model_str() == provider || provider == spec.model_str()
+                            })
                         })
                 })
                 .and_then(|spec| spec.plan.clone())

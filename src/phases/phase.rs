@@ -673,6 +673,18 @@ impl RunContext {
         {
             return picked;
         }
+        // v0.10: the registry keys every (section, model_id) pair
+        // under `"{section}::{model_id}"` unless section ==
+        // model_id. Look up the joined key from `(default_provider,
+        // default_model)` first; fall back to the bare section name
+        // for legacy single-instance callers (hand-rolled test
+        // fixtures that register the mock under `"mock"` directly
+        // instead of `"mock::mock-model"`).
+        let joined =
+            crate::llm::ProviderRegistry::registry_key(&self.default_provider, &self.default_model);
+        if let Some(p) = self.providers.get(&joined) {
+            return p;
+        }
         self.providers
             .get(&self.default_provider)
             .expect("default provider must be registered")

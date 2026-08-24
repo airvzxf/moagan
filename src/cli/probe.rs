@@ -670,6 +670,7 @@ fn build_provider_for_probe(
         top_p: spec.top_p,
         wire_format,
         omit_max_tokens: spec.omit_max_tokens,
+        kind: spec.kind.clone(),
     };
     let provider: Arc<dyn Provider> = if spec.endpoint_str() == "deepseek" {
         Arc::new(crate::llm::deepseek::DeepSeekProvider::from_resolved(

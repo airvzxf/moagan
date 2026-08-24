@@ -22,7 +22,6 @@ use crate::phases::{
     RepairPhase, RoutePhase, RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
 };
 use crate::redact::{self, RedactPolicy};
-use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::{PhaseEvent, Telemetry};
 
@@ -201,7 +200,12 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // (the helper rebuilds it from telemetry after the pipeline
     // finishes; the stub just carries the fields used by the
     // lineage block).
-    let default_model = cfg.provider(&default_provider)?.model_str().to_owned();
+    let default_model = cfg
+        .provider(&default_provider)?
+        .models
+        .first()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
 
     let stub = Manifest {
         schema_version: Manifest::schema_version_string(),
@@ -309,6 +313,36 @@ pub async fn run_full_pipeline(
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }
     let resolved_parallelism = max_parallelism.unwrap_or(cfg.max_parallelism);
+    // Resolve the (section, model_id) pair the registry will
+    // build, so we can pin `default_model` to the same value the
+    // registry keys on. The legacy `--provider SECTION` shorthand
+    // synthesises a model id from the section's first registered
+    // model (or `"mock-model"` for the mock section); mirroring
+    // that here keeps the RunContext lookup in sync with the
+    // registry's joined-key layout.
+    let resolved_default_model = if stub.provider.is_empty() {
+        cfg.default_provider.clone()
+    } else {
+        stub.provider.clone()
+    };
+    let default_model = if resolved_default_model.contains(':') {
+        crate::cli::probe::parse_provider_model(&resolved_default_model)
+            .map(|(_, m)| m)
+            .unwrap_or_default()
+    } else {
+        // Bare `--provider SECTION` shorthand: synthesise the
+        // canonical model id (`spec.model` falls back to
+        // `models[0].id` for legacy fixtures).
+        let spec = cfg.provider(&resolved_default_model)?;
+        if !spec.model.is_empty() {
+            spec.model.clone()
+        } else {
+            spec.models
+                .first()
+                .map(|m| m.id.clone())
+                .unwrap_or_default()
+        }
+    };
     let providers = Arc::new(build_registry_for(
         cfg,
         &default_provider,
@@ -321,7 +355,6 @@ pub async fn run_full_pipeline(
     // until they have all landed.
     let max_tokens_table = providers.max_tokens_table().cloned();
     let temperature_table = providers.temperature_table().cloned();
-    let default_model = cfg.provider(&default_provider)?.model_str().to_owned();
 
     // Wire-the-gates plan: refresh the on-disk `models.dev` catalog
     // so the modality gate (`ModalityGate::apply`) and the cost
@@ -612,14 +645,40 @@ pub(crate) fn build_registry_for_with_api_key(
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
 ) -> Result<ProviderRegistry> {
-    let (section, model_id) = super::probe::parse_provider_model(selected).map_err(
-        |e| match e {
+    // v0.10 (Phase 5): the CLI accepts `--provider SECTION` for
+    // single-model sections (the `--provider SECTION:MODEL`
+    // shape is required for multi-model sections). When the
+    // operator passes a bare section name, resolve it to the
+    // section's first (or only) model id so the legacy
+    // `--provider mock` / `--provider minimax` shorthand keeps
+    // working. The error path mirrors the canonical shape.
+    let (section, model_id) = if selected.contains(':') {
+        super::probe::parse_provider_model(selected).map_err(|e| match e {
             Error::InvalidArgs(msg) => Error::InvalidArgs(format!(
                 "build_registry_for: {msg} (--provider expects 'PROVIDER:MODEL')"
             )),
             other => other,
-        },
-    )?;
+        })?
+    } else {
+        let spec = cfg.providers.get(selected).ok_or_else(|| {
+            Error::InvalidArgs(format!(
+                "provider '{selected}' is not in config (known sections: [{}])",
+                cfg.providers.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+        let model_id = spec
+            .models
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| spec.model.clone());
+        if model_id.is_empty() {
+            return Err(Error::InvalidArgs(format!(
+                "--provider '{selected}' is a single-model alias but the section has \
+                 no model id configured; pass --provider {selected}:MODEL explicitly"
+            )));
+        }
+        (selected.to_owned(), model_id)
+    };
     let spec = cfg
         .providers
         .get(&section)
@@ -632,27 +691,34 @@ pub(crate) fn build_registry_for_with_api_key(
         .clone();
     // Mock short-circuit: load canned responses from disk and
     // register them under the requested `(section, model_id)` key.
-    // The legacy `mock` section has no upstream.
+    // The legacy `mock` section has no upstream. When the
+    // operator passed `--provider mock` (single-model alias) the
+    // resolved model id is `mock-model`; we register under both
+    // the joined `mock::mock-model` key and the bare `mock` key
+    // so the legacy `RunContext::provider()` lookup (which uses
+    // the section name for backward compatibility) finds the
+    // provider.
     if section == "mock"
         && let Some(dir) = mock_dir
     {
         let mock = crate::llm::MockProvider::from_dir(dir)?;
         let mut reg = ProviderRegistry::default();
-        let key = ProviderRegistry::registry_key(&section, &model_id);
-        reg.insert(key, Arc::new(mock));
+        let joined = ProviderRegistry::registry_key(&section, &model_id);
+        reg.insert(joined, Arc::new(mock));
         return Ok(reg);
     }
     // Minimax API-key short-circuit: the `--api-key` flag
     // overrides the env lookup. Wire the section into the
     // dispatcher with the operator-supplied key.
-    if section == "minimax"
-        && let Some(key) = api_key
-    {
+    if section == "minimax" && api_key.is_some() {
         let resolved = cfg.resolved_model(&section, &model_id)?;
         let provider = crate::llm::minimax::MinimaxProvider::from_resolved(&resolved)?;
         let mut reg = ProviderRegistry::default();
         let key = ProviderRegistry::registry_key(&section, &model_id);
-        reg.insert(key, Arc::new(provider) as Arc<dyn crate::llm::provider::Provider>);
+        reg.insert(
+            key,
+            Arc::new(provider) as Arc<dyn crate::llm::provider::Provider>,
+        );
         return Ok(reg);
     }
     let mut spec_map = std::collections::BTreeMap::new();

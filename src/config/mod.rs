@@ -1051,10 +1051,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
                 endpoint: minimax_endpoint.clone().unwrap_or_default(),
                 model: model.to_owned(),
                 max_tokens: Some(DEFAULT_MAX_TOKENS),
-                hard_incompatibilities: vec![
-                    "anthropic-sdk".to_owned(),
-                    "claude-sdk".to_owned(),
-                ],
+                hard_incompatibilities: vec!["anthropic-sdk".to_owned(), "claude-sdk".to_owned()],
                 endpoint_new: minimax_endpoint.clone(),
                 models,
                 temperature: Some(0.6),
@@ -1331,6 +1328,10 @@ pub struct ProviderConfig {
     /// `phase.rs::resolve_temperature`. Most operators leave
     /// this at the per-role default.
     pub temperature: Option<f32>,
+    /// Default nucleus sampling `top_p` for every model in the
+    /// section. Overridden by per-role defaults in
+    /// `phase.rs::resolve_temperature`. Most operators leave this
+    /// unset and rely on the per-role default.
     pub top_p: Option<f32>,
     /// Deprecated v0.9 hard-incompat list. Kept for test-fixture
     /// compatibility; production code never reads the field (it
@@ -1441,6 +1442,14 @@ pub struct ResolvedModelConfig {
     /// the wire body (e.g. OpenAI Responses for `gpt-5.6-luna`)
     /// can read it from the same struct.
     pub omit_max_tokens: bool,
+    /// Canonical `kind` from `ProviderConfig::kind` (e.g.
+    /// `"opencode"`, `"minimax"`, `"deepseek"`). Distinct from
+    /// `section` (which is the per-model alias) and the
+    /// `api_keys.toml` lookup is keyed on this value. Carried
+    /// through `from_resolved` so each concrete provider can
+    /// resolve its API key against the canonical kind without
+    /// having to re-derive it from the section name.
+    pub kind: String,
 }
 
 /// Token-plan declaration attached to a [`ProviderConfig`]. Powers the
@@ -1672,7 +1681,11 @@ impl Config {
             && !v.trim().is_empty()
         {
             for spec in self.providers.values_mut() {
-                if spec.endpoint_new.as_deref().is_some_and(|e| e.contains("/messages")) {
+                if spec
+                    .endpoint_new
+                    .as_deref()
+                    .is_some_and(|e| e.contains("/messages"))
+                {
                     spec.endpoint_new = Some(v.clone());
                 }
             }
@@ -1687,7 +1700,10 @@ impl Config {
             // `MOAGAN_MINIMAX_MODEL` contract for callers that
             // still rely on the env var.
             for spec in self.providers.values_mut() {
-                if spec.endpoint_new.as_deref().is_some_and(|e| e.contains("/messages"))
+                if spec
+                    .endpoint_new
+                    .as_deref()
+                    .is_some_and(|e| e.contains("/messages"))
                     && let Some(first) = spec.models.first_mut()
                 {
                     first.id = v.clone();
@@ -2192,11 +2208,7 @@ impl Config {
     /// it. The wire format is derived from the resolved endpoint
     /// URL via [`crate::llm::wire_format::wire_format_from_url`]
     /// so the dispatcher does not have to recompute it.
-    pub fn resolved_model(
-        &self,
-        section: &str,
-        model_id: &str,
-    ) -> Result<ResolvedModelConfig> {
+    pub fn resolved_model(&self, section: &str, model_id: &str) -> Result<ResolvedModelConfig> {
         let spec = self.provider(section)?;
         let model_cfg = spec
             .models
@@ -2225,9 +2237,7 @@ impl Config {
             })?;
         let wire_format =
             crate::llm::wire_format::wire_format_from_url(&endpoint).map_err(|e| {
-                crate::Error::InvalidArgs(format!(
-                    "provider '{section}' model '{model_id}': {e}"
-                ))
+                crate::Error::InvalidArgs(format!("provider '{section}' model '{model_id}': {e}"))
             })?;
         Ok(ResolvedModelConfig {
             section: section.to_owned(),
@@ -2238,6 +2248,7 @@ impl Config {
             top_p: spec.top_p,
             wire_format,
             omit_max_tokens: spec.omit_max_tokens,
+            kind: spec.kind.clone(),
         })
     }
 
@@ -2561,7 +2572,13 @@ mod tests {
     fn env_overrides_minimax_endpoint() {
         // Default config has the hardcoded production endpoint.
         let mut cfg = Config::default();
-        let baseline = cfg.providers.get("minimax").unwrap().endpoint.clone();
+        let baseline = cfg
+            .providers
+            .get("minimax")
+            .unwrap()
+            .endpoint_new
+            .clone()
+            .expect("default minimax section must carry endpoint_new");
         assert_eq!(baseline, "https://api.minimax.io/anthropic/v1/messages");
 
         // With the env var set, apply_env_overrides rewrites every
@@ -2575,10 +2592,14 @@ mod tests {
             std::env::remove_var("MOAGAN_MINIMAX_ENDPOINT");
         }
         assert_eq!(
-            cfg.providers.get("minimax").unwrap().endpoint,
-            "http://localhost:8086/x"
+            cfg.providers.get("minimax").unwrap().endpoint_new,
+            Some("http://localhost:8086/x".to_owned())
         );
-        assert_eq!(cfg.providers.get("mock").unwrap().endpoint, "mock://local");
+        assert_eq!(
+            cfg.providers.get("mock").unwrap().endpoint_new,
+            Some("mock://local".to_owned()),
+            "non-minimax providers must not be touched by MOAGAN_MINIMAX_ENDPOINT"
+        );
     }
 
     /// `MOAGAN_MINIMAX_MODEL` mirrors the existing `MOAGAN_MINIMAX_ENDPOINT`
@@ -2597,10 +2618,14 @@ mod tests {
         let _lock = TEST_CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
         let mut cfg = Config::default();
-        // Baseline: every direct-minimax provider carries its canonical model.
-        assert_eq!(cfg.providers.get("minimax").unwrap().model, "MiniMax-M3");
+        // Baseline: every direct-minimax provider carries its canonical
+        // model on `models[0].id` (the v0.10 canonical field).
         assert_eq!(
-            cfg.providers.get("minimax-m2.7-highspeed").unwrap().model,
+            cfg.providers.get("minimax").unwrap().models[0].id,
+            "MiniMax-M3"
+        );
+        assert_eq!(
+            cfg.providers.get("minimax-m2.7-highspeed").unwrap().models[0].id,
             "MiniMax-M2.7-highspeed"
         );
 
@@ -2613,25 +2638,29 @@ mod tests {
         }
 
         // Only direct-minimax providers (kind="minimax") reflect the env
-        // value. The opencode_go entries (minimax-m3/m2.7/m2.5) are
-        // routed through OpenCode Go and must NOT be touched by the
+        // value. The opencode entries (minimax-m3/m2.7/m2.5) are
+        // routed through OpenCode and must NOT be touched by the
         // MOAGAN_MINIMAX_MODEL env override.
         for name in ["minimax", "minimax-m2.7-highspeed"] {
             assert_eq!(
-                cfg.providers.get(name).unwrap().model,
+                cfg.providers.get(name).unwrap().models[0].id,
                 "MiniMax-M2.5",
                 "provider {name} should pick up MOAGAN_MINIMAX_MODEL"
             );
         }
         for name in ["minimax-m3", "minimax-m2.7", "minimax-m2.5"] {
             assert_eq!(
-                cfg.providers.get(name).unwrap().model,
+                cfg.providers.get(name).unwrap().models[0].id,
                 name,
-                "opencode_go provider {name} must NOT pick up MOAGAN_MINIMAX_MODEL"
+                "opencode provider {name} must NOT pick up MOAGAN_MINIMAX_MODEL"
             );
         }
         // The mock provider must not be touched.
-        assert_eq!(cfg.providers.get("mock").unwrap().model, "mock-model");
+        assert_eq!(
+            cfg.providers.get("mock").unwrap().models,
+            Vec::new(),
+            "mock provider must not be touched by MOAGAN_MINIMAX_MODEL"
+        );
     }
 
     /// Empty / whitespace env values are ignored, so a stale export in
@@ -2674,7 +2703,10 @@ mod tests {
     /// Q7 pin: every OpenCode model alias is registered as its own
     /// single-model section with a fully-qualified URL the dispatcher
     /// can dispatch on. The v0.9 `opencode_go` umbrella alias is
-    /// dropped: each alias now carries the wire-format path directly.
+    /// dropped: each alias now carries the wire-format path
+    /// directly. v0.10 update: the `kind` marker is now the
+    /// renamed `"opencode"` (matches the renamed `OPENCODE_API_KEY`
+    /// env var the api_keys lookup keys on).
     #[test]
     fn default_providers_lists_opencode_aliases() {
         let cfg = Config::default();
@@ -2695,8 +2727,8 @@ mod tests {
                 spec.endpoint
             );
             assert_eq!(
-                spec.kind, "opencode_go",
-                "alias {alias} must keep the legacy kind marker until Phase 3"
+                spec.kind, "opencode",
+                "alias {alias} must carry the renamed v0.10 kind marker"
             );
         }
     }
@@ -2752,9 +2784,11 @@ mod tests {
 
     /// Q5 + 2026-08-04 pin: the canonical MiniMax models are exposed
     /// as separate provider entries under `kind="minimax"` (direct)
-    /// or `kind="opencode_go"` (subscription, on the `/v1/messages`
+    /// or `kind="opencode"` (subscription, on the `/v1/messages`
     /// endpoint). The split matches the operator's 2026-08-04 model
-    /// roster: minimax-m3/m2.7/m2.5 are routed through OpenCode Go.
+    /// roster: minimax-m3/m2.7/m2.5 are routed through OpenCode.
+    /// v0.10 update: the subscription kind is the renamed
+    /// `"opencode"` (was `"opencode_go"`).
     #[test]
     fn default_providers_lists_four_canonical_minimax_models() {
         let cfg = Config::default();
@@ -2766,10 +2800,10 @@ mod tests {
                 "minimax",
                 "MiniMax-M2.7-highspeed",
             ),
-            // OpenCode Go subscription (kind="opencode_go")
-            ("minimax-m3", "opencode_go", "minimax-m3"),
-            ("minimax-m2.7", "opencode_go", "minimax-m2.7"),
-            ("minimax-m2.5", "opencode_go", "minimax-m2.5"),
+            // OpenCode subscription (kind="opencode")
+            ("minimax-m3", "opencode", "minimax-m3"),
+            ("minimax-m2.7", "opencode", "minimax-m2.7"),
+            ("minimax-m2.5", "opencode", "minimax-m2.5"),
         ];
         for (alias, kind, model) in canonical {
             let spec = cfg
@@ -2789,7 +2823,7 @@ mod tests {
         }
     }
 
-    /// Pin: every default `ProviderConfig` for an OpenCode Go model
+    /// Pin: every default `ProviderConfig` for an OpenCode model
     /// registered in `default_providers()` starts at
     /// `DEFAULT_MAX_TOKENS` and enables the auto-probe.
     ///
@@ -2800,7 +2834,7 @@ mod tests {
     /// a roster whose real ceilings differ per model and drift per
     /// relay. Two defences remain, and this test pins the second:
     ///
-    /// 1. The wire body in each of the three opencode_go providers
+    /// 1. The wire body in each of the three opencode providers
     ///    still clamps to `OPENCODE_GO_MAX_TOKENS_CAP` before the
     ///    request leaves the process.
     /// 2. `max_token_auto` is enabled here, so the probe discovers the
@@ -2811,8 +2845,9 @@ mod tests {
     /// HTTP 400 — hence the `max_token_auto` assertion below.
     ///
     /// v0.10 update: the legacy umbrella alias `opencode_go` is gone
-    /// (each model carries its own full URL); the test walks the
-    /// per-model aliases instead.
+    /// (each model carries its own full URL) and the `kind` marker
+    /// is the renamed `"opencode"`. The test walks the per-model
+    /// aliases and pins the renamed kind.
     #[test]
     fn default_opencode_go_providers_enable_max_tokens_auto_probe() {
         let cfg = Config::default();
@@ -2841,19 +2876,19 @@ mod tests {
                 .get(alias)
                 .unwrap_or_else(|| panic!("alias {alias} missing from default providers"));
             assert_eq!(
-                spec.kind, "opencode_go",
-                "alias {alias} must map to kind=opencode_go"
+                spec.kind, "opencode",
+                "alias {alias} must map to kind=opencode (renamed from opencode_go)"
             );
             assert_eq!(
                 spec.max_tokens,
                 Some(DEFAULT_MAX_TOKENS),
-                "opencode_go alias {alias} must start at DEFAULT_MAX_TOKENS; \
+                "opencode alias {alias} must start at DEFAULT_MAX_TOKENS; \
                  the probe narrows it to the real ceiling"
             );
             let floor = spec.max_token_auto.unwrap_or(0);
             assert!(
                 floor > 0,
-                "opencode_go alias {alias} must enable the max_tokens auto-probe \
+                "opencode alias {alias} must enable the max_tokens auto-probe \
                  (max_token_auto = Some(n), n > 0); with the probe off and \
                  max_tokens = 1M the upstream rejects with HTTP 400 unless the \
                  wire-layer clamp catches it"

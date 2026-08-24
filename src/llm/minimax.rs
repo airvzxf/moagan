@@ -54,11 +54,30 @@ impl MinimaxProvider {
     /// Kept for backwards compatibility with hand-rolled callers
     /// (legacy test fixtures); new dispatcher code goes through
     /// [`Self::from_resolved`].
+    ///
+    /// When `spec.models` is empty (the v0.9 fixture shape) the
+    /// legacy fields `model`, `endpoint` / `endpoint_new`, and
+    /// `max_tokens` are synthesised into a single `ModelConfig`
+    /// so the rest of the constructor (URL builder, clamp chain,
+    /// `max_tokens_table` lookup by `(name, model)`) sees the same
+    /// shape the v0.10 dispatcher passes in.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
         let client = build_client()?;
-        let first = spec.models.first().cloned().ok_or_else(|| {
-            Error::InvalidArgs("minimax provider has no models configured".into())
-        })?;
+        let first = spec
+            .models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| crate::config::ModelConfig {
+                id: spec.model.clone(),
+                endpoint: spec.endpoint_new.clone().or_else(|| {
+                    if spec.endpoint.is_empty() {
+                        None
+                    } else {
+                        Some(spec.endpoint.clone())
+                    }
+                }),
+                max_tokens: spec.max_tokens,
+            });
         Ok(Self {
             name: "minimax".to_owned(),
             model: first.id.clone(),
@@ -106,13 +125,17 @@ impl MinimaxProvider {
 
     /// v0.10 dispatcher entry point. Builds a `MinimaxProvider`
     /// from a `ResolvedModelConfig` and resolves the API key via
-    /// the unified helper. The dispatcher routes the canonical
-    /// MiniMax section to this constructor; the per-model URL is
-    /// the same for every MiniMax model so the dispatcher does not
-    /// have to inspect the URL.
+    /// the unified helper. The key lookup falls back from the
+    /// section name to the canonical `kind` so a per-model alias
+    /// like `minimax-m2.7-highspeed` (kind=`"minimax"`) resolves
+    /// against `MINIMAX_API_KEY` rather than the non-existent
+    /// `MINIMAX-M2.7-HIGHSPEED_API_KEY`. The dispatcher routes
+    /// the canonical MiniMax section to this constructor; the
+    /// per-model URL is the same for every MiniMax model so the
+    /// dispatcher does not have to inspect the URL.
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
-        let kind = &resolved.section;
-        let key = super::api_keys::lookup_key(kind, None)
+        let kind = super::api_keys::lookup_kind_for_resolved(resolved);
+        let key = super::api_keys::lookup_key(&kind, None)
             .ok_or_else(|| Error::InvalidApiKey {
                 message: format!(
                     "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
@@ -487,7 +510,7 @@ mod tests {
         }
         let cfg = ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             kind: "minimax".into(),
             endpoint: "https://api.minimax.io/anthropic/v1".into(),
             model: "MiniMax-M3".into(),

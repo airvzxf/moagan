@@ -40,7 +40,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
     let cfg = ProviderConfig {
         models: Vec::new(),
-                endpoint_new: None,
+        endpoint_new: None,
         kind: "minimax".to_owned(),
         endpoint: server_uri,
         model: "MiniMax-M3".to_owned(),

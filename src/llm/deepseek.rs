@@ -24,6 +24,13 @@ impl DeepSeekProvider {
     /// Kept for backwards compatibility with hand-rolled callers
     /// (legacy test fixtures); new dispatcher code goes through
     /// [`Self::from_resolved`].
+    ///
+    /// When `spec.models` is empty (the v0.9 fixture shape) the
+    /// legacy fields `model`, `endpoint`, and `max_tokens` are
+    /// synthesised into a single `ModelConfig` so the rest of the
+    /// constructor (URL builder, clamp chain, `max_tokens_table`
+    /// lookup by `(name, model)`) sees the same shape the v0.10
+    /// dispatcher passes in.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
         if !spec.endpoint.contains("deepseek") {
             return Err(Error::InvalidArgs(format!(
@@ -38,9 +45,21 @@ impl DeepSeekProvider {
                 message: format!("build http client: {e}"),
                 http_status: None,
             })?;
-        let first = spec.models.first().cloned().ok_or_else(|| {
-            Error::InvalidArgs("deepseek provider has no models configured".into())
-        })?;
+        let first = spec
+            .models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| crate::config::ModelConfig {
+                id: spec.model.clone(),
+                endpoint: spec.endpoint_new.clone().or_else(|| {
+                    if spec.endpoint.is_empty() {
+                        None
+                    } else {
+                        Some(spec.endpoint.clone())
+                    }
+                }),
+                max_tokens: spec.max_tokens,
+            });
         let name = "deepseek".to_owned();
         Ok(Self(OpenAICompatibleProvider {
             name: name.clone(),
@@ -59,7 +78,7 @@ impl DeepSeekProvider {
             api_key,
             client,
             max_retries: 3,
-            provider_max_tokens: first.max_tokens,
+            provider_max_tokens: first.max_tokens.or(spec.max_tokens),
             kind_hard_cap: Some(DEEPSEEK_MAX_TOKENS_CAP),
             max_tokens_table: None,
         }))
@@ -90,11 +109,16 @@ impl DeepSeekProvider {
     /// v0.10 dispatcher entry point. Builds a `DeepSeekProvider` from
     /// a `ResolvedModelConfig`, wrapping an `OpenAICompatibleProvider`
     /// with `DEEPSEEK_MAX_TOKENS_CAP` as the `kind_hard_cap`. The
-    /// dispatcher routes DeepSeek's `/v1/chat/completions` URL to this
-    /// constructor directly so the cap is wired at construction time.
+    /// key lookup falls back from the section name to the canonical
+    /// `kind` so a per-model alias like `deepseek-v4-flash`
+    /// (kind=`"deepseek"`) resolves against `DEEPSEEK_API_KEY`
+    /// rather than the non-existent `DEEPSEEK-V4-FLASH_API_KEY`.
+    /// The dispatcher routes DeepSeek's `/v1/chat/completions`
+    /// URL to this constructor directly so the cap is wired at
+    /// construction time.
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
-        let kind = &resolved.section;
-        let key = super::api_keys::lookup_key(kind, None)
+        let kind = super::api_keys::lookup_kind_for_resolved(resolved);
+        let key = super::api_keys::lookup_key(&kind, None)
             .ok_or_else(|| Error::InvalidApiKey {
                 message: format!(
                     "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
@@ -198,7 +222,7 @@ mod tests {
     fn config() -> ProviderConfig {
         ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             kind: "deepseek".into(),
             endpoint: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),
@@ -249,7 +273,7 @@ mod tests {
         // the new wiring in isolation, so build a separate spec.
         let spec = ProviderConfig {
             models: Vec::new(),
-                endpoint_new: None,
+            endpoint_new: None,
             kind: "deepseek".into(),
             endpoint: "https://api.deepseek.com/v1".into(),
             model: "deepseek-v4-flash".into(),

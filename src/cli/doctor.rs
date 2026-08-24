@@ -52,28 +52,28 @@ fn emit(check: Check, any_fail: &mut bool, any_warn: &mut bool) {
 fn check_api_key(cfg: &Config) -> Check {
     use crate::llm::api_keys::lookup_key;
     let mut missing: Vec<String> = Vec::new();
-    let mut seen_sections: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (name, _spec) in &cfg.providers {
-        // v0.10: API-key lookup keys on the section name (the
-        // `[providers.<name>]` key in `config.toml`). The
-        // `mock` section does not need an API key.
-        if name == "mock" {
+    let mut seen_kinds: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (name, spec) in &cfg.providers {
+        // v0.10: API-key lookup keys on `spec.kind` (the canonical
+        // kind tag the `api_keys.toml` `[providers]` table is
+        // keyed on, distinct from the section name which is just
+        // the alias in `[providers.<name>]`). The `mock` kind /
+        // section does not need an API key.
+        if spec.kind == "mock" || name == "mock" {
             continue;
         }
-        if !seen_sections.insert(name.clone()) {
+        if !seen_kinds.insert(spec.kind.clone()) {
             // Skip duplicates; one env var / api_keys.toml entry
             // services every provider alias of the same kind.
             continue;
         }
-        match lookup_key(name, None) {
+        match lookup_key(&spec.kind, None) {
             Some(Ok(_)) => {}
             Some(Err(_)) => {
                 missing.push(format!("{name} (api_keys.toml spec unresolvable)"));
             }
             None => {
-                missing.push(format!(
-                    "{name} (env var unset and no api_keys.toml entry)"
-                ));
+                missing.push(format!("{name} (env var unset and no api_keys.toml entry)"));
             }
         }
     }
@@ -172,30 +172,39 @@ fn check_provider_config(cfg: &Config) -> Check {
     }
 }
 
-/// Build the per-section model summary. Returns a vector of
+/// Build the per-kind model summary. Returns a vector of
 /// `(label, models)` pairs in stable (alphabetical) order; the
 /// caller prints them with the standard check-line format.
-/// v0.10: the section name (the `[providers.<name>]` key in
-/// `config.toml`) replaces the deprecated `kind` field. The
-/// `models[]` list under each section is the per-model inventory
-/// the operator sees in the doctor output.
+/// v0.10: groups by `spec.kind` (the canonical kind tag) so the
+/// operator sees one `models for provider '<kind>'` line per
+/// upstream family regardless of how many aliases are registered
+/// under that kind. The model id list is sourced from each
+/// section's `models[].id` and the deprecated `spec.model`
+/// fallback so legacy single-model sections still report their
+/// canonical model.
 fn models_per_provider(cfg: &Config) -> Vec<(String, Vec<String>)> {
     use std::collections::BTreeMap;
-    let mut by_section: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut by_kind: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (section, spec) in &cfg.providers {
-        for m in &spec.models {
-            by_section
-                .entry(section.clone())
-                .or_default()
-                .push(m.id.clone());
+        let kind = if spec.kind.is_empty() {
+            section.clone()
+        } else {
+            spec.kind.clone()
+        };
+        if !spec.models.is_empty() {
+            for m in &spec.models {
+                by_kind.entry(kind.clone()).or_default().push(m.id.clone());
+            }
+        } else if !spec.model.is_empty() {
+            by_kind.entry(kind).or_default().push(spec.model.clone());
         }
     }
-    by_section
+    by_kind
         .into_iter()
-        .map(|(section, mut models)| {
+        .map(|(kind, mut models)| {
             models.sort();
             models.dedup();
-            (format!("models for provider '{section}'"), models)
+            (format!("models for provider '{kind}'"), models)
         })
         .collect()
 }
@@ -361,7 +370,9 @@ fn run_capabilities() -> Result<i32> {
 /// to compile; Phase 6 migrates them.
 #[doc(hidden)]
 #[allow(dead_code)]
-pub(crate) fn capabilities_for_kind(section: &str) -> crate::llm::capabilities::ProviderCapabilities {
+pub(crate) fn capabilities_for_kind(
+    section: &str,
+) -> crate::llm::capabilities::ProviderCapabilities {
     capabilities_for_section(section)
 }
 
@@ -697,7 +708,7 @@ mod tests {
                 "mock".to_owned(),
                 ProviderConfig {
                     models: Vec::new(),
-                endpoint_new: None,
+                    endpoint_new: None,
                     kind: "mock".to_owned(),
                     endpoint: "mock://local".to_owned(),
                     model: "mock-model".to_owned(),
@@ -755,9 +766,11 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
     /// the `--capabilities` view uses to fill the wire-format
     /// columns when the catalog cache is missing. The
     /// `for_minimax` constructor flips the wire preference to
-    /// Anthropic and downgrades `supports_response_format`; the
-    /// `for_opencode_go_responses` constructor flips the wire
-    /// preference to the Responses API. The test pins both so a
+    /// Anthropic and downgrades `supports_response_format`. The
+    /// `for_opencode_go` (the renamed v0.10 opencode kind)
+    /// constructor defaults to the OpenAI-compat chat-completions
+    /// wire — the inner provider has already routed the model
+    /// to the right wire format by URL. The test pins both so a
     /// future refactor cannot silently break the matrix.
     #[test]
     fn capabilities_for_kind_picks_correct_static_matrix() {
@@ -765,9 +778,17 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         let m = super::capabilities_for_kind("minimax");
         assert!(m.prefers_anthropic_wire);
         assert_eq!(m.wire_format_id(), "anthropic");
-        let r = super::capabilities_for_kind("opencode_go_responses");
-        assert!(r.prefers_responses_wire);
-        assert_eq!(r.wire_format_id(), "responses");
+        let r = super::capabilities_for_kind("opencode");
+        // v0.10: the `opencode` kind defaults to the
+        // chat-completions wire (the inner provider dispatches
+        // by URL). The legacy `for_opencode_go_responses`
+        // constructor still exists for back-compat callers that
+        // key on the wire id explicitly.
+        assert!(r.prefers_openai_wire);
+        assert_eq!(r.wire_format_id(), "openai");
+        let resp = ProviderCapabilities::for_opencode_go_responses();
+        assert!(resp.prefers_responses_wire);
+        assert_eq!(resp.wire_format_id(), "responses");
         let mock = super::capabilities_for_kind("mock");
         assert!(mock.supports_tools);
         assert!(mock.supports_streaming);
