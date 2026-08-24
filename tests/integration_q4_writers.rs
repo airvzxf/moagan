@@ -8,10 +8,10 @@
 //! regressions where any writer silently stops emitting rows or the
 //! rank phase stops mirroring the stability verdict into SQLite.
 //!
-//! Single `moagan run --mode fast --provider mock` invocation — the
-//! mock fixture exercises intake + clarify + route + propose x3 +
-//! critique x6 + judge x9 + deliver = 22 calls; outbox_events should
-//! see one `call.completed` per real (non-cache-hit) call.
+//! Single `moagan run --mode fast --provider mock` invocation —
+//! the mock fixture exercises intake + clarify + route + propose
+//! x3 + critique x6 + judge x9 + deliver = 22 calls; outbox_events
+//! should see one `call.completed` per real (non-cache-hit) call.
 
 use std::process::Command;
 
@@ -24,6 +24,24 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
     // and the `.runs/` dir, so every LLM call this run makes is a
     // guaranteed cache miss.
     let tmp = tempfile::TempDir::new().expect("tmpdir");
+
+    // v0.10 dispatcher requires the `--provider SECTION` shorthand
+    // to resolve to a configured model id; `Config::default()`
+    // ships `[providers.mock]` with an empty `models[]` list. Drop
+    // a one-line config onto disk that registers `mock-model`
+    // under the `mock` section so the dispatcher finds it. The
+    // `MOAGAN_CONFIG` env var overrides the user-level config
+    // lookup (`src/config/mod.rs:2361`).
+    let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
+    let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
+    std::fs::write(
+        &mock_cfg_path,
+        "[providers.mock]\n\
+         endpoint = \"mock://local\"\n\
+         mock_dir = \"tests/fixtures/mock_provider\"\n\
+         models = [{ id = \"mock-model\" }]\n",
+    )
+    .expect("write mock config");
 
     let out = Command::new(&bin)
         .arg("run")
@@ -39,6 +57,7 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
         .arg("--runs-dir")
         .arg(tmp.path())
         .env_remove("MINIMAX_API_KEY")
+        .env("MOAGAN_CONFIG", &mock_cfg_path)
         .output()
         .expect("moagan run");
 
@@ -237,6 +256,21 @@ fn mock_run_prompt_dash_reads_from_stdin() {
 
     let tmp = tempfile::TempDir::new().expect("tmpdir");
 
+    // Mirror the `--provider mock` config shim from
+    // `mock_run_writes_all_v008_tables_and_v009_columns` above — the
+    // v0.10 dispatcher needs the `mock-model` entry registered under
+    // `[providers.mock]` for the bare-section shorthand to resolve.
+    let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
+    let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
+    std::fs::write(
+        &mock_cfg_path,
+        "[providers.mock]\n\
+         endpoint = \"mock://local\"\n\
+         mock_dir = \"tests/fixtures/mock_provider\"\n\
+         models = [{ id = \"mock-model\" }]\n",
+    )
+    .expect("write mock config");
+
     let mut child = Command::new(&bin)
         .arg("run")
         .arg("--mode")
@@ -251,6 +285,7 @@ fn mock_run_prompt_dash_reads_from_stdin() {
         .arg("--runs-dir")
         .arg(tmp.path())
         .env_remove("MINIMAX_API_KEY")
+        .env("MOAGAN_CONFIG", &mock_cfg_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

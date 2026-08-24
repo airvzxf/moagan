@@ -1528,10 +1528,15 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
     let spec = ProviderConfig {
         models: vec![moagan::config::ModelConfig {
             id: "MiniMax-M3".to_owned(),
-            endpoint: None,
+            // v0.10 schema: the dispatcher picks the wire endpoint
+            // off `models[].endpoint`, not the section-level
+            // `endpoint`. The wiremock URL has to live on the
+            // model entry so `MinimaxProvider::new` picks it up
+            // when it reads `first.endpoint`.
+            endpoint: Some(format!("{}/anthropic/v1", server.uri())),
             max_tokens: None,
         }],
-        endpoint: Some(format!("{}/anthropic/v1", server.uri())),
+        endpoint: None,
         temperature: None,
         top_p: None,
         omit_max_tokens: false,

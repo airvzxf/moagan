@@ -440,7 +440,30 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
         .join("tests")
         .join("fixtures")
         .join("mock_provider");
-    let cfg = Config::default();
+    // `Config::default()` ships the `[providers.mock]` section with
+    // an empty `models[]` list — the v0.10 dispatcher refuses that
+    // shape ("--provider 'mock' is a single-model alias but the
+    // section has no model id configured"). The pipeline helper
+    // expects `default_model` to be the first model's id, so
+    // inject `mock-model` into the registry here.
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "mock".to_owned(),
+        moagan::config::ProviderConfig {
+            models: vec![moagan::config::ModelConfig {
+                id: "mock-model".to_owned(),
+                endpoint: None,
+                max_tokens: None,
+            }],
+            endpoint: Some("mock://local".to_owned()),
+            temperature: None,
+            top_p: None,
+            omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_save: true,
+            plan: None,
+        },
+    );
     // `run_full_pipeline` uses `tokio::select!` (the shutdown-signal
     // branch), so it needs a tokio runtime. `pollster::block_on` is
     // not enough — `tokio::test` provides the proper runtime.
