@@ -1,17 +1,17 @@
-//! End-to-end discovery validation against the `opencode_go` provider
+//! End-to-end discovery validation against the `opencode` provider
 //! (closes the v0.7 P8 discovery-validation gap documented in
 //! `docs/discovery-validation-research-2026-08-13.md`).
 //!
 //! `#[ignore]`d by default; only runs locally / via
 //! `.github/workflows/test-ignored-opencode-go.yml` (post-PR #555,
 //! manual dispatch — the auto `push: branches: [main]` trigger was
-//! removed in PR #555 because the OPENCODE_GO_API_KEY budget is
-//! exhausted) when the operator's `OPENCODE_GO_API_KEY` is exported.
+//! removed in PR #555 because the OPENCODE_API_KEY budget is
+//! exhausted) when the operator's `OPENCODE_API_KEY` is exported.
 //! With no key the test returns `Ok(())` immediately so a CI run
 //! without the secret stays green. Run with:
 //!
 //! ```bash
-//! OPENCODE_GO_API_KEY=sk-... cargo test --test integration_discover_opencode_go -- --ignored
+//! OPENCODE_API_KEY=sk-... cargo test --test integration_discover_opencode_go:kimi-k3 -- --ignored
 //! ```
 //!
 //! The validation asserts the four sub-directories produced by the
@@ -33,10 +33,10 @@ fn binary() -> PathBuf {
 }
 
 #[test]
-#[ignore = "requires OPENCODE_GO_API_KEY; run with --ignored"]
+#[ignore = "requires OPENCODE_API_KEY; run with --ignored"]
 fn discover_opencode_go_writes_four_subdirs() {
-    if std::env::var_os("OPENCODE_GO_API_KEY").is_none() {
-        eprintln!("skipping: OPENCODE_GO_API_KEY not set");
+    if std::env::var_os("OPENCODE_API_KEY").is_none() {
+        eprintln!("skipping: OPENCODE_API_KEY not set");
         return;
     }
     // Use a stable path inside `target/` so the run artifacts persist
@@ -49,7 +49,7 @@ fn discover_opencode_go_writes_four_subdirs() {
         std::env::var("CARGO_TARGET_TMPDIR").unwrap_or_else(|_| "target".into()),
     )
     .join("test-runs")
-    .join("opencode_go");
+    .join("opencode");
     let _ = std::fs::remove_dir_all(&artifact_root); // clean from prior runs
     std::fs::create_dir_all(&artifact_root).expect("create artifact root");
     let tmp: &std::path::Path = artifact_root.as_path(); // type-coerce for call sites
@@ -71,7 +71,7 @@ fn discover_opencode_go_writes_four_subdirs() {
         .args([
             "discover",
             "--provider",
-            "opencode_go",
+            "opencode:kimi-k3",
             "--prompt",
             PROMPT,
             "--sketches-per-cell",
