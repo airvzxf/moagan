@@ -50,7 +50,7 @@ use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::llm::provider::Provider;
 use crate::llm::role::Role;
-use crate::llm::wire::Request;
+use crate::llm::wire::{Request, Response};
 
 /// Post-process the body emitted by `toml::to_string_pretty` so every
 /// key under the `[providers.<name>.<model>]` headers is
@@ -98,20 +98,28 @@ pub const TEMPERATURE_PROBE_VALUES: &[f32] = &[
 /// refactor can tune one without touching the other.
 pub const TEMPERATURE_PROBE_BATCH_SIZE: usize = 3;
 
-/// HTTP timeout for a single temperature probe. Mirrors the
-/// `max_tokens` probe — 5s is enough for a healthy upstream to
-/// answer the tiny `"Reply with the single character: 1"`
-/// payload; anything longer means the upstream is in trouble and
-/// the probe should fall through to `Indeterminate` so the
-/// algorithm does not block the batch.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// HTTP timeout for a single probe. Mirrors the `max_tokens`
+/// probe — 15 s is enough for a healthy upstream to answer the
+/// tiny `"Reply with the single character: 1"` payload even
+/// when the model spends a few seconds on a thinking pass.
+/// Anything longer means the upstream is in trouble and the
+/// probe should fall through to `Indeterminate` so the algorithm
+/// does not block the batch.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Minimum number of output tokens the probe request asks for.
 /// Some providers reject requests with `max_tokens = 0` (or
-/// clamp it to `1`) so the probe picks `16` — small enough to
-/// stay well below any per-call cap, large enough that the
-/// upstream does not treat the request as "no work".
-const PROBE_MIN_OUTPUT_TOKENS: u32 = 16;
+/// clamp it to `1`); others (the MiniMax M-series, OpenCode Go /
+/// MiMo, etc.) spend the budget on a thinking pass and never
+/// emit text when the cap is below the model's thinking
+/// footprint, returning HTTP 200 with `content: null`. 1024 is
+/// large enough to cover the thinking footprint of every model
+/// the runtime currently targets while staying well below every
+/// probe's per-request cap (MiniMax-M2.5 caps at 196_608,
+/// MiMo-v2.5 caps at 131_072, OpenCode Go proxies inherit the
+/// upstream cap). The value matches [`crate::llm::probe::MIN_AUTOPROBE_FLOOR`]
+/// so the two auto-probes share a single minimum-viable budget.
+const PROBE_MIN_OUTPUT_TOKENS: u32 = 1024;
 
 /// Probe request body. Tiny, deterministic, fits in any model
 /// window. The model is asked to reply with the literal `1`; the
@@ -127,29 +135,106 @@ pub const TEMPERATURE_PROBE_SYSTEM: &str = "";
 ///
 /// The classification mirrors the `max_tokens` probe's
 /// [`crate::llm::probe::ProbeOutcome`] so the auto-discovery flow
-/// can be reasoned about uniformly. The semantics differ only at
-/// the boundaries: a 2xx with an empty body is `Rejected` for
-/// temperatures (a 2xx but no content signals the upstream
-/// silently dropped the parameter — equivalent to a refusal),
-/// whereas the `max_tokens` probe treats an empty body as
-/// `Accepted`.
+/// can be reasoned about uniformly. The two probes diverge on
+/// the empty-body branch: the `max_tokens` probe treats an empty
+/// 2xx body as a successful no-op (the upstream accepted the
+/// parameter, the model just had no output to emit), while the
+/// temperature probe has to distinguish three distinct empty-2xx
+/// shapes — see [`classify_probe_response`] for the exact rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemperatureProbeOutcome {
-    /// Provider accepted the temperature and returned a non-empty
-    /// body that does not carry the rejection signature.
+    /// Provider accepted the temperature. Triggers:
+    ///
+    /// - HTTP 2xx/3xx with a non-empty body that does NOT carry
+    ///   the rejection signature.
+    /// - HTTP 2xx/3xx with an empty body AND the truncation
+    ///   signal (`finish_reason = "max_tokens"` with
+    ///   `output_tokens > 0`). The upstream unambiguously
+    ///   accepted the request and the model simply ran out of
+    ///   output budget before emitting the trailing tokens;
+    ///   classifying the truncated probe as `Accepted` is what
+    ///   lets the probe survive the
+    ///   `PROBE_MIN_OUTPUT_TOKENS = 1024` budget.
     Accepted,
     /// Provider rejected the temperature. Triggers: HTTP 2xx/3xx
-    /// with an empty body, HTTP 2xx/3xx with a body that carries
-    /// the rejection signature, HTTP 4xx with the rejection
-    /// signature in the body.
+    /// with a non-empty body that carries the rejection
+    /// signature, HTTP 4xx with the rejection signature in the
+    /// body.
+    ///
+    /// Note: an empty 2xx body WITHOUT the truncation signal is
+    /// NOT `Rejected` — that shape is genuinely ambiguous (the
+    /// upstream may have silently dropped the parameter, may
+    /// have errored in a way the wire decoder absorbed, or may
+    /// have returned a 200 envelope with no content) and the
+    /// algorithm needs the retry-once path to gather a second
+    /// sample before locking the candidate. See [`Indeterminate`].
     Rejected,
     /// Provider errored out for a reason other than the
-    /// temperature (network error, 5xx storm, 4xx without the
+    /// temperature, or returned a shape the classifier cannot
+    /// commit on (network error, 5xx storm, 4xx without the
     /// rejection signature — e.g. auth, model-not-found,
-    /// malformed response). The algorithm treats this the same
-    /// as `Rejected` for the batch boundary: a single transient
-    /// blip must not lock the algorithm.
+    /// malformed response — and the empty-2xx-without-truncation
+    /// case described in [`Rejected`]). The algorithm retries
+    /// each `Indeterminate` exactly once via
+    /// [`retry_once_on_indeterminate`]; the second outcome is
+    /// then treated as terminal for the batch boundary: a single
+    /// transient blip must not lock the algorithm.
     Indeterminate,
+}
+
+/// Reduced view of an upstream [`Response`] consumed by
+/// [`classify_probe_response`]. Carries only the fields the
+/// classifier needs to distinguish "upstream accepted the
+/// temperature but ran out of output budget" from "upstream
+/// silently dropped the parameter" — anything else (cache ids,
+/// headers, full usage breakdown, role / model identity) is
+/// dropped so the classifier stays a pure function with no
+/// transport coupling.
+///
+/// The view is intentionally borrowed (not owned) so the
+/// transport can build it inline without an extra allocation
+/// per probe. With the parallel fan-out of 21 candidates the
+/// zero-cost view matters at the boundary; every other layer of
+/// the algorithm only sees the [`TemperatureProbeOutcome`].
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeResponseView<'a> {
+    /// Joined text from the response body. Empty when the
+    /// upstream emitted `content: null` (the decoder tolerates
+    /// `null` since PR #594 + iter 2 so the max-tokens probe
+    /// does not collapse to `Indeterminate`) or when the
+    /// request returned no content for any other reason.
+    pub text: &'a str,
+    /// The `stop_reason` reported by the upstream
+    /// (`"end_turn"`, `"max_tokens"`, etc.). `None` when the
+    /// upstream omitted the field.
+    pub finish_reason: Option<&'a str>,
+    /// Convenience flag the wire decoder sets when
+    /// `finish_reason == "max_tokens"`. Mirrored as a separate
+    /// field so the classifier does not have to re-parse the
+    /// finish string on every probe.
+    pub truncated: bool,
+    /// Number of output tokens the upstream billed for the
+    /// request. Combined with `truncated`, this is the
+    /// unambiguous "ran out of budget mid-emit" signal —
+    /// `truncated && output_tokens > 0`. Either flag in
+    /// isolation is degenerate (a max_tokens stop with zero
+    /// output is a wire-level anomaly the algorithm should
+    /// re-probe, not lock).
+    pub output_tokens: u64,
+}
+
+impl<'a> ProbeResponseView<'a> {
+    /// Build a view from a borrowed [`Response`]. Lifted out of
+    /// the transport so the unit tests can construct views
+    /// without standing up a wiremock server.
+    pub fn from_response(resp: &'a Response) -> Self {
+        Self {
+            text: resp.text.as_str(),
+            finish_reason: resp.finish_reason.as_deref(),
+            truncated: resp.truncated,
+            output_tokens: resp.usage.output_tokens,
+        }
+    }
 }
 
 /// Trait that the temperature probe uses to send its tiny
@@ -206,7 +291,9 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
         };
         let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
         match res {
-            Ok(Ok((status, body))) => classify_probe_response(status, &body.text),
+            Ok(Ok((status, body))) => {
+                classify_probe_response(status, ProbeResponseView::from_response(&body))
+            }
             Ok(Err(_)) | Err(_) => TemperatureProbeOutcome::Indeterminate,
         }
     }
@@ -218,33 +305,60 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
 /// trait method so the tests can pin the 2xx/3xx/4xx branch logic
 /// without spinning up a full provider.
 ///
-/// Branching rules (mirrors the `max_tokens` probe but with the
-/// empty-body twist described in
-/// [`TemperatureProbeOutcome::Rejected`]):
+/// Branching rules (the empty-body branch was tightened after
+/// PR #594 + iter 2 to match the new `content: null` decoder
+/// behaviour; see [`TemperatureProbeOutcome::Accepted`] for the
+/// rationale):
 ///
 /// - 2xx / 3xx with non-empty body that does not carry the
 ///   rejection signature → `Accepted`.
-/// - 2xx / 3xx with empty body → `Rejected` (upstream silently
-///   dropped the parameter; equivalent to a refusal).
-/// - 2xx / 3xx with body that carries the rejection signature →
-///   `Rejected`.
-/// - 4xx with body that carries the rejection signature →
-///   `Rejected` (boundary — the upstream is telling us the
+/// - 2xx / 3xx with non-empty body that carries the rejection
+///   signature → `Rejected` (the upstream is telling us the
 ///   temperature is out of range).
+/// - 2xx / 3xx with empty body AND the truncation signal
+///   (`truncated && output_tokens > 0`) → `Accepted`. The
+///   upstream unambiguously accepted the request and the model
+///   ran out of output budget before emitting the trailing
+///   tokens; the temperature parameter was honoured.
+/// - 2xx / 3xx with empty body WITHOUT the truncation signal →
+///   `Indeterminate`. The shape is genuinely ambiguous (silent
+///   drop, decoder-absorbed error, 200 envelope with no content)
+///   and the algorithm needs the retry-once path to gather a
+///   second sample before locking the candidate.
+/// - 4xx with body that carries the rejection signature →
+///   `Rejected`.
 /// - 4xx with body that does NOT carry the signature →
 ///   `Indeterminate` (the 4xx is for something else — auth,
 ///   model-not-found — and is not a temperature signal).
 /// - 5xx / network / timeout → `Indeterminate`.
-pub fn classify_probe_response(status: u16, body: &str) -> TemperatureProbeOutcome {
-    let trimmed = body.trim();
+pub fn classify_probe_response(
+    status: u16,
+    view: ProbeResponseView<'_>,
+) -> TemperatureProbeOutcome {
+    let trimmed = view.text.trim();
     if (200..400).contains(&status) {
-        if trimmed.is_empty() || body_carries_temperature_rejection(body) {
+        if trimmed.is_empty() {
+            // Empty 2xx body. Distinguish the truncation case
+            // (upstream accepted, model ran out of output budget)
+            // from the ambiguous case (silent drop, decoder-
+            // absorbed error, 200 envelope with no content). The
+            // rejection heuristic cannot fire here — it requires
+            // the substring `temperature` in the body, which an
+            // empty body does not carry — so the two sub-branches
+            // are exhaustive: truncation → Accepted, anything
+            // else → Indeterminate.
+            if view.truncated && view.output_tokens > 0 {
+                TemperatureProbeOutcome::Accepted
+            } else {
+                TemperatureProbeOutcome::Indeterminate
+            }
+        } else if body_carries_temperature_rejection(view.text) {
             TemperatureProbeOutcome::Rejected
         } else {
             TemperatureProbeOutcome::Accepted
         }
     } else if (400..500).contains(&status) {
-        if body_carries_temperature_rejection(body) {
+        if body_carries_temperature_rejection(view.text) {
             TemperatureProbeOutcome::Rejected
         } else {
             TemperatureProbeOutcome::Indeterminate
@@ -1198,6 +1312,239 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // 5.1. classify_probe_response — branch matrix
+    //
+    // Pins the `pub fn classify_probe_response` contract so the
+    // PR #594 follow-up (truncation-as-Accepted) and the legacy
+    // branches (non-empty accept, 4xx with / without rejection
+    // signature, 5xx) cannot drift independently. The probe
+    // algorithm depends on every branch agreeing with the
+    // doc-comment above the function; a regression here would
+    // either (a) collapse the discovered set back to empty when
+    // the upstream truncates or (b) re-introduce the silent-drop
+    // false-positive the original implementation was guarding
+    // against.
+    // -----------------------------------------------------------------
+    /// Helper: build a [`ProbeResponseView`] with the supplied
+    /// fields. The view is `Copy` so the test sites can pass it
+    /// inline without a binding.
+    fn view<'a>(
+        text: &'a str,
+        finish_reason: Option<&'a str>,
+        output_tokens: u64,
+    ) -> ProbeResponseView<'a> {
+        let truncated = matches!(finish_reason, Some("max_tokens"));
+        ProbeResponseView {
+            text,
+            finish_reason,
+            truncated,
+            output_tokens,
+        }
+    }
+
+    #[test]
+    fn classify_probe_response_truncation_is_accepted() {
+        // The bug fix: HTTP 200 with `content: null` /
+        // `stop_reason: "max_tokens"` / `output_tokens > 0` is
+        // the upstream telling us "I accepted the parameter but
+        // ran out of budget before the trailing tokens". The
+        // classifier MUST return Accepted; the previous
+        // "empty body = Rejected" branch would have collapsed
+        // the discovered set to `Vec::new()`.
+        let v = view("", Some("max_tokens"), 5);
+        assert_eq!(
+            classify_probe_response(200, v),
+            TemperatureProbeOutcome::Accepted
+        );
+        // Sanity: 3xx behaves identically (the classifier
+        // already accepts the whole 200..400 range).
+        assert_eq!(
+            classify_probe_response(204, v),
+            TemperatureProbeOutcome::Accepted
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_empty_no_truncation_is_indeterminate() {
+        // Empty 2xx body WITHOUT the truncation signal — silent
+        // drop, decoder-absorbed error, or 200 envelope with no
+        // content — is genuinely ambiguous and must NOT lock
+        // the candidate as Rejected. The algorithm's
+        // `retry_once_on_indeterminate` path gathers a second
+        // sample before deciding.
+        // No finish_reason at all.
+        let v = view("", None, 0);
+        assert_eq!(
+            classify_probe_response(200, v),
+            TemperatureProbeOutcome::Indeterminate
+        );
+        // finish_reason = "end_turn" with an empty body is a
+        // contradictory upstream response (the model says it
+        // stopped normally but emitted nothing); retry is the
+        // correct response.
+        let v = view("", Some("end_turn"), 1);
+        assert_eq!(
+            classify_probe_response(200, v),
+            TemperatureProbeOutcome::Indeterminate
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_truncated_zero_output_is_indeterminate() {
+        // Degenerate shape: `stop_reason = "max_tokens"` but
+        // `output_tokens == 0`. The truncation flag is set
+        // without any tokens having been emitted — likely a
+        // wire-level anomaly (the upstream ran its truncation
+        // check before any token was generated, or the budget
+        // was so small that even the response envelope
+        // exhausted it). The classifier must NOT lock this as
+        // Accepted on the truncated flag alone; the
+        // `output_tokens > 0` half of the conjunction keeps the
+        // door open for the retry path.
+        let v = view("", Some("max_tokens"), 0);
+        assert_eq!(
+            classify_probe_response(200, v),
+            TemperatureProbeOutcome::Indeterminate
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_non_empty_body_without_signature_is_accepted() {
+        // The legacy "happy path" — 2xx + non-empty body + no
+        // rejection signature — stays Accepted. Pins the
+        // non-empty branch so the truncation follow-up cannot
+        // regress it.
+        let v = view("1", Some("end_turn"), 1);
+        assert_eq!(
+            classify_probe_response(200, v),
+            TemperatureProbeOutcome::Accepted
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_non_empty_body_with_signature_is_rejected() {
+        // The upstream returned a 2xx envelope but stamped the
+        // body with the rejection signature — the temperature
+        // parameter was honoured and rejected. Classify as
+        // Rejected so the algorithm excludes the candidate.
+        let v = view(
+            r#"{"error":{"message":"temperature must be between 0 and 2"}}"#,
+            Some("end_turn"),
+            0,
+        );
+        assert_eq!(
+            classify_probe_response(200, v),
+            TemperatureProbeOutcome::Rejected
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_4xx_with_signature_is_rejected() {
+        // The canonical upstream rejection shape (Anthropic-
+        // compat relays that cap at 1.0, OpenCode Go routes for
+        // `gpt-5.6-luna`). The classifier pins this as
+        // Rejected because the body carries the rejection
+        // signature.
+        let v = view(
+            r#"{"error":{"message":"temperature must be between 0 and 2"}}"#,
+            None,
+            0,
+        );
+        assert_eq!(
+            classify_probe_response(400, v),
+            TemperatureProbeOutcome::Rejected
+        );
+        assert_eq!(
+            classify_probe_response(422, v),
+            TemperatureProbeOutcome::Rejected
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_4xx_without_signature_is_indeterminate() {
+        // 4xx without the rejection signature — auth failures,
+        // model-not-found, malformed body — is NOT a temperature
+        // signal and must NOT lock the candidate as Rejected.
+        // The runtime's dispatch gate falls through to
+        // Indeterminate so a different relay / re-auth / new
+        // model does not poison the cache.
+        let v = view("invalid api key", None, 0);
+        assert_eq!(
+            classify_probe_response(401, v),
+            TemperatureProbeOutcome::Indeterminate
+        );
+        let v = view("model not found", None, 0);
+        assert_eq!(
+            classify_probe_response(404, v),
+            TemperatureProbeOutcome::Indeterminate
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_5xx_is_indeterminate() {
+        // 5xx storm, transient upstream error — never a
+        // temperature signal.
+        let v = view("upstream is on fire", None, 0);
+        assert_eq!(
+            classify_probe_response(500, v),
+            TemperatureProbeOutcome::Indeterminate
+        );
+        assert_eq!(
+            classify_probe_response(503, v),
+            TemperatureProbeOutcome::Indeterminate
+        );
+    }
+
+    #[test]
+    fn classify_probe_response_3xx_without_body_is_accepted_when_non_empty() {
+        // 3xx with a non-empty body still flows through the
+        // rejection / accept path (the classifier treats 200..400
+        // uniformly). Pins the upper bound of the status window.
+        let v = view("1", Some("end_turn"), 1);
+        assert_eq!(
+            classify_probe_response(304, v),
+            TemperatureProbeOutcome::Accepted
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 5.2. probe_response_view_from_response_round_trip
+    //
+    // Pins the [`ProbeResponseView::from_response`] bridge so
+    // every field the classifier consults is propagated
+    // verbatim from the [`Response`] the wire decoder produced.
+    // A regression here would silently change the classifier's
+    // input shape and break the truncation-as-Accepted contract
+    // pinned by 5.1.
+    // -----------------------------------------------------------------
+    #[test]
+    fn probe_response_view_from_response_round_trip() {
+        let resp = Response {
+            text: String::new(),
+            finish_reason: Some("max_tokens".to_owned()),
+            truncated: true,
+            usage: crate::llm::wire::Usage {
+                input_tokens: 49,
+                output_tokens: 16,
+                cache_read: 0,
+                cache_creation: 0,
+            },
+        };
+        let v = ProbeResponseView::from_response(&resp);
+        assert_eq!(v.text, "");
+        assert_eq!(v.finish_reason, Some("max_tokens"));
+        assert!(v.truncated);
+        assert_eq!(v.output_tokens, 16);
+        // End-to-end: the view the wire decoder produced must
+        // land as Accepted through the classifier. This is the
+        // "wire-shape that the upstream actually emits when the
+        // model thinks too hard" regression pin.
+        assert_eq!(
+            classify_probe_response(200, v),
+            TemperatureProbeOutcome::Accepted
+        );
+    }
+    // -----------------------------------------------------------------
     // 6. temperature_table_file_round_trip_through_toml
     // -----------------------------------------------------------------
     #[test]
@@ -1534,6 +1881,50 @@ mod tests {
         assert!(TEMPERATURE_PROBE_VALUES.contains(&0.0));
         assert!(TEMPERATURE_PROBE_VALUES.contains(&1.0));
         assert!(TEMPERATURE_PROBE_VALUES.contains(&2.0));
+    }
+
+    /// Pin `PROBE_MIN_OUTPUT_TOKENS >= MIN_AUTOPROBE_FLOOR`. The
+    /// probe body builder uses this constant to set
+    /// `Request::max_tokens`, and the field is also what the
+    /// upstream sees in the wire body. A regression to a small
+    /// value (e.g. 16) would re-introduce the M-series / MiMo
+    /// "thinks too hard and exhausts the output budget before
+    /// emitting text" shape, surfacing as `content: null` and
+    /// collapsing the discovered set to empty. The
+    /// `MIN_AUTOPROBE_FLOOR` bound comes from
+    /// [`crate::llm::probe`] and is the documented
+    /// minimum-viable budget for the max-tokens probe.
+    #[test]
+    fn probe_min_output_tokens_is_at_least_min_autoprobe_floor() {
+        const {
+            assert!(
+                PROBE_MIN_OUTPUT_TOKENS >= crate::llm::probe::MIN_AUTOPROBE_FLOOR,
+                "PROBE_MIN_OUTPUT_TOKENS must be >= MIN_AUTOPROBE_FLOOR so the \
+                 thinking footprint of any model the runtime targets fits \
+                 inside the probe budget",
+            );
+        }
+    }
+
+    /// Pin `PROBE_TIMEOUT >= 10s`. The probe budget covers the
+    /// upstream's thinking pass as well as the network
+    /// round-trip. The M-series / MiMo fleet typically answers
+    /// the 1-token payload in ~1.4 s; 10 s leaves generous
+    /// headroom for an upstream that occasionally takes longer,
+    /// while still falling through to `Indeterminate` quickly
+    /// when the upstream is genuinely broken.
+    #[test]
+    fn probe_timeout_is_long_enough_for_thinking_models() {
+        // `Duration`'s `PartialOrd` is not `const`-stable, so we
+        // compare via the `const fn` `as_secs` instead of `>=`.
+        const {
+            assert!(
+                PROBE_TIMEOUT.as_secs() >= 10,
+                "PROBE_TIMEOUT must be >= 10s so the upstream has time to \
+                 complete a thinking pass before the probe falls through to \
+                 Indeterminate",
+            );
+        }
     }
 
     #[test]

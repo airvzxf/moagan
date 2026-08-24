@@ -617,6 +617,20 @@ pub struct BreakeredProvider {
     /// configuration fields, and `src/cancel.rs::CancelToken`
     /// already uses the same shape.
     saturation_sink: Mutex<Option<Arc<dyn SaturationSink>>>,
+    /// Optional auto-probed `max_tokens` table. Wired by
+    /// [`crate::llm::provider::registry_from_config_with_home_and_sink`]
+    /// once the background probes have spawned, so the inner
+    /// provider's `effective_max_tokens` (which reads
+    /// `self.max_tokens_table`) sees the same discovered value the
+    /// pipeline consults on every LLM call. Without this field
+    /// the inner provider's `with_max_tokens_table` would have to
+    /// be called at construction time, but the table only exists
+    /// once the registry has decided whether the probe is enabled
+    /// (`probe_settings`); the interior-mutability setter mirrors
+    /// the saturation_sink / rate_limiter pattern so the registry
+    /// can attach the table after the wrapper is already shared.
+    /// PR-x23 follow-up.
+    max_tokens_table: Mutex<Option<Arc<MaxTokensTable>>>,
 }
 
 /// Push-side sink for [`crate::telemetry::saturation::SaturationEvent`].
@@ -667,6 +681,7 @@ impl BreakeredProvider {
             rate_limit_max_wait: None,
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
+            max_tokens_table: Mutex::new(None),
         }
     }
 
@@ -687,6 +702,7 @@ impl BreakeredProvider {
             rate_limit_max_wait: None,
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
+            max_tokens_table: Mutex::new(None),
         }
     }
 
@@ -769,6 +785,17 @@ impl BreakeredProvider {
     /// construction.
     pub fn set_rate_limiter(&self, rate_limiter: Arc<RateLimiter>) {
         *self.rate_limiter.lock() = Some(rate_limiter);
+    }
+
+    /// Attach the auto-probed `max_tokens` table so the wrapper's
+    /// `effective_max_tokens` can resolve the discovered value the
+    /// runtime consults on every LLM call. Mirrors the
+    /// interior-mutability pattern of `set_saturation_sink` /
+    /// `set_rate_limiter`: the registry wires the table after the
+    /// wrapper is already shared through `Arc<dyn Provider>`, so
+    /// the constructor cannot take the table as an argument.
+    pub fn set_max_tokens_table(&self, table: Arc<MaxTokensTable>) {
+        *self.max_tokens_table.lock() = Some(table);
     }
 
     /// Borrow the inner provider (used by the probe spawner to reach
@@ -945,8 +972,21 @@ impl Provider for BreakeredProvider {
     }
 
     fn effective_max_tokens(&self, req: &Request) -> u32 {
-        // Delegate to the inner provider: the wrapper is transparent
-        // and does not participate in the `max_tokens` clamp chain.
+        // PR-x23: the wrapper now owns a wrapper-level
+        // `max_tokens_table` so the registry can attach the
+        // auto-probed value after the wrapper is already shared
+        // through `Arc<dyn Provider>`. Consult the wrapper table
+        // first (it carries the post-probe value the registry
+        // builder attaches); fall back to the inner provider's
+        // own table so direct unit tests that wire
+        // `with_max_tokens_table` keep working unchanged.
+        if let Some(table) = self.max_tokens_table.lock().clone() {
+            return req.max_tokens.min(
+                table
+                    .resolve_cached(self.inner.name(), self.inner.model())
+                    .unwrap_or(u32::MAX),
+            );
+        }
         self.inner.effective_max_tokens(req)
     }
 
@@ -998,35 +1038,49 @@ impl ProviderPoolEntry for BreakeredProvider {
 fn build_pool_from_entries(
     entries: &[(String, Arc<BreakeredProvider>)],
 ) -> (Option<Arc<ProviderPool>>, Vec<String>) {
-    // First pass: tally per-kind counts while remembering the
-    // order each kind was first seen. The order is what makes the
-    // pool's round-robin sequence deterministic.
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    let mut seen: Vec<String> = Vec::new();
+    // First pass: tally per-(name, model) counts while remembering
+    // the order each pair was first seen. The order is what makes
+    // the pool's round-robin sequence deterministic.
+    //
+    // PR-x23: the key is `(name, model)` instead of just `name`.
+    // Multi-model sections like `[providers.minimax]` register one
+    // entry per `models[]` row (e.g. `minimax::MiniMax-M3`,
+    // `minimax::MiniMax-M2.5`, …) and they all share
+    // `name() == "minimax"`. Pooling by `name()` alone would round-
+    // robin across distinct models and silently swap the model the
+    // pipeline dispatches to — the operator's `--provider
+    // SECTION:MODEL` flag would be ignored by `RunContext::provider`
+    // because the pool is consulted before the joined-key lookup.
+    // Pooling by `(name, model)` groups only genuinely identical
+    // instances (e.g. two `mock::mock-model` entries) for the
+    // load-balancing round-robin the pool was designed for.
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    let mut seen: Vec<(String, String)> = Vec::new();
     for (_, wrapped) in entries {
-        let kind = wrapped.name().to_owned();
-        if !counts.contains_key(&kind) {
-            seen.push(kind.clone());
+        let key = (wrapped.name().to_owned(), wrapped.model().to_owned());
+        if !counts.contains_key(&key) {
+            seen.push(key.clone());
         }
-        *counts.entry(kind).or_insert(0) += 1;
+        *counts.entry(key).or_insert(0) += 1;
     }
-    // Pick the first seen kind that has 2+ entries.
-    let chosen_kind = seen
+    // Pick the first seen (name, model) pair that has 2+ entries.
+    let chosen_key = seen
         .into_iter()
         .find(|k| counts.get(k).copied().unwrap_or(0) >= 2);
-    let Some(kind) = chosen_kind else {
+    let Some(key) = chosen_key else {
         return (None, Vec::new());
     };
-    // Second pass: collect entries of the chosen kind, preserving
-    // insertion order so the round-robin sequence is deterministic.
+    // Second pass: collect entries of the chosen (name, model)
+    // pair, preserving insertion order so the round-robin sequence
+    // is deterministic.
     let names: Vec<String> = entries
         .iter()
-        .filter(|(_, w)| w.name() == kind)
+        .filter(|(_, w)| w.name() == key.0 && w.model() == key.1)
         .map(|(n, _)| n.clone())
         .collect();
     let pool_entries: Vec<Arc<dyn ProviderPoolEntry>> = entries
         .iter()
-        .filter(|(_, w)| w.name() == kind)
+        .filter(|(_, w)| w.name() == key.0 && w.model() == key.1)
         .map(|(_, w)| w.clone() as Arc<dyn ProviderPoolEntry>)
         .collect();
     (Some(Arc::new(ProviderPool::new(pool_entries))), names)
@@ -1294,7 +1348,33 @@ pub fn registry_from_config_with_home_and_sink(
             );
             let table = MaxTokensTable::from_home(home, settings.floor, settings.save)?;
             let table = Arc::new(table);
-            spawn_pending_probes(&wrapped_entries, cfg, Arc::clone(&table));
+            // PR-x23: scope the probe fan-out to the `(provider,
+            // model)` pairs the run will actually touch when the
+            // caller supplied a curated list. The legacy
+            // "probe every registered pair" behaviour is kept
+            // when `active_pairs = None` so existing tests and
+            // hand-rolled registries do not silently change
+            // semantics. Without this filter a multi-model
+            // section like `[providers.minimax]` (8 models) fans
+            // out 8 sequential Phase-1 probes that all race
+            // against the pipeline's first LLM call, and the
+            // pipeline aborts before any of them complete.
+            spawn_pending_probes(&wrapped_entries, cfg, Arc::clone(&table), active_pairs);
+            // PR-x23: also propagate the table to every wrapper
+            // already shared through `Arc<BreakeredProvider>` so
+            // `BreakeredProvider::effective_max_tokens` resolves
+            // the discovered value. Without this loop the table
+            // lives on the registry but the inner provider's
+            // `effective_max_tokens` (which `BreakeredProvider`
+            // delegates to) reads `self.max_tokens_table = None`
+            // and the LLM call falls back to the static
+            // `MINIMAX_MAX_TOKENS_CAP` (= 524_288), which the
+            // MiniMax upstream rejects with HTTP 400 for models
+            // whose discovered cap is below that value (e.g.
+            // MiniMax-M2.5 at 196_608).
+            for (_key, wrapped) in &wrapped_entries {
+                wrapped.set_max_tokens_table(Arc::clone(&table));
+            }
             registry = registry.with_max_tokens_table(table);
         } else {
             tracing::info!("max_tokens_auto: no provider enabled the probe");
@@ -1468,14 +1548,39 @@ fn probe_settings(
 /// (a failing probe must not poison the steady-state circuit) and
 /// runs against the inner [`Provider`] via
 /// [`ProviderProbeTransport`]. Per-call work is bounded by
-/// [`super::probe::PROBE_TIMEOUT`] (5 s).
+/// [`super::probe::PROBE_TIMEOUT`] (15 s).
 fn spawn_pending_probes(
     wrapped_entries: &[(String, Arc<BreakeredProvider>)],
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     table: Arc<MaxTokensTable>,
+    active_pairs: Option<&[(String, String)]>,
 ) {
     for (_key, wrapped) in wrapped_entries {
         let inner = wrapped.inner();
+        // PR-x23: scope the probe fan-out to the
+        // `(provider, model)` pairs the run is going to touch
+        // when the caller supplied a curated list. Mirrors the
+        // existing temperature-probe filter so a multi-model
+        // section like `[providers.minimax]` (8 models) only
+        // spawns one probe task for the `--provider
+        // minimax:MiniMax-M2.5` run instead of racing 8
+        // sequential Phase-1 probes against the pipeline's
+        // first LLM call. `active_pairs = None` keeps the
+        // legacy "probe every registered pair" behaviour for
+        // hand-rolled callers and tests that have no curated
+        // list.
+        if let Some(pairs) = active_pairs
+            && !pairs
+                .iter()
+                .any(|(p, m)| p == inner.name() && m == inner.model())
+        {
+            tracing::debug!(
+                provider = %inner.name(),
+                model = %inner.model(),
+                "max_tokens_auto: pair not in the active set; skipping background probe"
+            );
+            continue;
+        }
         // `cfg` is keyed by section name (e.g. `"minimax"`), but
         // `wrapped_entries` is keyed by the registry key (e.g.
         // `"minimax::minimax-m3"`). Resolve the section via the
@@ -1607,7 +1712,7 @@ fn spawn_pending_probes(
 /// circuit) and runs against the inner [`Provider`] via
 /// [`super::temperature_probe::ProviderTemperatureProbeTransport`].
 /// Per-call work is bounded by
-/// [`super::temperature_probe::PROBE_TIMEOUT`] (5 s) and the
+/// [`super::temperature_probe::PROBE_TIMEOUT`] (15 s) and the
 /// fan-out is batched at
 /// [`super::temperature_probe::TEMPERATURE_PROBE_BATCH_SIZE`] (3).
 fn spawn_pending_temperature_probes(
@@ -1920,6 +2025,109 @@ mod tests {
         let p2 = registry.pick(true).await.expect("allow_paused second");
         assert_eq!(p1.endpoint(), "mock://b");
         assert_eq!(p2.endpoint(), "mock://a");
+    }
+
+    /// PR-x23 regression pin: `build_pool_from_entries` keys the
+    /// round-robin pool by `(name, model)`, not by `name()` alone.
+    /// A multi-model section like the operator's `[providers.minimax]`
+    /// registers one entry per `models[]` row (all sharing
+    /// `name() == "minimax"` but distinct `model()` strings).
+    /// Pooling them together by `name()` would silently swap the
+    /// model the pipeline dispatches to on every pick, ignoring the
+    /// operator's `--provider SECTION:MODEL` flag. Verify the fix
+    /// keeps distinct models out of the pool while genuine
+    /// same-model duplicates (the load-balancing case) still round-
+    /// robin.
+    #[tokio::test]
+    async fn pool_does_not_group_distinct_models_of_same_provider() {
+        use crate::llm::provider::Provider;
+
+        /// Minimal Provider stub that returns fixed `(name, model)`
+        /// values regardless of what the wrapped MockProvider says.
+        /// Used to simulate the production layout where multiple
+        /// entries share `name()` but have different `model()`.
+        struct TaggedProvider {
+            inner: Arc<dyn Provider>,
+            name: &'static str,
+            model: &'static str,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for TaggedProvider {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn model(&self) -> &str {
+                self.model
+            }
+            fn endpoint(&self) -> &str {
+                self.inner.endpoint()
+            }
+            fn capabilities(&self) -> crate::llm::capabilities::ProviderCapabilities {
+                self.inner.capabilities()
+            }
+            async fn send(
+                &self,
+                req: &crate::llm::wire::Request,
+            ) -> crate::error::Result<(u16, crate::llm::wire::Response)> {
+                self.inner.send(req).await
+            }
+        }
+
+        let make = |name: &'static str, model: &'static str| -> Arc<BreakeredProvider> {
+            let mock: Arc<dyn Provider> = Arc::new(crate::llm::mock::MockProvider::empty());
+            let tagged: Arc<dyn Provider> = Arc::new(TaggedProvider {
+                inner: mock,
+                name,
+                model,
+            });
+            let breaker = Arc::new(CircuitBreaker::default());
+            Arc::new(BreakeredProvider::new(tagged, breaker))
+        };
+
+        // (name, model) tuples that share `name()` but differ on
+        // `model()`. After the fix, no pool is built and the
+        // registry exposes every entry through `by_name` /
+        // `get_model` so the runtime dispatch can pick the one
+        // the operator requested.
+        let distinct = vec![
+            (
+                "minimax::minimax-m3".to_owned(),
+                make("minimax", "minimax-m3"),
+            ),
+            (
+                "minimax::minimax-m2.5".to_owned(),
+                make("minimax", "minimax-m2.5"),
+            ),
+        ];
+        let (pool, names) = build_pool_from_entries(&distinct);
+        assert!(
+            pool.is_none(),
+            "distinct models of the same provider must NOT be pooled; got pool with {} entries: {:?}",
+            names.len(),
+            names
+        );
+        assert!(names.is_empty());
+
+        // Same `(name, model)` twice — the genuine load-balancing
+        // case — must still pool so `pick()` round-robins. The two
+        // entries are keyed under different registry strings
+        // (`mock::mock-a` / `mock::mock-b`) but their inner
+        // `(name, model)` matches.
+        let dup = vec![
+            ("mock::mock-a".to_owned(), make("mock", "mock-model")),
+            ("mock::mock-b".to_owned(), make("mock", "mock-model")),
+        ];
+        let (pool, names) = build_pool_from_entries(&dup);
+        assert!(
+            pool.is_some(),
+            "duplicate (name, model) entries must build a pool"
+        );
+        assert_eq!(
+            names.len(),
+            2,
+            "duplicate (name, model) entries must pool together for round-robin"
+        );
     }
 
     /// v0.10 pin: the legacy `BLOCKED_MODELS` gate

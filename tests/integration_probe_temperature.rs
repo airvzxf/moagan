@@ -144,6 +144,38 @@ async fn mount_reject_all(server: &MockServer) {
         .await;
 }
 
+/// Mount a wiremock that simulates the upstream shape the MiniMax
+/// relay emits when the model thinks too hard and exhausts its
+/// output budget mid-emit: HTTP 200 with `content: null`,
+/// `stop_reason: "max_tokens"`, and `usage.output_tokens > 0`.
+/// Before PR #594 + iter 2 made the wire decoder tolerate
+/// `content: null`, this shape would have surfaced as a
+/// transport error; after the decoder change, the [`Response`]
+/// carries an empty `text` field and the temperature-probe
+/// classifier is responsible for distinguishing "upstream
+/// accepted but the model had no budget to emit" from "upstream
+/// silently dropped the parameter". The [`TemperatureTable`]
+/// must therefore discover the full set — every probe lands
+/// as `Accepted` because the truncation signature
+/// (`stop_reason = "max_tokens"` AND `output_tokens > 0`) is
+/// exactly the case the classifier reads as acceptance.
+async fn mount_truncate_all(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": null,
+            "stop_reason": "max_tokens",
+            "usage": {
+                "input_tokens": 49,
+                "output_tokens": 16,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            }
+        })))
+        .mount(server)
+        .await;
+}
+
 /// Wire boundary at `1.0`. The wiremock accepts
 /// `temperature <= 1.0` and rejects `> 1.0` with the canonical
 /// `"temperature must be between 0 and 2"` signature. The
@@ -266,6 +298,145 @@ async fn probe_returns_empty_when_rejects_everything() {
     // so subsequent calls know the probe ran and decided nothing
     // is supported. `supported_for` returns `Vec::new()` for that
     // entry, which is the gate's "no clamp" signal.
+    let entry = table
+        .get("minimax", "MiniMax-M3")
+        .expect("probe_and_store records the entry even on empty result");
+    assert!(entry.temperatures.is_empty());
+}
+
+/// Regression pin for the operator-reported bug: when the
+/// upstream returns HTTP 200 with `content: null` and
+/// `stop_reason: "max_tokens"` for every probe (the
+/// MiniMax-on-think-too-hard shape), the temperature probe
+/// must discover the full set, not collapse it to `Vec::new()`.
+///
+/// Before the PR #594 follow-up, the `classify_probe_response`
+/// helper treated every 2xx-with-empty-body as `Rejected` —
+/// the assumption being that an empty body could only come
+/// from a silent parameter drop. After PR #594 made the wire
+/// decoder tolerate `content: null`, that assumption broke:
+/// the MiniMax upstream returns this shape legitimately when
+/// the model exhausts its output budget mid-emit, and the
+/// classifier has to recognise the truncation signal
+/// (`finish_reason = "max_tokens"` AND `output_tokens > 0`) as
+/// acceptance. The previous classifier collapsed every probe
+/// to `Rejected`, so `detect_supported_temperatures` returned
+/// an empty vec and the operator saw
+/// `temperatures = []` in `temperatures_auto.toml`.
+///
+/// This test is the end-to-end pin: a wiremock that emits the
+/// exact body shape the operator's run produced must surface
+/// all 21 candidates as `Accepted` through the real
+/// `MinimaxProvider` / `ProviderTemperatureProbeTransport` /
+/// `TemperatureTable::probe_and_store` chain. If this test
+/// ever regresses, the bug returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn probe_finds_full_set_when_upstream_truncates() {
+    let server = MockServer::start().await;
+    mount_truncate_all(&server).await;
+    let transport = wrap_transport(build_minimax_provider(server.uri()));
+
+    let table = TemperatureTable::empty();
+    let discovered = table
+        .probe_and_store(
+            "minimax",
+            "MiniMax-M3",
+            transport,
+            TEMPERATURE_PROBE_BATCH_SIZE,
+        )
+        .await
+        .expect("truncation-only upstream must not surface as an error");
+
+    // Every probe hits the truncated branch (the wiremock is
+    // uniform) and the classifier must commit each to
+    // `Accepted`. The discovered set is therefore the full
+    // canonical slice in canonical order.
+    assert_eq!(
+        discovered.len(),
+        TEMPERATURE_PROBE_VALUES.len(),
+        "truncated wiremock must surface all 21 candidates as Accepted"
+    );
+    assert_eq!(
+        discovered, TEMPERATURE_PROBE_VALUES,
+        "discovered set must match the canonical TEMPERATURE_PROBE_VALUES exactly"
+    );
+    // The entry recorded by `probe_and_store` reflects the
+    // non-empty discovery, so the runtime's dispatch gate can
+    // consult it on the first LLM call after the probe finishes.
+    let entry = table
+        .get("minimax", "MiniMax-M3")
+        .expect("probe_and_store records the discovered entry");
+    assert_eq!(entry.temperatures.as_slice(), TEMPERATURE_PROBE_VALUES);
+    assert!(entry.auto, "auto-detected entries must carry auto=true");
+}
+
+/// Pin for the silent-drop / decoder-absorbed-error branch:
+/// the wiremock emits HTTP 200 with `content: null` and
+/// `stop_reason: "end_turn"` (or no finish_reason at all) for
+/// every probe. The classifier must NOT classify this as
+/// `Accepted` (no truncation signal) and must NOT classify it
+/// as `Rejected` (the `body_carries_temperature_rejection`
+/// heuristic does not fire on an empty body). The shape
+/// therefore lands as `Indeterminate`, the algorithm's
+/// `retry_once_on_indeterminate` fires a second probe, and the
+/// second probe produces the same shape — so the batch
+/// boundary treats every candidate as terminal `Indeterminate`
+/// and the discovered set is empty.
+///
+/// This pins the "be honest about ambiguous upstream shapes"
+/// contract: a probe that cannot commit is NOT a probe that
+/// rejects. The runtime's dispatch gate falls back to the
+/// operator's requested temperature instead of locking the
+/// discovered set to a wrong value, which is the safer of the
+/// two failure modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn probe_returns_empty_when_upstream_returns_empty_body_no_truncation() {
+    let server = MockServer::start().await;
+    // Wiremock that returns 200 + content:null + stop_reason:
+    // "end_turn" — the upstream succeeded but emitted nothing.
+    // This is the ambiguous shape that the classifier commits
+    // to `Indeterminate`, so the algorithm's retry path runs
+    // and the final outcome stays non-`Accepted`.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": null,
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 49,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let transport = wrap_transport(build_minimax_provider(server.uri()));
+
+    let table = TemperatureTable::empty();
+    let discovered = table
+        .probe_and_store(
+            "minimax",
+            "MiniMax-M3",
+            transport,
+            TEMPERATURE_PROBE_BATCH_SIZE,
+        )
+        .await
+        .expect("uniform Indeterminate must not surface as an error");
+
+    // Every probe is `Indeterminate` → the algorithm retries
+    // once → the retry hits the same shape → the candidate is
+    // terminal `Indeterminate` at the batch boundary →
+    // `detect_supported_temperatures` treats it as not-
+    // accepted → the discovered set is empty.
+    assert!(
+        discovered.is_empty(),
+        "non-truncated empty body must surface as empty discovered set; got {discovered:?}"
+    );
+    // The on-table entry still records the run (so the next
+    // startup knows the probe ran and committed nothing) but
+    // with an empty `temperatures` vector.
     let entry = table
         .get("minimax", "MiniMax-M3")
         .expect("probe_and_store records the entry even on empty result");
