@@ -641,6 +641,10 @@ fn k9_lenient_strategy_skips_continuation_helper_on_truncated() {
         let provider = Arc::new(mock);
 
         let ctx = call_retry_run_context(home.clone(), provider.clone(), "kimi-k3", run_id);
+        // `max_retries = 1` lets the cap resolve to `min(budget.max_attempts, 2)`,
+        // so the retry path is exercised and the second mock response is reachable.
+        // With `max_retries = 0` the cap collapses to a single attempt and the
+        // documented "retry parses cleanly" branch can never fire.
         let result: serde_json::Value = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -651,7 +655,7 @@ fn k9_lenient_strategy_skips_continuation_helper_on_truncated() {
                     String::new(),
                     String::new(),
                     "Value",
-                    0,
+                    1,
                 )
                 .await
             })
