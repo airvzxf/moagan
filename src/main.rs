@@ -65,17 +65,36 @@ fn init_tracing() {
     // list to keep the JSONL compact on deeply nested pipeline
     // runs), so we do not need `with_current_span` / `with_span_list`
     // — those flags only exist for the text formats.
+    //
+    // Two writers: stderr (colored for interactive terminals) and
+    // a lazy file writer (`FileLogWriter`). The file writer is
+    // controlled by the top-level `--logs` flag and the
+    // `MOAGAN_RUN_LOGS` env var; the path is plumbed in by
+    // `dispatch_inner` after clap parses (the subscriber cannot be
+    // re-initialised, so the path goes through a process-global
+    // `OnceLock`). The file layer always disables ANSI so the
+    // output is grep-friendly. Both writers are wrapped in the
+    // redaction `ReportingLayer` so secrets never leak to either
+    // destination.
+    let stderr_layer = fmt::layer()
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(moagan::telemetry::redact::ReportingLayer::new(
+            std::io::stderr,
+        ));
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_ansi(false)
+        .with_writer(moagan::telemetry::redact::ReportingLayer::new(
+            moagan::telemetry::file_log::FileLogWriter,
+        ));
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(
-            fmt::layer()
-                .with_target(true)
-                .with_file(true)
-                .with_line_number(true)
-                .with_writer(moagan::telemetry::redact::ReportingLayer::new(
-                    std::io::stderr,
-                )),
-        )
+        .with(stderr_layer)
+        .with(file_layer)
         .try_init();
 }
 
