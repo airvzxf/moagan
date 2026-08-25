@@ -46,11 +46,16 @@
 //!   prose-prefixed / bracket-broken JSON (kimi-*, glm-*, hy3,
 //!   mimo-*).
 //! - [`Continuation`](JsonRecoveryStrategy::Continuation) — same as
-//!   Lenient for a single parse attempt; on parse failure the
-//!   dispatcher re-calls the model as
+//!   Lenient for the single parse attempt. On **truncated** response
+//!   (`finish_reason="length"` / `"max_tokens"`), the dispatcher
+//!   re-issues the call as
 //!   [`Role::Continuation`](crate::llm::role::Role::Continuation)
 //!   up to [`max_continuation_attempts`] times (2 in production).
-//!   Used for models that occasionally truncate (`minimax-*`).
+//!   On parse failure of a **non-truncated** response, the dispatcher
+//!   falls through to the normal parse-failure retry budget (5
+//!   attempts for Parse/Schema per the per-mode matrix in
+//!   `retry_budget.rs`). Used for models that occasionally truncate
+//!   (`minimax-*`).
 //! - [`PromptPrefill`](JsonRecoveryStrategy::PromptPrefill) —
 //!   same as Lenient for the first attempt; on parse failure the
 //!   dispatcher retries ONCE with an assistant prefill of `{`
@@ -92,11 +97,13 @@ pub enum JsonRecoveryStrategy {
     /// bracket-broken JSON (kimi-*, glm-*, hy3, mimo-*).
     #[default]
     Lenient,
-    /// Lenient plus bounded focused continuation. On parse
-    /// failure the dispatcher re-calls the model as
+    /// Lenient plus bounded focused continuation on TRUNCATED responses.
+    /// On a truncated response, the dispatcher re-calls the model as
     /// [`Role::Continuation`](crate::llm::role::Role::Continuation)
-    /// up to [`max_continuation_attempts`] (2 in production) times.
-    /// Use for models that occasionally truncate (`minimax-*`).
+    /// up to [`max_continuation_attempts`] (2 in production) times. On
+    /// parse failure of a non-truncated response, the dispatcher falls
+    /// through to the normal parse-failure retry budget. Use for models
+    /// that occasionally truncate (`minimax-*`).
     Continuation,
     /// Lenient with an assistant prefill of `{` injected at the
     /// body-builder level. On first parse failure the dispatcher

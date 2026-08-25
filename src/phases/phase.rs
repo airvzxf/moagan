@@ -1891,7 +1891,21 @@ impl RunContext {
     /// continuation itself is non-truncated (we stop regardless of
     /// `finished`), when the continuation response fails to parse
     /// as JSON, when the continuation call returns a transport /
-    /// HTTP error, or after [`MAX_CONTINUATIONS`] (2) attempts.
+    /// HTTP error, or after `max_continuation_attempts` re-calls.
+    ///
+    /// The cap is **passed in by the caller**, sourced from
+    /// [`crate::llm::json_strategy::max_continuation_attempts`] for
+    /// the resolved [`crate::llm::json_strategy::JsonRecoveryStrategy`].
+    /// In production this is `2` for
+    /// [`JsonRecoveryStrategy::Continuation`](crate::llm::json_strategy::JsonRecoveryStrategy::Continuation)
+    /// (the D.21.6 default) and `0` for every other strategy. The
+    /// call site gates invocation on `max_continuation_attempts > 0`,
+    /// so a `0` value is a no-op signal — the original (truncated)
+    /// response falls through to the parse-failure retry budget
+    /// instead of going through this loop. After the cap is reached
+    /// (or any other termination branch fires), the helper preserves
+    /// `truncated = true` so the existing parse path sees the same
+    /// input it sees today.
     ///
     /// Behavioural contract:
     ///
@@ -1923,11 +1937,11 @@ impl RunContext {
         role: Role,
         original: &Response,
         _started_unix: i64,
+        max_continuation_attempts: u8,
     ) -> Response {
         use crate::domain::ContinuationReport;
         use crate::llm::prompts::render_continuation_prompt;
 
-        const MAX_CONTINUATIONS: u8 = 2;
         const EXCERPT_BYTES: usize = 500;
 
         let mut accumulated = original.text.clone();
@@ -1939,7 +1953,7 @@ impl RunContext {
         let mut total_cache_creation = original.usage.cache_creation;
 
         let mut attempt_idx: u8 = 0;
-        while attempt_idx < MAX_CONTINUATIONS && truncated {
+        while attempt_idx < max_continuation_attempts && truncated {
             let last_excerpt: String =
                 crate::phases::util::safe_tail(&accumulated, EXCERPT_BYTES).to_string();
 
@@ -2174,13 +2188,20 @@ impl RunContext {
             // (Anthropic: stop_reason="max_tokens", OpenAI-compat:
             // finish_reason="length") and is non-empty, swap in the
             // continuation-augmented response so the parse pipeline
-            // runs on the stitched text. Cap at 2 attempts (D.21.6);
-            // after the cap we keep `truncated = true` so the
-            // existing parse path sees the same input it sees today
-            // (just one-shot, no retry).
+            // runs on the stitched text. The cap and the dispatch
+            // gate both come from
+            // [`crate::llm::json_strategy::max_continuation_attempts`]
+            // for the resolved strategy: `Continuation` returns `2`
+            // (D.21.6 default), every other strategy returns `0`
+            // and the helper is skipped — the truncated response
+            // then falls through to the normal parse-failure retry
+            // budget. After the cap is reached the helper preserves
+            // `truncated = true` so the existing parse path sees the
+            // same input it sees today (just one-shot, no retry).
+            let max_cont = json_strategy::max_continuation_attempts(strategy);
             let response = match response {
-                Ok(resp) if resp.truncated && !resp.text.is_empty() => Ok(self
-                    .continue_truncated_response(role, &resp, started_unix)
+                Ok(resp) if resp.truncated && !resp.text.is_empty() && max_cont > 0 => Ok(self
+                    .continue_truncated_response(role, &resp, started_unix, max_cont)
                     .await),
                 other => other,
             };
@@ -3164,12 +3185,21 @@ mod tests {
     /// runs the parse pipeline on the joined text. The pipeline
     /// must succeed and exactly one `model.continuation_attempt`
     /// warning must be emitted with `attempt = 0`.
+    ///
+    /// The test pins the helper for the `Continuation` strategy,
+    /// so the dispatch gate
+    /// ([`crate::llm::json_strategy::max_continuation_attempts`])
+    /// fires — we drive the context with `minimax-m3`, the
+    /// canonical `Continuation` model.
     #[tokio::test]
     async fn phase_continuation_loop_fires_when_truncated() {
-        let (temp, ctx, script) = retry_context(vec![
-            Ok((200, truncated_response(r#"{"a":"#))),
-            Ok((200, continuation_envelope("1}", true))),
-        ]);
+        let (temp, ctx, script) = retry_context_with_model(
+            "minimax-m3",
+            vec![
+                Ok((200, truncated_response(r#"{"a":"#))),
+                Ok((200, continuation_envelope("1}", true))),
+            ],
+        );
         let result = ctx
             .call_with_retry_parse::<serde_json::Value>(
                 Role::Intake,
@@ -3194,6 +3224,11 @@ mod tests {
     /// today), and emits exactly 2 `model.continuation_attempt`
     /// events plus a `model.response_truncated` warning for the
     /// original call.
+    ///
+    /// The cap is sourced from
+    /// [`crate::llm::json_strategy::max_continuation_attempts`] —
+    /// `Continuation` returns `2`. The context drives `minimax-m3`
+    /// so the dispatch gate fires.
     #[tokio::test]
     async fn phase_continuation_loop_caps_at_two_attempts() {
         fn continuation_envelope_truncated(continued: &str, finished: bool) -> Response {
@@ -3210,11 +3245,14 @@ mod tests {
                 usage: Default::default(),
             }
         }
-        let (temp, ctx, script) = retry_context(vec![
-            Ok((200, truncated_response("abc"))),
-            Ok((200, continuation_envelope_truncated("abc", false))),
-            Ok((200, continuation_envelope_truncated("abc", false))),
-        ]);
+        let (temp, ctx, script) = retry_context_with_model(
+            "minimax-m3",
+            vec![
+                Ok((200, truncated_response("abc"))),
+                Ok((200, continuation_envelope_truncated("abc", false))),
+                Ok((200, continuation_envelope_truncated("abc", false))),
+            ],
+        );
         let result = ctx
             .call_with_retry_parse::<serde_json::Value>(
                 Role::Intake,
@@ -3271,15 +3309,23 @@ mod tests {
     /// retrying. The dispatcher emits a `model.continuation_failed`
     /// warning and the parse pipeline sees the original truncated
     /// text (which fails to parse).
+    ///
+    /// Drove via `minimax-m3` so the dispatch gate
+    /// ([`crate::llm::json_strategy::max_continuation_attempts`])
+    /// fires; the helper is what emits `model.continuation_failed`
+    /// on transport errors.
     #[tokio::test]
     async fn phase_skips_continuation_on_first_transport_error() {
-        let (temp, ctx, script) = retry_context(vec![
-            Ok((200, truncated_response(r#"{"x":"#))),
-            Err(Error::Provider {
-                message: "transport died".into(),
-                http_status: None,
-            }),
-        ]);
+        let (temp, ctx, script) = retry_context_with_model(
+            "minimax-m3",
+            vec![
+                Ok((200, truncated_response(r#"{"x":"#))),
+                Err(Error::Provider {
+                    message: "transport died".into(),
+                    http_status: None,
+                }),
+            ],
+        );
         let result = ctx
             .call_with_retry_parse::<serde_json::Value>(
                 Role::Intake,
