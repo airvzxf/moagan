@@ -208,7 +208,7 @@ impl ProbeTransport for ProviderProbeTransport {
 
     async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
         let req = Request {
-            role: Role::Intake,
+            role: Role::Sketch, // F1: see investigation report
             model: self.provider.model().to_owned(),
             system: PROBE_SYSTEM.to_owned(),
             user: PROBE_USER.to_owned(),
