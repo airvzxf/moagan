@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Per-mode retry budget matrix (D.21.6) now allows retries across all modes.**
+  Fast/Explore/Batch previously had `max_attempts=1` for every failure reason,
+  which propagated upstream model non-determinism (e.g. `MiniMax-M3` returning
+  `{"problem":}` for the `Route` phase) as fatal `Error::SchemaViolation`
+  errors instead of recoverable parse failures. The new matrix:
+  - Parse/Schema: 5 attempts (4 retries) with `use_json_repair` in ALL modes
+  - Transport/RateLimit/Timeout: 3 attempts (2 retries) in Fast/Explore/Batch,
+    3-4 in Standard, 4-6 in Deep
+  - Truncated: 1-2 attempts (model already cut output)
+  The `max_retries` parameter on `call_with_retry_parse` remains a hard
+  ceiling so callers that want single-shot behavior (tests, mocks) keep it.
 - **Self-healing param rejection: close multi-rejection cascade + make `top_p` opt-in**
   - `detect_rejection` now reports all parameter names rejected in a single upstream response, not just the first; the dispatch loop iterates up to `PARAM_NAMES.len()` (3) times, registering each rejection and omitting the offending field before retrying. Closes the cascade where upstreams that reject `temperature`, `max_tokens`, and `top_p` together (e.g. `opencode:gpt-5.6-luna`) used to leak the second rejection as a fatal 4xx.
   - `parse_provider_error_body` now tolerates the `http <status> <reason-phrase>:` envelope that `llm::http::classify_status` produces for 4xx (e.g. `"http 400 Bad Request: {...}"`), not just the strict `"http <status>:"` form. Without this, the auto-heal cascade was silently no-op'ing in production because `detect_rejection` never saw the JSON body.

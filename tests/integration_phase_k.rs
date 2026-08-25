@@ -19,10 +19,16 @@
 
 use moagan::cli::Mode;
 use moagan::domain::constraint::{HARD_INCOMPATIBILITIES, is_incompatible};
+use moagan::execution::Parallelism;
+use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::embed::{Embedder, HashingEmbedder, cosine};
 use moagan::llm::retry_budget::{RetryReason, budget_for};
-use moagan::redact::apply::{RedactPolicy, Surface, apply_with_categories};
+use moagan::llm::{MockProvider, MockResponse, ProviderRegistry};
+use moagan::phases::util::write_json;
+use moagan::phases::{Phase, PhaseOutput, RoutePhase, RunContext};
+use moagan::redact::RedactPolicy;
+use moagan::redact::apply::{Surface, apply_with_categories};
 use moagan::redact::patterns::{PatternKind, substitute};
 use moagan::storage::sqlite::{
     Db, ManifestEventRow, OutboxEventRow, ProviderRollupRow, RedactAuditRow,
@@ -30,7 +36,10 @@ use moagan::storage::sqlite::{
 use moagan::storage::{
     ProcessLease, acquire_process_lock, heartbeat_process_lock, release_process_lock,
 };
+use moagan::telemetry::Telemetry;
+use moagan::test_support::with_moagan_home;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Open a fresh DB and register one run. Returns the DB handle and
 /// the run id; callers use `id.to_string()` as the foreign key
@@ -238,31 +247,228 @@ fn k7_substitute_returns_correct_marker() {
     );
 }
 
+/// `Deep` parse failures get the full repair budget: five attempts
+/// (= four retries) with the local JSON repair pass enabled. The
+/// previous matrix pinned this at 2 attempts; D.21.6 update now
+/// matches the per-mode envelope where Parse/Schema always
+/// cap at 5 to absorb model non-determinism.
 #[test]
 fn k9_retry_budget_for_deep_with_parse_uses_json_repair() {
     let b = budget_for(Mode::Deep, RetryReason::Parse);
-    assert_eq!(b.max_attempts, 2);
+    assert_eq!(b.max_attempts, 5);
     assert!(b.use_json_repair);
 }
 
+/// `Fast` allows retries for transient failures. The old matrix
+/// pinned every Fast reason at `max_attempts = 1`; the new matrix
+/// gives Transport / RateLimit / Timeout two retries (3 attempts)
+/// so a flaky network or short 429 does not invalidate a fast
+/// run. Parse / Schema still get the full repair budget
+/// (5 attempts with `use_json_repair`).
 #[test]
-fn k9_retry_budget_for_fast_is_always_single_attempt() {
+fn k9_retry_budget_for_fast_at_least_three_for_transients() {
     for reason in [
         RetryReason::Transport,
         RetryReason::RateLimit,
-        RetryReason::Parse,
-        RetryReason::Schema,
         RetryReason::Timeout,
-        RetryReason::Truncated,
     ] {
         let b = budget_for(Mode::Fast, reason);
-        assert_eq!(b.max_attempts, 1, "reason={reason:?}");
+        assert!(
+            b.max_attempts >= 3,
+            "Fast {reason:?} should allow at least 3 attempts, got {}",
+            b.max_attempts
+        );
     }
 }
 
+/// `Fast` parse / schema failures get the full repair budget
+/// (5 attempts with `use_json_repair` = true). This is the
+/// regression-pin for the smoke gate 2 fix: a `MiniMax-M3`
+/// response of `{"problem":}` (malformed JSON) used to fail
+/// the `Route` phase immediately because the old matrix
+/// capped Fast at 1 attempt for every reason.
 #[test]
-fn k9_retry_budget_for_deep_rate_limit_is_three_attempts() {
+fn k9_retry_budget_for_fast_at_least_five_for_parse_schema_with_repair() {
+    for reason in [RetryReason::Parse, RetryReason::Schema] {
+        let b = budget_for(Mode::Fast, reason);
+        assert_eq!(b.max_attempts, 5, "reason={reason:?}");
+        assert!(b.use_json_repair, "reason={reason:?}");
+    }
+}
+
+/// `Deep` rate-limit failures are the most generous slot in the
+/// matrix: six attempts (= five retries) because the heavy path
+/// is expensive to restart and a transient throttle should not
+/// invalidate the run. The old matrix pinned this at 3; the new
+/// matrix lifts it to 6.
+#[test]
+fn k9_retry_budget_for_deep_rate_limit_is_six_attempts() {
     let b = budget_for(Mode::Deep, RetryReason::RateLimit);
-    assert_eq!(b.max_attempts, 3);
+    assert_eq!(b.max_attempts, 6);
     assert!(!b.use_json_repair);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end retry-recovery test (Route phase).
+//
+// The D.21.6 matrix update lifts Fast / Explore / Batch off the
+// "always single-shot" footgun: before, a `Route` call that came
+// back with `{"problem":}` (the canonical MiniMax-M3 malformed
+// payload) failed the whole run with `Error::SchemaViolation` on
+// the first attempt because `budget_for(Fast, Parse).max_attempts
+// == 1`. After the matrix change, the same payload triggers the
+// retry loop (max_attempts = 5, use_json_repair = true) and
+// recovers the moment the mock serves a parseable route JSON.
+//
+// This test pins that recovery loop end-to-end:
+//   1. The mock returns `{"problem":}` for the first 3 Route calls.
+//   2. The mock returns a valid `Route` JSON on the 4th call.
+//   3. `RoutePhase::execute` completes with `PhaseOutput::Route`.
+//   4. The `<run_dir>/final/route.json` sidecar is parseable and
+//      matches the 4th mock response (proving the retry loop fired
+//      instead of bailing on the first malformed payload).
+// ---------------------------------------------------------------------------
+
+/// Build a `RunContext` for a single `RoutePhase` invocation. Mirrors
+/// the helper in `tests/integration_mvp.rs` so this test stays
+/// self-contained and does not pull the full fast-mode pipeline.
+fn build_route_run_context(
+    home: Arc<MoaganHome>,
+    provider: Arc<MockProvider>,
+    run_id: RunId,
+) -> RunContext {
+    let mut registry = ProviderRegistry::default();
+    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
+    registry.insert("mock".into(), arc);
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().expect("ensure run dir");
+    let telemetry =
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
+    let parallelism = Parallelism::new(1);
+    RunContext::new(
+        run_id,
+        home,
+        Arc::new(registry),
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "Recovery test brief".into(),
+        "fast".into(),
+    )
+}
+
+/// Minimal valid `Brief` the `RoutePhase::execute` reads at startup.
+/// Mirrors the shape written by `IntakePhase` so the phase does not
+/// bail on a missing `problem` field.
+fn route_recovery_brief() -> moagan::domain::Brief {
+    moagan::domain::Brief {
+        problem: "Trigger the retry loop on a malformed model response".into(),
+        objectives: vec!["Recover from parse failure".into()],
+        deliverables: vec![],
+        constraints: vec![],
+        assumptions: vec![],
+        non_goals: vec![],
+        acceptance: vec![],
+        risks: vec![],
+        context_block: None,
+    }
+}
+
+/// End-to-end recovery test: the mock serves `{"problem":}` for the
+/// first 3 Route calls, then a valid `Route` JSON on the 4th. The
+/// retry loop (max_attempts=5 for Fast/Parse per the new matrix)
+/// must consume the three malformed payloads, succeed on the 4th
+/// call, write `final/route.json`, and return
+/// `PhaseOutput::Route(path)`.
+///
+/// Before the D.21.6 matrix update this test would fail with
+/// `Error::SchemaViolation` on the first malformed response because
+/// the old `budget_for(Fast, Parse).max_attempts == 1`. After the
+/// update the budget allows the retry loop to fire; the assertion on
+/// the `MockProvider::calls()` count (4) is the regression pin.
+#[test]
+fn k9_route_phase_recovers_from_repeated_parse_failures() {
+    with_moagan_home("k9_route_recovery", |_home_path| {
+        // Build the home + run layout the Route phase expects.
+        let home = Arc::new(MoaganHome::resolve().expect("resolve home"));
+        home.ensure().expect("ensure home");
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run dir");
+
+        // Write the brief the phase reads on entry. Without it the
+        // phase bails on `Error::Io` (file not found) before the
+        // retry loop is even consulted, which would make this test
+        // pass for the wrong reason.
+        write_json(&run_dir.brief(), &route_recovery_brief()).expect("write brief");
+
+        // Mock: 3 malformed payloads followed by a valid one. The
+        // 4th response is the one the retry loop must accept.
+        let valid_route = r#"{
+  "mode": "fast",
+  "reason": "Recovery from parse failure",
+  "sketches": 0,
+  "proposals": 3,
+  "judges": 3
+}"#;
+        let mut mock = MockProvider::empty();
+        for _ in 0..3 {
+            // `{"problem":}` is not valid JSON (the value side is
+            // missing), so the parse pipeline classifies it as
+            // `RetryReason::Parse` and looks up the Fast/Parse row
+            // of the budget matrix.
+            mock.push(MockResponse::plain(r#"{"problem":}"#));
+        }
+        mock.push(MockResponse::plain(valid_route));
+        let provider = Arc::new(mock);
+
+        // Drive the phase through a single-thread tokio runtime —
+        // matches the pattern in `tests/integration_validators.rs`.
+        let ctx = build_route_run_context(home.clone(), provider.clone(), run_id);
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async { RoutePhase.execute(&ctx).await });
+        let output = output.expect("RoutePhase::execute must succeed after retries");
+        ctx.telemetry.flush().expect("flush telemetry");
+
+        // The output must be the `Route(path)` variant; the path
+        // must point at the canonical `final/route.json` sidecar.
+        let path = match output {
+            PhaseOutput::Route(p) => p,
+            other => panic!("expected PhaseOutput::Route, got {other:?}"),
+        };
+        assert!(
+            path.ends_with("final/route.json"),
+            "RoutePhase must write final/route.json, got {}",
+            path.display()
+        );
+        assert!(path.exists(), "route.json must exist on disk");
+
+        // The on-disk file must be parseable as the Route contract
+        // and must carry the payload from the 4th mock response —
+        // proof that the retry loop fired instead of bailing on the
+        // first malformed payload.
+        let raw = std::fs::read_to_string(&path).expect("read route.json");
+        let parsed: moagan::domain::Route =
+            serde_json::from_str(&raw).expect("route.json is valid JSON for the Route contract");
+        assert_eq!(parsed.mode, "fast");
+        assert_eq!(parsed.proposals, 3);
+        assert_eq!(parsed.reason, "Recovery from parse failure");
+
+        // Regression pin: the mock must have been called exactly
+        // 4 times (3 malformed + 1 valid). Before the D.21.6
+        // update the loop bailed on the first malformed response,
+        // so this counter would have been 1 and the test would
+        // have failed on the `panic!` branch above.
+        let calls = provider.calls();
+        assert_eq!(
+            calls.len(),
+            4,
+            "expected 4 mock calls (3 malformed + 1 valid), got {}",
+            calls.len()
+        );
+    });
 }
