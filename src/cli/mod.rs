@@ -159,6 +159,16 @@ pub struct Cli {
     /// and `import` all share a single override path (D.14.5).
     #[arg(long, global = true, env = "MOAGAN_RUNS_DIR")]
     pub runs_dir: Option<std::path::PathBuf>,
+    /// Write every tracing event to this path as plain text (no
+    /// ANSI codes). Globally available so every subcommand that
+    /// runs work (`discover`, `run`, `audit verify`, `probe`,
+    /// `preflight`, …) can plumb through the same flag. Equivalent
+    /// to the `MOAGAN_RUN_LOGS` env var — when both are set, the
+    /// env var wins (Unix convention). The parent directory is
+    /// created on demand. The default is to log to stderr with
+    /// ANSI colours, matching the historical behaviour.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub logs: Option<std::path::PathBuf>,
     /// Subcommand.
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -973,6 +983,53 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
 async fn dispatch_inner(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
+    // Plumb the `--logs` flag and the `MOAGAN_RUN_LOGS` env var
+    // into the lazy file writer registered in
+    // `src/main.rs::init_tracing`. The subscriber was
+    // initialised BEFORE clap parsed (it has to be, because the
+    // dispatcher's first `tracing::info!` runs at the top of
+    // `Config::load`), so the path is delivered via the
+    // process-global `OnceLock` in `src/telemetry/file_log.rs`.
+    //
+    // Precedence: env var beats flag (Unix convention). The env
+    // var is read here manually rather than via clap's `env`
+    // attribute because clap's default is "flag beats env"; we
+    // need the opposite, and a manual read is clearer than a
+    // post-parse override.
+    //
+    // We resolve `MOAGAN_RUN_LOGS` against the post-clap value
+    // so an explicit `--logs PATH` cannot be silently upgraded
+    // by an unrelated env var from the operator's shell.
+    let logs_path: Option<std::path::PathBuf> = std::env::var_os("MOAGAN_RUN_LOGS")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or(cli.logs.clone());
+    if let Some(path) = logs_path {
+        match crate::telemetry::file_log::set(path.clone()) {
+            Ok(()) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    "tracing file writer enabled"
+                );
+            }
+            Err(crate::telemetry::file_log::SetError::AlreadySet(prev)) => {
+                // Unreachable in practice — we only call `set`
+                // once per process here. Defensive: the dispatcher
+                // is the only writer of the cell.
+                tracing::debug!(
+                    flag_path = %path.display(),
+                    active_path = %prev.display(),
+                    "tracing file writer path already set; flag ignored"
+                );
+            }
+            Err(crate::telemetry::file_log::SetError::ParentDir { path, source }) => {
+                return Err(Error::InvalidArgs(format!(
+                    "--logs / MOAGAN_RUN_LOGS: could not create parent directory for {}: {source}",
+                    path.display()
+                )));
+            }
+        }
+    }
     let global_home = match cli.runs_dir {
         Some(path) => MoaganHome::at(path),
         None => MoaganHome::resolve()?,
