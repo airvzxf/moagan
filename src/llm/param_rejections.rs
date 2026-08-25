@@ -319,11 +319,17 @@ impl ParamRejectionsTable {
 ///
 /// Returns `Some(param_name)` when the HTTP status is 4xx AND the
 /// body matches one of the known rejection signatures; `None`
-/// otherwise. The seven patterns cover every rejection observed in
-/// the spike (Anthropic, OpenAI-compat, OpenCode Go, DeepSeek,
-/// MiniMax Anthropic-direct). All 7 patterns are regex-driven;
-/// `regex` is already a regular dependency so no new crates are
-/// pulled in.
+/// otherwise. Convenience wrapper around [`detect_all_rejections`]
+/// that returns the first match — equivalent to the legacy
+/// single-shot contract the rest of the codebase relied on before
+/// the cascade-recovery loop. New code should prefer
+/// [`detect_all_rejections`] directly so a single upstream response
+/// can seed every rejected name into the table at once.
+///
+/// The seven patterns cover every rejection observed in the spike
+/// (Anthropic, OpenAI-compat, OpenCode Go, DeepSeek, MiniMax
+/// Anthropic-direct). All 7 patterns are regex-driven; `regex` is
+/// already a regular dependency so no new crates are pulled in.
 ///
 /// Pattern catalogue:
 ///
@@ -339,44 +345,103 @@ impl ParamRejectionsTable {
 /// 7. `<param>: invalid value` (DeepSeek deserialization)
 /// 8. Legacy freeform: `<param> is too large: N`
 pub fn detect_rejection(status: u16, body: &str) -> Option<String> {
+    detect_all_rejections(status, body).into_iter().next()
+}
+
+/// Cascade-recovery counterpart of [`detect_rejection`]. Returns
+/// **every** wire parameter name mentioned in the upstream's 4xx
+/// body, deduplicated (via `BTreeSet` so the output is in canonical
+/// order across runs) and filtered against [`PARAM_NAMES`] — the
+/// whitelist of names the dispatcher actually knows how to omit.
+/// Returns an empty `Vec` for non-4xx status codes, malformed JSON,
+/// or 4xx bodies that don't match any rejection signature.
+///
+/// The dispatch loop consults this helper once per retry and omits
+/// every detected name in the same iteration: a single upstream
+/// response that lists `"Unknown parameters: 'temperature',
+/// 'max_tokens', 'top_p'"` (the canonical `gpt-5.6-luna` cascade)
+/// seeds all three into the table in one round-trip instead of
+/// the legacy single-shot behaviour that only recorded the first.
+pub fn detect_all_rejections(status: u16, body: &str) -> Vec<String> {
     if !(400..500).contains(&status) {
-        return None;
+        return Vec::new();
     }
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => return None,
+        Err(_) => return Vec::new(),
     };
+
+    let mut found: BTreeSet<String> = BTreeSet::new();
 
     // Pattern #4B (deterministic): the upstream's own structured
     // field. Handled first because it carries the field name
-    // verbatim — no regex needed.
+    // verbatim — no regex needed. Whitelisted against
+    // `PARAM_NAMES` so a freeform `error.param` field that names
+    // something the dispatcher cannot omit (e.g. `input`) does not
+    // poison the cascade with an un-droppable name.
     if let Some(param) = v
         .get("error")
         .and_then(|e| e.get("param"))
         .and_then(|p| p.as_str())
         && let Some(capture) = parse_error_param_start(param)
+        && PARAM_NAMES.contains(&capture.as_str())
     {
-        return Some(capture);
+        found.insert(capture);
     }
 
-    // The rest of the patterns are freeform `error.message` strings.
-    // Each upstream uses its own phrasing; we run them in
+    // The rest of the patterns are freeform `error.message`
+    // strings. Each upstream uses its own phrasing; we run them in
     // reliability order so the most specific pattern wins.
-    let msg = v
+    if let Some(msg) = v
         .get("error")
         .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())?;
-    run_message_patterns(msg)
+        .and_then(|m| m.as_str())
+    {
+        for cap in run_message_patterns(msg) {
+            // Whitelist: only emit names the dispatch path can
+            // actually omit. A message like "invalid input: ..."
+            // captures "input" under pattern #5, but `input` is the
+            // user prompt — dropping it breaks the wire contract.
+            if PARAM_NAMES.contains(&cap.as_str()) {
+                found.insert(cap);
+            }
+        }
+    }
+
+    found.into_iter().collect()
 }
 
 /// Test-only escape hatch for the regex set so unit tests can drive
-/// the message branch without an HTTP-shaped body. Mirrors the
-/// ordered `match` chain in [`detect_rejection`] so a failure here
-/// points the operator at the right pattern to fix.
-fn run_message_patterns(msg: &str) -> Option<String> {
+/// the message branch without an HTTP-shaped body. Iterates over
+/// every regex in the catalogue and emits all matches; the order is
+/// the same as the legacy single-shot chain so a regression points
+/// the operator at the right pattern to fix. Returns the captures
+/// as a `Vec<String>` rather than `Option<String>` so a single
+/// message like `"Unknown parameters: 'a', 'b', 'c'"` (handled by
+/// the dedicated plural extractor at the top of the function) yields
+/// every name.
+fn run_message_patterns(msg: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    // Pattern: plural-form "Unknown parameters: '<a>', '<b>', '<c>'"
+    // (Anthropic-compat relay + several OpenCode Go routes emit
+    // this shape). Must run before the singular #1+#2 extractor so
+    // the three quoted names are captured in one pass.
+    for cap in captures_iter(msg, r"'([A-Za-z_][A-Za-z0-9_]*)'") {
+        if !out.contains(&cap) {
+            out.push(cap);
+        }
+    }
+    // The plural-form extractor above is permissive — it accepts
+    // any quoted identifier — so we additionally run the singular
+    // patterns to seed names like `top_p` that may appear
+    // without quotes. The two extractors together close the
+    // cascade gap on `gpt-5.6-luna` (plural) and the canonical
+    // Anthropic "Unknown parameter: 'max_tokens'" (singular).
+
     // Pattern #4A (MiniMax Anthropic-direct).
     if let Some(cap) = capture(msg, r"invalid params, param '([A-Za-z_][A-Za-z0-9_]*)'") {
-        return Some(cap);
+        push_unique(&mut out, cap);
     }
 
     // Patterns #1 + #2: case-insensitive, with optional
@@ -387,7 +452,7 @@ fn run_message_patterns(msg: &str) -> Option<String> {
         msg,
         r#"(?i)(?:\[(?:unknown_parameter|invalid_request_error)\]\s*)?(?:unknown|unsupported) parameter[:\s]+['"<]?([A-Za-z_][A-Za-z0-9_]*)"#,
     ) {
-        return Some(cap);
+        push_unique(&mut out, cap);
     }
 
     // Pattern #7: DeepSeek deserialization
@@ -396,7 +461,7 @@ fn run_message_patterns(msg: &str) -> Option<String> {
     // value:" (where "value" is a generic noun, not a parameter
     // name) — pattern #5 would capture "value" if it ran first.
     if let Some(cap) = capture(msg, r"([A-Za-z_][A-Za-z0-9_]*):\s+invalid value") {
-        return Some(cap);
+        push_unique(&mut out, cap);
     }
 
     // Pattern #6: DeepSeek "Invalid temperature value, the valid
@@ -405,14 +470,14 @@ fn run_message_patterns(msg: &str) -> Option<String> {
         msg,
         r"(?i)invalid ([A-Za-z_][A-Za-z0-9_]*) value,\s+the valid range",
     ) {
-        return Some(cap);
+        push_unique(&mut out, cap);
     }
 
     // Pattern #5: OpenCode Go kimi-k3 "invalid temperature: only 1".
     // Anchored on `invalid <param>:` so the noun after "invalid"
     // is the parameter name (not a generic word like "value").
     if let Some(cap) = capture(msg, r"(?i)invalid ([A-Za-z_][A-Za-z0-9_]*):\s+[a-zA-Z]") {
-        return Some(cap);
+        push_unique(&mut out, cap);
     }
 
     // Pattern #4B legacy: "<param> is too large: N" without leading
@@ -421,10 +486,22 @@ fn run_message_patterns(msg: &str) -> Option<String> {
         msg,
         r"(?i)([A-Za-z_][A-Za-z0-9_]*) is (?:too|invalid) (?:large|small)",
     ) {
-        return Some(cap);
+        push_unique(&mut out, cap);
     }
 
-    None
+    out
+}
+
+/// Push `cap` into `out` only when absent — the regex catalogue
+/// captures the same identifier from multiple patterns (e.g. a
+/// message like `"Failed to deserialize ... temperature: invalid
+// value"` triggers both #7 and the generic `'<param>'` plural
+/// extractor). Without dedup, the cascade would persist the same
+/// name twice and burn a retry budget entry for nothing.
+fn push_unique(out: &mut Vec<String>, cap: String) {
+    if !out.contains(&cap) {
+        out.push(cap);
+    }
 }
 
 /// Run a single regex against `haystack` and return the first
@@ -440,6 +517,20 @@ fn capture(haystack: &str, pattern: &str) -> Option<String> {
     let caps = re.captures(haystack)?;
     let m = caps.get(1)?;
     Some(m.as_str().to_owned())
+}
+
+/// Multi-match counterpart of [`capture`]. Returns every captured
+/// group-1 across all matches in the haystack (in left-to-right
+/// order). The same compile-cost caveat as [`capture`] applies —
+/// used by [`run_message_patterns`] on the rare 4xx path, not on
+/// every dispatch.
+fn captures_iter(haystack: &str, pattern: &str) -> Vec<String> {
+    let Ok(re) = regex::Regex::new(pattern) else {
+        return Vec::new();
+    };
+    re.captures_iter(haystack)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_owned()))
+        .collect()
 }
 
 /// The `error.param` field is a freeform string the upstream uses
@@ -821,5 +912,155 @@ mod tests {
     fn audit_handles_non_object_body_without_panic() {
         let body = serde_json::json!(["a", "b"]);
         audit_unknown_fields(&body);
+    }
+
+    // ----- detect_all_rejections: cascade-recovery surface -----
+
+    /// The canonical `gpt-5.6-luna` cascade: a single upstream
+    /// response that lists every forbidden wire field in one
+    /// sentence. The detector must surface all three so the
+    /// dispatcher's retry loop can omit them in a single iteration
+    /// instead of the legacy single-shot behaviour that would only
+    /// record the first match and burn two more round-trips.
+    #[test]
+    fn detect_all_returns_three_names_from_unknown_parameters_list() {
+        let body = body_json("Unknown parameters: 'temperature', 'max_tokens', 'top_p'");
+        let detected = detect_all_rejections(400, &body);
+        assert!(
+            detected.iter().any(|s| s == "temperature"),
+            "temperature must be detected; got {detected:?}"
+        );
+        assert!(
+            detected.iter().any(|s| s == "max_tokens"),
+            "max_tokens must be detected; got {detected:?}"
+        );
+        assert!(
+            detected.iter().any(|s| s == "top_p"),
+            "top_p must be detected; got {detected:?}"
+        );
+    }
+
+    /// When the upstream mentions the same name across multiple
+    /// patterns (plural extractor + singular extractor), the output
+    /// must dedupe so the cascade retry budget isn't burned by
+    /// phantom duplicates.
+    #[test]
+    fn detect_all_dedupes_repeated_names() {
+        // `temperature` appears quoted (caught by the plural
+        // extractor) and again under "invalid temperature: ..."
+        // (caught by pattern #5). Without dedup we'd see two
+        // entries; the table's `BTreeSet` would also dedup at
+        // persist time, so the test pins the contract at the
+        // detector boundary instead of relying on the persistence
+        // path to swallow duplicates.
+        let body = body_json("Unknown parameters: 'temperature', 'temperature'");
+        let detected = detect_all_rejections(400, &body);
+        let temp_count = detected.iter().filter(|s| *s == "temperature").count();
+        assert_eq!(
+            temp_count, 1,
+            "temperature must appear once; got {detected:?}"
+        );
+    }
+
+    /// A 4xx that has nothing to do with param rejection (404,
+    /// 401, plain text) must yield an empty `Vec` so the cascade
+    /// loop's `while detected.is_empty()` branch fires and aborts
+    /// cleanly instead of recording noise.
+    #[test]
+    fn detect_all_returns_empty_for_unrelated_4xx() {
+        assert_eq!(
+            detect_all_rejections(404, r#"{"error":"model not found"}"#).len(),
+            0
+        );
+        assert_eq!(
+            detect_all_rejections(401, r#"{"error":"invalid api key"}"#).len(),
+            0
+        );
+        assert_eq!(detect_all_rejections(400, "not json").len(), 0);
+        assert_eq!(
+            detect_all_rejections(200, &body_json("Unknown parameters: 'temperature'")).len(),
+            0
+        );
+        assert_eq!(
+            detect_all_rejections(500, &body_json("internal server error")).len(),
+            0
+        );
+    }
+
+    /// `detect_rejection` (the legacy single-shot surface) must
+    /// remain a strict wrapper over `detect_all_rejections` so the
+    /// 12 existing integration tests keep their contract: returns
+    /// the FIRST detected name in canonical `BTreeSet` order.
+    #[test]
+    fn detect_rejection_wrapper_returns_first_from_detect_all() {
+        let body = body_json("Unknown parameters: 'temperature', 'max_tokens', 'top_p'");
+        let first = detect_rejection(400, &body);
+        let all = detect_all_rejections(400, &body);
+        assert_eq!(
+            first.as_deref(),
+            all.first().map(String::as_str),
+            "detect_rejection must return detect_all_rejections's first element; first={first:?}, all={all:?}"
+        );
+        assert!(first.is_some(), "cascade body must yield at least one name");
+    }
+
+    /// Pattern #4B whitelisting: when the upstream's structured
+    /// `error.param` field names a token that is NOT in
+    /// `PARAM_NAMES` (e.g. `input` — the user prompt, which the
+    /// dispatch path cannot omit), the detector must ignore it
+    /// instead of seeding the cascade with an un-droppable name.
+    #[test]
+    fn detect_rejection_ignores_param_field_not_in_param_names() {
+        // `input` is the user prompt — dropping it would break the
+        // wire contract. The detector must surface an empty result.
+        let body = r#"{"error":{"param":"input must be a non-empty array","type":"invalid_request_error","message":"..."}}"#;
+        assert_eq!(detect_rejection(400, body), None);
+        let all = detect_all_rejections(400, body);
+        assert!(
+            all.is_empty(),
+            "non-whitelisted error.param must not leak into the cascade; got {all:?}"
+        );
+    }
+
+    /// Pattern #4B positive case: when `error.param` names a known
+    /// wire field, the detector must surface it so the cascade
+    /// table can record it and the retry omits it.
+    #[test]
+    fn detect_rejection_accepts_param_field_in_param_names() {
+        let body = r#"{"error":{"param":"max_tokens is too large: 999999","type":"server_error","message":"..."}}"#;
+        assert_eq!(detect_rejection(400, body).as_deref(), Some("max_tokens"));
+    }
+
+    /// When `error.param` names a non-whitelisted token, the
+    /// detector must fall through to the message branch and pick
+    /// up any other field name the message body happens to list.
+    /// Pins the cascade contract that "the table can grow even
+    /// when one of the two extractor arms is dead".
+    #[test]
+    fn detect_rejection_falls_back_to_message_when_param_ignored() {
+        // `error.param` is `input` (ignored), but the message
+        // body still names `temperature` under pattern #7.
+        let body = r#"{"error":{"param":"input must be a non-empty array","message":"Failed to deserialize: temperature: invalid value","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            detect_rejection(400, body).as_deref(),
+            Some("temperature"),
+            "message branch must win when error.param is non-whitelisted"
+        );
+    }
+
+    /// `model` is NOT in `PARAM_NAMES` today, so a structured
+    /// `error.param = "model"` must be ignored by the detector —
+    /// the cascade table would not know how to omit it. The test
+    /// pins the whitelist boundary so a future contributor who
+    /// expands `PARAM_NAMES` to include `model` sees the detector
+    /// surface it (and updates this test in the same commit).
+    #[test]
+    fn detect_rejection_handles_model_param_field_correctly() {
+        let body = r#"{"error":{"param":"model not found","type":"invalid_request_error","message":"..."}}"#;
+        assert_eq!(
+            detect_rejection(400, body),
+            None,
+            "non-whitelisted error.param must be ignored"
+        );
     }
 }

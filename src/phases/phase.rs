@@ -31,11 +31,12 @@ use crate::llm::cache::{Cache, CacheConfig};
 use crate::llm::capability::CapabilityResolver;
 use crate::llm::models_dev::ModelsDevCatalog;
 use crate::llm::param_rejections::{
-    PARAM_NAMES, ParamRejectionsTable, audit_unknown_fields, detect_rejection,
+    PARAM_NAMES, ParamRejectionsTable, audit_unknown_fields, detect_all_rejections,
 };
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
+use crate::llm::prompts::top_p_for_role;
 use crate::llm::response_format_opt_out::render_system_prompt_with_prefix;
 use crate::llm::temperature_probe::TemperatureTable;
 use crate::llm::{ProviderRegistry, Request, Response, Role};
@@ -791,7 +792,7 @@ impl RunContext {
                 profile_overrides,
                 provider_temperature,
             )),
-            top_p: Some(provider_top_p.unwrap_or(0.95)),
+            top_p: resolve_top_p(role, provider_top_p),
             response_schema: None,
             stream: false,
             extra_messages: vec![],
@@ -896,7 +897,7 @@ impl RunContext {
             user,
             max_tokens: Some(max_tokens_for_role(role)),
             temperature: Some(temperature),
-            top_p: Some(provider_top_p.unwrap_or(0.95)),
+            top_p: resolve_top_p(role, provider_top_p),
             response_schema: None,
             stream: false,
             extra_messages: vec![],
@@ -970,7 +971,7 @@ impl RunContext {
             user,
             max_tokens: Some(max_tokens_for_role(role)),
             temperature: Some(temperature),
-            top_p: Some(provider_top_p.unwrap_or(0.95)),
+            top_p: resolve_top_p(role, provider_top_p),
             response_schema: None,
             stream: false,
             extra_messages: vec![],
@@ -1037,7 +1038,7 @@ impl RunContext {
                 profile_overrides,
                 provider_temperature,
             )),
-            top_p: Some(provider_top_p.unwrap_or(0.95)),
+            top_p: resolve_top_p(role, provider_top_p),
             response_schema: None,
             stream: false,
             extra_messages: vec![],
@@ -1256,64 +1257,82 @@ impl RunContext {
             "LLM call stage"
         );
         let mut result = provider.send(&hash_input).await;
-        // Self-healing retry: when the upstream rejects a wire
-        // field with HTTP 4xx and the body carries the rejection
-        // signature, omit the offending field and call once more.
-        // Recorded into the table so subsequent runs skip the
-        // failing round-trip entirely.
-        if let Err(err) = &result
-            && let Some(status) = err.http_status()
-            && (400..500).contains(&status)
-        {
-            // `Error::Display` for `Error::Provider` is
-            // `"provider error: http {status}: {body}"` — the body
-            // is the raw JSON the upstream returned, prefixed by
-            // the transport envelope. Strip the envelope so the
-            // detector parses JSON rather than a labelled string.
-            // Naive `rsplit(": ")` would split inside the JSON
-            // (the body itself often contains `": "` substrings);
-            // anchor the strip on the `"http {status}:"` token so
-            // the search is deterministic.
-            let raw = err.to_string();
-            let prefix = format!("provider error: http {status}: ");
-            let body = raw
-                .strip_prefix(&prefix)
-                .unwrap_or(raw.strip_prefix("provider error: ").unwrap_or(&raw));
-            if let Some(detected) = detect_rejection(status, body)
-                && let Some(table) = self.param_rejections.as_ref()
-            {
+        // Self-healing cascade retry: when the upstream rejects
+        // wire fields with HTTP 4xx and the body carries one or
+        // more rejection signatures, omit every detected name and
+        // retry. The legacy single-shot loop only recorded the
+        // first match — a single response that lists
+        // `"Unknown parameters: 'temperature', 'max_tokens',
+        // 'top_p'"` (the canonical `gpt-5.6-luna` cascade) lost
+        // the other two names and the next round-trip failed
+        // again with the same body, propagating the error to the
+        // caller. The bounded `while` below closes the gap by
+        // consulting [`detect_all_rejections`] once per iteration
+        // and persisting every name in one pass, capped at
+        // [`PARAM_NAMES`] entries so an upstream that loops the
+        // same response body can never starve the dispatcher.
+        let max_rejection_retries = PARAM_NAMES.len();
+        let mut rejection_attempts = 0;
+        while rejection_attempts < max_rejection_retries {
+            // Pull the HTTP status out of the latest result; abort
+            // the cascade on any non-4xx or transport-layer
+            // failure (the upstream either succeeded or hit a
+            // transient error the breaker/governor handles
+            // separately — neither is in scope for this loop).
+            let status = match result.as_ref().err().and_then(|e| e.http_status()) {
+                Some(s) if (400..500).contains(&s) => s,
+                _ => break,
+            };
+            let err = result.as_ref().expect_err("status set implies Err");
+            let body = parse_provider_error_body(err, status);
+            let detected = detect_all_rejections(status, body.as_ref());
+            if detected.is_empty() {
+                // The 4xx is something other than a param
+                // rejection (auth, model-not-found, generic
+                // upstream error). Surface it to the caller
+                // untouched.
+                break;
+            }
+            for detected_param in &detected {
                 tracing::info!(
                     provider = %self.default_provider,
                     model = %self.default_model,
                     role = %req.role.as_str(),
-                    detected_param = %detected,
+                    detected_param = %detected_param,
                     "auto-detected param rejection; retrying without it"
                 );
-                if let Err(rec_err) = table.record(
-                    self.default_provider.as_str(),
-                    self.default_model.as_str(),
-                    &detected,
-                ) {
+                if let Some(table) = self.param_rejections.as_ref()
+                    && let Err(rec_err) = table.record(
+                        self.default_provider.as_str(),
+                        self.default_model.as_str(),
+                        detected_param,
+                    )
+                {
                     tracing::warn!(
                         error = %rec_err,
                         "failed to persist param rejection; in-memory entry still kept"
                     );
                 }
-                crate::llm::wire::omit_param(&mut hash_input, &detected);
-                // Re-run the silent-acceptance audit on the post-omit
-                // body so the operator sees the diagnostic for the
-                // body that actually reaches the upstream on the retry.
-                if let Ok(value) = serde_json::to_value(&hash_input) {
-                    audit_unknown_fields(&value);
-                }
-                tracing::debug!(
-                    call_id = %call_id,
-                    phase = req.role.as_str(),
-                    stage = "provider.send.retry",
-                    detected_param = %detected,
-                    "LLM call stage"
-                );
-                result = provider.send(&hash_input).await;
+                crate::llm::wire::omit_param(&mut hash_input, detected_param);
+            }
+            // Re-run the silent-acceptance audit on the post-omit
+            // body so the operator sees the diagnostic for the
+            // body that actually reaches the upstream on the
+            // retry.
+            if let Ok(value) = serde_json::to_value(&hash_input) {
+                audit_unknown_fields(&value);
+            }
+            tracing::debug!(
+                call_id = %call_id,
+                phase = req.role.as_str(),
+                stage = "provider.send.retry",
+                detected_params = ?detected,
+                "LLM call stage"
+            );
+            rejection_attempts += 1;
+            result = provider.send(&hash_input).await;
+            if result.is_ok() {
+                break;
             }
         }
         tracing::debug!(
@@ -1788,7 +1807,7 @@ impl RunContext {
             user: user.to_owned(),
             max_tokens: Some(crate::phases::phase::max_tokens_for_role(role)),
             temperature: None,
-            top_p: Some(0.95),
+            top_p: None,
             response_schema: None,
             stream: false,
             extra_messages: vec![crate::llm::wire::Message {
@@ -1806,7 +1825,7 @@ impl RunContext {
             .providers
             .get(&self.default_provider)
             .and_then(|s| s.top_p);
-        req.top_p = Some(provider_top_p.unwrap_or(0.95));
+        req.top_p = resolve_top_p(role, provider_top_p);
         let started = crate::time::now_unix_secs();
         let response = self.dispatch_to_provider(req, None, started, 0).await?;
         // Run the lenient pipeline against the prefill response.
@@ -1956,7 +1975,7 @@ impl RunContext {
                 user,
                 max_tokens: Some(max_tokens_for_role(Role::Continuation)),
                 temperature: Some(temperature_for_role(Role::Continuation, None)),
-                top_p: Some(provider_top_p.unwrap_or(0.95)),
+                top_p: resolve_top_p(Role::Continuation, provider_top_p),
                 response_schema: None,
                 stream: false,
                 extra_messages: vec![],
@@ -2605,6 +2624,101 @@ pub fn resolve_temperature(
         return base;
     }
     temperature_for_role(role, profile_overrides)
+}
+
+/// PR-C3: resolve `top_p` for an LLM call by precedence.
+///
+/// Precedence (highest first):
+///
+/// 1. `provider_top_p` (when `Some`) — the operator's override from
+///    `[providers.<name>].top_p` in the user's TOML. Wins over the
+///    catalogue so the operator can pin a per-provider value without
+///    editing the role settings.
+/// 2. [`top_p_for_role`] (when `Some`) — the catalogue value
+///    registered in [`crate::llm::prompts::role_settings`]. Honours
+///    T01-06 §4.2: every role that ships a `RoleSettings` declares
+///    its sampling contract.
+/// 3. `None` — when neither the provider nor the role declare
+///    `top_p`, the field is omitted from the wire entirely via
+///    `skip_serializing_if = "Option::is_none"`. This replaces the
+///    legacy `unwrap_or(0.95)` that injected a forced 0.95 onto the
+///    wire even when no configuration asked for it — a behaviour
+///    that crashed any upstream rejecting `top_p`.
+///
+/// Without this helper, a role like `Role::Sketch` (no
+/// `RoleSettings`) plus a provider with `top_p = None` would have
+/// forced `Some(0.95)` onto the wire and triggered an immediate
+/// 4xx on relays that reject `top_p`. With it, both `None`s
+/// collapse to `None` and the wire omits the field end-to-end.
+pub fn resolve_top_p(role: Role, provider_top_p: Option<f32>) -> Option<f32> {
+    if let Some(p) = provider_top_p {
+        return Some(p);
+    }
+    top_p_for_role(role)
+}
+
+/// Strip the transport envelope off a provider-error message so the
+/// param-rejection detector parses JSON rather than a labelled
+/// string. The error's `Display` is `provider error: {message}`
+/// where `message` is built by [`crate::llm::http::classify_status`]
+/// as `format!("http {status}: {body}")` with `{status}` formatted
+/// via `reqwest::StatusCode`'s `Display` (which expands to
+/// `"400 Bad Request"`, not the bare integer). The helper tries the
+/// strict envelope first (`provider error: http {status}: `, status
+/// as integer — what the scripted provider in tests produces and
+/// what the legacy single-shot loop expected), then falls back to
+/// the production envelope (`provider error: http {status} <reason
+/// phrase>: `), then to `provider error: ` (catch-all when the
+/// upstream's body itself starts with the status line), then to a
+/// JSON `error.message` extraction, and finally returns the raw
+/// `Display` so the detector at least gets *something* to chew on
+/// when none of the envelopes match.
+pub(crate) fn parse_provider_error_body(err: &Error, status: u16) -> String {
+    let raw: String = err.to_string();
+    // Strict envelope (legacy / scripted providers): "provider error: http 400: <body>"
+    let strict = format!("provider error: http {status}: ");
+    if let Some(stripped) = raw.strip_prefix(&strict) {
+        return stripped.to_owned();
+    }
+    // Production envelope (reqwest::StatusCode Display expands to
+    // "400 Bad Request"): "provider error: http 400 Bad Request: <body>".
+    // The reason phrase is whatever `StatusCode::reason_phrase()`
+    // returns — typically one or two ASCII words. Scan for ": "
+    // AFTER the "provider error: http " marker so the first `": "`
+    // (which lives between "error" and "http") does not pull us
+    // out of position. The head slice between the marker and the
+    // delimiter must start with the status digits so a stray
+    // `": "` deeper in the body cannot be mistaken for the
+    // envelope terminator.
+    if let Some(http_idx) = raw.find("provider error: http ") {
+        let after_http = http_idx + "provider error: http ".len();
+        if let Some(colon_offset) = raw[after_http..].find(": ") {
+            let colon_idx = after_http + colon_offset;
+            let head = &raw[after_http..colon_idx];
+            if head.len() >= 3 && head.as_bytes()[..3] == *format!("{status:03}").as_bytes() {
+                return raw[colon_idx + 2..].to_owned();
+            }
+        }
+    }
+    // Catch-all: drop just the "provider error: " prefix and let
+    // the detector try to parse whatever's left.
+    if let Some(stripped) = raw.strip_prefix("provider error: ") {
+        return stripped.to_owned();
+    }
+    // Last resort: try to parse the raw as JSON and surface the
+    // `error.message` field verbatim. Some transports don't wrap
+    // the body at all (e.g. an upstream that returns the JSON
+    // envelope directly without the `provider error: http NNN: `
+    // prefix).
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+    {
+        return msg.to_owned();
+    }
+    raw
 }
 
 /// Outcome of a phase. Each variant corresponds to a sidecar file
@@ -3348,6 +3462,72 @@ mod tests {
         );
     }
 
+    // ----------------------------------------------------------------
+    // PR-C3: `resolve_top_p` precedence contract. Three cases pin the
+    // order documented in the helper's rustdoc:
+    //   1. Provider-set wins over role catalogue.
+    //   2. Role catalogue used when provider absent.
+    //   3. Both absent → None (wire omits the field).
+    // ----------------------------------------------------------------
+
+    /// Provider-set `top_p` wins over the role catalogue.
+    /// Mirrors `resolve_temperature_provider_base_beats_role_default`
+    /// for the `top_p` axis. `Role::Continuation` ships a catalogue
+    /// value (0.5) so this test exercises the precedence directly.
+    #[test]
+    fn resolve_top_p_provider_overrides_role_settings() {
+        assert_eq!(
+            resolve_top_p(Role::Continuation, Some(0.42)),
+            Some(0.42),
+            "provider top_p must beat the catalogue value (0.5)"
+        );
+    }
+
+    /// When the provider does not declare `top_p`, the role's
+    /// catalogue value applies. Same precedence as
+    /// `resolve_top_p_provider_overrides_role_settings` but on the
+    /// fallback branch.
+    #[test]
+    fn resolve_top_p_role_settings_used_when_provider_absent() {
+        assert_eq!(
+            resolve_top_p(Role::Continuation, None),
+            Some(0.5),
+            "provider None + Continuation catalogue (0.5) → catalogue value"
+        );
+        assert_eq!(
+            resolve_top_p(Role::TiefighterCritic, None),
+            Some(0.1),
+            "provider None + TiefighterCritic catalogue (0.1) → catalogue value"
+        );
+    }
+
+    /// When neither the provider nor the role declare `top_p`, the
+    /// helper returns `None` so the wire layer omits the field via
+    /// `skip_serializing_if = "Option::is_none"`. This is the
+    /// contract that closes the cascade gap on upstreams rejecting
+    /// `top_p` — a role without a catalogue entry (e.g. `Sketch`)
+    /// and a provider without a `top_p` config used to force
+    /// `Some(0.95)` onto the wire; the test pins the new behaviour
+    /// at the helper boundary.
+    #[test]
+    fn resolve_top_p_returns_none_when_neither_set() {
+        assert_eq!(
+            resolve_top_p(Role::Sketch, None),
+            None,
+            "Sketch has no RoleSettings; resolve_top_p must return None (not 0.95)"
+        );
+        assert_eq!(
+            resolve_top_p(Role::Intake, None),
+            None,
+            "Intake has no RoleSettings; resolve_top_p must return None"
+        );
+        assert_eq!(
+            resolve_top_p(Role::Clarify, None),
+            None,
+            "Clarify has no RoleSettings; resolve_top_p must return None"
+        );
+    }
+
     /// A `RecordingProvider` that captures the `Request` it received.
     /// Used by the call-layer test below to assert that the user's
     /// `[providers.X].temperature = 0.42` actually reaches the wire.
@@ -3527,10 +3707,14 @@ mod tests {
             Some(1.0),
             "without provider temperature, the per-role default (Sketch=1.0) must apply"
         );
+        // PR-C3 contract: `top_p` is now opt-in. Neither the
+        // provider nor the `Role::Sketch` role declare it, so the
+        // wire must omit the field entirely (legacy behaviour was
+        // to force `Some(0.95)`). The change closes the cascade
+        // gap for any upstream that rejects `top_p`.
         assert_eq!(
-            recorded.top_p,
-            Some(0.95),
-            "without provider top_p, the hard-coded 0.95 must apply"
+            recorded.top_p, None,
+            "without provider top_p AND without RoleSettings for the role, top_p must be None (wire omits the field)"
         );
     }
 
@@ -3950,5 +4134,256 @@ mod tests {
             Some(0.5),
             "out-of-range 0.7 must snap to the nearest supported value (0.5)"
         );
+    }
+
+    // ===========================================================
+    // PR-C2: cascade-recovery loop (bounded `while` with cap
+    // `PARAM_NAMES.len()`) + `parse_provider_error_body` envelope
+    // stripping. Each test drives `call_with_retry` against a
+    // scripted provider whose queue returns the responses the
+    // cascade should observe.
+    // ===========================================================
+
+    /// The legacy single-shot loop only recorded the FIRST
+    /// rejection name from a multi-name 4xx body, so a
+    /// `"Unknown parameters: 'temperature', 'max_tokens', 'top_p'"`
+    /// response burned a round-trip on `temperature` and
+    /// propagated the second failure to the caller. The new
+    /// cascade loop must:
+    /// 1. Detect every name in one pass.
+    /// 2. Record every name in `param_rejections.toml`.
+    /// 3. Omit every name in one retry iteration.
+    /// 4. Recover to a 200 envelope with exactly TWO `send`s
+    ///    (1 fail + 1 success).
+    #[tokio::test]
+    async fn dispatch_recovers_from_three_param_cascade() {
+        let body_json = r#"{"error":{"message":"Unknown parameters: 'temperature', 'max_tokens', 'top_p'","type":"invalid_request_error"}}"#;
+        let outcomes: Vec<Result<(u16, Response)>> = vec![
+            Err(Error::Provider {
+                message: format!("http 400: {body_json}"),
+                http_status: Some(400),
+            }),
+            Ok((200, response("ok"))),
+        ];
+        let (temp, ctx, script) = retry_context(outcomes);
+        let home = ctx.home.clone();
+        let table = crate::llm::param_rejections::ParamRejectionsTable::from_path(
+            &home.param_rejections_path(),
+        )
+        .expect("from_path on a fresh home");
+        let ctx = ctx.with_param_rejections(Arc::new(table));
+
+        let result = ctx.call(Role::Intake, "sys".into(), "user".into()).await;
+        assert!(
+            result.is_ok(),
+            "cascade must recover to 200; got {result:?}"
+        );
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            2,
+            "cascade must issue exactly 2 sends (1 initial fail + 1 success after omit-all)"
+        );
+
+        let persisted =
+            crate::llm::param_rejections::ParamRejectionsFile::load(&home.param_rejections_path())
+                .expect("load param_rejections.toml");
+        let entry = persisted
+            .providers
+            .get("retry")
+            .and_then(|m| m.get("retry-model"))
+            .expect("on-disk entry for (retry, retry-model) after cascade");
+        for name in ["temperature", "max_tokens", "top_p"] {
+            assert!(
+                entry.contains(name),
+                "{name} must be persisted; got {entry:?}"
+            );
+        }
+        drop(temp);
+    }
+
+    /// A 4xx body that doesn't match any rejection signature
+    /// (auth, model-not-found, plain text) must abort the cascade
+    /// loop with the upstream error intact — the dispatcher must
+    /// NOT record noise into `param_rejections.toml` and must
+    /// NOT issue a phantom retry.
+    #[tokio::test]
+    async fn dispatch_aborts_when_detector_returns_none() {
+        let body = r#"{"error":"model not found"}"#;
+        let outcomes: Vec<Result<(u16, Response)>> = vec![Err(Error::Provider {
+            message: format!("http 404: {body}"),
+            http_status: Some(404),
+        })];
+        let (temp, ctx, script) = retry_context(outcomes);
+        let home = ctx.home.clone();
+        let table = crate::llm::param_rejections::ParamRejectionsTable::from_path(
+            &home.param_rejections_path(),
+        )
+        .expect("from_path on a fresh home");
+        let ctx = ctx.with_param_rejections(Arc::new(table));
+
+        let result = ctx.call(Role::Intake, "sys".into(), "user".into()).await;
+        assert!(result.is_err(), "non-rejection 4xx must propagate");
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            1,
+            "cascade must abort on the first attempt when no param is detected"
+        );
+        assert!(
+            !home.param_rejections_path().exists(),
+            "param_rejections.toml must NOT be written when the 4xx is unrelated"
+        );
+        drop(temp);
+    }
+
+    /// The cascade cap is `PARAM_NAMES.len()` (3 today): even if
+    /// the upstream keeps returning a body with new rejection
+    /// signatures on every retry, the loop must bound itself and
+    /// surface the final error to the caller instead of looping
+    /// forever. Pins the contract that protects the dispatcher
+    /// from an upstream that never converges.
+    #[tokio::test]
+    async fn dispatch_caps_at_param_names_len() {
+        // 5 consecutive 4xx responses, each with a fresh param
+        // name. The cap is 3 iterations, so the dispatcher must
+        // see exactly 4 `send` calls (1 initial + 3 retries) and
+        // propagate the 4th error.
+        let bodies = [
+            r#"{"error":{"param":"temperature is invalid","type":"invalid_request_error","message":"..."}}"#,
+            r#"{"error":{"param":"max_tokens is invalid","type":"invalid_request_error","message":"..."}}"#,
+            r#"{"error":{"param":"top_p is invalid","type":"invalid_request_error","message":"..."}}"#,
+            r#"{"error":{"param":"input is invalid","type":"invalid_request_error","message":"..."}}"#,
+            r#"{"error":{"param":"model is invalid","type":"invalid_request_error","message":"..."}}"#,
+        ];
+        let outcomes: Vec<Result<(u16, Response)>> = bodies
+            .iter()
+            .map(|b| {
+                Err(Error::Provider {
+                    message: format!("http 400: {b}"),
+                    http_status: Some(400),
+                })
+            })
+            .collect();
+        let (temp, ctx, script) = retry_context(outcomes);
+        let home = ctx.home.clone();
+        let table = crate::llm::param_rejections::ParamRejectionsTable::from_path(
+            &home.param_rejections_path(),
+        )
+        .expect("from_path on a fresh home");
+        let ctx = ctx.with_param_rejections(Arc::new(table));
+
+        let result = ctx.call(Role::Intake, "sys".into(), "user".into()).await;
+        assert!(
+            result.is_err(),
+            "loop must surface the final 4xx when the cap is reached"
+        );
+        assert_eq!(
+            script.calls.load(Ordering::SeqCst),
+            // 1 initial send + PARAM_NAMES.len() retries before
+            // the cap trips (the 4th retry would be iteration
+            // index PARAM_NAMES.len() — the loop checks the bound
+            // BEFORE sending).
+            1 + PARAM_NAMES.len(),
+            "cascade must issue exactly 1 + PARAM_NAMES.len() sends before the cap"
+        );
+        drop(temp);
+    }
+
+    // ===========================================================
+    // PR-C2 / PR-4b: `parse_provider_error_body` envelope
+    // stripping. Pins both the strict envelope (legacy /
+    // scripted providers) and the production envelope
+    // (reqwest::StatusCode Display expansion).
+    // ===========================================================
+
+    /// The production envelope: `Error::Provider` wraps the
+    /// transport's `format!("http {status}: {body}")` where
+    /// `{status}` is `StatusCode`'s `Display`, which expands to
+    /// `"400 Bad Request"`. The detector must parse JSON, not a
+    /// labelled string, so the helper must strip
+    /// `"provider error: http 400 Bad Request: "` (with reason
+    /// phrase) cleanly.
+    #[test]
+    fn parse_provider_error_body_handles_status_with_reason_phrase() {
+        let body = r#"{"error":{"message":"[unknown_parameter] Unknown parameter: 'top_p'","type":"invalid_request_error"}}"#;
+        let err = Error::Provider {
+            message: format!("http 400 Bad Request: {body}"),
+            http_status: Some(400),
+        };
+        let parsed = parse_provider_error_body(&err, 400);
+        assert_eq!(
+            parsed, body,
+            "reason phrase 'Bad Request' must be stripped along with the envelope"
+        );
+    }
+
+    /// Multi-word reason phrases (e.g. status codes with longer
+    /// IANA reason texts) must also be tolerated.
+    #[test]
+    fn parse_provider_error_body_handles_multi_word_reason_phrase() {
+        let body = r#"{"error":{"param":"temperature is too large","type":"server_error","message":"..."}}"#;
+        let err = Error::Provider {
+            // 511 "Network Authentication Required" — a multi-word
+            // reason phrase that exercises the slice logic beyond
+            // a single token.
+            message: format!("http 511 Network Authentication Required: {body}"),
+            http_status: Some(511),
+        };
+        let parsed = parse_provider_error_body(&err, 511);
+        assert_eq!(
+            parsed, body,
+            "multi-word reason phrase must be stripped along with the envelope"
+        );
+    }
+
+    /// The strict envelope (legacy single-shot loop expectation)
+    /// must keep working — scripted providers and tests build
+    /// the error message by hand without a reason phrase.
+    #[test]
+    fn parse_provider_error_body_preserves_strict_envelope() {
+        let body = r#"{"error":{"message":"Unknown parameter: 'max_tokens'","type":"invalid_request_error"}}"#;
+        let err = Error::Provider {
+            message: format!("http 400: {body}"),
+            http_status: Some(400),
+        };
+        let parsed = parse_provider_error_body(&err, 400);
+        assert_eq!(parsed, body, "strict envelope must keep stripping cleanly");
+    }
+
+    /// When no envelope matches, the helper must return the raw
+    /// `Display` so the detector at least gets something to chew
+    /// on. The detector then parses JSON if possible or returns
+    /// `None` if the body is garbage.
+    #[test]
+    fn parse_provider_error_body_returns_raw_when_no_match() {
+        let err = Error::Provider {
+            message: "no envelope here at all".to_owned(),
+            http_status: Some(400),
+        };
+        let parsed = parse_provider_error_body(&err, 400);
+        assert_eq!(parsed, "no envelope here at all");
+    }
+
+    /// End-to-end: build the exact error message that
+    /// `classify_status` would build in production, with the
+    /// `StatusCode` `Display` expansion, and confirm the helper
+    /// recovers the JSON body the detector needs.
+    #[test]
+    fn parse_provider_error_body_handles_real_classify_status_envelope() {
+        use reqwest::StatusCode;
+        let body = r#"{"error":{"message":"invalid params, param 'top_p' should be in (0,1]","type":"invalid_request_error"}}"#;
+        let envelope = format!("http {sc}: {body}", sc = StatusCode::BAD_REQUEST);
+        // Sanity: confirm the production envelope actually
+        // contains the reason phrase. If `reqwest` ever drops it
+        // this test will need to track that.
+        assert!(
+            envelope.contains("Bad Request"),
+            "StatusCode Display must continue to include the reason phrase; got {envelope}"
+        );
+        let err = Error::Provider {
+            message: envelope,
+            http_status: Some(400),
+        };
+        let parsed = parse_provider_error_body(&err, 400);
+        assert_eq!(parsed, body);
     }
 }

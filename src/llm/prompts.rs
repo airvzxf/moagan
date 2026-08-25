@@ -132,6 +132,15 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
     }
 }
 
+/// Return the catalogue's `top_p` for a role, or `None` when the
+/// role has no `RoleSettings` registered (e.g. `Role::Sketch`).
+/// Thin wrapper over [`role_settings`] so the call layer does not
+/// have to special-case the catalogue miss; the precedence logic
+/// lives in [`crate::phases::phase::resolve_top_p`].
+pub fn top_p_for_role(role: Role) -> Option<f32> {
+    role_settings(role).map(|s| s.top_p)
+}
+
 const INTAKE_PROMPT: &str = include_str!("prompts/intake.md");
 const CLARIFY_PROMPT: &str = include_str!("prompts/clarify.md");
 const ROUTE_PROMPT: &str = include_str!("prompts/route.md");
@@ -606,5 +615,43 @@ mod tests {
         }
         assert!(injected.starts_with("# critique\n"));
         assert!(injected.ends_with("\ntail"));
+    }
+
+    /// PR-C3: `top_p_for_role` returns the catalogue value when
+    /// the role ships a `RoleSettings`. Pins the contract so the
+    /// call layer (`resolve_top_p`) can rely on the lookup
+    /// without re-deriving the catalogue.
+    #[test]
+    fn top_p_for_role_returns_registered_value_for_continuation() {
+        assert_eq!(
+            top_p_for_role(Role::Continuation),
+            Some(0.5),
+            "Continuation's RoleSettings.top_p must surface verbatim"
+        );
+        assert_eq!(
+            top_p_for_role(Role::TiefighterCritic),
+            Some(0.1),
+            "TiefighterCritic's RoleSettings.top_p must surface verbatim"
+        );
+    }
+
+    /// PR-C3: roles without a `RoleSettings` entry (the
+    /// `_ => None` arm in `role_settings`) must yield `None` so
+    /// `resolve_top_p` knows to omit `top_p` from the wire rather
+    /// than fall back to the legacy `Some(0.95)`. `Role::Sketch`
+    /// is the canonical non-catalogued role used by the cascade
+    /// tests in `tests/integration_param_rejection_cascade.rs`.
+    #[test]
+    fn top_p_for_role_returns_none_for_unregistered_role() {
+        assert_eq!(
+            top_p_for_role(Role::Sketch),
+            None,
+            "Sketch has no RoleSettings; top_p_for_role must return None"
+        );
+        assert_eq!(
+            top_p_for_role(Role::Intake),
+            None,
+            "Intake has no RoleSettings; top_p_for_role must return None"
+        );
     }
 }
