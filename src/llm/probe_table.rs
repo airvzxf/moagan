@@ -25,7 +25,8 @@ use crate::error::Result;
 use crate::fs_layout::MoaganHome;
 
 use super::probe::{
-    Entry, MIN_AUTOPROBE_FLOOR, MaxTokensTableFile, OperatorCap, ProbeTransport, detect_max_tokens,
+    Entry, MIN_AUTOPROBE_FLOOR, MaxTokensTableFile, OperatorCap, ProbeTransport,
+    detect_max_tokens_with_phase0_cap_callback,
 };
 
 /// In-memory table of `(provider_name, model_name) -> Entry` plus
@@ -159,6 +160,14 @@ impl MaxTokensTable {
     /// `Provider::max_tokens_probe_ceiling()` and pass the value
     /// here; tests typically pass [`MAX_AUTOPROBE_CEILING`] to
     /// exercise the unbounded algorithm.
+    ///
+    /// When Phase 0 / Phase 0.5 parses the upstream's hard cap
+    /// directly from the error body
+    /// (e.g. `"model[X] does not support max tokens > N"`), the cap
+    /// is persisted into [`Entry::ceiling`] alongside the discovered
+    /// value. Subsequent runs that load the entry can read the cap
+    /// back and use it as the cached ceiling so the algorithm skips
+    /// the Phase 0 single-request probe entirely on the next run.
     pub async fn probe_and_store(
         &self,
         provider: &str,
@@ -168,7 +177,27 @@ impl MaxTokensTable {
     ) -> Result<u32> {
         let floor = self.inner.read().floor;
         let attempts_before = self.inner.read().probe_tasks_started;
-        let discovered = detect_max_tokens(transport, floor, ceiling).await?;
+        // Single-element cell so the Phase 0 callback can write
+        // the cap from inside the async closure. The cell is
+        // uninitialised on entry; `Option::take()` after the
+        // await returns the cap when Phase 0 fired the callback,
+        // `None` otherwise. A simple `Cell<u32>` is not enough
+        // because the callback runs across an await point.
+        let phase0_cap: std::sync::Arc<std::sync::Mutex<Option<u32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let phase0_cap_for_cb = std::sync::Arc::clone(&phase0_cap);
+        let discovered =
+            detect_max_tokens_with_phase0_cap_callback(transport, floor, ceiling, move |cap| {
+                if let Ok(mut guard) = phase0_cap_for_cb.lock() {
+                    *guard = Some(cap);
+                }
+            })
+            .await?;
+        let phase0_cap_value = phase0_cap
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .filter(|&c| c <= discovered);
 
         let now = Utc::now().to_rfc3339();
         let attempts = {
@@ -183,6 +212,13 @@ impl MaxTokensTable {
                     verified_at: now,
                     auto: true,
                     attempts: attempts_total,
+                    // Stash the cap Phase 0 reported. Phase 0.5
+                    // validates the candidate; only persist when
+                    // the cap is no larger than the discovered
+                    // value (a cap above the discovered value is
+                    // a floor, not a ceiling, and would mislead
+                    // the next run's `ceiling` calculation).
+                    ceiling: phase0_cap_value,
                 },
             );
             attempts_total

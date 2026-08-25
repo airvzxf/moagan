@@ -1719,7 +1719,27 @@ fn spawn_pending_probes(
         // upstream will reject — and the rejections would classify
         // as `Indeterminate` per the v0.7.1 contract, collapsing
         // the discovered ceiling to the last accepted probe.
-        let ceiling = inner.max_tokens_probe_ceiling();
+        //
+        // If a cached entry exists with a Phase 0-parsed
+        // `ceiling`, prefer it: it is the upstream's own reported
+        // boundary, so passing it as the algorithm's ceiling
+        // collapses Phase 1 entirely on re-probe (Phase 0 still
+        // re-parses, but the discovered value lands at the cached
+        // cap on the first validation probe and Phase 0.5
+        // short-circuits the rest of the algorithm).
+        let mut ceiling = inner.max_tokens_probe_ceiling();
+        if let Some(cached) = table.get(section, inner.model())
+            && let Some(parsed) = cached.ceiling
+            && parsed >= super::probe::MIN_AUTOPROBE_FLOOR
+        {
+            // The cached cap is the upstream's own reported
+            // boundary. Use it directly: any candidate above
+            // `parsed` would be rejected by the upstream with the
+            // same Phase 0 error body we already parsed, so there
+            // is no benefit to letting the exponential phase walk
+            // up to `inner.max_tokens_probe_ceiling()`.
+            ceiling = parsed;
+        }
         let transport = match super::probe::ProviderProbeTransport::new(Arc::clone(inner)) {
             Ok(t) => Arc::new(t) as Arc<dyn super::probe::ProbeTransport>,
             Err(e) => {

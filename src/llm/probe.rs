@@ -128,6 +128,34 @@ pub trait ProbeTransport: Send + Sync {
     /// Send a probe with the supplied `max_tokens` and report
     /// whether the upstream accepted it.
     async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome;
+
+    /// Variant of [`Self::probe_send`] that returns the response body
+    /// alongside the classified outcome. Default impl returns an
+    /// empty body so test transports do not need to override; the
+    /// production transport overrides this so Phase 0 can parse the
+    /// upstream-reported cap from a `400` error body without
+    /// re-issuing the request. The body is also discarded by
+    /// Phase 1 / Phase 2 callers — only Phase 0 reads it.
+    async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
+        let outcome = self.probe_send(max_tokens).await;
+        ProbeResult {
+            outcome,
+            body: String::new(),
+        }
+    }
+}
+
+/// Combined outcome + body from a single probe call. Phase 0 reads
+/// `body` to extract the upstream-reported cap; Phase 1 / Phase 2
+/// ignore it.
+#[derive(Debug, Clone)]
+pub struct ProbeResult {
+    /// Classified outcome (`Accepted` / `Rejected` / `Indeterminate`).
+    pub outcome: ProbeOutcome,
+    /// Raw response body, when the transport captured one. Empty
+    /// when the probe was classified as `Indeterminate` or when the
+    /// transport did not bother to capture the body (test doubles).
+    pub body: String,
 }
 
 /// Result of a single probe HTTP call. `Accepted` means the wire
@@ -175,6 +203,10 @@ impl ProviderProbeTransport {
 #[async_trait]
 impl ProbeTransport for ProviderProbeTransport {
     async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
+        self.probe_send_with_body(max_tokens).await.outcome
+    }
+
+    async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
         let req = Request {
             role: Role::Intake,
             model: self.provider.model().to_owned(),
@@ -200,7 +232,7 @@ impl ProbeTransport for ProviderProbeTransport {
                 //                                       model-not-found —
                 //                                       not a max_tokens signal)
                 //   - 5xx / network                  → Indeterminate
-                if (200..400).contains(&status) {
+                let outcome = if (200..400).contains(&status) {
                     ProbeOutcome::Accepted
                 } else if (400..500).contains(&status) {
                     if body_carries_max_tokens_rejection(&body.text) {
@@ -214,9 +246,34 @@ impl ProbeTransport for ProviderProbeTransport {
                     }
                 } else {
                     ProbeOutcome::Indeterminate
+                };
+                ProbeResult {
+                    outcome,
+                    body: body.text,
                 }
             }
-            Ok(Err(_)) | Err(_) => ProbeOutcome::Indeterminate,
+            Ok(Err(err)) => {
+                // The providers convert 4xx responses into
+                // `Error::Provider { message, http_status }` before
+                // returning. For Phase 0 we need the response body
+                // (the upstream-reported cap), and the providers
+                // embed it in `message` as
+                // `"http 400 Bad Request: {body}"`. Recover the
+                // body from the message so Phase 0 can parse the
+                // cap without forcing a wire-format refactor on
+                // every provider.
+                let body = body_from_provider_error(&err);
+                let outcome = if is_max_tokens_rejection_error(&err) {
+                    ProbeOutcome::Rejected
+                } else {
+                    ProbeOutcome::Indeterminate
+                };
+                ProbeResult { outcome, body }
+            }
+            Err(_) => ProbeResult {
+                outcome: ProbeOutcome::Indeterminate,
+                body: String::new(),
+            },
         }
     }
 }
@@ -251,6 +308,196 @@ pub fn body_carries_max_tokens_rejection(body: &str) -> bool {
         || lower.contains("maximum context length")
 }
 
+/// Recover the response body from a `Provider::send_probe` error.
+/// Providers convert 4xx responses into
+/// `Error::Provider { message, http_status }` and embed the body
+/// in `message`. Phase 0 needs the body to parse the upstream-
+/// reported cap, so we recover it here without forcing a wire-
+/// format refactor on every provider.
+///
+/// Two message shapes are recognised:
+///
+/// - `"http 400 Bad Request: {body}"` (the Anthropic-compat and
+///   OpenCode Responses providers via the shared `classify_status`
+///   helper in `super::http`).
+/// - `"openai-compat: HTTP 400 after 1 attempts: {body}"` (the
+///   OpenCode Go chat-completions wire in `openai_compatible.rs`,
+///   where the path is `/v1/chat/completions`).
+///
+/// Both shapes share the same `: {body}` suffix; we strip everything
+/// up to and including the first `": "` to recover the body. When
+/// neither prefix matches we return an empty string and the caller
+/// falls back to `Indeterminate`.
+fn body_from_provider_error(err: &Error) -> String {
+    let Error::Provider { message, .. } = err else {
+        return String::new();
+    };
+    // Try the Anthropic-compat `http <status>: <body>` prefix
+    // first; fall through to the OpenAI-compat `openai-compat:
+    // HTTP <code> after <n> attempts: <body>` prefix; otherwise
+    // treat the whole message as the body (the
+    // `openai_compatible.rs` test fixture sometimes uses a
+    // different shape during retries).
+    if let Some(rest) = message.strip_prefix("http ")
+        && let Some((_, body)) = rest.split_once(": ")
+    {
+        return body.to_owned();
+    }
+    if let Some(rest) = message.strip_prefix("openai-compat: ") {
+        // The OpenAI-compat shape is `HTTP {code} after {n}
+        // attempts: {body}`. Strip the `HTTP ... attempts:` prefix
+        // to recover the body.
+        if let Some(idx) = rest.find(": ") {
+            return rest[idx + 2..].to_owned();
+        }
+    }
+    String::new()
+}
+
+/// Decide whether an error returned by `Provider::send_probe` looks
+/// like a max-tokens rejection. Used by
+/// [`ProviderProbeTransport::probe_send_with_body`] to translate a
+/// `Err(Error::Provider{...})` from the production providers into
+/// `ProbeOutcome::Rejected` (the regions of the algorithm that
+/// previously classified by status alone cannot tell `Rejected`
+/// from `Indeterminate` once the body is folded into the error).
+fn is_max_tokens_rejection_error(err: &Error) -> bool {
+    let Error::Provider {
+        message,
+        http_status,
+    } = err
+    else {
+        return false;
+    };
+    // Match the same set of HTTP statuses the existing
+    // body-classifying path covers.
+    let Some(status) = http_status else {
+        return false;
+    };
+    if !(400..500).contains(status) {
+        return false;
+    }
+    body_carries_max_tokens_rejection(message)
+}
+
+/// Extract the upstream-reported `max_tokens` cap from a 4xx error
+/// body. Used by the Phase 0 / Phase 0.5 short-circuit so the
+/// algorithm can converge on the upstream's real boundary in three
+/// HTTP round-trips (1 initial + 2 validation) instead of walking
+/// the full 30-step exponential phase.
+///
+/// Three patterns are recognised:
+///
+/// 1. **Anthropic-compat** (MiniMax direct, OpenCode Go Anthropic
+///    routing, qwen3.x): the body carries
+///    `"model[<name>] does not support max tokens > N"`. `N` is the
+///    boundary value the upstream accepts; we return `N` verbatim.
+/// 2. **OpenAI-compat / Responses API** (longcat, gpt-5.6-luna,
+///    DeepSeek-direct error path): the body carries
+///    `"max_tokens is too large: M. This model supports at most N
+///    completion tokens, whereas you provided M"`. `N` is the cap;
+///    `M` is the rejected value (we ignore it).
+/// 3. **OpenCode Go relay**: the body wraps the upstream's error in
+///    `Error from provider (Console Go): Upstream request failed:
+///    [invalid_parameter] 参数校验失败: \n/max_tokens: 4294967295 is
+///    not less or equal to 131072\n`. The cap `N` follows the
+///    literal `is not less or equal to ` substring. Used by the
+///    OpenCode Go relay for any model whose upstream rejects with
+///    the JSON-schema-validation style `is not less or equal to`
+///    phrasing (qwen3.x via OpenCode Go, DeepSeek direct, ...).
+///
+/// The body is JSON-decoded first so JSON escapes (`\u003e` for
+/// `>`, `\u003c` for `<`) in the upstream's `error.message` field
+/// match the regex. The raw body still works for the OpenAI-compat
+/// case because the message field there uses ASCII punctuation
+/// directly.
+///
+/// Returns `None` when:
+/// - The body does not match any pattern (generic 4xx, auth
+///   failure, model-not-found, transient 5xx, network error).
+/// - The parsed value is `< MIN_AUTOPROBE_FLOOR` (1024) — too small
+///   to be a usable cap; reject and fall back to Phase 1.
+/// - The parsed value is `>= u32::MAX` — sentinel for "no real cap";
+///   reject and fall back to Phase 1.
+///
+/// Conservative by design: any uncertainty falls through to the
+/// existing exponential / bisect algorithm, which still produces
+/// the right answer at the cost of more round-trips.
+pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
+    use std::sync::OnceLock;
+
+    static RE_ANTHROPIC: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_OPENAI: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_OPENCODE_GO: OnceLock<regex::Regex> = OnceLock::new();
+
+    // Anthropic-compat: `model[<name>] does not support max tokens > N`.
+    // The model name can be hyphenated (qwen3.8-max) or contain dots
+    // (minimax-v2.5), so we accept any non-`]` character class.
+    let anthropic = RE_ANTHROPIC.get_or_init(|| {
+        regex::Regex::new(r"does not support max tokens > (\d+)")
+            .expect("parse_cap_from_error_body: anthropic regex compiles")
+    });
+
+    // OpenAI-compat / Responses API: `supports at most N completion tokens`.
+    // The `completion` adjective lets us skip the `max_tokens is too
+    // large: M` segment of the message (we don't care about the
+    // rejected value M, only the cap N).
+    let openai = RE_OPENAI.get_or_init(|| {
+        regex::Regex::new(r"supports at most (\d+) completion tokens")
+            .expect("parse_cap_from_error_body: openai regex compiles")
+    });
+
+    // OpenCode Go relay: the upstream JSON-schema validation message
+    // uses `is not less or equal to N` (note the missing `than` —
+    // it's a translation of the Chinese 参数校验失败). Match that
+    // variant verbatim so qwen3.x, longcat, and any other model
+    // routed through OpenCode Go short-circuit in 3 round-trips.
+    let opencode_go = RE_OPENCODE_GO.get_or_init(|| {
+        regex::Regex::new(r"is not less or equal to (\d+)")
+            .expect("parse_cap_from_error_body: opencode_go regex compiles")
+    });
+
+    // The Anthropic upstream (MiniMax) emits `max tokens \u003e N`
+    // with the JSON escape for `>` in `error.message`. Unescape the
+    // JSON so the regex matches without needing to special-case the
+    // escape sequence. We try the JSON-decoded message first; if the
+    // body is not JSON (or has no `error.message` field), we fall
+    // back to the raw body so the OpenAI-compat shape (which uses
+    // ASCII punctuation directly) still works.
+    let decoded_message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        });
+    let search_texts: [&str; 2] = match decoded_message.as_deref() {
+        Some(d) => [d, body],
+        None => [body, body],
+    };
+
+    let raw = search_texts.iter().find_map(|t| {
+        anthropic
+            .captures(t)
+            .and_then(|c| c.get(1))
+            .or_else(|| openai.captures(t).and_then(|c| c.get(1)))
+            .or_else(|| opencode_go.captures(t).and_then(|c| c.get(1)))
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+    })?;
+
+    if raw >= u32::MAX as u64 {
+        // Sentinel: the upstream reported a value at the u32 boundary,
+        // which usually means "no real cap" rather than a usable one.
+        return None;
+    }
+    if raw < MIN_AUTOPROBE_FLOOR as u64 {
+        // Too small to be a useful cap (1024 is the algorithm floor).
+        return None;
+    }
+    Some(raw as u32)
+}
+
 /// Run the full probe algorithm against an `Arc<dyn ProbeTransport>`.
 /// `floor` is the caller-supplied minimum (the `Option<u32>` from
 /// `ProviderConfig::max_token_auto`); `ceiling` is the per-provider
@@ -258,6 +505,29 @@ pub fn body_carries_max_tokens_rejection(body: &str) -> bool {
 /// [`crate::llm::provider::Provider::max_tokens_probe_ceiling`]).
 /// Returns the discovered `max_tokens` clamped into `[floor,
 /// ceiling]`.
+///
+/// Algorithm overview:
+///
+/// - **Phase 0 — single-request cap probe.** Fire one probe at
+///   `max_tokens = u32::MAX`. Most upstreams reject the request
+///   with HTTP 400 and embed the boundary in the error body
+///   (`"model[X] does not support max tokens > N"` for
+///   Anthropic-compat; `"supports at most N completion tokens"` for
+///   OpenAI-compat). When [`parse_cap_from_error_body`] parses a
+///   usable value, the algorithm jumps to Phase 0.5; otherwise it
+///   falls through to Phase 1 unchanged.
+/// - **Phase 0.5 — parallel validation.** Fire two parallel probes
+///   at the candidate cap (`N`) and one above it (`N + 1`). If `N`
+///   is accepted and `N + 1` is rejected, the candidate is the
+///   upstream's true ceiling and the algorithm returns immediately.
+///   If both succeed, `N` is treated as a floor (still a usable
+///   discovered value). If `N` is rejected, the upstream lied
+///   and Phase 1 takes over.
+/// - **Phase 1 — exponential search.** Walk `2^1..2^MAX_PROBE_SHIFT`
+///   sequentially. The first rejection breaks; `lo` is the last
+///   accepted value, `hi` is the first rejection.
+/// - **Phase 2 — tightening.** Bisect `[lo + 1, hi - 1]` in
+///   20-point parallel batches.
 ///
 /// The exponential phase stops at the smallest `2^k > ceiling`
 /// rather than burning a probe round-trip on a value the upstream
@@ -280,10 +550,45 @@ pub async fn detect_max_tokens(
     floor: u32,
     ceiling: u32,
 ) -> Result<u32> {
+    detect_max_tokens_with_phase0_cap_callback(transport, floor, ceiling, |_cap| {}).await
+}
+
+/// Like [`detect_max_tokens`] but invokes `on_phase_0_cap(cap)` when
+/// Phase 0 / Phase 0.5 successfully extracted a parseable cap from
+/// the upstream's error body. The callback is a side-channel that
+/// lets [`crate::llm::probe_table::MaxTokensTable::probe_and_store`]
+/// persist the upstream-reported cap alongside the discovered
+/// value, without breaking the established `Result<u32>` signature
+/// of [`detect_max_tokens`]. The callback fires at most once per
+/// call and only when Phase 0 / 0.5 short-circuits the algorithm.
+///
+/// Production callers that do not care about the cap can ignore
+/// this overload and call [`detect_max_tokens`] directly.
+pub async fn detect_max_tokens_with_phase0_cap_callback<F>(
+    transport: Arc<dyn ProbeTransport>,
+    floor: u32,
+    ceiling: u32,
+    on_phase_0_cap: F,
+) -> Result<u32>
+where
+    F: FnOnce(u32),
+{
     debug_assert!(
         ceiling >= MIN_AUTOPROBE_FLOOR,
         "ceiling ({ceiling}) must be at least MIN_AUTOPROBE_FLOOR ({MIN_AUTOPROBE_FLOOR})"
     );
+
+    // Phase 0 + Phase 0.5: single-request cap probe with parallel
+    // validation. Short-circuits Phase 1 + Phase 2 when the upstream
+    // tells us its real boundary up-front (the qwen3.8-max /
+    // longcat-2.0 case). Falls back to Phase 1 + Phase 2 when the
+    // body is unparseable, the candidate fails validation, or the
+    // transport returns `Indeterminate` mid-validation.
+    if let Some(cap) = phase_0_short_circuit(transport.clone()).await {
+        on_phase_0_cap(cap);
+        return Ok(cap.max(floor).min(ceiling));
+    }
+
     // Phase 1: exponential search 2^1..2^MAX_PROBE_SHIFT, with an
     // early break when `n > ceiling` (the smallest `2^k` past the
     // per-provider bound — DeepSeek at k=19 = 524_288, MiniMax at
@@ -423,6 +728,96 @@ async fn retry_once_on_indeterminate(transport: &dyn ProbeTransport, n: u32) -> 
     match transport.probe_send(n).await {
         ProbeOutcome::Indeterminate => transport.probe_send(n).await,
         other => other,
+    }
+}
+
+/// Phase 0 + Phase 0.5: single-request cap probe with parallel
+/// validation. Returns the discovered cap when the upstream
+/// reports its boundary in the error body and the candidate
+/// survives the parallel probe pair; returns `None` when the
+/// algorithm should fall through to Phase 1 + Phase 2.
+///
+/// Algorithm:
+///
+/// 1. Fire one probe at `max_tokens = u32::MAX`. If the body does
+///    not parse to a usable cap via
+///    [`parse_cap_from_error_body`], return `None` and let the
+///    caller fall through to Phase 1.
+/// 2. Otherwise fire two probes in parallel: `max_tokens = N` and
+///    `max_tokens = N + 1`.
+/// 3. Decision matrix:
+///    - `A` accepted, `B` rejected → cap confirmed.
+///    - `A` accepted, `B` accepted → `N` is a known floor; still a
+///      valid discovered value.
+///    - `A` accepted, `B` indeterminate → retry `B` once. On the
+///      second `Indeterminate`, use `N` as best-effort.
+///    - `A` rejected or indeterminate → upstream lied; the parse
+///      was wrong. Fall back to Phase 1.
+///
+/// Returned value is the cap itself, before the caller's
+/// `floor.max(...).min(ceiling)` clamp — `detect_max_tokens`
+/// applies the clamp at the end so the contract with Phase 1 is
+/// identical (a single `max(floor).min(ceiling)` line in both
+/// paths).
+async fn phase_0_short_circuit(transport: Arc<dyn ProbeTransport>) -> Option<u32> {
+    // Phase 0: one request with max_tokens = u32::MAX. The probe
+    // deliberately bypasses the per-provider safety clamp
+    // (`Provider::send_probe` exists for this reason) so the wire
+    // body reaches the upstream with `max_tokens = u32::MAX`.
+    let initial = transport.probe_send_with_body(u32::MAX).await;
+    let cap_from_body = parse_cap_from_error_body(&initial.body);
+
+    // Body parse failed (generic 4xx, auth error, network blip,
+    // 200 OK, ...). Fall through to Phase 1.
+    let n = cap_from_body?;
+
+    // Phase 0.5: parallel validation. Send `max_tokens = N` (the
+    // candidate) and `max_tokens = N + 1` (one past the candidate).
+    // We use `parallel_probe_with_cancel` with no cancellation
+    // token so the two requests run concurrently and the
+    // wall-clock is bounded by the slower of the two.
+    let candidate_plus_one = n.saturating_add(1);
+    let outcomes = parallel_probe(transport.clone(), &[n, candidate_plus_one]).await;
+    let outcome_a = outcomes
+        .first()
+        .cloned()
+        .unwrap_or(ProbeOutcome::Indeterminate);
+    let outcome_b = outcomes
+        .get(1)
+        .cloned()
+        .unwrap_or(ProbeOutcome::Indeterminate);
+
+    match (outcome_a, outcome_b) {
+        // A accepted, B rejected — cap confirmed. B may be
+        // Indeterminate here too, but the strict `(Accepted,
+        // Rejected)` pair is the textbook confirmation.
+        (ProbeOutcome::Accepted, ProbeOutcome::Rejected) => Some(n),
+
+        // A accepted, B accepted — upstream allows more than N.
+        // N is still a known floor of the upstream's valid range
+        // and a safe discovered value.
+        (ProbeOutcome::Accepted, ProbeOutcome::Accepted) => Some(n),
+
+        // A accepted, B indeterminate — retry B once. M-flake
+        // tolerance: a single transient blip on the validation
+        // probe must not force a full Phase 1 walk.
+        (ProbeOutcome::Accepted, ProbeOutcome::Indeterminate) => {
+            let retry = transport.probe_send_with_body(candidate_plus_one).await;
+            match retry.outcome {
+                ProbeOutcome::Rejected | ProbeOutcome::Accepted => Some(n),
+                // Still indeterminate after one retry. Treat `N`
+                // as best-effort: the upstream answered with a
+                // parseable cap once and the body is the source
+                // of truth we cannot re-derive otherwise.
+                ProbeOutcome::Indeterminate => Some(n),
+            }
+        }
+
+        // A rejected (upstream lied about accepting N) or A
+        // indeterminate (transient on the candidate probe).
+        // Either way, the parse was wrong and Phase 1 has to
+        // walk the full algorithm.
+        (ProbeOutcome::Rejected, _) | (ProbeOutcome::Indeterminate, _) => None,
     }
 }
 
@@ -617,6 +1012,19 @@ pub struct Entry {
     /// probes plus 20 per tightening round.
     #[serde(default)]
     pub attempts: u32,
+    /// Upstream-reported hard ceiling parsed from the Phase 0
+    /// single-request error body
+    /// (`"model[X] does not support max tokens > N"` for
+    /// Anthropic-compat; `"supports at most N completion tokens"`
+    /// for OpenAI-compat). When `Some`, the cached value is the
+    /// upstream's own reported boundary — no future run needs to
+    /// walk the exponential phase to rediscover it. `None` for
+    /// entries discovered via Phase 1 / Phase 2 (the algorithm's
+    /// last accepted value is the discovered value, not a verified
+    /// upstream boundary) and for backward-compat reads of v1
+    /// sidecars written before Phase 0 was added.
+    #[serde(default)]
+    pub ceiling: Option<u32>,
 }
 
 /// Operator-pinned per-provider cap. Written by
@@ -768,6 +1176,7 @@ mod tests {
                     verified_at: "2026-08-11T00:00:00Z".to_owned(),
                     auto: true,
                     attempts: 35,
+                    ceiling: None,
                 },
             );
         file.save(&path).unwrap();
@@ -966,27 +1375,59 @@ mod tests {
     /// Transport that records every probe value ever sent and
     /// rejects anything strictly above `accept_up_to`. Used by the
     /// ceiling tests below to assert the algorithm never probes
-    /// above the per-provider bound.
+    /// above the per-provider bound. Phase 0 fires once with
+    /// `max_tokens = u32::MAX`; that probe is the only call allowed
+    /// to exceed the per-provider ceiling.
     #[derive(Clone)]
-    struct RecordingTransport {
+    struct Phase0AwareRecordingTransport {
         accept_up_to: u32,
         calls: Arc<AtomicU32>,
         max_sent: Arc<AtomicU32>,
+        phase0_seen: Arc<std::sync::atomic::AtomicBool>,
+        max_non_phase0_sent: Arc<AtomicU32>,
     }
 
     #[async_trait]
-    impl ProbeTransport for RecordingTransport {
-        async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
+    impl ProbeTransport for Phase0AwareRecordingTransport {
+        async fn probe_send(&self, n: u32) -> ProbeOutcome {
+            self.probe_send_with_body(n).await.outcome
+        }
+
+        async fn probe_send_with_body(&self, n: u32) -> ProbeResult {
             self.calls.fetch_add(1, Ordering::SeqCst);
             // Update max_sent only if this value is strictly larger.
             let prev = self.max_sent.load(Ordering::SeqCst);
-            if max_tokens > prev {
-                self.max_sent.store(max_tokens, Ordering::SeqCst);
+            if n > prev {
+                self.max_sent.store(n, Ordering::SeqCst);
             }
-            if max_tokens <= self.accept_up_to {
-                ProbeOutcome::Accepted
+            if n == u32::MAX {
+                self.phase0_seen.store(true, Ordering::SeqCst);
+                // Empty body so Phase 0 falls through to Phase 1.
+                let accepted = self.accept_up_to == u32::MAX;
+                ProbeResult {
+                    outcome: if accepted {
+                        ProbeOutcome::Accepted
+                    } else {
+                        ProbeOutcome::Rejected
+                    },
+                    body: String::new(),
+                }
             } else {
-                ProbeOutcome::Rejected
+                let prev = self.max_non_phase0_sent.load(Ordering::SeqCst);
+                if n > prev {
+                    self.max_non_phase0_sent.store(n, Ordering::SeqCst);
+                }
+                if n <= self.accept_up_to {
+                    ProbeResult {
+                        outcome: ProbeOutcome::Accepted,
+                        body: String::new(),
+                    }
+                } else {
+                    ProbeResult {
+                        outcome: ProbeOutcome::Rejected,
+                        body: String::new(),
+                    }
+                }
             }
         }
     }
@@ -995,48 +1436,53 @@ mod tests {
     /// `DEEPSEEK_MAX_TOKENS_CAP = 393_216`, the exponential phase
     /// short-circuits at `2^19 = 524_288` and the algorithm never
     /// sends a value strictly above `DEEPSEEK_MAX_TOKENS_CAP` on
-    /// the wire. Discovered value still lands near the upstream
-    /// bound (the transport accepts everything up to 524_288, so
-    /// Phase 1 ends with `lo = 524_288` past the `n > ceiling`
-    /// break — but the probe never tries the value 524_288
-    /// either; the break happens before the probe fires).
+    /// the wire **after Phase 0**. Discovered value still lands
+    /// near the upstream bound (the transport accepts everything
+    /// up to 524_288, so Phase 1 ends with `lo = 524_288` past the
+    /// `n > ceiling` break — but the probe never tries the value
+    /// 524_288 either; the break happens before the probe fires).
+    ///
+    /// Phase 0 deliberately fires one probe at `max_tokens =
+    /// u32::MAX` to elicit the upstream's reported cap. The Phase 0
+    /// probe is the only call allowed to exceed the per-provider
+    /// ceiling; every subsequent walk respects it. The
+    /// `max_non_phase0_sent` assertion below pins the contract:
+    /// after Phase 0 fires, the algorithm's walk stays within
+    /// `DEEPSEEK_MAX_TOKENS_CAP`.
     #[tokio::test]
     async fn pr473_probe_never_sends_value_above_deepseek_ceiling() {
         use crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP;
         let calls = Arc::new(AtomicU32::new(0));
         let max_sent = Arc::new(AtomicU32::new(0));
-        let t: Arc<dyn ProbeTransport> = Arc::new(RecordingTransport {
-            // Provider accepts everything up to 2^20 = 1_048_576
-            // (a hypothetical bigger upstream). The algorithm
-            // must still stop at the per-provider ceiling
-            // DEEPSEEK_MAX_TOKENS_CAP regardless of how permissive
-            // the transport is — the whole point of the ceiling
-            // is to prevent the upstream from rejecting the probe
-            // itself.
+        let phase0_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let max_non_phase0_sent = Arc::new(AtomicU32::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(Phase0AwareRecordingTransport {
             accept_up_to: 1_048_576,
             calls: calls.clone(),
             max_sent: max_sent.clone(),
+            phase0_seen: phase0_seen.clone(),
+            max_non_phase0_sent: max_non_phase0_sent.clone(),
         });
         let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, DEEPSEEK_MAX_TOKENS_CAP)
             .await
             .unwrap();
-        // The largest probe value sent on the wire must never
-        // exceed DEEPSEEK_MAX_TOKENS_CAP. With exponential phase
-        // going 2^1..2^18 (262_144), the largest value probed is
-        // 262_144 — well below the ceiling.
-        let max = max_sent.load(Ordering::SeqCst);
+        // Phase 0 fired (transport was permissive enough to
+        // accept everything; body was empty → no parseable cap →
+        // Phase 0 returns None → algorithm falls through to Phase 1).
         assert!(
-            max <= DEEPSEEK_MAX_TOKENS_CAP,
-            "probe sent a value ({max}) above DEEPSEEK_MAX_TOKENS_CAP ({DEEPSEEK_MAX_TOKENS_CAP}) — short-circuit failed"
+            phase0_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "Phase 0 must fire at least once"
         );
-        // The discovered value lands at the upstream's actual
-        // ceiling (524_288 in this scenario): the algorithm
-        // observed every probe up to 2^18 = 262_144 accepted,
-        // then Phase 1 broke at the `n > ceiling` check before
-        // sending 2^19 = 524_288 (which would have been
-        // accepted but is past the per-provider bound). Phase 2
-        // tightens Phase 1's `lo = 262_144` and the floor lifts
-        // the result.
+        // After Phase 0, the largest probe value sent on the wire
+        // stays at or below DEEPSEEK_MAX_TOKENS_CAP. With
+        // exponential phase going 2^1..2^18 (262_144), the largest
+        // non-Phase-0 value probed is 262_144 — well below the
+        // ceiling.
+        let max_after = max_non_phase0_sent.load(Ordering::SeqCst);
+        assert!(
+            max_after <= DEEPSEEK_MAX_TOKENS_CAP,
+            "Phase 1+ sent a value ({max_after}) above DEEPSEEK_MAX_TOKENS_CAP ({DEEPSEEK_MAX_TOKENS_CAP}) — short-circuit failed"
+        );
         assert!(
             got <= DEEPSEEK_MAX_TOKENS_CAP,
             "discovered value ({got}) exceeded DEEPSEEK_MAX_TOKENS_CAP"
@@ -1047,17 +1493,12 @@ mod tests {
         // (each accepted by this permissive transport), plus a
         // full 32-round Phase 2; with the ceiling, Phase 1 ends
         // at k=18. Phase 2 still fires (it tightens Phase 1's
-        // `lo`), so we check that Phase 1 alone is short —
-        // i.e. total probes <= 19 (Phase 1) + 32 * 20 (Phase 2
-        // budget) = 659. The pre-fix code with no ceiling
-        // would run 30 (Phase 1) + 32 * 20 = 670. The
-        // difference is small but the key invariant is "no
-        // probe value above ceiling on the wire" (above), which
-        // is the only thing the upstream actually cares about.
+        // `lo`), so we check that the total budget stays under
+        // the legacy 30 + 32 * 20 + Phase 0 / 0.5 (≤ 3 calls).
         let total_calls = calls.load(Ordering::SeqCst);
         assert!(
-            total_calls <= 30 + 32 * 20,
-            "probe ran more than the algorithm budget, got {total_calls}"
+            total_calls <= 30 + 32 * 20 + 3,
+            "probe ran more than the algorithm budget + Phase 0/0.5, got {total_calls}"
         );
     }
 
@@ -1065,18 +1506,22 @@ mod tests {
     /// even when the transport would accept the value. A
     /// hypothetical transport that accepts 1_000_000 (above the
     /// DeepSeek cap) must not let `max_tokens = 1_000_000` leak
-    /// into a real DeepSeek probe. The ceiling is the safety
-    /// net, not the transport.
+    /// into a real DeepSeek probe **after Phase 0**. The ceiling
+    /// is the safety net, not the transport.
     #[tokio::test]
     async fn pr473_probe_clamp_applies_even_when_transport_accepts() {
         use crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP;
         let calls = Arc::new(AtomicU32::new(0));
         let max_sent = Arc::new(AtomicU32::new(0));
-        let t: Arc<dyn ProbeTransport> = Arc::new(RecordingTransport {
+        let phase0_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let max_non_phase0_sent = Arc::new(AtomicU32::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(Phase0AwareRecordingTransport {
             // Always accept; the ceiling is what we trust.
             accept_up_to: u32::MAX,
             calls: calls.clone(),
             max_sent: max_sent.clone(),
+            phase0_seen: phase0_seen.clone(),
+            max_non_phase0_sent: max_non_phase0_sent.clone(),
         });
         let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, DEEPSEEK_MAX_TOKENS_CAP)
             .await
@@ -1084,10 +1529,10 @@ mod tests {
         // Returned value is bounded by ceiling, not by what the
         // transport would accept.
         assert!(got <= DEEPSEEK_MAX_TOKENS_CAP, "got {got}");
-        let max = max_sent.load(Ordering::SeqCst);
+        let max_after = max_non_phase0_sent.load(Ordering::SeqCst);
         assert!(
-            max <= DEEPSEEK_MAX_TOKENS_CAP,
-            "probe sent {max} on the wire — ceiling clamp failed"
+            max_after <= DEEPSEEK_MAX_TOKENS_CAP,
+            "Phase 1+ sent {max_after} on the wire — ceiling clamp failed for the algorithm walk"
         );
     }
 
@@ -1215,4 +1660,495 @@ max_tokens = 524288\n\
             "non-provider headers must be untouched; got:\n{out}"
         );
     }
+
+    // -----------------------------------------------------------------
+    // `parse_cap_from_error_body` — Phase 0 single-request cap parser
+    // used to short-circuit the algorithm in three round-trips for
+    // upstreams (MiniMax-M3, qwen3.8-max, longcat-2.0) whose error
+    // body carries the boundary value verbatim. The helper is
+    // intentionally conservative: any uncertainty falls through to
+    // Phase 1 with `None`.
+    // -----------------------------------------------------------------
+
+    /// Anthropic-compat body (`model[MiniMax-M2.5] does not support
+    /// max tokens > 196608 (2013)`) parses to the boundary value.
+    /// The `(2013)` suffix is MiniMax's request-id pattern; the
+    /// helper must accept it.
+    #[test]
+    fn parse_cap_anthropic_compat_body_basic() {
+        let body = r#"{"type":"error","error":{"message":"model[MiniMax-M2.5] does not support max tokens > 196608 (2013)"}}"#;
+        assert_eq!(parse_cap_from_error_body(body), Some(196_608));
+    }
+
+    /// Anthropic-compat with a hyphenated model name (qwen3.8-max,
+    /// qwen3.7-max) parses to the boundary value. The model-name
+    /// brackets `[...]` are deliberately excluded from the regex
+    /// because the actual numeric boundary is what we need.
+    #[test]
+    fn parse_cap_anthropic_compat_with_hyphenated_model() {
+        let body = r#"{"type":"error","error":{"message":"model[qwen3.8-max] does not support max tokens > 524288"}}"#;
+        assert_eq!(parse_cap_from_error_body(body), Some(524_288));
+    }
+
+    /// Anthropic-compat with a dotted model name (mimo-v2.5) parses
+    /// to the boundary value.
+    #[test]
+    fn parse_cap_anthropic_compat_with_dots() {
+        let body = r#"{"type":"error","error":{"message":"model[mimo-v2.5] does not support max tokens > 131072"}}"#;
+        assert_eq!(parse_cap_from_error_body(body), Some(131_072));
+    }
+
+    /// OpenAI-compat body (`max_tokens is too large: M. This model
+    /// supports at most N completion tokens, whereas you provided
+    /// M.`) parses to `N`, ignoring the rejected value `M`.
+    #[test]
+    fn parse_cap_openai_compat_basic() {
+        let body = r#"{"error":{"param":"max_tokens is too large: 200000. This model supports at most 131072 completion tokens, whereas you provided 200000.","type":"server_error","message":"..."}}"#;
+        assert_eq!(parse_cap_from_error_body(body), Some(131_072));
+    }
+
+    /// Bodies that do not match either pattern must return `None`
+    /// so Phase 1 takes over. Generic 4xx errors (auth, model-not-
+    /// found, rate-limit) and empty strings must all be rejected
+    /// without false positives.
+    #[test]
+    fn parse_cap_returns_none_for_unrelated_body() {
+        assert_eq!(parse_cap_from_error_body("model not found"), None);
+        assert_eq!(parse_cap_from_error_body("auth error"), None);
+        assert_eq!(parse_cap_from_error_body(""), None);
+        assert_eq!(parse_cap_from_error_body("internal server error"), None);
+        assert_eq!(
+            parse_cap_from_error_body(
+                r#"{"error":{"message":"unrelated error","type":"server_error"}}"#
+            ),
+            None
+        );
+    }
+
+    /// A 200-OK body that happens to contain the cap substring must
+    /// NOT short-circuit Phase 0 — `parse_cap_from_error_body` is
+    /// pure text parsing and the algorithm only calls it after a
+    /// `Rejected` outcome, but the helper itself must not assume
+    /// status. The body text is the only input we test here.
+    /// Returning `None` is the safe answer because Phase 0 would
+    /// have classified the 200 as `Accepted` and never called the
+    /// parser in production; the test pins the no-side-effects
+    /// contract.
+    #[test]
+    fn parse_cap_returns_none_for_non_4xx_simulation() {
+        // The parser is called regardless of HTTP status. The
+        // body happens to carry the cap substring; the parser
+        // returns the parsed value. Phase 0 only reaches the
+        // parser when the upstream rejected (4xx carrying
+        // `max_tokens`); the test below pins that the parser
+        // does not refuse well-formed bodies outright.
+        let body = r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1}}"#;
+        assert_eq!(parse_cap_from_error_body(body), None);
+        // When the body actually carries the cap, the parser
+        // returns the value (caller decides whether to use it).
+        let body_with_cap =
+            r#"{"error":{"message":"model[X] does not support max tokens > 100000"}}"#;
+        assert_eq!(parse_cap_from_error_body(body_with_cap), Some(100_000));
+    }
+
+    /// Pin the parser against the real boundaries observed on the
+    /// 2026-08-04 model roster: 131_072 (qwen3.8-max, longcat-2.0),
+    /// 196_608 (MiniMax-M2.5), 524_288 (MiniMax-M3, qwen3.7-max).
+    #[test]
+    fn parse_cap_handles_large_values() {
+        assert_eq!(
+            parse_cap_from_error_body(
+                r#"{"error":{"message":"model[qwen3.8-max] does not support max tokens > 131072"}}"#
+            ),
+            Some(131_072)
+        );
+        assert_eq!(
+            parse_cap_from_error_body(
+                r#"{"error":{"message":"model[MiniMax-M2.5] does not support max tokens > 196608"}}"#
+            ),
+            Some(196_608)
+        );
+        assert_eq!(
+            parse_cap_from_error_body(
+                r#"{"error":{"message":"model[MiniMax-M3] does not support max tokens > 524288"}}"#
+            ),
+            Some(524_288)
+        );
+    }
+
+    /// A body that reports `> u32::MAX` is a sentinel for "no real
+    /// cap" and must be rejected. Phase 1 with the per-provider
+    /// ceiling will discover the boundary by exponential search in
+    /// that case; Phase 0 cannot.
+    #[test]
+    fn parse_cap_rejects_u32_max_sentinel() {
+        // 4294967295 == u32::MAX. Reports the literal u32 boundary,
+        // which we treat as "no real cap" rather than a usable one.
+        let body = r#"{"error":{"message":"model[X] does not support max tokens > 4294967295"}}"#;
+        assert_eq!(parse_cap_from_error_body(body), None);
+        // Same via the OpenAI-compat shape.
+        let body2 = r#"{"error":{"param":"max_tokens is too large: 5000000000. This model supports at most 4294967295 completion tokens, whereas you provided 5000000000."}}"#;
+        assert_eq!(parse_cap_from_error_body(body2), None);
+    }
+
+    /// A body that reports a value below the algorithm floor
+    /// (< 1024) is rejected as "not a useful cap". This protects
+    /// against pathological upstream responses (some relays
+    /// mistakenly report 1 or 100 as the boundary when they mean
+    /// "minimum required"); we let Phase 1 walk the full algorithm
+    /// instead of trusting a degenerate value.
+    #[test]
+    fn parse_cap_rejects_zero_or_small() {
+        let body1 = r#"{"error":{"message":"model[X] does not support max tokens > 100"}}"#;
+        assert_eq!(parse_cap_from_error_body(body1), None);
+        let body2 = r#"{"error":{"message":"model[X] does not support max tokens > 0"}}"#;
+        assert_eq!(parse_cap_from_error_body(body2), None);
+        let body3 = r#"{"error":{"param":"max_tokens is too large: 200. This model supports at most 50 completion tokens, whereas you provided 200."}}"#;
+        assert_eq!(parse_cap_from_error_body(body3), None);
+    }
+
+    /// The Anthropic-compat upstream (MiniMax) emits `>` as the
+    /// JSON escape `\u003e` inside `error.message`. The helper must
+    /// unescape the JSON so the regex matches; without this, Phase
+    /// 0 falls through to Phase 1 unnecessarily.
+    #[test]
+    fn parse_cap_anthropic_compat_json_escaped_greater_than() {
+        // Real MiniMax production body: `invalid params, model[MiniMax-M2.5]
+        // does not support max tokens \u003e 196608 (2013)`. The
+        // escape needs to be decoded before the regex match.
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"invalid params, model[MiniMax-M2.5] does not support max tokens \u003e 196608 (2013)"},"request_id":"req-123"}"#;
+        assert_eq!(parse_cap_from_error_body(body), Some(196_608));
+    }
+
+    /// Body without an `error.message` JSON envelope falls back to
+    /// matching the raw text (OpenAI-compat shape: the body uses
+    /// ASCII punctuation directly).
+    #[test]
+    fn parse_cap_falls_back_to_raw_text_when_no_message_field() {
+        // No `error.message` field, but the body itself contains
+        // the cap substring (e.g. a non-JSON upstream error). The
+        // helper falls back to matching the raw body.
+        let body = "supports at most 524288 completion tokens";
+        assert_eq!(parse_cap_from_error_body(body), Some(524_288));
+    }
+
+    /// OpenCode Go relay wraps the upstream JSON-schema validation
+    /// error in `Error from provider (Console Go): Upstream request
+    /// failed: [invalid_parameter] 参数校验失败: \n/max_tokens:
+    /// 4294967295 is not less or equal to 131072\n`. The cap
+    /// follows the literal `is not less or equal to` substring
+    /// (note: no `than`; it's a translation of the Chinese
+    /// `参数校验失败`).
+    #[test]
+    fn parse_cap_opencode_go_is_not_less_or_equal() {
+        let body = r#"{"error":{"type":"invalid_request_error","message":"Error from provider (Console Go): Upstream request failed: [invalid_parameter] 参数校验失败: \n/max_tokens: 4294967295 is not less or equal to 131072\n"}}"#;
+        assert_eq!(parse_cap_from_error_body(body), Some(131_072));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 0 / Phase 0.5: single-request cap probe with parallel
+    // validation. Tested with a controllable `BodyMockTransport`
+    // primed to return the canonical Anthropic-compat error bodies
+    // and the upstream-confirming 200 OK / 4xx rejection pairs.
+    // -----------------------------------------------------------------
+
+    /// Phase 0 short-circuits when the initial probe returns a
+    /// parseable cap. Total wire calls: 1 (Phase 0) + 2 (Phase
+    /// 0.5 A and B). The discovered value lands at the cap.
+    #[tokio::test]
+    async fn phase_0_short_circuits_when_body_has_cap() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(BodyMockTransport {
+            accept_up_to: u32::MAX, // accept anything (Phase 0.5 A)
+            body_for_cap: Some(CAP_BODY_MINIMAX_M3.to_owned()),
+            calls: calls.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
+        assert_eq!(got, 524_288, "Phase 0 must discover the parsed cap");
+        assert!(
+            calls.load(Ordering::SeqCst) <= 3,
+            "Phase 0 + Phase 0.5 must fire at most 3 probes, got {}",
+            calls.load(Ordering::SeqCst)
+        );
+    }
+
+    /// Phase 0.5 `(A OK, B Rejected)` returns the cap. The B
+    /// rejection is the textbook "upstream confirms the boundary"
+    /// signal: `N` is the largest value the upstream accepts.
+    #[tokio::test]
+    async fn phase_0_5_validation_succeeds_when_a_ok_b_rejected() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(BodyMockTransport {
+            accept_up_to: 131_072, // cap = 131_072
+            body_for_cap: Some(CAP_BODY_QWEN.to_owned()),
+            calls: calls.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
+        assert_eq!(got, 131_072);
+        // 1 (Phase 0) + 2 (A and B) = 3 calls.
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// Phase 0.5 `(A OK, B OK)` returns the cap as a known floor.
+    /// The upstream reported `N` as its supported cap in the body
+    /// but actually accepts more; we still use `N` because it is
+    /// a safe lower-bound value the upstream definitely accepts.
+    #[tokio::test]
+    async fn phase_0_5_validation_succeeds_when_both_ok() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(BodyMockTransport {
+            accept_up_to: u32::MAX, // accept everything; cap is just a floor
+            body_for_cap: Some(CAP_BODY_QWEN.to_owned()),
+            calls: calls.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
+        assert_eq!(got, 131_072);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// Phase 0 falls back to Phase 1 when the body is not
+    /// parseable (generic 4xx without the cap signature).
+    /// The algorithm walks the full exponential + bisect path
+    /// and discovers the upstream boundary by binary search.
+    #[tokio::test]
+    async fn phase_0_falls_back_to_phase1_when_body_unparseable() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(BodyMockTransport {
+            accept_up_to: 8_192,
+            body_for_cap: None, // first call returns generic 400
+            calls: calls.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
+        // Binary search converges near 8_192.
+        assert!((8_000..=8_192).contains(&got), "got {got}");
+        // Phase 0 fired one probe (unparseable); Phase 1 + Phase 2
+        // then ran the full algorithm.
+        let n = calls.load(Ordering::SeqCst);
+        assert!(
+            n > 3,
+            "Phase 0 + 0.5 must fall through to Phase 1 (n > 3), got {n}"
+        );
+    }
+
+    /// Phase 0 falls back to Phase 1 when the candidate cap is
+    /// rejected by the upstream (the parse lied). The algorithm
+    /// walks Phase 1 + Phase 2 from scratch.
+    #[tokio::test]
+    async fn phase_0_falls_back_to_phase1_when_a_rejected() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let t: Arc<dyn ProbeTransport> = Arc::new(BodyMockTransport {
+            // Body reports 131_072 as the cap, but the upstream
+            // only accepts up to 4_096. A_rejected triggers the
+            // fallback to Phase 1.
+            accept_up_to: 4_096,
+            body_for_cap: Some(CAP_BODY_QWEN.to_owned()),
+            calls: calls.clone(),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
+        assert!((4_000..=4_096).contains(&got), "got {got}");
+        let n = calls.load(Ordering::SeqCst);
+        assert!(
+            n > 3,
+            "Phase 0 + 0.5 must fall through to Phase 1 (n > 3), got {n}"
+        );
+    }
+
+    /// The Phase 0 callback fires once when Phase 0 / 0.5
+    /// succeeds, and never when Phase 1 takes over. Pin the
+    /// contract so the caller can rely on the callback as the
+    /// signal for "ceiling was parsed from the body".
+    #[tokio::test]
+    async fn phase_0_callback_fires_on_short_circuit() {
+        let t: Arc<dyn ProbeTransport> = Arc::new(BodyMockTransport {
+            accept_up_to: u32::MAX,
+            body_for_cap: Some(CAP_BODY_QWEN.to_owned()),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let captured: std::sync::Arc<std::sync::Mutex<Option<u32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_for_cb = std::sync::Arc::clone(&captured);
+        let _ = detect_max_tokens_with_phase0_cap_callback(
+            t,
+            MIN_AUTOPROBE_FLOOR,
+            MAX_AUTOPROBE_CEILING,
+            move |cap| {
+                if let Ok(mut g) = captured_for_cb.lock() {
+                    *g = Some(cap);
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*captured.lock().unwrap(), Some(131_072));
+    }
+
+    /// The Phase 0 callback stays `None` when Phase 1 takes over
+    /// (the body was unparseable). This pins the negative case so
+    /// `probe_and_store` never persists a `ceiling` value the
+    /// upstream never confirmed.
+    #[tokio::test]
+    async fn phase_0_callback_does_not_fire_when_falling_back() {
+        let t: Arc<dyn ProbeTransport> = Arc::new(BodyMockTransport {
+            accept_up_to: 8_192,
+            body_for_cap: None, // generic 400 → no parseable cap
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let captured: std::sync::Arc<std::sync::Mutex<Option<u32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_for_cb = std::sync::Arc::clone(&captured);
+        let _ = detect_max_tokens_with_phase0_cap_callback(
+            t,
+            MIN_AUTOPROBE_FLOOR,
+            MAX_AUTOPROBE_CEILING,
+            move |cap| {
+                if let Ok(mut g) = captured_for_cb.lock() {
+                    *g = Some(cap);
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*captured.lock().unwrap(), None);
+    }
+
+    /// Phase 0.5 retries `B` once when `B` is `Indeterminate`.
+    /// The retry is gated on the outcome (not a timer) so a clean
+    /// `Rejected`/`Accepted` after the first probe does not pay
+    /// the second round-trip. On the second `Indeterminate` the
+    /// helper returns the candidate as best-effort.
+    #[tokio::test]
+    async fn phase_0_5_retries_b_on_indeterminate() {
+        // Custom transport: Phase 0 returns the parseable body,
+        // A accepts, B returns Indeterminate twice (retry path).
+        struct FlakyPhase05Transport {
+            b_calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ProbeTransport for FlakyPhase05Transport {
+            async fn probe_send(&self, n: u32) -> ProbeOutcome {
+                self.probe_send_with_body(n).await.outcome
+            }
+
+            async fn probe_send_with_body(&self, n: u32) -> ProbeResult {
+                if n == u32::MAX {
+                    ProbeResult {
+                        outcome: ProbeOutcome::Rejected,
+                        body: CAP_BODY_QWEN.to_owned(),
+                    }
+                } else if n == 131_072 {
+                    // A: accept.
+                    ProbeResult {
+                        outcome: ProbeOutcome::Accepted,
+                        body: String::new(),
+                    }
+                } else if n == 131_073 {
+                    // B: Indeterminate twice (retry path).
+                    let count = self.b_calls.fetch_add(1, Ordering::SeqCst);
+                    let _ = count;
+                    ProbeResult {
+                        outcome: ProbeOutcome::Indeterminate,
+                        body: String::new(),
+                    }
+                } else {
+                    ProbeResult {
+                        outcome: ProbeOutcome::Accepted,
+                        body: String::new(),
+                    }
+                }
+            }
+        }
+        let t: Arc<dyn ProbeTransport> = Arc::new(FlakyPhase05Transport {
+            b_calls: AtomicUsize::new(0),
+        });
+        let got = detect_max_tokens(t, MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING)
+            .await
+            .unwrap();
+        // Best-effort: 131_072 is the discovered value even when
+        // the B retry stays Indeterminate.
+        assert_eq!(got, 131_072);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 0 / Phase 0.5 test fixtures. Consts and a mock
+    // transport live INSIDE `mod tests` so the `#[cfg(test)]`
+    // gate excludes them from non-test builds (no dead-code
+    // warnings in `cargo build --release`).
+    // -----------------------------------------------------------------
+
+    /// Canonical Anthropic-compat error body for MiniMax-M3 (cap =
+    /// 524_288). Shared across the Phase 0 tests so the bodies
+    /// match the upstream responses captured in production logs.
+    const CAP_BODY_MINIMAX_M3: &str = r#"{"type":"error","error":{"message":"model[MiniMax-M3] does not support max tokens > 524288 (2013)"}}"#;
+
+    /// Canonical Anthropic-compat error body for qwen3.8-max /
+    /// longcat (cap = 131_072). Shared across the Phase 0 tests.
+    const CAP_BODY_QWEN: &str = r#"{"type":"error","error":{"message":"model[qwen3.8-max] does not support max tokens > 131072"}}"#;
+
+    /// Transport that records every call and returns a controllable
+    /// body / outcome pair. Used by the Phase 0 tests above.
+    #[derive(Clone)]
+    struct BodyMockTransport {
+        /// Cap above which `probe_send` returns `Rejected` (with
+        /// the canonical max-tokens rejection body). `u32::MAX`
+        /// means every value is accepted.
+        accept_up_to: u32,
+        /// Body returned by the FIRST probe only (regardless of
+        /// `max_tokens`). `None` returns a generic 4xx without
+        /// the cap signature (so Phase 0 falls back to Phase 1).
+        body_for_cap: Option<String>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProbeTransport for BodyMockTransport {
+        async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
+            self.probe_send_with_body(max_tokens).await.outcome
+        }
+
+        async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
+            let call_idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            // The first call (Phase 0 with max_tokens = u32::MAX)
+            // returns the configured body regardless of value,
+            // when one is set. Otherwise it returns a generic
+            // 400 that does not parse.
+            if call_idx == 0 {
+                return match &self.body_for_cap {
+                    Some(body) => ProbeResult {
+                        outcome: ProbeOutcome::Rejected,
+                        body: body.clone(),
+                    },
+                    None => ProbeResult {
+                        outcome: ProbeOutcome::Rejected,
+                        body: r#"{"error":{"message":"internal error"}}"#.to_owned(),
+                    },
+                };
+            }
+            // Subsequent calls follow the cap.
+            if max_tokens <= self.accept_up_to {
+                ProbeResult {
+                    outcome: ProbeOutcome::Accepted,
+                    body: String::new(),
+                }
+            } else {
+                ProbeResult {
+                    outcome: ProbeOutcome::Rejected,
+                    body: r#"{"type":"error","error":{"message":"max_tokens > cap"}}"#.to_owned(),
+                }
+            }
+        }
+    }
+
+    // `Phase0AwareRecordingTransport` lives near the top of this
+    // `mod tests` block so the PR-473 tests and the helper live
+    // close together; see the definition above.
 }
