@@ -34,7 +34,7 @@ fn sample_request(model: &str) -> Request {
         model: model.to_owned(),
         system: "sys".to_owned(),
         user: "user".to_owned(),
-        max_tokens: 1024,
+        max_tokens: Some(1024),
         temperature: Some(0.6),
         top_p: Some(0.95),
         response_schema: None,

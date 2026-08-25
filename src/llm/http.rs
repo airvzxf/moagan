@@ -159,7 +159,13 @@ pub fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
 #[derive(Debug, Serialize)]
 pub(crate) struct MessagesRequestBody<'a> {
     model: &'a str,
-    max_tokens: u32,
+    /// Output token ceiling. `None` serialises as field-absent (via
+    /// `skip_serializing_if`), required for providers that reject
+    /// the *presence* of `max_tokens` (e.g. `gpt-5.6-luna`). The
+    /// auto-healing `param_rejections` table sets this to `None` on
+    /// the retry so the upstream accepts the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]

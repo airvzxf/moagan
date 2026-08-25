@@ -118,8 +118,14 @@ pub trait Provider: Send + Sync {
     /// providers that do not clamp (mock, …).
     /// Implementations that clamp inside `send` must override this
     /// so the audit hash stays in sync with the wire body.
+    ///
+    /// `None` on `req.max_tokens` is treated as `u32::MAX` so the
+    /// audit hash stays deterministic when the auto-healing path
+    /// drops the field from the wire body (the auto-heal close-the-
+    /// loop contract for upstreams that reject the *presence* of
+    /// `max_tokens`, e.g. `gpt-5.6-luna`).
     fn effective_max_tokens(&self, req: &Request) -> u32 {
-        req.max_tokens
+        req.max_tokens.unwrap_or(u32::MAX)
     }
 
     /// Send a probe request bypassing the safety wire-clamp. Used by
@@ -1045,8 +1051,13 @@ impl Provider for BreakeredProvider {
         // builder attaches); fall back to the inner provider's
         // own table so direct unit tests that wire
         // `with_max_tokens_table` keep working unchanged.
+        //
+        // `None` on `req.max_tokens` is treated as `u32::MAX` so the
+        // audit hash stays deterministic when the auto-heal path
+        // drops the field from the wire body.
+        let requested = req.max_tokens.unwrap_or(u32::MAX);
         if let Some(table) = self.max_tokens_table.lock().clone() {
-            return req.max_tokens.min(
+            return requested.min(
                 table
                     .resolve_cached(self.inner.name(), self.inner.model())
                     .unwrap_or(u32::MAX),
@@ -2640,7 +2651,7 @@ mod tests {
             role: Role::Intake,
             system: String::new(),
             user: String::new(),
-            max_tokens: 16,
+            max_tokens: Some(16),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -2746,7 +2757,7 @@ mod tests {
             role: Role::Intake,
             system: "sys".into(),
             user: "user".into(),
-            max_tokens: 16,
+            max_tokens: Some(16),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -3176,7 +3187,7 @@ mod tests {
             role: Role::Intake,
             system: "sys".into(),
             user: "u".into(),
-            max_tokens: 64,
+            max_tokens: Some(64),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -3221,7 +3232,7 @@ mod tests {
             role: Role::Intake,
             system: "instructions".into(),
             user: "the user prompt".into(),
-            max_tokens: 32,
+            max_tokens: Some(32),
             temperature: None,
             top_p: None,
             response_schema: None,

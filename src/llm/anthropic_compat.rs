@@ -246,13 +246,20 @@ impl Provider for AnthropicCompatProvider {
         //      2026-08-04 model roster).
         //   2. `provider_max_tokens` (operator TOML override).
         //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
+        //
+        // `None` on `req.max_tokens` is treated as `u32::MAX` so the
+        // audit hash stays deterministic when the auto-heal path
+        // drops the field from the wire body.
         let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
         let table_cap = self
             .max_tokens_table
             .as_ref()
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
-        req.max_tokens.min(operator_cap).min(table_cap)
+        req.max_tokens
+            .unwrap_or(u32::MAX)
+            .min(operator_cap)
+            .min(table_cap)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
@@ -302,6 +309,11 @@ impl AnthropicCompatProvider {
             //      for the 2026-08-04 model roster.
             //   2. provider_max_tokens — operator TOML override.
             //   3. MaxTokensTable::resolve_cached — auto-probed value.
+            //
+            // `req.max_tokens = None` (set by the auto-healing
+            // `param_rejections` path) is preserved through the
+            // chain: the wire body omits the field so the upstream
+            // accepts the request without the cap.
             let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
             let table_cap = self
                 .max_tokens_table
@@ -309,12 +321,18 @@ impl AnthropicCompatProvider {
                 .and_then(|t| t.resolve_cached(self.name(), self.model()))
                 .unwrap_or(u32::MAX);
             let cap = operator_cap.min(table_cap);
-            req.max_tokens = req.max_tokens.min(cap);
+            if let Some(n) = req.max_tokens {
+                req.max_tokens = Some(n.min(cap));
+            }
         } else {
             // Probe path: bypass every cap. Floor ensures we
             // never ask for `max_tokens < 1024` (some upstreams
             // reject the request outright below that minimum).
-            req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
+            // `None` stays `None` so the probe honours any explicit
+            // request to drop the field.
+            if let Some(n) = req.max_tokens {
+                req.max_tokens = Some(n.max(MIN_AUTOPROBE_FLOOR));
+            }
         }
         let body = body_from_request(&req);
         let mut attempt: u32 = 0;
@@ -627,7 +645,7 @@ mod tests {
                 model: "minimax-m3".into(),
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1024,
+                max_tokens: Some(1024),
                 temperature: Some(0.7),
                 top_p: Some(0.95),
                 response_schema: None,
@@ -807,7 +825,7 @@ mod tests {
                 model: "minimax-m3".into(),
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: Some(0.7),
                 top_p: Some(0.95),
                 response_schema: None,
@@ -888,7 +906,7 @@ mod tests {
                 model: "minimax-m3".into(),
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: Some(0.7),
                 top_p: Some(0.95),
                 response_schema: None,
@@ -1024,7 +1042,7 @@ mod tests {
                 model: "minimax-m3".into(),
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: Some(0.7),
                 top_p: Some(0.95),
                 response_schema: None,

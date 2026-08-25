@@ -785,7 +785,7 @@ impl RunContext {
             model: self.default_model.clone(),
             system,
             user,
-            max_tokens: max_tokens_for_role(role),
+            max_tokens: Some(max_tokens_for_role(role)),
             temperature: Some(resolve_temperature(
                 role,
                 profile_overrides,
@@ -894,7 +894,7 @@ impl RunContext {
             model: self.default_model.clone(),
             system,
             user,
-            max_tokens: max_tokens_for_role(role),
+            max_tokens: Some(max_tokens_for_role(role)),
             temperature: Some(temperature),
             top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
@@ -968,7 +968,7 @@ impl RunContext {
             model: self.default_model.clone(),
             system,
             user,
-            max_tokens: max_tokens_for_role(role),
+            max_tokens: Some(max_tokens_for_role(role)),
             temperature: Some(temperature),
             top_p: Some(provider_top_p.unwrap_or(0.95)),
             response_schema: None,
@@ -1031,7 +1031,7 @@ impl RunContext {
             model: self.default_model.clone(),
             system,
             user,
-            max_tokens: max_tokens_for_role(role),
+            max_tokens: Some(max_tokens_for_role(role)),
             temperature: Some(resolve_temperature(
                 role,
                 profile_overrides,
@@ -1190,9 +1190,14 @@ impl RunContext {
             ),
             None => req.clone(),
         };
-        let hash_input = if gated.max_tokens != effective_max {
+        // `effective_max_tokens` treats `None` as `u32::MAX`, so we
+        // must compare in the same domain. When `req.max_tokens` is
+        // `None` (the auto-healing path) the two are equal and the
+        // clamp is a no-op.
+        let gated_audit = gated.max_tokens.unwrap_or(u32::MAX);
+        let hash_input = if gated_audit != effective_max {
             let mut clamped = gated;
-            clamped.max_tokens = effective_max;
+            clamped.max_tokens = Some(effective_max);
             clamped
         } else {
             gated
@@ -1648,7 +1653,7 @@ impl RunContext {
             model: self.default_model.clone(),
             system: String::new(),
             user: String::new(),
-            max_tokens: 0,
+            max_tokens: Some(0),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -1781,7 +1786,7 @@ impl RunContext {
             model: self.default_model.clone(),
             system: system.to_owned(),
             user: user.to_owned(),
-            max_tokens: crate::phases::phase::max_tokens_for_role(role),
+            max_tokens: Some(crate::phases::phase::max_tokens_for_role(role)),
             temperature: None,
             top_p: Some(0.95),
             response_schema: None,
@@ -1949,7 +1954,7 @@ impl RunContext {
                 model: self.default_model.clone(),
                 system,
                 user,
-                max_tokens: max_tokens_for_role(Role::Continuation),
+                max_tokens: Some(max_tokens_for_role(Role::Continuation)),
                 temperature: Some(temperature_for_role(Role::Continuation, None)),
                 top_p: Some(provider_top_p.unwrap_or(0.95)),
                 response_schema: None,

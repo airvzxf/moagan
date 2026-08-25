@@ -128,7 +128,7 @@ impl Cache {
             "user",
             &req.user,
             "max_tokens",
-            &req.max_tokens.to_string(),
+            &req.max_tokens.map(|n| n.to_string()).unwrap_or_default(),
             "temperature",
             &req.temperature.map(|t| t.to_string()).unwrap_or_default(),
             "top_p",
@@ -358,7 +358,7 @@ mod tests {
             model: "m".into(),
             system: system.into(),
             user: user.into(),
-            max_tokens: 16,
+            max_tokens: Some(16),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -863,7 +863,7 @@ mod tests {
         /// lookups stable across process restarts.
         #[test]
         fn prop_cache_key_is_deterministic(
-            system in ".*", user in ".*", max_tokens in 1u32..4096,
+            system in ".*", user in ".*", max_tokens in proptest::option::of(1u32..4096),
             temperature in proptest::option::of(0.0f32..2.0),
             top_p in proptest::option::of(0.0f32..1.0),
         ) {
@@ -912,8 +912,8 @@ mod tests {
             sys_a in ".+", sys_b in ".+",
         ) {
             prop_assume!(sys_a != sys_b);
-            let req_a = req_with(&sys_a, "u", 16, None, None);
-            let req_b = req_with(&sys_b, "u", 16, None, None);
+            let req_a = req_with(&sys_a, "u", Some(16), None, None);
+            let req_b = req_with(&sys_b, "u", Some(16), None, None);
             prop_assert_ne!(
                 Cache::cache_key(&req_a, "mock", "m"),
                 Cache::cache_key(&req_b, "mock", "m"),
@@ -949,8 +949,8 @@ mod tests {
             a in 1u32..4096, b in 1u32..4096,
         ) {
             prop_assume!(a != b);
-            let req_a = req_with("s", "u", a, None, None);
-            let req_b = req_with("s", "u", b, None, None);
+            let req_a = req_with("s", "u", Some(a), None, None);
+            let req_b = req_with("s", "u", Some(b), None, None);
             prop_assert_ne!(
                 Cache::cache_key(&req_a, "mock", "m"),
                 Cache::cache_key(&req_b, "mock", "m"),
@@ -968,8 +968,8 @@ mod tests {
         fn prop_cache_key_distinguishes_none_and_some_temperature(
             temp in 0.0f32..2.0,
         ) {
-            let req_none = req_with("s", "u", 16, None, None);
-            let req_some = req_with("s", "u", 16, Some(temp), None);
+            let req_none = req_with("s", "u", None, None, None);
+            let req_some = req_with("s", "u", Some(16), Some(temp), None);
             prop_assert_ne!(
                 Cache::cache_key(&req_none, "mock", "m"),
                 Cache::cache_key(&req_some, "mock", "m"),
@@ -1006,7 +1006,7 @@ mod tests {
     fn req_with(
         system: &str,
         user: &str,
-        max_tokens: u32,
+        max_tokens: Option<u32>,
         temperature: Option<f32>,
         top_p: Option<f32>,
     ) -> crate::llm::wire::Request {

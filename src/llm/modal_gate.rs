@@ -177,7 +177,7 @@ mod tests {
             model: "test-model".to_string(),
             system: String::new(),
             user: String::new(),
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             top_p: None,
             response_schema: None,

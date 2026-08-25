@@ -280,7 +280,7 @@ mod tests {
             role: crate::llm::Role::Route,
             system: String::new(),
             user: String::new(),
-            max_tokens: 1_000_000,
+            max_tokens: Some(1_000_000),
             temperature: None,
             top_p: None,
             response_schema: None,

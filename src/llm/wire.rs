@@ -16,8 +16,16 @@ pub struct Request {
     pub system: String,
     /// User prompt. The actual content the model reacts to.
     pub user: String,
-    /// Maximum tokens to generate.
-    pub max_tokens: u32,
+    /// Maximum tokens to generate. `None` lets the provider / upstream
+    /// default apply — the wire builder omits the `max_tokens` field
+    /// entirely (via `skip_serializing_if = "Option::is_none"`).
+    /// `Some(n)` sends `n` verbatim, after the per-provider clamp
+    /// chain. The auto-healing `param_rejections` table sets this
+    /// to `None` when the cache says the upstream rejects the
+    /// field; the omit step then retries with the field absent so
+    /// the upstream accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// Sampling temperature (e.g. 0.6). `None` lets the provider choose.
     pub temperature: Option<f32>,
     /// Nucleus sampling top-p (e.g. 0.95). `None` lets the provider choose.
@@ -219,21 +227,23 @@ impl From<crate::cli::flags_batch::HashAlgo> for CacheHashAlgo {
 /// does not re-emit a parameter the upstream already rejected.
 ///
 /// `param` is matched against the optional fields the dispatch path
-/// can actually mutate at runtime — `temperature` and `top_p` today.
-/// Unknown parameters are ignored silently so the helper is safe to
-/// call from a generic loop even when the rejection detector picks
-/// up a field the runtime cannot omit (e.g. `max_tokens`).
-///
-/// `max_tokens` is intentionally NOT supported here because
-/// [`crate::llm::wire::Request::max_tokens`] is `u32`, not
-/// `Option<u32>` — restructuring the field would break every
-/// call site. The runtime's escape hatch for `max_tokens` rejections
-/// stays the operator-supplied `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true`
-/// env var (read by the per-provider cap path).
+/// can mutate at runtime — `temperature`, `top_p`, and
+/// `max_tokens` (the latter is `Option<u32>`, so dropping it makes
+/// the wire body omit the field entirely). Unknown parameters are
+/// ignored silently so the helper is safe to call from a generic
+/// loop even when the rejection detector picks up a field the
+/// runtime cannot omit.
 pub fn omit_param(req: &mut Request, param: &str) {
     match param {
         "temperature" => req.temperature = None,
         "top_p" => req.top_p = None,
+        // `max_tokens` → `None` drops the field from the wire body
+        // (via `skip_serializing_if`). The auto-healing
+        // `param_rejections` table records the rejection so the
+        // next run omits the field from the first call, closing
+        // the loop for upstreams that reject the *presence* of
+        // `max_tokens` (e.g. `gpt-5.6-luna`).
+        "max_tokens" => req.max_tokens = None,
         // Unknown parameters are a no-op so the runtime can record
         // the rejection (so the next run learns) without breaking
         // the current call.
@@ -272,7 +282,7 @@ pub fn build_cache_key(req: &Request, provider: &str, model: &str, algo: CacheHa
         "user",
         &req.user,
         "max_tokens",
-        &req.max_tokens.to_string(),
+        &req.max_tokens.map(|n| n.to_string()).unwrap_or_default(),
         "temperature",
         &req.temperature.map(|t| t.to_string()).unwrap_or_default(),
         "top_p",
@@ -323,7 +333,7 @@ mod tests {
             model: "MiniMax-M3".into(),
             system: "system".into(),
             user: "user".into(),
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
@@ -335,7 +345,7 @@ mod tests {
         let j = serde_json::to_string(&r).unwrap();
         let back: Request = serde_json::from_str(&j).unwrap();
         assert_eq!(back.role, Role::Intake);
-        assert_eq!(back.max_tokens, 1024);
+        assert_eq!(back.max_tokens, Some(1024));
         assert!(!back.stream, "default stream flag roundtrips as false");
         assert!(
             back.extra_messages.is_empty(),
@@ -374,7 +384,7 @@ mod tests {
             model: "deepseek-v4-flash".into(),
             system: "sys".into(),
             user: "user".into(),
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
@@ -407,7 +417,7 @@ mod tests {
             model: "MiniMax-M3".into(),
             system: "system".into(),
             user: "user".into(),
-            max_tokens: 64,
+            max_tokens: Some(64),
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
@@ -442,7 +452,7 @@ mod tests {
             model: "MiniMax-M3".into(),
             system: "system".into(),
             user: "user".into(),
-            max_tokens: 64,
+            max_tokens: Some(64),
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
@@ -489,6 +499,99 @@ mod tests {
         assert_eq!(CacheHashAlgo::default(), CacheHashAlgo::Blake3);
     }
 
+    /// `Request::max_tokens = None` must round-trip as field-absent
+    /// on the wire (the `skip_serializing_if` attribute pins this).
+    /// The auto-healing `param_rejections` path relies on the
+    /// field being absent on the retry so upstreams that reject
+    /// the *presence* of `max_tokens` (e.g. `gpt-5.6-luna`) accept
+    /// the request.
+    #[test]
+    fn request_omits_max_tokens_when_none() {
+        let r = Request {
+            role: Role::Intake,
+            model: "m".into(),
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        let j: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert!(
+            j.get("max_tokens").is_none(),
+            "max_tokens must be absent from the wire when None, got: {j}"
+        );
+        // Round-trip via deserialise honours `#[serde(default)]`:
+        // a payload that omits the field deserialises as `None`.
+        let back: Request = serde_json::from_value(j).unwrap();
+        assert_eq!(back.max_tokens, None);
+    }
+
+    /// `Request::max_tokens = Some(n)` must round-trip with the
+    /// numeric value preserved. Pins the byte-identity contract the
+    /// pre-existing wire body builders rely on (`Some(n)` produces
+    /// the same wire JSON that `u32 = n` did before this PR).
+    #[test]
+    fn request_includes_max_tokens_when_some() {
+        let r = Request {
+            role: Role::Intake,
+            model: "m".into(),
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        let j: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            j.get("max_tokens"),
+            Some(&serde_json::json!(1024)),
+            "max_tokens must serialise as a numeric JSON value, got: {j}"
+        );
+        let back: Request = serde_json::from_value(j).unwrap();
+        assert_eq!(back.max_tokens, Some(1024));
+    }
+
+    /// `omit_param` clears `max_tokens` to `None` so the wire body
+    /// drops the field. Pins the auto-healing close-the-loop: the
+    /// dispatch path can now omit a `max_tokens` rejection on the
+    /// retry without operator intervention.
+    #[test]
+    fn omit_param_clears_max_tokens_to_none() {
+        let mut req = Request {
+            role: Role::Intake,
+            model: "m".into(),
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: Some(1024),
+            temperature: Some(0.6),
+            top_p: Some(0.95),
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        super::omit_param(&mut req, "max_tokens");
+        assert_eq!(
+            req.max_tokens, None,
+            "omit_param must clear max_tokens to None"
+        );
+        // Other fields stay untouched.
+        assert_eq!(req.temperature, Some(0.6));
+        assert_eq!(req.top_p, Some(0.95));
+    }
+
     // -----------------------------------------------------------------
     // Property-based tests (proptest 1.4, dev-only per ADR-0001).
     // These pin the invariants of `build_cache_key` for both
@@ -510,7 +613,7 @@ mod tests {
     fn req_with_all(
         system: &str,
         user: &str,
-        max_tokens: u32,
+        max_tokens: Option<u32>,
         temperature: Option<f32>,
         top_p: Option<f32>,
     ) -> Request {
@@ -537,7 +640,7 @@ mod tests {
         /// a cache key in the first place.
         #[test]
         fn prop_build_cache_key_is_deterministic_blake3(
-            system in ".*", user in ".*", max_tokens in 1u32..4096,
+            system in ".*", user in ".*", max_tokens in proptest::option::of(1u32..4096),
             temperature in proptest::option::of(0.0f32..2.0),
             top_p in proptest::option::of(0.0f32..1.0),
         ) {
@@ -551,7 +654,7 @@ mod tests {
 
         #[test]
         fn prop_build_cache_key_is_deterministic_sha256(
-            system in ".*", user in ".*", max_tokens in 1u32..4096,
+            system in ".*", user in ".*", max_tokens in proptest::option::of(1u32..4096),
             temperature in proptest::option::of(0.0f32..2.0),
             top_p in proptest::option::of(0.0f32..1.0),
         ) {
@@ -572,7 +675,7 @@ mod tests {
         fn prop_build_cache_key_algorithms_disagree(
             user in ".+",
         ) {
-            let r = req_with_all("s", &user, 16, None, None);
+            let r = req_with_all("s", &user, Some(16), None, None);
             let blake = build_cache_key(&r, "mock", "m", CacheHashAlgo::Blake3);
             let sha = build_cache_key(&r, "mock", "m", CacheHashAlgo::Sha256);
             prop_assert_ne!(blake, sha);
@@ -587,8 +690,8 @@ mod tests {
             user_a in ".+", user_b in ".+",
         ) {
             prop_assume!(user_a != user_b);
-            let ra = req_with_all("s", &user_a, 16, None, None);
-            let rb = req_with_all("s", &user_b, 16, None, None);
+            let ra = req_with_all("s", &user_a, Some(16), None, None);
+            let rb = req_with_all("s", &user_b, Some(16), None, None);
             prop_assert_ne!(
                 build_cache_key(&ra, "mock", "m", CacheHashAlgo::Blake3),
                 build_cache_key(&rb, "mock", "m", CacheHashAlgo::Blake3),
@@ -600,8 +703,8 @@ mod tests {
             user_a in ".+", user_b in ".+",
         ) {
             prop_assume!(user_a != user_b);
-            let ra = req_with_all("s", &user_a, 16, None, None);
-            let rb = req_with_all("s", &user_b, 16, None, None);
+            let ra = req_with_all("s", &user_a, Some(16), None, None);
+            let rb = req_with_all("s", &user_b, Some(16), None, None);
             prop_assert_ne!(
                 build_cache_key(&ra, "mock", "m", CacheHashAlgo::Sha256),
                 build_cache_key(&rb, "mock", "m", CacheHashAlgo::Sha256),
@@ -615,7 +718,7 @@ mod tests {
         /// invalidated every time the prefill retry fired.
         #[test]
         fn prop_build_cache_key_ignores_extra_messages_blake3(
-            user in ".*", max_tokens in 1u32..4096,
+            user in ".*", max_tokens in proptest::option::of(1u32..4096),
         ) {
             let base = req_with_all("s", &user, max_tokens, None, None);
             let with_prefill = Request {
@@ -634,7 +737,7 @@ mod tests {
 
         #[test]
         fn prop_build_cache_key_ignores_extra_messages_sha256(
-            user in ".*", max_tokens in 1u32..4096,
+            user in ".*", max_tokens in proptest::option::of(1u32..4096),
         ) {
             let base = req_with_all("s", &user, max_tokens, None, None);
             let with_prefill = Request {

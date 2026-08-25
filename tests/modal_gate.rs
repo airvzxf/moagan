@@ -57,7 +57,7 @@ fn request() -> Request {
         model: "wiremock-model".to_string(),
         system: String::new(),
         user: "hello".to_string(),
-        max_tokens: 16,
+        max_tokens: Some(16),
         temperature: Some(0.6),
         top_p: Some(0.95),
         response_schema: None,
@@ -77,12 +77,18 @@ fn request() -> Request {
 fn body_json(req: &Request) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": req.model,
-        "max_tokens": req.max_tokens,
         "messages": [{
             "role": "user",
             "content": req.user,
         }],
     });
+    // `max_tokens` is `Option<u32>`; `skip_serializing_if =
+    // "Option::is_none"` means the wire body omits the field when
+    // `None`. Mirror that contract here so the test mock
+    // matches the production wire shape.
+    if let Some(n) = req.max_tokens {
+        body["max_tokens"] = serde_json::json!(n);
+    }
     if !req.attachments.is_empty() {
         let arr = serde_json::json!(
             req.attachments

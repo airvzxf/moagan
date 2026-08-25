@@ -217,7 +217,7 @@ async fn probe_does_not_retry_on_transient_5xx() {
         role: Role::Intake,
         system: String::new(),
         user: "Reply with the single character: 1".into(),
-        max_tokens: 1024,
+        max_tokens: Some(1024),
         temperature: Some(0.5),
         top_p: None,
         response_schema: None,

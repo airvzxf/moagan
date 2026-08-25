@@ -53,18 +53,19 @@ use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 
 /// Wire field names that the auto-detect knows how to omit on the
-/// retry path. `temperature` and `top_p` are the two that change from
-/// `Option<f32>` on [`crate::llm::wire::Request`] and can therefore
-/// be dropped at runtime without restructuring the request shape.
+/// retry path. `temperature`, `top_p`, and `max_tokens` are the three
+/// optional fields on [`crate::llm::wire::Request`]; setting any of
+/// them to `None` makes the wire builder drop the field (via
+/// `#[serde(skip_serializing_if = "Option::is_none")]`).
 ///
-/// `max_tokens` is intentionally NOT listed here because
-/// [`crate::llm::wire::Request::max_tokens`] is `u32`, not
-/// `Option<u32>` — the dispatch path cannot omit a non-Option field
-/// without restructuring the request, and operators already have a
-/// well-known escape hatch (`MOAGAN_<NAME>_OMIT_MAX_TOKENS=true`) for
-/// that case. The auto-detect stays scoped to fields the runtime can
-/// actually drop.
-pub const PARAM_NAMES: &[&str] = &["temperature", "top_p"];
+/// `max_tokens` is now in scope: the field is `Option<u32>` so the
+/// dispatch path can drop it without restructuring the request
+/// shape. `omit_param(req, "max_tokens")` clears the field; the
+/// Anthropic / OpenAI / Responses wire builders emit field-absent;
+/// and upstreams that reject the *presence* of `max_tokens` (e.g.
+/// `gpt-5.6-luna`) accept the retry. The auto-detect closes the
+/// loop end-to-end.
+pub const PARAM_NAMES: &[&str] = &["temperature", "top_p", "max_tokens"];
 
 /// Serde shape persisted at `<MOAGAN_HOME>/param_rejections.toml`.
 /// Schema version 1.
