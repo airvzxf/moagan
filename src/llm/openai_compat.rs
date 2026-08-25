@@ -239,28 +239,41 @@ struct ResponsesRequest<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
-    /// OpenAI-style JSON output mode. Mirrors the OpenAI-compat
-    /// gating: omitted for free-text roles (`Sketch`, `FinalReport`,
-    /// etc.) and for models on the `response_format_opt_out` list.
-    /// `Capabilities::for_openai_compat` advertises
-    /// `supports_response_format: true` because the Responses API
-    /// still honours the field, so a JSON role on a non-opted-out
-    /// model must send it.
+    /// Responses-API JSON output gate. The Responses API rejects the
+    /// legacy `response_format` field and expects the same shape
+    /// under `text.format` (`{"text": {"format": {"type":
+    /// "json_object"}}}`). Upstream returns HTTP 400 with
+    /// `Unsupported parameter: 'response_format'. In the Responses
+    /// API, this parameter has moved to 'text.format'` when the
+    /// legacy field is sent, so the wire builder must serialise the
+    /// new location. Mirrors the OpenAI-compat gating: omitted for
+    /// free-text roles (`Sketch`, `FinalReport`, etc.) and for
+    /// models on the `response_format_opt_out` list.
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponsesResponseFormat>,
+    text: Option<ResponsesText>,
     stream: bool,
 }
 
+/// Wrapper struct that mirrors the Responses API's `text.format`
+/// nesting. The outer field is `text`; the inner `format` carries
+/// the JSON mode discriminator (`{"type": "json_object"}`).
 #[derive(Debug, Serialize)]
-struct ResponsesResponseFormat {
+struct ResponsesText {
+    format: ResponsesTextFormat,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesTextFormat {
     #[serde(rename = "type")]
     kind: &'static str,
 }
 
 /// Compute the gate the OpenAI-compat path uses to decide whether
-/// to send `response_format: { type: "json_object" }`. Kept local
-/// so the wire builder can stay a free function and so the
-/// `#[cfg(test)]` block can drive it directly.
+/// to send `text: { format: { type: "json_object" } }` (the
+/// Responses-API shape — the legacy `response_format` field is
+/// rejected by the upstream). Kept local so the wire builder can
+/// stay a free function and so the `#[cfg(test)]` block can drive
+/// it directly.
 fn wants_response_format(role: crate::llm::Role, model: &str) -> bool {
     role_requires_json(role) && !model_skips_response_format(model)
 }
@@ -422,14 +435,24 @@ fn build_responses_body<'a>(
         },
         temperature: req.temperature,
         top_p: req.top_p,
-        response_format: if wants_response_format(req.role, model) {
-            Some(ResponsesResponseFormat {
-                kind: "json_object",
-            })
-        } else {
-            None
-        },
+        text: responses_text_json_object(wants_response_format(req.role, model)),
         stream,
+    }
+}
+
+/// Build the `text: { format: { type: "json_object" } }` payload
+/// when the JSON gate fires, or `None` so the field is dropped from
+/// the wire body entirely. Centralises the nested-struct build so
+/// the streaming and non-streaming paths stay byte-identical.
+fn responses_text_json_object(wants: bool) -> Option<ResponsesText> {
+    if wants {
+        Some(ResponsesText {
+            format: ResponsesTextFormat {
+                kind: "json_object",
+            },
+        })
+    } else {
+        None
     }
 }
 
@@ -538,13 +561,7 @@ impl OpenAICompatProvider {
                 max_tokens,
                 temperature: req.temperature,
                 top_p: req.top_p,
-                response_format: if wants_response_format(req.role, &self.model) {
-                    Some(ResponsesResponseFormat {
-                        kind: "json_object",
-                    })
-                } else {
-                    None
-                },
+                text: responses_text_json_object(wants_response_format(req.role, &self.model)),
                 stream: false,
             };
             let request_started = std::time::Instant::now();
@@ -1498,46 +1515,60 @@ data: [DONE]\n\n",
         }
     }
 
-    /// JSON role + non-opted-out model → `response_format` must be
-    /// serialised as `{"type":"json_object"}`. Pins the contract
-    /// the capability matrix advertises
-    /// (`supports_response_format: true`).
+    /// JSON role + non-opted-out model → `text.format` must be
+    /// serialised as `{"type":"json_object"}` (the Responses-API
+    /// location; the legacy `response_format` field is rejected by
+    /// the upstream). Pins the contract the capability matrix
+    /// advertises (`supports_response_format: true`).
     #[test]
-    fn responses_wire_sets_response_format_when_role_requires_json_and_model_is_not_opted_out() {
+    fn responses_wire_sets_text_format_when_role_requires_json_and_model_is_not_opted_out() {
         let req = json_request(crate::llm::Role::Intake, "gpt-5.6-luna");
         let body = build_responses_body(&req, &req.model, false, false);
         let value: serde_json::Value = serde_json::to_value(&body).unwrap();
         assert_eq!(
-            value.get("response_format"),
-            Some(&serde_json::json!({"type": "json_object"})),
-            "Intake role + gpt-5.6-luna must include response_format, got: {value}"
+            value.get("text"),
+            Some(&serde_json::json!({
+                "format": {"type": "json_object"}
+            })),
+            "Intake role + gpt-5.6-luna must include text.format, got: {value}"
+        );
+        // Regression pin: the Responses API rejects the legacy
+        // `response_format` key (HTTP 400). The wire body must
+        // never carry both — the Responses shape uses
+        // `text.format`, the Chat Completions shape uses
+        // `response_format`, and the two paths serialise different
+        // structs.
+        assert!(
+            value.get("response_format").is_none(),
+            "wire body must not carry the legacy response_format key on the Responses path, got: {value}"
         );
     }
 
     /// `Sketch` is a free-text role and is NOT in `role_requires_json`,
-    /// so the field must stay absent even on a non-opted-out model.
+    /// so the `text` field must stay absent even on a non-opted-out
+    /// model.
     #[test]
-    fn responses_wire_omits_response_format_for_role_sketch() {
+    fn responses_wire_omits_text_format_for_role_sketch() {
         let req = json_request(crate::llm::Role::Sketch, "gpt-5.6-luna");
         let body = build_responses_body(&req, &req.model, false, false);
         let value: serde_json::Value = serde_json::to_value(&body).unwrap();
         assert!(
-            value.get("response_format").is_none(),
-            "Sketch role must drop response_format, got: {value}"
+            value.get("text").is_none(),
+            "Sketch role must drop text.format, got: {value}"
         );
     }
 
-    /// Model on the opt-out list + JSON role → field must stay
-    /// absent so the upstream returns raw markdown instead of
+    /// Model on the opt-out list + JSON role → `text` field must
+    /// stay absent so the upstream returns raw markdown instead of
     /// prose-prefixed JSON.
     #[test]
-    fn responses_wire_omits_response_format_for_opted_out_model() {
+    fn responses_wire_omits_text_format_for_opted_out_model() {
         let req = json_request(crate::llm::Role::Intake, "kimi-k3");
         let body = build_responses_body(&req, &req.model, false, false);
         let value: serde_json::Value = serde_json::to_value(&body).unwrap();
         assert!(
-            value.get("response_format").is_none(),
-            "opted-out model kimi-k3 must drop response_format, got: {value}"
+            value.get("text").is_none(),
+            "opted-out model kimi-k3 must drop text.format, got: {value}"
         );
     }
 
@@ -1584,10 +1615,11 @@ data: [DONE]\n\n",
         );
         assert_eq!(value["stream"], false);
         // Gate was true (Route + gpt-5.6-luna), so the new field
-        // is also present.
+        // is also present under the Responses-API `text.format`
+        // location.
         assert_eq!(
-            value["response_format"],
-            serde_json::json!({"type": "json_object"})
+            value["text"],
+            serde_json::json!({"format": {"type": "json_object"}})
         );
     }
 
