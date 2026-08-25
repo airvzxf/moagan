@@ -30,6 +30,9 @@ use crate::ids::RunId;
 use crate::llm::cache::{Cache, CacheConfig};
 use crate::llm::capability::CapabilityResolver;
 use crate::llm::models_dev::ModelsDevCatalog;
+use crate::llm::param_rejections::{
+    PARAM_NAMES, ParamRejectionsTable, audit_unknown_fields, detect_rejection,
+};
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
@@ -189,6 +192,16 @@ pub struct RunContext {
     /// and the legacy `moagan run --provider mock` flow leave it
     /// as `None`.
     pub models_dev_catalog: Option<Arc<ModelsDevCatalog>>,
+    /// Self-healing param-rejection table. When `Some`,
+    /// [`Self::dispatch_to_provider`] consults it before every LLM
+    /// call to omit wire fields the upstream rejected on a previous
+    /// call, and after every 4xx to auto-detect + record any new
+    /// rejection. `None` disables both behaviours (legacy
+    /// hand-rolled paths and tests that bypass the registry wiring).
+    /// The CLI boundary (`cli::run` / `cli::discover`) populates
+    /// this field; unit tests that exercise the pre-omit behaviour
+    /// leave it as `None`.
+    pub param_rejections: Option<Arc<ParamRejectionsTable>>,
 }
 
 /// Default heartbeat interval. Renews the lease well before the
@@ -294,6 +307,7 @@ impl RunContext {
             temperature_table: None,
             capability_resolver: None,
             models_dev_catalog: None,
+            param_rejections: None,
         }
     }
 
@@ -508,6 +522,28 @@ impl RunContext {
     pub fn with_models_dev_catalog_opt(mut self, catalog: Option<Arc<ModelsDevCatalog>>) -> Self {
         if let Some(c) = catalog {
             self.models_dev_catalog = Some(c);
+        }
+        self
+    }
+
+    /// Self-healing param rejection: attach the table so
+    /// [`Self::dispatch_to_provider`] can pre-call omit and post-call
+    /// detect. Mirrors [`Self::with_max_tokens_table`] — the
+    /// consuming builder form lets the CLI boundary chain it next
+    /// to the other auto-discovered handles.
+    pub fn with_param_rejections(mut self, table: Arc<ParamRejectionsTable>) -> Self {
+        self.param_rejections = Some(table);
+        self
+    }
+
+    /// Self-healing param rejection: optional variant of
+    /// [`Self::with_param_rejections`] for callers that already hold
+    /// an `Option<Arc<...>>` (the `ProviderRegistry::param_rejections`
+    /// accessor). No-op when the table is `None` so legacy
+    /// hand-rolled paths stay bit-for-bit.
+    pub fn with_param_rejections_opt(mut self, table: Option<Arc<ParamRejectionsTable>>) -> Self {
+        if let Some(t) = table {
+            self.param_rejections = Some(t);
         }
         self
     }
@@ -1161,9 +1197,50 @@ impl RunContext {
         } else {
             gated
         };
+        // Self-healing param rejection: omit wire fields the
+        // upstream rejected on a previous call (per the
+        // persisted `param_rejections.toml`). Runs AFTER every
+        // other gate so the audit hash and the wire body stay in
+        // lock-step: a field the capability resolver already
+        // dropped (e.g. `temperature` on `kimi-k3`) does not
+        // produce a double-omit; a field the temperature table
+        // already clamped stays clamped. `None` table preserves
+        // the legacy "send everything" path.
+        let mut hash_input = hash_input;
+        if let Some(table) = self.param_rejections.as_ref() {
+            let mut omitted: Vec<&str> = Vec::new();
+            for param in PARAM_NAMES {
+                if table.should_omit(
+                    self.default_provider.as_str(),
+                    self.default_model.as_str(),
+                    param,
+                ) {
+                    crate::llm::wire::omit_param(&mut hash_input, param);
+                    omitted.push(param);
+                }
+            }
+            if !omitted.is_empty() {
+                tracing::debug!(
+                    provider = %self.default_provider,
+                    model = %self.default_model,
+                    role = %req.role.as_str(),
+                    omitted = ?omitted,
+                    "omitted known-rejected params before dispatch"
+                );
+            }
+        }
         let request_body_sha256 = (self.default_provider == "minimax")
             .then(|| crate::llm::http::request_body_sha256(&hash_input))
             .transpose()?;
+        // Silent-acceptance audit: emit a WARN per non-standard
+        // field on the serialised wire body. Some upstreams
+        // swallow unknown fields and behave inconsistently on the
+        // next call; the audit hint lets operators spot the
+        // configuration drift in the run logs. The whitelist
+        // lives in `crate::llm::param_rejections::audit_unknown_fields`.
+        if let Ok(value) = serde_json::to_value(&hash_input) {
+            audit_unknown_fields(&value);
+        }
         let call_id = uuid::Uuid::now_v7().to_string();
         let provider_started = std::time::Instant::now();
         tracing::debug!(
@@ -1173,7 +1250,67 @@ impl RunContext {
             retry_count,
             "LLM call stage"
         );
-        let result = provider.send(&hash_input).await;
+        let mut result = provider.send(&hash_input).await;
+        // Self-healing retry: when the upstream rejects a wire
+        // field with HTTP 4xx and the body carries the rejection
+        // signature, omit the offending field and call once more.
+        // Recorded into the table so subsequent runs skip the
+        // failing round-trip entirely.
+        if let Err(err) = &result
+            && let Some(status) = err.http_status()
+            && (400..500).contains(&status)
+        {
+            // `Error::Display` for `Error::Provider` is
+            // `"provider error: http {status}: {body}"` — the body
+            // is the raw JSON the upstream returned, prefixed by
+            // the transport envelope. Strip the envelope so the
+            // detector parses JSON rather than a labelled string.
+            // Naive `rsplit(": ")` would split inside the JSON
+            // (the body itself often contains `": "` substrings);
+            // anchor the strip on the `"http {status}:"` token so
+            // the search is deterministic.
+            let raw = err.to_string();
+            let prefix = format!("provider error: http {status}: ");
+            let body = raw
+                .strip_prefix(&prefix)
+                .unwrap_or(raw.strip_prefix("provider error: ").unwrap_or(&raw));
+            if let Some(detected) = detect_rejection(status, body)
+                && let Some(table) = self.param_rejections.as_ref()
+            {
+                tracing::info!(
+                    provider = %self.default_provider,
+                    model = %self.default_model,
+                    role = %req.role.as_str(),
+                    detected_param = %detected,
+                    "auto-detected param rejection; retrying without it"
+                );
+                if let Err(rec_err) = table.record(
+                    self.default_provider.as_str(),
+                    self.default_model.as_str(),
+                    &detected,
+                ) {
+                    tracing::warn!(
+                        error = %rec_err,
+                        "failed to persist param rejection; in-memory entry still kept"
+                    );
+                }
+                crate::llm::wire::omit_param(&mut hash_input, &detected);
+                // Re-run the silent-acceptance audit on the post-omit
+                // body so the operator sees the diagnostic for the
+                // body that actually reaches the upstream on the retry.
+                if let Ok(value) = serde_json::to_value(&hash_input) {
+                    audit_unknown_fields(&value);
+                }
+                tracing::debug!(
+                    call_id = %call_id,
+                    phase = req.role.as_str(),
+                    stage = "provider.send.retry",
+                    detected_param = %detected,
+                    "LLM call stage"
+                );
+                result = provider.send(&hash_input).await;
+            }
+        }
         tracing::debug!(
             call_id = %call_id,
             phase = req.role.as_str(),
