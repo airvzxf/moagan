@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `parse_provider_error_body` now tolerates the `http <status> <reason-phrase>:` envelope that `llm::http::classify_status` produces for 4xx (e.g. `"http 400 Bad Request: {...}"`), not just the strict `"http <status>:"` form. Without this, the auto-heal cascade was silently no-op'ing in production because `detect_rejection` never saw the JSON body.
   - Pattern #4B of the auto-detect (which trusts the upstream's `error.param` field) is now whitelisted against `PARAM_NAMES`: wire-required fields like `input` or `model` that the dispatcher cannot omit are ignored, falling back to the `message`-regex patterns.
   - `top_p` is no longer force-injected as `Some(0.95)` when neither the provider config nor the role catalogue sets it. The new `resolve_top_p(role, provider_top_p)` helper honours the precedence `provider TOML > role catalogue > None`. The wire builder's `skip_serializing_if = "Option::is_none"` drops the field entirely when unset. Upstreams that reject `top_p` outright (e.g. `gpt-5.6-luna`) no longer trip the first call.
+- **Wire `max_continuation_attempts(strategy)` into `continue_truncated_response`.**
+  The helper previously hardcoded `MAX_CONTINUATIONS = 2`; the cap is
+  now sourced from the per-strategy helper so a future bump (e.g.
+  `Continuation = 3`) flows through every call site. The dispatch
+  decision is now also gated on `max_continuation_attempts > 0`, so
+  strategies with `0` (Strict, Lenient, PromptPrefill) skip the
+  focused continuation path entirely — truncated responses from
+  those models fall through to the normal parse-failure retry
+  budget (5 attempts for Parse/Schema per the per-mode matrix
+  added in the previous release). The misleading
+  `Continuation` strategy doc-comment that claimed the helper
+  fired on parse failure has been corrected to reflect that
+  it only fires on truncated responses.
 
 ### Added
 

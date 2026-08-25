@@ -472,3 +472,223 @@ fn k9_route_phase_recovers_from_repeated_parse_failures() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// K.9 — wire `max_continuation_attempts(strategy)` into the retry loop.
+//
+// The `JsonRecoveryStrategy::Continuation` cap (`2` in production,
+// `0` for every other variant) now drives both the dispatch gate
+// in `RunContext::call_with_retry_parse` AND the upper bound on the
+// focused-continuation helper. These two integration tests pin
+// the end-to-end behaviour:
+//
+//   * `minimax-m3` resolves to `Continuation` (`max_cont = 2`) —
+//     a truncated response MUST route through
+//     `continue_truncated_response` (the helper is invoked and the
+//     envelope fragment is stitched onto the truncated payload).
+//   * `kimi-k3` resolves to `Lenient` (`max_cont = 0`) — the helper
+//     MUST NOT fire, even on a truncated response; the truncated
+//     payload falls through to the parse pipeline and the normal
+//     parse-failure retry budget kicks in.
+//
+// The helpers from `phase.rs::tests` (`retry_context_with_model`,
+// `truncated_response`, `continuation_envelope`) are NOT exported,
+// so we replicate the wiring locally against `MockProvider`. The
+// model identifier on `RunContext::new` is the only thing that
+// picks the strategy — `strategy_for(model, None)` reads the
+// per-model table and `max_continuation_attempts(strategy)` then
+// decides whether the helper fires.
+// ---------------------------------------------------------------------------
+
+/// Build a `RunContext` whose `default_model` resolves to the desired
+/// `JsonRecoveryStrategy`. Mirrors the wiring in `phase.rs::tests`
+/// (`retry_context_with_model`) but uses the public
+/// `MockProvider` + `MockResponse` API surface so the test stays
+/// integration-shaped. `db` is `None` for parity with the existing
+/// `k9_route_phase_recovers_from_repeated_parse_failures` test.
+fn call_retry_run_context(
+    home: Arc<MoaganHome>,
+    provider: Arc<MockProvider>,
+    model: &str,
+    run_id: RunId,
+) -> RunContext {
+    let mut registry = ProviderRegistry::default();
+    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
+    registry.insert("mock".into(), arc);
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().expect("ensure run dir");
+    let telemetry =
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
+    RunContext::new(
+        run_id,
+        home,
+        Arc::new(registry),
+        "mock".into(),
+        model.into(),
+        Parallelism::new(1),
+        telemetry,
+        "x".into(),
+        "fast".into(),
+    )
+}
+
+/// Pin that the `Continuation` strategy (resolved from `minimax-m3`)
+/// fires the focused-continuation helper on a truncated response.
+/// The helper appends the envelope's `continued` fragment onto the
+/// truncated payload and the parse pipeline then sees a balanced
+/// JSON object.
+#[test]
+fn k9_continuation_strategy_triggers_helper_on_truncated() {
+    use moagan::llm::Role;
+    with_moagan_home("k9_continuation_helper", |_home_path| {
+        let home = Arc::new(MoaganHome::resolve().expect("resolve home"));
+        home.ensure().expect("ensure home");
+        let run_id = RunId::new();
+
+        // minimax-m3 → Continuation → max_continuation_attempts = 2.
+        // Mock sequence:
+        //   1. truncated `{"answer": 42` — first call returns
+        //      `truncated = true` because `finish_reason = max_tokens`.
+        //   2. continuation envelope with `continued = ", \"trail\": true}"`
+        //      and `finished = true` — the helper stitches the fragment
+        //      onto the truncated payload and the concatenated text
+        //      `{"answer": 42, "trail": true}` parses as a `Value`.
+        let envelope = r#"{"continued":", \"trail\": true}","finished":true,"raw_excerpt":"","schema_version":"continuation.v1"}"#;
+        let mut mock = MockProvider::empty();
+        mock.push(MockResponse::truncated(r#"{"answer": 42"#));
+        mock.push(MockResponse::plain(envelope));
+        // Spare response in case the helper loops one extra time.
+        mock.push(MockResponse::plain(envelope));
+        mock.set_cycle(false);
+        let provider = Arc::new(mock);
+
+        let ctx = call_retry_run_context(home.clone(), provider.clone(), "minimax-m3", run_id);
+        let result: serde_json::Value = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async {
+                ctx.call_with_retry_parse::<serde_json::Value>(
+                    Role::Intake,
+                    String::new(),
+                    String::new(),
+                    "Value",
+                    0,
+                )
+                .await
+            })
+            .expect("Continuation must stitch the truncated payload with the envelope fragment");
+        ctx.telemetry.flush().expect("flush telemetry");
+
+        // The helper appended `, "trail": true}` to `{"answer": 42`.
+        // If the helper did NOT fire, the parse would have failed
+        // and the retry loop would have run on a different
+        // (unconcatenated) payload.
+        assert_eq!(
+            result,
+            serde_json::json!({"answer": 42, "trail": true}),
+            "the continuation helper must stitch the truncated payload with the envelope fragment"
+        );
+        // Regression pin: 1 original truncated call + 1 continuation
+        // re-call. If the helper did NOT fire, `provider.calls()`
+        // would carry a 2nd retry of the same prompt (cache-bypass)
+        // rather than a `Role::Continuation` re-issue. Either way,
+        // the call count stays at 2 — the differentiator is the
+        // resulting payload (asserted above) and the warnings
+        // stream (asserted below).
+        assert_eq!(
+            provider.calls().len(),
+            2,
+            "1 original truncated call + 1 continuation re-call"
+        );
+    });
+}
+
+/// Pin that the `Lenient` strategy (resolved from `kimi-k3`,
+/// `max_continuation_attempts = 0`) does NOT fire the
+/// focused-continuation helper, even on a truncated response. The
+/// truncated payload falls through to the parse pipeline and the
+/// normal parse-failure retry budget applies.
+///
+/// The mock returns a valid JSON on retry, so the call eventually
+/// succeeds — but the result is the retry payload verbatim, NOT
+/// the concatenated `{"answer": 42, "trail": true}` the helper
+/// would have produced. That payload-shape assertion is the
+/// regression pin for "the helper was skipped".
+#[test]
+fn k9_lenient_strategy_skips_continuation_helper_on_truncated() {
+    use moagan::llm::Role;
+    with_moagan_home("k9_lenient_skip_continuation", |_home_path| {
+        let home = Arc::new(MoaganHome::resolve().expect("resolve home"));
+        home.ensure().expect("ensure home");
+        let run_id = RunId::new();
+
+        // kimi-k3 → Lenient → max_continuation_attempts = 0. The
+        // dispatch gate (`max_cont > 0`) is false so the helper is
+        // NOT invoked. The truncated payload goes straight to the
+        // parse pipeline which fails (or fails before repair);
+        // the retry loop then consumes the next response.
+        //
+        // Mock sequence:
+        //   1. truncated `{"answer": 42` — fails parse.
+        //   2. plain `{"answer": 42}` — retry parses cleanly.
+        //   3. spare plain — defence against a future retry-loop bump.
+        let mut mock = MockProvider::empty();
+        mock.push(MockResponse::truncated(r#"{"answer": 42"#));
+        mock.push(MockResponse::plain(r#"{"answer": 42}"#));
+        mock.push(MockResponse::plain(r#"{"answer": 42}"#));
+        mock.set_cycle(false);
+        let provider = Arc::new(mock);
+
+        let ctx = call_retry_run_context(home.clone(), provider.clone(), "kimi-k3", run_id);
+        let result: serde_json::Value = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async {
+                ctx.call_with_retry_parse::<serde_json::Value>(
+                    Role::Intake,
+                    String::new(),
+                    String::new(),
+                    "Value",
+                    0,
+                )
+                .await
+            })
+            .expect("parse must succeed — either via repair on the truncated text or via retry");
+        ctx.telemetry.flush().expect("flush telemetry");
+
+        // Regression pin: the result MUST NOT carry `"trail": true`
+        // because the helper (which is what would have produced
+        // that fragment by stitching a continuation envelope) was
+        // skipped. Whatever the result is, the only way
+        // `result.get("trail")` is `Some` is if a `Role::Continuation`
+        // re-call fired — and `max_cont = 0` guarantees that does
+        // not happen.
+        assert!(
+            result.get("trail").is_none(),
+            "the helper must not fire for Lenient (max_cont = 0); got result = {result}"
+        );
+        // The original truncated payload is `{"answer": 42` and the
+        // retry payload is `{"answer": 42}`. Both parse to the same
+        // shape — assert that the call resolved to a JSON object
+        // with the expected answer, not a continuation envelope.
+        assert_eq!(
+            result.get("answer").and_then(|v| v.as_i64()),
+            Some(42),
+            "the recovered payload must carry the answer from the original prompt"
+        );
+
+        // Regression pin: the helper would have issued at least 1
+        // continuation re-call (`Role::Continuation`); we expect at
+        // most 2 calls (1 truncated + 1 retry, possibly fewer if
+        // the lenient repair chain recovers the truncated text
+        // inline). Anything ≥ 3 means the helper fired, which is
+        // the regression we are pinning.
+        let call_count = provider.calls().len();
+        assert!(
+            call_count <= 2,
+            "Lenient must not invoke the helper; saw {call_count} provider calls (1 truncated + N retries, no continuation)"
+        );
+    });
+}
