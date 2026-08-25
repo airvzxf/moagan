@@ -5,6 +5,22 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Self-healing param rejection: close multi-rejection cascade + make `top_p` opt-in**
+  - `detect_rejection` now reports all parameter names rejected in a single upstream response, not just the first; the dispatch loop iterates up to `PARAM_NAMES.len()` (3) times, registering each rejection and omitting the offending field before retrying. Closes the cascade where upstreams that reject `temperature`, `max_tokens`, and `top_p` together (e.g. `opencode:gpt-5.6-luna`) used to leak the second rejection as a fatal 4xx.
+  - `parse_provider_error_body` now tolerates the `http <status> <reason-phrase>:` envelope that `llm::http::classify_status` produces for 4xx (e.g. `"http 400 Bad Request: {...}"`), not just the strict `"http <status>:"` form. Without this, the auto-heal cascade was silently no-op'ing in production because `detect_rejection` never saw the JSON body.
+  - Pattern #4B of the auto-detect (which trusts the upstream's `error.param` field) is now whitelisted against `PARAM_NAMES`: wire-required fields like `input` or `model` that the dispatcher cannot omit are ignored, falling back to the `message`-regex patterns.
+  - `top_p` is no longer force-injected as `Some(0.95)` when neither the provider config nor the role catalogue sets it. The new `resolve_top_p(role, provider_top_p)` helper honours the precedence `provider TOML > role catalogue > None`. The wire builder's `skip_serializing_if = "Option::is_none"` drops the field entirely when unset. Upstreams that reject `top_p` outright (e.g. `gpt-5.6-luna`) no longer trip the first call.
+
+### Added
+
+- `pub fn top_p_for_role(role: Role) -> Option<f32>` in `src/llm/prompts.rs` — mirrors `temperature_for_role` for nucleus sampling.
+- `pub fn resolve_top_p(role: Role, provider_top_p: Option<f32>) -> Option<f32>` in `src/phases/phase.rs` — central precedence helper.
+- `tests/integration_param_rejection_cascade.rs` — 3 integration tests covering the cascade end-to-end: three-param recovery, pre-flight omit of known rejections without round-trip, and `top_p` absence from the wire when neither provider nor role set it.
+
 ## [0.10.0] - 2026-08-24
 
 ### Breaking
