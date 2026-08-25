@@ -3332,18 +3332,18 @@ pub fn apply_budget_pressure(state: &mut RunState, deficit: u64) -> BudgetAction
 
 #### D.21.6. Per-mode retry budget matrix
 
-[partial — module shipped, wire-up pending] Módulo en src/llm/retry_budget.rs (PR #29, sub-fase K). Wire-up al retry loop en phases/phase.rs::call_with_retry_parse se aplaza a PR #52 (sub-fase Q2). Anotación propuesta en docs/q1-v0.3-status-sync.
+[updated — uniform retries across modes, except Truncated] Módulo en `src/llm/retry_budget.rs` (PR #29 sub-fase K; matriz revisada en rama `fix/retry-budget-no-fast-no-retry`). Wire-up al retry loop en `phases/phase.rs::call_with_retry_parse` está cerrado vía PR #54 (`fa890ab refactor(phase): consume RetryBudget in call_with_retry_parse`). Política previa ("Fast/Explore/Batch = 1 attempt, sin retries, sin importar la razón") se eliminó: la no-determinismo upstream (p.ej. `MiniMax-M3` devolviendo `{"problem":}` para la fase `Route`) se propagaba como `Error::SchemaViolation` fatal en lugar de fallo de parse recuperable.
 
 | Mode | transport | rate-limit | parse | schema | timeout | truncated |
 |---|---:|---:|---:|---:|---:|---:|
-| `fast` | 1 | 1 | 1 (json_repair) | 1 (json_repair) | 1 | 1 |
-| `standard` | 2 | 2 | 1 (json_repair) | 1 (json_repair) | 1 | 1 |
-| `deep` | 2 | 3 | 2 (json_repair) | 2 (json_repair) | 1 | 1 |
-| `explore` | 1 | 1 | 1 (json_repair) | 1 (json_repair) | 1 | 1 |
-| `batch` | 1 | 1 | 1 (json_repair) | 1 (json_repair) | 1 | 1 |
-| `discovery` | 1 | 1 | 0 | 0 | 1 | 0 |
+| `fast` | 3 | 3 | 5 (json_repair) | 5 (json_repair) | 3 | 1 |
+| `standard` | 3 | 4 | 5 (json_repair) | 5 (json_repair) | 3 | 2 |
+| `deep` | 4 | 6 | 5 (json_repair) | 5 (json_repair) | 4 | 2 |
+| `explore` | 3 | 3 | 5 (json_repair) | 5 (json_repair) | 3 | 1 |
+| `batch` | 3 | 3 | 5 (json_repair) | 5 (json_repair) | 3 | 1 |
+| `discovery` | 3 | 3 | 5 (json_repair) | 5 (json_repair) | 3 | 1 |
 
-(Inspirado en T16-06 §2.5.)
+(Inspirado en T16-06 §2.5. La fila `discovery` se conserva como referencia documental; no existe variante `Mode::Discovery` en `cli::Mode` por lo que el codepath real de `budget_for` solo cubre las cinco variantes activas.)
 
 > **Implementación v0.4 — sub-fase K.9 (commit `861c660`,
 > agrupado con K.2).** `src/llm/retry_budget.rs` ships
@@ -3351,13 +3351,15 @@ pub fn apply_budget_pressure(state: &mut RunState, deficit: u64) -> BudgetAction
 > Timeout, Truncated }`, `pub struct RetryBudget { max_attempts,
 > use_json_repair }`, y la función pura `pub fn budget_for(mode,
 > reason) -> RetryBudget` que reproduce la matriz del spec
-> verbatim. `phase.rs::call_with_retry_parse` mantiene su
-> `n_attempts = 5` hard-coded por ahora; el siguiente paso de
-> integración (sub-fase L o un sub-fase K.10) substituirá la
-> constante por `budget_for(current_mode, current_reason)`. 10
-> unit tests pinea los valores del spec (Deep+Parse=2 con
-> json_repair, Deep+RateLimit=3, Fast=1 siempre, Standard+Parse=1
-> con json_repair, etc.).
+> verbatim. `phase.rs::call_with_retry_parse` consume el módulo
+> (PR #54): el cap real del loop es
+> `min(budget.max_attempts, max_retries + 1)`, donde
+> `max_retries` del caller actúa como techo duro para callers
+> que quieran 1 attempt (tests, mocks). 16 unit tests pinean
+> los valores del spec: Parse/Schema = 5 con json_repair en
+> todos los modos, Deep+RateLimit = 6, Standard+RateLimit = 4,
+> Transport/Timeout = 3-4 según modo, Truncated = 1 en
+> Fast/Explore/Batch y 2 en Standard/Deep.
 
 #### D.21.7. Quorum de judges por modo (D40)
 

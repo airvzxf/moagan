@@ -618,7 +618,19 @@ mod tests {
     /// warning that the helper emits.
     #[tokio::test]
     async fn find_contradictions_against_malformed_json_falls_back_gracefully() {
-        let mock = MockProvider::new(vec!["this is not json at all { ]".to_owned()]);
+        // Phase 1 of the retry-budget matrix bumped Parse/Schema
+        // attempts to min(budget_for(Standard, Parse).max_attempts,
+        // caller's max_retries + 1) = 4 (budget = 5, ceiling = 3).
+        // The loop pops one mock entry per attempt so we keep the
+        // queue deep enough that exhausting it does not panic with
+        // `MockProvider was drained`; the same malformed body is
+        // returned on every attempt.
+        let mock = MockProvider::new(vec![
+            "this is not json at all { ]".to_owned(),
+            "this is not json at all { ]".to_owned(),
+            "this is not json at all { ]".to_owned(),
+            "this is not json at all { ]".to_owned(),
+        ]);
         let (_tmp, ctx) = build_ctx(mock.clone());
         let focal = Sketch {
             id: "sk_001".into(),

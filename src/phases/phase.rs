@@ -2085,21 +2085,29 @@ impl RunContext {
     /// loop's actual cap is `min(budget.max_attempts, max_retries + 1)`.
     /// In practice this means:
     ///
-    /// - `Fast`, `Explore`, `Batch`: exactly 1 attempt regardless
-    ///   of `max_retries` (the budget wins).
-    /// - `Standard` transport / rate-limit / timeout / truncated:
-    ///   2 attempts (was 6 with the legacy hard-coded cap).
-    /// - `Standard` parse / schema: 1 attempt with the JSON repair
-    ///   pass; the repair runs inline in `parse_model_json` so the
-    ///   budget's `use_json_repair` flag is reported on the
-    ///   warning payload but not re-applied.
-    /// - `Deep` rate-limit: 3 attempts.
-    /// - `Deep` parse / schema: 2 attempts with repair.
+    /// - `Fast`, `Explore`, `Batch` parse / schema: 5 attempts with
+    ///   the JSON repair pass (was 1; pre-fix budget propagated
+    ///   upstream non-determinism as fatal `SchemaViolation`).
+    /// - `Fast`, `Explore`, `Batch` transport / rate-limit / timeout:
+    ///   3 attempts (was 1).
+    /// - `Fast`, `Explore`, `Batch` truncated: 1 attempt (the model
+    ///   already cut output; a re-issue would truncate again).
+    /// - `Standard` parse / schema: 5 attempts with repair.
+    /// - `Standard` rate-limit: 4 attempts (one extra over the
+    ///   transient baseline for quota headroom).
+    /// - `Standard` transport / timeout: 3 attempts.
+    /// - `Standard` truncated: 2 attempts.
+    /// - `Deep` parse / schema: 5 attempts with repair.
+    /// - `Deep` rate-limit: 6 attempts (most generous row; deep
+    ///   restart is expensive).
+    /// - `Deep` transport / timeout: 4 attempts.
+    /// - `Deep` truncated: 2 attempts.
     ///
-    /// Callers that explicitly want more attempts (e.g. tests that
-    /// exercise the retry loop with a 6-deep mock queue) can pass
-    /// a larger `max_retries`; the ceiling is a safety net, not a
-    /// guarantee.
+    /// Callers that explicitly want a lower cap (single-shot tests,
+    /// mocks that need deterministic failure on attempt N) can pass
+    /// a smaller `max_retries`; the ceiling is a safety net, not a
+    /// guarantee — the budget only widens the loop's window, it
+    /// never narrows the caller's request.
     ///
     /// Every retry, recovery, and parse failure is recorded as a
     /// structured warning (`model.retry_parse`, `model.retry_provider`,
@@ -3016,7 +3024,7 @@ mod tests {
                 String::new(),
                 String::new(),
                 "Intake: {problem, objectives[]}",
-                5,
+                0,
             )
             .await
             .unwrap();
@@ -3040,7 +3048,7 @@ mod tests {
                 String::new(),
                 String::new(),
                 "Intake: {problem, objectives[]}",
-                5,
+                0,
             )
             .await;
         assert!(matches!(result, Err(Error::SchemaViolation(_))));
@@ -3060,7 +3068,7 @@ mod tests {
                 String::new(),
                 String::new(),
                 "Intake: {problem, objectives[]}",
-                5,
+                0,
             )
             .await;
         assert!(result.is_err());
@@ -3098,7 +3106,7 @@ mod tests {
                 String::new(),
                 String::new(),
                 "Intake: {problem, objectives[]}",
-                5,
+                0,
             )
             .await
             .unwrap();
@@ -3129,7 +3137,7 @@ mod tests {
                 String::new(),
                 String::new(),
                 "Intake: {problem, objectives[]}",
-                5,
+                0,
             )
             .await;
         assert!(
@@ -3213,7 +3221,7 @@ mod tests {
                 String::new(),
                 String::new(),
                 "Value",
-                5,
+                0,
             )
             .await;
         assert!(
@@ -3278,7 +3286,7 @@ mod tests {
                 String::new(),
                 String::new(),
                 "Value",
-                5,
+                0,
             )
             .await;
         assert!(

@@ -266,14 +266,19 @@ v0.7-final-report.md §7)"* — **stale**, hay que corregirlo (Tier A en
 docstring propio | OPEN"*.
 
 **Realidad verificada** (`verify-spec-gaps` §D): la función se define
-en `src/phases/phase.rs:1637` y lleva un bloque `///` de **32 líneas
-completas en `src/phases/phase.rs:1605-1636`** (las "últimas 12 líneas"
-del docstring son `:1625-1636`, inmediatamente encima de la firma), que
-documenta los presupuestos de reintento (`Deep` rate-limit: 3
-intentos; `Deep` parse/schema: 2 con reparación), la semántica de
-`max_retries` como techo de seguridad y no como garantía, y el hecho de
-que cada reintento se registra como warning estructurado
-(`model.retry_parse`).
+en `src/phases/phase.rs:2108` y lleva un bloque `///` de **32 líneas
+completas en `src/phases/phase.rs:2076-2107`** (las "últimas 32 líneas"
+del docstring son `:2076-2107`, inmediatamente encima de la firma), que
+documenta los presupuestos de reintento (`Deep` rate-limit: 6
+intentos; `Deep` parse/schema: 5 con reparación; Fast/Explore/Batch
+parse/schema: 5 con reparación; Standard/Deep transport/timeout: 3-4;
+Truncated: 1-2), la semántica de `max_retries` como techo de
+seguridad y no como garantía, y el hecho de que cada reintento se
+registra como warning estructurado (`model.retry_parse`). [Nota
+posterior: la matriz detallada al cierre del docstring se revisó
+en la rama `fix/retry-budget-no-fast-no-retry` para uniformizar
+retries en todos los modos — antes de ese PR los valores citados
+eran `Deep` rate-limit: 3 y `Deep` parse/schema: 2 con reparación.]
 
 **Estado correcto**: **CLOSED — documentado**. Se retira de la lista de
 items abiertos y del Tier S.

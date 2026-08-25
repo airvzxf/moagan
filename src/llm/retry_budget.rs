@@ -50,57 +50,116 @@ pub struct RetryBudget {
 }
 
 /// Look up the retry budget for `(mode, reason)`. The matrix
-/// matches proposal-03 §D.21.6 verbatim — keep it in sync when
+/// matches proposal-03 §D.21.6 — keep both in sync when
 /// tweaking either input.
 ///
 /// Behavioural rules:
 ///
-/// - `Fast`, `Explore`, `Batch`: no retries regardless of reason.
-///   These modes are designed to be CI-friendly and predictable,
-///   so a 5xx / 429 surfaces immediately.
-/// - `Standard`: one extra attempt for transport / rate-limit /
-///   timeout / truncated failures; parse / schema failures also
-///   get one attempt but with the local JSON repair pass
-///   enabled.
-/// - `Deep`: same as `Standard` for transport / timeout /
-///   truncated; parse / schema failures get two attempts; rate
-///   limits get three (the heavy path tolerates a transient
-///   throttle and is the most expensive to restart).
+/// - **All modes now allow retries**, with the budget scaled to
+///   the cost of running the mode and the actionability of the
+///   failure. The only entry that stays single-shot is
+///   `Truncated`, because the model already stopped producing
+///   output and a re-issue of the same call would be
+///   deterministic.
+/// - `Parse` / `Schema` failures get the highest cap (5
+///   attempts = 4 retries) across every mode, with the local
+///   JSON repair pass enabled: model output non-determinism is
+///   the dominant failure class in practice and the repair pass
+///   can salvage some malformed bodies without a re-issue.
+/// - `Transport` / `Timeout` get 3 attempts in `Fast`,
+///   `Explore`, `Batch`, and `Standard` (4 in `Deep` because
+///   the heavy path is expensive to restart).
+/// - `RateLimit` follows the same envelope as transport in the
+///   short modes, bumps to 4 in `Standard`, and is the most
+///   generous row in `Deep` (6 attempts = 5 retries).
+/// - `Truncated` is 1 attempt in `Fast`, `Explore`, `Batch` and
+///   2 attempts in `Standard` / `Deep` (one extra shot in case
+///   the truncation was caused by a transient quota blip).
 pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
     use Mode::*;
     use RetryReason::*;
+    // Parse / Schema get the highest cap in every mode; the
+    // local JSON repair pass can salvage malformed output
+    // without a re-issue.
+    const REPAIR_ATTEMPTS: u32 = 5;
+    // Short modes: 3 attempts for transients, 1 for truncated.
+    const SHORT_TRANSIENT: u32 = 3;
+    const SHORT_TRUNCATED: u32 = 1;
     match (mode, reason) {
-        (Fast, _) => RetryBudget {
-            max_attempts: 1,
-            use_json_repair: matches!(reason, Parse | Schema),
-        },
-        (Standard, Parse | Schema) => RetryBudget {
-            max_attempts: 1,
+        // --- Fast ----------------------------------------------------
+        (Fast, Parse | Schema) => RetryBudget {
+            max_attempts: REPAIR_ATTEMPTS,
             use_json_repair: true,
         },
-        (Standard, _) => RetryBudget {
+        (Fast, RateLimit | Transport | Timeout) => RetryBudget {
+            max_attempts: SHORT_TRANSIENT,
+            use_json_repair: false,
+        },
+        (Fast, Truncated) => RetryBudget {
+            max_attempts: SHORT_TRUNCATED,
+            use_json_repair: false,
+        },
+
+        // --- Standard ------------------------------------------------
+        (Standard, Parse | Schema) => RetryBudget {
+            max_attempts: REPAIR_ATTEMPTS,
+            use_json_repair: true,
+        },
+        (Standard, RateLimit) => RetryBudget {
+            max_attempts: 4,
+            use_json_repair: false,
+        },
+        (Standard, Transport | Timeout) => RetryBudget {
+            max_attempts: SHORT_TRANSIENT,
+            use_json_repair: false,
+        },
+        (Standard, Truncated) => RetryBudget {
             max_attempts: 2,
             use_json_repair: false,
         },
+
+        // --- Deep (most generous) ------------------------------------
         (Deep, Parse | Schema) => RetryBudget {
-            max_attempts: 2,
+            max_attempts: REPAIR_ATTEMPTS,
             use_json_repair: true,
         },
         (Deep, RateLimit) => RetryBudget {
-            max_attempts: 3,
+            max_attempts: 6,
             use_json_repair: false,
         },
-        (Deep, _) => RetryBudget {
+        (Deep, Transport | Timeout) => RetryBudget {
+            max_attempts: 4,
+            use_json_repair: false,
+        },
+        (Deep, Truncated) => RetryBudget {
             max_attempts: 2,
             use_json_repair: false,
         },
-        (Explore, _) => RetryBudget {
-            max_attempts: 1,
-            use_json_repair: matches!(reason, Parse | Schema),
+
+        // --- Explore / Batch (same envelope as Fast) -----------------
+        (Explore, Parse | Schema) => RetryBudget {
+            max_attempts: REPAIR_ATTEMPTS,
+            use_json_repair: true,
         },
-        (Batch, _) => RetryBudget {
-            max_attempts: 1,
-            use_json_repair: matches!(reason, Parse | Schema),
+        (Explore, RateLimit | Transport | Timeout) => RetryBudget {
+            max_attempts: SHORT_TRANSIENT,
+            use_json_repair: false,
+        },
+        (Explore, Truncated) => RetryBudget {
+            max_attempts: SHORT_TRUNCATED,
+            use_json_repair: false,
+        },
+        (Batch, Parse | Schema) => RetryBudget {
+            max_attempts: REPAIR_ATTEMPTS,
+            use_json_repair: true,
+        },
+        (Batch, RateLimit | Transport | Timeout) => RetryBudget {
+            max_attempts: SHORT_TRANSIENT,
+            use_json_repair: false,
+        },
+        (Batch, Truncated) => RetryBudget {
+            max_attempts: SHORT_TRUNCATED,
+            use_json_repair: false,
         },
     }
 }
@@ -161,9 +220,14 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
 mod tests {
     use super::*;
 
-    /// `Fast` does not retry. Period.
+    /// `Fast` now allows retries: parse / schema failures get the
+    /// full repair budget (5 attempts with `use_json_repair =
+    /// true`), transient failures (transport / rate-limit /
+    /// timeout) get two retries, and `Truncated` stays
+    /// single-shot because the model already stopped producing
+    /// output.
     #[test]
-    fn budget_for_fast_any_reason_is_one_attempt() {
+    fn budget_for_fast_at_least_five_attempts_for_parse_schema() {
         for reason in [
             RetryReason::Transport,
             RetryReason::RateLimit,
@@ -173,100 +237,190 @@ mod tests {
             RetryReason::Truncated,
         ] {
             let b = budget_for(Mode::Fast, reason);
-            assert_eq!(b.max_attempts, 1, "reason={reason:?}");
+            match reason {
+                RetryReason::Parse | RetryReason::Schema => {
+                    assert_eq!(b.max_attempts, 5, "reason={reason:?}");
+                    assert!(b.use_json_repair, "reason={reason:?}");
+                }
+                RetryReason::Truncated => {
+                    assert_eq!(b.max_attempts, 1, "reason={reason:?}");
+                    assert!(!b.use_json_repair, "reason={reason:?}");
+                }
+                RetryReason::Transport | RetryReason::RateLimit | RetryReason::Timeout => {
+                    assert_eq!(b.max_attempts, 3, "reason={reason:?}");
+                    assert!(!b.use_json_repair, "reason={reason:?}");
+                }
+            }
         }
     }
 
-    /// `Standard` allows one retry for transport (the common
-    /// transient 5xx).
+    /// `Fast` parse failures get the full repair budget:
+    /// four retries (= five attempts) with the local repair
+    /// pass enabled.
     #[test]
-    fn budget_for_standard_transport_is_two_attempts() {
-        let b = budget_for(Mode::Standard, RetryReason::Transport);
-        assert_eq!(b.max_attempts, 2);
-        assert!(!b.use_json_repair);
-    }
-
-    /// `Standard` parse failures use the local repair pass; the
-    /// retry budget stays at 1 attempt because repair happens
-    /// inline before the next LLM call is considered.
-    #[test]
-    fn budget_for_standard_parse_uses_json_repair() {
-        let b = budget_for(Mode::Standard, RetryReason::Parse);
-        assert_eq!(b.max_attempts, 1);
+    fn budget_for_fast_parse_uses_json_repair_with_four_retries() {
+        let b = budget_for(Mode::Fast, RetryReason::Parse);
+        assert_eq!(b.max_attempts, 5);
         assert!(b.use_json_repair);
     }
 
-    /// `Deep` rate-limit failures are the only entry in the
-    /// matrix that allows three attempts — the heavy path can
-    /// absorb the latency hit.
+    /// `Fast` truncated failures stay single-shot: the model
+    /// already stopped producing output, so a re-issue would
+    /// just truncate again.
     #[test]
-    fn budget_for_deep_rate_limit_is_three_attempts() {
-        let b = budget_for(Mode::Deep, RetryReason::RateLimit);
+    fn budget_for_fast_truncated_is_single_attempt() {
+        let b = budget_for(Mode::Fast, RetryReason::Truncated);
+        assert_eq!(b.max_attempts, 1);
+        assert!(!b.use_json_repair);
+    }
+
+    /// `Standard` allows two retries for transport (the common
+    /// transient 5xx).
+    #[test]
+    fn budget_for_standard_transport_is_three_attempts() {
+        let b = budget_for(Mode::Standard, RetryReason::Transport);
         assert_eq!(b.max_attempts, 3);
         assert!(!b.use_json_repair);
     }
 
-    /// `Deep` parse failures get two attempts with repair on.
+    /// `Standard` parse failures get the full repair budget:
+    /// four retries with the local repair pass enabled.
     #[test]
-    fn budget_for_deep_parse_uses_json_repair() {
-        let b = budget_for(Mode::Deep, RetryReason::Parse);
-        assert_eq!(b.max_attempts, 2);
+    fn budget_for_standard_parse_uses_json_repair() {
+        let b = budget_for(Mode::Standard, RetryReason::Parse);
+        assert_eq!(b.max_attempts, 5);
         assert!(b.use_json_repair);
     }
 
-    /// `Explore` is single-shot across the board (mirrors `Fast`).
+    /// `Standard` rate-limit failures get one extra retry over
+    /// the transient baseline (four attempts instead of three)
+    /// because quota windows typically allow more headroom
+    /// than a one-shot 5xx.
     #[test]
-    fn budget_for_explore_any_reason_is_one_attempt() {
+    fn budget_for_standard_rate_limit_four_attempts() {
+        let b = budget_for(Mode::Standard, RetryReason::RateLimit);
+        assert_eq!(b.max_attempts, 4);
+        assert!(!b.use_json_repair);
+    }
+
+    /// `Deep` rate-limit failures get the most generous slot in
+    /// the matrix: six attempts because the heavy path is
+    /// expensive to restart and a transient throttle should
+    /// not invalidate the run.
+    #[test]
+    fn budget_for_deep_rate_limit_is_six_attempts() {
+        let b = budget_for(Mode::Deep, RetryReason::RateLimit);
+        assert_eq!(b.max_attempts, 6);
+        assert!(!b.use_json_repair);
+    }
+
+    /// Alias pin for the Deep rate-limit row, expressed in
+    /// retries instead of attempts (six attempts = five
+    /// retries). Keeps the public matrix anchor from drifting
+    /// if a future refactor renames the other pin.
+    #[test]
+    fn budget_for_deep_rate_limit_remains_five_retries() {
+        let b = budget_for(Mode::Deep, RetryReason::RateLimit);
+        assert_eq!(b.max_attempts, 6);
+        assert!(!b.use_json_repair);
+    }
+
+    /// `Deep` parse failures get the full repair budget:
+    /// five attempts with `use_json_repair = true`.
+    #[test]
+    fn budget_for_deep_parse_uses_json_repair() {
+        let b = budget_for(Mode::Deep, RetryReason::Parse);
+        assert_eq!(b.max_attempts, 5);
+        assert!(b.use_json_repair);
+    }
+
+    /// `Explore` mirrors the `Fast` envelope: five attempts with
+    /// repair for parse / schema, three attempts for
+    /// transients, one for `Truncated`.
+    #[test]
+    fn budget_for_explore_at_least_five_attempts_for_parse_schema() {
         for reason in [
             RetryReason::Transport,
             RetryReason::RateLimit,
             RetryReason::Parse,
+            RetryReason::Schema,
             RetryReason::Timeout,
+            RetryReason::Truncated,
         ] {
             let b = budget_for(Mode::Explore, reason);
-            assert_eq!(b.max_attempts, 1, "reason={reason:?}");
+            match reason {
+                RetryReason::Parse | RetryReason::Schema => {
+                    assert_eq!(b.max_attempts, 5, "reason={reason:?}");
+                    assert!(b.use_json_repair, "reason={reason:?}");
+                }
+                RetryReason::Truncated => {
+                    assert_eq!(b.max_attempts, 1, "reason={reason:?}");
+                    assert!(!b.use_json_repair, "reason={reason:?}");
+                }
+                RetryReason::Transport | RetryReason::RateLimit | RetryReason::Timeout => {
+                    assert_eq!(b.max_attempts, 3, "reason={reason:?}");
+                    assert!(!b.use_json_repair, "reason={reason:?}");
+                }
+            }
         }
     }
 
-    /// `Batch` is single-shot across the board (CI-friendly).
+    /// `Batch` mirrors the `Fast` envelope: five attempts with
+    /// repair for parse / schema, three attempts for
+    /// transients, one for `Truncated`.
     #[test]
-    fn budget_for_batch_any_reason_is_one_attempt() {
+    fn budget_for_batch_at_least_five_attempts_for_parse_schema() {
         for reason in [
             RetryReason::Transport,
             RetryReason::RateLimit,
+            RetryReason::Parse,
             RetryReason::Schema,
+            RetryReason::Timeout,
             RetryReason::Truncated,
         ] {
             let b = budget_for(Mode::Batch, reason);
-            assert_eq!(b.max_attempts, 1, "reason={reason:?}");
+            match reason {
+                RetryReason::Parse | RetryReason::Schema => {
+                    assert_eq!(b.max_attempts, 5, "reason={reason:?}");
+                    assert!(b.use_json_repair, "reason={reason:?}");
+                }
+                RetryReason::Truncated => {
+                    assert_eq!(b.max_attempts, 1, "reason={reason:?}");
+                    assert!(!b.use_json_repair, "reason={reason:?}");
+                }
+                RetryReason::Transport | RetryReason::RateLimit | RetryReason::Timeout => {
+                    assert_eq!(b.max_attempts, 3, "reason={reason:?}");
+                    assert!(!b.use_json_repair, "reason={reason:?}");
+                }
+            }
         }
     }
 
-    /// `Deep` transport failures retry but do NOT use the JSON
-    /// repair pass (the parse layer is irrelevant here).
+    /// `Deep` transport failures retry three times (no repair
+    /// — the parse layer is irrelevant here).
     #[test]
-    fn budget_for_deep_transport_is_two_attempts_no_repair() {
+    fn budget_for_deep_transport_is_four_attempts_no_repair() {
         let b = budget_for(Mode::Deep, RetryReason::Transport);
-        assert_eq!(b.max_attempts, 2);
+        assert_eq!(b.max_attempts, 4);
         assert!(!b.use_json_repair);
     }
 
     /// `Deep` schema failures are equivalent to parse failures
-    /// from the retry-budget perspective: two attempts with
+    /// from the retry-budget perspective: five attempts with
     /// repair.
     #[test]
     fn budget_for_deep_schema_uses_json_repair() {
         let b = budget_for(Mode::Deep, RetryReason::Schema);
-        assert_eq!(b.max_attempts, 2);
+        assert_eq!(b.max_attempts, 5);
         assert!(b.use_json_repair);
     }
 
-    /// `Standard` timeouts allow one retry (the deadline may
+    /// `Standard` timeouts allow two retries (the deadline may
     /// have been hit because of an upstream blip).
     #[test]
-    fn budget_for_standard_timeout_is_two_attempts_no_repair() {
+    fn budget_for_standard_timeout_is_three_attempts_no_repair() {
         let b = budget_for(Mode::Standard, RetryReason::Timeout);
-        assert_eq!(b.max_attempts, 2);
+        assert_eq!(b.max_attempts, 3);
         assert!(!b.use_json_repair);
     }
 
@@ -402,9 +556,11 @@ mod tests {
     }
 
     /// Sanity: composing `reason_from_error` with `budget_for`
-    /// yields the per-mode cap the spec wants. Standard +
-    /// transport = 2 attempts, the legacy behaviour for the
-    /// common transient 5xx case.
+    /// yields the per-mode cap the spec wants. The expected
+    /// values mirror the new matrix (D.21.6 update): Standard
+    /// transients get three attempts, Deep rate-limit gets six
+    /// attempts, Deep schema failures get five with repair,
+    /// and even Fast transients are no longer single-shot.
     #[test]
     fn reason_from_error_then_budget_for_round_trips_through_matrix() {
         let cases = [
@@ -414,7 +570,7 @@ mod tests {
                     http_status: None,
                 },
                 Mode::Standard,
-                2,
+                3,
             ),
             (
                 Error::Provider {
@@ -422,7 +578,7 @@ mod tests {
                     http_status: None,
                 },
                 Mode::Standard,
-                2,
+                3,
             ),
             (
                 Error::PlanExhausted {
@@ -430,16 +586,16 @@ mod tests {
                     http_status: None,
                 },
                 Mode::Deep,
-                3,
+                6,
             ),
-            (Error::SchemaViolation("x".into()), Mode::Deep, 2),
+            (Error::SchemaViolation("x".into()), Mode::Deep, 5),
             (
                 Error::Provider {
                     message: "x".into(),
                     http_status: None,
                 },
                 Mode::Fast,
-                1,
+                3,
             ),
         ];
         for (err, mode, expected) in cases {
