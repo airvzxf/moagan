@@ -372,8 +372,15 @@ impl Provider for MinimaxProvider {
         //   2. ProviderConfig::max_tokens — operator override.
         //   3. MaxTokensTable::resolve_cached — auto-probed
         //      per-(provider, model) value, primary source of truth.
+        //
+        // `req.max_tokens = None` (set by the auto-healing
+        // `param_rejections` path) is preserved through the chain:
+        // the wire body omits the field so the upstream accepts the
+        // request without the cap.
         let cap = operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP);
-        req.max_tokens = req.max_tokens.min(cap);
+        if let Some(n) = req.max_tokens {
+            req.max_tokens = Some(n.min(cap));
+        }
         self.send_http(req).await
     }
 
@@ -385,6 +392,10 @@ impl Provider for MinimaxProvider {
         // records the sha256 of `max_tokens = 524_288`, and the
         // proxy verify step would flag every call as a body
         // mismatch.
+        //
+        // `None` on `req.max_tokens` is treated as `u32::MAX` so the
+        // audit hash stays deterministic when the auto-heal path
+        // drops the field from the wire body.
         let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
         let table_cap = self
             .max_tokens_table
@@ -392,6 +403,7 @@ impl Provider for MinimaxProvider {
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
         req.max_tokens
+            .unwrap_or(u32::MAX)
             .min(operator_cap)
             .min(table_cap)
             .min(MINIMAX_MAX_TOKENS_CAP)
@@ -537,7 +549,7 @@ mod tests {
             role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "test".into(),
-            max_tokens: 16,
+            max_tokens: Some(16),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -730,7 +742,7 @@ mod tests {
             role: crate::llm::role::Role::Intake,
             system: "you are minimax".into(),
             user: "hello upstream".into(),
-            max_tokens: 32,
+            max_tokens: Some(32),
             temperature: Some(0.4),
             top_p: Some(0.9),
             response_schema: None,
@@ -786,7 +798,7 @@ mod tests {
     /// Per-provider `max_tokens` cap from `ProviderConfig::max_tokens`
     /// must clamp the value sent on the wire, mirroring the
     /// `OpenAiCompatProvider` behaviour. With `max_tokens: Some(8192)`
-    /// and a `Request { max_tokens: 1_000_000, .. }`, the JSON body
+    /// and a `Request { max_tokens: Some(1_000_000), .. }`, the JSON body
     /// the mock server captures must carry `"max_tokens":8192`.
     #[tokio::test]
     async fn send_clamps_max_tokens_to_provider_cap() {
@@ -850,7 +862,7 @@ mod tests {
             role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "hello".into(),
-            max_tokens: 1_000_000,
+            max_tokens: Some(1_000_000),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -939,7 +951,7 @@ mod tests {
             role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "hello".into(),
-            max_tokens: 1_000_000,
+            max_tokens: Some(1_000_000),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -1059,7 +1071,7 @@ mod tests {
             role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "hello".into(),
-            max_tokens: 1_000_000,
+            max_tokens: Some(1_000_000),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -1126,7 +1138,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             p.effective_max_tokens(&Request {
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 ..test_request()
             }),
             MINIMAX_MAX_TOKENS_CAP,
@@ -1136,7 +1148,7 @@ mod tests {
         // flows unchanged, no audit-hash mutation needed).
         assert_eq!(
             p.effective_max_tokens(&Request {
-                max_tokens: 4096,
+                max_tokens: Some(4096),
                 ..test_request()
             }),
             4096,
@@ -1169,7 +1181,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             p_op.effective_max_tokens(&Request {
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 ..test_request()
             }),
             8_192,
@@ -1196,7 +1208,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             p_above.effective_max_tokens(&Request {
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 ..test_request()
             }),
             MINIMAX_MAX_TOKENS_CAP,
@@ -1250,7 +1262,7 @@ mod tests {
         .with_max_tokens_table(table);
         assert_eq!(
             p_table.effective_max_tokens(&Request {
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 ..test_request()
             }),
             discovered,
@@ -1324,7 +1336,7 @@ mod tests {
             role: crate::llm::role::Role::Intake,
             system: String::new(),
             user: "Reply with the single character: 1".into(),
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: Some(0.5),
             top_p: None,
             response_schema: None,

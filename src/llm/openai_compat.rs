@@ -211,13 +211,21 @@ impl OpenAICompatProvider {
         let _ = attempt;
     }
 
-    /// Returns `None` when `omit_max_tokens` is set (so the field is
-    /// dropped from the wire body), otherwise the request's max_tokens.
-    fn effective_max_tokens(&self, requested: u32) -> Option<u32> {
-        if self.omit_max_tokens {
+    /// Translate the request's `max_tokens` (`Option<u32>`) into the
+    /// wire-side value the responses payload carries:
+    ///
+    /// - `None` on `req.max_tokens` → `None` (the auto-healing path
+    ///   asked us to drop the field, and we honour that).
+    /// - `Some(n)` with `omit_max_tokens = true` → `None` (the
+    ///   operator pinned the provider config to always omit the
+    ///   field).
+    /// - `Some(n)` with `omit_max_tokens = false` → `Some(n)`
+    ///   (the wire builder carries the value).
+    fn wire_max_tokens(&self, requested: Option<u32>) -> Option<u32> {
+        if requested.is_none() || self.omit_max_tokens {
             None
         } else {
-            Some(requested)
+            requested
         }
     }
 }
@@ -389,13 +397,20 @@ impl Provider for OpenAICompatProvider {
         // `omit_max_tokens` does NOT affect this value — it only
         // drops the field from the wire body; when the field is
         // present the value is the same clamped `u32`.
+        //
+        // `None` on `req.max_tokens` is treated as `u32::MAX` so
+        // the audit hash stays deterministic when the auto-heal
+        // path drops the field from the wire body.
         let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
         let table_cap = self
             .max_tokens_table
             .as_ref()
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
-        req.max_tokens.min(operator_cap).min(table_cap)
+        req.max_tokens
+            .unwrap_or(u32::MAX)
+            .min(operator_cap)
+            .min(table_cap)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
@@ -428,10 +443,14 @@ fn build_responses_body<'a>(
         model,
         instructions: Some(&req.system),
         input: &req.user,
+        // `req.max_tokens` is `Option<u32>`; the auto-heal path sets
+        // it to `None` and the wire body omits the field. The
+        // operator-pinned `omit_max_tokens` flag also maps to
+        // `None`. Otherwise the value carries through verbatim.
         max_tokens: if omit_max_tokens {
             None
         } else {
-            Some(req.max_tokens)
+            req.max_tokens
         },
         temperature: req.temperature,
         top_p: req.top_p,
@@ -536,6 +555,11 @@ impl OpenAICompatProvider {
             //      for the 2026-08-04 roster (kimi-k* / gpt-5.6-luna).
             //   2. provider_max_tokens — operator TOML override.
             //   3. MaxTokensTable::resolve_cached — auto-probed value.
+            //
+            // `max_tokens = None` (set by the auto-healing
+            // `param_rejections` path) is preserved through the
+            // chain: the wire body omits the field so the
+            // upstream accepts the request without the cap.
             let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
             let table_cap = self
                 .max_tokens_table
@@ -543,14 +567,20 @@ impl OpenAICompatProvider {
                 .and_then(|t| t.resolve_cached(self.name(), self.model()))
                 .unwrap_or(u32::MAX);
             let cap = operator_cap.min(table_cap);
-            req.max_tokens = req.max_tokens.min(cap);
+            if let Some(n) = req.max_tokens {
+                req.max_tokens = Some(n.min(cap));
+            }
         } else {
             // Probe path: bypass every cap. Floor ensures we
             // never ask for `max_tokens < 1024` (some upstreams
             // reject the request outright below that minimum).
-            req.max_tokens = req.max_tokens.max(MIN_AUTOPROBE_FLOOR);
+            // `None` stays `None` so the probe honours any
+            // explicit request to drop the field.
+            if let Some(n) = req.max_tokens {
+                req.max_tokens = Some(n.max(MIN_AUTOPROBE_FLOOR));
+            }
         }
-        let max_tokens = self.effective_max_tokens(req.max_tokens);
+        let max_tokens = self.wire_max_tokens(req.max_tokens);
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -690,7 +720,12 @@ impl OpenAICompatProvider {
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
         let cap = operator_cap.min(table_cap);
-        req.max_tokens = req.max_tokens.min(cap);
+        // `None` (auto-heal path) stays `None`; `Some(n)` is
+        // clamped to `cap`. The wire body decides whether `None`
+        // serialises as field-absent (via `skip_serializing_if`).
+        if let Some(n) = req.max_tokens {
+            req.max_tokens = Some(n.min(cap));
+        }
         let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
         let request_started = std::time::Instant::now();
         let resp = self
@@ -882,7 +917,7 @@ data: [DONE]\n\n";
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 256,
+                max_tokens: Some(256),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -943,7 +978,7 @@ data: {not json}\n\n";
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 64,
+                max_tokens: Some(64),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1003,7 +1038,7 @@ data: {not json}\n\n";
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 64,
+                max_tokens: Some(64),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1089,7 +1124,7 @@ data: [DONE]\n\n";
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1155,7 +1190,7 @@ data: [DONE]\n\n",
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1235,7 +1270,7 @@ data: [DONE]\n\n",
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1304,7 +1339,7 @@ data: [DONE]\n\n",
                 // (16_384) so the cap does not engage and the
                 // assertion about the field surviving the wire
                 // builder stays meaningful.
-                max_tokens: 1024,
+                max_tokens: Some(1024),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1385,7 +1420,7 @@ data: [DONE]\n\n",
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1466,7 +1501,7 @@ data: [DONE]\n\n",
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1504,7 +1539,7 @@ data: [DONE]\n\n",
             model: model.into(),
             system: "system".into(),
             user: "user".into(),
-            max_tokens: 128,
+            max_tokens: Some(128),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -1583,7 +1618,7 @@ data: [DONE]\n\n",
             role: crate::llm::Role::Route,
             system: "sys".into(),
             user: "user".into(),
-            max_tokens: 256,
+            max_tokens: Some(256),
             temperature: Some(0.4),
             top_p: Some(0.9),
             response_schema: None,
@@ -1731,7 +1766,7 @@ data: [DONE]\n\n",
                 role: crate::llm::Role::Intake,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1753,6 +1788,88 @@ data: [DONE]\n\n",
                 body.get("max_tokens").and_then(|v| v.as_u64()),
                 Some(discovered as u64),
                 "wire body must carry the table-resolved value ({discovered}), got body: {body}"
+            );
+        });
+    }
+
+    /// Auto-heal close-the-loop pin: when the dispatcher hands the
+    /// Responses provider a `Request { max_tokens: None, .. }`
+    /// (the auto-healing `param_rejections` table set it on the
+    /// retry), the wire body must omit the field entirely so the
+    /// upstream accepts the request. Mirrors
+    /// `send_omits_max_tokens_when_omit_flag_set` but covers the
+    /// new `req.max_tokens = None` path — without this test, a
+    /// regression that drops the omit step would still pass the
+    /// existing pin because the latter relies on the provider
+    /// flag, not the request field.
+    #[test]
+    fn send_omits_max_tokens_when_req_max_tokens_is_none() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "output": [{
+                        "content": [
+                            {"type": "output_text", "text": "ok"}
+                        ]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let p = OpenAICompatProvider::new(
+                &ProviderConfig {
+                    // No operator cap, no table — only the
+                    // request-level `max_tokens = None` drives the
+                    // omission.
+                    models: vec![crate::config::ModelConfig {
+                        id: "gpt-5.6-luna".into(),
+                        endpoint: None,
+                        max_tokens: None,
+                    }],
+                    endpoint: Some(format!("{}/v1", server.uri())),
+                    temperature: None,
+                    top_p: None,
+                    omit_max_tokens: false,
+                    plan: None,
+                    max_token_auto: None,
+                    max_token_auto_enabled: None,
+                    max_token_auto_save: true,
+                },
+                SecretString::new("dummy".into()),
+            )
+            .unwrap();
+            let req = Request {
+                model: "gpt-5.6-luna".into(),
+                role: crate::llm::Role::Intake,
+                system: "sys".into(),
+                user: "user".into(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                response_schema: None,
+                stream: false,
+                extra_messages: vec![],
+                attachments: vec![],
+                tool_choice: None,
+            };
+            let (status, _response) = p.send(&req).await.unwrap();
+            assert_eq!(status, 200);
+            let received = server
+                .received_requests()
+                .await
+                .expect("recording must be enabled by default");
+            assert_eq!(received.len(), 1, "exactly one request must be sent");
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body)
+                .expect("mock server received a JSON body");
+            assert!(
+                body.get("max_tokens").is_none(),
+                "max_tokens must be absent when req.max_tokens = None, got body: {body}"
             );
         });
     }

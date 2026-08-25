@@ -316,7 +316,13 @@ impl OpenAICompatibleProvider {
 struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage>,
-    max_tokens: u32,
+    /// Output token ceiling. `None` serialises as field-absent (via
+    /// `skip_serializing_if`), required for providers that reject
+    /// the *presence* of `max_tokens`. The auto-healing
+    /// `param_rejections` table sets this to `None` on the retry
+    /// so the upstream accepts the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -454,6 +460,10 @@ impl Provider for OpenAICompatibleProvider {
         //      Go routes; `None` for DeepSeek-direct).
         //   2. `provider_max_tokens` (operator TOML override).
         //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
+        //
+        // `None` on `req.max_tokens` is treated as `u32::MAX` so the
+        // audit hash stays deterministic even when the auto-heal
+        // path drops the field from the wire body.
         let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
         let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
         let table_cap = self
@@ -462,6 +472,7 @@ impl Provider for OpenAICompatibleProvider {
             .and_then(|t| t.resolve_cached(self.name(), self.model()))
             .unwrap_or(u32::MAX);
         req.max_tokens
+            .unwrap_or(u32::MAX)
             .min(operator_cap)
             .min(kind_cap)
             .min(table_cap)
@@ -546,6 +557,11 @@ impl OpenAICompatibleProvider {
                 //   3. `MaxTokensTable::resolve_cached` — auto-probed
                 //      per-(provider, model) value; primary source of
                 //      truth when present.
+                //
+                // `max_tokens = None` (set by the auto-healing
+                // `param_rejections` path) is preserved through the
+                // chain: the wire body omits the field so the
+                // upstream accepts the request without the cap.
                 let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
                 let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
                 let table_cap = self
@@ -554,25 +570,28 @@ impl OpenAICompatibleProvider {
                     .and_then(|t| t.resolve_cached(self.name(), self.model()))
                     .unwrap_or(u32::MAX);
                 let cap = operator_cap.min(kind_cap).min(table_cap);
-                if body.max_tokens > cap {
-                    ChatRequest {
-                        max_tokens: cap,
+                match body.max_tokens {
+                    Some(n) if n > cap => ChatRequest {
+                        max_tokens: Some(cap),
                         ..body
-                    }
-                } else {
-                    body
+                    },
+                    // `Some(n)` within cap, or `None` — keep
+                    // verbatim. The wire builder decides whether
+                    // `None` becomes field-absent.
+                    _ => body,
                 }
             } else {
                 // Probe path: bypass every cap. Floor ensures we
                 // never ask for `max_tokens < 1024` (some upstreams
                 // reject the request outright below that minimum).
-                if body.max_tokens < MIN_AUTOPROBE_FLOOR {
-                    ChatRequest {
-                        max_tokens: MIN_AUTOPROBE_FLOOR,
+                // `None` stays `None` so the probe still honours
+                // any explicit request to drop the field.
+                match body.max_tokens {
+                    Some(n) if n < MIN_AUTOPROBE_FLOOR => ChatRequest {
+                        max_tokens: Some(MIN_AUTOPROBE_FLOOR),
                         ..body
-                    }
-                } else {
-                    body
+                    },
+                    _ => body,
                 }
             };
             let result = self
@@ -724,7 +743,7 @@ mod tests {
                     content: "user".into(),
                 },
             ],
-            max_tokens: 128,
+            max_tokens: Some(128),
             temperature: None,
             top_p: None,
             stream: false,
@@ -774,7 +793,7 @@ mod tests {
             model: model.into(),
             system: "system".into(),
             user: "user".into(),
-            max_tokens: 128,
+            max_tokens: Some(128),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -1088,7 +1107,7 @@ mod tests {
                 role: crate::llm::Role::Route,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1176,7 +1195,7 @@ mod tests {
                 role: crate::llm::Role::Route,
                 system: "sys".into(),
                 user: "user".into(),
-                max_tokens: 1_000_000,
+                max_tokens: Some(1_000_000),
                 temperature: None,
                 top_p: None,
                 response_schema: None,
@@ -1416,7 +1435,7 @@ mod tests {
             role: crate::llm::Role::Route,
             system: "sys".into(),
             user: "user".into(),
-            max_tokens: 1_000_000,
+            max_tokens: Some(1_000_000),
             temperature: None,
             top_p: None,
             response_schema: None,

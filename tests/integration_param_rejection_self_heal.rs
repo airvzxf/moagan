@@ -39,7 +39,7 @@ fn sample_request() -> Request {
         model: "m".to_owned(),
         system: "sys".to_owned(),
         user: "user".to_owned(),
-        max_tokens: 1024,
+        max_tokens: Some(1024),
         temperature: Some(0.6),
         top_p: Some(0.95),
         response_schema: None,
@@ -63,7 +63,7 @@ fn omit_param_drops_temperature() {
     assert!(req.temperature.is_none(), "temperature must be cleared");
     // Other fields stay untouched.
     assert!(req.top_p.is_some());
-    assert_eq!(req.max_tokens, 1024);
+    assert_eq!(req.max_tokens, Some(1024));
 }
 
 #[test]
@@ -72,19 +72,20 @@ fn omit_param_drops_top_p() {
     omit_param(&mut req, "top_p");
     assert!(req.top_p.is_none());
     assert!(req.temperature.is_some());
-    assert_eq!(req.max_tokens, 1024);
+    assert_eq!(req.max_tokens, Some(1024));
 }
 
 #[test]
 fn omit_param_unknown_is_noop() {
-    // Unknown params (e.g. `max_tokens`, which the dispatch path
-    // cannot drop without restructuring the request) must be
-    // silently ignored so the retry loop is safe to call on any
-    // detected rejection name.
+    // Truly unknown params (the dispatch path knows nothing about
+    // them) must be silently ignored so the retry loop is safe to
+    // call on any detected rejection name. `max_tokens` itself is
+    // supported and must clear the field — see
+    // `omit_param_clears_max_tokens_to_none` in
+    // `crate::llm::wire::tests`.
     let mut req = sample_request();
     let before_temp = req.temperature;
     let before_top_p = req.top_p;
-    omit_param(&mut req, "max_tokens");
     omit_param(&mut req, "made_up_field");
     assert_eq!(req.temperature, before_temp);
     assert_eq!(req.top_p, before_top_p);

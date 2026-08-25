@@ -106,7 +106,7 @@ fn dummy_request() -> Request {
         model: "scripted-model".into(),
         system: String::new(),
         user: "u".into(),
-        max_tokens: 16,
+        max_tokens: Some(16),
         temperature: None,
         top_p: None,
         response_schema: None,

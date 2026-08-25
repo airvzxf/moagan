@@ -212,7 +212,11 @@ impl ProbeTransport for ProviderProbeTransport {
             model: self.provider.model().to_owned(),
             system: PROBE_SYSTEM.to_owned(),
             user: PROBE_USER.to_owned(),
-            max_tokens,
+            // The probe always sets `Some(...)` so the wire body
+            // carries the candidate value. The auto-healing
+            // `param_rejections` path is the only code that sets
+            // `None`, and it never fires during a probe.
+            max_tokens: Some(max_tokens),
             temperature: None,
             top_p: None,
             response_schema: None,

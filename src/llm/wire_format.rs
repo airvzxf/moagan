@@ -187,15 +187,22 @@ impl WireFormat for ResponsesWire {
     }
 
     fn encode_body(&self, req: &Request) -> Result<Vec<u8>> {
-        let value = serde_json::json!({
+        // Build the body field-by-field so `None` on `max_tokens`
+        // omits the field (the auto-healing close-the-loop
+        // contract). The Responses API path rejects the *presence*
+        // of `max_tokens` on a handful of upstreams
+        // (`gpt-5.6-luna`).
+        let mut value = serde_json::json!({
             "model": req.model,
             "instructions": req.system,
             "input": req.user,
-            "max_tokens": req.max_tokens,
             "temperature": req.temperature,
             "top_p": req.top_p,
             "stream": false,
         });
+        if let Some(n) = req.max_tokens {
+            value["max_tokens"] = serde_json::json!(n);
+        }
         serde_json::to_vec(&value).map_err(|e| Error::Provider {
             message: format!("encode: {e}"),
             http_status: None,
@@ -312,8 +319,13 @@ pub(crate) fn build_openai_body(req: &Request) -> serde_json::Value {
             {"role": "system", "content": req.system},
             {"role": "user", "content": req.user},
         ],
-        "max_tokens": req.max_tokens,
     });
+    // `max_tokens` is `Option<u32>`. The wire body omits the field
+    // when the auto-healing path set it to `None` so the upstream
+    // (e.g. `gpt-5.6-luna`) accepts the request without the cap.
+    if let Some(n) = req.max_tokens {
+        value["max_tokens"] = serde_json::json!(n);
+    }
     if let Some(t) = req.temperature {
         value["temperature"] = serde_json::json!(t);
     }
@@ -477,7 +489,7 @@ mod tests {
             model: "deepseek-v4-flash".into(),
             system: "system".into(),
             user: "user".into(),
-            max_tokens: 128,
+            max_tokens: Some(128),
             temperature: Some(0.6),
             top_p: Some(0.95),
             response_schema: None,
@@ -495,7 +507,7 @@ mod tests {
             model: "m".into(),
             system: "s".into(),
             user: "u".into(),
-            max_tokens: 16,
+            max_tokens: Some(16),
             temperature: None,
             top_p: None,
             response_schema: None,
@@ -698,7 +710,7 @@ mod tests {
             model: "gpt-5.6-luna".into(),
             system: "sys".into(),
             user: "u".into(),
-            max_tokens: 64,
+            max_tokens: Some(64),
             temperature: None,
             top_p: None,
             response_schema: None,

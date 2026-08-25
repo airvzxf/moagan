@@ -63,7 +63,7 @@ mod tests {
             model: "m".into(),
             system: "sys".into(),
             user: text.into(),
-            max_tokens: 8,
+            max_tokens: Some(8),
             temperature: None,
             top_p: None,
             response_schema: None,

@@ -567,7 +567,7 @@ mod tests {
             model: model.to_owned(),
             system: String::new(),
             user: String::new(),
-            max_tokens: 0,
+            max_tokens: Some(0),
             temperature: None,
             top_p: None,
             response_schema: None,

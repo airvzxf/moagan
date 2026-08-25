@@ -280,7 +280,9 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
             model: self.provider.model().to_owned(),
             system: TEMPERATURE_PROBE_SYSTEM.to_owned(),
             user: TEMPERATURE_PROBE_USER.to_owned(),
-            max_tokens: PROBE_MIN_OUTPUT_TOKENS,
+            // Probe always sets `Some(...)` so the wire body
+            // carries the probe budget.
+            max_tokens: Some(PROBE_MIN_OUTPUT_TOKENS),
             temperature: Some(temperature),
             top_p: None,
             response_schema: None,

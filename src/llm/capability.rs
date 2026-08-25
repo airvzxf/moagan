@@ -275,7 +275,7 @@ mod tests {
             model: "kimi-k3".to_owned(),
             system: "sys".to_owned(),
             user: "user".to_owned(),
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature,
             top_p: Some(0.95),
             response_schema: None,
@@ -388,7 +388,7 @@ mod tests {
         assert!(gated.temperature.is_none(), "temperature must be None");
         assert_eq!(gated.system, "sys");
         assert_eq!(gated.user, "user");
-        assert_eq!(gated.max_tokens, 1024);
+        assert_eq!(gated.max_tokens, Some(1024));
         assert_eq!(gated.top_p, Some(0.95), "top_p must NOT be touched");
         assert_eq!(gated.model, "kimi-k3");
     }
