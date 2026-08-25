@@ -276,7 +276,7 @@ impl ProviderTemperatureProbeTransport {
 impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
     async fn probe_send_temperature(&self, temperature: f32) -> TemperatureProbeOutcome {
         let req = Request {
-            role: Role::Intake,
+            role: Role::Sketch, // F1: see investigation report
             model: self.provider.model().to_owned(),
             system: TEMPERATURE_PROBE_SYSTEM.to_owned(),
             user: TEMPERATURE_PROBE_USER.to_owned(),
