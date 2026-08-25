@@ -186,6 +186,19 @@ impl MoaganHome {
         self.root.join("temperatures_auto.toml")
     }
 
+    /// Path of the self-healing `param_rejections` table. Records
+    /// per-`(provider, model)` the names of wire fields the upstream
+    /// rejected with HTTP 4xx so future calls can omit them without
+    /// a round-trip. Mirrors the `max_tokens_auto.toml` /
+    /// `temperatures_auto.toml` convention so config-style files stay
+    /// co-located. Schema version 1. Read at startup by
+    /// [`crate::llm::param_rejections::ParamRejectionsTable::from_home`]
+    /// and re-written when the runtime auto-detects a rejection on a
+    /// fresh `(provider, model)` pair.
+    pub fn param_rejections_path(&self) -> PathBuf {
+        self.root.join("param_rejections.toml")
+    }
+
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(self.runs_dir())?;

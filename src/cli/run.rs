@@ -414,6 +414,7 @@ pub async fn run_full_pipeline(
     // until they have all landed.
     let max_tokens_table = providers.max_tokens_table().cloned();
     let temperature_table = providers.temperature_table().cloned();
+    let param_rejections = providers.param_rejections().cloned();
 
     // Wire-the-gates plan: refresh the on-disk `models.dev` catalog
     // so the modality gate (`ModalityGate::apply`) and the cost
@@ -527,6 +528,7 @@ pub async fn run_full_pipeline(
     .with_timeouts(cfg.phase_timeout_secs, cfg.total_timeout_secs)
     .with_max_tokens_table_opt(max_tokens_table)
     .with_temperature_table_opt(temperature_table)
+    .with_param_rejections_opt(param_rejections)
     .with_models_dev_catalog_opt(models_dev_catalog.clone())
     .with_capability_resolver_opt(capability_resolver.clone())
     // V4 §13.6 promises "no human pauses" for Mode::Batch. The

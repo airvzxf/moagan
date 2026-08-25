@@ -23,6 +23,7 @@ pub mod modal_gate;
 pub mod models_dev;
 pub mod openai_compat;
 pub mod openai_compatible;
+pub mod param_rejections;
 pub mod probe;
 pub mod probe_table;
 pub mod prompt_cache;

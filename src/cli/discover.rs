@@ -500,6 +500,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     // sees the same handles the registry fired.
     let max_tokens_table = providers.max_tokens_table().cloned();
     let temperature_table = providers.temperature_table().cloned();
+    let param_rejections = providers.param_rejections().cloned();
     let default_model = if default_provider.contains(':') {
         crate::cli::probe::parse_provider_model(&default_provider)
             .map(|(_, m)| m)
@@ -650,6 +651,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     )
     .with_max_tokens_table_opt(max_tokens_table)
     .with_temperature_table_opt(temperature_table)
+    .with_param_rejections_opt(param_rejections)
     .with_interactive(!opts.non_interactive)
     // Per-role rate-limit (catalog §D.19.6): wire each
     // `[rate_limit_per_role]` entry into a `RateLimiter` keyed by

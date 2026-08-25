@@ -215,6 +215,32 @@ impl From<crate::cli::flags_batch::HashAlgo> for CacheHashAlgo {
     }
 }
 
+/// Drop an optional wire field from a `Request` so the retry call
+/// does not re-emit a parameter the upstream already rejected.
+///
+/// `param` is matched against the optional fields the dispatch path
+/// can actually mutate at runtime — `temperature` and `top_p` today.
+/// Unknown parameters are ignored silently so the helper is safe to
+/// call from a generic loop even when the rejection detector picks
+/// up a field the runtime cannot omit (e.g. `max_tokens`).
+///
+/// `max_tokens` is intentionally NOT supported here because
+/// [`crate::llm::wire::Request::max_tokens`] is `u32`, not
+/// `Option<u32>` — restructuring the field would break every
+/// call site. The runtime's escape hatch for `max_tokens` rejections
+/// stays the operator-supplied `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true`
+/// env var (read by the per-provider cap path).
+pub fn omit_param(req: &mut Request, param: &str) {
+    match param {
+        "temperature" => req.temperature = None,
+        "top_p" => req.top_p = None,
+        // Unknown parameters are a no-op so the runtime can record
+        // the rejection (so the next run learns) without breaking
+        // the current call.
+        _ => {}
+    }
+}
+
 /// Build a cache key for `req` using the requested hash
 /// algorithm. The canonical input set is `(role, provider,
 /// model, system, user, max_tokens, temperature, top_p,

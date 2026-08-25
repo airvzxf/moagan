@@ -55,6 +55,7 @@ use crate::fs_layout::MoaganHome;
 
 use super::capabilities::ProviderCapabilities;
 use super::circuit_breaker::CircuitBreaker;
+use super::param_rejections::ParamRejectionsTable;
 use super::probe_table::MaxTokensTable;
 use super::provider_pool::{ProviderPool, ProviderPoolEntry};
 use super::rate_limiter::RateLimiter;
@@ -216,6 +217,18 @@ pub struct ProviderRegistry {
     /// temperatures being upstream-acceptable (a global cap, not
     /// per-model reality).
     temperature_table: Option<Arc<TemperatureTable>>,
+    /// Self-healing param-rejection table. Built from
+    /// `<MOAGAN_HOME>/param_rejections.toml` by
+    /// [`registry_from_config_with_home_and_sink`] and consulted by
+    /// [`crate::phases::phase::RunContext::dispatch_to_provider`]
+    /// before every LLM call so a parameter the upstream rejected on
+    /// a prior call (e.g. `top_p` on a relay that doesn't accept it)
+    /// is omitted from the wire body. New rejections detected at
+    /// runtime are written back to the same TOML so subsequent runs
+    /// skip the failing round-trip. `None` disables both the
+    /// pre-call omit and the post-call detection so legacy
+    /// hand-rolled registries keep the "send everything" path.
+    pub param_rejections: Option<Arc<ParamRejectionsTable>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -239,6 +252,14 @@ impl std::fmt::Debug for ProviderRegistry {
             .field(
                 "temperature_table",
                 &if self.temperature_table.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+            )
+            .field(
+                "param_rejections",
+                &if self.param_rejections.is_some() {
                     "present"
                 } else {
                     "absent"
@@ -290,6 +311,7 @@ impl ProviderRegistry {
             pool_names,
             max_tokens_table: None,
             temperature_table: None,
+            param_rejections: None,
         }
     }
 
@@ -329,6 +351,25 @@ impl ProviderRegistry {
     /// behaviour.
     pub fn temperature_table(&self) -> Option<&Arc<TemperatureTable>> {
         self.temperature_table.as_ref()
+    }
+
+    /// Attach the self-healing `ParamRejectionsTable` so the
+    /// dispatch path can pre-call omit and post-call record. Mirrors
+    /// [`Self::with_max_tokens_table`] / [`Self::with_temperature_table`]
+    /// — the consuming builder form lets `registry_from_config_with_home_and_sink`
+    /// chain it next to the other auto-discovered tables.
+    pub fn with_param_rejections(mut self, table: Arc<ParamRejectionsTable>) -> Self {
+        self.param_rejections = Some(table);
+        self
+    }
+
+    /// The self-healing param-rejection table, when the home
+    /// directory was resolvable and `param_rejections.toml` was
+    /// loadable. `None` disables both the pre-call omit and the
+    /// post-call auto-detect so hand-rolled tests keep the legacy
+    /// "send everything" path.
+    pub fn param_rejections(&self) -> Option<&Arc<ParamRejectionsTable>> {
+        self.param_rejections.as_ref()
     }
 
     /// Look up a provider by registry key (section name or
@@ -631,6 +672,18 @@ pub struct BreakeredProvider {
     /// can attach the table after the wrapper is already shared.
     /// PR-x23 follow-up.
     max_tokens_table: Mutex<Option<Arc<MaxTokensTable>>>,
+    /// Self-healing param-rejection table. Wired by
+    /// [`crate::llm/provider::registry_from_config_with_home_and_sink`]
+    /// alongside `max_tokens_table` so future features can route
+    /// per-provider diagnostics through the wrapper. The dispatch
+    /// path consults the registry-level handle on every call rather
+    /// than going through the wrapper, so this field is reserved for
+    /// future per-provider hooks (today it is set but unused at the
+    /// wrapper level — the registry-level table on
+    /// [`ProviderRegistry::param_rejections`] is the runtime source
+    /// of truth).
+    #[allow(dead_code)]
+    param_rejections: Mutex<Option<Arc<ParamRejectionsTable>>>,
 }
 
 /// Push-side sink for [`crate::telemetry::saturation::SaturationEvent`].
@@ -682,6 +735,7 @@ impl BreakeredProvider {
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
             max_tokens_table: Mutex::new(None),
+            param_rejections: Mutex::new(None),
         }
     }
 
@@ -703,6 +757,7 @@ impl BreakeredProvider {
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
             max_tokens_table: Mutex::new(None),
+            param_rejections: Mutex::new(None),
         }
     }
 
@@ -796,6 +851,16 @@ impl BreakeredProvider {
     /// the constructor cannot take the table as an argument.
     pub fn set_max_tokens_table(&self, table: Arc<MaxTokensTable>) {
         *self.max_tokens_table.lock() = Some(table);
+    }
+
+    /// Attach the self-healing `ParamRejectionsTable`. Mirrors
+    /// [`Self::set_max_tokens_table`] — the registry wires the table
+    /// after the wrapper is already shared. The field is reserved
+    /// for future per-provider hooks; the dispatch path consults the
+    /// registry-level handle on every call today.
+    #[allow(dead_code)]
+    pub fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
+        *self.param_rejections.lock() = Some(table);
     }
 
     /// Borrow the inner provider (used by the probe spawner to reach
@@ -1337,6 +1402,7 @@ pub fn registry_from_config_with_home_and_sink(
         pool_names,
         max_tokens_table: None,
         temperature_table: None,
+        param_rejections: None,
     };
     if let Some(home) = home {
         if let Some(settings) = probe_settings(cfg) {
@@ -1406,6 +1472,36 @@ pub fn registry_from_config_with_home_and_sink(
                     error = %e,
                     "temperature_probe: failed to build the supported-set table; \
                      every LLM call will skip the temperature clamp"
+                );
+            }
+        }
+        // Self-healing param rejection: build the table from
+        // `<MOAGAN_HOME>/param_rejections.toml`. Persistence is
+        // always on (the runtime records new rejections as it
+        // detects them). A missing file is fine — `from_home`
+        // returns an empty table. Failure to load an existing
+        // (malformed) file is propagated as a warning so a typo in
+        // operator-land cannot silently break startup. Mirrors the
+        // `temperature_probe` block above: the registry carries the
+        // table, the dispatch path consults it on every LLM call,
+        // and the runtime writes back as it learns.
+        match ParamRejectionsTable::from_home(home) {
+            Ok(table) => {
+                let table = Arc::new(table);
+                for (_key, wrapped) in &wrapped_entries {
+                    wrapped.set_param_rejections(Arc::clone(&table));
+                }
+                tracing::info!(
+                    "param_rejections: registry carrying the rejection table; \
+                     self-healing retry will omit auto-detected fields"
+                );
+                registry = registry.with_param_rejections(table);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "param_rejections: failed to build the rejection table; \
+                     every LLM call will skip the auto-detect omit/retry"
                 );
             }
         }
