@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::cancel::Cancel;
 use crate::cli::Mode;
@@ -877,63 +878,79 @@ impl DiscoveryCoordinator {
                         // task acquires a parallelism permit (semaphore.acquire) BEFORE
                         // the LLM call so the in-flight count is bounded; the permit is
                         // released when the permit guard drops at the end of the task.
-                        join_set.spawn(async move {
-                            // Cancellation honor: bail before burning API budget.
-                            if cancel_for_task.is_cancelled() {
-                                return;
-                            }
-                            let _permit = match ctx_for_attempt.parallelism.acquire().await {
-                                Ok(p) => p,
-                                Err(_) => return,
-                            };
-
-                            let sketch_result = retry_sketch_extraction(10, || {
-                                let ctx = ctx_for_attempt.clone();
-                                let user = user_for_attempt.clone();
-                                let system = system_for_attempt.to_string();
-                                let id = id_for_attempt.clone();
-                                let cell = cell_for_angle.clone();
-                                let attempt = n_for_attempt;
-                                async move {
-                                    let started_unix = crate::time::now_unix_secs();
-                                    let raw = if attempt == 0 {
-                                        ctx.call_with_retry_at_temp(
-                                            crate::llm::Role::Sketch,
-                                            system,
-                                            user,
-                                            0,
-                                            temperature,
-                                        )
-                                        .await?
-                                    } else {
-                                        ctx.call_uncached_at_temp(
-                                            crate::llm::Role::Sketch,
-                                            system,
-                                            user,
-                                            started_unix,
-                                            attempt as u32,
-                                            temperature,
-                                        )
-                                        .await?
-                                    };
-                                    let schema_hint = crate::llm::prompts::system_prompt(
-                                        crate::llm::Role::Sketch,
-                                    )
-                                    .to_owned();
-                                    let mut sketch: Sketch = ctx.parse_model_json(
-                                        crate::llm::Role::Sketch,
-                                        &raw.text,
-                                        &schema_hint,
-                                    )?;
-                                    if sketch.id.is_empty() {
-                                        sketch.id = id;
-                                    }
-                                    sketch.angle =
-                                        format!("{}:{}", cell.dimension_id, cell.facet_id);
-                                    Ok::<Sketch, Error>(sketch)
+                        // Wrap the future with the per-iteration span so the
+                        // events emitted inside the task (LLM call, telemetry
+                        // writes, sketch retry loop) all carry the same
+                        // (n, total, cell, temperature, replica, sketch_index)
+                        // context the operator can grep end-to-end.
+                        let iteration_span = tracing::trace_span!(
+                            "iteration",
+                            n = n,
+                            total = total,
+                            cell_dim = %cell.dimension_id,
+                            cell_facet = %cell.facet_id,
+                            temperature_profile = temperature,
+                            replica = replica,
+                            sketch_index = sketch_index,
+                        );
+                        join_set.spawn(
+                            async move {
+                                // Cancellation honor: bail before burning API budget.
+                                if cancel_for_task.is_cancelled() {
+                                    return;
                                 }
-                            })
-                            .await;
+                                let _permit = match ctx_for_attempt.parallelism.acquire().await {
+                                    Ok(p) => p,
+                                    Err(_) => return,
+                                };
+
+                                let sketch_result = retry_sketch_extraction(10, || {
+                                    let ctx = ctx_for_attempt.clone();
+                                    let user = user_for_attempt.clone();
+                                    let system = system_for_attempt.to_string();
+                                    let id = id_for_attempt.clone();
+                                    let cell = cell_for_angle.clone();
+                                    let attempt = n_for_attempt;
+                                    async move {
+                                        let started_unix = crate::time::now_unix_secs();
+                                        let raw = if attempt == 0 {
+                                            ctx.call_with_retry_at_temp(
+                                                crate::llm::Role::Sketch,
+                                                system,
+                                                user,
+                                                0,
+                                                temperature,
+                                            )
+                                            .await?
+                                        } else {
+                                            ctx.call_uncached_at_temp(
+                                                crate::llm::Role::Sketch,
+                                                system,
+                                                user,
+                                                started_unix,
+                                                attempt as u32,
+                                                temperature,
+                                            )
+                                            .await?
+                                        };
+                                        let schema_hint = crate::llm::prompts::system_prompt(
+                                            crate::llm::Role::Sketch,
+                                        )
+                                        .to_owned();
+                                        let mut sketch: Sketch = ctx.parse_model_json(
+                                            crate::llm::Role::Sketch,
+                                            &raw.text,
+                                            &schema_hint,
+                                        )?;
+                                        if sketch.id.is_empty() {
+                                            sketch.id = id;
+                                        }
+                                        sketch.angle =
+                                            format!("{}:{}", cell.dimension_id, cell.facet_id);
+                                        Ok::<Sketch, Error>(sketch)
+                                    }
+                                })
+                                .await;
 
                             match sketch_result {
                                 Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
@@ -1014,7 +1031,13 @@ impl DiscoveryCoordinator {
                                     let _ = s.save(&run_dir_for_task);
                                 }
                             }
-                        });
+                            // Pipe the future through the iteration span
+                            // so every event emitted inside (LLM call,
+                            // retry loop, telemetry mirror) carries the
+                            // same (n, total, cell, temperature, replica,
+                            // sketch_index) context the operator can
+                            // grep end-to-end.
+                        }.instrument(iteration_span));
 
                         n += 1;
                         tokio::task::yield_now().await;

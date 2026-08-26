@@ -207,6 +207,8 @@ impl ProbeTransport for ProviderProbeTransport {
     }
 
     async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
+        use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
+        use tracing::Instrument;
         let req = Request {
             role: Role::Sketch, // F1: see investigation report
             model: self.provider.model().to_owned(),
@@ -225,8 +227,26 @@ impl ProbeTransport for ProviderProbeTransport {
             attachments: vec![],
             tool_choice: None,
         };
-        let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
-        match res {
+        // llm_probe span: every HTTP event emitted by `send_probe`
+        // inherits probe_kind=max_tokens, candidate=<N>, provider,
+        // model. Operators grep `llm_probe{probe_kind=max_tokens
+        // candidate=4096}` to follow one candidate through the
+        // bisection loop.
+        let probe_span = tracing::info_span!(
+            "llm_probe",
+            probe_kind = "max_tokens",
+            candidate = max_tokens,
+            provider = %self.provider.name(),
+            model = %self.provider.model(),
+        );
+        let res = timeout(
+            PROBE_TIMEOUT,
+            self.provider
+                .send_probe(&req)
+                .instrument(probe_span.clone()),
+        )
+        .await;
+        let result: ProbeResult = match res {
             Ok(Ok((status, body))) => {
                 // Classify:
                 //   - 2xx / 3xx                       → Accepted
@@ -278,7 +298,30 @@ impl ProbeTransport for ProviderProbeTransport {
                 outcome: ProbeOutcome::Indeterminate,
                 body: String::new(),
             },
+        };
+
+        // Stdout Probe event mirror: emitted alongside the llm_probe
+        // span so `moagan … 2>log.jsonl | jq 'select(.kind=="probe")'`
+        // gives a clean candidate-by-candidate timeline. Iteration
+        // is `0` here (the orchestrator that called us tracks the
+        // bisection step itself).
+        if crate::telemetry::stdout_events::resolve_event_format(EventFormat::Jsonl) {
+            crate::telemetry::stdout_events::STDOUT_EVENTS.emit(Event::Probe {
+                schema: SCHEMA_VERSION,
+                ts: now_rfc3339(),
+                probe_kind: "max_tokens",
+                candidate: max_tokens as f32,
+                iteration: 0,
+                provider: self.provider.name(),
+                model: self.provider.model(),
+                outcome: match &result.outcome {
+                    crate::llm::probe::ProbeOutcome::Accepted => "accepted",
+                    crate::llm::probe::ProbeOutcome::Rejected => "rejected",
+                    crate::llm::probe::ProbeOutcome::Indeterminate => "indeterminate",
+                },
+            });
         }
+        result
     }
 }
 

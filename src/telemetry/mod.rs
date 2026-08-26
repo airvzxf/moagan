@@ -33,12 +33,12 @@ pub mod dashboard;
 pub mod dashboard_static;
 pub mod event;
 pub mod export;
-pub mod file_log;
 pub mod heartbeat;
 pub mod lineage_graph;
 pub mod redact;
 pub mod retention;
 pub mod saturation;
+pub mod stdout_events;
 pub mod verify;
 
 /// One phase event (start/end/error/cancel).
@@ -779,6 +779,11 @@ impl Telemetry {
         details: serde_json::Value,
         ctx: WarningContext,
     ) -> Result<()> {
+        // Clone the WarningContext fields we need to keep around
+        // after the move into WarningEvent below. We need them for
+        // the stdout Warning event mirror.
+        let stdout_ctx_phase = ctx.phase.clone();
+        let stdout_details = details.clone();
         tracing::trace!(
             code,
             level,
@@ -841,6 +846,19 @@ impl Telemetry {
         }
         self.flush_if_due();
         tracing::trace!(code, "Telemetry::warn: ok");
+
+        // Stdout Warning event mirror. Auto-silenced on TTY so the
+        // operator's terminal stays clean.
+        if stdout_events::resolve_event_format(stdout_events::EventFormat::Jsonl) {
+            stdout_events::STDOUT_EVENTS.emit(stdout_events::Event::Warning {
+                schema: stdout_events::SCHEMA_VERSION,
+                ts: stdout_events::now_rfc3339(),
+                code,
+                level,
+                phase: stdout_ctx_phase.as_deref(),
+                details: stdout_details,
+            });
+        }
         Ok(())
     }
 

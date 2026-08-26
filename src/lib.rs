@@ -94,16 +94,95 @@ pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;
     let cli = cli::Cli::parse();
+    run_with_cli(cli).await
+}
+
+/// CLI entry point with a pre-parsed [`cli::Cli`]. Used by `main.rs`
+/// so the `--log-format` / `--event-format` flags take effect on
+/// the very first tracing event (before this function is called).
+/// `run()` is a convenience wrapper that parses the CLI itself.
+pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
+    use crate::telemetry::stdout_events;
+    use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
+    use std::io::IsTerminal;
+    use tracing::Instrument;
+    let run_started = std::time::Instant::now();
+    let emit_stdout = stdout_events::resolve_event_format(EventFormat::Jsonl);
+
+    // Pipeline span: root context for every event the run emits.
+    // Operators grep `pipeline{run_id=...}` to follow the entire
+    // run from `run_start` through every nested `phase` /
+    // `iteration` / `llm_call` / `probe` event.
+    let pipeline_span = tracing::info_span!(
+        "pipeline",
+        run_id = "pre-dispatch",
+        mode = "<help-or-readonly>",
+        provider = "<n/a>",
+        model = "<n/a>",
+        resumed = false,
+    );
+    let _pipeline_enter = pipeline_span.enter();
+
+    // Stdout event: `run_start`. Always emitted (even for the
+    // `moagan --help` subcommand) when stdout is not a TTY so
+    // operators can `moagan … | jq 'select(.kind == "run_start")'`
+    // to confirm the binary even started. The synthetic
+    // `run_id` is only useful when the dispatch produces a real
+    // run; for the `--help` and read-only commands we emit a
+    // stable hash of the command name.
+    if emit_stdout {
+        stdout_events::STDOUT_EVENTS.emit(Event::RunStart {
+            schema: SCHEMA_VERSION,
+            ts: now_rfc3339(),
+            run_id: "pre-dispatch",
+            mode: "<help-or-readonly>",
+            provider: "<n/a>",
+            model: "<n/a>",
+            prompt_hash: "<n/a>",
+        });
+    }
+
     tracing::info!("moagan::run: dispatching");
-    let code = match cli::dispatch(cli).await {
+    let code = match cli::dispatch(cli).instrument(pipeline_span.clone()).await {
         Ok(code) => {
             tracing::info!(exit_code = code, "moagan::run: dispatch ok");
+            if emit_stdout {
+                stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
+                    schema: SCHEMA_VERSION,
+                    ts: now_rfc3339(),
+                    run_id: "pre-dispatch",
+                    status: "ok",
+                    exit_code: code,
+                    elapsed_ms: run_started.elapsed().as_millis() as u64,
+                    artefacts: serde_json::json!({}),
+                });
+            }
             code
         }
         Err(e) => {
             tracing::error!(error = %e, "moagan::run: dispatch failed");
-            eprintln!("error: {e}");
-            i32::from(exit_code(&e))
+            // The plain-text error message goes to stderr ONLY when
+            // the user is on a TTY (interactive mode). When stderr
+            // is redirected/piped, the structured `tracing::error!`
+            // event above already carries the same information as
+            // JSON; an extra `eprintln!` here would break
+            // `moagan … 2> log.jsonl | jq` consumers.
+            if std::io::stderr().is_terminal() {
+                eprintln!("error: {e}");
+            }
+            let code = i32::from(exit_code(&e));
+            if emit_stdout {
+                stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
+                    schema: SCHEMA_VERSION,
+                    ts: now_rfc3339(),
+                    run_id: "pre-dispatch",
+                    status: "error",
+                    exit_code: code,
+                    elapsed_ms: run_started.elapsed().as_millis() as u64,
+                    artefacts: serde_json::json!({}),
+                });
+            }
+            code
         }
     };
     std::process::exit(code)
@@ -111,12 +190,19 @@ pub async fn run() -> anyhow::Result<()> {
 
 /// Synchronous entry point used by `main.rs` and integration tests.
 pub fn run_blocking() -> anyhow::Result<()> {
+    use clap::Parser;
+    let cli = cli::Cli::parse();
+    run_blocking_with_cli(cli)
+}
+
+/// Synchronous entry point with a pre-parsed [`cli::Cli`].
+pub fn run_blocking_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
     tracing::debug!("moagan::run_blocking: building tokio runtime");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     tracing::trace!("moagan::run_blocking: runtime built; entering block_on");
-    rt.block_on(run())
+    rt.block_on(run_with_cli(cli))
 }
 
 #[cfg(test)]

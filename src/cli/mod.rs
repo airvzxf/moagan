@@ -152,6 +152,33 @@ impl From<ContinueKindArg> for crate::phases::PipelineKind {
     }
 }
 
+/// stderr format selector (per ADR-0002 §B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum LogFormatArg {
+    /// Pick `text` when stderr is a TTY (interactive shell),
+    /// `json` otherwise (CI, redirected, piped). The default.
+    Auto,
+    /// Coloured text. Optimised for humans in a terminal.
+    Text,
+    /// NDJSON, one event per line. Optimised for `jq` /
+    /// `Promtail` / `Loki` / `Datadog` ingestion.
+    Json,
+}
+
+/// stdout event-stream selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum EventFormatArg {
+    /// Emit one NDJSON event per line on stdout when stdout is
+    /// not a TTY; stay silent in interactive mode so the
+    /// terminal output stays uncluttered.
+    Jsonl,
+    /// No stdout events. Use when the run's stdout must remain
+    /// minimal (e.g. wrapping moagan inside another TUI).
+    Off,
+}
+
 /// Top-level CLI.
 #[derive(Debug, Parser)]
 #[command(
@@ -168,16 +195,26 @@ pub struct Cli {
     /// and `import` all share a single override path (D.14.5).
     #[arg(long, global = true, env = "MOAGAN_RUNS_DIR")]
     pub runs_dir: Option<std::path::PathBuf>,
-    /// Write every tracing event to this path as plain text (no
-    /// ANSI codes). Globally available so every subcommand that
-    /// runs work (`discover`, `run`, `audit verify`, `probe`,
-    /// `preflight`, …) can plumb through the same flag. Equivalent
-    /// to the `MOAGAN_RUN_LOGS` env var — when both are set, the
-    /// env var wins (Unix convention). The parent directory is
-    /// created on demand. The default is to log to stderr with
-    /// ANSI colours, matching the historical behaviour.
-    #[arg(long, global = true, value_name = "PATH")]
-    pub logs: Option<std::path::PathBuf>,
+    /// Format of the tracing events emitted to stderr. `auto`
+    /// (default) picks `text` when stderr is a TTY and `json`
+    /// otherwise — the latter produces NDJSON that downstream
+    /// tooling (`jq`, Promtail, Loki, Datadog) can parse without a
+    /// custom adapter. The `--logs <PATH>` flag and `MOAGAN_RUN_LOGS`
+    /// env var that this flag replaces were removed in v0.11; use
+    /// POSIX redirection (`2> path`) to capture stderr instead.
+    /// Per ADR-0002 §B.
+    #[arg(long, global = true, value_enum, default_value_t = LogFormatArg::Auto,
+          env = "MOAGAN_LOG_FORMAT")]
+    pub log_format: LogFormatArg,
+    /// Format of the structured events emitted to stdout. `jsonl`
+    /// (default) emits one NDJSON event per line on stdout whenever
+    /// stdout is not a TTY, so pipelines like
+    /// `moagan … 2> log.jsonl | jq -c 'select(.kind=="llm_call")'`
+    /// work out of the box. `off` silences stdout entirely; `auto`
+    /// is an alias for `jsonl` (the TTY check that gates the
+    /// output is what makes it quiet in interactive mode).
+    #[arg(long, global = true, value_enum, default_value_t = EventFormatArg::Jsonl)]
+    pub event_format: EventFormatArg,
     /// Subcommand.
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -998,6 +1035,7 @@ impl Cmd {
 
 /// Dispatch the parsed CLI and convert domain errors into process exit codes.
 pub async fn dispatch(cli: Cli) -> Result<i32> {
+    use std::io::IsTerminal;
     trace!("dispatch: enter");
     let result = dispatch_inner(cli).await;
     match &result {
@@ -1007,7 +1045,12 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Err(e) => {
             error!(error = %e, exit_code = e.exit_code() as i32, "dispatch: error");
-            eprintln!("error: {e}");
+            // Same rationale as `lib.rs::run_with_cli`: the
+            // structured `tracing::error!` above is enough for
+            // machines; a plain-text line is only useful on a TTY.
+            if std::io::stderr().is_terminal() {
+                eprintln!("error: {e}");
+            }
             Ok(e.exit_code() as i32)
         }
     }
@@ -1018,58 +1061,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
     trace!("dispatch_inner: forbidden-crates guard passed");
-    // Plumb the `--logs` flag and the `MOAGAN_RUN_LOGS` env var
-    // into the lazy file writer registered in
-    // `src/main.rs::init_tracing`. The subscriber was
-    // initialised BEFORE clap parsed (it has to be, because the
-    // dispatcher's first `tracing::info!` runs at the top of
-    // `Config::load`), so the path is delivered via the
-    // process-global `OnceLock` in `src/telemetry/file_log.rs`.
-    //
-    // Precedence: env var beats flag (Unix convention). The env
-    // var is read here manually rather than via clap's `env`
-    // attribute because clap's default is "flag beats env"; we
-    // need the opposite, and a manual read is clearer than a
-    // post-parse override.
-    //
-    // We resolve `MOAGAN_RUN_LOGS` against the post-clap value
-    // so an explicit `--logs PATH` cannot be silently upgraded
-    // by an unrelated env var from the operator's shell.
-    let logs_path: Option<std::path::PathBuf> = std::env::var_os("MOAGAN_RUN_LOGS")
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from)
-        .or(cli.logs.clone());
-    if let Some(path) = logs_path {
-        match crate::telemetry::file_log::set(path.clone()) {
-            Ok(()) => {
-                tracing::debug!(
-                    path = %path.display(),
-                    "tracing file writer enabled"
-                );
-            }
-            Err(crate::telemetry::file_log::SetError::AlreadySet(prev)) => {
-                // Unreachable in practice — we only call `set`
-                // once per process here. Defensive: the dispatcher
-                // is the only writer of the cell.
-                tracing::debug!(
-                    flag_path = %path.display(),
-                    active_path = %prev.display(),
-                    "tracing file writer path already set; flag ignored"
-                );
-            }
-            Err(crate::telemetry::file_log::SetError::ParentDir { path, source }) => {
-                error!(
-                    path = %path.display(),
-                    error = %source,
-                    "could not create parent directory for log file"
-                );
-                return Err(Error::InvalidArgs(format!(
-                    "--logs / MOAGAN_RUN_LOGS: could not create parent directory for {}: {source}",
-                    path.display()
-                )));
-            }
-        }
-    }
+    // v0.11 removed the `--logs <PATH>` flag and `MOAGAN_RUN_LOGS`
+    // env var. Stderr is the single source of tracing events; the
+    // operator captures it with POSIX redirection
+    // (`moagan … 2> log.jsonl`). See ADR-0002 §B.
     let global_home = match cli.runs_dir {
         Some(path) => {
             trace!(path = %path.display(), "dispatch_inner: explicit runs_dir");

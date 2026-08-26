@@ -153,18 +153,41 @@ impl Pipeline {
     }
 
     async fn run_phases(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
+        use crate::telemetry::stdout_events::{self, Event, EventFormat, SCHEMA_VERSION};
+        use tracing::Instrument;
         let resume = self.is_resumed();
+        let emit_stdout = stdout_events::resolve_event_format(EventFormat::Jsonl);
         let mut outputs = Vec::with_capacity(self.phases.len());
         for (i, phase) in self.phases.iter().enumerate() {
             let seq = i as i64;
+            // Phase span: every event emitted by `phase.execute(ctx)`
+            // (LLM calls, discovery iterations, telemetry writes,
+            // sub-phase errors) inherits `phase=... phase_seq=N` as
+            // structured fields. Operators can grep one phase to
+            // follow its entire timeline end-to-end.
+            let phase_span = tracing::info_span!("phase", phase = phase.name(), phase_seq = seq);
+            let phase_started = std::time::Instant::now();
             tracing::debug!(seq, phase = phase.name(), "pipeline: phase start");
             ctx.telemetry
                 .phase(phase.name(), seq, "start", None, resume)?;
+            if emit_stdout {
+                stdout_events::STDOUT_EVENTS.emit(Event::PhaseStart {
+                    schema: SCHEMA_VERSION,
+                    ts: stdout_events::now_rfc3339(),
+                    phase: phase.name(),
+                    seq,
+                });
+            }
             let timeout = ctx.phase_timeout();
             let result = if timeout.is_zero() {
-                phase.execute(ctx).await
+                phase.execute(ctx).instrument(phase_span.clone()).await
             } else {
-                match tokio::time::timeout(timeout, phase.execute(ctx)).await {
+                match tokio::time::timeout(
+                    timeout,
+                    phase.execute(ctx).instrument(phase_span.clone()),
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(_) => {
                         tracing::error!(
@@ -187,11 +210,22 @@ impl Pipeline {
                     }
                 }
             };
+            let elapsed_ms = phase_started.elapsed().as_millis() as u64;
             match &result {
                 Ok(_) => {
                     tracing::debug!(seq, phase = phase.name(), "pipeline: phase end");
                     ctx.telemetry
                         .phase(phase.name(), seq, "end", None, resume)?;
+                    if emit_stdout {
+                        stdout_events::STDOUT_EVENTS.emit(Event::PhaseEnd {
+                            schema: SCHEMA_VERSION,
+                            ts: stdout_events::now_rfc3339(),
+                            phase: phase.name(),
+                            seq,
+                            elapsed_ms,
+                            status: "ok",
+                        });
+                    }
                 }
                 Err(e) => {
                     tracing::error!(
@@ -207,6 +241,21 @@ impl Pipeline {
                         Some(&e.to_string()),
                         resume,
                     )?;
+                    if emit_stdout {
+                        stdout_events::STDOUT_EVENTS.emit(Event::PhaseError {
+                            schema: SCHEMA_VERSION,
+                            ts: stdout_events::now_rfc3339(),
+                            phase: phase.name(),
+                            seq,
+                            error: &e.to_string(),
+                            // The pipeline runner picks the real
+                            // exit code after this; the placeholder
+                            // `0` lets operators tell the schema
+                            // apart but is replaced by the
+                            // run-end event.
+                            exit_code: 0,
+                        });
+                    }
                 }
             }
             outputs.push(result?);

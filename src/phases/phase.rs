@@ -1443,6 +1443,31 @@ impl RunContext {
                         stage = "telemetry.call.completed",
                         "LLM call stage"
                     );
+                    // Stdout event mirror: NDJSON for pipeline
+                    // consumers (`jq`, dashboards). Auto-silenced
+                    // when stdout is a TTY. Errors from the
+                    // emitter are swallowed (the run does not
+                    // fail because a downstream `head |` closed).
+                    if crate::telemetry::stdout_events::resolve_event_format(
+                        crate::telemetry::stdout_events::EventFormat::Jsonl,
+                    ) {
+                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                            crate::telemetry::stdout_events::Event::LlmCall {
+                                schema: crate::telemetry::stdout_events::SCHEMA_VERSION,
+                                ts: crate::telemetry::stdout_events::now_rfc3339(),
+                                call_id: &call_id,
+                                phase: phase_name,
+                                role: phase_name,
+                                provider: self.default_provider.as_str(),
+                                model: self.default_model.as_str(),
+                                elapsed_ms: provider_started.elapsed().as_millis() as u64,
+                                ok: true,
+                                input_tokens: response.usage.input_tokens as u32,
+                                output_tokens: response.usage.output_tokens as u32,
+                                retry_count,
+                            },
+                        );
+                    }
                     // Wire-the-gates plan, PR-6 follow-up: write
                     // the per-call USD estimate to the SQLite
                     // index so `moagan telemetry cost` returns
