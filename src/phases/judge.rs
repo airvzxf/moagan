@@ -524,6 +524,27 @@ impl Phase for JudgePhase {
             let out_path: PathBuf = evaluations_dir.join(format!("{proposal_id}.json"));
             write_json(&out_path, &agg)?;
             paths.push(out_path);
+            // c2: `judge_verdict` decision event. All-only level:
+            // the verdict fires once per proposal × panel quorum,
+            // which is too noisy for the default `summary` verbosity
+            // (a 3-judge standard run produces N × 3 events). The
+            // score is the post-adversary aggregated score; the
+            // pass threshold is `disagreement_threshold` reused as
+            // a "did the panel agree enough?" proxy. `passed` is
+            // `true` when no adversary delta was applied (the panel
+            // landed within threshold).
+            let proposal_id_for_event = proposal_id.clone();
+            let agg_score = agg.score;
+            let passed = agg.adversary_delta.abs() < f32::EPSILON;
+            let threshold = self.disagreement_threshold;
+            crate::telemetry::stdout_events::emit_decision("judge_verdict", || {
+                serde_json::json!({
+                    "proposal_id": proposal_id_for_event,
+                    "score": agg_score,
+                    "passed": passed,
+                    "threshold": threshold,
+                })
+            });
         }
         if !adversary_paths.is_empty() {
             tracing::info!(

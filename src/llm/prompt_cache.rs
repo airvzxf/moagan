@@ -39,16 +39,42 @@ impl PromptCache {
     /// it points at is a cache miss (e.g. evicted, expired,
     /// never stored).
     pub fn lookup_by_id(&self, prompt_id: &str) -> Option<CacheEntry> {
-        let key = self.by_id.get(prompt_id)?;
-        let hit = self.cache.lookup(key).ok().flatten();
+        // c2: `cache_miss` decision event (All-only). Emitted at
+        // the single exit point so the nine curated emit sites
+        // stay uniform — one site per `decision_kind`, not one
+        // per miss path. The `cache_key` field is the
+        // canonical content-hash key when the `prompt_id` was
+        // registered, or the `prompt_id` itself when it wasn't
+        // (the only discriminator the caller has at that layer);
+        // `reason` discriminates the two miss paths so a
+        // consumer can split them without re-deriving.
+        let key = self.by_id.get(prompt_id);
+        let hit = match key {
+            Some(k) => self.cache.lookup(k).ok().flatten(),
+            None => None,
+        };
         if hit.is_some() {
-            tracing::trace!(prompt_id, key, "PromptCache: lookup hit");
+            tracing::trace!(prompt_id, key = ?key, "PromptCache: lookup hit");
         } else {
+            let cache_key_value: String = match &key {
+                Some(k) => k.to_string(),
+                None => prompt_id.to_owned(),
+            };
+            let reason: &str = match &key {
+                Some(_) => "canonical_key_absent",
+                None => "prompt_id_not_registered",
+            };
             tracing::debug!(
                 prompt_id,
-                key,
-                "PromptCache: lookup miss (canonical key absent)"
+                key = ?key,
+                "PromptCache: lookup miss ({reason})"
             );
+            crate::telemetry::stdout_events::emit_decision("cache_miss", || {
+                serde_json::json!({
+                    "cache_key": cache_key_value,
+                    "reason": reason,
+                })
+            });
         }
         hit
     }

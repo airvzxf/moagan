@@ -850,8 +850,11 @@ fn runs_dir_dispatch_mirrors_into_moagan_home_env() -> Result<()> {
     // proof that the env var was set: if the global flag had been
     // ignored, dispatch would have tried the default home and
     // `meta.sqlite` would not exist under our tmpdir.
-    let rc = pollster::block_on(moagan::cli::dispatch(cli))?;
-    assert_eq!(rc, 0, "inspect must exit 0 on an empty home");
+    //
+    // `cli::dispatch` now returns `Result<DispatchResult>` so we
+    // extract the exit code from `dispatch_result.exit_code`.
+    let dr = pollster::block_on(moagan::cli::dispatch(cli))?;
+    assert_eq!(dr.exit_code, 0, "inspect must exit 0 on an empty home");
     let db_path = home.path().join("meta.sqlite");
     assert!(
         db_path.is_file(),

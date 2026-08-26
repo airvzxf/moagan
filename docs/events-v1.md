@@ -20,6 +20,50 @@ MOAGAN_EVENT_FORMAT=off moagan …   # env var
 The same `MOAGAN_EVENT_FORMAT` env var is honoured so the operator can
 configure once in their shell rc.
 
+## Decision-event verbosity (`--decision-format`)
+
+Decision events are emitted independently of the rest of the bus and
+have their own verbosity knob. The `Decision` kind is curated: only
+nine `decision_kind` strings are produced, and each is classified as
+either **Summary** (always emitted at the default verbosity) or
+**AllOnly** (suppressed unless `--decision-format=all`). The split
+deliberately keeps the default `summary` mode quiet; the high-volume
+kinds (`cache_hit`, `cache_miss`, `judge_verdict`,
+`category_assigned`) would otherwise produce dozens of events per run.
+
+```bash
+moagan … --decision-format summary   # default; curated set only
+moagan … --decision-format all      # everything (dashboards, audits)
+moagan … --decision-format off      # silence every Decision event
+MOAGAN_DECISION_FORMAT=all moagan …   # env var (same precedence as flag)
+```
+
+Resolution order (highest first):
+
+1. `MOAGAN_DECISION_FORMAT` env var (`off` / `summary` / `all`;
+   unknown values fall back to `summary`).
+2. Explicit `--decision-format` flag.
+3. Default (`summary`).
+
+The classification table is internal to
+`src/telemetry/stdout_events.rs::classification`. New `decision_kind`
+strings added by future commits MUST update the table; unknown
+kinds default to Summary so every emit site is visible until classified.
+
+### Curated `decision_kind` strings
+
+| `decision_kind` | Emit site | Level | Payload |
+|---|---|---|---|
+| `winner_picked` | `src/phases/rank.rs` | Summary | `{proposal_id, score, runner_up_id?, runner_up_score?}` |
+| `low_confidence_winner` | `src/phases/rank.rs` | Summary | `{top_score, threshold, gap}` |
+| `cluster_skipped` | `src/phases/cluster_proposals.rs` | Summary | `{reason, size, threshold}` |
+| `category_assigned` | `src/phases/discover_summary.rs` | AllOnly | `{sketch_id, category, confidence, sources}` |
+| `repair_applied` | `src/phases/repair.rs` | Summary | `{proposal_id, repair_kind, attempts}` |
+| `judge_verdict` | `src/phases/judge.rs` | AllOnly | `{proposal_id, score, passed, threshold}` |
+| `portfolio_finalized` | `src/phases/deliver.rs` | Summary | `{proposal_id, ranking_strategy, alternatives}` |
+| `cache_hit` | `src/llm/provider.rs` | AllOnly | `{cache_key, role, model}` |
+| `cache_miss` | `src/llm/prompt_cache.rs` | AllOnly | `{cache_key, prompt_id?, reason}` |
+
 ## Wire format
 
 Each event is a single JSON object terminated by `\n` (LF). There is
@@ -58,8 +102,17 @@ versioned independently of `moagan`'s own version. **Additive changes**
 | `llm_call`     | On successful `provider.send` (non-probe).     | `call_id`, `phase`, `role`, `provider`, `model`, `elapsed_ms`, `ok`, `input_tokens`, `output_tokens`, `retry_count` |
 | `discovery_iteration` | Per sketch loop iteration in discovery. | `n`, `total`, `cell_dim`, `cell_facet`, `temperature`, `replica`, `sketch_index`, `outcome` |
 | `probe`        | Per auto-probe call (temperature / max_tokens). | `probe_kind`, `candidate`, `iteration`, `provider`, `model`, `outcome: "accepted"\|"rejected"\|"indeterminate"` |
+
+> **v0.11.1**: `iteration` is now populated for `probe_kind=temperature`
+> as well as `probe_kind=max_tokens`. The temperature probe tags every
+> emit with the sequential index of the call within the parallel
+> fan-out (0, 1, 2, …) so operators can correlate the NDJSON timeline
+> with the per-batch `[t=0.0, t=0.1, t=0.2]` ordering — the
+> `max_tokens` probe had already been emitting `iteration: 0` since
+> v0.11.0, and the parity closes the gap that the temperature
+> auto-probe emitted no `iteration` field at all.
 | `warning`      | When `Telemetry::warn` is called.               | `code`, `level`, `phase?`, `details` |
-| `decision`     | Reserved for explicit decision events (curated by the dispatcher). | `decision_kind`, `payload` |
+| `decision`     | At curated decision points throughout the pipeline (see `--decision-format` below). Verbosity controlled by `--decision-format`. | `decision_kind`, `payload` |
 
 The list grows over time. Consumers SHOULD ignore unknown `kind`s
 (forwards compatibility) and unknown fields (per the JSON-LD

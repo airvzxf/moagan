@@ -64,6 +64,37 @@ impl Phase for DeliverPhase {
             "deliver: artefacts loaded"
         );
 
+        // c2: `portfolio_finalized` decision event. Summary level.
+        // Emitted once per run, immediately after the ranking is
+        // resolved and the deliver LLM call has been prepared —
+        // operators who watch the bus see the winner locked in
+        // before the deliver-side text generation finishes.
+        // `ranking_strategy` is the
+        // `Config::selection_plan.kind` label (`top_n` /
+        // `diverse_n` / `outlier_n`); `alternatives` is the top-N
+        // representative ids excluding the winner so a downstream
+        // consumer can reconstruct the portfolio without
+        // re-reading `ranking.json`.
+        let winner_id = ranking.winner.clone();
+        let alternatives: Vec<String> = ranking
+            .representatives
+            .iter()
+            .map(|r| r.id.clone())
+            .filter(|id| id != &winner_id)
+            .collect();
+        let ranking_strategy = match ctx.config.selection_plan.kind {
+            crate::phases::cardinality::SelectionKind::TopN => "top_n",
+            crate::phases::cardinality::SelectionKind::DiverseN => "diverse_n",
+            crate::phases::cardinality::SelectionKind::OutlierN => "outlier_n",
+        };
+        crate::telemetry::stdout_events::emit_decision("portfolio_finalized", || {
+            serde_json::json!({
+                "proposal_id": winner_id,
+                "ranking_strategy": ranking_strategy,
+                "alternatives": alternatives,
+            })
+        });
+
         let user = serde_json::to_string(&serde_json::json!({
             "winner": ranking.winner,
             "proposal": winner_proposal,

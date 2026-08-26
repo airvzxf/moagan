@@ -214,6 +214,20 @@ impl Phase for ClusterProposalsPhase {
         }
         if paths.is_empty() {
             tracing::error!("cluster_proposals: zero clusters produced");
+            // c2: `cluster_skipped` decision event. Summary level —
+            // emitted when the clusterer produced zero clusters
+            // despite having items (the `items.len() < 2` early
+            // return above is NOT a skip, it is a "nothing to
+            // merge" branch). Operators who see this event can
+            // surface the reason via `reason: "empty_clusters"` and
+            // inspect the `size` / `threshold` payload.
+            crate::telemetry::stdout_events::emit_decision("cluster_skipped", || {
+                serde_json::json!({
+                    "reason": "empty_clusters",
+                    "size": items.len(),
+                    "threshold": self.threshold,
+                })
+            });
             return Err(Error::InvalidState(
                 "cluster_proposals produced zero clusters".into(),
             ));

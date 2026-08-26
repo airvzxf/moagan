@@ -77,6 +77,141 @@ pub fn resolve_event_format(explicit: EventFormat) -> bool {
     }
 }
 
+/// Decision-event verbosity. Decoupled from [`EventFormat`] so the
+/// `Decision` event stream can be silenced (`Off`) or saturated
+/// (`All`) independently of the rest of the bus.
+///
+/// Three values, three audiences:
+///
+/// - `Summary` (default) — only the curated low-volume decisions
+///   that summarise a run in a handful of lines (`winner_picked`,
+///   `low_confidence_winner`, `cluster_skipped`, `repair_applied`,
+///   `portfolio_finalized`). Operators get a tight summary by
+///   default; the high-volume decisions are opt-in.
+/// - `All` — every decision, including the per-LLM-call cache
+///   observability (`cache_hit` / `cache_miss`), per-proposal judge
+///   verdicts (`judge_verdict`), and per-sketch category assignments
+///   (`category_assigned`). Volatile; intended for dashboards and
+///   audits, NOT for run-of-the-mill console output.
+/// - `Off` — silence every decision event. Use when the caller only
+///   wants phase / llm_call events and is happy to drop the audit
+///   trail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecisionFormat {
+    /// Silence every `Decision` event.
+    Off,
+    /// Emit only the curated, low-volume decisions (default).
+    Summary,
+    /// Emit every decision, including per-LLM-call cache events.
+    All,
+}
+
+/// Resolve the active [`DecisionFormat`]. Honours
+/// `MOAGAN_DECISION_FORMAT` if set; falls through to the explicit
+/// flag value otherwise. Mirrors [`resolve_event_format`]'s
+/// precedence: env var > flag > default. Symmetry with
+/// `resolve_event_format` keeps the operator mental model
+/// consistent.
+pub fn resolve_decision_format(explicit: DecisionFormat) -> DecisionFormat {
+    if let Ok(s) = std::env::var("MOAGAN_DECISION_FORMAT") {
+        return match s.to_ascii_lowercase().as_str() {
+            "off" | "none" | "disable" => DecisionFormat::Off,
+            "all" | "verbose" | "trace" => DecisionFormat::All,
+            // Default to Summary for anything unrecognised: the
+            // Summary level is the safe default for unknown / typo
+            // values; an operator who actually wanted `All` will
+            // notice the missing cache_hit events and correct.
+            _ => DecisionFormat::Summary,
+        };
+    }
+    explicit
+}
+
+/// Required emit-level for each [`decision_kind`] string. Internal
+/// to this module — the public surface is the
+/// `(DecisionFormat, &str) -> bool` helper [`should_emit_decision`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecisionLevel {
+    /// Visible in [`DecisionFormat::Summary`] and `All`. Default
+    /// for low-volume, run-summary decisions.
+    Summary,
+    /// Only visible in [`DecisionFormat::All`]. Default for
+    /// high-volume events (cache, judge, category assignment) that
+    /// would otherwise drown stdout under the default verbosity.
+    AllOnly,
+}
+
+/// Map every curated `decision_kind` string to its required emit
+/// level. New `decision_kind`s added by future commits MUST update
+/// this table; an unknown kind defaults to `Summary` (the safe
+/// side — every kind is visible until classified).
+fn classification(kind: &str) -> DecisionLevel {
+    match kind {
+        // Low-volume, run-summary events — always visible.
+        "winner_picked"
+        | "low_confidence_winner"
+        | "cluster_skipped"
+        | "repair_applied"
+        | "portfolio_finalized" => DecisionLevel::Summary,
+        // High-volume events — opt-in via --decision-format=all.
+        "category_assigned" | "judge_verdict" | "cache_hit" | "cache_miss" => {
+            DecisionLevel::AllOnly
+        }
+        // Unknown kinds default to Summary: every kind is visible
+        // until the table is updated.
+        _ => DecisionLevel::Summary,
+    }
+}
+
+/// Should the emitter emit a [`Event::Decision`] for the given
+/// `kind` under the active [`DecisionFormat`]? Pure function; no
+/// env-var lookups, no I/O. Call sites should prefer
+/// [`emit_decision`] which wraps this helper plus the payload
+/// construction.
+pub fn should_emit_decision(level: DecisionFormat, kind: &str) -> bool {
+    match (level, classification(kind)) {
+        (DecisionFormat::Off, _) => false,
+        (DecisionFormat::Summary, DecisionLevel::Summary) => true,
+        (DecisionFormat::Summary, DecisionLevel::AllOnly) => false,
+        (DecisionFormat::All, _) => true,
+    }
+}
+
+/// Emit one [`Event::Decision`] line if [`should_emit_decision`]
+/// approves the active level for `kind`. The `payload_fn` is
+/// lazy-evaluated so callers don't pay the JSON construction cost
+/// when the level is `Off` (the common case for the high-volume
+/// `AllOnly` kinds under the default `Summary` verbosity).
+///
+/// Call sites look like:
+///
+/// ```ignore
+/// crate::telemetry::stdout_events::emit_decision("winner_picked", || {
+///     serde_json::json!({
+///         "proposal_id": winner_id,
+///         "score": top_score,
+///     })
+/// });
+/// ```
+///
+/// The helper hides the `should_emit_decision` + `STDOUT_EVENTS.emit`
+/// ceremony so the nine emit sites stay compact and uniform.
+pub fn emit_decision<F>(kind: &'static str, payload_fn: F)
+where
+    F: FnOnce() -> serde_json::Value,
+{
+    let level = resolve_decision_format(DecisionFormat::Summary);
+    if !should_emit_decision(level, kind) {
+        return;
+    }
+    STDOUT_EVENTS.emit(Event::Decision {
+        schema: SCHEMA_VERSION,
+        ts: now_rfc3339(),
+        decision_kind: kind,
+        payload: payload_fn(),
+    });
+}
+
 /// Typed domain event. Serialised as NDJSON; each variant gets its
 /// own `kind` discriminator via `#[serde(tag = "kind")]`.
 ///
@@ -304,5 +439,182 @@ mod tests {
         assert!(s.contains("\"provider\":\"minimax\""));
         assert!(s.contains("\"elapsed_ms\":1234"));
         assert!(s.contains("\"ok\":true"));
+    }
+
+    // -- Decision format helpers --------------------------------------
+
+    /// `Off` silences every kind, including the curated Summary
+    /// ones. The env-var precedence path is exercised separately
+    /// (this test pins the in-process resolution).
+    #[test]
+    fn should_emit_decision_off_silences_every_kind() {
+        assert!(!should_emit_decision(DecisionFormat::Off, "winner_picked"));
+        assert!(!should_emit_decision(
+            DecisionFormat::Off,
+            "portfolio_finalized"
+        ));
+        assert!(!should_emit_decision(DecisionFormat::Off, "cache_hit"));
+        assert!(!should_emit_decision(DecisionFormat::Off, "cache_miss"));
+        assert!(!should_emit_decision(DecisionFormat::Off, "judge_verdict"));
+        assert!(!should_emit_decision(
+            DecisionFormat::Off,
+            "category_assigned"
+        ));
+    }
+
+    /// `Summary` admits the five curated low-volume kinds and
+    /// suppresses the four AllOnly ones. Pins the curated split
+    /// documented in `docs/events-v1.md`.
+    #[test]
+    fn should_emit_decision_summary_classification() {
+        // Summary-level kinds are visible.
+        for kind in [
+            "winner_picked",
+            "low_confidence_winner",
+            "cluster_skipped",
+            "repair_applied",
+            "portfolio_finalized",
+        ] {
+            assert!(
+                should_emit_decision(DecisionFormat::Summary, kind),
+                "kind {kind:?} must be visible under Summary"
+            );
+        }
+        // AllOnly kinds are hidden under Summary.
+        for kind in [
+            "category_assigned",
+            "judge_verdict",
+            "cache_hit",
+            "cache_miss",
+        ] {
+            assert!(
+                !should_emit_decision(DecisionFormat::Summary, kind),
+                "kind {kind:?} must be hidden under Summary"
+            );
+        }
+    }
+
+    /// `All` admits every classified kind AND every unknown kind
+    /// (the safe default for new emit sites the table hasn't been
+    /// updated for yet).
+    #[test]
+    fn should_emit_decision_all_admits_every_kind() {
+        for kind in [
+            "winner_picked",
+            "portfolio_finalized",
+            "cache_hit",
+            "cache_miss",
+            "judge_verdict",
+            "category_assigned",
+            "future_kind_not_yet_classified",
+        ] {
+            assert!(
+                should_emit_decision(DecisionFormat::All, kind),
+                "kind {kind:?} must be visible under All"
+            );
+        }
+    }
+
+    /// Unknown kinds default to Summary-safe (visible under Summary
+    /// and All; hidden under Off). Pins the contract for future
+    /// emit sites that pre-date an update to the classification
+    /// table.
+    #[test]
+    fn should_emit_decision_unknown_kind_defaults_to_summary_safe() {
+        assert!(should_emit_decision(
+            DecisionFormat::Summary,
+            "future_kind_v0"
+        ));
+        assert!(should_emit_decision(DecisionFormat::All, "future_kind_v0"));
+        assert!(!should_emit_decision(DecisionFormat::Off, "future_kind_v0"));
+    }
+
+    /// Env-var precedence: `MOAGAN_DECISION_FORMAT=off` wins over
+    /// the explicit `All` flag (and over every other explicit
+    /// value). Symmetric with `MOAGAN_EVENT_FORMAT` precedence.
+    #[test]
+    fn resolve_decision_format_env_var_wins_over_explicit() {
+        // Save and restore to keep the test hermetic.
+        let prev = std::env::var("MOAGAN_DECISION_FORMAT").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_DECISION_FORMAT", "off");
+        }
+        let resolved = resolve_decision_format(DecisionFormat::All);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_DECISION_FORMAT", v),
+                None => std::env::remove_var("MOAGAN_DECISION_FORMAT"),
+            }
+        }
+        assert_eq!(
+            resolved,
+            DecisionFormat::Off,
+            "MOAGAN_DECISION_FORMAT=off must override explicit All"
+        );
+    }
+
+    /// Env-var precedence: `MOAGAN_DECISION_FORMAT=all` wins over
+    /// the explicit `Summary` flag.
+    #[test]
+    fn resolve_decision_format_env_var_all_wins_over_summary() {
+        let prev = std::env::var("MOAGAN_DECISION_FORMAT").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_DECISION_FORMAT", "all");
+        }
+        let resolved = resolve_decision_format(DecisionFormat::Summary);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_DECISION_FORMAT", v),
+                None => std::env::remove_var("MOAGAN_DECISION_FORMAT"),
+            }
+        }
+        assert_eq!(
+            resolved,
+            DecisionFormat::All,
+            "MOAGAN_DECISION_FORMAT=all must override explicit Summary"
+        );
+    }
+
+    /// Unrecognised env values default to Summary (the safe
+    /// default for typos / unfamiliar names).
+    #[test]
+    fn resolve_decision_format_unknown_env_defaults_to_summary() {
+        let prev = std::env::var("MOAGAN_DECISION_FORMAT").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_DECISION_FORMAT", "verbose-not-real");
+        }
+        let resolved = resolve_decision_format(DecisionFormat::Off);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_DECISION_FORMAT", v),
+                None => std::env::remove_var("MOAGAN_DECISION_FORMAT"),
+            }
+        }
+        assert_eq!(
+            resolved,
+            DecisionFormat::Summary,
+            "unrecognised env value must default to Summary"
+        );
+    }
+
+    /// The `Decision` event serialises with `decision_kind` and
+    /// `payload` exactly as the wire schema promises.
+    #[test]
+    fn decision_event_serializes_with_payload() {
+        let ev = Event::Decision {
+            schema: SCHEMA_VERSION,
+            ts: "2026-01-01T00:00:00.000Z".to_owned(),
+            decision_kind: "winner_picked",
+            payload: serde_json::json!({
+                "proposal_id": "p_000",
+                "score": 8.4,
+            }),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["kind"], "decision");
+        assert_eq!(json["decision_kind"], "winner_picked");
+        assert_eq!(json["payload"]["proposal_id"], "p_000");
+        assert!((json["payload"]["score"].as_f64().unwrap() - 8.4).abs() < 1e-9);
+        assert_eq!(json["schema"], 1);
     }
 }

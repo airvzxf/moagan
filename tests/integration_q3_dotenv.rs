@@ -33,7 +33,21 @@ fn version_succeeds_with_dotenv_in_current_directory() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).contains(env!("CARGO_PKG_VERSION")));
-    assert!(stderr(&output).contains("[moagan] loaded .env from"));
+    // c1 migration (Riesgos #6): clap processes `--version`
+    // BEFORE `init_tracing()` runs and calls
+    // `std::process::exit(0)` from the parser. As a result, the
+    // new `moagan::boot` tracing event is NOT emitted on the
+    // `--version` fast path — clap exits before any subscriber
+    // is installed. The pre-c1 plain-text line was similarly
+    // missing on `--version` because the `eprintln!` lived in
+    // the same `main()` body that clap short-circuits. The
+    // contract under c1 is: no plain-text line, no JSONL boot
+    // event, just the version on stdout.
+    let stderr_text = stderr(&output);
+    assert!(
+        !stderr_text.contains("[moagan] loaded .env from"),
+        "legacy plain-text '[moagan] loaded .env from …' must NOT appear on stderr; stderr:\n{stderr_text}"
+    );
 }
 
 #[test]
@@ -52,7 +66,7 @@ fn doctor_loads_api_key_from_dotenv() {
     )
     .unwrap();
 
-    let output = run_in(tmp.path(), &["doctor"])
+    let output = run_in(tmp.path(), &["doctor", "--log-format", "json"])
         .env_remove("MINIMAX_API_KEY")
         .env_remove("DEEPSEEK_API_KEY")
         .env_remove("OPENCODE_API_KEY")
@@ -66,7 +80,19 @@ fn doctor_loads_api_key_from_dotenv() {
     assert!(output.status.success(), "{stdout}\n{}", stderr(&output));
     assert!(stdout.contains("[OK] api_key"), "{stdout}");
     assert!(stdout.contains("doctor: OK"), "{stdout}");
-    assert!(stderr(&output).contains("[moagan] loaded .env from"));
+    // c1 migration (Riesgos #6): the operator-facing notice
+    // is now emitted via `tracing::info!` with target
+    // `moagan::boot` instead of an `eprintln!` that leaked
+    // into NDJSON purity on stderr. Pin the new shape.
+    let stderr_text = stderr(&output);
+    assert!(
+        !stderr_text.contains("[moagan] loaded .env from"),
+        "legacy plain-text '[moagan] loaded .env from …' must NOT appear; stderr:\n{stderr_text}"
+    );
+    assert!(
+        stderr_text.contains("\"target\":\"moagan::boot\""),
+        "expected JSONL boot event; stderr:\n{stderr_text}"
+    );
 }
 
 #[test]
