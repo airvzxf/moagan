@@ -11,12 +11,18 @@
 //! invocation rooted at a tmpdir so the cross-run LLM cache is
 //! guaranteed cold. The test asserts:
 //!
-//! 1. The run id advertised on stdout is present (the CLI succeeded).
+//! 1. The CLI exits successfully (`<runs-dir>/.runs/<id>/` exists).
 //! 2. `<runs-dir>/.runs/<id>/dashboard.html` exists.
 //! 3. The on-disk file matches the `DASHBOARD_HTML` constant byte-for-byte.
 //! 4. The HTML contains the `moagan dashboard` sentinel so a regression
 //!    that drops the file in favour of an empty placeholder still trips
 //!    the assertion.
+//!
+//! Note: under a non-TTY stdout the `moagan run <id> …` banner and
+//! the `run id: <uuid>` footer are deliberately suppressed so stdout
+//! stays pure NDJSON for `moagan … | jq` consumers. The run id is
+//! therefore resolved by enumerating `<runs-dir>/.runs/` instead of
+//! parsing stdout.
 
 use std::process::Command;
 
@@ -71,13 +77,31 @@ fn mock_run_writes_dashboard_html() {
         out.status
     );
 
-    let run_id = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("run id: "))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| panic!("run id not found in stdout:\nstdout={stdout}\nstderr={stderr}"))
-        .to_string();
+    // Resolve the run id from disk instead of from stdout: under
+    // a non-TTY stdout (which `Command::output()` captures), the
+    // dispatcher suppresses both the `moagan run <id> …` banner
+    // and the `run id: <uuid>` footer so stdout stays pure NDJSON
+    // for `moagan … | jq`. The only stateful on-disk artefact of
+    // the run is `<runs-dir>/.runs/<uuid>/manifest.json`, so we
+    // enumerate the `.runs/` subdir and pick the one entry.
+    let runs_root = tmp.path().join(".runs");
+    let mut entries: Vec<_> = std::fs::read_dir(&runs_root)
+        .unwrap_or_else(|e| panic!("read_dir({}): {e}", runs_root.display()))
+        .filter_map(|res| res.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one run under {runs_root:?}, found {} (stdout={stdout}\nstderr={stderr})",
+        entries.len()
+    );
+    let run_id = entries
+        .pop()
+        .expect("checked above")
+        .file_name()
+        .into_string()
+        .expect("run id is utf-8");
     assert_eq!(run_id.len(), 36, "expected hyphenated uuid, got {run_id}");
 
     let dashboard_path = tmp

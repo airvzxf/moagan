@@ -1076,6 +1076,7 @@ impl RunContext {
         started_unix: i64,
         retry_count: u32,
     ) -> Result<Response> {
+        use tracing::Instrument;
         // Apply the same per-provider cap that the provider will apply
         // inside `send()`, so the body_sha256 matches the body that
         // actually leaves the process. Cloned here because `req` is
@@ -1258,19 +1259,28 @@ impl RunContext {
         }
         let call_id = uuid::Uuid::now_v7().to_string();
         let provider_started = std::time::Instant::now();
-        tracing::debug!(
-            call_id = %call_id,
-            phase = req.role.as_str(),
-            stage = "provider.send.started",
-            retry_count,
-            "LLM call stage"
-        );
         // PR-correlation: open a span that carries `call_id` so every
-        // event emitted by `provider.send` (and the per-provider
+        // event emitted by this LLM call inherits the id: events
+        // emitted by `provider.send` (the per-provider
         // `BreakeredProvider dispatched via ...`, rate-limiter wait,
-        // HTTP retries, etc.) inherits the id. Operators can grep
-        // `call_id=<uuid>` and stitch the provider's wire-side
-        // timeline back to the dispatch site.
+        // HTTP retries), the rejection-cascade loop's debug/info/warn
+        // events, the post-call `cache.store.*` events, the
+        // `telemetry.call.*` events, the `cost.record.error` warn,
+        // and the final stdout `Event::LlmCall` mirror. Operators can
+        // grep `call_id=<uuid>` and stitch the provider's wire-side
+        // timeline back to the dispatch site and every bookkeeping
+        // step that records it.
+        //
+        // Implementation note: `let _enter = call_span.enter()` would
+        // only enter the span on the current thread, and `.await` on
+        // `provider.send` may resume on a different worker — dropping
+        // the span context on resume (and on every rejection-cascade
+        // retry's `.await`). `Instrument::instrument` enters the span
+        // on every poll regardless of thread, so events emitted
+        // inside the future — including across `.await` points and
+        // the cascade's `provider.send().await` calls — appear in the
+        // JSONL with `llm_call{call_id, provider, model, role}` in
+        // their `spans[]` array.
         let call_span = tracing::info_span!(
             "llm_call",
             call_id = %call_id,
@@ -1279,279 +1289,301 @@ impl RunContext {
             role = %req.role.as_str(),
             stage = tracing::field::Empty,
         );
-        let mut result = {
-            let _enter = call_span.enter();
-            provider.send(&hash_input).await
-        };
-        // Self-healing cascade retry: when the upstream rejects
-        // wire fields with HTTP 4xx and the body carries one or
-        // more rejection signatures, omit every detected name and
-        // retry. The legacy single-shot loop only recorded the
-        // first match — a single response that lists
-        // `"Unknown parameters: 'temperature', 'max_tokens',
-        // 'top_p'"` (the canonical `gpt-5.6-luna` cascade) lost
-        // the other two names and the next round-trip failed
-        // again with the same body, propagating the error to the
-        // caller. The bounded `while` below closes the gap by
-        // consulting [`detect_all_rejections`] once per iteration
-        // and persisting every name in one pass, capped at
-        // [`PARAM_NAMES`] entries so an upstream that loops the
-        // same response body can never starve the dispatcher.
-        let max_rejection_retries = PARAM_NAMES.len();
-        let mut rejection_attempts = 0;
-        while rejection_attempts < max_rejection_retries {
-            // Pull the HTTP status out of the latest result; abort
-            // the cascade on any non-4xx or transport-layer
-            // failure (the upstream either succeeded or hit a
-            // transient error the breaker/governor handles
-            // separately — neither is in scope for this loop).
-            let status = match result.as_ref().err().and_then(|e| e.http_status()) {
-                Some(s) if (400..500).contains(&s) => s,
-                _ => break,
-            };
-            let err = result.as_ref().expect_err("status set implies Err");
-            let body = parse_provider_error_body(err, status);
-            let detected = detect_all_rejections(status, body.as_ref());
-            if detected.is_empty() {
-                // The 4xx is something other than a param
-                // rejection (auth, model-not-found, generic
-                // upstream error). Surface it to the caller
-                // untouched.
-                break;
-            }
-            for detected_param in &detected {
-                tracing::info!(
-                    provider = %self.default_provider,
-                    model = %self.default_model,
-                    role = %req.role.as_str(),
-                    detected_param = %detected_param,
-                    "auto-detected param rejection; retrying without it"
-                );
-                if let Some(table) = self.param_rejections.as_ref()
-                    && let Err(rec_err) = table.record(
-                        self.default_provider.as_str(),
-                        self.default_model.as_str(),
-                        detected_param,
-                    )
-                {
-                    tracing::warn!(
-                        error = %rec_err,
-                        "failed to persist param rejection; in-memory entry still kept"
-                    );
+        // The instrumented future covers the entire dispatch sequence:
+        // the `provider.send.started` debug event, the initial
+        // `provider.send().await`, the rejection cascade (including
+        // its `provider.send().await` retries and per-iteration
+        // `auto-detected param rejection` info events), the
+        // `provider.send.completed` debug event, the post-call cache
+        // store, telemetry write, cost record, the `Event::LlmCall`
+        // emit, and the response-truncated / response-empty
+        // telemetry. Events emitted before this point — the
+        // param-rejection omit, the audit_unknown_fields WARN, the
+        // silent-acceptance audit — are dispatch-prep bookkeeping and
+        // intentionally outside the span. Events emitted after this
+        // point — the orchestrator's downstream retry / ranking —
+        // are also outside.
+        async {
+            tracing::debug!(
+                call_id = %call_id,
+                phase = req.role.as_str(),
+                stage = "provider.send.started",
+                retry_count,
+                "LLM call stage"
+            );
+            let mut result = provider.send(&hash_input).await;
+            // Self-healing cascade retry: when the upstream rejects
+            // wire fields with HTTP 4xx and the body carries one or
+            // more rejection signatures, omit every detected name and
+            // retry. The legacy single-shot loop only recorded the
+            // first match — a single response that lists
+            // `"Unknown parameters: 'temperature', 'max_tokens',
+            // 'top_p'"` (the canonical `gpt-5.6-luna` cascade) lost
+            // the other two names and the next round-trip failed
+            // again with the same body, propagating the error to the
+            // caller. The bounded `while` below closes the gap by
+            // consulting [`detect_all_rejections`] once per iteration
+            // and persisting every name in one pass, capped at
+            // [`PARAM_NAMES`] entries so an upstream that loops the
+            // same response body can never starve the dispatcher.
+            let max_rejection_retries = PARAM_NAMES.len();
+            let mut rejection_attempts = 0;
+            while rejection_attempts < max_rejection_retries {
+                // Pull the HTTP status out of the latest result; abort
+                // the cascade on any non-4xx or transport-layer
+                // failure (the upstream either succeeded or hit a
+                // transient error the breaker/governor handles
+                // separately — neither is in scope for this loop).
+                let status = match result.as_ref().err().and_then(|e| e.http_status()) {
+                    Some(s) if (400..500).contains(&s) => s,
+                    _ => break,
+                };
+                let err = result.as_ref().expect_err("status set implies Err");
+                let body = parse_provider_error_body(err, status);
+                let detected = detect_all_rejections(status, body.as_ref());
+                if detected.is_empty() {
+                    // The 4xx is something other than a param
+                    // rejection (auth, model-not-found, generic
+                    // upstream error). Surface it to the caller
+                    // untouched.
+                    break;
                 }
-                crate::llm::wire::omit_param(&mut hash_input, detected_param);
-            }
-            // Re-run the silent-acceptance audit on the post-omit
-            // body so the operator sees the diagnostic for the
-            // body that actually reaches the upstream on the
-            // retry.
-            if let Ok(value) = serde_json::to_value(&hash_input) {
-                audit_unknown_fields(&value);
+                for detected_param in &detected {
+                    tracing::info!(
+                        provider = %self.default_provider,
+                        model = %self.default_model,
+                        role = %req.role.as_str(),
+                        detected_param = %detected_param,
+                        "auto-detected param rejection; retrying without it"
+                    );
+                    if let Some(table) = self.param_rejections.as_ref()
+                        && let Err(rec_err) = table.record(
+                            self.default_provider.as_str(),
+                            self.default_model.as_str(),
+                            detected_param,
+                        )
+                    {
+                        tracing::warn!(
+                            error = %rec_err,
+                            "failed to persist param rejection; in-memory entry still kept"
+                        );
+                    }
+                    crate::llm::wire::omit_param(&mut hash_input, detected_param);
+                }
+                // Re-run the silent-acceptance audit on the post-omit
+                // body so the operator sees the diagnostic for the
+                // body that actually reaches the upstream on the
+                // retry.
+                if let Ok(value) = serde_json::to_value(&hash_input) {
+                    audit_unknown_fields(&value);
+                }
+                tracing::debug!(
+                    call_id = %call_id,
+                    phase = req.role.as_str(),
+                    stage = "provider.send.retry",
+                    detected_params = ?detected,
+                    "LLM call stage"
+                );
+                rejection_attempts += 1;
+                result = provider.send(&hash_input).await;
+                if result.is_ok() {
+                    break;
+                }
             }
             tracing::debug!(
                 call_id = %call_id,
                 phase = req.role.as_str(),
-                stage = "provider.send.retry",
-                detected_params = ?detected,
+                stage = "provider.send.completed",
+                elapsed_ms = provider_started.elapsed().as_millis(),
+                success = result.is_ok(),
+                retry_count,
                 "LLM call stage"
             );
-            rejection_attempts += 1;
-            result = provider.send(&hash_input).await;
-            if result.is_ok() {
-                break;
-            }
-        }
-        tracing::debug!(
-            call_id = %call_id,
-            phase = req.role.as_str(),
-            stage = "provider.send.completed",
-            elapsed_ms = provider_started.elapsed().as_millis(),
-            success = result.is_ok(),
-            retry_count,
-            "LLM call stage"
-        );
-        let ended_unix = crate::time::now_unix_secs();
-        let phase_name = req.role.as_str();
-        let ctx = || WarningContext {
-            phase: Some(phase_name.to_owned()),
-            role: Some(phase_name.to_owned()),
-            call_id: Some(call_id.clone()),
-            attempt: Some(retry_count),
-        };
-        match &result {
-            Ok((status, response)) => {
-                if let Some(ref key) = cache_key {
-                    let cache_started = std::time::Instant::now();
-                    tracing::debug!(
-                        call_id = %call_id,
-                        phase = phase_name,
-                        stage = "cache.store.started",
-                        "LLM call stage"
-                    );
-                    match self.cache.store(
-                        key,
-                        self.default_provider.as_str(),
-                        self.default_model.as_str(),
-                        response,
-                    ) {
-                        Ok(()) => tracing::debug!(
+            let ended_unix = crate::time::now_unix_secs();
+            let phase_name = req.role.as_str();
+            let ctx = || WarningContext {
+                phase: Some(phase_name.to_owned()),
+                role: Some(phase_name.to_owned()),
+                call_id: Some(call_id.clone()),
+                attempt: Some(retry_count),
+            };
+            match &result {
+                Ok((status, response)) => {
+                    if let Some(ref key) = cache_key {
+                        let cache_started = std::time::Instant::now();
+                        tracing::debug!(
                             call_id = %call_id,
                             phase = phase_name,
-                            stage = "cache.store.completed",
-                            elapsed_ms = cache_started.elapsed().as_millis(),
+                            stage = "cache.store.started",
                             "LLM call stage"
-                        ),
-                        Err(e) => tracing::warn!(
-                            call_id = %call_id,
-                            phase = phase_name,
-                            stage = "cache.store.error",
-                            error = %e,
-                            "LLM call stage"
-                        ),
-                    }
-                }
-                if let Err(e) = self.telemetry.call(
-                    &call_id,
-                    phase_name,
-                    phase_name,
-                    self.default_provider.as_str(),
-                    self.default_model.as_str(),
-                    cache_key.as_deref().unwrap_or(""),
-                    request_body_sha256.as_deref(),
-                    false,
-                    Some(*status),
-                    response.usage.input_tokens,
-                    response.usage.output_tokens,
-                    0,
-                    response.usage.cache_creation,
-                    started_unix,
-                    ended_unix,
-                    None,
-                    retry_count,
-                ) {
-                    tracing::warn!(
-                        call_id = %call_id,
-                        phase = phase_name,
-                        stage = "telemetry.call.error",
-                        error = %e,
-                        "LLM call stage"
-                    );
-                } else {
-                    tracing::debug!(
-                        call_id = %call_id,
-                        phase = phase_name,
-                        stage = "telemetry.call.completed",
-                        "LLM call stage"
-                    );
-                    // Stdout event mirror: NDJSON for pipeline
-                    // consumers (`jq`, dashboards). Auto-silenced
-                    // when stdout is a TTY. Errors from the
-                    // emitter are swallowed (the run does not
-                    // fail because a downstream `head |` closed).
-                    if crate::telemetry::stdout_events::resolve_event_format(
-                        crate::telemetry::stdout_events::EventFormat::Jsonl,
-                    ) {
-                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
-                            crate::telemetry::stdout_events::Event::LlmCall {
-                                schema: crate::telemetry::stdout_events::SCHEMA_VERSION,
-                                ts: crate::telemetry::stdout_events::now_rfc3339(),
-                                call_id: &call_id,
-                                phase: phase_name,
-                                role: phase_name,
-                                provider: self.default_provider.as_str(),
-                                model: self.default_model.as_str(),
-                                elapsed_ms: provider_started.elapsed().as_millis() as u64,
-                                ok: true,
-                                input_tokens: response.usage.input_tokens as u32,
-                                output_tokens: response.usage.output_tokens as u32,
-                                retry_count,
-                            },
                         );
-                    }
-                    // Wire-the-gates plan, PR-6 follow-up: write
-                    // the per-call USD estimate to the SQLite
-                    // index so `moagan telemetry cost` returns
-                    // real numbers instead of always zero. The
-                    // catalog is the source of truth for the
-                    // rate; a missing catalog or missing
-                    // `(provider, model)` row returns 0.0 and the
-                    // `record_call_cost` helper itself skips the
-                    // UPDATE for zero/NaN so the column stays
-                    // `NULL` (not "zero dollars billed") on
-                    // unknown models.
-                    if let Some(db) = self.telemetry.db() {
-                        let cost_usd = crate::llm::cost::cost_estimate(
-                            self.models_dev_catalog.as_deref(),
+                        match self.cache.store(
+                            key,
                             self.default_provider.as_str(),
                             self.default_model.as_str(),
-                            &response.usage,
-                        );
-                        if let Err(e) = db.record_call_cost(&call_id, cost_usd) {
-                            tracing::warn!(
+                            response,
+                        ) {
+                            Ok(()) => tracing::debug!(
                                 call_id = %call_id,
                                 phase = phase_name,
-                                stage = "cost.record.error",
+                                stage = "cache.store.completed",
+                                elapsed_ms = cache_started.elapsed().as_millis(),
+                                "LLM call stage"
+                            ),
+                            Err(e) => tracing::warn!(
+                                call_id = %call_id,
+                                phase = phase_name,
+                                stage = "cache.store.error",
                                 error = %e,
                                 "LLM call stage"
-                            );
+                            ),
                         }
                     }
+                    if let Err(e) = self.telemetry.call(
+                        &call_id,
+                        phase_name,
+                        phase_name,
+                        self.default_provider.as_str(),
+                        self.default_model.as_str(),
+                        cache_key.as_deref().unwrap_or(""),
+                        request_body_sha256.as_deref(),
+                        false,
+                        Some(*status),
+                        response.usage.input_tokens,
+                        response.usage.output_tokens,
+                        0,
+                        response.usage.cache_creation,
+                        started_unix,
+                        ended_unix,
+                        None,
+                        retry_count,
+                    ) {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "telemetry.call.error",
+                            error = %e,
+                            "LLM call stage"
+                        );
+                    } else {
+                        tracing::debug!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "telemetry.call.completed",
+                            "LLM call stage"
+                        );
+                        // Stdout event mirror: NDJSON for pipeline
+                        // consumers (`jq`, dashboards). Auto-silenced
+                        // when stdout is a TTY. Errors from the
+                        // emitter are swallowed (the run does not
+                        // fail because a downstream `head |` closed).
+                        if crate::telemetry::stdout_events::resolve_event_format(
+                            crate::telemetry::stdout_events::EventFormat::Jsonl,
+                        ) {
+                            crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                crate::telemetry::stdout_events::Event::LlmCall {
+                                    schema: crate::telemetry::stdout_events::SCHEMA_VERSION,
+                                    ts: crate::telemetry::stdout_events::now_rfc3339(),
+                                    call_id: &call_id,
+                                    phase: phase_name,
+                                    role: phase_name,
+                                    provider: self.default_provider.as_str(),
+                                    model: self.default_model.as_str(),
+                                    elapsed_ms: provider_started.elapsed().as_millis() as u64,
+                                    ok: true,
+                                    input_tokens: response.usage.input_tokens as u32,
+                                    output_tokens: response.usage.output_tokens as u32,
+                                    retry_count,
+                                },
+                            );
+                        }
+                        // Wire-the-gates plan, PR-6 follow-up: write
+                        // the per-call USD estimate to the SQLite
+                        // index so `moagan telemetry cost` returns
+                        // real numbers instead of always zero. The
+                        // catalog is the source of truth for the
+                        // rate; a missing catalog or missing
+                        // `(provider, model)` row returns 0.0 and the
+                        // `record_call_cost` helper itself skips the
+                        // UPDATE for zero/NaN so the column stays
+                        // `NULL` (not "zero dollars billed") on
+                        // unknown models.
+                        if let Some(db) = self.telemetry.db() {
+                            let cost_usd = crate::llm::cost::cost_estimate(
+                                self.models_dev_catalog.as_deref(),
+                                self.default_provider.as_str(),
+                                self.default_model.as_str(),
+                                &response.usage,
+                            );
+                            if let Err(e) = db.record_call_cost(&call_id, cost_usd) {
+                                tracing::warn!(
+                                    call_id = %call_id,
+                                    phase = phase_name,
+                                    stage = "cost.record.error",
+                                    error = %e,
+                                    "LLM call stage"
+                                );
+                            }
+                        }
+                    }
+                    if response.truncated {
+                        let _ = self.telemetry.warn(
+                            "model.response_truncated",
+                            "warn",
+                            "model response ended at max_tokens",
+                            serde_json::json!({
+                                "text_bytes": response.text.len(),
+                                "finish_reason": response.finish_reason,
+                            }),
+                            ctx(),
+                        );
+                    }
+                    if response.text.is_empty() {
+                        let _ = self.telemetry.warn(
+                            "model.response_empty",
+                            "warn",
+                            "model returned an empty text block",
+                            serde_json::json!({
+                                "finish_reason": response.finish_reason,
+                            }),
+                            ctx(),
+                        );
+                    }
                 }
-                if response.truncated {
-                    let _ = self.telemetry.warn(
-                        "model.response_truncated",
-                        "warn",
-                        "model response ended at max_tokens",
-                        serde_json::json!({
-                            "text_bytes": response.text.len(),
-                            "finish_reason": response.finish_reason,
-                        }),
-                        ctx(),
-                    );
-                }
-                if response.text.is_empty() {
-                    let _ = self.telemetry.warn(
-                        "model.response_empty",
-                        "warn",
-                        "model returned an empty text block",
-                        serde_json::json!({
-                            "finish_reason": response.finish_reason,
-                        }),
-                        ctx(),
-                    );
+                Err(e) => {
+                    if let Err(telemetry_error) = self.telemetry.call(
+                        &call_id,
+                        phase_name,
+                        phase_name,
+                        self.default_provider.as_str(),
+                        self.default_model.as_str(),
+                        cache_key.as_deref().unwrap_or(""),
+                        request_body_sha256.as_deref(),
+                        false,
+                        e.http_status(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        started_unix,
+                        ended_unix,
+                        Some(&e.to_string()),
+                        retry_count,
+                    ) {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "telemetry.call.error",
+                            error = %telemetry_error,
+                            "LLM call stage"
+                        );
+                    }
                 }
             }
-            Err(e) => {
-                if let Err(telemetry_error) = self.telemetry.call(
-                    &call_id,
-                    phase_name,
-                    phase_name,
-                    self.default_provider.as_str(),
-                    self.default_model.as_str(),
-                    cache_key.as_deref().unwrap_or(""),
-                    request_body_sha256.as_deref(),
-                    false,
-                    e.http_status(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    started_unix,
-                    ended_unix,
-                    Some(&e.to_string()),
-                    retry_count,
-                ) {
-                    tracing::warn!(
-                        call_id = %call_id,
-                        phase = phase_name,
-                        stage = "telemetry.call.error",
-                        error = %telemetry_error,
-                        "LLM call stage"
-                    );
-                }
-            }
+            result.map(|(_, r)| r)
         }
-        result.map(|(_, r)| r)
+        .instrument(call_span)
+        .await
     }
 
     /// Record a cache hit and surface the cached response. The cached

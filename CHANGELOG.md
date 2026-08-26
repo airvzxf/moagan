@@ -5,7 +5,7 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-08-26
 
 ### Removed (BREAKING)
 
@@ -56,6 +56,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `std::io::stderr().is_terminal()` so the operator gets a
   one-liner on a TTY but the JSONL stream stays clean for
   `moagan … 2>log.jsonl | jq`.
+- **`llm_call` span propagated to events emitted across `.await`.**
+  The previous implementation used `let _enter = call_span.enter()`
+  at `src/phases/phase.rs:1274`, which only entered the span on
+  the calling thread — the future inside `provider.send()` resumes
+  on a different worker across every `.await`, dropping the span
+  context (and on every rejection-cascade retry). The smoke
+  histogram showed zero `llm_call` events: `pipeline=1587,
+  phase=1012, llm_call=0`. Fix: wrap the dispatch sequence in
+  `async { … }.instrument(call_span)` (see
+  `src/phases/phase.rs:1585`), so `Instrument` re-enters the span
+  on every poll. Histogram after the fix: `pipeline=676,
+  phase=460, llm_call=260`, with `Event::LlmCall` and every
+  `cache.store.*` / `telemetry.call.*` / `cost.record.*` event
+  inheriting the `llm_call{call_id, provider, model, role}` slot.
+- **Stdout NDJSON purity under non-TTY.** Three pre-existing
+  human-affordance prints leaked to stdout regardless of whether
+  it was a TTY, corrupting `moagan … | jq` consumers:
+  - start banner at `src/cli/run.rs:328-336`,
+  - `run id:` footer at `src/cli/mod.rs:1314-1316`,
+  - checkpoint prompts at `src/checkpoint/human.rs:361-364`.
+  Each is now gated on `std::io::stdout().is_terminal()`, so the
+  TTY UX is preserved while pipe consumers see pure NDJSON. Smoke
+  verdict: `exit=0, stdout NDJSON ✅`.
+- **Removed false `--event-format auto` doc.** The doc comment at
+  `src/cli/mod.rs:210-216` claimed `auto` is a valid alias for
+  `jsonl`, but `EventFormatArg` only has `Jsonl | Off` and clap
+  correctly rejects `auto`. The doc now matches the enum — `auto`
+  was removed from the prose and `off` is documented as the only
+  non-default value.
 
 ## [0.10.0] - 2026-08-24
 

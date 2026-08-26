@@ -70,16 +70,31 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
     );
 
     // ---- Locate the run id -------------------------------------------------
-    // src/cli/mod.rs:524 prints `run id: <full-uuid>` on success.
-    // Strip the prefix and the trailing newline; the uuid formatter
-    // uses hyphenated canonical form (8-4-4-4-12 hex chars).
-    let run_id = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("run id: "))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| panic!("run id not found in stdout:\nstdout={stdout}\nstderr={stderr}"))
-        .to_string();
+    // Under a non-TTY stdout (which `Command::output()` captures) the
+    // dispatcher suppresses the `moagan run <id> …` banner and the
+    // `run id: <uuid>` footer so stdout stays pure NDJSON for
+    // `moagan … | jq` consumers. Resolve the run id from disk by
+    // enumerating `<runs-dir>/.runs/`, where the dispatcher has
+    // materialised exactly one `<uuid>/` directory per successful
+    // run.
+    let runs_root = tmp.path().join(".runs");
+    let mut entries: Vec<_> = std::fs::read_dir(&runs_root)
+        .unwrap_or_else(|e| panic!("read_dir({}): {e}", runs_root.display()))
+        .filter_map(|res| res.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one run under {runs_root:?}, found {} (stdout={stdout}\nstderr={stderr})",
+        entries.len()
+    );
+    let run_id = entries
+        .pop()
+        .expect("checked above")
+        .file_name()
+        .into_string()
+        .expect("run id is utf-8");
     assert_eq!(run_id.len(), 36, "expected hyphenated uuid, got {run_id}");
 
     // ---- Locate the meta DB ------------------------------------------------
@@ -314,14 +329,28 @@ fn mock_run_prompt_dash_reads_from_stdin() {
     );
 
     // ---- Locate the run id -------------------------------------------------
-    // src/cli/mod.rs:875 prints `run id: <full-uuid>` on success.
-    let run_id = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("run id: "))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| panic!("run id not found in stdout:\nstdout={stdout}\nstderr={stderr}"))
-        .to_string();
+    // Under a non-TTY stdout the `run id:` footer is suppressed
+    // (stdout stays pure NDJSON), so resolve the run id from the
+    // one `<uuid>/` directory the dispatcher materialised under
+    // `<runs-dir>/.runs/`.
+    let runs_root = tmp.path().join(".runs");
+    let mut entries: Vec<_> = std::fs::read_dir(&runs_root)
+        .unwrap_or_else(|e| panic!("read_dir({}): {e}", runs_root.display()))
+        .filter_map(|res| res.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one run under {runs_root:?}, found {} (stdout={stdout}\nstderr={stderr})",
+        entries.len()
+    );
+    let run_id = entries
+        .pop()
+        .expect("checked above")
+        .file_name()
+        .into_string()
+        .expect("run id is utf-8");
     assert_eq!(run_id.len(), 36, "expected hyphenated uuid, got {run_id}");
 
     // ---- Verify cli_prompt was resolved from stdin -------------------------
