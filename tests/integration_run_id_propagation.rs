@@ -359,3 +359,234 @@ fn dotenvy_load_message_suppressed_by_moagan_quiet() {
         );
     });
 }
+
+/// v0.11.2 audit-fix pin: every event emitted DURING dispatch that
+/// carries a `pipeline` span MUST also carry a non-null `run_id`
+/// inside that span. The pre-v0.11.2 implementation declared
+/// `run_id = tracing::field::Empty` on the span and called
+/// `Span::record` AFTER `cli::dispatch` returned; by that point
+/// ~98.9% of events had already inherited a null `run_id`. The
+/// fix pre-allocates the `RunId` in `run_with_cli` and constructs
+/// the span with `run_id = %run_id` so events emitted during
+/// dispatch (intake, phases, llm_call, probe, …) inherit a real
+/// UUID v7. This test pins the contract end-to-end by running the
+/// mock fast pipeline and counting events whose `pipeline` span
+/// has a null `run_id` — the count must be zero.
+#[test]
+fn run_id_present_in_pipeline_span_for_every_event() {
+    with_moagan_home("run_id_in_pipeline_span", |home| {
+        let work = tempfile::tempdir().expect("workdir");
+        // The drive helper captures stderr into `log.jsonl` only
+        // when `moagan_quiet` is false and the harness pipes
+        // stderr to a file. We re-spawn the binary with explicit
+        // paths so the assertion can read the JSONL stream
+        // independently of stdout events.
+        let mock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("mock_provider");
+        let stderr_path = work.path().join("log.jsonl");
+        let stdout_path = work.path().join("events.jsonl");
+        let mut cmd = Command::new(moagan_bin());
+        cmd.env("MOAGAN_HOME", home)
+            .env_remove("MOAGAN_QUIET")
+            .arg("run")
+            .arg("--mode")
+            .arg("fast")
+            .arg("--provider")
+            .arg("mock:mock-model")
+            .arg("--prompt")
+            .arg("Enumera los 7 colores del arcoiris en orden")
+            .arg("--mock-dir")
+            .arg(&mock_dir)
+            .arg("--non-interactive")
+            .arg("--log-format")
+            .arg("json")
+            .arg("--event-format")
+            .arg("jsonl");
+        let output = cmd
+            .stdout(std::fs::File::create(&stdout_path).expect("create events.jsonl"))
+            .stderr(std::fs::File::create(&stderr_path).expect("create log.jsonl"))
+            .output()
+            .expect("spawn moagan run");
+        assert!(
+            output.status.success(),
+            "moagan run must exit 0; status={:?}; stdout={}; stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr_text = std::fs::read_to_string(&stderr_path).expect("read stderr");
+
+        // Count every JSONL line on stderr that carries a
+        // `pipeline` span with a null `run_id`. Pre-v0.11.2 this
+        // would have been ~98.9% of events; post-fix it must be
+        // zero because the span is constructed with `run_id =
+        // %candidate_run_id` from the very start.
+        let mut null_count: usize = 0;
+        let mut pipeline_count: usize = 0;
+        let mut null_examples: Vec<String> = Vec::new();
+        for line in stderr_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue, // tolerate any non-JSONL diagnostic
+            };
+            let Some(spans) = v.get("spans").and_then(|s| s.as_array()) else {
+                continue;
+            };
+            for span in spans {
+                if span.get("name").and_then(|n| n.as_str()) != Some("pipeline") {
+                    continue;
+                }
+                pipeline_count += 1;
+                let run_id_null = span.get("run_id").map(|r| r.is_null()).unwrap_or(true);
+                if run_id_null {
+                    null_count += 1;
+                    if null_examples.len() < 3 {
+                        null_examples.push(trimmed.to_owned());
+                    }
+                }
+            }
+        }
+        assert!(
+            pipeline_count > 0,
+            "expected the mock fast run to emit at least one event with a `pipeline` span; got 0"
+        );
+        assert_eq!(
+            null_count,
+            0,
+            "every `pipeline` span must carry a non-null `run_id`; got {null_count}/{pipeline_count} null. Examples:\n{}",
+            null_examples.join("\n")
+        );
+    });
+}
+
+/// v0.11.2 audit-fix pin: `Event::RunEnd.status` must reflect the
+/// dispatcher exit code. Pre-v0.11.2 the bus always emitted
+/// `status: "ok"`, which lied when the run exited non-zero (e.g.
+/// a missing or invalid `--provider`). The fix makes
+/// `resolved_status` a conditional: `"ok"` iff `exit_code == 0`,
+/// otherwise `"error"`. This test drives a failing run
+/// (`--provider ""` — the dispatcher rejects empty providers with
+/// `Error::InvalidArgs` and exit code 2) and asserts the
+/// `RunEnd` event carries `status: "error"`. A positive control
+/// run with a valid provider confirms `status: "ok"` on success.
+#[test]
+fn run_end_status_reflects_non_zero_exit_code() {
+    with_moagan_home("run_end_status", |home| {
+        // ---- Negative case: invalid --provider -> exit 2, status "error" ----
+        let work_err = tempfile::tempdir().expect("workdir err");
+        let stdout_err = work_err.path().join("events.jsonl");
+        let stderr_err = work_err.path().join("log.jsonl");
+        let mut cmd_err = Command::new(moagan_bin());
+        cmd_err
+            .env("MOAGAN_HOME", home)
+            .env_remove("MOAGAN_QUIET")
+            .arg("run")
+            .arg("--mode")
+            .arg("fast")
+            .arg("--provider")
+            .arg("") // empty -> InvalidArgs, exit 2
+            .arg("--prompt")
+            .arg("x")
+            .arg("--non-interactive")
+            .arg("--log-format")
+            .arg("json")
+            .arg("--event-format")
+            .arg("jsonl");
+        let output_err = cmd_err
+            .stdout(std::fs::File::create(&stdout_err).expect("create events.jsonl"))
+            .stderr(std::fs::File::create(&stderr_err).expect("create log.jsonl"))
+            .output()
+            .expect("spawn moagan run (invalid provider)");
+        assert_eq!(
+            output_err.status.code(),
+            Some(2),
+            "empty --provider must surface as exit code 2 (InvalidArgs); got {:?}; stderr={}",
+            output_err.status.code(),
+            String::from_utf8_lossy(&output_err.stderr)
+        );
+        let events_err = read_jsonl(&stdout_err);
+        let run_end_err: Vec<&serde_json::Value> = events_err
+            .iter()
+            .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("run_end"))
+            .collect();
+        assert_eq!(
+            run_end_err.len(),
+            1,
+            "exactly one run_end expected on failure; got {run_end_err:?}"
+        );
+        let status_err = run_end_err[0]
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        let exit_code_err = run_end_err[0]
+            .get("exit_code")
+            .and_then(|c| c.as_i64())
+            .unwrap_or(-1);
+        assert_eq!(
+            status_err, "error",
+            "run_end.status must be \"error\" when exit_code != 0; got {status_err:?} (exit_code={exit_code_err})"
+        );
+        assert_eq!(
+            exit_code_err, 2,
+            "run_end.exit_code must echo the process exit code 2; got {exit_code_err}"
+        );
+
+        // ---- Positive control: valid mock provider -> exit 0, status "ok" ----
+        let work_ok = tempfile::tempdir().expect("workdir ok");
+        let stdout_ok = work_ok.path().join("events.jsonl");
+        let stderr_ok = work_ok.path().join("log.jsonl");
+        let mock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("mock_provider");
+        let mut cmd_ok = Command::new(moagan_bin());
+        cmd_ok
+            .env("MOAGAN_HOME", home)
+            .env_remove("MOAGAN_QUIET")
+            .arg("run")
+            .arg("--mode")
+            .arg("fast")
+            .arg("--provider")
+            .arg("mock:mock-model")
+            .arg("--prompt")
+            .arg("Enumera los 7 colores del arcoiris en orden")
+            .arg("--mock-dir")
+            .arg(&mock_dir)
+            .arg("--non-interactive")
+            .arg("--log-format")
+            .arg("json")
+            .arg("--event-format")
+            .arg("jsonl");
+        let output_ok = cmd_ok
+            .stdout(std::fs::File::create(&stdout_ok).expect("create events.jsonl"))
+            .stderr(std::fs::File::create(&stderr_ok).expect("create log.jsonl"))
+            .output()
+            .expect("spawn moagan run (mock ok)");
+        assert!(
+            output_ok.status.success(),
+            "mock fast run must exit 0; status={:?}; stderr={}",
+            output_ok.status.code(),
+            String::from_utf8_lossy(&output_ok.stderr)
+        );
+        let events_ok = read_jsonl(&stdout_ok);
+        let run_end_ok: Vec<&serde_json::Value> = events_ok
+            .iter()
+            .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("run_end"))
+            .collect();
+        assert_eq!(run_end_ok.len(), 1, "exactly one run_end on success");
+        let status_ok = run_end_ok[0]
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            status_ok, "ok",
+            "run_end.status must be \"ok\" on success; got {status_ok:?}"
+        );
+    });
+}

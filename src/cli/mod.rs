@@ -1088,19 +1088,35 @@ impl Cmd {
     }
 }
 
-/// Dispatch the parsed CLI and convert domain errors into process
-/// exit codes. The returned [`DispatchResult`] carries the real
-/// `run_id` produced / referenced by the subcommand so the outer
+/// Dispatch the parsed CLI with a pre-allocated `run_id` and
+/// convert domain errors into process exit codes. The returned
+/// [`DispatchResult`] carries the real `run_id` produced /
+/// referenced by the subcommand so the outer
 /// [`crate::run_with_cli`] can stamp it onto the `pipeline_span`
 /// and the
 /// [`crate::telemetry::stdout_events::Event::RunStart`] /
 /// [`crate::telemetry::stdout_events::Event::RunEnd`] events
 /// instead of the historic `"pre-dispatch"` /
 /// `<help-or-readonly>` / `<n/a>` placeholders.
-pub async fn dispatch(cli: Cli) -> Result<DispatchResult> {
+///
+/// Why the pre-allocated id matters (v0.11.2 audit fix):
+/// `pipeline_span` is constructed in `run_with_cli` with
+/// `run_id = %run_id` BEFORE dispatch runs. Every event emitted
+/// DURING dispatch inherits the span context — so the run_id
+/// must be the SAME one the dispatcher uses downstream. Arms
+/// that produce a new run (Run / Discover / Preflight /
+/// Continue-fork) USE this id instead of generating their own;
+/// arms that operate on an existing run (Resume / Rerun / Refine
+/// / Rerank / Continue --from-pause) keep the id the operator
+/// passed on the CLI (which is what the outer pre-parse
+/// computed). Read-only arms ignore the param.
+pub async fn dispatch_with_run_id(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchResult> {
     use std::io::IsTerminal;
-    trace!("dispatch: enter");
-    let result = dispatch_inner(cli).await;
+    trace!(
+        candidate_run_id = %run_id,
+        "dispatch_with_run_id: enter"
+    );
+    let result = dispatch_inner(cli, run_id).await;
     match &result {
         Ok(dr) => {
             info!(
@@ -1129,6 +1145,17 @@ pub async fn dispatch(cli: Cli) -> Result<DispatchResult> {
             })
         }
     }
+}
+
+/// Convenience wrapper for callers (integration tests, ad-hoc
+/// CLI invocations) that do not carry a pre-allocated `run_id`.
+/// Allocates a fresh UUIDv7 internally so the inner
+/// `dispatch_with_run_id` always receives one. The
+/// `pipeline_span` built by the outer `run_with_cli` will carry
+/// the SAME fresh id, so events emitted during dispatch and the
+/// `Event::RunStart.run_id` stay byte-identical.
+pub async fn dispatch(cli: Cli) -> Result<DispatchResult> {
+    dispatch_with_run_id(cli, crate::ids::RunId::new()).await
 }
 
 /// Result of dispatching a parsed [`Cli`]. Carries the real
@@ -1212,8 +1239,8 @@ impl DispatchResult {
     }
 }
 
-async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
-    debug!("dispatch_inner: enter");
+async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchResult> {
+    debug!(candidate_run_id = %run_id, "dispatch_inner: enter");
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
     trace!("dispatch_inner: forbidden-crates guard passed");
@@ -1452,7 +1479,7 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
                 mode = ?mode,
                 "dispatching moagan run"
             );
-            let run_id = run::run(
+            let new_run_id = run::run(
                 run::RunOptions {
                     mode,
                     provider,
@@ -1467,6 +1494,7 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
                     context_scope: scope,
                 },
                 &cfg,
+                run_id,
             )
             .await?;
             // The `run id: <uuid>` footer is a human affordance.
@@ -1474,14 +1502,17 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
             // not a TTY), writing this line corrupts the stream
             // and breaks `moagan … | jq`. The matching
             // `Event::RunEnd` already carries `run_id` for machine
-            // consumers. Only print on a TTY.
+            // consumers. Only print on a TTY. We print the id the
+            // pipeline ACTUALLY used (`new_run_id`) — it is
+            // guaranteed to match the value `run_with_cli`
+            // pre-allocated and stamped on `pipeline_span`.
             if std::io::stdout().is_terminal() {
-                println!("run id: {run_id}");
+                println!("run id: {new_run_id}");
             }
             Ok(DispatchResult::with_run(
                 0,
                 "run",
-                run_id,
+                new_run_id,
                 Some(resolved_provider),
                 resolved_model,
                 Some(resolved_prompt_hash),
@@ -1950,7 +1981,7 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
                 sketches_per_cell = sketches_per_cell,
                 "dispatching moagan discover"
             );
-            let run_id = discover::run(
+            let new_run_id = discover::run(
                 discover::DiscoverOptions {
                     provider,
                     prompt,
@@ -1970,13 +2001,14 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
                     explain: false,
                 },
                 &cfg,
+                run_id,
             )
             .await?;
-            println!("discovery run id: {run_id}");
+            println!("discovery run id: {new_run_id}");
             Ok(DispatchResult::with_run(
                 0,
                 "discover",
-                run_id,
+                new_run_id,
                 Some(resolved_provider),
                 resolved_model,
                 Some(resolved_prompt_hash),
@@ -2169,10 +2201,16 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
                     explain: false,
                 },
                 &cfg,
+                run_id,
             )
             .await?;
             println!("preflight discover run_id: {discover_run_id}");
 
+            // The fast leg gets a fresh UUIDv7 so its run directory
+            // is independent of the discover run (the pre-PR-c1
+            // contract: the fast run is a real sibling, not a child
+            // manifest of the discover one). The discover leg
+            // already consumed the pre-allocated candidate id.
             let fast_run_id = run::run(
                 run::RunOptions {
                     mode: Mode::Fast,
@@ -2188,6 +2226,7 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
                     context_scope: crate::context::loader::ContextScope::Full,
                 },
                 &cfg,
+                crate::ids::RunId::new(),
             )
             .await?;
             println!("preflight fast run_id: {fast_run_id}");
