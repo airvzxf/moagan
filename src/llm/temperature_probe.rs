@@ -275,6 +275,7 @@ impl ProviderTemperatureProbeTransport {
 #[async_trait]
 impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
     async fn probe_send_temperature(&self, temperature: f32) -> TemperatureProbeOutcome {
+        use tracing::Instrument;
         let req = Request {
             role: Role::Sketch, // F1: see investigation report
             model: self.provider.model().to_owned(),
@@ -291,7 +292,25 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
             attachments: vec![],
             tool_choice: None,
         };
-        let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
+        // llm_probe span: every HTTP event emitted by `send_probe`
+        // (and the timeout error if it fires) inherits
+        // probe_kind=temperature, candidate=<temp>, provider, model.
+        // Operators can grep `llm_probe{probe_kind=temperature}` to
+        // follow the entire auto-probe fan-out.
+        let probe_span = tracing::info_span!(
+            "llm_probe",
+            probe_kind = "temperature",
+            candidate = temperature,
+            provider = %self.provider.name(),
+            model = %self.provider.model(),
+        );
+        let res = timeout(
+            PROBE_TIMEOUT,
+            self.provider
+                .send_probe(&req)
+                .instrument(probe_span.clone()),
+        )
+        .await;
         match res {
             Ok(Ok((status, body))) => {
                 classify_probe_response(status, ProbeResponseView::from_response(&body))

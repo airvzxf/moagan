@@ -207,6 +207,7 @@ impl ProbeTransport for ProviderProbeTransport {
     }
 
     async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
+        use tracing::Instrument;
         let req = Request {
             role: Role::Sketch, // F1: see investigation report
             model: self.provider.model().to_owned(),
@@ -225,7 +226,25 @@ impl ProbeTransport for ProviderProbeTransport {
             attachments: vec![],
             tool_choice: None,
         };
-        let res = timeout(PROBE_TIMEOUT, self.provider.send_probe(&req)).await;
+        // llm_probe span: every HTTP event emitted by `send_probe`
+        // inherits probe_kind=max_tokens, candidate=<N>, provider,
+        // model. Operators grep `llm_probe{probe_kind=max_tokens
+        // candidate=4096}` to follow one candidate through the
+        // bisection loop.
+        let probe_span = tracing::info_span!(
+            "llm_probe",
+            probe_kind = "max_tokens",
+            candidate = max_tokens,
+            provider = %self.provider.name(),
+            model = %self.provider.model(),
+        );
+        let res = timeout(
+            PROBE_TIMEOUT,
+            self.provider
+                .send_probe(&req)
+                .instrument(probe_span.clone()),
+        )
+        .await;
         match res {
             Ok(Ok((status, body))) => {
                 // Classify:

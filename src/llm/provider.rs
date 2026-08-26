@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use tracing::Instrument;
 
 use crate::config::{CircuitBreakerConfig, ProviderConfig, RateLimitConfig};
 use crate::error::Result;
@@ -1808,7 +1809,20 @@ fn spawn_pending_probes(
         let model_name = inner.model().to_owned();
         let provider_name_for_handle = provider_name.clone();
         let model_name_for_handle = model_name.clone();
-        let handle = tokio::spawn(async move {
+        // `llm_probe_background` span covers the entire background
+        // task. The `verify` and `probe_and_store` futures inside
+        // it do NOT re-emit the same span (they use the
+        // `llm_probe` span directly), so the JSONL shows two
+        // distinct span contexts: the background task itself and
+        // each individual probe attempt.
+        let bg_span = tracing::info_span!(
+            "llm_probe_background",
+            probe_kind = "max_tokens",
+            provider = %provider_name,
+            model = %model_name,
+        );
+        let handle = tokio::spawn(
+            async move {
             tracing::info!(
                 provider = %provider_name,
                 model = %model_name,
@@ -1848,7 +1862,8 @@ fn spawn_pending_probes(
                     "max_tokens_auto: cached entry verified"
                 );
             }
-        });
+        }
+        .instrument(bg_span));
         table.record_probe_join_handle(provider_name_for_handle, model_name_for_handle, handle);
     }
 }
@@ -1946,54 +1961,67 @@ fn spawn_pending_temperature_probes(
         let table_for_task = Arc::clone(&table);
         let provider_name = inner.name().to_owned();
         let model_name = inner.model().to_owned();
-        let handle = tokio::spawn(async move {
-            tracing::info!(
-                provider = %provider_name,
-                model = %model_name,
-                "temperature_probe: probe task spawned; verifying cached entry"
-            );
-            let verified = table_for_task
-                .verify(&provider_name, &model_name, Arc::clone(&transport))
-                .await
-                .unwrap_or(false);
-            if !verified {
+        // `llm_probe_background` span covers the entire background
+        // task. The `verify` and `probe_and_store` futures inside
+        // use the `llm_probe` span directly; the background span is
+        // the umbrella.
+        let bg_span = tracing::info_span!(
+            "llm_probe_background",
+            probe_kind = "temperature",
+            provider = %provider_name,
+            model = %model_name,
+        );
+        let handle = tokio::spawn(
+            async move {
                 tracing::info!(
                     provider = %provider_name,
                     model = %model_name,
-                    "temperature_probe: no usable cached entry; running full probe"
+                    "temperature_probe: probe task spawned; verifying cached entry"
                 );
-                match table_for_task
-                    .probe_and_store(
-                        &provider_name,
-                        &model_name,
-                        transport,
-                        TEMPERATURE_PROBE_BATCH_SIZE,
-                    )
+                let verified = table_for_task
+                    .verify(&provider_name, &model_name, Arc::clone(&transport))
                     .await
-                {
-                    Ok(value) => tracing::info!(
+                    .unwrap_or(false);
+                if !verified {
+                    tracing::info!(
                         provider = %provider_name,
                         model = %model_name,
-                        discovered = ?value,
-                        "temperature_probe: discovered supported set"
-                    ),
-                    Err(e) => tracing::warn!(
+                        "temperature_probe: no usable cached entry; running full probe"
+                    );
+                    match table_for_task
+                        .probe_and_store(
+                            &provider_name,
+                            &model_name,
+                            transport,
+                            TEMPERATURE_PROBE_BATCH_SIZE,
+                        )
+                        .await
+                    {
+                        Ok(value) => tracing::info!(
+                            provider = %provider_name,
+                            model = %model_name,
+                            discovered = ?value,
+                            "temperature_probe: discovered supported set"
+                        ),
+                        Err(e) => tracing::warn!(
+                            provider = %provider_name,
+                            model = %model_name,
+                            error = %e,
+                            "temperature_probe: probe failed; provider will skip the \
+                             supported-set clamp and the runtime will fall back to the \
+                             operator's raw temperature value"
+                        ),
+                    }
+                } else {
+                    tracing::info!(
                         provider = %provider_name,
                         model = %model_name,
-                        error = %e,
-                        "temperature_probe: probe failed; provider will skip the \
-                         supported-set clamp and the runtime will fall back to the \
-                         operator's raw temperature value"
-                    ),
+                        "temperature_probe: cached entry verified"
+                    );
                 }
-            } else {
-                tracing::info!(
-                    provider = %provider_name,
-                    model = %model_name,
-                    "temperature_probe: cached entry verified"
-                );
             }
-        });
+            .instrument(bg_span),
+        );
         table.record_probe_join_handle(handle);
     }
 }
