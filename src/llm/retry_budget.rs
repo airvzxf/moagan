@@ -85,7 +85,7 @@ pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
     // Short modes: 3 attempts for transients, 1 for truncated.
     const SHORT_TRANSIENT: u32 = 3;
     const SHORT_TRUNCATED: u32 = 1;
-    match (mode, reason) {
+    let budget = match (mode, reason) {
         // --- Fast ----------------------------------------------------
         (Fast, Parse | Schema) => RetryBudget {
             max_attempts: REPAIR_ATTEMPTS,
@@ -161,7 +161,15 @@ pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
             max_attempts: SHORT_TRUNCATED,
             use_json_repair: false,
         },
-    }
+    };
+    tracing::trace!(
+        mode = ?mode,
+        reason = ?reason,
+        max_attempts = budget.max_attempts,
+        repair = budget.use_json_repair,
+        "budget_for"
+    );
+    budget
 }
 
 /// Map a provider / call error to the closest `RetryReason`. The
@@ -194,7 +202,7 @@ pub fn budget_for(mode: Mode, reason: RetryReason) -> RetryBudget {
 ///   same call would just receive another oversized body — the
 ///   cap is a contract, not a flaky transient.
 pub fn reason_from_error(err: &Error) -> RetryReason {
-    match err {
+    let reason = match err {
         Error::Timeout { .. } => RetryReason::Timeout,
         Error::PlanExhausted { .. } | Error::Throttled { .. } => RetryReason::RateLimit,
         Error::SchemaViolation(_) => RetryReason::Schema,
@@ -213,7 +221,9 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::ResearchUnavailable(_)
         | Error::Cancelled(_)
         | Error::Cancel(_) => RetryReason::Transport,
-    }
+    };
+    tracing::trace!(reason = ?reason, "reason_from_error classified");
+    reason
 }
 
 #[cfg(test)]

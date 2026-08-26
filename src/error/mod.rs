@@ -73,7 +73,7 @@ pub enum ExitCode {
 
 impl From<ErrorCode> for ExitCode {
     fn from(code: ErrorCode) -> Self {
-        match code {
+        let out = match code {
             ErrorCode::Storage => Self::Storage,
             ErrorCode::Llm => Self::Llm,
             ErrorCode::Sandbox => Self::Sandbox,
@@ -81,7 +81,9 @@ impl From<ErrorCode> for ExitCode {
             ErrorCode::Resume => Self::Resume,
             ErrorCode::Discovery => Self::Discovery,
             _ => Self::GenericError,
-        }
+        };
+        tracing::trace!(?code, exit_code = out as i32, "error::ExitCode::from");
+        out
     }
 }
 
@@ -312,14 +314,16 @@ impl Error {
     /// had to parse the message string to know whether the upstream
     /// returned 429, 500, or just dropped the connection.
     pub fn http_status(&self) -> Option<u16> {
-        match self {
+        let out = match self {
             Self::InvalidApiKey { http_status, .. }
             | Self::PlanExhausted { http_status, .. }
             | Self::Throttled { http_status, .. }
             | Self::Timeout { http_status, .. }
             | Self::Provider { http_status, .. } => *http_status,
             _ => None,
-        }
+        };
+        tracing::trace!(?out, "error::Error::http_status");
+        out
     }
 
     /// Public, stable error code. Maps every `Error` variant to
@@ -328,7 +332,7 @@ impl Error {
     /// back to `ErrorCode::UnhandledError`. Wire form is
     /// `SCREAMING_SNAKE_CASE` (D.12.12).
     pub fn code(&self) -> ErrorCode {
-        match self {
+        let out = match self {
             Self::Io(_) => ErrorCode::Io,
             Self::InvalidArgs(_) => ErrorCode::InvalidArgs,
             Self::InvalidApiKey { .. } => ErrorCode::Auth,
@@ -350,12 +354,14 @@ impl Error {
             Self::PayloadTooLarge(_) => ErrorCode::InputTooLarge,
             Self::ModalityUnsupported(_) => ErrorCode::Unsupported,
             Self::ResearchUnavailable(_) => ErrorCode::Research,
-        }
+        };
+        tracing::trace!(?out, "error::Error::code");
+        out
     }
 
     /// Return the stable process exit code for this error.
     pub fn exit_code(&self) -> ExitCode {
-        match self {
+        let out = match self {
             Self::InvalidArgs(_) => ExitCode::InvalidArgs,
             Self::InvalidApiKey { .. } => ExitCode::ApiKeyInvalid,
             Self::PlanExhausted { .. } => ExitCode::PlanExhausted,
@@ -373,7 +379,9 @@ impl Error {
             Self::PayloadTooLarge(_) => ExitCode::ProviderError,
             Self::ModalityUnsupported(_) => ExitCode::ProviderError,
             Self::ResearchUnavailable(_) => ExitCode::Research,
-        }
+        };
+        tracing::trace!(?out, "error::Error::exit_code");
+        out
     }
 
     /// Should this error count toward the per-provider circuit
@@ -452,10 +460,12 @@ impl Error {
     ///   issues; tripping a remote breaker on a local I/O blip is
     ///   the wrong granularity.
     pub fn is_circuit_opening(&self) -> bool {
-        matches!(
+        let out = matches!(
             self,
             Self::InvalidApiKey { .. } | Self::Provider { .. } | Self::Timeout { .. }
-        )
+        );
+        tracing::trace!(?out, "error::Error::is_circuit_opening");
+        out
     }
 
     /// Categorize the provider-side errors that demand *recovery* —
@@ -472,7 +482,7 @@ impl Error {
     /// provider. The split lands each mode with the recovery path
     /// that fits.
     pub fn provider_cause(&self) -> Option<ProviderCause> {
-        Some(match self {
+        let out = Some(match self {
             Self::Throttled {
                 retry_after_ms,
                 message,
@@ -489,7 +499,12 @@ impl Error {
                 message: message.clone(),
             },
             _ => return None,
-        })
+        });
+        tracing::trace!(
+            cause = ?out,
+            "error::Error::provider_cause"
+        );
+        out
     }
 }
 
@@ -695,7 +710,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Map the error to the documented exit code (T01-06 §12.3).
 pub fn exit_code(err: &Error) -> u8 {
-    err.exit_code() as u8
+    let code = err.exit_code() as u8;
+    tracing::trace!(?err, code, "error::exit_code");
+    code
 }
 
 #[cfg(test)]

@@ -17,6 +17,10 @@ pub struct PerProviderSemaphores {
 impl PerProviderSemaphores {
     /// Build an empty registry.
     pub fn new() -> Self {
+        tracing::info!(
+            component = "per_provider_semaphores",
+            "PerProviderSemaphores::new building empty registry"
+        );
         Self {
             map: Mutex::new(HashMap::new()),
         }
@@ -25,11 +29,30 @@ impl PerProviderSemaphores {
     /// the semaphore on first use. Awaits until the slot is
     /// available.
     pub async fn acquire(&self, provider: &str, permits: usize) -> OwnedSemaphorePermit {
+        let effective = permits.max(1);
         let sem = {
             let mut map = self.map.lock().await;
-            map.entry(provider.to_string())
-                .or_insert_with(|| Arc::new(Semaphore::new(permits.max(1))))
-                .clone()
+            let entry = map.entry(provider.to_string());
+            let existed = matches!(entry, std::collections::hash_map::Entry::Occupied(_));
+            let arc = entry
+                .or_insert_with(|| Arc::new(Semaphore::new(effective)))
+                .clone();
+            if !existed {
+                tracing::info!(
+                    component = "per_provider_semaphores",
+                    provider = %provider,
+                    permits = effective,
+                    "PerProviderSemaphores created new semaphore for provider"
+                );
+            } else {
+                tracing::trace!(
+                    component = "per_provider_semaphores",
+                    provider = %provider,
+                    requested = permits,
+                    "PerProviderSemaphores reusing existing semaphore"
+                );
+            }
+            arc
         };
         sem.acquire_owned().await.unwrap()
     }
@@ -38,7 +61,14 @@ impl PerProviderSemaphores {
     /// has been created yet (no `acquire` has run for that key).
     pub async fn available_permits(&self, provider: &str) -> Option<usize> {
         let map = self.map.lock().await;
-        map.get(provider).map(|s| s.available_permits())
+        let result = map.get(provider).map(|s| s.available_permits());
+        tracing::trace!(
+            component = "per_provider_semaphores",
+            provider = %provider,
+            available = ?result,
+            "PerProviderSemaphores::available_permits"
+        );
+        result
     }
 }
 

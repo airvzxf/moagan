@@ -172,11 +172,20 @@ impl Phase for ClusterProposalsPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(threshold = self.threshold, "cluster_proposals: enter");
         let dir = ctx.run_dir().cluster_proposals_dir();
         std::fs::create_dir_all(&dir)?;
 
         let items = Self::load_proposals(ctx)?;
+        tracing::debug!(
+            proposal_count = items.len(),
+            "cluster_proposals: proposals loaded"
+        );
         if items.len() < 2 {
+            tracing::info!(
+                proposal_count = items.len(),
+                "cluster_proposals: too few proposals, writing empty marker"
+            );
             // Nothing meaningful to cluster. Write an empty marker so
             // downstream phases can detect "we ran, but there was
             // nothing to merge".
@@ -193,6 +202,10 @@ impl Phase for ClusterProposalsPhase {
         }
 
         let clusters = self.cluster(&items);
+        tracing::info!(
+            cluster_count = clusters.len(),
+            "cluster_proposals: clusters computed"
+        );
         let mut paths: Vec<PathBuf> = Vec::with_capacity(clusters.len());
         for c in clusters {
             let path = dir.join(format!("{}.json", c.id));
@@ -200,10 +213,15 @@ impl Phase for ClusterProposalsPhase {
             paths.push(path);
         }
         if paths.is_empty() {
+            tracing::error!("cluster_proposals: zero clusters produced");
             return Err(Error::InvalidState(
                 "cluster_proposals produced zero clusters".into(),
             ));
         }
+        tracing::info!(
+            clusters_written = paths.len(),
+            "cluster_proposals: phase complete"
+        );
         Ok(PhaseOutput::ClusterProposals(paths))
     }
 }

@@ -122,14 +122,26 @@ impl Pipeline {
     /// without a `JoinHandle` recorded or a `CancellationToken`
     /// parent — both hold here).
     pub async fn run(&self, ctx: &RunContext) -> Result<Vec<PhaseOutput>> {
+        tracing::info!(
+            phase_count = self.phases.len(),
+            resumed = self.is_resumed(),
+            "pipeline: run: start"
+        );
         ctx.ensure_heartbeat()?;
         let timeout = ctx.total_timeout();
         if timeout.is_zero() {
             return self.run_phases(ctx).await;
         }
         match tokio::time::timeout(timeout, self.run_phases(ctx)).await {
-            Ok(result) => result,
+            Ok(result) => {
+                tracing::info!(success = result.is_ok(), "pipeline: run: complete");
+                result
+            }
             Err(_) => {
+                tracing::error!(
+                    secs = timeout.as_secs(),
+                    "pipeline: run: total timeout exceeded"
+                );
                 ctx.cancel()
                     .cancel(crate::cancel::CancelReason::TotalTimeout);
                 Err(crate::Error::Timeout {
@@ -145,6 +157,7 @@ impl Pipeline {
         let mut outputs = Vec::with_capacity(self.phases.len());
         for (i, phase) in self.phases.iter().enumerate() {
             let seq = i as i64;
+            tracing::debug!(seq, phase = phase.name(), "pipeline: phase start");
             ctx.telemetry
                 .phase(phase.name(), seq, "start", None, resume)?;
             let timeout = ctx.phase_timeout();
@@ -154,6 +167,11 @@ impl Pipeline {
                 match tokio::time::timeout(timeout, phase.execute(ctx)).await {
                     Ok(result) => result,
                     Err(_) => {
+                        tracing::error!(
+                            phase = phase.name(),
+                            secs = timeout.as_secs(),
+                            "pipeline: phase timeout exceeded"
+                        );
                         ctx.cancel()
                             .cancel(crate::cancel::CancelReason::PhaseTimeout(
                                 phase.name().to_owned(),
@@ -170,10 +188,18 @@ impl Pipeline {
                 }
             };
             match &result {
-                Ok(_) => ctx
-                    .telemetry
-                    .phase(phase.name(), seq, "end", None, resume)?,
+                Ok(_) => {
+                    tracing::debug!(seq, phase = phase.name(), "pipeline: phase end");
+                    ctx.telemetry
+                        .phase(phase.name(), seq, "end", None, resume)?;
+                }
                 Err(e) => {
+                    tracing::error!(
+                        seq,
+                        phase = phase.name(),
+                        error = %e,
+                        "pipeline: phase error"
+                    );
                     ctx.telemetry.phase(
                         phase.name(),
                         seq,

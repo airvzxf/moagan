@@ -32,6 +32,12 @@ impl RateLimiter {
     /// Build a new rate limiter.
     pub fn new(cfg: RateLimitConfig) -> Self {
         let initial = cfg.initial.unwrap_or(cfg.capacity) as f64;
+        tracing::debug!(
+            capacity = cfg.capacity,
+            refill_per_sec = cfg.refill_per_sec,
+            initial = initial,
+            "RateLimiter: constructed"
+        );
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 capacity: cfg.capacity,
@@ -51,6 +57,10 @@ impl RateLimiter {
             g.token_after_one()
         };
         if !wait.is_zero() {
+            tracing::trace!(
+                wait_ms = wait.as_millis() as u64,
+                "RateLimiter: acquire waits"
+            );
             tokio::time::sleep(wait).await;
         }
         Ok(wait)
@@ -75,6 +85,11 @@ impl RateLimiter {
                 let secs = deficit / g.refill_per_sec.max(1) as f64;
                 let wait = Duration::from_secs_f64(secs);
                 if wait > max {
+                    tracing::warn!(
+                        wait_ms = wait.as_millis() as u64,
+                        max_ms = max.as_millis() as u64,
+                        "RateLimiter: budget exhausted (wait > max)"
+                    );
                     return Err(Error::Provider {
                         message: format!(
                             "rate limiter budget exhausted: would wait {wait:?} > max {max:?}"
@@ -116,7 +131,14 @@ impl RateLimiter {
     /// configured ceiling.
     pub fn refund(&self) {
         let mut g = self.inner.lock();
+        let before = g.tokens;
         g.tokens = (g.tokens + 1.0).min(g.capacity as f64);
+        tracing::trace!(
+            before = before,
+            after = g.tokens,
+            cap = g.capacity,
+            "RateLimiter: refund applied"
+        );
     }
 
     /// Configured bucket capacity. Used by the push-side saturation
@@ -140,9 +162,17 @@ impl Inner {
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        let before = self.tokens;
         self.tokens =
             (self.tokens + elapsed * self.refill_per_sec as f64).min(self.capacity as f64);
         self.last_refill = now;
+        tracing::trace!(
+            elapsed_secs = elapsed,
+            before = before,
+            after = self.tokens,
+            cap = self.capacity,
+            "RateLimiter: refill advanced"
+        );
     }
 
     /// Refill tokens based on elapsed time and consume one, returning

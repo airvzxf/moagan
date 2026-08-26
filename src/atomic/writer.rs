@@ -106,6 +106,11 @@ impl AtomicWriter {
     /// never leaves a partially-updated file.
     pub fn with_fsync(mut self, yes: bool) -> Self {
         self.fsync_on_commit = yes;
+        tracing::debug!(
+            component = "atomic_writer",
+            fsync_on_commit = yes,
+            "AtomicWriter::with_fsync configured"
+        );
         self
     }
 
@@ -113,12 +118,34 @@ impl AtomicWriter {
     /// not exist; if it does, the previous content is replaced once the
     /// new file is fully durable.
     pub fn write(&self, dest: &Path, data: &[u8]) -> Result<ArtifactMeta> {
-        let parent = dest.parent().ok_or_else(|| IoError::NoParent {
-            path: dest.to_path_buf(),
+        tracing::debug!(
+            component = "atomic_writer",
+            dest = %dest.display(),
+            bytes = data.len(),
+            fsync = self.fsync_on_commit,
+            "AtomicWriter::write starting atomic write"
+        );
+        let parent = dest.parent().ok_or_else(|| {
+            tracing::error!(
+                component = "atomic_writer",
+                dest = %dest.display(),
+                "AtomicWriter::write: dest has no parent"
+            );
+            IoError::NoParent {
+                path: dest.to_path_buf(),
+            }
         })?;
-        fs::create_dir_all(parent).map_err(|e| IoError::CreateDir {
-            path: parent.to_path_buf(),
-            source: e,
+        fs::create_dir_all(parent).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                parent = %parent.display(),
+                error = %e,
+                "AtomicWriter::write: create_dir_all failed"
+            );
+            IoError::CreateDir {
+                path: parent.to_path_buf(),
+                source: e,
+            }
         })?;
 
         let nonce = fastrand::u64(..);
@@ -126,31 +153,76 @@ impl AtomicWriter {
         let tmp_meta = Self::tmp_meta_path(dest, nonce);
 
         // Step 1: write data to tmp.
-        let mut data_file = File::create(&tmp).map_err(|e| IoError::CreateFile {
-            path: tmp.clone(),
-            source: e,
+        let mut data_file = File::create(&tmp).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                path = %tmp.display(),
+                error = %e,
+                "AtomicWriter::write: create tmp data file failed"
+            );
+            IoError::CreateFile {
+                path: tmp.clone(),
+                source: e,
+            }
         })?;
-        data_file.write_all(data).map_err(|e| IoError::Write {
-            path: tmp.clone(),
-            source: e,
+        data_file.write_all(data).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                path = %tmp.display(),
+                error = %e,
+                "AtomicWriter::write: write_all to tmp data file failed"
+            );
+            IoError::Write {
+                path: tmp.clone(),
+                source: e,
+            }
         })?;
         // Step 2: fsync data (skipped when fsync_on_commit is false).
         if self.fsync_on_commit {
-            data_file.sync_all().map_err(|e| IoError::Sync {
-                path: tmp.clone(),
-                source: e,
+            data_file.sync_all().map_err(|e| {
+                tracing::error!(
+                    component = "atomic_writer",
+                    path = %tmp.display(),
+                    error = %e,
+                    "AtomicWriter::write: data file fsync failed"
+                );
+                IoError::Sync {
+                    path: tmp.clone(),
+                    source: e,
+                }
             })?;
         }
         drop(data_file);
+        tracing::trace!(
+            component = "atomic_writer",
+            path = %tmp.display(),
+            bytes = data.len(),
+            "AtomicWriter::write: data written"
+        );
 
         // Compute metadata.
         let meta = compute_meta(data)?;
-        let meta_bytes = serde_json::to_vec(&meta).map_err(IoError::SerializeMeta)?;
+        let meta_bytes = serde_json::to_vec(&meta).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                error = %e,
+                "AtomicWriter::write: meta serialise failed"
+            );
+            IoError::SerializeMeta(e)
+        })?;
 
         // Step 3: write meta to tmp.
-        let mut meta_file = File::create(&tmp_meta).map_err(|e| IoError::CreateFile {
-            path: tmp_meta.clone(),
-            source: e,
+        let mut meta_file = File::create(&tmp_meta).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                path = %tmp_meta.display(),
+                error = %e,
+                "AtomicWriter::write: create tmp meta file failed"
+            );
+            IoError::CreateFile {
+                path: tmp_meta.clone(),
+                source: e,
+            }
         })?;
         meta_file
             .write_all(&meta_bytes)
@@ -166,6 +238,11 @@ impl AtomicWriter {
             })?;
         }
         drop(meta_file);
+        tracing::trace!(
+            component = "atomic_writer",
+            path = %tmp_meta.display(),
+            "AtomicWriter::write: meta sidecar written"
+        );
 
         // Step 5+6: rename both atomically.
         fs::rename(&tmp, dest).map_err(|e| IoError::Rename {
@@ -179,12 +256,25 @@ impl AtomicWriter {
             to: final_meta,
             source: e,
         })?;
+        tracing::trace!(
+            component = "atomic_writer",
+            dest = %dest.display(),
+            "AtomicWriter::write: renames committed"
+        );
 
         // Step 7: fsync parent directory (skipped when fsync_on_commit is false).
         if self.fsync_on_commit {
             Self::fsync_dir(parent)?;
         }
 
+        tracing::info!(
+            component = "atomic_writer",
+            dest = %dest.display(),
+            bytes = data.len(),
+            blake3 = %meta.blake3_hex,
+            size_bytes = meta.size_bytes,
+            "AtomicWriter::write committed"
+        );
         Ok(meta)
     }
 
@@ -198,22 +288,57 @@ impl AtomicWriter {
     /// `now_unix_secs()` change between the write and the read
     /// is expected and not an error.
     pub fn read_with_meta(&self, dest: &Path) -> Result<(Vec<u8>, ArtifactMeta)> {
-        let data = fs::read(dest).map_err(|e| IoError::Read {
-            path: dest.to_path_buf(),
-            source: e,
+        tracing::debug!(
+            component = "atomic_writer",
+            dest = %dest.display(),
+            "AtomicWriter::read_with_meta starting"
+        );
+        let data = fs::read(dest).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                dest = %dest.display(),
+                error = %e,
+                "AtomicWriter::read_with_meta: read data failed"
+            );
+            IoError::Read {
+                path: dest.to_path_buf(),
+                source: e,
+            }
         })?;
         let meta_path = Self::meta_path(dest);
-        let meta_bytes = fs::read(&meta_path).map_err(|e| IoError::Read {
-            path: meta_path.clone(),
-            source: e,
+        let meta_bytes = fs::read(&meta_path).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                path = %meta_path.display(),
+                error = %e,
+                "AtomicWriter::read_with_meta: read meta failed"
+            );
+            IoError::Read {
+                path: meta_path.clone(),
+                source: e,
+            }
         })?;
-        let meta: ArtifactMeta =
-            serde_json::from_slice(&meta_bytes).map_err(IoError::DeserializeMeta)?;
+        let meta: ArtifactMeta = serde_json::from_slice(&meta_bytes).map_err(|e| {
+            tracing::error!(
+                component = "atomic_writer",
+                path = %meta_path.display(),
+                error = %e,
+                "AtomicWriter::read_with_meta: meta deserialise failed"
+            );
+            IoError::DeserializeMeta(e)
+        })?;
         if !data_fingerprint_matches(&data, &meta) {
             // Build a diagnostic `expected` that re-uses the
             // sidecar's `sealed_at_unix` so the error message
             // surfaces a single timestamp per field.
             let expected = compute_meta_at(&data, meta.sealed_at_unix)?;
+            tracing::error!(
+                component = "atomic_writer",
+                dest = %dest.display(),
+                expected_size = expected.size_bytes,
+                got_size = meta.size_bytes,
+                "AtomicWriter::read_with_meta: fingerprint mismatch"
+            );
             return Err(IoError::MetaMismatch {
                 path: dest.to_path_buf(),
                 expected: Box::new(expected),
@@ -221,6 +346,12 @@ impl AtomicWriter {
             }
             .into());
         }
+        tracing::trace!(
+            component = "atomic_writer",
+            dest = %dest.display(),
+            bytes = data.len(),
+            "AtomicWriter::read_with_meta verified"
+        );
         Ok((data, meta))
     }
 
@@ -261,6 +392,11 @@ impl AtomicWriter {
         {
             let _ = dir;
         }
+        tracing::trace!(
+            component = "atomic_writer",
+            dir = %dir.display(),
+            "fsync_dir completed"
+        );
         Ok(())
     }
 }
@@ -279,6 +415,12 @@ fn compute_meta_at(data: &[u8], sealed_at_unix: i64) -> Result<ArtifactMeta> {
     hasher.update(data);
     let blake3_hex = hex::encode(hasher.finalize().as_bytes());
     let crc32c_hex = crc32c_hex(data);
+    tracing::trace!(
+        component = "atomic_writer",
+        size_bytes,
+        blake3_prefix = %blake3_hex.get(..12).unwrap_or(&blake3_hex),
+        "compute_meta_at built meta"
+    );
     Ok(ArtifactMeta {
         schema_version: ArtifactMeta::SCHEMA_VERSION.to_owned(),
         size_bytes,
@@ -293,15 +435,29 @@ fn compute_meta_at(data: &[u8], sealed_at_unix: i64) -> Result<ArtifactMeta> {
 /// informational and intentionally excluded from the comparison.
 fn data_fingerprint_matches(data: &[u8], meta: &ArtifactMeta) -> bool {
     if data.len() as u64 != meta.size_bytes {
+        tracing::trace!(
+            component = "atomic_writer",
+            expected = meta.size_bytes,
+            got = data.len() as u64,
+            "data_fingerprint_matches: size mismatch"
+        );
         return false;
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(data);
     let blake3_hex = hex::encode(hasher.finalize().as_bytes());
     if blake3_hex != meta.blake3_hex {
+        tracing::trace!(
+            component = "atomic_writer",
+            "data_fingerprint_matches: blake3 mismatch"
+        );
         return false;
     }
     if crc32c_hex(data) != meta.crc32c_hex {
+        tracing::trace!(
+            component = "atomic_writer",
+            "data_fingerprint_matches: crc32c mismatch"
+        );
         return false;
     }
     true

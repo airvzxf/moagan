@@ -484,14 +484,22 @@ impl ValidationOutcome {
 /// the deliver phase can show "validated with cargo 1.97.1" without
 /// having to re-run anything.
 pub async fn capture_tool_version(sandbox: &Sandbox, tool: &str) -> Option<String> {
+    tracing::trace!(tool, "validators::capture_tool_version: enter");
     let result = sandbox.run(tool, &["--version"]).await.ok()?;
     if result.status != crate::sandbox::SandboxStatus::Pass {
+        tracing::trace!(
+            tool,
+            status = ?result.status,
+            "validators::capture_tool_version: non-pass"
+        );
         return None;
     }
     let first_line = result.stdout.lines().next()?.trim();
     if first_line.is_empty() {
+        tracing::trace!(tool, "validators::capture_tool_version: empty stdout");
         return None;
     }
+    tracing::debug!(tool, version = %first_line, "validators::capture_tool_version: captured");
     Some(first_line.to_owned())
 }
 
@@ -540,10 +548,19 @@ impl CompositeValidator {
         proposal: &Proposal,
         sandbox: Option<&Sandbox>,
     ) -> Result<Vec<ValidationEvidence>> {
-        let mut out = Vec::with_capacity(self.validators.len());
+        let count = self.validators.len();
+        tracing::debug!(
+            validator_count = count,
+            "validators::CompositeValidator::run: enter"
+        );
+        let mut out = Vec::with_capacity(count);
         for v in &self.validators {
             out.push(v.validate(proposal, sandbox)?);
         }
+        tracing::debug!(
+            returned = out.len(),
+            "validators::CompositeValidator::run: exit"
+        );
         Ok(out)
     }
 
@@ -553,6 +570,7 @@ impl CompositeValidator {
         proposal: &Proposal,
         sandbox: Option<&Sandbox>,
     ) -> Result<ValidationEvidence> {
+        tracing::debug!("validators::CompositeValidator::aggregate: enter");
         let evidences = self.run(proposal, sandbox)?;
         let mut aggregate = ValidationEvidence {
             validator: "composite".into(),
@@ -578,6 +596,12 @@ impl CompositeValidator {
                 },
             };
         }
+        tracing::info!(
+            status = ?aggregate.status,
+            failures = aggregate.failures.len(),
+            checks_run = aggregate.checks_run.len(),
+            "validators::CompositeValidator::aggregate: exit"
+        );
         Ok(aggregate)
     }
 }

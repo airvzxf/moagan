@@ -38,6 +38,12 @@ use crate::ids::RunId;
 ///   the helper is meant to validate the *input* path, not the
 ///   target's existence).
 pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
+    tracing::trace!(
+        root = %root.display(),
+        candidate = %candidate.display(),
+        absolute = candidate.is_absolute(),
+        "safe_path: enter"
+    );
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
@@ -48,6 +54,11 @@ pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
     // would also reject for an absent parent segment.
     for comp in joined.components() {
         if matches!(comp, std::path::Component::ParentDir) {
+            tracing::warn!(
+                candidate = %candidate.display(),
+                joined = %joined.display(),
+                "safe_path: rejecting candidate with `..` component"
+            );
             return Err(Error::PathTraversal(format!(
                 "{} contains `..`",
                 candidate.display()
@@ -55,6 +66,11 @@ pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
         }
     }
     let canonical_root = root.canonicalize().map_err(|e| {
+        tracing::error!(
+            root = %root.display(),
+            error = %e,
+            "safe_path: cannot canonicalize root"
+        );
         Error::Io(IoError::Raw(std::io::Error::new(
             e.kind(),
             format!(
@@ -70,10 +86,18 @@ pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
     let canonical_candidate = match joined.canonicalize() {
         Ok(p) => p,
         Err(_) => {
+            tracing::trace!(
+                joined = %joined.display(),
+                "safe_path: candidate does not exist; falling back to parent-canonicalise"
+            );
             let parent = joined.parent().unwrap_or(&joined);
             let tail = joined
                 .file_name()
                 .ok_or_else(|| {
+                    tracing::error!(
+                        candidate = %candidate.display(),
+                        "safe_path: candidate has no filename component"
+                    );
                     Error::PathTraversal(format!(
                         "safe_path: candidate {} has no filename component",
                         candidate.display()
@@ -81,6 +105,11 @@ pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
                 })?
                 .to_owned();
             let canon_parent = parent.canonicalize().map_err(|e| {
+                tracing::error!(
+                    parent = %parent.display(),
+                    error = %e,
+                    "safe_path: cannot canonicalize parent"
+                );
                 Error::Io(IoError::Raw(std::io::Error::new(
                     e.kind(),
                     format!(
@@ -93,6 +122,12 @@ pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
         }
     };
     if !canonical_candidate.starts_with(&canonical_root) {
+        tracing::warn!(
+            candidate = %candidate.display(),
+            resolved = %canonical_candidate.display(),
+            root = %canonical_root.display(),
+            "safe_path: candidate escapes root (symlink or ..)"
+        );
         return Err(Error::PathTraversal(format!(
             "{} resolves to {} which is outside root {}",
             candidate.display(),
@@ -100,6 +135,11 @@ pub fn safe_path(root: &Path, candidate: &Path) -> Result<PathBuf> {
             canonical_root.display()
         )));
     }
+    tracing::debug!(
+        candidate = %candidate.display(),
+        resolved = %canonical_candidate.display(),
+        "safe_path: ok"
+    );
     Ok(canonical_candidate)
 }
 
@@ -112,26 +152,32 @@ pub struct MoaganHome {
 impl MoaganHome {
     /// Build a `MoaganHome` from an explicit root path.
     pub fn at(root: PathBuf) -> Self {
+        tracing::trace!(root = %root.display(), "MoaganHome::at: enter");
         Self { root }
     }
 
     /// Resolve `${MOAGAN_HOME:-~/.local/share/moagan}`.
     pub fn resolve() -> Result<Self> {
+        tracing::trace!("MoaganHome::resolve: enter");
         if let Ok(env) = std::env::var("MOAGAN_HOME")
             && !env.trim().is_empty()
         {
+            tracing::debug!(moagan_home = %env, "MoaganHome::resolve: from MOAGAN_HOME");
             return Ok(Self::at(PathBuf::from(env)));
         }
         if let Some(home) = std::env::var_os("HOME")
             && !home.is_empty()
         {
-            return Ok(Self::at(
-                PathBuf::from(home)
-                    .join(".local")
-                    .join("share")
-                    .join("moagan"),
-            ));
+            let home_pb = PathBuf::from(&home);
+            let resolved = home_pb.join(".local").join("share").join("moagan");
+            tracing::debug!(
+                home = %home_pb.display(),
+                resolved = %resolved.display(),
+                "MoaganHome::resolve: from $HOME"
+            );
+            return Ok(Self::at(resolved));
         }
+        tracing::error!("MoaganHome::resolve: no MOAGAN_HOME or HOME; cannot resolve");
         Err(Error::Io(IoError::Raw(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "could not resolve user home directory; set MOAGAN_HOME",
@@ -201,14 +247,25 @@ impl MoaganHome {
 
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
+        tracing::debug!(root = %self.root.display(), "MoaganHome::ensure: creating layout");
         std::fs::create_dir_all(self.runs_dir())?;
         std::fs::create_dir_all(self.cross_run_cache_dir())?;
         std::fs::create_dir_all(self.cross_run_facet_cache_dir())?;
+        tracing::trace!(
+            runs_dir = %self.runs_dir().display(),
+            cache_dir = %self.cross_run_cache_dir().display(),
+            facet_cache_dir = %self.cross_run_facet_cache_dir().display(),
+            "MoaganHome::ensure: ok"
+        );
         Ok(())
     }
 
     /// Directory for a specific run.
     pub fn run_dir(&self, run_id: RunId) -> RunDir<'_> {
+        tracing::trace!(
+            run_id = %run_id,
+            "MoaganHome::run_dir: building RunDir"
+        );
         RunDir {
             root: self.runs_dir().join(run_id.to_string()),
             _home: self,
@@ -412,7 +469,11 @@ impl RunDir<'_> {
 
     /// Create every directory the run expects. Idempotent.
     pub fn ensure(&self) -> Result<()> {
-        for d in [
+        tracing::debug!(
+            run_root = %self.root.display(),
+            "RunDir::ensure: creating run layout"
+        );
+        let dirs = [
             self.root.clone(),
             self.proposals(),
             self.critiques(),
@@ -435,9 +496,11 @@ impl RunDir<'_> {
             self.cluster_proposals_dir(),
             self.adversaries(),
             self.coverage(),
-        ] {
-            std::fs::create_dir_all(&d)?;
+        ];
+        for d in &dirs {
+            std::fs::create_dir_all(d)?;
         }
+        tracing::trace!(dir_count = dirs.len(), "RunDir::ensure: ok");
         Ok(())
     }
 }
@@ -475,6 +538,11 @@ impl RunPaths {
     /// `home`. Returns a `RunPaths` with both maps populated.
     /// Idempotent: does not touch the filesystem.
     pub fn resolve(home: &MoaganHome, run_id: RunId) -> Self {
+        tracing::trace!(
+            run_id = %run_id,
+            home = %home.root().display(),
+            "RunPaths::resolve: enter"
+        );
         let run_dir = home.run_dir(run_id);
         let root = run_dir.root().to_path_buf();
         let entries: [(&str, &str); 8] = [
@@ -493,19 +561,28 @@ impl RunPaths {
             relative.insert(key.to_string(), sub.to_string());
             absolute.insert(key.to_string(), root.join(sub));
         }
+        tracing::debug!(
+            run_id = %run_id,
+            entry_count = relative.len(),
+            "RunPaths::resolve: ok"
+        );
         Self { relative, absolute }
     }
 
     /// Look up an absolute path by key. Returns `None` if the
     /// key is not in the catalog.
     pub fn absolute(&self, key: &str) -> Option<&PathBuf> {
-        self.absolute.get(key)
+        let found = self.absolute.get(key);
+        tracing::trace!(key, found = found.is_some(), "RunPaths::absolute");
+        found
     }
 
     /// Look up a run-relative path by key. Returns `None` if the
     /// key is not in the catalog.
     pub fn relative_str(&self, key: &str) -> Option<&str> {
-        self.relative.get(key).map(String::as_str)
+        let found = self.relative.get(key).map(String::as_str);
+        tracing::trace!(key, found = found.is_some(), "RunPaths::relative_str");
+        found
     }
 
     /// Number of catalog entries. Always 8 by construction.

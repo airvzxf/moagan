@@ -54,6 +54,7 @@ impl QualityVector {
 /// `a` dominates `b` when `a >= b` in every dimension and strictly `>`
 /// in at least one. Higher is better.
 pub fn dominates(a: &QualityVector, b: &QualityVector) -> bool {
+    tracing::trace!("ranking::pareto::dominates: enter");
     let ad = a.dims();
     let bd = b.dims();
     let mut all_ge = true;
@@ -67,15 +68,25 @@ pub fn dominates(a: &QualityVector, b: &QualityVector) -> bool {
             any_gt = true;
         }
     }
-    all_ge && any_gt
+    let out = all_ge && any_gt;
+    tracing::trace!(
+        all_ge,
+        any_gt,
+        dominated = out,
+        "ranking::pareto::dominates: exit"
+    );
+    out
 }
 
 /// Return the indices of proposals that are not dominated by any
 /// other proposal in `vectors`. Ties broken in favour of the earlier
 /// index. The returned indices are in ascending order.
 pub fn pareto_front(vectors: &[QualityVector]) -> Vec<usize> {
+    tracing::debug!(n = vectors.len(), "ranking::pareto::pareto_front: enter");
     let n = vectors.len();
     let mut dominated_by: Vec<Option<usize>> = vec![None; n];
+    let mut comparisons = 0u64;
+    let mut dominance_set = 0usize;
     for i in 0..n {
         if dominated_by[i].is_some() {
             continue;
@@ -84,15 +95,25 @@ pub fn pareto_front(vectors: &[QualityVector]) -> Vec<usize> {
             if dominated_by[j].is_some() {
                 continue;
             }
+            comparisons += 1;
             if dominates(&vectors[i], &vectors[j]) {
                 dominated_by[j] = Some(i);
+                dominance_set += 1;
             } else if dominates(&vectors[j], &vectors[i]) {
                 dominated_by[i] = Some(j);
+                dominance_set += 1;
                 break;
             }
         }
     }
-    (0..n).filter(|i| dominated_by[*i].is_none()).collect()
+    let out: Vec<usize> = (0..n).filter(|i| dominated_by[*i].is_none()).collect();
+    tracing::debug!(
+        front_size = out.len(),
+        comparisons,
+        dominance_set,
+        "ranking::pareto::pareto_front: exit"
+    );
+    out
 }
 
 #[cfg(test)]

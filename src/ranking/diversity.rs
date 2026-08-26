@@ -20,7 +20,13 @@ pub fn pick_with_crowding(
     vectors: &[QualityVector],
     top_k: usize,
 ) -> Vec<usize> {
+    tracing::debug!(
+        cluster_count = clusters.len(),
+        top_k,
+        "ranking::diversity::pick_with_crowding: enter"
+    );
     if clusters.is_empty() || top_k == 0 {
+        tracing::trace!("ranking::diversity::pick_with_crowding: empty short-circuit");
         return Vec::new();
     }
 
@@ -44,6 +50,10 @@ pub fn pick_with_crowding(
     }
     if reps.len() >= top_k {
         reps.truncate(top_k);
+        tracing::debug!(
+            picked = reps.len(),
+            "ranking::diversity::pick_with_crowding: round-1 saturated top_k"
+        );
         return reps;
     }
 
@@ -51,6 +61,7 @@ pub fn pick_with_crowding(
     // members round-robin (the cluster with the strongest next-best
     // goes first). Stop at top_k.
     let mut exhausted = vec![false; sorted_clusters.len()];
+    let mut rounds = 0u32;
     while reps.len() < top_k {
         let mut picked_any = false;
         for (idx, sorted) in sorted_clusters.iter_mut().enumerate() {
@@ -65,7 +76,12 @@ pub fn pick_with_crowding(
                 exhausted[idx] = true;
             }
         }
+        rounds += 1;
         if !picked_any {
+            tracing::trace!(
+                rounds,
+                "ranking::diversity::pick_with_crowding: no more candidates"
+            );
             break;
         }
     }
@@ -89,6 +105,11 @@ pub fn pick_with_crowding(
         reps.remove(victim);
     }
 
+    tracing::debug!(
+        picked = reps.len(),
+        rounds,
+        "ranking::diversity::pick_with_crowding: exit"
+    );
     reps
 }
 

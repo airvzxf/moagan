@@ -225,6 +225,7 @@ impl Phase for DecomposePhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!("decompose: enter");
         // 1. Load the canonical brief and decide whether to bother
         //    calling the LLM. The trigger ladder is in
         //    `domain::should_decompose`.

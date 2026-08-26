@@ -85,17 +85,33 @@ impl std::fmt::Debug for DashboardHandle {
 impl DashboardHandle {
     /// Stop accepting connections and drain active handlers.
     pub async fn shutdown(mut self) -> Result<()> {
+        tracing::info!(local_addr = %self.local_addr, "DashboardHandle::shutdown: enter");
         self.shutdown.cancel();
         let Some(task) = self.task.take() else {
+            tracing::info!("DashboardHandle::shutdown: no task to drain");
             return Ok(());
         };
-        task.await
-            .map_err(|e| Error::InvalidState(format!("dashboard task failed: {e}")))?
+        let res = task.await;
+        match res {
+            Ok(Ok(())) => {
+                tracing::info!("DashboardHandle::shutdown: task finished cleanly");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "DashboardHandle::shutdown: task errored");
+                Err(e)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "DashboardHandle::shutdown: join error");
+                Err(Error::InvalidState(format!("dashboard task failed: {e}")))
+            }
+        }
     }
 }
 
 impl Drop for DashboardHandle {
     fn drop(&mut self) {
+        tracing::debug!("DashboardHandle::drop: cancelling shutdown token");
         self.shutdown.cancel();
     }
 }
@@ -139,7 +155,9 @@ fn pick_port(requested: u16) -> u16 {
 /// Start the dashboard. `bind` must be a loopback address.
 pub async fn start(cfg: DashboardConfig) -> Result<DashboardHandle> {
     let bind_ip = cfg.bind.ip();
+    tracing::info!(bind = %cfg.bind, "Dashboard::start: enter");
     if !bind_ip.is_loopback() {
+        tracing::error!(bind = %cfg.bind, "Dashboard::start: non-loopback bind rejected");
         return Err(Error::InvalidArgs(
             "dashboard must bind on a loopback address".into(),
         ));
@@ -151,6 +169,10 @@ pub async fn start(cfg: DashboardConfig) -> Result<DashboardHandle> {
     let shutdown = CancellationToken::new();
     let task_shutdown = shutdown.clone();
     let task = tokio::spawn(serve(listener, cfg, task_shutdown));
+    tracing::info!(
+        local_addr = %local_addr,
+        "Dashboard::start: serving on local addr"
+    );
     Ok(DashboardHandle {
         local_addr,
         shutdown,
@@ -163,19 +185,32 @@ async fn serve(
     cfg: Arc<DashboardConfig>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    tracing::debug!("dashboard::serve: accept loop starting");
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => return Ok(()),
+            _ = shutdown.cancelled() => {
+                tracing::info!("dashboard::serve: shutdown signalled");
+                return Ok(());
+            }
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = match accepted {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "dashboard::serve: accept failed");
+                        continue;
+                    }
+                };
                 let cfg = Arc::clone(&cfg);
                 let handler_shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    let _ = tokio::time::timeout(
+                    if let Err(e) = tokio::time::timeout(
                         IO_TIMEOUT,
                         handle_connection(stream, cfg, handler_shutdown),
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::debug!(error = %e, "dashboard handler timed out or errored");
+                    }
                 });
             }
         }
@@ -195,25 +230,32 @@ async fn handle_connection(
     shutdown: CancellationToken,
 ) -> Result<()> {
     if shutdown.is_cancelled() {
+        tracing::trace!("dashboard::handle_connection: cancelled");
         return Ok(());
     }
     let request = match read_request(&mut stream).await {
         Ok(r) => r,
         Err(status) => {
+            tracing::debug!(status, "dashboard::handle_connection: bad request");
             return write_error(&mut stream, status, "bad request").await;
         }
     };
     if request.method != "GET" {
+        tracing::debug!(method = %request.method, "dashboard::handle_connection: non-GET rejected");
         return write_error(&mut stream, 405, "method not allowed").await;
     }
     let (path, query) = request
         .target
         .split_once('?')
         .map_or((request.target.as_str(), ""), |(p, q)| (p, q));
+    tracing::debug!(path, query, "dashboard::handle_connection: dispatch");
     let response = dispatch(path, query, &cfg).await;
     match response {
         Ok(resp) => write_response(&mut stream, &request.version, &resp).await,
-        Err((status, msg)) => write_error(&mut stream, status, &msg).await,
+        Err((status, msg)) => {
+            tracing::debug!(path, status, message = %msg, "dashboard::handle_connection: dispatch error");
+            write_error(&mut stream, status, &msg).await
+        }
     }
 }
 
@@ -230,6 +272,7 @@ async fn dispatch(
     query: &str,
     cfg: &DashboardConfig,
 ) -> std::result::Result<Response, (u16, String)> {
+    tracing::trace!(path, "dashboard::dispatch: enter");
     let db = open_db(cfg).map_err(internal)?;
 
     if path == "/api/runs" {
@@ -459,6 +502,7 @@ fn open_db(cfg: &DashboardConfig) -> Result<Db> {
         .db_path
         .clone()
         .unwrap_or_else(|| cfg.home.meta_db_path());
+    tracing::trace!(path = %path.display(), "dashboard::open_db: enter");
     Db::open(&path)
 }
 
@@ -530,6 +574,7 @@ pub struct HashRow {
 /// Walk `root` recursively and compute the SHA-256 of every file.
 /// Symlinks are skipped (matches the audit-sidecar policy).
 pub fn compute_hashes(root: &std::path::Path) -> Result<Vec<HashRow>> {
+    tracing::debug!(root = %root.display(), "compute_hashes: enter");
     let mut out = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
@@ -559,6 +604,7 @@ pub fn compute_hashes(root: &std::path::Path) -> Result<Vec<HashRow>> {
         });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
+    tracing::debug!(count = out.len(), "compute_hashes: ok");
     Ok(out)
 }
 
@@ -722,6 +768,11 @@ async fn read_request(stream: &mut TcpStream) -> std::result::Result<ParsedReque
 
 async fn write_response(stream: &mut TcpStream, version: &str, resp: &Response) -> Result<()> {
     let reason = reason_phrase(resp.status);
+    tracing::trace!(
+        status = resp.status,
+        body_len = resp.body.len(),
+        "dashboard::write_response"
+    );
     stream
         .write_all(
             format!(
@@ -739,6 +790,7 @@ async fn write_response(stream: &mut TcpStream, version: &str, resp: &Response) 
 }
 
 async fn write_error(stream: &mut TcpStream, status: u16, message: &str) -> Result<()> {
+    tracing::debug!(status, message, "dashboard::write_error");
     let body = format!("{status} {message}\n");
     let reason = reason_phrase(status);
     stream

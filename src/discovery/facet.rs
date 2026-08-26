@@ -9,6 +9,7 @@ use crate::domain::{Facet, FacetList};
 /// Stable id for a facet name. The slug is kebab-cased and trimmed
 /// to 64 chars.
 pub fn slug(name: &str) -> String {
+    tracing::trace!(name_len = name.len(), "facet: slug enter");
     let mut s = String::new();
     let mut prev_dash = false;
     for ch in name.chars() {
@@ -28,16 +29,27 @@ pub fn slug(name: &str) -> String {
         }
     }
     let trimmed = s.trim_matches('-').to_string();
-    if trimmed.len() > 64 {
+    let out = if trimmed.len() > 64 {
+        tracing::trace!(
+            pre_truncate_len = trimmed.len(),
+            "facet: slug truncating to 64"
+        );
         trimmed[..64].to_string()
     } else {
         trimmed
-    }
+    };
+    tracing::trace!(out_len = out.len(), "facet: slug exit");
+    out
 }
 
 /// Compute the cache key for a `(brief, category_id)` pair. Used by
 /// the facet phase to memoize the derived list across runs.
 pub fn cache_key(brief: &str, category_id: &str) -> String {
+    tracing::debug!(
+        brief_len = brief.len(),
+        category_id = %category_id,
+        "facet: cache_key"
+    );
     let mut h = Sha256::new();
     h.update(brief.as_bytes());
     h.update([0x1f]);
@@ -56,6 +68,14 @@ impl FacetList {
         now_unix: i64,
         triples: Vec<(String, String, bool)>,
     ) -> Self {
+        let required_count = triples.iter().filter(|(_, _, r)| *r).count();
+        tracing::debug!(
+            category_id = %category_id,
+            cluster_id = %cluster_id,
+            triples = triples.len(),
+            required = required_count,
+            "facet: FacetList::from_triples"
+        );
         let facets: Vec<Facet> = triples
             .into_iter()
             .map(|(name, description, required)| Facet {

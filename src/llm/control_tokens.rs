@@ -100,7 +100,14 @@ static CHAT_TEMPLATE_MARKERS: Lazy<Regex> = Lazy::new(|| {
 /// Returns [`Cow::Borrowed`] when no marker was present, so the
 /// common clean-response path allocates nothing.
 pub fn strip_chat_template_tokens(input: &str) -> Cow<'_, str> {
-    CHAT_TEMPLATE_MARKERS.replace_all(input, " ")
+    let out = CHAT_TEMPLATE_MARKERS.replace_all(input, " ");
+    if matches!(out, Cow::Owned(_)) {
+        tracing::debug!(
+            input_len = input.len(),
+            "control_tokens: chat-template markers stripped"
+        );
+    }
+    out
 }
 
 /// Response-path entry point: run both sanitising passes over `input`.
@@ -155,6 +162,11 @@ pub fn strip(s: &str) -> Cow<'_, str> {
             out.push(c);
         }
     }
+    tracing::debug!(
+        input_len = s.len(),
+        output_len = out.len(),
+        "control_tokens: ASCII control bytes stripped"
+    );
     Cow::Owned(out)
 }
 

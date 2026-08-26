@@ -245,11 +245,18 @@ fn orphan_where(t: &SweepTable) -> String {
 /// Count orphan rows on every curated table. Returns a per-table
 /// report. Does not mutate the database.
 pub fn list_orphans(conn: &Connection) -> Result<OrphanReport> {
+    tracing::info!(tables = SWEEP_TABLES.len(), "list_orphans: enter");
     let mut tables = Vec::with_capacity(SWEEP_TABLES.len());
     let mut total: i64 = 0;
     for t in SWEEP_TABLES {
         let sql = count_query(t);
         let rows: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
+        tracing::trace!(
+            table = t.table,
+            column = t.run_id_column,
+            rows,
+            "list_orphans: per-table count"
+        );
         tables.push(OrphanTableStat {
             table: t.table,
             run_id_column: t.run_id_column,
@@ -259,6 +266,7 @@ pub fn list_orphans(conn: &Connection) -> Result<OrphanReport> {
         });
         total = total.saturating_add(rows);
     }
+    tracing::info!(total, "list_orphans: ok");
     Ok(OrphanReport {
         tables,
         total_rows: total,
@@ -270,6 +278,7 @@ pub fn list_orphans(conn: &Connection) -> Result<OrphanReport> {
 /// success. The transaction is `BEGIN IMMEDIATE` so the sweep
 /// either lands in full or leaves the DB untouched on a failure.
 pub fn purge_orphans(conn: &Connection) -> Result<OrphanReport> {
+    tracing::info!(tables = SWEEP_TABLES.len(), "purge_orphans: enter");
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let mut tables = Vec::with_capacity(SWEEP_TABLES.len());
     let mut total: i64 = 0;
@@ -280,6 +289,12 @@ pub fn purge_orphans(conn: &Connection) -> Result<OrphanReport> {
         match outcome {
             Ok(rows) => {
                 let rows = rows as i64;
+                tracing::debug!(
+                    table = t.table,
+                    column = t.run_id_column,
+                    rows,
+                    "purge_orphans: deleted"
+                );
                 tables.push(OrphanTableStat {
                     table: t.table,
                     run_id_column: t.run_id_column,
@@ -290,6 +305,11 @@ pub fn purge_orphans(conn: &Connection) -> Result<OrphanReport> {
                 total = total.saturating_add(rows);
             }
             Err(e) => {
+                tracing::error!(
+                    table = t.table,
+                    error = %e,
+                    "purge_orphans: DELETE failed; rolling back"
+                );
                 failure = Some(e.into());
                 break;
             }
@@ -300,6 +320,7 @@ pub fn purge_orphans(conn: &Connection) -> Result<OrphanReport> {
         return Err(err);
     }
     conn.execute_batch("COMMIT")?;
+    tracing::info!(total, "purge_orphans: committed");
     Ok(OrphanReport {
         tables,
         total_rows: total,

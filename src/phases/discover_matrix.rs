@@ -265,6 +265,11 @@ impl Phase for DiscoverMatrixPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(
+            cell_count = self.matrix.cells(),
+            per_cell = self.matrix.sketches_per_cell,
+            "discover_matrix: enter"
+        );
         let matrix_path = self.persist_matrix(ctx)?;
 
         let brief: serde_json::Value = read_json(&ctx.run_dir().brief())?;
@@ -512,10 +517,15 @@ impl Phase for DiscoverMatrixPhase {
         }
 
         if paths.is_empty() {
+            tracing::error!("discover_matrix: zero sketches produced");
             return Err(Error::InvalidState(
                 "discover_matrix produced zero sketches".into(),
             ));
         }
+        tracing::info!(
+            sketches_kept = paths.len(),
+            "discover_matrix: phase complete"
+        );
 
         // Stop policy (PR-19, D.13.1/.2/.3/.7/.8): the
         // [`SaturationTracker`] observes the surviving batch and

@@ -213,6 +213,11 @@ impl CoverageRecorder {
         let coverage_dir = run_dir.coverage();
         std::fs::create_dir_all(&coverage_dir)?;
         let active = coverage_dir.join(format!("{run_id}.profraw"));
+        tracing::info!(
+            run_id = %run_id,
+            active = %active.display(),
+            "coverage::CoverageRecorder::enable: wiring SanCov runtime"
+        );
         // SAFETY: see fn docs. The recorder is constructed at run
         // start, single-threaded.
         unsafe {
@@ -230,6 +235,7 @@ impl CoverageRecorder {
     /// without touching the filesystem or the env table. Used by
     /// the test suite and by the `coverage` feature being off.
     pub fn noop() -> Self {
+        tracing::trace!("coverage::CoverageRecorder::noop: building no-op recorder");
         Self {
             active: PathBuf::from("/dev/null"),
             snapshots_dir: PathBuf::from("/dev/null"),
@@ -284,6 +290,7 @@ impl CoverageRecorder {
             "coverage: snapshot start"
         );
         if !self.active_flag {
+            tracing::trace!(seq, "coverage::CoverageRecorder::snapshot: no-op recorder");
             return Ok(CoverageSnapshot {
                 path: self.active.clone(),
                 tag: tag.to_owned(),
@@ -313,6 +320,10 @@ impl CoverageRecorder {
             "coverage: dump flushed"
         );
         if !after_dump {
+            tracing::trace!(
+                seq,
+                "coverage::CoverageRecorder::snapshot: nothing to rename"
+            );
             return Ok(CoverageSnapshot {
                 path: self.active.clone(),
                 tag: tag.to_owned(),
@@ -328,11 +339,18 @@ impl CoverageRecorder {
             .snapshots_dir
             .join(format!("{active_name}-{tag}-{seq}.profraw"));
         match std::fs::rename(&self.active, &snapshot_path) {
-            Ok(()) => Ok(CoverageSnapshot {
-                path: snapshot_path,
-                tag: tag.to_owned(),
-                seq,
-            }),
+            Ok(()) => {
+                tracing::info!(
+                    seq,
+                    snapshot = %snapshot_path.display(),
+                    "coverage::CoverageRecorder::snapshot: rotated"
+                );
+                Ok(CoverageSnapshot {
+                    path: snapshot_path,
+                    tag: tag.to_owned(),
+                    seq,
+                })
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // The runtime flushed and recreated the file
                 // between our existence check and the rename. The
@@ -340,13 +358,24 @@ impl CoverageRecorder {
                 // sitting in the new active file; surface the
                 // active path so the caller can correlate
                 // against the *next* snapshot.
+                tracing::warn!(
+                    seq,
+                    "coverage::CoverageRecorder::snapshot: NotFound race; returning active"
+                );
                 Ok(CoverageSnapshot {
                     path: self.active.clone(),
                     tag: tag.to_owned(),
                     seq,
                 })
             }
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                tracing::error!(
+                    seq,
+                    error = %e,
+                    "coverage::CoverageRecorder::snapshot: rename failed"
+                );
+                Err(e.into())
+            }
         }
     }
 
@@ -373,9 +402,17 @@ impl CoverageRecorder {
         interval_secs: u64,
     ) -> Option<std::thread::JoinHandle<()>> {
         if !self.active_flag {
+            tracing::trace!(
+                "coverage::CoverageRecorder::start_rotation: inactive recorder; no thread spawned"
+            );
             return None;
         }
         let me = self.clone();
+        tracing::info!(
+            max_bytes,
+            interval_secs,
+            "coverage::CoverageRecorder::start_rotation: spawning rotation thread"
+        );
         Some(std::thread::spawn(move || {
             let interval = std::time::Duration::from_secs(interval_secs.max(1));
             loop {
@@ -383,6 +420,12 @@ impl CoverageRecorder {
                 let size = std::fs::metadata(&me.active).map(|m| m.len()).unwrap_or(0);
                 if size > max_bytes {
                     let tag = format!("rotate-{}-{}", size, me.seq.load(Ordering::Relaxed));
+                    tracing::debug!(
+                        size,
+                        max_bytes,
+                        tag = %tag,
+                        "coverage::CoverageRecorder::start_rotation: rotating"
+                    );
                     if let Err(e) = me.snapshot(&tag) {
                         tracing::warn!(
                             error = %e,
@@ -392,6 +435,7 @@ impl CoverageRecorder {
                     }
                 }
             }
+            // Unreachable: process exit ends the thread.
         }))
     }
 }

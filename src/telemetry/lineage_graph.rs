@@ -30,6 +30,7 @@ impl LineageGraph {
     /// Build the graph from a flat list of `(parent, child)`
     /// pairs. Nodes are deduplicated in first-seen order.
     pub fn from_pairs(pairs: &[(String, String)]) -> Self {
+        tracing::trace!(pair_count = pairs.len(), "LineageGraph::from_pairs: enter");
         let mut nodes: Vec<RunId> = Vec::new();
         let mut edges: Vec<(RunId, RunId)> = Vec::new();
         let mut seen: HashMap<String, ()> = HashMap::new();
@@ -44,6 +45,11 @@ impl LineageGraph {
             }
             edges.push((parent.clone(), child.clone()));
         }
+        tracing::trace!(
+            nodes = nodes.len(),
+            edges = edges.len(),
+            "LineageGraph::from_pairs: ok"
+        );
         Self { nodes, edges }
     }
     /// Total node count.

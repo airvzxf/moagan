@@ -285,12 +285,19 @@ impl HostRateLimiter {
                 // Cooldown elapsed: half-open. A probe will be
                 // allowed through; the next outcome decides
                 // whether the breaker re-opens or fully closes.
+                tracing::info!(
+                    consecutive_failures = circuit.consecutive_failures,
+                    "research::fetcher::circuit_is_open: cooldown elapsed; transitioning to half-open"
+                );
                 circuit.open_until = None;
                 circuit.consecutive_failures = 0;
                 circuit.window_start = Instant::now();
                 false
             }
-            Some(_) => true,
+            Some(_) => {
+                tracing::trace!("research::fetcher::circuit_is_open: circuit open");
+                true
+            }
         }
     }
 
@@ -307,6 +314,10 @@ impl HostRateLimiter {
         // Without advanced features the fetcher's old contract
         // holds: a 429 / 503 is a hard fail, no retries.
         let Some(adv) = self.advanced.as_ref() else {
+            tracing::trace!(
+                attempt,
+                "research::fetcher::on_rate_limited: no advanced retry policy"
+            );
             return RateLimitAction::Fail(FetchError::NetworkError(
                 "upstream rate-limited (no retry policy)".to_string(),
             ));
@@ -329,11 +340,22 @@ impl HostRateLimiter {
             if cfg.circuit_breaker_threshold > 0
                 && circuit.consecutive_failures >= cfg.circuit_breaker_threshold
             {
+                tracing::warn!(
+                    consecutive_failures = circuit.consecutive_failures,
+                    threshold = cfg.circuit_breaker_threshold,
+                    cooldown_secs = cfg.circuit_breaker_cooldown_secs,
+                    "research::fetcher::on_rate_limited: circuit breaker tripped"
+                );
                 circuit.open_until =
                     Some(now + Duration::from_secs(cfg.circuit_breaker_cooldown_secs.max(1)));
             }
         }
         if attempt >= cfg.max_retries {
+            tracing::warn!(
+                attempt,
+                max_retries = cfg.max_retries,
+                "research::fetcher::on_rate_limited: retry budget exhausted"
+            );
             return RateLimitAction::Fail(FetchError::NetworkError(format!(
                 "upstream rate-limited; retry budget exhausted ({} attempts)",
                 attempt + 1
@@ -347,6 +369,11 @@ impl HostRateLimiter {
             cfg.max_retry_after_secs,
             cfg.jitter_ratio,
         );
+        tracing::trace!(
+            attempt,
+            wait_ms = wait.as_millis(),
+            "research::fetcher::on_rate_limited: wait"
+        );
         RateLimitAction::Wait(wait)
     }
 
@@ -358,6 +385,9 @@ impl HostRateLimiter {
             return;
         };
         let mut circuit = adv.circuit.lock();
+        if circuit.open_until.is_some() || circuit.consecutive_failures > 0 {
+            tracing::info!("research::fetcher::record_success: closing circuit breaker");
+        }
         circuit.open_until = None;
         circuit.consecutive_failures = 0;
         circuit.window_start = Instant::now();
@@ -533,6 +563,7 @@ impl ResearchFetcher {
         rate_map: HashMap<String, RateLimitConfig>,
         retry_map: HashMap<String, HostRetryConfig>,
     ) -> Self {
+        let total = rate_map.len();
         // Merge: every host with rate-limit config gets a limiter;
         // if it also has a retry policy, the limiter carries the
         // advanced state. Hosts only in retry_map are ignored
@@ -548,6 +579,11 @@ impl ResearchFetcher {
                 Some((host, Arc::new(HostRateLimiter::with_retry(rl_cfg, retry))))
             })
             .collect();
+        tracing::info!(
+            requested_hosts = total,
+            installed_hosts = self.per_host_rate_limit.len(),
+            "research::fetcher::ResearchFetcher::with_per_host_retry: configured"
+        );
         self
     }
 
@@ -555,14 +591,22 @@ impl ResearchFetcher {
         &self,
         host: &str,
     ) -> std::result::Result<Option<OwnedSemaphorePermit>, FetchError> {
-        let Some(limiter) = self.per_host_rate_limit.get(&canonical_host(host)) else {
+        let canonical = canonical_host(host);
+        let Some(limiter) = self.per_host_rate_limit.get(&canonical) else {
+            tracing::trace!(
+                host,
+                "research::fetcher::acquire_host_rate_limit: no limiter configured"
+            );
             return Ok(None);
         };
         if limiter.circuit_is_open() {
-            return Err(FetchError::CircuitOpen {
-                host: canonical_host(host),
-            });
+            tracing::warn!(
+                host = %canonical,
+                "research::fetcher::acquire_host_rate_limit: circuit open; short-circuiting"
+            );
+            return Err(FetchError::CircuitOpen { host: canonical });
         }
+        tracing::trace!(host = %canonical, "research::fetcher::acquire_host_rate_limit: acquiring permit");
         limiter.acquire().await.map(Some)
     }
 
@@ -578,10 +622,21 @@ impl ResearchFetcher {
         &self,
         urls: &[String],
     ) -> Vec<std::result::Result<ResearchSnippet, FetchError>> {
+        tracing::debug!(
+            requested = urls.len(),
+            limit = MAX_URLS_PER_CALL,
+            "research::fetcher::ResearchFetcher::fetch_all: enter"
+        );
         if urls.is_empty() {
+            tracing::debug!("research::fetcher::ResearchFetcher::fetch_all: empty input");
             return Vec::new();
         }
         if urls.len() > MAX_URLS_PER_CALL {
+            tracing::warn!(
+                requested = urls.len(),
+                limit = MAX_URLS_PER_CALL,
+                "research::fetcher::ResearchFetcher::fetch_all: too many URLs"
+            );
             return vec![Err(FetchError::TooManyUrls {
                 requested: urls.len(),
             })];
@@ -592,9 +647,24 @@ impl ResearchFetcher {
             .expect("reqwest client builder is infallible for our config");
         let policy = RedactPolicy::default();
         let mut out = Vec::with_capacity(urls.len());
+        let mut ok_count = 0usize;
+        let mut err_count = 0usize;
         for url in urls {
+            tracing::trace!(
+                url,
+                "research::fetcher::ResearchFetcher::fetch_all: fetch_one"
+            );
+            match self.fetch_one(&client, &policy, url).await {
+                Ok(_) => ok_count += 1,
+                Err(_) => err_count += 1,
+            }
             out.push(self.fetch_one(&client, &policy, url).await);
         }
+        tracing::debug!(
+            ok_count,
+            err_count,
+            "research::fetcher::ResearchFetcher::fetch_all: exit"
+        );
         out
     }
 
@@ -618,12 +688,18 @@ impl ResearchFetcher {
         policy: &RedactPolicy,
         url: &str,
     ) -> std::result::Result<ResearchSnippet, FetchError> {
+        tracing::debug!(url, "research::fetcher::ResearchFetcher::fetch_one: enter");
         let parsed = reqwest::Url::parse(url)
             .map_err(|e| FetchError::NetworkError(format!("parse: {e}")))?;
         let host = parsed
             .host_str()
             .ok_or_else(|| FetchError::NetworkError("url has no host".into()))?;
         if !allowlist::is_allowed(host) {
+            tracing::warn!(
+                url,
+                host,
+                "research::fetcher::ResearchFetcher::fetch_one: host not in allowlist"
+            );
             return Err(FetchError::DisallowedHost(host.to_string()));
         }
         let canonical = canonical_host(host);
@@ -640,6 +716,10 @@ impl ResearchFetcher {
         // `truncated = false` because the parser applies its own
         // output-side cap internally.
         if pdf::looks_like_pdf_url(url) {
+            tracing::debug!(
+                url,
+                "research::fetcher::ResearchFetcher::fetch_one: routing to pdf parser"
+            );
             let text = pdf::fetch_pdf_text(url, pdf::DEFAULT_MAX_INPUT_BYTES)
                 .await
                 .map_err(|err| match err {
@@ -699,6 +779,11 @@ impl ResearchFetcher {
                         .filter(|k| !k.is_empty())
                 });
                 if let Some(value) = token {
+                    tracing::trace!(
+                        url,
+                        host,
+                        "research::fetcher::ResearchFetcher::fetch_one: attaching bearer token"
+                    );
                     request = request.header("Authorization", format!("Bearer {value}"));
                 }
             }
@@ -707,6 +792,12 @@ impl ResearchFetcher {
                 .await
                 .map_err(|e| FetchError::NetworkError(format!("send: {e}")))?;
             let status = resp.status().as_u16();
+            tracing::trace!(
+                url,
+                status,
+                attempt,
+                "research::fetcher::ResearchFetcher::fetch_one: got status"
+            );
             if status == 429 || status == 503 {
                 let limiter = self.per_host_rate_limit.get(&canonical);
                 let header_value = resp
@@ -721,6 +812,12 @@ impl ResearchFetcher {
                 };
                 match action {
                     RateLimitAction::Wait(d) if attempt + 1 < MAX_ATTEMPTS => {
+                        tracing::trace!(
+                            url,
+                            attempt,
+                            wait_ms = d.as_millis(),
+                            "research::fetcher::ResearchFetcher::fetch_one: retrying"
+                        );
                         if !d.is_zero() {
                             tokio::time::sleep(d).await;
                         }
@@ -736,6 +833,12 @@ impl ResearchFetcher {
                                 "upstream {status}; retry ceiling reached"
                             )),
                         };
+                        tracing::warn!(
+                            url,
+                            attempt,
+                            status,
+                            "research::fetcher::ResearchFetcher::fetch_one: giving up"
+                        );
                         return Err(err);
                     }
                 }
@@ -759,6 +862,13 @@ impl ResearchFetcher {
             let raw = String::from_utf8_lossy(slice);
             let redacted_cow = apply(policy, Surface::Storage, &raw)
                 .map_err(|e| FetchError::NetworkError(format!("redact: {e}")))?;
+            tracing::debug!(
+                url,
+                status,
+                bytes = redacted_cow.len(),
+                truncated,
+                "research::fetcher::ResearchFetcher::fetch_one: ok"
+            );
             return Ok(ResearchSnippet {
                 url: url.to_string(),
                 content: redacted_cow.into_owned(),

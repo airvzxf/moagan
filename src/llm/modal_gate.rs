@@ -68,6 +68,12 @@ impl ModalityGate {
     /// singular) is consulted; the rest of the gate operates
     /// purely on the already-validated types.
     pub fn from_entry(entry: &ModelsDevEntry) -> Self {
+        tracing::trace!(
+            model = %entry.id,
+            attachment = entry.attachment,
+            tool_call = entry.tool_call,
+            "ModalityGate: from_entry"
+        );
         Self {
             attachment: entry.attachment,
             tool_call: entry.tool_call,
@@ -85,6 +91,7 @@ impl ModalityGate {
     /// `attachment: false` flag still rejects an image even
     /// though `image` would also be absent from the modality list.
     pub fn from_conservative_default() -> Self {
+        tracing::trace!("ModalityGate: from_conservative_default (text-only baseline)");
         Self {
             attachment: false,
             tool_call: false,
@@ -111,7 +118,18 @@ impl ModalityGate {
     ///    forbids tool calls. The caller does not see this as an
     ///    error; the wire body simply omits the field.
     pub fn apply(&self, req: &mut Request) -> Result<()> {
+        tracing::trace!(
+            model = %req.model,
+            attachments = req.attachments.len(),
+            tool_choice_set = req.tool_choice.is_some(),
+            "ModalityGate: apply begin"
+        );
         if !self.attachment && !req.attachments.is_empty() {
+            tracing::debug!(
+                model = %req.model,
+                attached = req.attachments.len(),
+                "ModalityGate: rejecting (model does not accept attachments)"
+            );
             return Err(Error::ModalityUnsupported(format!(
                 "model {} does not accept attachments ({} attached)",
                 req.model,
@@ -120,6 +138,12 @@ impl ModalityGate {
         }
         for att in &req.attachments {
             if !self.modalities_in.iter().any(|m| m == &att.modality) {
+                tracing::debug!(
+                    model = %req.model,
+                    modality = %att.modality,
+                    allowed = ?self.modalities_in,
+                    "ModalityGate: rejecting (modality unsupported)"
+                );
                 return Err(Error::ModalityUnsupported(format!(
                     "{} attachment refused: model {} accepts {:?} only",
                     att.modality, req.model, self.modalities_in
@@ -127,6 +151,10 @@ impl ModalityGate {
             }
         }
         if !self.tool_call && req.tool_choice.is_some() {
+            tracing::debug!(
+                model = %req.model,
+                "ModalityGate: dropping tool_choice (tool_call disabled)"
+            );
             req.tool_choice = None;
         }
         Ok(())

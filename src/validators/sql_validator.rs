@@ -73,6 +73,11 @@ impl SqlValidator {
     /// `language: "sql-postgresql"`. Defaults to `Sql` (ANSI) when
     /// no marker is present.
     pub fn detect_dialect(artifact: &CodeArtifact) -> Dialect {
+        tracing::trace!(
+            kind = %artifact.kind,
+            language = %artifact.language,
+            "validators::sql::SqlValidator::detect_dialect"
+        );
         if artifact.kind.starts_with("dialect:") {
             return Dialect::from_marker(&artifact.kind["dialect:".len()..]);
         }
@@ -84,9 +89,14 @@ impl SqlValidator {
     /// recorded in the `status` field with a description in
     /// `failed_checks` (Fail) or `skipped_checks` (Skipped).
     pub async fn check(artifact: &CodeArtifact, sandbox: &Sandbox) -> Result<ValidationEvidence> {
+        tracing::debug!(
+            kind = %artifact.kind,
+            "validators::sql::SqlValidator::check: enter"
+        );
         let dialect = Self::detect_dialect(artifact);
         let source = artifact.source.trim();
         if source.is_empty() {
+            tracing::trace!("validators::sql::SqlValidator::check: empty source; skipping");
             return Ok(ValidationEvidence::skipped(
                 "sql",
                 "empty source; nothing to validate",
@@ -99,6 +109,7 @@ impl SqlValidator {
         // single-statement so we feed it one at a time.
         let statements = split_statements(source);
         if statements.is_empty() {
+            tracing::trace!("validators::sql::SqlValidator::check: no statements after split");
             return Ok(ValidationEvidence::skipped(
                 "sql",
                 "no statements after splitting on ';'",
@@ -120,6 +131,12 @@ impl SqlValidator {
                 Err(e) => parse_failures.push(e.to_string()),
             }
         }
+        tracing::trace!(
+            dialect = %dialect,
+            parse_ok,
+            parse_failures = parse_failures.len(),
+            "validators::sql::SqlValidator::check: parse phase complete"
+        );
 
         if !parse_failures.is_empty() {
             let mut evidence = ValidationEvidence {
@@ -131,6 +148,10 @@ impl SqlValidator {
             for msg in parse_failures {
                 evidence.record_failure(ValidationFailure::new(FailureKind::SqlSyntaxError, msg));
             }
+            tracing::debug!(
+                parse_failures = evidence.failures.len(),
+                "validators::sql::SqlValidator::check: parse-fail exit"
+            );
             return Ok(evidence);
         }
 
@@ -144,9 +165,17 @@ impl SqlValidator {
                     if let Some(v) = capture_tool_version(sandbox, "sqlite3").await {
                         evidence.reproducibility.push(("sqlite3".into(), v));
                     }
+                    tracing::debug!(
+                        status = ?evidence.status,
+                        "validators::sql::SqlValidator::check: sqlite exit"
+                    );
                     return Ok(evidence);
                 }
                 Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "validators::sql::SqlValidator::check: sqlite spawn failed"
+                    );
                     let mut evidence = ValidationEvidence {
                         validator: "sql".into(),
                         status: ValidationStatus::Fail,
@@ -165,6 +194,10 @@ impl SqlValidator {
         evidence
             .checks_run
             .push(format!("parsed {} statement(s) as {dialect}", parse_ok));
+        tracing::debug!(
+            status = ?evidence.status,
+            "validators::sql::SqlValidator::check: pass exit"
+        );
         Ok(evidence)
     }
 }
@@ -234,6 +267,10 @@ impl Dialect {
 /// `''` is the SQL escape for a literal apostrophe). Empty
 /// fragments are dropped.
 fn split_statements(source: &str) -> Vec<String> {
+    tracing::trace!(
+        source_len = source.len(),
+        "validators::sql::split_statements"
+    );
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_quote = false;
@@ -1243,6 +1280,10 @@ fn peek_token(tok: &mut Tokenizer<'_>) -> ParseResult<Option<Tok>> {
 /// raw `SandboxResult`. The sandbox enforces the 64 KiB stdout/stderr
 /// cap and aborts a command that exceeds it.
 async fn run_in_sqlite(sandbox: &Sandbox, source: &str) -> Result<SandboxResult> {
+    tracing::trace!(
+        source_len = source.len(),
+        "validators::sql::run_in_sqlite: enter"
+    );
     sandbox
         .run("sqlite3", &["-bail", ":memory:", source])
         .await
@@ -1250,6 +1291,11 @@ async fn run_in_sqlite(sandbox: &Sandbox, source: &str) -> Result<SandboxResult>
 }
 
 fn sqlite_evidence(result: SandboxResult, parse_ok: usize) -> ValidationEvidence {
+    tracing::trace!(
+        ?result.status,
+        exit_code = result.exit_code,
+        "validators::sql::sqlite_evidence"
+    );
     let status = match result.status {
         SandboxStatus::Pass => ValidationStatus::Pass,
         SandboxStatus::Fail | SandboxStatus::Timeout => ValidationStatus::Fail,

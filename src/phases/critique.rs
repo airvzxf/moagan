@@ -39,6 +39,11 @@ impl Phase for CritiquePhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(
+            critics_per_proposal = self.critics_per_proposal,
+            rubric_enabled = ctx.config.rubric.enabled,
+            "critique: enter"
+        );
         let proposals_dir = ctx.run_dir().proposals();
         let critiques_dir = ctx.run_dir().critiques();
         std::fs::create_dir_all(&critiques_dir)?;
@@ -64,6 +69,10 @@ impl Phase for CritiquePhase {
             }
             proposals.push(read_json(&path)?);
         }
+        tracing::info!(
+            proposal_count = proposals.len(),
+            "critique: proposals pre-loaded"
+        );
 
         let critics = self.critics_per_proposal as usize;
         let total = proposals.len() * critics;
@@ -101,6 +110,12 @@ impl Phase for CritiquePhase {
                     let critique: Critique = serde_json::from_value(response)?;
                     let out_path: PathBuf = critiques_dir.join(format!("{id_clone}.json"));
                     write_json(&out_path, &critique)?;
+                    tracing::trace!(
+                        critic_id = %id_clone,
+                        verdict = %critique.verdict,
+                        issue_count = critique.issues.len(),
+                        "critique: future persisted"
+                    );
                     Ok::<PathBuf, crate::error::Error>(out_path)
                 }
             })
@@ -109,8 +124,19 @@ impl Phase for CritiquePhase {
         let results = join_all(futures).await;
         let mut paths = Vec::with_capacity(total);
         for r in results {
-            paths.push(r?);
+            match r {
+                Ok(p) => paths.push(p),
+                Err(e) => {
+                    tracing::error!(error = %e, "critique: future failed");
+                    return Err(e);
+                }
+            }
         }
+        tracing::info!(
+            critiques_written = paths.len(),
+            total_expected = total,
+            "critique: base critics loop complete"
+        );
 
         // Track E (E7 partial): TiefighterCritic adversarial
         // cross-check sidecar. Opt-in via
@@ -123,7 +149,12 @@ impl Phase for CritiquePhase {
         // skipped — the base critics loop is authoritative and the
         // run never fails because the adversarial pass failed.
         if ctx.config.critique.tiefighter_enabled {
+            tracing::info!("critique: TiefighterCritic sidecar enabled");
             let scored = run_tiefighter_sidecar(ctx, &proposals, &critiques_dir).await?;
+            tracing::debug!(
+                sidecar_reports = scored.len(),
+                "critique: TiefighterCritic sidecar complete"
+            );
             for (_proposal_id, _score) in scored {
                 // The full report lives at
                 // <run_dir>/critiques/<proposal_id>_tiefighter.json

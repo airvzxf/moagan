@@ -69,11 +69,22 @@ impl SaturationTracker {
     /// Build a tracker with `completed = 0` and the given target.
     /// Uses [`StopPolicy::default`] for the tuning knobs.
     pub fn new(target: usize) -> Self {
+        tracing::debug!(target, "SaturationTracker::new");
         Self::with_policy(target, StopPolicy::default())
     }
 
     /// Build a tracker with a custom [`StopPolicy`].
     pub fn with_policy(target: usize, policy: StopPolicy) -> Self {
+        tracing::debug!(
+            target,
+            saturation_threshold = policy.saturation_threshold,
+            reserve_ratio = policy.reserve_ratio,
+            outlier_distance = policy.outlier_distance,
+            min_sketches = policy.min_sketches,
+            max_sketches = policy.max_sketches,
+            hard_cap = policy.hard_cap,
+            "SaturationTracker::with_policy"
+        );
         Self {
             completed: 0,
             target,
@@ -89,6 +100,12 @@ impl SaturationTracker {
     /// Snapshot a tracker from the current `SketchLoopState`. The
     /// state's `completed_sketches` vector is the source of truth.
     pub fn from_state(state: &SketchLoopState, target: usize) -> Self {
+        tracing::debug!(
+            target,
+            completed = state.completed_sketches.len(),
+            failed = state.failed_attempts,
+            "SaturationTracker::from_state"
+        );
         Self {
             completed: state.completed_sketches.len(),
             target,
@@ -100,25 +117,37 @@ impl SaturationTracker {
     /// coverage to avoid division-by-zero traps in the caller's
     /// decision logic.
     pub fn coverage(&self) -> f32 {
-        if self.target == 0 {
+        let v = if self.target == 0 {
             1.0
         } else {
             self.completed as f32 / self.target as f32
-        }
+        };
+        tracing::trace!(
+            completed = self.completed,
+            target = self.target,
+            coverage = v,
+            "coverage"
+        );
+        v
     }
 
     /// `true` when coverage has reached (or exceeded) 100%.
     pub fn is_saturated(&self) -> bool {
-        self.coverage() >= 1.0
+        let s = self.coverage() >= 1.0;
+        tracing::trace!(saturated = s, "is_saturated");
+        s
     }
 
     /// Per-model saturation query (D.13.2). Returns `false` for
     /// models the tracker has not seen.
     pub fn model_saturated(&self, model: &str) -> bool {
-        self.per_model_saturated
+        let v = self
+            .per_model_saturated
             .get(model)
             .copied()
-            .unwrap_or(false)
+            .unwrap_or(false);
+        tracing::trace!(model = %model, saturated = v, "model_saturated");
+        v
     }
 
     /// Record a sketch completion. Convenience helper so the
@@ -126,11 +155,22 @@ impl SaturationTracker {
     /// fields directly. Mirrors `SketchLoopState::record_completion`.
     pub fn record_completion(&mut self) {
         self.completed += 1;
+        tracing::trace!(
+            completed = self.completed,
+            target = self.target,
+            "record_completion"
+        );
     }
 
     /// Record a batch of sketch completions.
     pub fn record_completions(&mut self, count: usize) {
         self.completed = self.completed.saturating_add(count);
+        tracing::trace!(
+            count,
+            completed = self.completed,
+            target = self.target,
+            "record_completions"
+        );
     }
 
     /// Observe a `(batch, clusters)` snapshot and return the
@@ -293,10 +333,18 @@ impl SaturationTracker {
 /// in a real pairwise mean without touching the call sites.
 fn mean_intra_cluster_similarity(clusters: &[Cluster]) -> f32 {
     if clusters.is_empty() {
+        tracing::trace!("mean_intra_cluster_similarity: empty");
         return 0.0;
     }
     let sum: f32 = clusters.iter().map(|c| c.cohesion).sum();
-    sum / clusters.len() as f32
+    let v = sum / clusters.len() as f32;
+    tracing::trace!(
+        clusters = clusters.len(),
+        sum,
+        mean = v,
+        "mean_intra_cluster_similarity"
+    );
+    v
 }
 
 /// True when the loop has spent the `reserve_ratio` margin on
@@ -316,18 +364,31 @@ fn mean_intra_cluster_similarity(clusters: &[Cluster]) -> f32 {
 /// divide-by-zero trap.
 fn reserve_spent(completed: usize, target: usize, reserve_ratio: f32) -> bool {
     if target == 0 {
+        tracing::trace!("reserve_spent: target=0 → spent");
         return true;
     }
     let saturation_point = target / 2;
     let cap = (saturation_point as f32 * (1.0 + reserve_ratio)).ceil() as usize;
-    completed >= cap
+    let spent = completed >= cap;
+    tracing::trace!(
+        completed,
+        target,
+        reserve_ratio,
+        saturation_point,
+        cap,
+        spent,
+        "reserve_spent"
+    );
+    spent
 }
 
 /// Outlier cap. Default `min_sketches / 2` — i.e. one outlier
 /// per two regular sketches is the rule of thumb. The cap is a
 /// safety net so an outlier-flooded run still terminates.
 fn outliers_cap(min_sketches: usize) -> usize {
-    min_sketches / 2
+    let v = min_sketches / 2;
+    tracing::trace!(min_sketches, cap = v, "outliers_cap");
+    v
 }
 
 #[cfg(test)]

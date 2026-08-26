@@ -127,9 +127,22 @@ impl FromStr for NamespaceFlags {
                 "net" => Self::NET,
                 "uts" => Self::UTS,
                 "ipc" => Self::IPC,
-                _ => return Err(format!("unknown namespace: {name}")),
+                _ => {
+                    tracing::warn!(
+                        sandbox = "namespace",
+                        name = %name,
+                        "NamespaceFlags::from_str: unknown namespace token"
+                    );
+                    return Err(format!("unknown namespace: {name}"));
+                }
             };
         }
+        tracing::debug!(
+            sandbox = "namespace",
+            input = %value,
+            result = %flags,
+            "NamespaceFlags::from_str parsed input"
+        );
         Ok(flags)
     }
 }
@@ -161,12 +174,34 @@ impl<'de> Deserialize<'de> for NamespaceFlags {
 #[cfg(target_os = "linux")]
 pub fn apply(flags: NamespaceFlags) -> std::io::Result<()> {
     if flags.is_empty() {
+        tracing::trace!(
+            sandbox = "namespace",
+            "namespace::apply called with empty flags; no-op"
+        );
         return Ok(());
     }
+    tracing::debug!(
+        sandbox = "namespace",
+        flags = %flags,
+        libc_flags = %flags.to_libc(),
+        "namespace::apply calling libc::unshare"
+    );
     let result = unsafe { libc::unshare(flags.to_libc()) };
     if result != 0 {
-        Err(std::io::Error::last_os_error())
+        let error = std::io::Error::last_os_error();
+        tracing::warn!(
+            sandbox = "namespace",
+            flags = %flags,
+            error = %error,
+            "namespace::apply: libc::unshare failed"
+        );
+        Err(error)
     } else {
+        tracing::info!(
+            sandbox = "namespace",
+            flags = %flags,
+            "namespace::apply succeeded"
+        );
         Ok(())
     }
 }
@@ -175,7 +210,12 @@ pub fn apply(flags: NamespaceFlags) -> std::io::Result<()> {
 ///
 /// Namespace isolation is unavailable outside Linux, so this is a no-op.
 #[cfg(not(target_os = "linux"))]
-pub fn apply(_flags: NamespaceFlags) -> std::io::Result<()> {
+pub fn apply(flags: NamespaceFlags) -> std::io::Result<()> {
+    tracing::trace!(
+        sandbox = "namespace",
+        flags = %flags,
+        "namespace::apply no-op on non-Linux"
+    );
     Ok(())
 }
 

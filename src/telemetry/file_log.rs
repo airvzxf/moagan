@@ -55,15 +55,21 @@ pub enum SetError {
 /// (`logs` with no parent component) skips the directory step —
 /// `Path::parent` returns `Some("")` in that case.
 pub fn set(path: PathBuf) -> Result<(), SetError> {
+    tracing::debug!(path = %path.display(), "file_log::set: enter");
     // `Path::parent` returns `Some("")` for a bare filename. Skip
     // the create_dir_all when the parent is empty.
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(source) = std::fs::create_dir_all(parent)
     {
+        tracing::warn!(
+            path = %path.display(),
+            error = %source,
+            "file_log::set: create_dir_all failed"
+        );
         return Err(SetError::ParentDir { path, source });
     }
-    LOG_FILE_PATH.set(path).map_err(|_| {
+    let outcome = LOG_FILE_PATH.set(path).map_err(|_| {
         // `set` failed because the cell is already populated.
         // `get` is guaranteed `Some` in that case; the `expect`
         // documents the invariant.
@@ -73,7 +79,13 @@ pub fn set(path: PathBuf) -> Result<(), SetError> {
                 .expect("LOG_FILE_PATH set returned Err but get returned None")
                 .clone(),
         )
-    })
+    });
+    match &outcome {
+        Ok(()) => tracing::info!("file_log::set: ok"),
+        Err(SetError::AlreadySet(_)) => tracing::warn!("file_log::set: already set, ignored"),
+        Err(SetError::ParentDir { .. }) => {}
+    }
+    outcome
 }
 
 /// True iff `--logs` or `MOAGAN_RUN_LOGS` requested a file. Cheap
@@ -103,9 +115,19 @@ impl<'a> MakeWriter<'a> for FileLogWriter {
 
     fn make_writer(&'a self) -> Self::Writer {
         FileLogHandle {
-            inner: LOG_FILE_PATH
-                .get()
-                .and_then(|p| OpenOptions::new().create(true).append(true).open(p).ok()),
+            inner: LOG_FILE_PATH.get().and_then(|p| {
+                match OpenOptions::new().create(true).append(true).open(p) {
+                    Ok(f) => Some(f),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %p.display(),
+                            error = %e,
+                            "file_log: failed to open log file, dropping event"
+                        );
+                        None
+                    }
+                }
+            }),
         }
     }
 }

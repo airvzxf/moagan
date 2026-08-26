@@ -48,10 +48,17 @@ use super::epistemic_legacy::EpistemicLegacy;
 /// `RunContext::call_with_retry_parse` and returns the selected
 /// persona id.
 pub async fn pick_persona(ctx: &RunContext, candidates: Vec<String>) -> Result<Option<String>> {
+    tracing::debug!(
+        candidates = candidates.len(),
+        persona_enabled = ctx.config.discovery.persona_enabled,
+        "pick_persona: enter (async)"
+    );
     if !ctx.config.discovery.persona_enabled {
+        tracing::trace!("pick_persona: short-circuit (persona_enabled=false)");
         return Ok(None);
     }
     if candidates.is_empty() {
+        tracing::trace!("pick_persona: short-circuit (empty candidates)");
         return Ok(None);
     }
     let user = serde_json::json!({ "candidates": candidates });
@@ -66,6 +73,11 @@ pub async fn pick_persona(ctx: &RunContext, candidates: Vec<String>) -> Result<O
         )
         .await?;
     let report: PersonaPickerReport = serde_json::from_value(response)?;
+    tracing::info!(
+        selected = %report.selected,
+        rationale = %report.rationale,
+        "pick_persona: selected"
+    );
     Ok(Some(report.selected))
 }
 
@@ -87,11 +99,22 @@ pub async fn pick_angle(
     legacy: &mut EpistemicLegacy,
     clusters: Vec<String>,
 ) -> Result<Option<String>> {
+    tracing::debug!(
+        clusters = clusters.len(),
+        angle_enabled = ctx.config.discovery.angle_enabled,
+        "pick_angle: enter (async)"
+    );
     if !ctx.config.discovery.angle_enabled {
+        tracing::trace!("pick_angle: short-circuit (angle_enabled=false)");
         return Ok(None);
     }
     let min_clusters = ctx.config.discovery.angle_clusters_min;
     if clusters.len() < min_clusters {
+        tracing::trace!(
+            clusters = clusters.len(),
+            min_clusters,
+            "pick_angle: short-circuit (below min_clusters)"
+        );
         return Ok(None);
     }
     let user = serde_json::json!({ "clusters": clusters });
@@ -109,6 +132,12 @@ pub async fn pick_angle(
     legacy
         .preferred_strategies
         .push(format!("angle:{}", report.selected));
+    tracing::info!(
+        selected = %report.selected,
+        rationale = %report.rationale,
+        legacy_preferred = legacy.preferred_strategies.len(),
+        "pick_angle: appended to legacy"
+    );
     Ok(Some(report.selected))
 }
 

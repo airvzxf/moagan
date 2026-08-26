@@ -50,7 +50,10 @@ pub struct ContradictionRecord {
 /// clustering step is in `distances` (already sorted descending by
 /// the cluster phase), and we return the top-`max_n` pairs.
 pub fn top_pairs(distances: &[(String, String, f32)], max_n: usize) -> Vec<(String, String, f32)> {
-    distances.iter().take(max_n).cloned().collect()
+    tracing::debug!(input = distances.len(), max_n, "contradiction: top_pairs");
+    let out: Vec<(String, String, f32)> = distances.iter().take(max_n).cloned().collect();
+    tracing::trace!(returned = out.len(), "contradiction: top_pairs result");
+    out
 }
 
 /// Severity ordering used to sort contradictions before persistence.
@@ -60,12 +63,14 @@ pub fn top_pairs(distances: &[(String, String, f32)], max_n: usize) -> Vec<(Stri
 /// strings) can keep using the existing numeric ladder without
 /// having to round-trip through the new enum.
 pub fn severity_rank(s: &str) -> u8 {
-    match s {
+    let v = match s {
         "high" => 3,
         "medium" => 2,
         "low" => 1,
         _ => 0,
-    }
+    };
+    tracing::trace!(severity = %s, rank = v, "contradiction: severity_rank");
+    v
 }
 
 /// Maximum number of candidate sketches the LLM-as-judge prompt
@@ -88,12 +93,25 @@ const MAX_CANDIDATES_PER_CALL: usize = 32;
 /// primes the judge to emit `{"findings": []}` so the wire form is
 /// still well-typed.
 pub fn user_payload(focal: &Sketch, candidates: &[Sketch]) -> String {
+    tracing::debug!(
+        focal_id = %focal.id,
+        candidates = candidates.len(),
+        "contradiction: user_payload"
+    );
     let focal_block = render_sketch(focal);
     let candidate_blocks: Vec<String> = candidates
         .iter()
         .take(MAX_CANDIDATES_PER_CALL)
         .map(render_sketch)
         .collect();
+    let truncated = candidates.len() > MAX_CANDIDATES_PER_CALL;
+    if truncated {
+        tracing::trace!(
+            cap = MAX_CANDIDATES_PER_CALL,
+            dropped = candidates.len() - MAX_CANDIDATES_PER_CALL,
+            "contradiction: candidate pool capped"
+        );
+    }
     format!(
         "Focal sketch:\n{focal}\n\n\
          Candidate sketches (compare every candidate against the focal):\n{cands}\n\n\
@@ -151,7 +169,13 @@ pub async fn find_contradictions_against(
     focal: &Sketch,
     candidates: &[Sketch],
 ) -> Result<Vec<ContradictionFinding>> {
+    tracing::debug!(
+        focal_id = %focal.id,
+        candidates = candidates.len(),
+        "find_contradictions_against: enter (async)"
+    );
     if candidates.is_empty() {
+        tracing::trace!("find_contradictions_against: short-circuit (no candidates)");
         return Ok(Vec::new());
     }
     let user = user_payload(focal, candidates);
@@ -171,6 +195,12 @@ pub async fn find_contradictions_against(
             // warnings; we add one more so the discovery phase can
             // correlate a missing findings array with the failed
             // call.
+            tracing::warn!(
+                focal_id = %focal.id,
+                candidates = candidates.len(),
+                error = %e,
+                "find_contradictions_against: parse fallback; surfacing zero findings"
+            );
             let _ = ctx.telemetry.warn(
                 "discovery.contradiction_judge.parse_fallback",
                 "warn",
@@ -189,7 +219,13 @@ pub async fn find_contradictions_against(
             return Ok(Vec::new());
         }
     };
-    Ok(parse_findings(&raw))
+    let findings = parse_findings(&raw);
+    tracing::info!(
+        focal_id = %focal.id,
+        findings = findings.len(),
+        "find_contradictions_against: ok"
+    );
+    Ok(findings)
 }
 
 /// Lenient parse of the wire-form wrapper into the typed
@@ -197,6 +233,7 @@ pub async fn find_contradictions_against(
 /// 2-element string array (instead of bubbling an error up) so a
 /// single bad row cannot blank the entire phase.
 pub fn parse_findings(value: &Value) -> Vec<ContradictionFinding> {
+    tracing::debug!("contradiction: parse_findings");
     // Collect raw item values first; the wrapper JSON object or
     // a bare array are both acceptable inputs.
     let items: Vec<Value> =
@@ -205,27 +242,39 @@ pub fn parse_findings(value: &Value) -> Vec<ContradictionFinding> {
             // Value so the lenient field-by-field parsing below sees
             // the same shape regardless of whether the model returned
             // the typed wrapper or a bare array.
+            tracing::trace!("parse_findings: typed wrapper accepted");
             report
                 .findings
                 .iter()
                 .map(|f| serde_json::to_value(f).unwrap_or(Value::Null))
                 .collect()
         } else if let Some(arr) = value.get("findings").and_then(|v| v.as_array()) {
+            tracing::trace!("parse_findings: findings array accepted");
             arr.clone()
         } else if let Some(arr) = value.as_array() {
+            tracing::trace!("parse_findings: bare array accepted");
             arr.clone()
         } else {
+            tracing::trace!("parse_findings: no findings array; empty result");
             return Vec::new();
         };
     let mut out: Vec<ContradictionFinding> = Vec::with_capacity(items.len());
+    let mut dropped = 0usize;
     for item in items {
         if let Some(f) = ContradictionFinding::from_json(&item) {
             out.push(f);
+        } else {
+            dropped += 1;
+            tracing::trace!("parse_findings: dropped malformed item");
         }
+    }
+    if dropped > 0 {
+        tracing::warn!(dropped, "parse_findings: dropped malformed items");
     }
     // Stable, severity-descending sort so the integrator picks
     // the urgent fixes first.
     out.sort_by_key(|f| std::cmp::Reverse(f.severity.rank()));
+    tracing::debug!(findings = out.len(), dropped, "parse_findings result");
     out
 }
 
@@ -235,6 +284,7 @@ pub fn parse_findings(value: &Value) -> Vec<ContradictionFinding> {
 /// kept here so the severity-remapping story is co-located with
 /// the enum definition.
 pub fn severity_to_legacy(s: ContradictionSeverity) -> &'static str {
+    tracing::trace!(?s, "contradiction: severity_to_legacy");
     s.legacy_label()
 }
 

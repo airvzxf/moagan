@@ -54,10 +54,12 @@ pub struct CacheEntry {
 impl CacheEntry {
     /// True if the entry is still fresh at `now_unix`.
     pub fn is_fresh(&self, now_unix: i64) -> bool {
-        match self.stale_at_unix {
+        let v = match self.stale_at_unix {
             None => true,
             Some(t) => t > now_unix,
-        }
+        };
+        tracing::trace!(now_unix, stale_at_unix = ?self.stale_at_unix, fresh = v, "CacheEntry::is_fresh");
+        v
     }
 }
 
@@ -98,8 +100,14 @@ impl FacetCache {
     /// Open a cache rooted at `root`. The directory is created
     /// lazily on first `store`.
     pub fn new(root: impl Into<PathBuf>, ttl_secs: Option<u64>) -> Self {
+        let root: PathBuf = root.into();
+        tracing::debug!(
+            root = %root.display(),
+            ttl_secs = ?ttl_secs,
+            "FacetCache::new"
+        );
         Self {
-            root: root.into(),
+            root,
             ttl_secs,
             hits: Arc::new(AtomicU64::new(0)),
             misses: Arc::new(AtomicU64::new(0)),
@@ -129,8 +137,10 @@ impl FacetCache {
         now_unix: i64,
     ) -> Result<Option<FacetList>> {
         let path = root.join(format!("{cache_key}.json"));
+        tracing::debug!(cache_key, "FacetCache::lookup_at");
         if !path.exists() {
             self.misses.fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(cache_key, "facet cache: file absent");
             return Ok(None);
         }
         let raw = match fs::read_to_string(&path) {
@@ -172,6 +182,11 @@ impl FacetCache {
             return Ok(None);
         }
         self.hits.fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(
+            cache_key,
+            stored_at = %entry.stored_at,
+            "facet cache hit"
+        );
         Ok(Some(entry.facet_list))
     }
 
@@ -217,10 +232,22 @@ impl FacetCache {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<FacetList>>,
     {
+        tracing::debug!(cache_key, "FacetCache::get_or_compute (async)");
         if let Some(cached) = self.lookup(cache_key)? {
+            tracing::info!(
+                cache_key,
+                facets = cached.facets.len(),
+                "facet cache hit; LLM skipped"
+            );
             return Ok(cached);
         }
+        tracing::debug!(cache_key, "facet cache miss; invoking compute_fn");
         let list = compute_fn().await?;
+        tracing::info!(
+            cache_key,
+            facets = list.facets.len(),
+            "facet cache miss; computed"
+        );
         if let Err(e) = self.store(&list) {
             tracing::warn!(
                 cache_key,
@@ -234,6 +261,11 @@ impl FacetCache {
     /// Persist `list` under its `cache_key`. Existing entries are
     /// overwritten. Returns the path that was written.
     pub fn store(&self, list: &FacetList) -> Result<PathBuf> {
+        tracing::debug!(
+            cache_key = %list.cache_key,
+            facets = list.facets.len(),
+            "FacetCache::store"
+        );
         let now = Utc::now();
         let stale_at_unix = self.ttl_secs.map(|t| now.timestamp() + t as i64);
         let entry = CacheEntry {
@@ -250,12 +282,19 @@ impl FacetCache {
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, &raw)?;
         fs::rename(&tmp, &path)?;
+        tracing::trace!(path = %path.display(), "FacetCache::store ok");
         Ok(path)
     }
 
     /// Invalidate a single cache entry by its key.
     pub fn invalidate(&self, cache_key: &str) -> Result<()> {
         let path = self.path_for(cache_key);
+        tracing::debug!(
+            cache_key,
+            path = %path.display(),
+            exists = path.exists(),
+            "FacetCache::invalidate"
+        );
         if path.exists() {
             fs::remove_file(&path)?;
         }
@@ -266,6 +305,7 @@ impl FacetCache {
     /// smoke tests to confirm the cache is being exercised).
     pub fn count(&self) -> Result<usize> {
         if !self.root.exists() {
+            tracing::trace!("FacetCache::count: root absent");
             return Ok(0);
         }
         let mut n = 0usize;
@@ -276,6 +316,7 @@ impl FacetCache {
                 n += 1;
             }
         }
+        tracing::trace!(root = %self.root.display(), n, "FacetCache::count");
         Ok(n)
     }
 
@@ -286,11 +327,18 @@ impl FacetCache {
     /// was constructed (clones share the same counters). `entries`
     /// is recomputed on demand via [`FacetCache::count`].
     pub fn stats(&self) -> FacetCacheStats {
-        FacetCacheStats {
+        let s = FacetCacheStats {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             entries: self.count().unwrap_or(0),
-        }
+        };
+        tracing::trace!(
+            hits = s.hits,
+            misses = s.misses,
+            entries = s.entries,
+            "FacetCache::stats"
+        );
+        s
     }
 }
 

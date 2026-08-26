@@ -42,7 +42,7 @@ pub struct VerifyReport {
 impl VerifyReport {
     /// Aggregate result.
     pub fn summary(&self) -> &'static str {
-        if self.audit_file_missing
+        let result = if self.audit_file_missing
             || self.internal_file_missing
             || self.internal_file_invalid
             || self.crc_invalid_count > 0
@@ -57,16 +57,20 @@ impl VerifyReport {
             "ok"
         } else {
             "mismatch"
-        }
+        };
+        tracing::trace!(result, "audit::verify::VerifyReport::summary: classified");
+        result
     }
 
     /// Translate the result to the audit CLI contract.
     pub fn exit_code(&self) -> i32 {
-        match self.summary() {
+        let code = match self.summary() {
             "ok" => 0,
             "mismatch" => 1,
             _ => 2,
-        }
+        };
+        tracing::trace!(code, "audit::verify::VerifyReport::exit_code");
+        code
     }
 }
 
@@ -74,11 +78,21 @@ impl VerifyReport {
 /// decompressing gzip when the extension is `.gz`. Used by the
 /// verifier to materialise the stream before parsing.
 fn read_path(path: &Path) -> Result<String> {
-    if path.extension().and_then(|value| value.to_str()) == Some("gz") {
+    tracing::trace!(path = %path.display(), "audit::verify::read_path: enter");
+    let is_gz = path.extension().and_then(|value| value.to_str()) == Some("gz");
+    let result = if is_gz {
         compression::read_to_string(path)
     } else {
         std::fs::read_to_string(path).map_err(Error::from)
+    };
+    match &result {
+        Ok(text) => tracing::trace!(bytes = text.len(), "audit::verify::read_path: exit"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "audit::verify::read_path: failed to read"
+        ),
     }
+    result
 }
 
 struct ExternalCall {
@@ -111,6 +125,11 @@ struct InternalCall {
 
 /// Verify using the filesystem telemetry as the source of truth.
 pub fn verify(run_dir: &RunDir<'_>, calls_jsonl_path: &Path) -> Result<VerifyReport> {
+    tracing::debug!(
+        audit_path = %run_dir.external_audit_path().display(),
+        calls_path = %calls_jsonl_path.display(),
+        "audit::verify::verify: enter"
+    );
     verify_inner(run_dir, calls_jsonl_path, None)
 }
 
@@ -120,6 +139,11 @@ pub fn verify_with_db(
     calls_jsonl_path: &Path,
     db: &Db,
 ) -> Result<VerifyReport> {
+    tracing::debug!(
+        audit_path = %run_dir.external_audit_path().display(),
+        calls_path = %calls_jsonl_path.display(),
+        "audit::verify::verify_with_db: enter"
+    );
     verify_inner(run_dir, calls_jsonl_path, Some(db))
 }
 
@@ -131,10 +155,18 @@ fn verify_inner(
     let mut report = VerifyReport::default();
     let audit_path = run_dir.external_audit_path();
     if !audit_path.exists() {
+        tracing::warn!(
+            path = %audit_path.display(),
+            "audit::verify::verify_inner: audit file missing"
+        );
         report.audit_file_missing = true;
         return Ok(report);
     }
     if !calls_jsonl_path.exists() {
+        tracing::warn!(
+            path = %calls_jsonl_path.display(),
+            "audit::verify::verify_inner: calls file missing"
+        );
         report.internal_file_missing = true;
         return Ok(report);
     }
@@ -142,6 +174,10 @@ fn verify_inner(
     let audit_text = match read_path(&audit_path) {
         Ok(text) => text,
         Err(_) => {
+            tracing::warn!(
+                path = %audit_path.display(),
+                "audit::verify::verify_inner: audit read failed"
+            );
             report.crc_invalid_count = 1;
             return Ok(report);
         }
@@ -154,6 +190,10 @@ fn verify_inner(
     let calls_text = match read_path(calls_jsonl_path) {
         Ok(text) => text,
         Err(_) => {
+            tracing::warn!(
+                path = %calls_jsonl_path.display(),
+                "audit::verify::verify_inner: calls file read failed"
+            );
             report.internal_file_invalid = true;
             return Ok(report);
         }
@@ -169,14 +209,34 @@ fn verify_inner(
     };
     match_calls(external, internal, &mut report);
     report.unmatched_internal_count += db_discrepancies;
+    tracing::info!(
+        match_count = report.match_count,
+        body_mismatch_count = report.body_mismatch_count,
+        orphan_request_count = report.orphan_request_count,
+        orphan_response_count = report.orphan_response_count,
+        unmatched_internal_count = report.unmatched_internal_count,
+        unmatched_external_count = report.unmatched_external_count,
+        crc_invalid_count = report.crc_invalid_count,
+        "audit::verify::verify_inner: complete"
+    );
     Ok(report)
 }
 
 fn parse_audit_records(text: &str, _report: &mut VerifyReport) -> Vec<AuditRecord> {
-    text.lines()
+    tracing::trace!(
+        text_bytes = text.len(),
+        "audit::verify::parse_audit_records: enter"
+    );
+    let records: Vec<AuditRecord> = text
+        .lines()
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
+        .collect();
+    tracing::debug!(
+        records = records.len(),
+        "audit::verify::parse_audit_records: exit"
+    );
+    records
 }
 
 fn pair_external_records(
@@ -184,24 +244,39 @@ fn pair_external_records(
     report: &mut VerifyReport,
 ) -> Vec<ExternalCall> {
     let mut pairs: HashMap<String, ExternalPair> = HashMap::new();
+    let mut request_count = 0usize;
+    let mut terminal_count = 0usize;
+    let mut unknown_count = 0usize;
     for record in records {
         let pair = pairs
             .entry(record.id.clone())
             .or_insert_with(ExternalPair::new);
         match record.event.as_str() {
             "request" => {
+                request_count += 1;
                 if pair.request.replace(record).is_some() {
                     pair.duplicate = true;
                 }
             }
             "response" | "upstream_error" => {
+                terminal_count += 1;
                 if pair.terminal.replace(record).is_some() {
                     pair.duplicate = true;
                 }
             }
-            _ => pair.duplicate = true,
+            _ => {
+                unknown_count += 1;
+                pair.duplicate = true;
+            }
         }
     }
+    tracing::debug!(
+        unique_ids = pairs.len(),
+        request_count,
+        terminal_count,
+        unknown_count,
+        "audit::verify::pair_external_records: paired"
+    );
 
     let mut external = Vec::new();
     for (id, pair) in pairs {
@@ -217,9 +292,17 @@ fn pair_external_records(
                     started_unix: request.ts.floor() as i64,
                 });
             }
-            (Some(_), None) => report.orphan_request_count += 1,
-            (None, Some(_)) => report.orphan_response_count += 1,
-            (Some(_), Some(_)) => report.crc_invalid_count += 1,
+            (Some(_), None) => {
+                tracing::debug!(id = %id, "audit::verify::pair_external_records: orphan request");
+                report.orphan_request_count += 1;
+            }
+            (None, Some(_)) => {
+                tracing::debug!(id = %id, "audit::verify::pair_external_records: orphan response");
+                report.orphan_response_count += 1;
+            }
+            (Some(_), Some(_)) => {
+                report.crc_invalid_count += 1;
+            }
             (None, None) => {}
         }
     }
@@ -230,21 +313,32 @@ fn pair_external_records(
 
 fn parse_internal_calls(text: &str, report: &mut VerifyReport) -> Vec<InternalCall> {
     let mut internal = Vec::new();
+    let mut skipped_cache_hit = 0usize;
+    let mut skipped_minimax = 0usize;
     for line in text.lines().filter(|line| !line.is_empty()) {
         let event: CallEvent = match serde_json::from_str(line) {
             Ok(event) => event,
             Err(_) => {
+                tracing::warn!("audit::verify::parse_internal_calls: invalid JSON line");
                 report.internal_file_invalid = true;
                 continue;
             }
         };
         if event.cache_hit {
+            skipped_cache_hit += 1;
             continue;
         }
         let body_sha256 = match event.body_sha256 {
             Some(body_sha256) if !body_sha256.is_empty() => body_sha256,
-            None if event.provider != "minimax" => continue,
+            None if event.provider != "minimax" => {
+                skipped_minimax += 1;
+                continue;
+            }
             _ => {
+                tracing::warn!(
+                    call_id = %event.call_id,
+                    "audit::verify::parse_internal_calls: invalid event"
+                );
                 report.internal_file_invalid = true;
                 continue;
             }
@@ -258,10 +352,21 @@ fn parse_internal_calls(text: &str, report: &mut VerifyReport) -> Vec<InternalCa
     internal.sort_by(|left, right| {
         (left.started_unix, &left.call_id).cmp(&(right.started_unix, &right.call_id))
     });
+    tracing::debug!(
+        internal_count = internal.len(),
+        skipped_cache_hit,
+        skipped_minimax,
+        "audit::verify::parse_internal_calls: exit"
+    );
     internal
 }
 
 fn compare_sqlite(run_dir: &RunDir<'_>, db: &Db, internal: &[InternalCall]) -> Result<usize> {
+    tracing::debug!(
+        run_dir = %run_dir.root().display(),
+        internal_count = internal.len(),
+        "audit::verify::compare_sqlite: enter"
+    );
     let run_id = run_dir
         .root()
         .file_name()
@@ -290,6 +395,7 @@ fn compare_sqlite(run_dir: &RunDir<'_>, db: &Db, internal: &[InternalCall]) -> R
         .iter()
         .filter(|call| !seen.contains(&call.call_id))
         .count();
+    tracing::debug!(discrepancies, "audit::verify::compare_sqlite: exit");
     Ok(discrepancies)
 }
 
@@ -298,6 +404,11 @@ fn match_calls(
     internal: Vec<InternalCall>,
     report: &mut VerifyReport,
 ) {
+    tracing::trace!(
+        external = external.len(),
+        internal = internal.len(),
+        "audit::verify::match_calls: enter"
+    );
     let mut external_used = vec![false; external.len()];
     let mut internal_used = vec![false; internal.len()];
 
@@ -332,6 +443,11 @@ fn match_calls(
 
     report.unmatched_external_count += external_used.iter().filter(|used| !**used).count();
     report.unmatched_internal_count += internal_used.iter().filter(|used| !**used).count();
+    tracing::trace!(
+        match_count = report.match_count,
+        body_mismatch_count = report.body_mismatch_count,
+        "audit::verify::match_calls: exit"
+    );
 }
 
 fn within_window(left: i64, right: i64) -> bool {
@@ -340,11 +456,14 @@ fn within_window(left: i64, right: i64) -> bool {
 
 /// Write the verification summary as TSV.
 pub fn write_tsv(report: &VerifyReport, dest: &Path) -> Result<()> {
+    tracing::debug!(dest = %dest.display(), "audit::verify::write_tsv: enter");
     let body = render_tsv(report);
+    let body_bytes = body.len();
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(dest, body)?;
+    tracing::debug!(bytes = body_bytes, "audit::verify::write_tsv: written");
     Ok(())
 }
 

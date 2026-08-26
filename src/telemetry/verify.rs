@@ -84,7 +84,9 @@ impl VerifyReport {
 /// verified in place; when it is an archive (`tar.gz`, `tar`,
 /// `zip`) it is extracted into a temporary directory first.
 pub fn verify(path: &Path) -> Result<VerifyReport> {
+    tracing::info!(path = %path.display(), "verify: enter");
     if !path.exists() {
+        tracing::error!(path = %path.display(), "verify: path not found");
         return Err(Error::InvalidArgs(format!(
             "verify path not found: {}",
             path.display()
@@ -98,28 +100,35 @@ pub fn verify(path: &Path) -> Result<VerifyReport> {
         .as_deref()
     {
         Some("zip") => {
+            tracing::debug!(path = %path.display(), "verify: extract_zip branch");
             let dir = staging_root.path().join("verify");
             std::fs::create_dir_all(&dir)?;
             extract_zip(path, &dir)?;
             dir
         }
         Some("tar") => {
+            tracing::debug!(path = %path.display(), "verify: extract_tar branch");
             let dir = staging_root.path().join("verify");
             std::fs::create_dir_all(&dir)?;
             extract_tar(path, &dir)?;
             dir
         }
         Some("gz") => {
+            tracing::debug!(path = %path.display(), "verify: extract_tar_gz branch");
             let dir = staging_root.path().join("verify");
             std::fs::create_dir_all(&dir)?;
             extract_tar_gz(path, &dir)?;
             dir
         }
-        _ => path.to_path_buf(),
+        _ => {
+            tracing::debug!(path = %path.display(), "verify: in-place directory branch");
+            path.to_path_buf()
+        }
     };
 
     let sums_path = verify_dir.join("SHA256SUMS");
     if !sums_path.exists() {
+        tracing::error!(sums = %sums_path.display(), "verify: SHA256SUMS missing");
         return Err(Error::InvalidState(format!(
             "no SHA256SUMS at {}; cannot verify",
             sums_path.display()
@@ -133,23 +142,38 @@ pub fn verify(path: &Path) -> Result<VerifyReport> {
     })?;
     let entries = parse_sha256sums(&body)?;
     let rows = check_entries(&entries, &verify_dir)?;
-    Ok(VerifyReport {
+    let report = VerifyReport {
         rows,
         root: verify_dir,
-    })
+    };
+    tracing::info!(
+        ok = report.ok_count(),
+        fail = report.fail_count(),
+        "verify: ok"
+    );
+    Ok(report)
 }
 
 fn check_entries(entries: &[HashEntry], root: &Path) -> Result<Vec<VerifyRow>> {
+    tracing::trace!(count = entries.len(), root = %root.display(), "check_entries: enter");
     let mut rows = Vec::with_capacity(entries.len());
     for entry in entries {
         let path = root.join(&entry.path);
         let verdict = if !path.exists() {
+            tracing::trace!(path = %entry.path, "check_entries: missing");
             VerifyVerdict::Missing
         } else {
             let actual = sha256_file(&path)?;
             if actual == entry.sha256 {
+                tracing::trace!(path = %entry.path, "check_entries: ok");
                 VerifyVerdict::Ok
             } else {
+                tracing::warn!(
+                    path = %entry.path,
+                    expected = %entry.sha256,
+                    actual = %actual,
+                    "check_entries: mismatch"
+                );
                 VerifyVerdict::Mismatch {
                     expected: entry.sha256.clone(),
                     actual,
@@ -253,6 +277,7 @@ fn zip_err(err: &zip::result::ZipError) -> std::io::Error {
 /// Re-hash a byte slice. Useful for tests.
 #[allow(dead_code)]
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    tracing::trace!(len = bytes.len(), "sha256_hex: enter");
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())

@@ -56,9 +56,11 @@ pub const HARD_INCOMPATIBILITIES: &[(&str, &str)] = &[
 /// Symmetric incompatibility check. Returns `true` when `(a, b)`
 /// (in either order) appears in `HARD_INCOMPATIBILITIES`.
 pub fn is_incompatible(a: &str, b: &str) -> bool {
-    HARD_INCOMPATIBILITIES
+    let result = HARD_INCOMPATIBILITIES
         .iter()
-        .any(|(x, y)| (a == *x && b == *y) || (a == *y && b == *x))
+        .any(|(x, y)| (a == *x && b == *y) || (a == *y && b == *x));
+    tracing::trace!(a, b, result, "domain::constraint::is_incompatible");
+    result
 }
 
 /// Iterate every unique pair (a, b) where a and b are members of
@@ -67,6 +69,10 @@ pub fn is_incompatible(a: &str, b: &str) -> bool {
 /// earlier in `HARD_INCOMPATIBILITIES`. Returns the pair as a
 /// 2-tuple of borrowed strings.
 pub fn find_conflicts<'a>(tags: &[&'a str]) -> Vec<(&'a str, &'a str)> {
+    tracing::trace!(
+        tag_count = tags.len(),
+        "domain::constraint::find_conflicts: enter"
+    );
     let mut out: Vec<(&'a str, &'a str)> = Vec::new();
     for i in 0..tags.len() {
         for j in (i + 1)..tags.len() {
@@ -75,6 +81,11 @@ pub fn find_conflicts<'a>(tags: &[&'a str]) -> Vec<(&'a str, &'a str)> {
             }
         }
     }
+    tracing::trace!(
+        tags = tags.len(),
+        conflicts = out.len(),
+        "domain::constraint::find_conflicts: exit"
+    );
     out
 }
 
@@ -104,7 +115,15 @@ pub fn find_conflicts<'a>(tags: &[&'a str]) -> Vec<(&'a str, &'a str)> {
 pub fn detect_cluster_local_in_global(tags: &[&str]) -> Option<HardIncompat> {
     let has_cluster_local = tags.iter().any(|t| t.eq_ignore_ascii_case("cluster_local"));
     let has_global = tags.iter().any(|t| t.eq_ignore_ascii_case("global"));
-    (has_cluster_local && has_global).then_some(HardIncompat::ClusterLocalInGlobal)
+    let out = (has_cluster_local && has_global).then_some(HardIncompat::ClusterLocalInGlobal);
+    tracing::trace!(
+        tags = tags.len(),
+        has_cluster_local,
+        has_global,
+        ?out,
+        "domain::constraint::detect_cluster_local_in_global"
+    );
+    out
 }
 
 /// Detect [`HardIncompat::PullInPushOnly`]: a tag set containing
@@ -122,7 +141,15 @@ pub fn detect_pull_in_push_only(tags: &[&str]) -> Option<HardIncompat> {
     let has_push = tags
         .iter()
         .any(|t| t.eq_ignore_ascii_case("push_only") || t.eq_ignore_ascii_case("push_endpoint"));
-    (has_pull && has_push).then_some(HardIncompat::PullInPushOnly)
+    let out = (has_pull && has_push).then_some(HardIncompat::PullInPushOnly);
+    tracing::trace!(
+        tags = tags.len(),
+        has_pull,
+        has_push,
+        ?out,
+        "domain::constraint::detect_pull_in_push_only"
+    );
+    out
 }
 
 /// Detect [`HardIncompat::StatelessInStateful`]: a tag set
@@ -134,7 +161,15 @@ pub fn detect_stateless_in_stateful(tags: &[&str]) -> Option<HardIncompat> {
     let has_stateful = tags
         .iter()
         .any(|t| t.eq_ignore_ascii_case("stateful_required"));
-    (has_stateless && has_stateful).then_some(HardIncompat::StatelessInStateful)
+    let out = (has_stateless && has_stateful).then_some(HardIncompat::StatelessInStateful);
+    tracing::trace!(
+        tags = tags.len(),
+        has_stateless,
+        has_stateful,
+        ?out,
+        "domain::constraint::detect_stateless_in_stateful"
+    );
+    out
 }
 
 /// Run the three opt-in catalog detectors in a fixed order
@@ -151,15 +186,32 @@ pub fn detect_stateless_in_stateful(tags: &[&str]) -> Option<HardIncompat> {
 /// first; the detectors themselves iterate the slice once and
 /// ignore duplicates.
 pub fn detect_opt_in_hardincompat(tags: &[&str]) -> Option<HardIncompat> {
+    tracing::trace!(
+        tags = tags.len(),
+        "domain::constraint::detect_opt_in_hardincompat: enter"
+    );
     if let Some(h) = detect_cluster_local_in_global(tags) {
+        tracing::trace!(
+            ?h,
+            "domain::constraint::detect_opt_in_hardincompat: matched ClusterLocalInGlobal"
+        );
         return Some(h);
     }
     if let Some(h) = detect_pull_in_push_only(tags) {
+        tracing::trace!(
+            ?h,
+            "domain::constraint::detect_opt_in_hardincompat: matched PullInPushOnly"
+        );
         return Some(h);
     }
     if let Some(h) = detect_stateless_in_stateful(tags) {
+        tracing::trace!(
+            ?h,
+            "domain::constraint::detect_opt_in_hardincompat: matched StatelessInStateful"
+        );
         return Some(h);
     }
+    tracing::trace!("domain::constraint::detect_opt_in_hardincompat: no match");
     None
 }
 
@@ -316,7 +368,7 @@ impl HardIncompat {
     /// and the JSON sidecar; the unit tests pin the wording for
     /// the variants added by catalog I.6.
     pub fn explain(&self) -> String {
-        match self {
+        let msg = match self {
             Self::LanguageToolchainMismatch { lang, toolchain } => {
                 format!("language '{lang}' cannot run on toolchain '{toolchain}'")
             }
@@ -377,7 +429,9 @@ impl HardIncompat {
                 "stateless component (request-scoped handler, serverless function, load-balanced frontend) is placed where the contract requires stateful behaviour (sticky session affinity, in-process aggregate, file handle retention)"
                     .to_string()
             }
-        }
+        };
+        tracing::trace!("domain::constraint::HardIncompat::explain: emitted");
+        msg
     }
 
     /// Catalog I.6 §D.13.15 (exhaustive): return the canonical
@@ -387,14 +441,19 @@ impl HardIncompat {
     /// use it to pin the contract without depending on each
     /// variant individually.
     pub fn from_catalog() -> Vec<HardIncompat> {
-        vec![
+        let out = vec![
             HardIncompat::MonolithVsMicroservices,
             HardIncompat::SqlVsNosqlBackend,
             HardIncompat::GcRuntimeWithManualMem,
             HardIncompat::SingleTenantInMultitenant,
             HardIncompat::StatefulInServerless,
             HardIncompat::SyncApiWithAsyncCaller,
-        ]
+        ];
+        tracing::trace!(
+            count = out.len(),
+            "domain::constraint::HardIncompat::from_catalog"
+        );
+        out
     }
 
     /// Catalog I.6 (opt-in): return the three additional unit
@@ -410,11 +469,16 @@ impl HardIncompat {
     /// component placed where the contract requires stateful
     /// behaviour).
     pub fn from_opt_in_catalog() -> Vec<HardIncompat> {
-        vec![
+        let out = vec![
             HardIncompat::ClusterLocalInGlobal,
             HardIncompat::PullInPushOnly,
             HardIncompat::StatelessInStateful,
-        ]
+        ];
+        tracing::trace!(
+            count = out.len(),
+            "domain::constraint::HardIncompat::from_opt_in_catalog"
+        );
+        out
     }
 }
 

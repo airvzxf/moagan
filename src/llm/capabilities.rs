@@ -113,6 +113,7 @@ impl ProviderCapabilities {
     /// Direct MiniMax provider (`minimax`). Speaks the
     /// Anthropic-compatible `/v1/messages` wire.
     pub fn for_minimax() -> Self {
+        tracing::trace!("ProviderCapabilities::for_minimax");
         Self {
             supports_system_field: true,
             supports_response_format: false,

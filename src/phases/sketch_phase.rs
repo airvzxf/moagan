@@ -439,12 +439,14 @@ impl Phase for SketchPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(count = self.count, "sketch: enter");
         let count = self.count as usize;
         if count == 0 {
             // `fast` mode (and any future caller that explicitly opts
             // out) skips the phase entirely; persist an empty
             // summary so `inspect` can tell `fast` from a mode that
             // ran 0 sketches because the budget ran out.
+            tracing::info!("sketch: count=0, returning empty summary");
             let summary_path = ctx.run_dir().final_dir().join("sketches_summary.json");
             let stats = SketchFilterStats::default();
             write_json(&summary_path, &stats)?;
@@ -654,6 +656,14 @@ impl Phase for SketchPhase {
         let csv_rows: Vec<SketchSummaryRow> =
             vec![(ctx.default_model.clone(), stats.kept as u64, 0)];
         write_sketches_summary(ctx.run_dir().root(), &csv_rows)?;
+        tracing::info!(
+            kept = stats.kept,
+            dropped_empty_thesis = stats.dropped_empty_thesis,
+            dropped_hard_constraint = stats.dropped_hard_constraint,
+            dropped_redundant = stats.dropped_redundant,
+            dropped_low_coverage = stats.dropped_low_coverage,
+            "sketch: phase complete"
+        );
         Ok(PhaseOutput::Sketches(paths))
     }
 }

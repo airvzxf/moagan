@@ -6,19 +6,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Current Unix time in seconds. Returns 0 if the system clock is
 /// before the epoch (which only happens on broken systems).
 pub fn now_unix_secs() -> i64 {
-    SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    tracing::trace!(secs, "now_unix_secs: ok");
+    secs
 }
 
 /// Current Unix time in milliseconds. Returns 0 if the system clock is
 /// before the epoch.
 pub fn now_unix_millis() -> i64 {
-    SystemTime::now()
+    let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    tracing::trace!(ms, "now_unix_millis: ok");
+    ms
 }
 
 #[cfg(test)]

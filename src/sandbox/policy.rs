@@ -71,7 +71,17 @@ impl NetworkPolicy {
         match self {
             Self::Off => false,
             Self::Open => true,
-            Self::AllowList { hosts } => hosts.iter().any(|h| h == host),
+            Self::AllowList { hosts } => {
+                let matched = hosts.iter().find(|h| h.as_str() == host);
+                tracing::trace!(
+                    sandbox = "policy",
+                    host = %host,
+                    allowlist_len = hosts.len(),
+                    matched = matched.is_some(),
+                    "NetworkPolicy::allows (AllowList)"
+                );
+                matched.is_some()
+            }
         }
     }
 
@@ -79,13 +89,22 @@ impl NetworkPolicy {
     /// suitable for logging or surfacing to the operator. Returns
     /// `None` when the policy permits the host.
     pub fn deny_reason(&self, host: &str) -> Option<String> {
-        match self {
+        let reason = match self {
             Self::Off => Some(format!("network disabled (host={host})")),
             Self::AllowList { hosts } if !hosts.iter().any(|h| h == host) => {
                 Some(format!("host {host} not in allow_list"))
             }
             _ => None,
+        };
+        if let Some(ref r) = reason {
+            tracing::trace!(
+                sandbox = "policy",
+                host = %host,
+                reason = %r,
+                "NetworkPolicy::deny_reason produced denial"
+            );
         }
+        reason
     }
 }
 

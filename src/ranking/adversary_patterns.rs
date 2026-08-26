@@ -182,11 +182,13 @@ pub struct PatternVerdict {
 /// does not have to outlive the `provenance_lc` borrow used for
 /// the substring check.
 fn first_match_token(tokens: &[&'static str], haystack: &str) -> &'static str {
-    tokens
+    let out = tokens
         .iter()
         .copied()
         .find(|t| haystack.contains(t))
-        .unwrap_or("none")
+        .unwrap_or("none");
+    tracing::trace!(matched = %out, "ranking::adversary_patterns::first_match_token");
+    out
 }
 
 /// Run every pattern in [`AdversaryPattern::all`] against the
@@ -214,7 +216,14 @@ pub fn run_all_patterns(
     evidence_count: usize,
     provenance: &str,
 ) -> Vec<PatternVerdict> {
+    tracing::debug!(
+        scores = scores.len(),
+        evidence_count,
+        provenance_len = provenance.len(),
+        "ranking::adversary_patterns::run_all_patterns: enter"
+    );
     if scores.is_empty() {
+        tracing::warn!("ranking::adversary_patterns::run_all_patterns: empty scores slice");
         return AdversaryPattern::all()
             .into_iter()
             .map(|pattern| PatternVerdict {
@@ -232,6 +241,11 @@ pub fn run_all_patterns(
     let mean = scores.iter().sum::<f64>() / scores.len() as f64;
     let variance = scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / scores.len() as f64;
     let stddev = variance.sqrt();
+    tracing::trace!(
+        spread,
+        stddev,
+        "ranking::adversary_patterns::run_all_patterns: spread/stddev"
+    );
 
     const HALLUCINATION_TOKENS: &[&str] = &["as an ai", "i cannot", "i don't have"];
     const AUDIENCE_JARGON: &[&str] = &["page tables", "tlb shootdown", "ring -1", "vfs layer"];
@@ -313,7 +327,7 @@ pub fn run_all_patterns(
     // proposals that *should* mention a risk are flagged.
     const OMITTED_RISK_MIN_LEN: usize = 200;
 
-    vec![
+    let verdicts = vec![
         PatternVerdict {
             pattern: AdversaryPattern::ScoreSpread,
             fired: spread > 1.0,
@@ -397,7 +411,14 @@ pub fn run_all_patterns(
             fired: unverified_claims_match != "none",
             detail: format!("sourceless_attribution={}", unverified_claims_match),
         },
-    ]
+    ];
+    let fired_count = verdicts.iter().filter(|v| v.fired).count();
+    tracing::debug!(
+        fired = fired_count,
+        total = verdicts.len(),
+        "ranking::adversary_patterns::run_all_patterns: verdicts computed"
+    );
+    verdicts
 }
 
 #[cfg(test)]

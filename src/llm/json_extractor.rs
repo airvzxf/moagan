@@ -66,6 +66,7 @@ impl std::error::Error for ExtractError {}
 /// leading UTF-8 BOM, skip JS comments and prose prefix, then
 /// brace-balance to the matching close delimiter.
 pub fn extract_tolerant_json(input: &str) -> Result<(usize, usize), ExtractError> {
+    tracing::trace!(input_len = input.len(), "extract_tolerant_json: enter");
     let bytes = input.as_bytes();
     // Strip an optional leading UTF-8 BOM if present.
     let offset = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -73,13 +74,35 @@ pub fn extract_tolerant_json(input: &str) -> Result<(usize, usize), ExtractError
     } else {
         0
     };
-    let (start, open_char, after_open) =
-        find_first_json_delim(bytes, offset).ok_or(ExtractError::NoJsonFound)?;
+    let (start, open_char, after_open) = find_first_json_delim(bytes, offset).ok_or_else(|| {
+        tracing::debug!(
+            input_len = input.len(),
+            "extract_tolerant_json: no delim found"
+        );
+        ExtractError::NoJsonFound
+    })?;
     if !looks_like_json_after_open(bytes, after_open, open_char) {
+        tracing::debug!(
+            start,
+            open_code = open_char as u32,
+            "extract_tolerant_json: UnbalancedBraces"
+        );
         return Err(ExtractError::UnbalancedBraces);
     }
-    let abs_end =
-        find_balanced_end(bytes, after_open, open_char).ok_or(ExtractError::UnbalancedBraces)?;
+    let abs_end = find_balanced_end(bytes, after_open, open_char).ok_or_else(|| {
+        tracing::debug!(
+            start,
+            open_code = open_char as u32,
+            "extract_tolerant_json: UnbalancedBraces on balance"
+        );
+        ExtractError::UnbalancedBraces
+    })?;
+    tracing::trace!(
+        start,
+        end = abs_end,
+        span = abs_end - start,
+        "extract_tolerant_json: ok"
+    );
     Ok((start, abs_end))
 }
 
@@ -87,7 +110,10 @@ pub fn extract_tolerant_json(input: &str) -> Result<(usize, usize), ExtractError
 pub fn extract_and_parse<T: DeserializeOwned>(input: &str) -> Result<T, ExtractError> {
     let (start, end) = extract_tolerant_json(input)?;
     let slice = &input[start..end];
-    serde_json::from_str(slice).map_err(|e| ExtractError::ParseFailed(e.to_string()))
+    serde_json::from_str(slice).map_err(|e| {
+        tracing::debug!(error = %e, "extract_and_parse: parse failed on extracted slice");
+        ExtractError::ParseFailed(e.to_string())
+    })
 }
 
 /// Advance `i` past any JS comment that starts at position `i` (or
@@ -339,12 +365,22 @@ pub async fn parse_with_strategy<T: DeserializeOwned>(
 ) -> Result<T, ParseError> {
     let _ = model;
     let _ = request;
-    match strategy {
+    tracing::trace!(
+        strategy = ?strategy,
+        role = ?request.role,
+        raw_len = raw.len(),
+        "parse_with_strategy"
+    );
+    let result = match strategy {
         JsonRecoveryStrategy::Strict => parse_strict(raw),
         JsonRecoveryStrategy::Lenient
         | JsonRecoveryStrategy::Continuation
         | JsonRecoveryStrategy::PromptPrefill => parse_lenient(raw),
+    };
+    if let Err(ref e) = result {
+        tracing::debug!(strategy = ?strategy, error = %e.message(), "parse_with_strategy failed");
     }
+    result
 }
 
 /// Direct parse only. Returns [`ParseError::Strict`] with the
@@ -352,8 +388,14 @@ pub async fn parse_with_strategy<T: DeserializeOwned>(
 /// valid JSON.
 fn parse_strict<T: DeserializeOwned>(raw: &str) -> Result<T, ParseError> {
     match serde_json::from_str::<T>(raw) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(ParseError::Strict(e.to_string())),
+        Ok(v) => {
+            tracing::trace!("parse_strict: direct parse succeeded");
+            Ok(v)
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "parse_strict: direct parse failed");
+            Err(ParseError::Strict(e.to_string()))
+        }
     }
 }
 
@@ -386,8 +428,10 @@ fn parse_lenient<T: DeserializeOwned>(raw: &str) -> Result<T, ParseError> {
     // path because the wrapper fires at most once per retry
     // attempt — emitting one warning per recovery pass would
     // multiply warnings by the retry count.
-    crate::phases::util::parse_model_json_traced::<T, _>(raw, |_event| {})
-        .map_err(|e| ParseError::Lenient(e.to_string()))
+    crate::phases::util::parse_model_json_traced::<T, _>(raw, |_event| {}).map_err(|e| {
+        tracing::debug!(error = %e, "parse_lenient: full chain failed");
+        ParseError::Lenient(e.to_string())
+    })
 }
 
 #[cfg(test)]

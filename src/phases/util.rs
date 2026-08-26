@@ -23,16 +23,24 @@ const DEFAULT_STALE_TTL_SECS: u64 = 86_400;
 const DEFAULT_BRACKET_REPAIR_MAX_ITERS: usize = 3;
 
 fn stale_ttl_secs() -> u64 {
-    std::env::var("MOAGAN_STALE_TTL_SECS")
+    let ttl = std::env::var("MOAGAN_STALE_TTL_SECS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_STALE_TTL_SECS)
+        .unwrap_or(DEFAULT_STALE_TTL_SECS);
+    tracing::trace!(ttl, "phases::util::stale_ttl_secs");
+    ttl
 }
 
 fn emit_stale_artifact_if_needed(path: &Path) -> Option<crate::redact::StaleArtifact> {
     let artifact = detect_stale(path, stale_ttl_secs());
     if let Some(artifact) = &artifact {
         artifact.emit();
+        tracing::debug!(
+            path = %path.display(),
+            age_secs = artifact.age_secs,
+            ttl_secs = artifact.ttl_secs,
+            "phases::util::emit_stale_artifact_if_needed: stale artifact emitted"
+        );
     }
     artifact
 }
@@ -63,12 +71,14 @@ pub enum RepairKind {
 impl RepairKind {
     /// Stable string label used in the warnings stream.
     pub fn as_str(self) -> &'static str {
-        match self {
+        let s = match self {
             Self::Colon => "colon",
             Self::Separator => "separator",
             Self::Bracket => "bracket",
             Self::OpenBrace => "open_brace",
-        }
+        };
+        tracing::trace!(?self, label = %s, "phases::util::RepairKind::as_str");
+        s
     }
 }
 
@@ -79,15 +89,32 @@ pub type RepairEvent = RepairTrace;
 
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    tracing::trace!(path = %path.display(), "phases::util::read_json: enter");
     emit_stale_artifact_if_needed(path);
-    let bytes = std::fs::read(path)?;
-    serde_json::from_slice(&bytes).map_err(crate::Error::from)
+    let bytes = std::fs::read(path).map_err(|e| {
+        tracing::error!(
+            path = %path.display(),
+            error = %e,
+            "phases::util::read_json: read failed"
+        );
+        e
+    })?;
+    serde_json::from_slice(&bytes).map_err(|e| {
+        tracing::error!(
+            path = %path.display(),
+            error = %e,
+            "phases::util::read_json: parse failed"
+        );
+        crate::Error::from(e)
+    })
 }
 
 /// Write `value` as JSON to `path` atomically.
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    tracing::trace!(path = %path.display(), "phases::util::write_json: enter");
     let bytes = serde_json::to_vec(value).map_err(crate::Error::from)?;
     AtomicWriter::new().write(path, &bytes)?;
+    tracing::debug!(path = %path.display(), bytes = bytes.len(), "phases::util::write_json: ok");
     Ok(())
 }
 
@@ -114,6 +141,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// excluded implicitly by the extension filter; callers that need
 /// `index.json` should open it explicitly via [`read_json`].
 pub fn primary_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    tracing::trace!(dir = %dir.display(), "phases::util::primary_json_paths: enter");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|r| r.ok())
         .map(|e| e.path())
@@ -127,6 +155,11 @@ pub fn primary_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
         })
         .collect();
     paths.sort();
+    tracing::debug!(
+        dir = %dir.display(),
+        count = paths.len(),
+        "phases::util::primary_json_paths: exit"
+    );
     Ok(paths)
 }
 
@@ -148,14 +181,22 @@ pub fn primary_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
 /// input is shorter than `max_bytes` the original string is
 /// returned untouched.
 pub(crate) fn safe_tail(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
+    let out = if s.len() <= max_bytes {
         return s;
-    }
-    let mut idx = s.len() - max_bytes;
-    while idx < s.len() && !s.is_char_boundary(idx) {
-        idx += 1;
-    }
-    &s[idx..]
+    } else {
+        let mut idx = s.len() - max_bytes;
+        while idx < s.len() && !s.is_char_boundary(idx) {
+            idx += 1;
+        }
+        &s[idx..]
+    };
+    tracing::trace!(
+        input_len = s.len(),
+        max_bytes,
+        output_len = out.len(),
+        "phases::util::safe_tail"
+    );
+    out
 }
 
 /// Strip a leading/trailing markdown fence from the model output and
@@ -198,19 +239,26 @@ pub(crate) fn safe_tail(s: &str, max_bytes: usize) -> &str {
 /// commit `196b40d`, expanded to also handle missing colons in
 /// commit TBD.
 pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
+    tracing::trace!(raw_len = raw.len(), "phases::util::parse_model_json: enter");
     let trimmed = strip_code_fence(raw);
     if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
+        tracing::trace!("phases::util::parse_model_json: direct parse ok");
         return Ok(v);
     }
     if let Some(repaired) = repair_m3_brackets(&trimmed)
         && let Ok(v) = serde_json::from_str::<T>(&repaired)
     {
+        tracing::debug!("phases::util::parse_model_json: m3 repair ok");
         return Ok(v);
     }
     let e = serde_json::from_str::<T>(&trimmed)
         .err()
         .expect("parse failed above");
     let tail = safe_tail(&trimmed, 500);
+    tracing::warn!(
+        trimmed_len = trimmed.len(),
+        "phases::util::parse_model_json: all strategies failed"
+    );
     Err(crate::Error::SchemaViolation(format!(
         "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
         trimmed.len(),
@@ -260,8 +308,13 @@ where
     T: DeserializeOwned,
     F: FnMut(RepairEvent),
 {
+    tracing::trace!(
+        raw_len = raw.len(),
+        "phases::util::parse_model_json_traced: enter"
+    );
     let trimmed = strip_code_fence(raw);
     if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
+        tracing::trace!("phases::util::parse_model_json_traced: direct parse ok");
         return Ok(v);
     }
     // Sanitising pass: chat-template markers and ASCII control
@@ -275,6 +328,7 @@ where
         // enough on its own for payloads whose only defect was a
         // wrapping marker pair.
         if let Ok(v) = serde_json::from_str::<T>(stripped) {
+            tracing::debug!("phases::util::parse_model_json_traced: strip+parse ok");
             return Ok(v);
         }
     }
@@ -289,6 +343,11 @@ where
     let braced = if let Some(patched) = repair_missing_open_brace(&cleaned) {
         let bytes_before = cleaned.len();
         let bytes_after = patched.len();
+        tracing::trace!(
+            bytes_before,
+            bytes_after,
+            "phases::util::parse_model_json_traced: open-brace repair applied"
+        );
         sink(RepairEvent {
             kind: RepairKind::OpenBrace,
             bytes_before,
@@ -302,9 +361,15 @@ where
     // case is that prepending `{` produces a parseable JSON
     // object on the first retry.
     if let Ok(v) = serde_json::from_str::<T>(&braced) {
+        tracing::debug!("phases::util::parse_model_json_traced: braced direct parse ok");
         return Ok(v);
     }
     if let Ok((start, end)) = json_extractor::extract_tolerant_json(&braced) {
+        tracing::trace!(
+            start,
+            end,
+            "phases::util::parse_model_json_traced: tolerant extraction hit"
+        );
         let candidate = &braced[start..end];
         if let Ok(v) = serde_json::from_str::<T>(candidate) {
             return Ok(v);
@@ -319,6 +384,7 @@ where
                 });
             }
             if let Ok(v) = serde_json::from_str::<T>(&repaired) {
+                tracing::debug!("phases::util::parse_model_json_traced: tolerant+candidate ok");
                 return Ok(v);
             }
         }
@@ -329,6 +395,10 @@ where
             .err()
             .expect("parse failed above");
         let tail = safe_tail(&braced, 500);
+        tracing::warn!(
+            braced_len = braced.len(),
+            "phases::util::parse_model_json_traced: all strategies failed"
+        );
         return Err(crate::Error::SchemaViolation(format!(
             "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
             braced.len(),
@@ -345,6 +415,10 @@ where
     }
     serde_json::from_str::<T>(&repaired).map_err(|e| {
         let tail = safe_tail(&repaired, 500);
+        tracing::warn!(
+            repaired_len = repaired.len(),
+            "phases::util::parse_model_json_traced: post-repair parse failed"
+        );
         crate::Error::SchemaViolation(format!(
             "model output is not valid JSON after repair: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
             repaired.len(),
@@ -397,6 +471,10 @@ pub enum ParseError {
 /// post-execution reviewers can see which strategy recovered the
 /// payload.
 pub fn parse_json_with_recovery(input: &str) -> std::result::Result<serde_json::Value, ParseError> {
+    tracing::trace!(
+        input_len = input.len(),
+        "phases::util::parse_json_with_recovery: enter"
+    );
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(input) {
         tracing::trace!("parse_json_with_recovery: direct parse ok");
         return Ok(v);

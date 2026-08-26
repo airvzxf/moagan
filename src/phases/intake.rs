@@ -278,6 +278,7 @@ impl Phase for IntakePhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(interactive = ctx.interactive, "intake: enter");
         let system = system_prompt(Role::Intake).to_owned();
         // E9: normalise the raw prompt BEFORE the LLM call. The
         // normalised string is what the model sees AND what we
@@ -385,6 +386,12 @@ impl Phase for IntakePhase {
         if !intake.open_questions.is_empty()
             || (!intake.constraints.is_empty() && !intake.non_goals.is_empty())
         {
+            tracing::info!(
+                open_questions = intake.open_questions.len(),
+                constraints = intake.constraints.len(),
+                non_goals = intake.non_goals.len(),
+                "intake: ambiguous, asking for checkpoint"
+            );
             let prompt = format!(
                 "intake surfaced {} open question(s) and {} constraint(s); continue?",
                 intake.open_questions.len(),

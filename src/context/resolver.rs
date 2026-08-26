@@ -61,9 +61,11 @@ impl ContextRef {
 /// filesystem probe. The UUID parse is the cheap check; if it
 /// fails the caller should treat the input as a path candidate.
 pub fn classify_no_io(input: &str) -> Result<ContextRef> {
+    tracing::trace!(input, "context::resolver::classify_no_io");
     if let Ok(uuid) = uuid::Uuid::parse_str(input) {
         return Ok(ContextRef::RunId(RunId::from_uuid(uuid)));
     }
+    tracing::warn!(input, "context::resolver::classify_no_io: not a UUID");
     Err(Error::InvalidArgs(format!(
         "context {input:?} is neither a valid UUID nor a path"
     )))
@@ -79,13 +81,22 @@ pub fn classify_no_io(input: &str) -> Result<ContextRef> {
 /// and side-effect-free so `run` can persist the classification
 /// before deciding whether to load the actual contents.
 pub fn resolve_classify(input: &str, home: &MoaganHome) -> Result<ContextRef> {
+    tracing::trace!(input, "context::resolver::resolve_classify: enter");
     if let Some(path_ref) = resolve_path(Path::new(input)) {
+        tracing::trace!(?path_ref, "context::resolver::resolve_classify: path");
         return Ok(path_ref);
     }
     if let Ok(uuid) = uuid::Uuid::parse_str(input) {
-        return Ok(ContextRef::RunId(RunId::from_uuid(uuid)));
+        let r = ContextRef::RunId(RunId::from_uuid(uuid));
+        tracing::trace!(kind = r.kind(), "context::resolver::resolve_classify: uuid");
+        return Ok(r);
     }
     let run_dir = home.runs_dir().join(input).display().to_string();
+    tracing::warn!(
+        input,
+        run_dir,
+        "context::resolver::resolve_classify: unknown"
+    );
     Err(Error::InvalidArgs(format!(
         "context {input:?} is neither a valid run id (looked for {run_dir}) nor an existing path"
     )))
@@ -117,16 +128,22 @@ fn resolve_path(path: &Path) -> Option<ContextRef> {
 /// `<home>/.runs/<id>/`. Errors out with `Error::InvalidArgs` for
 /// any other failure (no such UUID, missing path, etc.).
 pub fn resolve(home: &MoaganHome, raw: &str) -> Result<ContextRef> {
+    tracing::debug!(raw, "context::resolver::resolve: enter");
     let r = resolve_classify(raw, home)?;
     if let ContextRef::RunId(id) = &r {
         let run_dir = home.run_dir(*id);
         if !run_dir.root().exists() {
+            tracing::warn!(
+                id = %id,
+                "context::resolver::resolve: run dir missing"
+            );
             return Err(Error::InvalidArgs(format!(
                 "context run id {id} not found under {}",
                 home.runs_dir().display()
             )));
         }
     }
+    tracing::trace!(kind = r.kind(), "context::resolver::resolve: ok");
     Ok(r)
 }
 

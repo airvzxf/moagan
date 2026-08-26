@@ -61,6 +61,11 @@ impl MinimaxProvider {
     /// clamp chain, `max_tokens_table` lookup by `(name, model)`)
     /// sees the same shape the v0.10 dispatcher passes in.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
+        tracing::debug!(
+            endpoint = spec.endpoint.as_deref(),
+            models = spec.models.len(),
+            "MinimaxProvider::new: enter"
+        );
         let client = build_client()?;
         let first = spec
             .models
@@ -71,6 +76,11 @@ impl MinimaxProvider {
                 endpoint: spec.endpoint.clone(),
                 max_tokens: None,
             });
+        tracing::info!(
+            model = %first.id,
+            endpoint = spec.endpoint.as_deref().unwrap_or("default"),
+            "MinimaxProvider: constructed"
+        );
         Ok(Self {
             name: "minimax".to_owned(),
             model: first.id.clone(),
@@ -91,11 +101,16 @@ impl MinimaxProvider {
     /// helper. Kept for backwards compatibility; new dispatcher
     /// code goes through [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
+        tracing::debug!("MinimaxProvider::from_config: enter");
         let key = super::api_keys::lookup_key("minimax", None)
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: "MINIMAX_API_KEY not set; provide via env, --api-key, or api_keys.toml"
-                    .into(),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!("MinimaxProvider::from_config: MINIMAX_API_KEY missing");
+                Error::InvalidApiKey {
+                    message:
+                        "MINIMAX_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                            .into(),
+                    http_status: None,
+                }
             })?
             .map_err(|e| match e {
                 Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
@@ -120,14 +135,22 @@ impl MinimaxProvider {
     /// per-model URL is the same for every MiniMax model so the
     /// dispatcher does not have to inspect the URL.
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        tracing::debug!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "MinimaxProvider::from_resolved: enter"
+        );
         let kind = super::api_keys::lookup_kind_for_resolved(resolved);
         let key = super::api_keys::lookup_key(&kind, None)
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: format!(
-                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
-                    kind.to_ascii_uppercase()
-                ),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!(kind, "MinimaxProvider::from_resolved: API key missing");
+                Error::InvalidApiKey {
+                    message: format!(
+                        "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                        kind.to_ascii_uppercase()
+                    ),
+                    http_status: None,
+                }
             })?
             .map_err(|e| match e {
                 Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
@@ -140,6 +163,11 @@ impl MinimaxProvider {
                 other => other,
             })?;
         let client = build_client()?;
+        tracing::info!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "MinimaxProvider::from_resolved: constructed"
+        );
         Ok(Self {
             name: resolved.section.clone(),
             model: resolved.id.clone(),
@@ -155,6 +183,7 @@ impl MinimaxProvider {
 
     /// Set the maximum number of retries (default 3).
     pub fn with_max_retries(mut self, n: u32) -> Self {
+        tracing::debug!(n, "MinimaxProvider::with_max_retries");
         self.max_retries = n;
         self
     }
@@ -165,6 +194,7 @@ impl MinimaxProvider {
     /// builder takes `self` by value to stay fluent with the other
     /// `with_*` builders in this provider.
     pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        tracing::debug!("MinimaxProvider::with_max_tokens_table");
         self.max_tokens_table = Some(table);
         self
     }
@@ -172,17 +202,24 @@ impl MinimaxProvider {
     /// Compute the URL for the messages endpoint.
     fn messages_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
-        if base.ends_with("/v1/messages") {
+        let url = if base.ends_with("/v1/messages") {
             base.to_owned()
         } else if base.ends_with("/v1") {
             format!("{base}/messages")
         } else {
             format!("{base}/v1/messages")
-        }
+        };
+        tracing::trace!(endpoint = %self.endpoint, url = %url, "messages_url");
+        url
     }
 
     /// Sleep helper that honours `Retry-After` plus jitter.
     async fn sleep_with_jitter(attempt: u32, suggested: Option<Duration>) {
+        tracing::trace!(
+            attempt,
+            suggested_ms = suggested.map(|d| d.as_millis() as u64),
+            "sleep_with_jitter"
+        );
         let base = suggested.unwrap_or(Duration::from_millis(500));
         let jitter = (fastrand::u64(..) % 250) + 1;
         let total = base + Duration::from_millis(jitter);

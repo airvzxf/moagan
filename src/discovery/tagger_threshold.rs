@@ -27,8 +27,21 @@ impl TaggerThreshold {
     /// partially populated.
     pub fn from_config_value(v: Option<f32>) -> Self {
         match v {
-            Some(v) if (0.0..=1.0).contains(&v) => Self { value: v },
-            _ => Self::default(),
+            Some(v) if (0.0..=1.0).contains(&v) => {
+                tracing::debug!(value = v, "tagger_threshold: accepted config value");
+                Self { value: v }
+            }
+            Some(v) => {
+                tracing::warn!(
+                    value = v,
+                    "tagger_threshold: out-of-range config value; falling back to default"
+                );
+                Self::default()
+            }
+            None => {
+                tracing::trace!("tagger_threshold: no config value; using default");
+                Self::default()
+            }
         }
     }
 }

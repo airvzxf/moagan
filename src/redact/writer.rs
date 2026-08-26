@@ -2,6 +2,16 @@
 //!
 //! Used by the telemetry layer and the manifest writer so all on-disk
 //! artefacts pass through the same policy.
+//!
+//! ## Tracing policy
+//!
+//! `RedactWriter` IS the tracing subscriber's writer. Every `tracing::xxx!`
+//! event emitted from here runs while the subscriber is already inside
+//! `Write::write`, so any event whose level passes the active filter
+//! re-enters `Write::write` and recurses infinitely (stack overflow).
+//! The redact layer therefore emits **no tracing events at all**:
+//! debugging of this module has to happen via `RUST_BACKTRACE` and
+//! `lldb` / `gdb`, not via the tracing macros.
 
 use std::io::{self, Write};
 

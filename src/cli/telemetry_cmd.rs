@@ -19,6 +19,7 @@
 
 use crate::error::{Error, Result};
 use crate::ids::RunId;
+use tracing::{debug, trace, warn};
 
 /// Top-level `moagan telemetry` subcommand.
 #[derive(Debug, Clone, clap::Subcommand)]
@@ -316,7 +317,8 @@ impl std::fmt::Display for ExportFormat {
 impl TelemetryCmd {
     /// Dispatch the telemetry subcommand.
     pub async fn dispatch(self) -> Result<i32> {
-        match self {
+        debug!(cmd = ?self, "TelemetryCmd::dispatch: enter");
+        let res = match self {
             Self::List { .. } => list::run(&self).map(|_| 0),
             Self::Summary { .. } => summary::run(&self).map(|_| 0),
             Self::Compare { .. } => compare::run(&self).map(|_| 0),
@@ -335,15 +337,27 @@ impl TelemetryCmd {
             Self::Plan { .. } => plan::run(&self),
             Self::Cost { .. } => cost::run(&self).map(|_| 0),
             Self::Alerts { .. } => alerts::run(&self).map(|_| 0),
+        };
+        match &res {
+            Ok(rc) => debug!(exit_code = rc, "TelemetryCmd::dispatch: ok"),
+            Err(e) => warn!(error = %e, "TelemetryCmd::dispatch: error"),
         }
+        res
     }
 
     /// Extract a `RunId` from the variants that carry one. Returns
     /// `Err(InvalidState)` for variants that don't.
     #[allow(dead_code)]
     pub(crate) fn parse_run(&self, raw: &str) -> Result<RunId> {
-        raw.parse()
-            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")))
+        trace!(raw = raw, "TelemetryCmd::parse_run: enter");
+        let res = raw
+            .parse()
+            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")));
+        match &res {
+            Ok(id) => debug!(run_id = %id, "TelemetryCmd::parse_run: ok"),
+            Err(e) => warn!(error = %e, "TelemetryCmd::parse_run: error"),
+        }
+        res
     }
 }
 
@@ -354,10 +368,15 @@ impl TelemetryCmd {
 pub(crate) fn resolve_home(
     runs_dir: Option<&std::path::Path>,
 ) -> Result<crate::fs_layout::MoaganHome> {
-    match runs_dir {
+    let out = match runs_dir {
         Some(p) => Ok(crate::fs_layout::MoaganHome::at(p.to_path_buf())),
         None => crate::fs_layout::MoaganHome::resolve(),
+    };
+    match &out {
+        Ok(h) => trace!(home = %h.root().display(), "resolve_home"),
+        Err(e) => warn!(error = %e, "resolve_home: failed"),
     }
+    out
 }
 
 #[allow(dead_code)]
@@ -374,8 +393,10 @@ mod list {
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
+    use tracing::{debug, trace};
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!("telemetry list::run: enter");
         let (runs_dir, limit, run) = match cmd {
             TelemetryCmd::List {
                 runs_dir,
@@ -398,6 +419,12 @@ mod list {
             let phases = db.list_phase_summaries_for_run(run_id)?;
             let usage = db.list_provider_usage_for_run(run_id)?;
             let run_dir = home.run_dir(run_id);
+            trace!(
+                run_id = %run_id,
+                phases = phases.len(),
+                usage_rows = usage.len(),
+                "list: drill into run"
+            );
             print_one_run(&row, run_dir.root(), &agg, &phases, &usage);
         } else {
             let rows = db.list_runs(limit)?;
@@ -503,8 +530,10 @@ mod summary {
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
+    use tracing::debug;
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(run = ?cmd, "telemetry summary::run: enter");
         let (runs_dir, run) = match cmd {
             TelemetryCmd::Summary { runs_dir, run } => (runs_dir.as_ref(), run.as_str()),
             _ => return Err(Error::InvalidState("summary: wrong variant".into())),
@@ -524,6 +553,14 @@ mod summary {
         let root = run_dir.root();
         let bytes = dir_bytes(root).unwrap_or(0);
         let duration_secs = row.updated_unix.saturating_sub(row.created_unix).max(0);
+        debug!(
+            run_id = %run_id,
+            bytes = bytes,
+            duration_secs = duration_secs,
+            phases = phases.len(),
+            usage_rows = usage.len(),
+            "telemetry summary: aggregates loaded"
+        );
 
         println!("Run: {}", row.run_id);
         println!("Mode: {}", row.mode);
@@ -638,8 +675,10 @@ pub(crate) mod compare {
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::{Db, RunAggregate, RunRow};
+    use tracing::debug;
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry compare::run: enter");
         let (runs_dir, run_a, run_b) = match cmd {
             TelemetryCmd::Compare {
                 runs_dir,
@@ -664,6 +703,13 @@ pub(crate) mod compare {
             .ok_or_else(|| Error::InvalidState(format!("run {run_b} not found in the index")))?;
         let agg_a = db.run_aggregate(a)?;
         let agg_b = db.run_aggregate(b)?;
+        debug!(
+            a = %a,
+            b = %b,
+            a_calls = agg_a.calls,
+            b_calls = agg_b.calls,
+            "telemetry compare: aggregates loaded"
+        );
 
         print_side_by_side(&row_a, &agg_a, &row_b, &agg_b);
         println!();
@@ -738,8 +784,10 @@ mod provider {
     use crate::config::{Config, ProviderConfig};
     use crate::storage::sqlite::Db;
     use std::collections::BTreeMap;
+    use tracing::debug;
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry provider::run: enter");
         let (runs_dir, plan, list) = match cmd {
             TelemetryCmd::Provider {
                 runs_dir,
@@ -753,13 +801,16 @@ mod provider {
         let db = Db::open(&home.meta_db_path())?;
 
         if list {
+            debug!("telemetry provider: list mode");
             list_providers(&cfg, &db);
         } else if let Some(name) = plan {
+            debug!(name = name, "telemetry provider: plan mode");
             plan_summary(name, &cfg, &db)?;
         } else {
             // Default action (no flag): list providers. This matches
             // V4 §8.7 ("moagan telemetry provider" with no flags
             // shows the provider roster).
+            debug!("telemetry provider: default list mode");
             list_providers(&cfg, &db);
         }
         Ok(())
@@ -887,14 +938,21 @@ mod view {
     use crate::telemetry::dashboard::{self, DashboardConfig};
     use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
+    use tracing::debug;
 
     pub(super) async fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry view::run: enter");
         let (runs_dir, port) = match cmd {
             TelemetryCmd::View { runs_dir, port } => (runs_dir.as_ref(), *port),
             _ => return Err(Error::InvalidState("view: wrong variant".into())),
         };
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let cfg = Config::load()?;
+        debug!(
+            port = port,
+            ensure_home = cfg.server.ensure_home,
+            "telemetry view: starting dashboard"
+        );
         // `ServerConfig::ensure_home` controls whether the
         // dashboard creates the runs/ + cache/ directories on
         // startup (default true). When the operator disables it
@@ -943,8 +1001,10 @@ mod view {
 mod export {
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
+    use tracing::debug;
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry export::run: enter");
         let (runs_dir, run, level, format, out) = match cmd {
             TelemetryCmd::Export {
                 runs_dir,
@@ -978,6 +1038,12 @@ mod export {
             .unwrap_or_else(|| run_dir.root().with_file_name(default_name));
         let result =
             crate::telemetry::export::export_run(&run_dir, run_id, level, format, &out_path)?;
+        debug!(
+            run_id = %run_id,
+            file_count = result.file_count,
+            archive_bytes = result.archive_bytes,
+            "telemetry export done"
+        );
         println!("export: wrote {} file(s)", result.file_count);
         println!("  payload bytes: {}", result.payload_bytes);
         println!("  archive bytes: {}", result.archive_bytes);
@@ -1003,8 +1069,10 @@ mod cleanup {
     use crate::storage::sqlite::Db;
     use crate::telemetry::cross_run_sweep::{OrphanReport, OrphanTableStat};
     use crate::telemetry::retention::{RetentionConfig, RetentionPolicy, apply};
+    use tracing::{debug, warn};
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry cleanup::run: enter");
         let (runs_dir, dry_run, archive_flag, cross_run, yes) = match cmd {
             TelemetryCmd::Cleanup {
                 runs_dir,
@@ -1022,6 +1090,7 @@ mod cleanup {
         // side of the database is being mutated, so the CLI
         // rejects the combination at the boundary.
         if cross_run && archive_flag {
+            warn!("--cross-run and --archive combined: rejected");
             return Err(Error::InvalidArgs(
                 "--cross-run and --archive are mutually exclusive \
                  (the sweep touches SQLite only; the archive moves .runs/<id>/)"
@@ -1029,8 +1098,13 @@ mod cleanup {
             ));
         }
         if cross_run {
+            debug!("telemetry cleanup: cross-run sweep");
             return run_cross_run(runs_dir.map(|p| p.as_path()), dry_run, yes);
         }
+        debug!(
+            archive = archive_flag,
+            "telemetry cleanup: per-run retention"
+        );
         run_per_run_retention(runs_dir, dry_run, archive_flag)
     }
 
@@ -1043,6 +1117,7 @@ mod cleanup {
         dry_run: bool,
         archive_flag: bool,
     ) -> Result<()> {
+        debug!("telemetry cleanup: per-run retention enter");
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let runs_dir = home.runs_dir();
         let db = Db::open(&home.meta_db_path()).ok();
@@ -1102,6 +1177,7 @@ mod cleanup {
     /// Either way the report is printed to stdout; the only
     /// difference is whether the underlying DELETEs run.
     fn run_cross_run(runs_dir: Option<&std::path::Path>, dry_run: bool, yes: bool) -> Result<()> {
+        debug!(dry_run, yes, "telemetry cleanup: cross-run enter");
         let home = super::resolve_home(runs_dir)?;
         let db = Db::open(&home.meta_db_path())?;
         let effective_dry_run = dry_run || !yes;
@@ -1186,8 +1262,10 @@ mod cleanup {
 mod verify {
     use super::{Error, Result, TelemetryCmd};
     use crate::telemetry::verify::{self, VerifyVerdict};
+    use tracing::{debug, warn};
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry verify::run: enter");
         let path = match cmd {
             TelemetryCmd::Verify { path, .. } => path,
             _ => return Err(Error::InvalidState("verify: wrong variant".into())),
@@ -1202,6 +1280,7 @@ mod verify {
                 fail += 1;
             }
             if let VerifyVerdict::Mismatch { expected, actual } = &row.verdict {
+                warn!(path = %row.path, expected = %expected, actual = %actual, "verify: MISMATCH");
                 println!(
                     "MISMATCH  {}  expected={}  actual={}",
                     row.path, expected, actual
@@ -1210,6 +1289,7 @@ mod verify {
                 println!("{:9}  {}", row.verdict.label(), row.path);
             }
         }
+        debug!(ok, fail, "telemetry verify: totals");
         println!();
         println!("OK: {} files verified, {} failed", ok, fail);
         if fail > 0 {
@@ -1230,8 +1310,10 @@ mod config {
     //! resolved value.
     use super::{Result, TelemetryCmd};
     use crate::config::Config;
+    use tracing::debug;
 
     pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
+        debug!("telemetry config::run: enter");
         let cfg = Config::load()?;
         println!("=== providers ===");
         let mut names: Vec<&String> = cfg.providers.keys().collect();
@@ -1324,8 +1406,10 @@ mod plan {
     use super::{Error, Result, TelemetryCmd};
     use crate::config::{Config, PlanConfig};
     use crate::storage::sqlite::{Db, WindowUsageRow};
+    use tracing::{debug, warn};
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<i32> {
+        debug!(cmd = ?cmd, "telemetry plan::run: enter");
         let (runs_dir, provider_filter, mut window_days) = match cmd {
             TelemetryCmd::Plan {
                 runs_dir,
@@ -1335,6 +1419,7 @@ mod plan {
             _ => return Err(Error::InvalidState("plan: wrong variant".into())),
         };
         if window_days == 0 {
+            warn!("--window-days=0 is invalid");
             return Err(Error::InvalidArgs(
                 "--window-days must be >= 1 (use a positive rolling window)".into(),
             ));
@@ -1593,8 +1678,10 @@ mod cost {
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
+    use tracing::{debug, warn};
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry cost::run: enter");
         let (runs_dir, run, all) = match cmd {
             TelemetryCmd::Cost { runs_dir, run, all } => (runs_dir.as_ref(), run.as_deref(), *all),
             _ => return Err(Error::InvalidState("cost: wrong variant".into())),
@@ -1633,10 +1720,12 @@ mod cost {
     }
 
     fn print_for_run(db: &Db, run_id: RunId) -> Result<()> {
+        debug!(run_id = %run_id, "telemetry cost: print_for_run");
         // The per-run aggregate is the union of every recorded
         // call. Empty result means the run id is unknown; surface
         // a clear error so the operator can re-check.
         if db.get_run(run_id)?.is_none() {
+            warn!(run_id = %run_id, "cost: run not in index");
             return Err(Error::InvalidState(format!(
                 "run {run_id} not found in the index"
             )));
@@ -1656,6 +1745,7 @@ mod cost {
     }
 
     fn print_for_all(db: &Db) -> Result<()> {
+        debug!("telemetry cost: print_for_all");
         let rows = db.aggregate_cost_by_provider_model(None)?;
         let total: f64 = rows.iter().map(|r| r.cost_usd).sum();
         println!("ALL RUNS");
@@ -1710,8 +1800,10 @@ mod alerts {
     //! prints `(no saturation events match the filter)` and exits 0.
     use super::{AlertsAction, Error, Result, TelemetryCmd};
     use crate::storage::sqlite::{Db, SaturationRow};
+    use tracing::debug;
 
     pub(super) fn run(cmd: &TelemetryCmd) -> Result<()> {
+        debug!(cmd = ?cmd, "telemetry alerts::run: enter");
         let (runs_dir, action) = match cmd {
             TelemetryCmd::Alerts { runs_dir, action } => (runs_dir.as_ref(), action),
             _ => return Err(Error::InvalidState("alerts: wrong variant".into())),
@@ -1740,6 +1832,12 @@ mod alerts {
         provider: Option<&str>,
         limit: u32,
     ) -> Result<()> {
+        debug!(
+            since = ?since,
+            provider = ?provider,
+            limit = limit,
+            "telemetry alerts: list"
+        );
         let home = super::resolve_home(runs_dir)?;
         let db = Db::open(&home.meta_db_path())?;
         let since_unix = parse_since(since);

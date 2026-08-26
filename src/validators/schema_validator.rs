@@ -55,6 +55,10 @@ impl SchemaValidator {
     /// - **Skipped** when there is no schema and no JSON to
     ///   validate (e.g. a proposal without any of these artifacts).
     pub fn check(artifacts: &[CodeArtifact], _sandbox: &Sandbox) -> Result<ValidationEvidence> {
+        tracing::debug!(
+            artifact_count = artifacts.len(),
+            "validators::schema::SchemaValidator::check: enter"
+        );
         // Pull out the schema and data candidates.
         let schema_artifact = artifacts
             .iter()
@@ -65,6 +69,9 @@ impl SchemaValidator {
         let inline_artifact = artifacts.iter().find(|a| a.kind == "json-schema+data");
 
         if schema_artifact.is_none() && json_artifact.is_none() && inline_artifact.is_none() {
+            tracing::trace!(
+                "validators::schema::SchemaValidator::check: no schema/json artifacts; skipping"
+            );
             return Ok(ValidationEvidence::skipped(
                 "schema",
                 "no json-schema or json artifact present",
@@ -110,12 +117,18 @@ impl SchemaValidator {
                 }
             }
             Err(detail) => {
+                tracing::warn!(detail = %detail, "validators::schema::SchemaValidator::check: validation failed");
                 evidence.status = ValidationStatus::Fail;
                 evidence
                     .record_failure(ValidationFailure::new(FailureKind::SchemaViolation, detail));
             }
         }
 
+        tracing::debug!(
+            status = ?evidence.status,
+            checks = evidence.checks_run.len(),
+            "validators::schema::SchemaValidator::check: exit"
+        );
         Ok(evidence)
     }
 }
@@ -147,6 +160,12 @@ fn validate_pairs(
     data: Option<&CodeArtifact>,
     inline: Option<&CodeArtifact>,
 ) -> std::result::Result<ValidationReport, String> {
+    tracing::trace!(
+        has_schema = schema.is_some(),
+        has_data = data.is_some(),
+        has_inline = inline.is_some(),
+        "validators::schema::validate_pairs: enter"
+    );
     let mut report = ValidationReport::default();
 
     // Inline artifact (carries both schema and data).
@@ -187,6 +206,10 @@ fn validate_pairs(
         report.pairs += 1;
     }
 
+    tracing::trace!(
+        pairs = report.pairs,
+        "validators::schema::validate_pairs: exit"
+    );
     Ok(report)
 }
 
@@ -201,6 +224,7 @@ fn validate_value(
         .map(|_| Vec::new())
         .unwrap_or_else(|it| it.collect());
     if errors.is_empty() {
+        tracing::trace!("validators::schema::validate_value: ok");
         Ok(())
     } else {
         let summary = errors

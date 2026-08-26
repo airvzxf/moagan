@@ -297,6 +297,11 @@ impl Phase for JudgePhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(
+            enable_adversary = self.enable_adversary,
+            enable_final_disagreement = self.enable_final_disagreement,
+            "judge: enter"
+        );
         let proposals_dir = ctx.run_dir().proposals();
         let revisions_dir = ctx.run_dir().revisions();
         let evaluations_dir = ctx.run_dir().evaluations();
@@ -335,12 +340,18 @@ impl Phase for JudgePhase {
             };
             subjects.push((proposal_id, subject));
         }
+        tracing::info!(subject_count = subjects.len(), "judge: subjects collected");
 
         let judges = self
             .mode
             .map(judge_quorum_for_mode)
             .unwrap_or(self.judges as usize);
         let total = subjects.len() * judges;
+        tracing::debug!(
+            total,
+            judges_per_proposal = judges,
+            "judge: panel size determined"
+        );
         let system_arc = Arc::new(system);
         let evaluations_dir_arc = Arc::new(evaluations_dir.clone());
 
@@ -610,6 +621,7 @@ impl Phase for JudgePhase {
 }
 
 fn aggregate(scores: &[JudgeScore]) -> Aggregated {
+    tracing::trace!(n = scores.len(), "judge: aggregate: enter");
     let n = scores.len() as f32;
     let avg = |f: &dyn Fn(&JudgeScore) -> f32| scores.iter().map(f).sum::<f32>() / n;
     Aggregated {

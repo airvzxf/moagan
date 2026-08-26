@@ -34,7 +34,7 @@ pub struct RoleSettings {
 
 /// Return the catalogue settings for a role.
 pub fn role_settings(role: Role) -> Option<RoleSettings> {
-    match role {
+    let settings = match role {
         Role::MergeSynthesizer => Some(RoleSettings {
             temperature: 0.2,
             top_p: 0.7,
@@ -129,7 +129,11 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             json_mode: true,
         }),
         _ => None,
+    };
+    if settings.is_none() {
+        tracing::trace!(role = ?role, "role_settings: no catalog entry");
     }
+    settings
 }
 
 /// Return the catalogue's `top_p` for a role, or `None` when the
@@ -210,7 +214,13 @@ pub fn prompt_set_hash() -> String {
                 DIMENSION_DERIVER_PROMPT,
             ]
             .join("\u{1f}");
-            blake3_hex(all.as_bytes())
+            let hash = blake3_hex(all.as_bytes());
+            tracing::info!(
+                hash = %hash,
+                prompt_count = 28,
+                "prompt_set_hash: computed once"
+            );
+            hash
         })
         .clone()
 }
@@ -267,9 +277,11 @@ pub const EPISTEMIC_LEGACY_PLACEHOLDER: &str = "${epistemic_legacy}";
 /// present, `prompt` is returned unchanged.
 pub fn inject_epistemic_legacy(prompt: &str) -> String {
     if !prompt.contains(EPISTEMIC_LEGACY_PLACEHOLDER) {
+        tracing::trace!("inject_epistemic_legacy: no placeholder, passthrough");
         return prompt.to_owned();
     }
     let legacy = EpistemicLegacy::load();
+    tracing::debug!("inject_epistemic_legacy: substituted");
     prompt.replace(EPISTEMIC_LEGACY_PLACEHOLDER, &legacy.render_markdown())
 }
 
@@ -285,9 +297,11 @@ pub const EPISTEMIC_PREFERENCES_PLACEHOLDER: &str = "${epistemic_preferences}";
 /// returned unchanged.
 pub fn inject_epistemic_preferences(prompt: &str, user: &str) -> String {
     if !prompt.contains(EPISTEMIC_PREFERENCES_PLACEHOLDER) {
+        tracing::trace!("inject_epistemic_preferences: no placeholder, passthrough");
         return prompt.to_owned();
     }
     let block = crate::preferences::integration::render_preferences_block(user, 3);
+    tracing::debug!(user, "inject_epistemic_preferences: substituted");
     prompt.replace(EPISTEMIC_PREFERENCES_PLACEHOLDER, &block)
 }
 
@@ -313,9 +327,11 @@ pub const RUBRIC_PLACEHOLDER: &str = "${rubric}";
 /// is returned unchanged.
 pub fn inject_rubric(prompt: &str) -> String {
     if !prompt.contains(RUBRIC_PLACEHOLDER) {
+        tracing::trace!("inject_rubric: no placeholder, passthrough");
         return prompt.to_owned();
     }
     let block = crate::ranking::render_rubric_block();
+    tracing::debug!("inject_rubric: substituted");
     prompt.replace(RUBRIC_PLACEHOLDER, &block)
 }
 
@@ -327,9 +343,11 @@ pub fn inject_rubric(prompt: &str) -> String {
 /// misled into believing the block was forgotten.
 pub fn inject_known_apis(prompt: &str, snippets: &[crate::research::ResearchSnippet]) -> String {
     if !prompt.contains(KNOWN_APIS_PLACEHOLDER) {
+        tracing::trace!("inject_known_apis: no placeholder, passthrough");
         return prompt.to_owned();
     }
     let block = crate::research::render_known_apis_block(snippets);
+    tracing::debug!(snippets = snippets.len(), "inject_known_apis: substituted");
     prompt.replace(KNOWN_APIS_PLACEHOLDER, &block)
 }
 
@@ -355,8 +373,13 @@ pub const CONTINUATION_LAST_EXCERPT_PLACEHOLDER: &str = "${last_excerpt}";
 pub fn render_continuation_prompt(last_excerpt: &str) -> String {
     let base = system_prompt(Role::Continuation);
     if base.contains(CONTINUATION_LAST_EXCERPT_PLACEHOLDER) {
+        tracing::trace!(
+            excerpt_len = last_excerpt.len(),
+            "render_continuation_prompt: placeholder substituted"
+        );
         base.replace(CONTINUATION_LAST_EXCERPT_PLACEHOLDER, last_excerpt)
     } else {
+        tracing::warn!("render_continuation_prompt: no placeholder in source; appending excerpt");
         format!("{base}\n\n{last_excerpt}")
     }
 }

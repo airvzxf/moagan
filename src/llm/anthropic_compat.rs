@@ -72,6 +72,11 @@ impl AnthropicCompatProvider {
     /// the first model id for the model id, and the section-level
     /// `endpoint` for the URL.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
+        tracing::debug!(
+            models = spec.models.len(),
+            endpoint = spec.endpoint.as_deref(),
+            "AnthropicCompatProvider::new: enter"
+        );
         let client = build_client()?;
         let name = spec
             .models
@@ -90,6 +95,12 @@ impl AnthropicCompatProvider {
             .or_else(|| spec.endpoint.clone())
             .unwrap_or_else(|| "http://localhost".to_owned());
         let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
+        tracing::info!(
+            name = %name,
+            model = %model,
+            endpoint = %endpoint,
+            "AnthropicCompatProvider: constructed"
+        );
         Ok(Self {
             name,
             model,
@@ -106,6 +117,7 @@ impl AnthropicCompatProvider {
     /// layers the discovered ceiling into the clamp chain. Wired by
     /// `registry_from_config` when the registry has a table.
     pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        tracing::debug!(name = %self.name, "AnthropicCompatProvider::with_max_tokens_table");
         self.max_tokens_table = Some(table);
         self
     }
@@ -115,13 +127,18 @@ impl AnthropicCompatProvider {
     /// callers (test fixtures); new dispatcher code goes through
     /// [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
+        tracing::debug!("AnthropicCompatProvider::from_config: enter");
         let key = std::env::var("OPENCODE_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
-                    .into(),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!("AnthropicCompatProvider::from_config: OPENCODE_API_KEY missing");
+                Error::InvalidApiKey {
+                    message:
+                        "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                            .into(),
+                    http_status: None,
+                }
             })?;
         Self::new(spec, SecretString::new(key))
     }
@@ -137,14 +154,25 @@ impl AnthropicCompatProvider {
     /// this constructor for endpoints whose path resolves to
     /// [`super::wire_format::WireFormatId::Anthropic`].
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        tracing::debug!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "AnthropicCompatProvider::from_resolved: enter"
+        );
         let kind = super::api_keys::lookup_kind_for_resolved(resolved);
         let key = super::api_keys::lookup_key(&kind, None)
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: format!(
-                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
-                    kind.to_ascii_uppercase()
-                ),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!(
+                    kind,
+                    "AnthropicCompatProvider::from_resolved: API key missing"
+                );
+                Error::InvalidApiKey {
+                    message: format!(
+                        "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                        kind.to_ascii_uppercase()
+                    ),
+                    http_status: None,
+                }
             })?
             .map_err(|e| match e {
                 Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
@@ -157,6 +185,11 @@ impl AnthropicCompatProvider {
                 other => other,
             })?;
         let client = build_client()?;
+        tracing::info!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "AnthropicCompatProvider::from_resolved: constructed"
+        );
         Ok(Self {
             name: resolved.section.clone(),
             model: resolved.id.clone(),
@@ -172,13 +205,15 @@ impl AnthropicCompatProvider {
     /// Compute the URL for the messages endpoint.
     pub fn messages_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
-        if base.ends_with("/v1/messages") {
+        let url = if base.ends_with("/v1/messages") {
             base.to_owned()
         } else if base.ends_with("/v1") {
             format!("{base}/messages")
         } else {
             format!("{base}/v1/messages")
-        }
+        };
+        tracing::trace!(endpoint = %self.endpoint, url = %url, "messages_url");
+        url
     }
 
     async fn sleep_with_jitter(attempt: u32, suggested: Option<std::time::Duration>) {

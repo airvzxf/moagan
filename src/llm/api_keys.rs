@@ -69,21 +69,45 @@ pub fn lookup_key(
     kind: &str,
     home_override: Option<&std::path::Path>,
 ) -> Option<Result<String, Error>> {
-    let env_var = env_var_for(kind)?;
+    let env_var = match env_var_for(kind) {
+        Some(v) => v,
+        None => {
+            tracing::trace!(kind, "lookup_key: unknown kind (no env var mapping)");
+            return None;
+        }
+    };
     let home_path: PathBuf = match home_override {
         Some(p) => p.to_path_buf(),
         None => match MoaganHome::resolve() {
             Ok(h) => h.root().to_path_buf(),
-            Err(_) => return env_var_value(env_var).map(Ok),
+            Err(e) => {
+                tracing::debug!(
+                    kind,
+                    env_var,
+                    error = %e,
+                    "lookup_key: MoaganHome::resolve failed; falling back to env var"
+                );
+                return env_var_value(env_var).map(Ok);
+            }
         },
     };
     let file = ApiKeysFile::load(&home_path);
     if let Some(spec) = file.providers.get(kind) {
+        tracing::debug!(
+            kind,
+            env_var,
+            "lookup_key: spec present; resolving (authoritative)"
+        );
         // The spec is authoritative. We do NOT fall back to the
         // direct env var when the spec fails — the operator chose
         // this entry explicitly.
         return Some(resolve_spec(spec, env_var));
     }
+    tracing::debug!(
+        kind,
+        env_var,
+        "lookup_key: no spec; using direct env var fallback"
+    );
     env_var_value(env_var).map(Ok)
 }
 
@@ -92,6 +116,7 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
     if let Some(rest) = trimmed_spec.strip_prefix("env:") {
         let var = rest.trim();
         std::env::var(var).ok().filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+            tracing::warn!(env_var = var, "resolve_spec: env spec unresolvable");
             Error::InvalidApiKey {
                 message: format!(
                     "api_keys.toml spec {spec:?} requested env var {var:?} for {env_var:?}, which is unset or blank"
@@ -106,6 +131,7 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
+                tracing::warn!(path = %path.display(), "resolve_spec: file spec unresolvable");
                 Error::InvalidApiKey {
                     message: format!(
                         "api_keys.toml spec {spec:?} requested file {path:?} for {env_var:?}, which could not be read or was empty"
@@ -115,14 +141,17 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
             })
     } else if literal_allowed() {
         if trimmed_spec.is_empty() {
+            tracing::warn!("resolve_spec: literal spec is empty");
             Err(Error::InvalidApiKey {
                 message: format!("api_keys.toml literal spec for {env_var:?} was empty"),
                 http_status: None,
             })
         } else {
+            tracing::debug!("resolve_spec: literal spec accepted (opt-in set)");
             Ok(trimmed_spec.to_string())
         }
     } else {
+        tracing::warn!("resolve_spec: literal spec blocked (opt-in not set)");
         Err(Error::InvalidApiKey {
             message: format!(
                 "api_keys.toml spec {spec:?} for {env_var:?} is a literal but MOAGAN_API_KEY_ALLOW_LITERAL is not set"

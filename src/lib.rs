@@ -94,9 +94,14 @@ pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;
     let cli = cli::Cli::parse();
+    tracing::info!("moagan::run: dispatching");
     let code = match cli::dispatch(cli).await {
-        Ok(code) => code,
+        Ok(code) => {
+            tracing::info!(exit_code = code, "moagan::run: dispatch ok");
+            code
+        }
         Err(e) => {
+            tracing::error!(error = %e, "moagan::run: dispatch failed");
             eprintln!("error: {e}");
             i32::from(exit_code(&e))
         }
@@ -106,9 +111,11 @@ pub async fn run() -> anyhow::Result<()> {
 
 /// Synchronous entry point used by `main.rs` and integration tests.
 pub fn run_blocking() -> anyhow::Result<()> {
+    tracing::debug!("moagan::run_blocking: building tokio runtime");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    tracing::trace!("moagan::run_blocking: runtime built; entering block_on");
     rt.block_on(run())
 }
 

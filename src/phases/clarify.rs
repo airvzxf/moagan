@@ -26,6 +26,7 @@ impl Phase for ClarifyPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!("clarify: enter");
         let intake: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let user = serde_json::to_string(&intake).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Clarify).to_owned();
@@ -48,16 +49,28 @@ impl Phase for ClarifyPhase {
             2,
         )
         .await?;
+        tracing::debug!(
+            risks = brief.risks.len(),
+            assumptions = brief.assumptions.len(),
+            constraints = brief.constraints.len(),
+            deliverables = brief.deliverables.len(),
+            "clarify: brief produced"
+        );
         if brief.context_block.is_none() {
             brief.context_block = context_block.and_then(|value| value.as_str().map(str::to_owned));
         }
         write_json(&ctx.run_dir().brief(), &brief)?;
+        tracing::trace!(path = %ctx.run_dir().brief().display(), "clarify: brief.json written");
 
         // Phase D checkpoint: a blocking ambiguity is signaled by the
         // brief carrying unresolved risks or implicit assumptions.
         // We treat `risks.len() >= 2` as the trigger — single-risk
         // briefs are common and don't need a human gate.
         if brief.risks.len() >= 2 {
+            tracing::info!(
+                risk_count = brief.risks.len(),
+                "clarify: ambiguous brief, asking for human approval"
+            );
             let prompt = format!(
                 "brief carries {} risk(s); continue with current assumptions?",
                 brief.risks.len()
@@ -70,8 +83,11 @@ impl Phase for ClarifyPhase {
             };
             let resolution = crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)?;
             match resolution {
-                crate::checkpoint::Resolution::Approved => {}
+                crate::checkpoint::Resolution::Approved => {
+                    tracing::debug!("clarify: checkpoint approved");
+                }
                 crate::checkpoint::Resolution::Modify(text) => {
+                    tracing::info!(text_len = text.len(), "clarify: checkpoint modified");
                     // F1: persist the operator's text to the
                     // `<run_dir>/state/modify_note.json` sidecar via
                     // the shared helper so the rank and deliver
@@ -87,6 +103,7 @@ impl Phase for ClarifyPhase {
                     write_json(&ctx.run_dir().brief(), &brief)?;
                 }
                 crate::checkpoint::Resolution::Rejected => {
+                    tracing::warn!("clarify: checkpoint rejected, cancelling run");
                     return Err(crate::error::Error::Cancelled(
                         "user rejected the clarify checkpoint".into(),
                     ));

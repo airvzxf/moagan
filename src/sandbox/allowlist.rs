@@ -54,22 +54,40 @@ impl Allowlist {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let inner = items
+        let inner: HashSet<String> = items
             .into_iter()
             .map(|s| s.as_ref().to_owned())
             .collect::<HashSet<_>>();
+        tracing::debug!(
+            sandbox = "allowlist",
+            entries = inner.len(),
+            "Allowlist::from_slice built allowlist"
+        );
         Self { inner }
     }
 
     /// Use the project default allowlist.
     pub fn default_list() -> Self {
+        tracing::info!(
+            sandbox = "allowlist",
+            entries = DEFAULT_ALLOWLIST.len(),
+            "Allowlist::default_list loading project defaults"
+        );
         Self::from_slice(DEFAULT_ALLOWLIST)
     }
 
     /// Returns true when `cmd` (the binary basename) is allowed.
     pub fn permits(&self, cmd: &str) -> bool {
         let key = basename(cmd);
-        self.inner.contains(key)
+        let allowed = self.inner.contains(key);
+        tracing::trace!(
+            sandbox = "allowlist",
+            cmd = %cmd,
+            key = %key,
+            allowed,
+            "Allowlist::permits lookup"
+        );
+        allowed
     }
 
     /// Returns the number of entries.
@@ -104,15 +122,25 @@ impl Denylist {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let inner = items
+        let inner: HashSet<String> = items
             .into_iter()
             .map(|s| s.as_ref().to_owned())
             .collect::<HashSet<_>>();
+        tracing::debug!(
+            sandbox = "denylist",
+            entries = inner.len(),
+            "Denylist::from_slice built denylist"
+        );
         Self { inner }
     }
 
     /// Use the project default denylist.
     pub fn default_list() -> Self {
+        tracing::info!(
+            sandbox = "denylist",
+            entries = DEFAULT_DENYLIST.len(),
+            "Denylist::default_list loading project defaults"
+        );
         Self::from_slice(DEFAULT_DENYLIST)
     }
 
@@ -120,7 +148,14 @@ impl Denylist {
     /// exact (no globbing) so it stays cheap; the allowlist already
     /// does the bulk filtering.
     pub fn bans(&self, token: &str) -> bool {
-        self.inner.contains(token)
+        let banned = self.inner.contains(token);
+        tracing::trace!(
+            sandbox = "denylist",
+            token = %token,
+            banned,
+            "Denylist::bans lookup"
+        );
+        banned
     }
 
     /// Returns the number of entries.
@@ -142,7 +177,14 @@ impl Default for Denylist {
 
 /// True if `cmd` is permitted by `allowlist`.
 pub fn is_allowed(cmd: &str, allowlist: &Allowlist) -> bool {
-    allowlist.permits(cmd)
+    let allowed = allowlist.permits(cmd);
+    tracing::trace!(
+        sandbox = "allowlist",
+        cmd = %cmd,
+        allowed,
+        "is_allowed check"
+    );
+    allowed
 }
 
 /// True if the argv contains any token from the denylist. The check
@@ -151,7 +193,24 @@ pub fn contains_deny_token<S>(argv: &[S], denylist: &Denylist) -> bool
 where
     S: AsRef<str>,
 {
-    argv.iter().any(|a| denylist.bans(a.as_ref()))
+    let mut banned_token: Option<String> = None;
+    for a in argv {
+        if denylist.bans(a.as_ref()) {
+            banned_token = Some(a.as_ref().to_owned());
+            break;
+        }
+    }
+    match banned_token {
+        Some(tok) => {
+            tracing::warn!(
+                sandbox = "denylist",
+                token = %tok,
+                "argv contains a denylisted token"
+            );
+            true
+        }
+        None => false,
+    }
 }
 
 /// Extract the basename from a possibly-path-prefixed binary name.

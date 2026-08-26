@@ -46,10 +46,21 @@ pub fn record_with<T, F>(db: &Db, events: &[OutboxEvent], sidecar_write: F) -> R
 where
     F: FnOnce() -> Result<T>,
 {
+    tracing::debug!(
+        event_count = events.len(),
+        "record_with: enter (sidecar then outbox tx)"
+    );
     let sidecar_result = sidecar_write()?;
+    tracing::trace!("record_with: sidecar ok, opening outbox tx");
     let conn = db.pool().get()?;
     let tx = conn.unchecked_transaction()?;
-    for ev in events {
+    for (idx, ev) in events.iter().enumerate() {
+        tracing::trace!(
+            idx,
+            run_id = %ev.run_id,
+            event_type = %ev.event_type,
+            "record_with: insert outbox row"
+        );
         tx.execute(
             "INSERT INTO outbox_events (run_id, event_type, payload, at_unix) \
              VALUES (?, ?, ?, strftime('%s','now'))",
@@ -57,6 +68,7 @@ where
         )?;
     }
     tx.commit()?;
+    tracing::debug!(event_count = events.len(), "record_with: tx committed");
     Ok(sidecar_result)
 }
 

@@ -52,11 +52,18 @@ pub use super::id::SketchId;
 /// threshold — pass a larger value to be more permissive
 /// (fewer outliers), a smaller value to be more strict.
 pub fn detect_outliers(samples: &[Sketch], clusters: &[Cluster]) -> Vec<SketchId> {
-    detect_outliers_with_threshold(
+    tracing::debug!(
+        samples = samples.len(),
+        clusters = clusters.len(),
+        "outlier: detect_outliers enter"
+    );
+    let out = detect_outliers_with_threshold(
         samples,
         clusters,
         crate::discovery::stop_policy::DEFAULT_OUTLIER_DISTANCE,
-    )
+    );
+    tracing::info!(outliers = out.len(), "outlier: detect_outliers done");
+    out
 }
 
 /// Like [`detect_outliers`] but with an explicit threshold.
@@ -74,18 +81,32 @@ pub fn detect_outliers_with_threshold(
     clusters: &[Cluster],
     outlier_distance: f32,
 ) -> Vec<SketchId> {
+    tracing::debug!(
+        samples = samples.len(),
+        clusters = clusters.len(),
+        outlier_distance,
+        "outlier: detect_outliers_with_threshold enter"
+    );
     // Pre-compute the feature bag for every cluster. Doing it
     // once outside the per-sample loop keeps the asymptotic
     // shape O(N*C) where N is samples and C is cluster feature
     // bags (we use the cluster's member ids, not its full
     // text).
     let cluster_features: Vec<HashSet<String>> = clusters.iter().map(cluster_features).collect();
+    tracing::trace!(
+        cluster_features = cluster_features.len(),
+        "outlier: cluster_features precomputed"
+    );
 
     // The set of ids that belong to at least one cluster.
     let clustered_ids: HashSet<&str> = clusters
         .iter()
         .flat_map(|c| c.members.iter().map(String::as_str))
         .collect();
+    tracing::trace!(
+        clustered_ids = clustered_ids.len(),
+        "outlier: clustered_ids set built"
+    );
 
     // Phase 1 (parallel): compute the per-sample outlier decision
     // while preserving the original index so the dedup phase can
@@ -99,6 +120,7 @@ pub fn detect_outliers_with_threshold(
         .filter_map(|(_, sketch)| {
             let id = sketch.id.as_str();
             if id.is_empty() {
+                tracing::trace!("outlier: skipping blank id sample");
                 return None;
             }
             let sketch_feats = sketch_features(sketch);
@@ -115,6 +137,10 @@ pub fn detect_outliers_with_threshold(
             Some((id.to_string(), is_outlier))
         })
         .collect();
+    tracing::trace!(
+        decisions = decisions.len(),
+        "outlier: parallel decision phase complete"
+    );
 
     // Phase 2 (sequential): dedup by id, keeping the FIRST
     // occurrence (matches the pre-rayon behaviour where
@@ -123,14 +149,21 @@ pub fn detect_outliers_with_threshold(
     // visits samples in the same sequence as the original code.
     let mut seen: HashSet<String> = HashSet::new();
     let mut outliers: Vec<SketchId> = Vec::with_capacity(decisions.len());
+    let mut dupes = 0usize;
     for (id, is_outlier) in decisions {
         if !seen.insert(id.clone()) {
+            dupes += 1;
+            tracing::trace!(id = %id, "outlier: duplicate id dropped");
             continue;
         }
         if is_outlier {
             outliers.push(SketchId(id));
         }
     }
+    if dupes > 0 {
+        tracing::debug!(dupes, "outlier: dedup pass dropped duplicates");
+    }
+    tracing::debug!(outliers = outliers.len(), dupes, "outlier: dedup complete");
     outliers
 }
 
@@ -155,6 +188,11 @@ fn cluster_features(c: &Cluster) -> HashSet<String> {
     for member in &c.members {
         set.insert(member.to_ascii_lowercase());
     }
+    tracing::trace!(
+        cluster_id = %c.id,
+        tokens = set.len(),
+        "outlier: cluster_features built"
+    );
     set
 }
 
@@ -189,6 +227,11 @@ fn sketch_features(s: &Sketch) -> HashSet<String> {
             }
         }
     }
+    tracing::trace!(
+        sketch_id = %s.id,
+        tokens = set.len(),
+        "outlier: sketch_features built"
+    );
     set
 }
 
@@ -197,11 +240,13 @@ fn sketch_features(s: &Sketch) -> HashSet<String> {
 /// empty.
 fn jaccard_distance(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
     if a.is_empty() && b.is_empty() {
+        tracing::trace!("outlier: jaccard both-empty");
         return 1.0;
     }
     let intersection = a.intersection(b).count() as f32;
     let union = a.union(b).count() as f32;
     if union == 0.0 {
+        tracing::trace!("outlier: jaccard zero union");
         1.0
     } else {
         1.0 - (intersection / union)

@@ -36,12 +36,28 @@ impl ApiKeysFile {
     pub fn load(home: &Path) -> Self {
         let path = home.join("api_keys.toml");
         if !path.exists() {
+            tracing::trace!(path = %path.display(), "ApiKeysFile: no file at path");
             return Self::default();
         }
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+        let raw = std::fs::read_to_string(&path).ok();
+        let parsed = raw.as_deref().and_then(|s| toml::from_str::<Self>(s).ok());
+        match parsed {
+            Some(file) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    providers = file.providers.len(),
+                    "ApiKeysFile: loaded"
+                );
+                file
+            }
+            None => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "ApiKeysFile: parse failed; defaulting to empty"
+                );
+                Self::default()
+            }
+        }
     }
 
     /// Resolve the spec for `provider` against the given default
@@ -49,6 +65,7 @@ impl ApiKeysFile {
     /// the file or if the entry cannot be materialised.
     pub fn resolve(&self, provider: &str, env_var: &str) -> Option<String> {
         let spec = self.providers.get(provider)?;
+        tracing::trace!(provider, env_var, "ApiKeysFile: resolving spec");
         resolve_spec(spec, env_var)
     }
 }
@@ -59,16 +76,30 @@ impl ApiKeysFile {
 /// an `env:` reference (which is fully self-contained).
 fn resolve_spec(spec: &str, env_var: &str) -> Option<String> {
     if let Some(rest) = spec.strip_prefix("env:") {
-        std::env::var(rest).ok()
+        let v = std::env::var(rest).ok();
+        tracing::trace!(
+            env = rest,
+            present = v.is_some(),
+            "ApiKeysFile: env spec resolve"
+        );
+        v
     } else if let Some(rest) = spec.strip_prefix("file:") {
-        std::fs::read_to_string(rest)
+        let v = std::fs::read_to_string(rest)
             .ok()
-            .map(|s| s.trim().to_string())
+            .map(|s| s.trim().to_string());
+        tracing::trace!(
+            path = rest,
+            present = v.is_some(),
+            "ApiKeysFile: file spec resolve"
+        );
+        v
     } else {
         let _ = env_var;
         if literal_allowed() {
+            tracing::debug!("ApiKeysFile: literal spec allowed");
             Some(spec.to_string())
         } else {
+            tracing::debug!("ApiKeysFile: literal spec blocked (opt-in not set)");
             None
         }
     }
@@ -97,6 +128,7 @@ impl LazyApiKey {
     /// Build a lazy key that resolves only from the env var
     /// `env_var`. Equivalent to the v0.1 behaviour.
     pub fn new(env_var: &str) -> Self {
+        tracing::debug!(env_var, "LazyApiKey: constructed (env fallback)");
         Self {
             spec: String::new(),
             env_var: env_var.to_string(),
@@ -115,8 +147,14 @@ impl LazyApiKey {
                 std::env::var(&self.env_var).ok()
             };
             match result {
-                Some(value) => Ok(value),
-                None => Err("not found".to_string()),
+                Some(value) => {
+                    tracing::debug!(env_var = %self.env_var, "LazyApiKey: resolved ok");
+                    Ok(value)
+                }
+                None => {
+                    tracing::warn!(env_var = %self.env_var, "LazyApiKey: resolution failed (not found)");
+                    Err("not found".to_string())
+                }
             }
         });
         cached.as_ref().map(|s| s.as_str()).map_err(|e| e.as_str())

@@ -253,7 +253,14 @@ pub fn try_load_from_disk(home_path: &Path) -> Option<ModelsDevCatalog> {
     let path = catalog_path(home_path);
     let bytes = std::fs::read(&path).ok()?;
     match serde_json::from_slice::<ModelsDevCatalog>(&bytes) {
-        Ok(catalog) => Some(catalog),
+        Ok(catalog) => {
+            tracing::debug!(
+                path = %path.display(),
+                providers = catalog.providers.len(),
+                "models_dev: try_load_from_disk hit"
+            );
+            Some(catalog)
+        }
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -288,11 +295,18 @@ pub fn is_fresh(catalog: &ModelsDevCatalog, now_unix: u64, ttl_hours: u64) -> bo
 /// internally consistent (lowercase provider ids, verbatim model
 /// ids), so a fuzzy match would only mask caller bugs.
 pub fn lookup(catalog: &ModelsDevCatalog, provider: &str, model: &str) -> Option<ModelsDevEntry> {
-    catalog
+    let entry = catalog
         .providers
         .get(provider)
         .and_then(|p| p.models.get(model))
-        .cloned()
+        .cloned();
+    tracing::trace!(
+        provider,
+        model,
+        present = entry.is_some(),
+        "models_dev::lookup"
+    );
+    entry
 }
 
 /// Load the catalog from disk, falling back to a network fetch when
@@ -311,6 +325,12 @@ pub async fn load_or_fetch(
     ttl_hours: u64,
     offline: bool,
 ) -> Result<CatalogLoad, String> {
+    tracing::debug!(
+        home = %home_path.display(),
+        ttl_hours,
+        offline,
+        "models_dev::load_or_fetch"
+    );
     let client = super::http::build_client()
         .map_err(|e| format!("models_dev: build reqwest client: {e}"))?;
     load_or_fetch_at(home_path, ttl_hours, offline, MODELS_DEV_URL, &client).await
@@ -326,10 +346,21 @@ pub async fn load_or_fetch_at(
     url: &str,
     client: &Client,
 ) -> Result<CatalogLoad, String> {
+    tracing::debug!(
+        home = %home_path.display(),
+        ttl_hours,
+        offline,
+        url,
+        "models_dev::load_or_fetch_at"
+    );
     let path = catalog_path(home_path);
     let now = unix_now_secs_u64();
 
     if let Some(catalog) = read_fresh_cache(&path, ttl_hours, now) {
+        tracing::info!(
+            path = %path.display(),
+            "models_dev: fresh cache hit, no fetch"
+        );
         return Ok(CatalogLoad {
             catalog,
             from_cache: true,
@@ -338,6 +369,10 @@ pub async fn load_or_fetch_at(
     }
 
     if offline {
+        tracing::warn!(
+            path = %path.display(),
+            "models_dev: offline mode and cache missing/stale"
+        );
         return Err(format!(
             "models_dev: offline mode and cache missing or stale at {}",
             path.display()
@@ -345,11 +380,18 @@ pub async fn load_or_fetch_at(
     }
 
     match fetch_and_persist(url, client, &path).await {
-        Ok(catalog) => Ok(CatalogLoad {
-            catalog,
-            from_cache: false,
-            path,
-        }),
+        Ok(catalog) => {
+            tracing::info!(
+                url,
+                providers = catalog.providers.len(),
+                "models_dev: fetched fresh catalog"
+            );
+            Ok(CatalogLoad {
+                catalog,
+                from_cache: false,
+                path,
+            })
+        }
         Err(fetch_err) => fallback_to_stale_cache(&path, &fetch_err),
     }
 }
@@ -388,25 +430,35 @@ async fn fetch_and_persist(
     client: &Client,
     path: &Path,
 ) -> Result<ModelsDevCatalog, String> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("models_dev: fetch {url} failed: {e}"))?;
+    tracing::info!(url, "models_dev: fetching catalog from upstream");
+    let response = client.get(url).send().await.map_err(|e| {
+        tracing::warn!(url, error = %e, "models_dev: fetch send failed");
+        format!("models_dev: fetch {url} failed: {e}")
+    })?;
     let status = response.status();
     if !status.is_success() {
+        tracing::warn!(
+            url,
+            status = status.as_u16(),
+            "models_dev: fetch returned non-success"
+        );
         return Err(format!("models_dev: fetch {url} returned HTTP {status}"));
     }
-    let providers: BTreeMap<String, ModelsDevProvider> = response
-        .json()
-        .await
-        .map_err(|e| format!("models_dev: parse response from {url}: {e}"))?;
+    let providers: BTreeMap<String, ModelsDevProvider> = response.json().await.map_err(|e| {
+        tracing::warn!(url, error = %e, "models_dev: parse response failed");
+        format!("models_dev: parse response from {url}: {e}")
+    })?;
     let catalog = ModelsDevCatalog {
         schema_version: CATALOG_SCHEMA_VERSION,
         fetched_at_unix: unix_now_secs_u64(),
         providers,
     };
     write_atomic(path, &catalog)?;
+    tracing::debug!(
+        path = %path.display(),
+        providers = catalog.providers.len(),
+        "models_dev: catalog persisted"
+    );
     Ok(catalog)
 }
 

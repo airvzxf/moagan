@@ -285,6 +285,7 @@ impl ProviderRegistry {
     /// registry also builds a [`ProviderPool`] for round-robin
     /// selection across those entries (D.19.19/.20).
     pub fn new(providers: Vec<(String, Arc<dyn Provider>)>) -> Self {
+        tracing::debug!(count = providers.len(), "ProviderRegistry::new: enter");
         let mut by_name = HashMap::new();
         let mut wrapped: HashMap<String, Arc<BreakeredProvider>> = HashMap::new();
         let mut wrapped_entries: Vec<(String, Arc<BreakeredProvider>)> = Vec::new();
@@ -310,6 +311,11 @@ impl ProviderRegistry {
             wrapped_entries.push((name, entry));
         }
         let (pool, pool_names) = build_pool_from_entries(&wrapped_entries);
+        tracing::info!(
+            count = wrapped_entries.len(),
+            pool_size = pool_names.len(),
+            "ProviderRegistry: constructed"
+        );
         Self {
             by_name,
             wrapped,
@@ -326,6 +332,7 @@ impl ProviderRegistry {
     /// onto a freshly built registry and hand-rolled test paths can
     /// opt in with one call.
     pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        tracing::debug!("ProviderRegistry::with_max_tokens_table");
         self.max_tokens_table = Some(table);
         self
     }
@@ -344,6 +351,7 @@ impl ProviderRegistry {
     /// chain it onto a freshly built registry, and hand-rolled test
     /// paths can opt in with one call.
     pub fn with_temperature_table(mut self, table: Arc<TemperatureTable>) -> Self {
+        tracing::debug!("ProviderRegistry::with_temperature_table");
         self.temperature_table = Some(table);
         self
     }
@@ -733,6 +741,7 @@ impl BreakeredProvider {
     /// chain [`Self::with_rate_limiter`] (and optionally
     /// [`Self::with_rate_limit_max_wait`]) on top of this.
     pub fn new(inner: Arc<dyn Provider>, breaker: Arc<CircuitBreaker>) -> Self {
+        tracing::debug!(provider = inner.name(), "BreakeredProvider: constructed");
         Self {
             inner,
             breaker,
@@ -755,6 +764,10 @@ impl BreakeredProvider {
         breaker: Arc<CircuitBreaker>,
         rate_limiter: Arc<RateLimiter>,
     ) -> Self {
+        tracing::debug!(
+            provider = inner.name(),
+            "BreakeredProvider: constructed (with rate limiter)"
+        );
         Self {
             inner,
             breaker,
@@ -772,6 +785,10 @@ impl BreakeredProvider {
     /// `Error::Provider` (carrying a budget-exhausted message)
     /// instead of sleeping. Default (`None`) is unbounded wait.
     pub fn with_rate_limit_max_wait(mut self, max: Duration) -> Self {
+        tracing::debug!(
+            max_ms = max.as_millis() as u64,
+            "BreakeredProvider::with_rate_limit_max_wait"
+        );
         self.rate_limit_max_wait = Some(max);
         self
     }
@@ -1188,6 +1205,7 @@ pub fn registry_from_config(
     cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     breaker_cfg: &CircuitBreakerConfig,
 ) -> Result<ProviderRegistry> {
+    tracing::debug!(sections = cfg.len(), "registry_from_config");
     registry_from_config_with_sink(cfg, breaker_cfg, None)
 }
 
@@ -1204,6 +1222,11 @@ pub fn registry_from_config_with_sink(
     breaker_cfg: &CircuitBreakerConfig,
     sink: Option<Arc<dyn SaturationSink>>,
 ) -> Result<ProviderRegistry> {
+    tracing::debug!(
+        sections = cfg.len(),
+        sink = sink.is_some(),
+        "registry_from_config_with_sink"
+    );
     registry_from_config_with_sink_active(cfg, breaker_cfg, sink, None)
 }
 
@@ -1218,6 +1241,12 @@ pub fn registry_from_config_with_sink_active(
     sink: Option<Arc<dyn SaturationSink>>,
     active_pairs: Option<&[(String, String)]>,
 ) -> Result<ProviderRegistry> {
+    tracing::debug!(
+        sections = cfg.len(),
+        sink = sink.is_some(),
+        active_pairs = active_pairs.map(|p| p.len()),
+        "registry_from_config_with_sink_active"
+    );
     match MoaganHome::resolve() {
         Ok(home) => registry_from_config_with_home_and_sink(
             cfg,
@@ -1250,6 +1279,11 @@ pub fn registry_from_config_with_home(
     breaker_cfg: &CircuitBreakerConfig,
     home: Option<&MoaganHome>,
 ) -> Result<ProviderRegistry> {
+    tracing::debug!(
+        sections = cfg.len(),
+        home = home.is_some(),
+        "registry_from_config_with_home"
+    );
     registry_from_config_with_home_and_sink(cfg, breaker_cfg, home, None, None)
 }
 
@@ -1271,6 +1305,12 @@ pub fn registry_from_config_with_home_and_sink(
     sink: Option<Arc<dyn SaturationSink>>,
     active_pairs: Option<&[(String, String)]>,
 ) -> Result<ProviderRegistry> {
+    tracing::info!(
+        sections = cfg.len(),
+        home = home.is_some(),
+        sink = sink.is_some(),
+        "registry_from_config_with_home_and_sink: building"
+    );
     use super::anthropic_compat::AnthropicCompatProvider;
     use super::openai_compat::OpenAICompatProvider;
     use super::openai_compatible::OpenAICompatibleProvider;

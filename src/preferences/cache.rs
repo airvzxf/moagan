@@ -61,6 +61,7 @@ impl PreferenceCache {
     /// Construct an empty cache for `user` stamped with the current
     /// [`SCHEMA_VERSION`].
     pub fn empty(user: String) -> Self {
+        tracing::trace!(user = %user, "preferences::cache::PreferenceCache::empty");
         Self {
             version: SCHEMA_VERSION,
             user,
@@ -74,9 +75,14 @@ impl PreferenceCache {
     /// canonical truthy spellings (`1`, `true`, `yes`, `on`,
     /// case-insensitive).
     pub fn enabled() -> bool {
-        std::env::var("MOAGAN_LEARNING")
+        let result = std::env::var("MOAGAN_LEARNING")
             .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        tracing::trace!(
+            enabled = result,
+            "preferences::cache::PreferenceCache::enabled"
+        );
+        result
     }
 
     /// Load the persisted cache for `user`. Returns
@@ -84,30 +90,75 @@ impl PreferenceCache {
     /// file, schema mismatch, corrupt JSON, user mismatch) so a
     /// malformed cache never blocks the rest of the pipeline.
     pub fn load(user: &str) -> Self {
+        tracing::debug!(user, "preferences::cache::PreferenceCache::load: enter");
         if !Self::enabled() {
+            tracing::debug!("preferences::cache::PreferenceCache::load: opt-out; returning empty");
             return Self::empty(user.to_string());
         }
         let Some(path) = cache_path(user) else {
+            tracing::debug!(
+                user,
+                "preferences::cache::PreferenceCache::load: no cache_path"
+            );
             return Self::empty(user.to_string());
         };
         if !path.exists() {
+            tracing::debug!(
+                user,
+                path = %path.display(),
+                "preferences::cache::PreferenceCache::load: missing file"
+            );
             return Self::empty(user.to_string());
         }
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<Self>(&text) {
                 Ok(mut cache) => {
                     if cache.version != SCHEMA_VERSION {
+                        tracing::warn!(
+                            path = %path.display(),
+                            on_disk_version = cache.version,
+                            current_version = SCHEMA_VERSION,
+                            "preferences::cache::PreferenceCache::load: schema mismatch"
+                        );
                         return Self::empty(user.to_string());
                     }
                     if cache.user != user {
+                        tracing::warn!(
+                            path = %path.display(),
+                            on_disk_user = %cache.user,
+                            requested_user = %user,
+                            "preferences::cache::PreferenceCache::load: user mismatch"
+                        );
                         return Self::empty(user.to_string());
                     }
+                    let pre_count = cache.ratings.len();
                     cache.decay();
+                    tracing::info!(
+                        user,
+                        path = %path.display(),
+                        ratings = pre_count,
+                        after_decay = cache.ratings.len(),
+                        "preferences::cache::PreferenceCache::load: loaded"
+                    );
                     cache
                 }
-                Err(_) => Self::empty(user.to_string()),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "preferences::cache::PreferenceCache::load: parse failed; returning empty"
+                    );
+                    Self::empty(user.to_string())
+                }
             },
-            Err(_) => Self::empty(user.to_string()),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "preferences::cache::PreferenceCache::load: read failed; returning empty"
+                );
+                Self::empty(user.to_string())
+            }
         }
     }
 
@@ -116,10 +167,17 @@ impl PreferenceCache {
     /// `tmp + rename` so a partial write never leaves a half-baked
     /// JSON on disk.
     pub fn save(&self) -> Result<()> {
+        tracing::debug!(
+            user = %self.user,
+            rating_count = self.ratings.len(),
+            "preferences::cache::PreferenceCache::save: enter"
+        );
         if !Self::enabled() {
+            tracing::trace!("preferences::cache::PreferenceCache::save: opt-out; no-op");
             return Ok(());
         }
         let Some(path) = cache_path(&self.user) else {
+            tracing::trace!("preferences::cache::PreferenceCache::save: no cache_path");
             return Ok(());
         };
         if let Some(parent) = path.parent() {
@@ -144,6 +202,12 @@ impl PreferenceCache {
                 source: e,
             })
         })?;
+        tracing::info!(
+            user = %self.user,
+            path = %path.display(),
+            bytes = json.len(),
+            "preferences::cache::PreferenceCache::save: persisted"
+        );
         Ok(())
     }
 
@@ -152,13 +216,26 @@ impl PreferenceCache {
     /// dropped from the front of the vector to keep the bound.
     pub fn add(&mut self, rating: Rating) {
         if !Self::enabled() {
+            tracing::trace!("preferences::cache::PreferenceCache::add: opt-out; no-op");
             return;
         }
+        let proposal_id = rating.proposal_id.clone();
+        let score = rating.score;
         self.ratings.push(rating);
-        if self.ratings.len() > MAX_RATINGS {
+        let dropped = if self.ratings.len() > MAX_RATINGS {
             let drop = self.ratings.len() - MAX_RATINGS;
             self.ratings.drain(0..drop);
-        }
+            drop
+        } else {
+            0
+        };
+        tracing::trace!(
+            proposal_id = %proposal_id,
+            score,
+            total = self.ratings.len(),
+            dropped,
+            "preferences::cache::PreferenceCache::add"
+        );
     }
 
     /// Return the `limit` ratings with the highest linear-decay
@@ -180,8 +257,17 @@ impl PreferenceCache {
                 }
             })
             .collect();
+        let filtered = self.ratings.len() - scored.len();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(limit).map(|(_, r)| r).collect()
+        let out: Vec<&Rating> = scored.into_iter().take(limit).map(|(_, r)| r).collect();
+        tracing::trace!(
+            input = self.ratings.len(),
+            filtered_past_decay = filtered,
+            limit,
+            output = out.len(),
+            "preferences::cache::PreferenceCache::recent"
+        );
+        out
     }
 
     /// Drop ratings older than [`DECAY_DAYS`] and stamp
@@ -189,11 +275,19 @@ impl PreferenceCache {
     pub fn decay(&mut self) {
         let now = unix_now();
         let decay_secs = DECAY_DAYS * SECONDS_PER_DAY;
+        let before = self.ratings.len();
         self.ratings.retain(|r| {
             let age = (now - r.rated_unix).max(0) as u64;
             age < decay_secs
         });
+        let dropped = before - self.ratings.len();
         self.last_decay_unix = now;
+        tracing::trace!(
+            before,
+            after = self.ratings.len(),
+            dropped,
+            "preferences::cache::PreferenceCache::decay"
+        );
     }
 }
 
@@ -206,11 +300,11 @@ fn cache_path(user: &str) -> Option<PathBuf> {
             .ok()
             .map(|h| format!("{h}/.local/share/moagan"))
     })?;
-    Some(
-        PathBuf::from(home)
-            .join("preferences")
-            .join(format!("{user}.json")),
-    )
+    let path = PathBuf::from(home)
+        .join("preferences")
+        .join(format!("{user}.json"));
+    tracing::trace!(path = %path.display(), "preferences::cache::cache_path");
+    Some(path)
 }
 
 /// Current Unix time in seconds. Returns `0` if the system clock
@@ -220,10 +314,12 @@ fn cache_path(user: &str) -> Option<PathBuf> {
 /// `preferences::integration`) can stamp `Rating::rated_unix` with
 /// the same clock the cache uses internally.
 pub fn unix_now() -> i64 {
-    SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    tracing::trace!(now, "preferences::cache::unix_now");
+    now
 }
 
 #[cfg(test)]

@@ -183,10 +183,19 @@ impl DimensionFacetDescription {
         facet_id: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
+        let d = dimension_id.into();
+        let f = facet_id.into();
+        let desc = description.into();
+        tracing::trace!(
+            dimension_id = %d,
+            facet_id = %f,
+            description_len = desc.len(),
+            "DimensionFacetDescription::new"
+        );
         Self {
-            dimension_id: dimension_id.into(),
-            facet_id: facet_id.into(),
-            description: description.into(),
+            dimension_id: d,
+            facet_id: f,
+            description: desc,
         }
     }
 }
@@ -195,10 +204,18 @@ impl DiscoveryDimensions {
     /// Look up the description for a `(dimension_id, facet_id)`
     /// pair. Returns `None` when the LLM did not supply one.
     pub fn description_for(&self, dim: &str, facet: &str) -> Option<&str> {
-        self.descriptions
+        let hit = self
+            .descriptions
             .iter()
             .find(|d| d.dimension_id == dim && d.facet_id == facet)
-            .map(|d| d.description.as_str())
+            .map(|d| d.description.as_str());
+        tracing::trace!(
+            dimension_id = %dim,
+            facet_id = %facet,
+            hit = hit.is_some(),
+            "DiscoveryDimensions::description_for"
+        );
+        hit
     }
 }
 
@@ -270,6 +287,11 @@ impl ExplorationMatrix {
     /// [`ExplorationMatrix::load_or_derive`].
     pub fn new(dimensions: Vec<Dimension>, sketches_per_cell: usize) -> Self {
         let sketches_per_cell = sketches_per_cell.max(1);
+        tracing::debug!(
+            dimensions = dimensions.len(),
+            sketches_per_cell,
+            "ExplorationMatrix::new"
+        );
         Self {
             dimensions,
             sketches_per_cell,
@@ -284,6 +306,11 @@ impl ExplorationMatrix {
     /// CLI / TOML resolved (F2 will move the flag from
     /// `--cardinality` to `--sketches-per-cell`).
     pub fn from_spec(spec: MatrixSpec, sketches_per_cell: usize) -> Self {
+        tracing::debug!(
+            spec_dims = spec.dimensions.len(),
+            sketches_per_cell,
+            "ExplorationMatrix::from_spec"
+        );
         Self::new(spec.into_dimensions(), sketches_per_cell)
     }
 
@@ -292,6 +319,11 @@ impl ExplorationMatrix {
     /// constructor just wraps the `Vec<Dimension>` with the
     /// operator-chosen fan-out.
     pub fn from_derived(dimensions: Vec<Dimension>, sketches_per_cell: usize) -> Self {
+        tracing::debug!(
+            dimensions = dimensions.len(),
+            sketches_per_cell,
+            "ExplorationMatrix::from_derived"
+        );
         Self::new(dimensions, sketches_per_cell)
     }
 
@@ -301,6 +333,11 @@ impl ExplorationMatrix {
     /// caller doesn't have to clone the dimensions just to wrap
     /// them.
     pub fn from_sidecar(sidecar: DiscoveryDimensions, sketches_per_cell: usize) -> Self {
+        tracing::debug!(
+            dimensions = sidecar.dimensions.len(),
+            sketches_per_cell,
+            "ExplorationMatrix::from_sidecar"
+        );
         Self::new(sidecar.dimensions, sketches_per_cell)
     }
 
@@ -311,12 +348,23 @@ impl ExplorationMatrix {
     /// malformed (resume must surface, not silently drop).
     pub fn load_or_derive(run_dir: &Path, sketches_per_cell: usize) -> Result<Option<Self>> {
         let path = run_dir.join(DISCOVERY_DIMENSIONS_FILENAME);
+        tracing::debug!(
+            path = %path.display(),
+            sketches_per_cell,
+            "ExplorationMatrix::load_or_derive"
+        );
         if !path.exists() {
+            tracing::trace!("load_or_derive: sidecar absent");
             return Ok(None);
         }
         let sidecar: DiscoveryDimensions = match read_json(&path) {
             Ok(s) => s,
             Err(e) => {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "load_or_derive: sidecar malformed"
+                );
                 return Err(Error::InvalidState(format!(
                     "{} malformed: {e}",
                     DISCOVERY_DIMENSIONS_FILENAME
@@ -333,6 +381,12 @@ impl ExplorationMatrix {
     /// pass the exact `ProviderConfig::model` value (e.g.
     /// `"MiniMax-M3"`) when configuring the map.
     pub fn profile_for(&self, provider_model: &str) -> &TemperatureProfile {
+        let explicit = self.temperature_profiles.contains_key(provider_model);
+        tracing::trace!(
+            provider_model = %provider_model,
+            explicit_profile = explicit,
+            "ExplorationMatrix::profile_for"
+        );
         self.temperature_profiles
             .get(provider_model)
             .unwrap_or(&self.default_profile)
@@ -359,9 +413,15 @@ impl ExplorationMatrix {
         &mut self,
         supported_sets: &std::collections::HashMap<String, Vec<f32>>,
     ) -> Vec<RewriteEvent> {
+        tracing::debug!(
+            supported_keys = supported_sets.len(),
+            profile_keys = self.temperature_profiles.len(),
+            "ExplorationMatrix::rewrite_temperatures_to_supported"
+        );
         let mut events: Vec<RewriteEvent> = Vec::new();
         for (model, supported) in supported_sets {
             let Some(profile) = self.temperature_profiles.get_mut(model) else {
+                tracing::trace!(model = %model, "rewrite: profile missing; skipping");
                 continue;
             };
             let rewritten: Vec<f32> = profile
@@ -376,10 +436,16 @@ impl ExplorationMatrix {
                 .filter(|(a, b)| (*a - *b).abs() > f32::EPSILON)
                 .count();
             if n_clamped == 0 {
+                tracing::trace!(model = %model, "rewrite: nothing to clamp");
                 continue;
             }
             let requested = profile.temperatures.clone();
             profile.temperatures = rewritten.clone();
+            tracing::trace!(
+                model = %model,
+                n_clamped,
+                "rewrite: clamping temperatures"
+            );
             events.push(RewriteEvent {
                 provider_model: model.clone(),
                 requested,
@@ -387,6 +453,7 @@ impl ExplorationMatrix {
                 n_clamped,
             });
         }
+        tracing::debug!(events = events.len(), "rewrite complete");
         events
     }
 
@@ -405,7 +472,14 @@ impl ExplorationMatrix {
     /// The discovery phase applies `profile_for(provider).total()`
     /// itself.
     pub fn cardinality(&self) -> usize {
-        self.cells() * self.sketches_per_cell
+        let c = self.cells() * self.sketches_per_cell;
+        tracing::trace!(
+            cells = self.cells(),
+            sketches_per_cell = self.sketches_per_cell,
+            cardinality = c,
+            "cardinality"
+        );
+        c
     }
 
     /// Number of cells (one per `dimension × facet` pair). With
@@ -418,14 +492,18 @@ impl ExplorationMatrix {
         // dimension as one cell so the fan-out never silently
         // disappears.
         if self.dimensions.is_empty() {
+            tracing::trace!("cells: empty matrix");
             0
         } else {
-            self.dimensions.iter().map(|d| d.facets.len().max(1)).sum()
+            let v: usize = self.dimensions.iter().map(|d| d.facets.len().max(1)).sum();
+            tracing::trace!(dimensions = self.dimensions.len(), cells = v, "cells");
+            v
         }
     }
 
     /// Iterate over every cell in declaration order.
     pub fn iter_cells(&self) -> impl Iterator<Item = MatrixCell> + '_ {
+        tracing::trace!("iter_cells invoked");
         self.dimensions.iter().flat_map(|d| {
             d.facets.iter().map(move |f| MatrixCell {
                 dimension_id: d.id.clone(),
@@ -437,15 +515,24 @@ impl ExplorationMatrix {
 
     /// Look up a dimension by id.
     pub fn dimension(&self, id: &str) -> Option<&Dimension> {
-        self.dimensions.iter().find(|d| d.id == id)
+        let hit = self.dimensions.iter().find(|d| d.id == id);
+        tracing::trace!(
+            dimension_id = %id,
+            hit = hit.is_some(),
+            "dimension lookup"
+        );
+        hit
     }
 
     /// Tally of dimension → facet count, useful for logs.
     pub fn tally(&self) -> BTreeMap<String, usize> {
-        self.dimensions
+        let map: BTreeMap<String, usize> = self
+            .dimensions
             .iter()
             .map(|d| (d.id.clone(), d.facets.len()))
-            .collect()
+            .collect();
+        tracing::debug!(tally = ?map, "ExplorationMatrix::tally");
+        map
     }
 }
 

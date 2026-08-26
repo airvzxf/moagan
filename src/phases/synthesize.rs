@@ -466,6 +466,11 @@ impl Phase for SynthesizePhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(
+            min_cluster_size = self.min_cluster_size,
+            force_singletons = self.force_singletons,
+            "synthesize: enter"
+        );
         let dir = ctx.run_dir().synthesized();
         std::fs::create_dir_all(&dir)?;
         let dir = std::sync::Arc::new(dir);
@@ -505,6 +510,10 @@ impl Phase for SynthesizePhase {
             .collect();
 
         if eligible.is_empty() {
+            tracing::info!(
+                cluster_count = clusters.len(),
+                "synthesize: no eligible clusters, returning empty"
+            );
             // PR D.8: even on the empty-eligible fast-path, fire
             // the auto-record so a run that synthesised zero
             // proposals still gets a neutral entry per portfolio
@@ -517,6 +526,10 @@ impl Phase for SynthesizePhase {
             }
             return Ok(PhaseOutput::Synthesized(Vec::new()));
         }
+        tracing::info!(
+            eligible_count = eligible.len(),
+            "synthesize: eligible clusters identified"
+        );
 
         let futures = eligible.iter().enumerate().map(|(idx, cluster)| {
             let cluster: ProposalCluster = (*cluster).clone();
@@ -632,10 +645,19 @@ impl Phase for SynthesizePhase {
         let results = join_all(futures).await;
         let mut paths: Vec<PathBuf> = Vec::new();
         for r in results {
-            if let Some(p) = r? {
-                paths.push(p);
+            match r {
+                Ok(Some(p)) => paths.push(p),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "synthesize: future failed");
+                    return Err(e);
+                }
             }
         }
+        tracing::info!(
+            syntheses_written = paths.len(),
+            "synthesize: phase complete"
+        );
 
         // PR D.8: on phase completion, fire the auto-record for
         // the synthesised proposals. Every synthesised `s_<NN>`

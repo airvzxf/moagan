@@ -99,6 +99,10 @@ impl DerivedDimensions {
     /// CLI/TOML side). The phase calls this once the LLM's
     /// payload has been validated.
     pub fn into_matrix_spec(self) -> MatrixSpec {
+        tracing::debug!(
+            dimensions = self.dimensions.len(),
+            "DerivedDimensions::into_matrix_spec"
+        );
         MatrixSpec {
             dimensions: self.dimensions,
         }
@@ -118,13 +122,16 @@ impl MatrixSpec {
     ///   one dimension.
     pub fn parse_one(raw: &str) -> Result<Self> {
         let raw = raw.trim();
+        tracing::debug!(raw_len = raw.len(), "MatrixSpec::parse_one");
         if raw.is_empty() {
+            tracing::warn!("MatrixSpec::parse_one: empty input");
             return Err(Error::InvalidArgs("matrix-spec is empty".to_string()));
         }
         let mut out = Self::default();
         for chunk in raw.split(';') {
             let chunk = chunk.trim();
             if chunk.is_empty() {
+                tracing::warn!(raw = %raw, "MatrixSpec::parse_one: empty dimension segment");
                 return Err(Error::InvalidArgs(format!(
                     "matrix-spec has an empty dimension segment in {raw:?}"
                 )));
@@ -134,10 +141,16 @@ impl MatrixSpec {
             out.dimensions.push(dim);
         }
         if out.dimensions.is_empty() {
+            tracing::warn!(raw = %raw, "MatrixSpec::parse_one: zero dimensions");
             return Err(Error::InvalidArgs(format!(
                 "matrix-spec {raw:?} produced zero dimensions"
             )));
         }
+        tracing::debug!(
+            dimensions = out.dimensions.len(),
+            cells = out.cells(),
+            "MatrixSpec::parse_one ok"
+        );
         Ok(out)
     }
 
@@ -153,9 +166,12 @@ impl MatrixSpec {
         S: AsRef<str>,
     {
         let mut out = Self::default();
+        let mut dropped = 0usize;
         for raw in entries {
             let raw = raw.as_ref();
             if raw.trim().is_empty() {
+                dropped += 1;
+                tracing::trace!("MatrixSpec::parse_all: dropping empty entry");
                 continue;
             }
             let parsed = Self::parse_one(raw)?;
@@ -164,11 +180,20 @@ impl MatrixSpec {
                 out.dimensions.push(dim);
             }
         }
+        if dropped > 0 {
+            tracing::warn!(dropped, "MatrixSpec::parse_all: dropped empty entries");
+        }
         if out.dimensions.is_empty() {
+            tracing::warn!("MatrixSpec::parse_all: zero dimensions after parsing all entries");
             return Err(Error::InvalidArgs(
                 "matrix-spec produced zero dimensions after parsing all entries".to_string(),
             ));
         }
+        tracing::debug!(
+            dimensions = out.dimensions.len(),
+            cells = out.cells(),
+            "MatrixSpec::parse_all ok"
+        );
         Ok(out)
     }
 
@@ -176,7 +201,13 @@ impl MatrixSpec {
     /// Kept on the spec so the dispatcher can size the run without
     /// first building the [`crate::discovery::matrix::ExplorationMatrix`].
     pub fn cells(&self) -> usize {
-        self.dimensions.iter().map(|d| d.facets.len()).sum()
+        let v: usize = self.dimensions.iter().map(|d| d.facets.len()).sum();
+        tracing::trace!(
+            dimensions = self.dimensions.len(),
+            cells = v,
+            "MatrixSpec::cells"
+        );
+        v
     }
 
     /// Validate every dimension and facet id is non-empty +
@@ -186,6 +217,7 @@ impl MatrixSpec {
     /// pass for any caller that builds a `MatrixSpec`
     /// programmatically.
     pub fn validate(&self) -> Result<()> {
+        tracing::debug!(dimensions = self.dimensions.len(), "MatrixSpec::validate");
         if self.dimensions.is_empty() {
             return Err(Error::InvalidArgs(
                 "MatrixSpec has zero dimensions".to_string(),
@@ -242,7 +274,8 @@ impl MatrixSpec {
     /// caller persists alongside, or are surfaced via the
     /// dimension-deriver phase's sidecar.
     pub fn into_dimensions(self) -> Vec<Dimension> {
-        self.dimensions
+        let dims: Vec<Dimension> = self
+            .dimensions
             .into_iter()
             .map(|d| Dimension {
                 id: d.id,
@@ -256,7 +289,9 @@ impl MatrixSpec {
                     })
                     .collect(),
             })
-            .collect()
+            .collect();
+        tracing::trace!(dimensions = dims.len(), "MatrixSpec::into_dimensions");
+        dims
     }
 
     /// Convert into `Vec<Dimension>` while preserving per-facet
@@ -268,6 +303,10 @@ impl MatrixSpec {
     pub fn into_dimensions_with_descriptions(
         self,
     ) -> (Vec<Dimension>, HashMap<(String, String), String>) {
+        tracing::debug!(
+            dimensions = self.dimensions.len(),
+            "MatrixSpec::into_dimensions_with_descriptions"
+        );
         let mut descs: HashMap<(String, String), String> = HashMap::new();
         let dims = self
             .dimensions
@@ -307,6 +346,11 @@ impl DimensionSpec {
         dim: &Dimension,
         descriptions: &HashMap<(String, String), String>,
     ) -> Self {
+        tracing::trace!(
+            dimension_id = %dim.id,
+            facets = dim.facets.len(),
+            "DimensionSpec::from_dimension_with_descriptions"
+        );
         let facets = dim
             .facets
             .iter()
@@ -331,6 +375,7 @@ impl DimensionSpec {
 /// [`DimensionSpec`].
 fn parse_dimension_segment(segment: &str) -> Result<DimensionSpec> {
     let (id_part, facets_part) = segment.split_once('=').ok_or_else(|| {
+        tracing::warn!(segment = %segment, "parse_dimension_segment: missing '='");
         Error::InvalidArgs(format!(
             "matrix-spec segment {segment:?} is missing `=`; \
              expected `<dim-id>=<facet1>,<facet2>,..."
@@ -343,6 +388,7 @@ fn parse_dimension_segment(segment: &str) -> Result<DimensionSpec> {
         )));
     }
     if !is_kebab_case(id) {
+        tracing::warn!(id = %id, "parse_dimension_segment: dim id not kebab-case");
         return Err(Error::InvalidArgs(format!(
             "matrix-spec dimension id {:?} is not kebab-case",
             id
@@ -363,6 +409,11 @@ fn parse_dimension_segment(segment: &str) -> Result<DimensionSpec> {
             )));
         }
         if !is_kebab_case(fid) {
+            tracing::warn!(
+                fid = %fid,
+                segment = %segment,
+                "parse_dimension_segment: facet id not kebab-case"
+            );
             return Err(Error::InvalidArgs(format!(
                 "matrix-spec facet id {:?} in segment {segment:?} is not kebab-case",
                 fid
@@ -392,6 +443,11 @@ fn validate_unique_facet_ids(dim: &DimensionSpec, raw: &str) -> Result<()> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for facet in &dim.facets {
         if !seen.insert(facet.id.as_str()) {
+            tracing::warn!(
+                dim_id = %dim.id,
+                facet_id = %facet.id,
+                "validate_unique_facet_ids: duplicate"
+            );
             return Err(Error::InvalidArgs(format!(
                 "matrix-spec {raw:?} has duplicate facet id {:?} in dimension {:?}",
                 facet.id, dim.id
@@ -419,6 +475,7 @@ fn is_kebab_case(s: &str) -> bool {
 
 /// Build a human-readable default label from a kebab-case id.
 fn default_label_from_id(id: &str) -> String {
+    tracing::trace!(id, "default_label_from_id");
     let mut out = String::with_capacity(id.len());
     let mut at_word_start = true;
     for ch in id.chars() {

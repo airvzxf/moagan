@@ -25,6 +25,9 @@ load();
 
 /// Write the dashboard HTML to `<out_dir>/dashboard.html`.
 pub fn write_dashboard(out_dir: &std::path::Path) -> std::io::Result<()> {
+    tracing::debug!(out_dir = %out_dir.display(), "write_dashboard: enter");
     std::fs::create_dir_all(out_dir)?;
-    std::fs::write(out_dir.join("dashboard.html"), DASHBOARD_HTML)
+    std::fs::write(out_dir.join("dashboard.html"), DASHBOARD_HTML)?;
+    tracing::trace!(out_dir = %out_dir.display(), "write_dashboard: ok");
+    Ok(())
 }

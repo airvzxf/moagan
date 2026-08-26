@@ -24,6 +24,8 @@
 
 use std::fmt;
 
+use tracing::{debug, trace};
+
 use crate::cli::discover::{DEFAULT_SKETCHES_PER_CELL, DiscoverOptions, MIN_SKETCHES_PER_CELL};
 use crate::config::Config;
 use crate::discovery::matrix_spec::MatrixSpec;
@@ -94,7 +96,16 @@ impl ExplainInput {
     /// sketches_per_cell * temperatures * replicas`. Always
     /// `>= 0` (overflow is impossible for realistic inputs).
     pub fn requests_llm(&self) -> usize {
-        self.cells * self.sketches_per_cell * self.temperatures * self.replicas
+        let n = self.cells * self.sketches_per_cell * self.temperatures * self.replicas;
+        trace!(
+            cells = self.cells,
+            sketches_per_cell = self.sketches_per_cell,
+            temperatures = self.temperatures,
+            replicas = self.replicas,
+            requests = n,
+            "ExplainInput::requests_llm"
+        );
+        n
     }
 }
 
@@ -117,9 +128,14 @@ const DEFAULT_FACETS_PER_DIM_HINT: usize = 2;
 /// parser is reused (F1's `MatrixSpec::parse_all`) so the cells
 /// computation matches the real run verbatim.
 pub fn build_explain_input(opts: &DiscoverOptions, cfg: &Config) -> Result<ExplainInput> {
+    debug!("discover_explain::build_explain_input: enter");
     let (cells, source_cells) = resolve_cells(opts)?;
     let (sketches_per_cell, source_sketches_per_cell) = resolve_sketches_per_cell(opts, cfg);
     let (temperatures, replicas, source_profile) = resolve_temperature_profile(opts, cfg);
+    trace!(
+        cells,
+        sketches_per_cell, temperatures, replicas, "discover_explain: built input"
+    );
     Ok(ExplainInput {
         cells,
         sketches_per_cell,
@@ -411,6 +427,7 @@ fn format_results(input: &ExplainInput) -> String {
 /// The dispatcher prints the formatted string itself (so it can be
 /// captured by tests) — this helper only formats.
 pub fn build_and_format(opts: &DiscoverOptions, _cfg: &Config) -> Result<String> {
+    debug!("discover_explain::build_and_format: enter");
     // Validation: the F2 floor is enforced at the CLI layer
     // (the dispatcher rejects `sketches_per_cell < 10`), but we
     // re-check here so the explain path matches the real run's

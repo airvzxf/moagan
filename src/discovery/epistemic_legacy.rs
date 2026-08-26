@@ -42,6 +42,7 @@ pub struct EpistemicLegacy {
 impl EpistemicLegacy {
     /// Construct an empty legacy with the current [`SCHEMA_VERSION`].
     pub fn empty() -> Self {
+        tracing::trace!("epistemic_legacy: empty()");
         Self {
             version: SCHEMA_VERSION,
             ..Default::default()
@@ -51,16 +52,30 @@ impl EpistemicLegacy {
     /// Load from the canonical location, falling back to XDG.
     /// Returns `Self::empty()` on missing or corrupt file.
     pub fn load() -> Self {
+        tracing::debug!("epistemic_legacy: load from canonical location");
         if let Some(p) = primary_path()
             && let Ok(legacy) = Self::load_from(&p)
         {
+            tracing::info!(
+                path = %p.display(),
+                known_failures = legacy.known_failures.len(),
+                preferred_strategies = legacy.preferred_strategies.len(),
+                "epistemic_legacy: loaded from primary"
+            );
             return legacy;
         }
         if let Some(p) = xdg_fallback_path()
             && let Ok(legacy) = Self::load_from(&p)
         {
+            tracing::info!(
+                path = %p.display(),
+                known_failures = legacy.known_failures.len(),
+                preferred_strategies = legacy.preferred_strategies.len(),
+                "epistemic_legacy: loaded from xdg fallback"
+            );
             return legacy;
         }
+        tracing::trace!("epistemic_legacy: no legacy found; returning empty");
         Self::empty()
     }
 
@@ -68,40 +83,103 @@ impl EpistemicLegacy {
     /// schema-version mismatch so callers can distinguish "missing" from
     /// "wire-incompatible".
     pub fn load_from(path: &Path) -> Result<Self, LoadError> {
-        let text = std::fs::read_to_string(path).map_err(LoadError::Io)?;
-        let parsed: Self = serde_json::from_str(&text).map_err(LoadError::Parse)?;
+        tracing::debug!(path = %path.display(), "epistemic_legacy: load_from");
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "epistemic_legacy: read failed"
+            );
+            LoadError::Io(e)
+        })?;
+        let parsed: Self = serde_json::from_str(&text).map_err(|e| {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "epistemic_legacy: parse failed"
+            );
+            LoadError::Parse(e)
+        })?;
         if parsed.version != SCHEMA_VERSION {
+            tracing::warn!(
+                path = %path.display(),
+                on_disk = parsed.version,
+                current = SCHEMA_VERSION,
+                "epistemic_legacy: schema version mismatch"
+            );
             return Err(LoadError::Version);
         }
+        tracing::trace!(path = %path.display(), "epistemic_legacy: load_from ok");
         Ok(parsed)
     }
 
     /// Save to the canonical location (creates parent dirs).
     pub fn save(&self) -> Result<(), SaveError> {
-        let path = primary_path().ok_or(SaveError::NoHome)?;
+        let path = primary_path().ok_or_else(|| {
+            tracing::error!("epistemic_legacy: save failed (no home env)");
+            SaveError::NoHome
+        })?;
         self.save_to(&path)
     }
 
     /// Save to an explicit path. Atomic write via tmp+rename and a
     /// best-effort `fsync` on the parent directory for durability.
     pub fn save_to(&self, path: &Path) -> Result<(), SaveError> {
+        tracing::debug!(
+            path = %path.display(),
+            known_failures = self.known_failures.len(),
+            preferred_strategies = self.preferred_strategies.len(),
+            "epistemic_legacy: save_to"
+        );
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(SaveError::Io)?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                tracing::error!(
+                    path = %parent.display(),
+                    error = %e,
+                    "epistemic_legacy: mkdir for parent failed"
+                );
+                SaveError::Io(e)
+            })?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(SaveError::Serialize)?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            tracing::error!(error = %e, "epistemic_legacy: serialize failed");
+            SaveError::Serialize(e)
+        })?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json.as_bytes()).map_err(SaveError::Io)?;
-        std::fs::rename(&tmp, path).map_err(SaveError::Io)?;
+        std::fs::write(&tmp, json.as_bytes()).map_err(|e| {
+            tracing::error!(
+                path = %tmp.display(),
+                error = %e,
+                "epistemic_legacy: tmp write failed"
+            );
+            SaveError::Io(e)
+        })?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            tracing::error!(
+                path = %path.display(),
+                error = %e,
+                "epistemic_legacy: rename tmp->final failed"
+            );
+            SaveError::Io(e)
+        })?;
         if let Some(parent) = path.parent()
             && let Ok(dir) = std::fs::File::open(parent)
         {
             let _ = dir.sync_all();
         }
+        tracing::trace!(path = %path.display(), "epistemic_legacy: save_to ok");
         Ok(())
     }
 
     /// Render as a Markdown snippet suitable for prompt injection.
     pub fn render_markdown(&self) -> String {
+        tracing::trace!(
+            known_failures = self.known_failures.len(),
+            preferred_strategies = self.preferred_strategies.len(),
+            domain_assumptions = self.domain_assumptions.len(),
+            confidence_overrides = self.confidence_overrides.len(),
+            "epistemic_legacy: render_markdown"
+        );
         let mut s = String::new();
         s.push_str("# Epistemic legacy\n\n");
         if !self.known_failures.is_empty() {

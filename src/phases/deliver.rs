@@ -39,8 +39,15 @@ impl Phase for DeliverPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(interactive = ctx.interactive, "deliver: enter");
         let ranking_path = ctx.run_dir().rankings().join("ranking.json");
         let ranking: Ranking = read_json(&ranking_path)?;
+        tracing::trace!(
+            winner = %ranking.winner,
+            ranked_len = ranking.ranked.len(),
+            representatives_len = ranking.representatives.len(),
+            "deliver: ranking loaded"
+        );
         let proposals_dir = ctx.run_dir().proposals();
         let revisions_dir = ctx.run_dir().revisions();
         let winner_proposal: Proposal =
@@ -51,6 +58,11 @@ impl Phase for DeliverPhase {
 
         let evaluations = load_evaluations(&ctx.run_dir().evaluations());
         let critiques = load_critiques(&ctx.run_dir().critiques());
+        tracing::trace!(
+            evaluations_loaded = evaluations.len(),
+            critiques_loaded = critiques.len(),
+            "deliver: artefacts loaded"
+        );
 
         let user = serde_json::to_string(&serde_json::json!({
             "winner": ranking.winner,
@@ -74,11 +86,17 @@ impl Phase for DeliverPhase {
                 5,
             )
             .await?;
+        tracing::debug!(
+            alternatives = report.alternatives.len(),
+            next_steps = report.next_steps.len(),
+            "deliver: model produced report"
+        );
 
         let final_dir = ctx.run_dir().final_dir();
         std::fs::create_dir_all(&final_dir)?;
         let json_path: PathBuf = final_dir.join("portfolio.json");
         write_json(&json_path, &report)?;
+        tracing::trace!(path = %json_path.display(), "deliver: portfolio.json written");
 
         let md = render_markdown(
             &report,
@@ -92,11 +110,16 @@ impl Phase for DeliverPhase {
         );
         let md_path: PathBuf = final_dir.join("portfolio.md");
         std::fs::write(&md_path, md)?;
+        tracing::trace!(path = %md_path.display(), "deliver: portfolio.md written");
 
         // Phase D final checkpoint: confirm the portfolio before
         // terminating the run. Persisted under
         // `checkpoints/h_<uuid>.json` for auditability.
         if ctx.interactive {
+            tracing::info!(
+                winner = %ranking.winner,
+                "deliver: final checkpoint fired"
+            );
             let cp = Checkpoint::yes_no(
                 CheckpointKind::Final,
                 format!("ship portfolio with winner `{}`?", ranking.winner),
@@ -111,8 +134,11 @@ impl Phase for DeliverPhase {
             // gets a non-zero exit and the manifest status flips to
             // 'failed'.
             match crate::checkpoint::ask(&cp, &ctx.run_dir().checkpoints(), &opts)? {
-                crate::checkpoint::Resolution::Approved => {}
+                crate::checkpoint::Resolution::Approved => {
+                    tracing::debug!("deliver: final checkpoint approved");
+                }
                 crate::checkpoint::Resolution::Modify(text) => {
+                    tracing::info!(text_len = text.len(), "deliver: final checkpoint modified");
                     // F1: persist the operator's correction. The
                     // current deliver call already shipped, so the
                     // note informs the next rank/deliver cycle
@@ -120,6 +146,7 @@ impl Phase for DeliverPhase {
                     crate::checkpoint::persist_modify_note(ctx.run_dir().root(), "deliver", &text)?;
                 }
                 crate::checkpoint::Resolution::Rejected => {
+                    tracing::warn!("deliver: final checkpoint rejected, cancelling run");
                     return Err(crate::error::Error::Cancelled(
                         "user rejected the final portfolio".into(),
                     ));

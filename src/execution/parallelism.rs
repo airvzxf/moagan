@@ -46,6 +46,12 @@ impl Parallelism {
     /// Build a new parallelism cap.
     pub fn new(max_parallelism: usize) -> Self {
         let n = max_parallelism.max(1);
+        tracing::info!(
+            component = "parallelism",
+            requested = max_parallelism,
+            effective = n,
+            "Parallelism::new building cap"
+        );
         Self {
             inner: Arc::new(Inner {
                 permits: n,
@@ -57,14 +63,26 @@ impl Parallelism {
 
     /// Acquire one permit. The returned guard releases on drop.
     pub async fn acquire(&self) -> Result<Permit> {
-        let permit = self
-            .inner
-            .sem
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| crate::Error::Cancelled(format!("semaphore closed: {e}")))?;
+        tracing::trace!(
+            component = "parallelism",
+            cap = self.max(),
+            in_use = self.in_use(),
+            "Parallelism::acquire awaiting one permit"
+        );
+        let permit = self.inner.sem.clone().acquire_owned().await.map_err(|e| {
+            tracing::error!(
+                component = "parallelism",
+                error = %e,
+                "Parallelism::acquire: semaphore closed"
+            );
+            crate::Error::Cancelled(format!("semaphore closed: {e}"))
+        })?;
         self.inner.in_use.fetch_add(1, Ordering::SeqCst);
+        tracing::debug!(
+            component = "parallelism",
+            in_use = self.in_use(),
+            "Parallelism::acquire granted one permit"
+        );
         Ok(Permit {
             permit: Some(permit),
             in_use: self.inner.in_use.clone(),
@@ -76,22 +94,34 @@ impl Parallelism {
         &self,
         n: usize,
     ) -> std::result::Result<Vec<OwnedSemaphorePermit>, AcquireError> {
+        tracing::debug!(
+            component = "parallelism",
+            requested = n,
+            cap = self.max(),
+            "Parallelism::acquire_many_owned enter"
+        );
         if n == 0 {
             return Ok(Vec::new());
         }
         let cap = self.max();
         if n > cap {
+            tracing::warn!(
+                component = "parallelism",
+                requested = n,
+                cap,
+                "Parallelism::acquire_many_owned: request exceeds cap"
+            );
             return Err(AcquireError::TooManyPermits { requested: n, cap });
         }
         let mut permits = Vec::with_capacity(n);
         for _ in 0..n {
-            let permit = self
-                .inner
-                .sem
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| AcquireError::Closed)?;
+            let permit = self.inner.sem.clone().acquire_owned().await.map_err(|_| {
+                tracing::error!(
+                    component = "parallelism",
+                    "Parallelism::acquire_many_owned: semaphore closed mid-acquire"
+                );
+                AcquireError::Closed
+            })?;
             permits.push(permit);
         }
         Ok(permits)
@@ -101,18 +131,32 @@ impl Parallelism {
     /// the actual number acquired in a guard.
     pub async fn acquire_many(&self, n: usize) -> Result<PermitsGuard> {
         let want = n.min(self.inner.permits);
+        tracing::debug!(
+            component = "parallelism",
+            requested = n,
+            want,
+            cap = self.max(),
+            "Parallelism::acquire_many enter"
+        );
         let mut permits = Vec::with_capacity(want);
         for _ in 0..want {
-            let p = self
-                .inner
-                .sem
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| crate::Error::Cancelled(format!("semaphore closed: {e}")))?;
+            let p = self.inner.sem.clone().acquire_owned().await.map_err(|e| {
+                tracing::error!(
+                    component = "parallelism",
+                    error = %e,
+                    "Parallelism::acquire_many: semaphore closed"
+                );
+                crate::Error::Cancelled(format!("semaphore closed: {e}"))
+            })?;
             permits.push(p);
         }
         self.inner.in_use.fetch_add(want, Ordering::SeqCst);
+        tracing::debug!(
+            component = "parallelism",
+            count = want,
+            in_use = self.in_use(),
+            "Parallelism::acquire_many granted"
+        );
         Ok(PermitsGuard {
             permits,
             in_use: self.inner.in_use.clone(),
@@ -150,6 +194,11 @@ pub struct Permit {
 impl Drop for Permit {
     fn drop(&mut self) {
         self.in_use.fetch_sub(1, Ordering::SeqCst);
+        tracing::trace!(
+            component = "parallelism",
+            remaining = self.in_use.load(Ordering::SeqCst),
+            "Permit dropped; in_use decremented"
+        );
     }
 }
 
@@ -172,6 +221,12 @@ impl PermitsGuard {
 impl Drop for PermitsGuard {
     fn drop(&mut self) {
         self.in_use.fetch_sub(self.count, Ordering::SeqCst);
+        tracing::trace!(
+            component = "parallelism",
+            released = self.count,
+            remaining = self.in_use.load(Ordering::SeqCst),
+            "PermitsGuard dropped"
+        );
     }
 }
 

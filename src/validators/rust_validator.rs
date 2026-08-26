@@ -59,12 +59,17 @@ impl RustValidator {
     /// the sandbox's scratch dir. See module docs for the exact
     /// step ordering and verdict mapping.
     pub async fn check(artifact: &CodeArtifact, sandbox: &Sandbox) -> Result<ValidationEvidence> {
+        tracing::debug!(
+            kind = %artifact.kind,
+            "validators::rust::RustValidator::check: enter"
+        );
         if !looks_like_rust_source(&artifact.source) {
             // Very loose sanity check: an empty / placeholder source
             // almost certainly indicates a non-executable artefact
             // (e.g. a config snippet labelled "rust"). Treat as
             // Skipped rather than Fail so the pipeline does not
             // punish proposals that include non-compilable notes.
+            tracing::trace!("validators::rust::RustValidator::check: skipping non-executable");
             return Ok(ValidationEvidence::skipped(
                 "rust",
                 "no `fn` body in source; artifact looks non-executable",
@@ -171,6 +176,11 @@ impl RustValidator {
         if let Some(v) = capture_tool_version(sandbox, "cargo").await {
             evidence.reproducibility.push(("cargo".into(), v));
         }
+        tracing::debug!(
+            status = ?evidence.status,
+            checks = evidence.checks_run.len(),
+            "validators::rust::RustValidator::check: exit"
+        );
         Ok(evidence)
     }
 }
@@ -224,31 +234,39 @@ impl Validator for RustValidator {
 fn looks_like_rust_source(source: &str) -> bool {
     let bytes = source.as_bytes();
     let mut i = 0;
-    while i + 4 < bytes.len() {
-        if &bytes[i..i + 3] == b"fn "
-            && (bytes[i + 3].is_ascii_alphabetic() || bytes[i + 3] == b'_')
-        {
-            // Walk the identifier characters.
-            let mut j = i + 3;
-            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                j += 1;
+    let result = (|| {
+        while i + 4 < bytes.len() {
+            if &bytes[i..i + 3] == b"fn "
+                && (bytes[i + 3].is_ascii_alphabetic() || bytes[i + 3] == b'_')
+            {
+                // Walk the identifier characters.
+                let mut j = i + 3;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                // Skip whitespace (including newlines).
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                // A function signature must have an open paren next (possibly
+                // preceded by generic params, but the open paren is required).
+                if j < bytes.len() && bytes[j] == b'(' {
+                    return true;
+                }
+                // Otherwise keep scanning; advance i past this `fn `.
+                i = j;
+                continue;
             }
-            // Skip whitespace (including newlines).
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            // A function signature must have an open paren next (possibly
-            // preceded by generic params, but the open paren is required).
-            if j < bytes.len() && bytes[j] == b'(' {
-                return true;
-            }
-            // Otherwise keep scanning; advance i past this `fn `.
-            i = j;
-            continue;
+            i += 1;
         }
-        i += 1;
-    }
-    false
+        false
+    })();
+    tracing::trace!(
+        source_len = bytes.len(),
+        looks_like_rust = result,
+        "validators::rust::looks_like_rust_source"
+    );
+    result
 }
 
 /// Lay out a minimal Cargo project around the artifact's source. The
@@ -257,6 +275,7 @@ fn looks_like_rust_source(source: &str) -> bool {
 /// a `fn main()`, the model almost certainly meant a binary crate;
 /// in that case the source goes to `src/main.rs` instead.
 fn write_minimal_crate(root: &std::path::Path, artifact: &CodeArtifact) -> Result<()> {
+    tracing::trace!(root = %root.display(), "validators::rust::write_minimal_crate: enter");
     let src_dir = root.join("src");
     fs::create_dir_all(&src_dir)?;
     let has_main = artifact.source.contains("fn main(");
@@ -264,10 +283,12 @@ fn write_minimal_crate(root: &std::path::Path, artifact: &CodeArtifact) -> Resul
         fs::write(src_dir.join("main.rs"), &artifact.source)?;
         let manifest = "[package]\nname = \"validator_snippet\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n";
         fs::write(root.join("Cargo.toml"), manifest)?;
+        tracing::trace!(root = %root.display(), "validators::rust::write_minimal_crate: bin layout");
     } else {
         fs::write(src_dir.join("lib.rs"), &artifact.source)?;
         let manifest = "[package]\nname = \"validator_snippet\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[lib]\npath = \"src/lib.rs\"\n";
         fs::write(root.join("Cargo.toml"), manifest)?;
+        tracing::trace!(root = %root.display(), "validators::rust::write_minimal_crate: lib layout");
     }
     Ok(())
 }
@@ -281,6 +302,12 @@ pub(super) fn record_step(
     status: ValidationStatus,
     result: &SandboxResult,
 ) {
+    tracing::trace!(
+        label,
+        ?status,
+        exit_code = result.exit_code,
+        "validators::rust::record_step"
+    );
     evidence.checks_run.push(label.to_owned());
     // Always update the headline command/exit/stdout/stderr so
     // the deliver phase can show what produced the verdict. On
@@ -318,14 +345,16 @@ pub(super) fn record_step(
 }
 
 fn status_from_sandbox(status: SandboxStatus) -> ValidationStatus {
-    match status {
+    let out = match status {
         SandboxStatus::Pass => ValidationStatus::Pass,
         SandboxStatus::Fail => ValidationStatus::Fail,
         SandboxStatus::Timeout => ValidationStatus::Fail,
         SandboxStatus::NotAllowed => ValidationStatus::Skipped,
         SandboxStatus::NotFound => ValidationStatus::Skipped,
         SandboxStatus::Error => ValidationStatus::Error,
-    }
+    };
+    tracing::trace!(?status, ?out, "validators::rust::status_from_sandbox");
+    out
 }
 
 /// Keep the trailing N bytes of `text` so we never blow up the

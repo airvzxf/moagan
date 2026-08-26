@@ -61,6 +61,10 @@ pub struct SketchLoopState {
 impl SketchLoopState {
     /// Build a fresh state for a loop targeting `current_strategy`.
     pub fn new(current_strategy: String) -> Self {
+        tracing::debug!(
+            current_strategy = %current_strategy,
+            "SketchLoopState::new"
+        );
         let now = unix_now();
         Self {
             version: SCHEMA_VERSION,
@@ -79,12 +83,24 @@ impl SketchLoopState {
     /// a mismatched schema version — all three cases mean "start fresh".
     pub fn load(run_dir: &Path) -> Result<Option<Self>> {
         let path = run_dir.join(FILENAME);
+        tracing::debug!(
+            path = %path.display(),
+            "SketchLoopState::load"
+        );
         if !path.exists() {
+            tracing::trace!("SketchLoopState::load: absent");
             return Ok(None);
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| IoError::Read {
-            path: path.clone(),
-            source: e,
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            tracing::error!(
+                path = %path.display(),
+                error = %e,
+                "SketchLoopState::load: read failed"
+            );
+            IoError::Read {
+                path: path.clone(),
+                source: e,
+            }
         })?;
         let parsed: Self = match serde_json::from_str(&text) {
             Ok(v) => v,
@@ -104,6 +120,11 @@ impl SketchLoopState {
             );
             return Ok(None);
         }
+        tracing::debug!(
+            completed = parsed.completed_sketches.len(),
+            failed = parsed.failed_attempts,
+            "SketchLoopState::load: resumed"
+        );
         Ok(Some(parsed))
     }
 
@@ -112,7 +133,17 @@ impl SketchLoopState {
     /// corrupt the file.
     pub fn save(&self, run_dir: &Path) -> Result<()> {
         let path = run_dir.join(FILENAME);
-        let json = serde_json::to_string_pretty(self).map_err(IoError::SerializeMeta)?;
+        tracing::trace!(
+            path = %path.display(),
+            completed = self.completed_sketches.len(),
+            failed = self.failed_attempts,
+            phase = ?self.phase,
+            "SketchLoopState::save"
+        );
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            tracing::error!(error = %e, "SketchLoopState::save: serialize failed");
+            IoError::SerializeMeta(e)
+        })?;
         AtomicWriter::new()
             .with_fsync(true)
             .write(&path, json.as_bytes())?;
@@ -124,8 +155,20 @@ impl SketchLoopState {
     /// a successful loop.
     pub fn delete(run_dir: &Path) -> Result<()> {
         let path = run_dir.join(FILENAME);
+        tracing::debug!(
+            path = %path.display(),
+            exists = path.exists(),
+            "SketchLoopState::delete"
+        );
         if path.exists() {
-            std::fs::remove_file(&path).map_err(IoError::Raw)?;
+            std::fs::remove_file(&path).map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "SketchLoopState::delete: remove failed"
+                );
+                IoError::Raw(e)
+            })?;
         }
         Ok(())
     }
@@ -133,6 +176,12 @@ impl SketchLoopState {
     /// Record a successful sketch. Mutates counters and pushes
     /// `sketch_id` onto `completed_sketches`.
     pub fn record_completion(&mut self, sketch_id: String) {
+        tracing::trace!(
+            sketch_id = %sketch_id,
+            total_attempts = self.total_attempts + 1,
+            completed = self.completed_sketches.len() + 1,
+            "SketchLoopState::record_completion"
+        );
         self.completed_sketches.push(sketch_id);
         self.total_attempts += 1;
         self.last_updated_unix = unix_now();
@@ -140,6 +189,11 @@ impl SketchLoopState {
 
     /// Record a failed sketch attempt. Mutates counters only.
     pub fn record_failure(&mut self) {
+        tracing::trace!(
+            failed_attempts = self.failed_attempts + 1,
+            total_attempts = self.total_attempts + 1,
+            "SketchLoopState::record_failure"
+        );
         self.failed_attempts += 1;
         self.total_attempts += 1;
         self.last_updated_unix = unix_now();
@@ -148,6 +202,11 @@ impl SketchLoopState {
     /// Mark the loop as fully done. Flips the phase to
     /// `SketchLoopDone` and timestamps the transition.
     pub fn mark_done(&mut self) {
+        tracing::debug!(
+            completed = self.completed_sketches.len(),
+            failed = self.failed_attempts,
+            "SketchLoopState::mark_done"
+        );
         self.phase = Phase::SketchLoopDone;
         self.last_updated_unix = unix_now();
     }

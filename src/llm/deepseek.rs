@@ -31,9 +31,18 @@ impl DeepSeekProvider {
     /// clamp chain, `max_tokens_table` lookup by `(name, model)`)
     /// sees the same shape the v0.10 dispatcher passes in.
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
+        tracing::debug!(
+            endpoint = spec.endpoint.as_deref(),
+            models = spec.models.len(),
+            "DeepSeekProvider::new: enter"
+        );
         if let Some(ep) = spec.endpoint.as_deref()
             && !ep.contains("deepseek")
         {
+            tracing::warn!(
+                endpoint = ep,
+                "DeepSeekProvider::new: endpoint validation failed"
+            );
             return Err(Error::InvalidArgs(format!(
                 "deepseek provider requires an endpoint containing 'deepseek', got {ep:?}"
             )));
@@ -41,9 +50,12 @@ impl DeepSeekProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(180))
             .build()
-            .map_err(|e| Error::Provider {
-                message: format!("build http client: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::error!(error = %e, "DeepSeekProvider::new: reqwest client build failed");
+                Error::Provider {
+                    message: format!("build http client: {e}"),
+                    http_status: None,
+                }
             })?;
         let first = spec
             .models
@@ -55,6 +67,12 @@ impl DeepSeekProvider {
                 max_tokens: None,
             });
         let name = "deepseek".to_owned();
+        tracing::info!(
+            model = %first.id,
+            endpoint = spec.endpoint.as_deref().unwrap_or("default"),
+            cap = DEEPSEEK_MAX_TOKENS_CAP,
+            "DeepSeekProvider: constructed"
+        );
         Ok(Self(OpenAICompatibleProvider {
             name: name.clone(),
             model: first.id.clone(),
@@ -76,10 +94,14 @@ impl DeepSeekProvider {
     /// code goes through [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
         let key = super::api_keys::lookup_key("deepseek", None)
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: "DEEPSEEK_API_KEY not set; provide via env, --api-key, or api_keys.toml"
-                    .into(),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!("DeepSeekProvider::from_config: DEEPSEEK_API_KEY missing");
+                Error::InvalidApiKey {
+                    message:
+                        "DEEPSEEK_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                            .into(),
+                    http_status: None,
+                }
             })?
             .map_err(|e| match e {
                 Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
@@ -104,14 +126,22 @@ impl DeepSeekProvider {
     /// URL to this constructor directly so the cap is wired at
     /// construction time.
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        tracing::debug!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "DeepSeekProvider::from_resolved: enter"
+        );
         let kind = super::api_keys::lookup_kind_for_resolved(resolved);
         let key = super::api_keys::lookup_key(&kind, None)
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: format!(
-                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
-                    kind.to_ascii_uppercase()
-                ),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!(kind, "DeepSeekProvider::from_resolved: API key missing");
+                Error::InvalidApiKey {
+                    message: format!(
+                        "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                        kind.to_ascii_uppercase()
+                    ),
+                    http_status: None,
+                }
             })?
             .map_err(|e| match e {
                 Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
@@ -126,10 +156,19 @@ impl DeepSeekProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(180))
             .build()
-            .map_err(|e| Error::Provider {
-                message: format!("build http client: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::error!(error = %e, "DeepSeekProvider::from_resolved: reqwest client build failed");
+                Error::Provider {
+                    message: format!("build http client: {e}"),
+                    http_status: None,
+                }
             })?;
+        tracing::info!(
+            section = %resolved.section,
+            model = %resolved.id,
+            cap = DEEPSEEK_MAX_TOKENS_CAP,
+            "DeepSeekProvider::from_resolved: constructed"
+        );
         Ok(Self(OpenAICompatibleProvider {
             name: resolved.section.clone(),
             model: resolved.id.clone(),

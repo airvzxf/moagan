@@ -104,8 +104,10 @@ impl HashingEmbedder {
     /// Values below 8 are clamped to 8 to keep the modulo step
     /// well-defined and the resulting vector reasonably sparse.
     pub fn new(dim: usize) -> Self {
+        let effective = dim.max(8);
+        tracing::debug!(requested = dim, effective, "HashingEmbedder: constructed");
         Self {
-            dim: dim.max(8),
+            dim: effective,
             cache: parking_lot::Mutex::new(HashMap::new()),
         }
     }
@@ -128,6 +130,7 @@ impl Embedder for HashingEmbedder {
 
     fn embed(&self, text: &str) -> Vec<f32> {
         if let Some(v) = self.cache.lock().get(text) {
+            tracing::trace!(text_len = text.len(), "HashingEmbedder: cache hit");
             return v.clone();
         }
         let mut v = vec![0.0f32; self.dim];
@@ -144,6 +147,11 @@ impl Embedder for HashingEmbedder {
             }
         }
         self.cache.lock().insert(text.to_string(), v.clone());
+        tracing::trace!(
+            text_len = text.len(),
+            dim = self.dim,
+            "HashingEmbedder: cached fresh embed"
+        );
         v
     }
 }
@@ -165,10 +173,13 @@ fn fnv1a_32(bytes: &[u8]) -> u32 {
 /// are dropped; everything else is kept verbatim after the
 /// lower-case fold.
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
+    let tokens: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_lowercase())
-        .collect()
+        .collect();
+    tracing::trace!(count = tokens.len(), "tokenize");
+    tokens
 }
 
 /// Cosine similarity between two vectors. Returns `0.0` when the
@@ -179,12 +190,18 @@ fn tokenize(text: &str) -> Vec<String> {
 /// `cosine(a, b) == cosine(b, a)` invariant.
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
+        tracing::trace!(
+            a_len = a.len(),
+            b_len = b.len(),
+            "cosine: short-circuit (dim mismatch or empty)"
+        );
         return 0.0;
     }
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if na == 0.0 || nb == 0.0 {
+        tracing::trace!(na, nb, "cosine: short-circuit (zero norm)");
         0.0
     } else {
         dot / (na * nb)

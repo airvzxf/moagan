@@ -36,11 +36,13 @@ use crate::error::{Error, IoError, Result};
 /// process crashes between writes, `MultiGzDecoder` reads whatever
 /// was already persisted and stops at the truncated trailing member.
 pub fn open_gz_append(path: &Path) -> Result<Box<dyn Write + Send>> {
+    tracing::debug!(path = %path.display(), "open_gz_append: enter");
     let f = File::options()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| Error::Io(IoError::Raw(e)))?;
+    tracing::trace!(path = %path.display(), "open_gz_append: opened append handle");
     Ok(Box::new(MemberGzWriter::new(f)))
 }
 
@@ -49,6 +51,7 @@ pub fn open_gz_append(path: &Path) -> Result<Box<dyn Write + Send>> {
 /// write path produces a sequence of complete gzip members rather
 /// than a single member spanning the whole file.
 fn open_gz_read(path: &Path) -> Result<Box<dyn Read + Send>> {
+    tracing::trace!(path = %path.display(), "open_gz_read: enter");
     let f = File::open(path).map_err(|e| Error::Io(IoError::Raw(e)))?;
     let buf = BufReader::new(f);
     Ok(Box::new(MultiGzDecoder::new(buf)))
@@ -58,6 +61,7 @@ fn open_gz_read(path: &Path) -> Result<Box<dyn Read + Send>> {
 /// `open_gz_read` so legacy runs (or runs produced before compression
 /// was wired) remain readable by manifest builders and external tools.
 fn open_plain_read(path: &Path) -> Result<Box<dyn Read + Send>> {
+    tracing::trace!(path = %path.display(), "open_plain_read: enter");
     let f = File::open(path).map_err(|e| Error::Io(IoError::Raw(e)))?;
     Ok(Box::new(BufReader::new(f)))
 }
@@ -67,22 +71,28 @@ fn open_plain_read(path: &Path) -> Result<Box<dyn Read + Send>> {
 /// for a single run are O(phases × parallel calls), and calls.jsonl is
 /// appended incrementally so the manifest reads it once per run.
 pub fn read_to_string(path: &Path) -> Result<String> {
-    if std::fs::metadata(path)
-        .map_err(|e| Error::Io(IoError::Raw(e)))?
-        .len()
-        == 0
-    {
+    tracing::debug!(path = %path.display(), "read_to_string: enter");
+    let metadata = std::fs::metadata(path).map_err(|e| Error::Io(IoError::Raw(e)))?;
+    if metadata.len() == 0 {
+        tracing::trace!(path = %path.display(), "read_to_string: empty file -> empty string");
         return Ok(String::new());
     }
     let mut buf = String::new();
     let mut reader: Box<dyn Read> = if is_gz_path(path) {
+        tracing::trace!(path = %path.display(), "read_to_string: gz branch");
         open_gz_read(path)?
     } else {
+        tracing::trace!(path = %path.display(), "read_to_string: plain branch");
         open_plain_read(path)?
     };
     reader
         .read_to_string(&mut buf)
         .map_err(|e| Error::Io(IoError::Raw(e)))?;
+    tracing::debug!(
+        path = %path.display(),
+        bytes = buf.len(),
+        "read_to_string: ok"
+    );
     Ok(buf)
 }
 
@@ -116,6 +126,7 @@ impl MemberGzWriter {
 
     fn encoder(&mut self) -> io::Result<&mut GzEncoder<File>> {
         if self.current.is_none() {
+            tracing::trace!("MemberGzWriter::encoder: lazy-initialising GzEncoder");
             let f = self.file.try_clone()?;
             self.current = Some(GzEncoder::new(f, FlateCompression::default()));
         }
@@ -134,6 +145,7 @@ impl Write for MemberGzWriter {
         // disk. Drop the encoder to release any borrowed state
         // before the next write opens a new member.
         if let Some(enc) = self.current.take() {
+            tracing::trace!("MemberGzWriter::flush: finishing gzip member");
             let mut file = enc.finish()?;
             file.flush()?;
         }
@@ -148,7 +160,7 @@ impl Drop for MemberGzWriter {
         if self.current.is_some()
             && let Err(e) = self.flush()
         {
-            eprintln!("warn: MemberGzWriter drop flush failed: {e}");
+            tracing::warn!(error = %e, "MemberGzWriter drop flush failed");
         }
     }
 }
@@ -182,11 +194,13 @@ impl Compression {
     /// Returns `None` for any non-recognized extension.
     pub fn from_extension(path: &Path) -> Self {
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        match ext {
+        let mode = match ext {
             "gz" => Self::Gz,
             "zst" => Self::Zst,
             _ => Self::None,
-        }
+        };
+        tracing::trace!(path = %path.display(), ext, ?mode, "Compression::from_extension");
+        mode
     }
 }
 
@@ -228,9 +242,11 @@ impl Compression {
     ///
     /// Refs: D.7.5 (PR-26).
     pub fn multi_reader(path: &Path) -> io::Result<Box<dyn Read>> {
+        let mode = Self::from_extension(path);
+        tracing::debug!(path = %path.display(), ?mode, "Compression::multi_reader: enter");
         let f = File::open(path)?;
         let buf = BufReader::new(f);
-        match Self::from_extension(path) {
+        match mode {
             Self::None => Ok(Box::new(buf)),
             Self::Gz => Ok(Box::new(MultiGzDecoder::new(buf))),
             Self::Zst => Ok(Box::new(zstd::Decoder::new(buf)?)),
@@ -264,9 +280,11 @@ impl ZstWriter {
     /// level; F5 does not pin a level so callers can change it
     /// later without breaking existing archives).
     pub fn new(path: &Path) -> io::Result<Self> {
+        tracing::debug!(path = %path.display(), "ZstWriter::new: enter");
         let file = File::create(path)?;
         let encoder = zstd::stream::write::Encoder::new(file, 0)
             .map_err(|e| io::Error::other(format!("zstd encoder init: {e}")))?;
+        tracing::trace!(path = %path.display(), "ZstWriter::new: encoder ready");
         Ok(Self { encoder })
     }
 
@@ -282,8 +300,10 @@ impl ZstWriter {
     /// keep writing (e.g. a tar builder that needs the
     /// underlying writer for `into_inner()`) can recover it.
     pub fn finish(self) -> io::Result<File> {
+        tracing::debug!("ZstWriter::finish: enter");
         let mut file = self.encoder.finish()?;
         file.flush()?;
+        tracing::trace!("ZstWriter::finish: ok");
         Ok(file)
     }
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::signal;
+use tracing::{debug, trace, warn};
 
 use crate::audit::proxy::{self, ProxyConfig};
 use crate::audit::verify as verify_mod;
@@ -63,15 +64,27 @@ pub fn resolve_run(
     run_id: Option<String>,
     require_run_id: bool,
 ) -> Result<(Arc<MoaganHome>, Option<RunId>)> {
+    debug!(require_run_id, "audit::resolve_run: enter");
     let home = Arc::new(match args_runs_dir {
         Some(root) => MoaganHome::at(root),
         None => MoaganHome::resolve()?,
     });
     home.ensure()?;
     let run_id = match run_id {
-        Some(id) => Some(id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?),
-        None if require_run_id => pick_latest_run(&home)?,
-        None => None,
+        Some(id) => {
+            let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
+            trace!(run_id = %parsed, "audit::resolve_run: explicit run_id");
+            Some(parsed)
+        }
+        None if require_run_id => {
+            let latest = pick_latest_run(&home)?;
+            debug!(run_id = ?latest, "audit::resolve_run: latest picked");
+            latest
+        }
+        None => {
+            trace!("audit::resolve_run: no run_id");
+            None
+        }
     };
     Ok((home, run_id))
 }
@@ -94,11 +107,13 @@ fn pick_latest_run(home: &MoaganHome) -> Result<Option<RunId>> {
 /// `<run_dir>/telemetry/external_audit.jsonl.gz`. SIGINT/SIGTERM
 /// triggers a clean shutdown.
 pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
+    debug!(host = %args.listen_host, port = args.port, "audit::proxy_cmd: enter");
     let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone(), false)?;
     let listen: std::net::SocketAddr = format!("{}:{}", args.listen_host, args.port)
         .parse()
         .map_err(|e| Error::InvalidArgs(format!("bind: {e}")))?;
     if !listen.ip().is_loopback() {
+        warn!(host = %args.listen_host, "audit proxy: non-loopback bind rejected");
         return Err(Error::InvalidArgs(
             "audit proxy must listen on a loopback address".into(),
         ));
@@ -151,8 +166,10 @@ pub async fn proxy_cmd(args: ProxyArgs) -> Result<()> {
 /// Moagan's internal `calls.jsonl.gz` + SQLite, write a TSV summary,
 /// return the exit code (0 ok, 1 mismatch/orphans, 2 missing/invalid).
 pub async fn verify_cmd(args: VerifyArgs) -> Result<i32> {
+    debug!(cmd = ?args, "audit::verify_cmd: enter");
     let (home, run_id) = resolve_run(args.runs_dir.clone(), args.run_id.clone(), true)?;
     let Some(run_id) = run_id else {
+        warn!("audit::verify: no run_id resolved");
         let report = verify_mod::VerifyReport {
             audit_file_missing: true,
             ..Default::default()
@@ -167,6 +184,7 @@ pub async fn verify_cmd(args: VerifyArgs) -> Result<i32> {
     {
         Ok(report) => report,
         Err(error) => {
+            warn!(run_id = %run_id, error = %error, "audit verify: SQLite cross-check failed");
             eprintln!("audit verify: SQLite cross-check failed: {error}");
             let mut report = verify_mod::verify(&run_dir, &calls_path)?;
             report.internal_file_invalid = true;
@@ -176,6 +194,7 @@ pub async fn verify_cmd(args: VerifyArgs) -> Result<i32> {
     let tsv_path = run_dir.external_audit_verify_path();
     let tsv = verify_mod::render_tsv(&report);
     let write_failed = if let Err(error) = verify_mod::write_tsv(&report, &tsv_path) {
+        warn!(tsv = %tsv_path.display(), error = %error, "audit verify: tsv write failed");
         eprintln!(
             "audit verify: could not write {}: {error}",
             tsv_path.display()
@@ -188,5 +207,6 @@ pub async fn verify_cmd(args: VerifyArgs) -> Result<i32> {
     if !write_failed {
         eprintln!("tsv: {}", tsv_path.display());
     }
+    debug!(exit_code = report.exit_code(), "audit::verify_cmd: done");
     Ok(if write_failed { 2 } else { report.exit_code() })
 }

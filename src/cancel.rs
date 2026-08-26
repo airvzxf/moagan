@@ -46,13 +46,15 @@ pub enum CancelTier {
 
 impl From<CancelReason> for crate::domain::PauseReason {
     fn from(reason: CancelReason) -> Self {
-        match reason {
+        let target = match reason {
             CancelReason::UserInterrupt | CancelReason::Requested => Self::UserPause,
             CancelReason::TotalTimeout => Self::TimeoutTotal,
             CancelReason::PhaseTimeout(_) => Self::TimeoutPhase,
             CancelReason::PlanExhausted => Self::PlanExceeded,
             CancelReason::ApiKeySwitch => Self::ProviderError,
-        }
+        };
+        tracing::trace!(reason = ?reason, pause = ?target, "CancelReason -> PauseReason");
+        target
     }
 }
 
@@ -99,6 +101,7 @@ pub const HARD_KILL_GRACE: Duration = Duration::from_secs(2);
 impl Cancel {
     /// Build a fresh, uncancelled token.
     pub fn new() -> Self {
+        tracing::trace!("Cancel::new: enter");
         Self {
             inner: Arc::new(Inner {
                 token: TkToken::new(),
@@ -110,6 +113,7 @@ impl Cancel {
 
     /// Build a child token that is cancelled when the parent is.
     pub fn child(&self) -> Self {
+        tracing::trace!("Cancel::child: enter");
         Self {
             inner: Arc::new(Inner {
                 token: self.inner.token.child_token(),
@@ -121,6 +125,7 @@ impl Cancel {
 
     /// Cancel the token with a reason.
     pub fn cancel(&self, reason: CancelReason) {
+        tracing::trace!(reason = ?reason, "Cancel::cancel");
         *self.inner.reason.lock() = Some(reason);
         self.inner.token.cancel();
     }
@@ -133,6 +138,7 @@ impl Cancel {
     /// signals — the typical pattern is `child_token()` so a
     /// sub-token's signal does not cascade to siblings.
     pub fn token(&self) -> TkToken {
+        tracing::trace!("Cancel::token: cloning parent token");
         self.inner.token.clone()
     }
 
@@ -142,6 +148,7 @@ impl Cancel {
     /// proxy) so they exit when the run is cancelled but never
     /// cancel the run themselves.
     pub fn child_token(&self) -> TkToken {
+        tracing::trace!("Cancel::child_token: cloning child token");
         self.inner.token.child_token()
     }
 
@@ -160,18 +167,22 @@ impl Cancel {
     /// does not have to hold the lock across the (potentially slow)
     /// `killpg` syscalls.
     pub fn cancel_with_tier(&self, reason: CancelReason, tier: CancelTier) {
+        tracing::trace!(reason = ?reason, tier = ?tier, "Cancel::cancel_with_tier");
         // 1) Cooperative token so in-flight async work notices.
         self.cancel(reason);
 
         if !matches!(tier, CancelTier::Hard) {
+            tracing::trace!(tier = ?tier, "cancel_with_tier: cooperative-only path");
             return;
         }
 
         // 2) Snapshot the registered pgids under the lock.
         let pgids: Vec<i32> = self.inner.child_pgids.lock().iter().copied().collect();
         if pgids.is_empty() {
+            tracing::trace!("cancel_with_tier: no registered pgids; SIGKILL/SIGTERM skipped");
             return;
         }
+        tracing::trace!(pgid_count = pgids.len(), "cancel_with_tier: hard kill path");
 
         #[cfg(unix)]
         {
@@ -184,6 +195,10 @@ impl Cancel {
                 // a missing group yields ESRCH which we ignore.
                 let _ = unsafe { libc::killpg(*pgid, libc::SIGTERM) };
             }
+            tracing::debug!(
+                pgid_count = pgids.len(),
+                "cancel_with_tier: SIGTERM dispatched to process groups"
+            );
             // 3b) SIGKILL after the grace window on a tokio task so
             // we never block the caller. The task is parented to the
             // cooperative `CancellationToken` (AGENTS.md §"No-go list":
@@ -204,6 +219,10 @@ impl Cancel {
                     // SAFETY: same as above.
                     let _ = unsafe { libc::killpg(*pgid, libc::SIGKILL) };
                 }
+                tracing::debug!(
+                    pgid_count = pgids_for_kill.len(),
+                    "cancel_with_tier: SIGKILL dispatched after grace"
+                );
             });
         }
 
@@ -221,6 +240,7 @@ impl Cancel {
     /// value is taken verbatim so the sandbox controls whether it
     /// uses the child's pid or an inherited id.
     pub fn register_child(&self, pgid: i32) {
+        tracing::trace!(pgid, "Cancel::register_child");
         self.inner.child_pgids.lock().insert(pgid);
     }
 
@@ -229,30 +249,43 @@ impl Cancel {
     /// exit path (natural, error, timeout) so the registry does not
     /// leak ids.
     pub fn unregister_child(&self, pgid: i32) {
+        tracing::trace!(pgid, "Cancel::unregister_child");
         self.inner.child_pgids.lock().remove(&pgid);
     }
 
     /// True if cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
-        self.inner.token.is_cancelled()
+        let cancelled = self.inner.token.is_cancelled();
+        tracing::trace!(cancelled, "Cancel::is_cancelled");
+        cancelled
     }
 
     /// Await cancellation. Returns immediately if already cancelled.
     pub async fn cancelled(&self) {
+        tracing::trace!("Cancel::cancelled: awaiting");
         self.inner.token.cancelled().await
     }
 
     /// Current cancel reason, if set.
     pub fn reason(&self) -> Option<CancelReason> {
-        self.inner.reason.lock().clone()
+        let r = self.inner.reason.lock().clone();
+        tracing::trace!(reason = ?r, "Cancel::reason");
+        r
     }
 
     /// Translate into a `crate::Error::Cancelled` with the recorded reason.
     pub fn into_error(&self) -> Error {
+        tracing::trace!("Cancel::into_error: enter");
         let reason = self.reason();
         match reason {
-            Some(r) => Error::Cancelled(r.to_string()),
-            None => Error::Cancelled("cancelled".to_owned()),
+            Some(r) => {
+                tracing::trace!(reason = ?r, "Cancel::into_error: with reason");
+                Error::Cancelled(r.to_string())
+            }
+            None => {
+                tracing::trace!("Cancel::into_error: generic reason");
+                Error::Cancelled("cancelled".to_owned())
+            }
         }
     }
 }

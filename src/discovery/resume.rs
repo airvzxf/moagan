@@ -40,7 +40,14 @@ pub const DEFAULT_PAUSED_AT_PHASE: &str = "synthesize";
 /// default fallback" — this function does not know about the
 /// default list because the fallback policy lives in the CLI layer.
 pub fn derive_completed_phases(db: &Db, run_id: RunId) -> Result<Vec<String>> {
-    db.list_completed_phases(run_id)
+    tracing::debug!(run_id = %run_id, "resume: derive_completed_phases");
+    let phases = db.list_completed_phases(run_id)?;
+    tracing::trace!(
+        run_id = %run_id,
+        count = phases.len(),
+        "resume: derive_completed_phases result"
+    );
+    Ok(phases)
 }
 
 /// Resolve the `paused_at_phase` string for `run_id`. Tries the live
@@ -55,8 +62,22 @@ pub fn derive_completed_phases(db: &Db, run_id: RunId) -> Result<Vec<String>> {
 /// later `moagan continue --from-pause` resumes from exactly the
 /// phase the pause was issued at.
 pub fn derive_paused_at_phase(db: &Db, run_id: RunId) -> Result<String> {
+    tracing::debug!(run_id = %run_id, "resume: derive_paused_at_phase");
     let last = db.last_completed_phase(run_id)?;
-    Ok(last.unwrap_or_else(|| DEFAULT_PAUSED_AT_PHASE.to_string()))
+    let out = last.unwrap_or_else(|| {
+        tracing::trace!(
+            run_id = %run_id,
+            fallback = DEFAULT_PAUSED_AT_PHASE,
+            "resume: derive_paused_at_phase using default fallback"
+        );
+        DEFAULT_PAUSED_AT_PHASE.to_string()
+    });
+    tracing::trace!(
+        run_id = %run_id,
+        paused_at_phase = %out,
+        "resume: derive_paused_at_phase result"
+    );
+    Ok(out)
 }
 
 /// True when the SQLite index has any record for `run_id`. Lets
@@ -64,7 +85,14 @@ pub fn derive_paused_at_phase(db: &Db, run_id: RunId) -> Result<String> {
 /// from "run paused before DB commit, use legacy fallback" without
 /// coupling the CLI to the `runs` table directly.
 pub fn run_is_registered(db: &Db, run_id: RunId) -> Result<bool> {
-    db.has_run(run_id)
+    tracing::debug!(run_id = %run_id, "resume: run_is_registered");
+    let registered = db.has_run(run_id)?;
+    tracing::trace!(
+        run_id = %run_id,
+        registered,
+        "resume: run_is_registered result"
+    );
+    Ok(registered)
 }
 
 #[cfg(test)]

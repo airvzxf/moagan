@@ -288,6 +288,7 @@ impl Role {
     /// could not be parsed, which is much friendlier than the raw
     /// "expected `,` or `]` at line 1 column N" that serde produces.
     pub fn validate_json(&self, value: &serde_json::Value) -> Result<()> {
+        tracing::trace!(role = self.as_str(), "Role::validate_json");
         let result: std::result::Result<(), serde_json::Error> = match self {
             Self::Intake => serde_json::from_value::<Intake>(value.clone()).map(|_| ()),
             Self::Clarify => serde_json::from_value::<Brief>(value.clone()).map(|_| ()),
@@ -388,6 +389,7 @@ impl Role {
             }
         };
         if let Err(e) = result {
+            tracing::debug!(role = self.as_str(), error = %e, "Role::validate_json: schema mismatch");
             return Err(Error::SchemaViolation(format!(
                 "role={} schema mismatch: {e}; expected {}",
                 self.as_str(),
@@ -442,6 +444,7 @@ impl FromStr for Role {
     type Err = Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        tracing::trace!(input = s, "Role::from_str");
         match s {
             "intake" => Ok(Self::Intake),
             "clarify" => Ok(Self::Clarify),
@@ -471,7 +474,10 @@ impl FromStr for Role {
             "continuation" => Ok(Self::Continuation),
             "contradiction_judge" => Ok(Self::ContradictionJudge),
             "dimension_deriver" => Ok(Self::DimensionDeriver),
-            other => Err(Error::InvalidArgs(format!("unknown role: {other}"))),
+            other => {
+                tracing::warn!(input = other, "Role::from_str: unknown role");
+                Err(Error::InvalidArgs(format!("unknown role: {other}")))
+            }
         }
     }
 }

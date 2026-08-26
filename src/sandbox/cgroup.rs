@@ -99,7 +99,9 @@ impl std::fmt::Display for CgroupBackend {
 /// `/sys/fs/cgroup/cgroup.controllers`. Returns `false` on every
 /// non-Linux platform.
 pub fn cgroup_v2_available() -> bool {
-    cgroup_v2_path().is_some()
+    let available = cgroup_v2_path().is_some();
+    tracing::trace!(sandbox = "cgroup", available, "cgroup_v2_available probe");
+    available
 }
 
 /// Canonical cgroup v2 mount path, when present.
@@ -137,9 +139,23 @@ pub fn apply(limits: &CgroupLimits) -> Result<CgroupBackend> {
 
 #[cfg(unix)]
 fn apply_for_target(limits: &CgroupLimits) -> Result<CgroupBackend> {
+    tracing::debug!(
+        sandbox = "cgroup",
+        cpu_max = ?limits.cpu_max,
+        memory_max_bytes = ?limits.memory_max_bytes,
+        pids_max = ?limits.pids_max,
+        "apply_for_target: resolving cgroup backend"
+    );
     if let Some(root) = cgroup_v2_path() {
         match create_and_configure_cgroup(root, limits) {
-            Ok(()) => return Ok(CgroupBackend::CgroupV2),
+            Ok(()) => {
+                tracing::info!(
+                    sandbox = "cgroup",
+                    backend = %CgroupBackend::CgroupV2,
+                    "cgroup v2 path succeeded"
+                );
+                return Ok(CgroupBackend::CgroupV2);
+            }
             Err(error) => {
                 tracing::warn!(
                     sandbox = "cgroup",
@@ -148,6 +164,11 @@ fn apply_for_target(limits: &CgroupLimits) -> Result<CgroupBackend> {
                 );
             }
         }
+    } else {
+        tracing::debug!(
+            sandbox = "cgroup",
+            "cgroup v2 mount unavailable; going to prlimit path"
+        );
     }
     apply_prlimit(limits).map_err(|error| {
         tracing::warn!(
@@ -161,7 +182,9 @@ fn apply_for_target(limits: &CgroupLimits) -> Result<CgroupBackend> {
 }
 
 #[cfg(not(unix))]
-fn apply_for_target(_limits: &CgroupLimits) -> Result<CgroupBackend> {
+fn apply_for_target(limits: &CgroupLimits) -> Result<CgroupBackend> {
+    tracing::trace!(sandbox = "cgroup", "apply_for_target: no-op on non-Unix");
+    let _ = limits;
     Ok(CgroupBackend::None)
 }
 
@@ -183,6 +206,12 @@ fn create_and_configure_cgroup(root: &Path, limits: &CgroupLimits) -> Result<()>
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let cgroup_path: PathBuf = root.join(format!("moagan-{pid}-{nanos}"));
+    tracing::debug!(
+        sandbox = "cgroup",
+        path = %cgroup_path.display(),
+        pid,
+        "create_and_configure_cgroup: creating child cgroup"
+    );
 
     fs::create_dir_all(&cgroup_path)?;
     if let Some(cpu) = &limits.cpu_max {
@@ -200,6 +229,12 @@ fn create_and_configure_cgroup(root: &Path, limits: &CgroupLimits) -> Result<()>
     fs::write(cgroup_path.join("cgroup.procs"), &pid_str).map_err(|error| {
         io::Error::new(error.kind(), format!("cgroup.procs write failed: {error}"))
     })?;
+    tracing::info!(
+        sandbox = "cgroup",
+        path = %cgroup_path.display(),
+        pid,
+        "create_and_configure_cgroup: child PID moved into cgroup"
+    );
     Ok(())
 }
 
@@ -235,6 +270,13 @@ fn write_cgroup_file(cgroup: &Path, name: &str, value: &str) -> Result<()> {
 fn apply_prlimit(limits: &CgroupLimits) -> Result<()> {
     use std::io;
 
+    tracing::debug!(
+        sandbox = "cgroup",
+        pids_max = ?limits.pids_max,
+        memory_max_bytes = ?limits.memory_max_bytes,
+        "apply_prlimit: applying per-process rlimits"
+    );
+
     // SAFETY: `prlimit(0, ...)` mutates the calling process; both
     // arguments are well-formed references to stack-allocated
     // `rlimit` values. `prlimit` is async-signal-safe.
@@ -247,12 +289,25 @@ fn apply_prlimit(limits: &CgroupLimits) -> Result<()> {
             if libc::prlimit(0, libc::RLIMIT_NPROC, &rlim, std::ptr::null_mut()) != 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() != io::ErrorKind::PermissionDenied {
+                    tracing::error!(
+                        sandbox = "cgroup",
+                        rlimit = "RLIMIT_NPROC",
+                        error = %err,
+                        "apply_prlimit: RLIMIT_NPROC failed (non-EPERM)"
+                    );
                     return Err(err.into());
                 }
                 tracing::debug!(
                     sandbox = "cgroup",
                     rlimit = "RLIMIT_NPROC",
                     "EPERM on RLIMIT_NPROC; CAP_SYS_RESOURCE missing",
+                );
+            } else {
+                tracing::trace!(
+                    sandbox = "cgroup",
+                    rlimit = "RLIMIT_NPROC",
+                    pids,
+                    "RLIMIT_NPROC applied"
                 );
             }
         }
@@ -264,12 +319,25 @@ fn apply_prlimit(limits: &CgroupLimits) -> Result<()> {
             if libc::prlimit(0, libc::RLIMIT_AS, &rlim, std::ptr::null_mut()) != 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() != io::ErrorKind::PermissionDenied {
+                    tracing::error!(
+                        sandbox = "cgroup",
+                        rlimit = "RLIMIT_AS",
+                        error = %err,
+                        "apply_prlimit: RLIMIT_AS failed (non-EPERM)"
+                    );
                     return Err(err.into());
                 }
                 tracing::debug!(
                     sandbox = "cgroup",
                     rlimit = "RLIMIT_AS",
                     "EPERM on RLIMIT_AS; CAP_SYS_RESOURCE missing",
+                );
+            } else {
+                tracing::trace!(
+                    sandbox = "cgroup",
+                    rlimit = "RLIMIT_AS",
+                    bytes = mem,
+                    "RLIMIT_AS applied"
                 );
             }
         }

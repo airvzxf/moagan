@@ -25,6 +25,7 @@ pub use fetcher::{
 /// should construct a [`ResearchFetcher`] explicitly so the
 /// bearer opt-in hosts see the key when configured.
 pub async fn fetch_all(urls: &[String]) -> Vec<std::result::Result<ResearchSnippet, FetchError>> {
+    tracing::debug!(requested = urls.len(), "research::fetch_all: free function");
     ResearchFetcher::new(None).fetch_all(urls).await
 }
 
@@ -36,21 +37,30 @@ pub async fn fetch_all(urls: &[String]) -> Vec<std::result::Result<ResearchSnipp
 /// marker so the prompt never has the placeholder literally in it.
 pub fn render_known_apis_block(snippets: &[ResearchSnippet]) -> String {
     if snippets.is_empty() {
+        tracing::debug!("research::render_known_apis_block: empty; emitting marker");
         return "<!-- known_apis: no research available -->".to_owned();
     }
     let mut out = String::new();
+    let mut truncated_count = 0usize;
     for (i, snippet) in snippets.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
         out.push_str(&format!("### Source: {}\n", snippet.url));
         if snippet.truncated {
+            truncated_count += 1;
             out.push_str("(truncated to MAX_BYTES_PER_URL)\n");
         }
         out.push_str("```\n");
         out.push_str(snippet.content.trim());
         out.push_str("\n```\n");
     }
+    tracing::debug!(
+        total = snippets.len(),
+        truncated = truncated_count,
+        output_bytes = out.len(),
+        "research::render_known_apis_block: rendered"
+    );
     out
 }
 

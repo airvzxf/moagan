@@ -289,8 +289,10 @@ impl Telemetry {
         policy: RedactPolicy,
         db: Option<Db>,
     ) -> Result<Self> {
+        tracing::info!(%run_id, telemetry = %run.telemetry().display(), "Telemetry::open: enter");
         run.telemetry(); // ensures the path is computed
         std::fs::create_dir_all(run.telemetry())?;
+        tracing::debug!("Telemetry::open: telemetry dir ensured");
         // Spec §1.5 declares `gz` as the default compression for the
         // two append-only streams (`phases.jsonl` and `calls.jsonl`).
         // AGENTS.md's smoke gate #2 then names the on-disk file
@@ -343,6 +345,7 @@ impl Telemetry {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(60),
         );
+        tracing::info!(%run_id, "Telemetry::open: ok");
         Ok(Self {
             inner: Arc::new(Inner {
                 run_id,
@@ -483,6 +486,11 @@ impl Telemetry {
     /// not abort the run (the JSON sidecar remains the source of
     /// truth).
     pub fn record_checkpoint(&self, cp: &crate::domain::HumanCheckpoint) -> Result<()> {
+        tracing::debug!(
+            ckp_id = %cp.id,
+            kind = %cp.kind,
+            "record_checkpoint: enter"
+        );
         let event = CheckpointEvent {
             run_id: self.inner.run_id.to_string(),
             ckp_id: cp.id.clone(),
@@ -518,6 +526,7 @@ impl Telemetry {
             );
         }
         self.flush_if_due();
+        tracing::trace!(ckp_id = %cp.id, "record_checkpoint: ok");
         Ok(())
     }
 
@@ -553,6 +562,7 @@ impl Telemetry {
         error: Option<&str>,
         resume: bool,
     ) -> Result<()> {
+        tracing::trace!(phase, seq, status, resume, "Telemetry::phase: enter");
         // ADR-0002: capture the active `profraw` snapshot so the
         // post-mortem story can correlate the phase event with
         // the lines that were visited up to and including this
@@ -591,6 +601,7 @@ impl Telemetry {
             tracing::warn!(phase, seq, status, error = %e, "SQLite phase mirror failed");
         }
         self.flush_if_due();
+        tracing::trace!(phase, seq, status, "Telemetry::phase: ok");
         Ok(())
     }
 
@@ -616,6 +627,19 @@ impl Telemetry {
         error: Option<&str>,
         retry_count: u32,
     ) -> Result<()> {
+        tracing::trace!(
+            call_id,
+            phase,
+            role,
+            provider,
+            model,
+            cache_hit,
+            http_status = ?http_status,
+            input_tokens,
+            output_tokens,
+            retry_count,
+            "Telemetry::call: enter"
+        );
         // ADR-0002: snapshot coverage at the call boundary so the
         // post-mortem story can correlate a failed LLM call with
         // the lines of code that ran up to and including the
@@ -717,6 +741,7 @@ impl Telemetry {
             tracing::warn!(call_id, error = %e, "provider_rollups write failed");
         }
         self.flush_if_due();
+        tracing::trace!(call_id, phase, "Telemetry::call: ok");
         Ok(())
     }
 
@@ -729,6 +754,7 @@ impl Telemetry {
         // emit `resume: false`. The flag would only matter inside a
         // resumed pipeline and the heartbeat fires per-tick from a
         // background task; it is never "the resumed phase".
+        tracing::trace!("Telemetry::heartbeat: tick");
         self.phase("heartbeat", 0, "tick", None, false)
     }
 
@@ -753,6 +779,13 @@ impl Telemetry {
         details: serde_json::Value,
         ctx: WarningContext,
     ) -> Result<()> {
+        tracing::trace!(
+            code,
+            level,
+            phase = ?ctx.phase,
+            call_id = ?ctx.call_id,
+            "Telemetry::warn: enter"
+        );
         let ev = WarningEvent {
             run_id: self.inner.run_id.to_string(),
             at_unix_ms: now_unix_millis(),
@@ -807,11 +840,13 @@ impl Telemetry {
             }
         }
         self.flush_if_due();
+        tracing::trace!(code, "Telemetry::warn: ok");
         Ok(())
     }
 
     /// Flush both streams. Idempotent.
     pub fn flush(&self) -> Result<()> {
+        tracing::trace!("Telemetry::flush: enter");
         if let Some(w) = self.inner.phases.lock().as_mut() {
             w.flush()?;
         }
@@ -844,11 +879,11 @@ impl Telemetry {
             .flush_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let every = self.inner.flush_every;
-        if every > 0
-            && (n + 1).is_multiple_of(every)
-            && let Err(e) = self.flush()
-        {
-            tracing::warn!(error = %e, "telemetry: auto-flush failed");
+        if every > 0 && (n + 1).is_multiple_of(every) {
+            tracing::trace!(n = n + 1, every, "flush_if_due: triggering auto-flush");
+            if let Err(e) = self.flush() {
+                tracing::warn!(error = %e, "telemetry: auto-flush failed");
+            }
         }
     }
 
@@ -868,6 +903,13 @@ impl Telemetry {
     /// discovery call before the run is registered) leave it
     /// `None` so the SQLite mirror still accepts the row.
     pub fn saturation(&self, event: &SaturationEvent) -> Result<()> {
+        tracing::debug!(
+            provider = %event.provider,
+            model = %event.model,
+            kind = %event.kind,
+            threshold_pct = event.threshold_pct,
+            "Telemetry::saturation: enter"
+        );
         let bytes = serde_json::to_vec(event).map_err(crate::Error::from)?;
         let mut g = self.inner.saturation.lock();
         if let Some(w) = g.as_mut() {
@@ -886,6 +928,7 @@ impl Telemetry {
             );
         }
         self.flush_if_due();
+        tracing::trace!("Telemetry::saturation: ok");
         Ok(())
     }
 
@@ -898,6 +941,12 @@ impl Telemetry {
         model: &str,
         failure_count: u32,
     ) -> Result<()> {
+        tracing::info!(
+            provider,
+            model,
+            failure_count,
+            "record_circuit_open: dispatching saturation event"
+        );
         let event = SaturationEvent::from_circuit_breaker(
             provider,
             model,
@@ -920,6 +969,14 @@ impl Telemetry {
         capacity: u32,
         refill_per_sec: u32,
     ) -> Result<()> {
+        tracing::info!(
+            provider,
+            model,
+            threshold_pct,
+            capacity,
+            refill_per_sec,
+            "record_rate_limit: dispatching saturation event"
+        );
         let event = SaturationEvent::from_rate_limit(
             provider,
             model,
@@ -946,6 +1003,11 @@ impl crate::llm::provider::SaturationSink for Telemetry {
     /// wrapper's caller was already on the error path; the
     /// rejection must not be hidden by a sink failure).
     fn on_saturation(&self, event: &SaturationEvent) {
+        tracing::trace!(
+            provider = %event.provider,
+            kind = %event.kind,
+            "on_saturation: stamping run_id and forwarding"
+        );
         let mut stamped = event.clone();
         if stamped.run_id.is_none() {
             stamped.run_id = Some(self.inner.run_id.to_string());
@@ -968,6 +1030,7 @@ impl crate::llm::provider::SaturationSink for Telemetry {
 /// the categorised pass.
 #[allow(dead_code)]
 fn detect_redact_kind(text: &str) -> Option<&'static str> {
+    tracing::trace!(len = text.len(), "detect_redact_kind: enter");
     use crate::redact::apply::{RedactPolicy, Surface, apply};
     let policy = RedactPolicy::default();
     // The fastest possible detection: if the text wasn't redacted
@@ -977,12 +1040,13 @@ fn detect_redact_kind(text: &str) -> Option<&'static str> {
         .map(|c| matches!(c, std::borrow::Cow::Borrowed(_)))
         .unwrap_or(true)
     {
+        tracing::trace!("detect_redact_kind: no redaction -> None");
         return None;
     }
     // Match each pattern id and return the first mapped kind.
     for p in policy.active_patterns() {
         if p.re.is_match(text) {
-            return Some(match p.id {
+            let kind = match p.id {
                 "minimax_sk_cp" => "sk_cp_api_key",
                 "anthropic_key" => "anthropic_api_key",
                 "openai_key" => "openai_api_key",
@@ -1000,9 +1064,12 @@ fn detect_redact_kind(text: &str) -> Option<&'static str> {
                 "private_ip" | "ip_v4" => "private_ip",
                 "ssn_like" => "ssn_like",
                 _ => continue,
-            });
+            };
+            tracing::trace!(pattern = p.id, kind, "detect_redact_kind: hit");
+            return Some(kind);
         }
     }
+    tracing::trace!("detect_redact_kind: miss");
     None
 }
 

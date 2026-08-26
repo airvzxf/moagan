@@ -67,13 +67,33 @@ pub fn bearer_token_env_for<'a>(
     overrides: &'a std::collections::HashMap<String, String>,
 ) -> Option<&'a str> {
     let canonical = crate::research::fetcher::canonical_host_pub(host);
+    tracing::trace!(
+        host,
+        canonical = %canonical,
+        "research::allowlist::bearer_token_env_for: resolving"
+    );
     if let Some(name) = overrides.get(&canonical) {
         let trimmed = name.trim();
         if !trimmed.is_empty() {
+            tracing::trace!(
+                host,
+                source = "override",
+                "research::allowlist::bearer_token_env_for: hit override"
+            );
             return Some(trimmed);
         }
     }
-    find_policy(host).and_then(|p| p.bearer_token_env)
+    let out = find_policy(host).and_then(|p| p.bearer_token_env);
+    tracing::trace!(
+        host,
+        source = if out.is_some() {
+            "static_policy"
+        } else {
+            "none"
+        },
+        "research::allowlist::bearer_token_env_for: resolved"
+    );
+    out
 }
 
 /// Hosts the bounded research fetcher is permitted to fetch from.
@@ -123,7 +143,9 @@ pub const ALLOWED_HOSTS: &[&str] = &["docs.rs", "crates.io", "api.github.com", "
 
 /// Case-insensitive membership test against [`ALLOWED_HOSTS`].
 pub fn is_allowed(host: &str) -> bool {
-    ALLOWED_HOSTS.iter().any(|h| host.eq_ignore_ascii_case(h))
+    let result = ALLOWED_HOSTS.iter().any(|h| host.eq_ignore_ascii_case(h));
+    tracing::trace!(host, allowed = result, "research::allowlist::is_allowed");
+    result
 }
 
 /// Look up the host policy entry that matches `host` (case-insensitive
@@ -131,7 +153,13 @@ pub fn is_allowed(host: &str) -> bool {
 /// allowlist; the caller is expected to enforce the allowlist
 /// separately via [`is_allowed`] before looking up policy details.
 pub fn find_policy(host: &str) -> Option<&'static HostPolicy> {
-    HOSTS.iter().find(|p| p.host.eq_ignore_ascii_case(host))
+    let result = HOSTS.iter().find(|p| p.host.eq_ignore_ascii_case(host));
+    tracing::trace!(
+        host,
+        found = result.is_some(),
+        "research::allowlist::find_policy"
+    );
+    result
 }
 
 #[cfg(test)]

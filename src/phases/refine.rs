@@ -203,6 +203,11 @@ impl RefineDispatchPlan {
 /// [`RefineContext`] and return a [`RefineDispatchPlan`] describing
 /// the effects. Pure function: no I/O, no LLM, no DB.
 pub fn dispatch_refine_action(action: RefineAction, mut ctx: RefineContext) -> RefineDispatchPlan {
+    tracing::debug!(
+        action = action.as_str(),
+        proposal_id = %ctx.proposal.id,
+        "refine: dispatch_refine_action: enter"
+    );
     match action {
         RefineAction::TightenConstraint => {
             let mut next_request = ctx.synthesis_request.clone();

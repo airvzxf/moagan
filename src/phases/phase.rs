@@ -237,6 +237,13 @@ impl RunContext {
         raw_prompt: String,
         mode: String,
     ) -> Self {
+        tracing::debug!(
+            %run_id,
+            default_provider = %default_provider,
+            default_model = %default_model,
+            mode = %mode,
+            "RunContext: new"
+        );
         Self::new_with_config(
             run_id,
             home,

@@ -47,6 +47,7 @@ pub struct HashEntry {
 /// (one `<sha256>  <path>` per line, LF terminated, no trailing
 /// newline). Mirrors `sha256sum -b` output.
 fn format_sha256sums(entries: &[HashEntry]) -> String {
+    tracing::trace!(count = entries.len(), "format_sha256sums: enter");
     let mut out = String::new();
     for e in entries {
         // Note the two spaces between digest and path (sha256sum
@@ -60,6 +61,7 @@ fn format_sha256sums(entries: &[HashEntry]) -> String {
 /// Tolerant of CRLF and surrounding whitespace so files produced by
 /// different `sha256sum` builds round-trip cleanly.
 pub fn parse_sha256sums(body: &str) -> Result<Vec<HashEntry>> {
+    tracing::trace!(len = body.len(), "parse_sha256sums: enter");
     let mut out = Vec::new();
     for (idx, line) in body.lines().enumerate() {
         let line = line.trim_end_matches('\r');
@@ -68,12 +70,14 @@ pub fn parse_sha256sums(body: &str) -> Result<Vec<HashEntry>> {
         }
         let mut parts = line.split_whitespace();
         let Some(sha) = parts.next() else {
+            tracing::warn!(line = idx + 1, "parse_sha256sums: missing digest");
             return Err(Error::InvalidArgs(format!(
                 "SHA256SUMS line {}: missing digest",
                 idx + 1
             )));
         };
         let Some(path) = parts.next() else {
+            tracing::warn!(line = idx + 1, "parse_sha256sums: missing path");
             return Err(Error::InvalidArgs(format!(
                 "SHA256SUMS line {}: missing path",
                 idx + 1
@@ -87,12 +91,14 @@ pub fn parse_sha256sums(body: &str) -> Result<Vec<HashEntry>> {
             path: path.to_owned(),
         });
     }
+    tracing::trace!(count = out.len(), "parse_sha256sums: ok");
     Ok(out)
 }
 
 /// Compute the SHA-256 of a single file in streaming fashion. Reads
 /// through a 64 KiB buffer so multi-GB files stay bounded in RAM.
 pub fn sha256_file(path: &Path) -> Result<String> {
+    tracing::trace!(path = %path.display(), "sha256_file: enter");
     let f = File::open(path).map_err(|e| {
         Error::Io(IoError::Read {
             path: path.to_path_buf(),
@@ -115,7 +121,9 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     let digest = hasher.finalize();
-    Ok(hex::encode(digest))
+    let hex = hex::encode(digest);
+    tracing::trace!(path = %path.display(), sha256 = %hex, "sha256_file: ok");
+    Ok(hex)
 }
 
 /// Result of an export run.
@@ -146,7 +154,9 @@ pub fn export_run(
     format: ExportFormat,
     out: &Path,
 ) -> Result<ExportResult> {
+    tracing::info!(%run_id, ?level, ?format, out = %out.display(), "export_run: enter");
     if !run_dir.root().exists() {
+        tracing::error!(%run_id, root = %run_dir.root().display(), "export_run: run dir missing");
         return Err(Error::InvalidState(format!(
             "run {run_id} directory not found at {}",
             run_dir.root().display()
@@ -172,6 +182,11 @@ pub fn export_run(
         })?;
         payload_bytes += std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     }
+    tracing::debug!(
+        file_count = included.len(),
+        payload_bytes,
+        "export_run: stage 1 done"
+    );
 
     // Stage 2: hash every staged file in deterministic order so the
     // SHA256SUMS line order is stable across exports of the same
@@ -187,6 +202,7 @@ pub fn export_run(
     }
     let sums_path = staging_dir.join("SHA256SUMS");
     std::fs::write(&sums_path, format_sha256sums(&entries))?;
+    tracing::debug!("export_run: stage 2 done (sha256sums written)");
 
     // Stage 3: bundle the staged tree into the requested container.
     if let Some(parent) = out.parent()
@@ -202,12 +218,21 @@ pub fn export_run(
         ExportFormat::TarZst => write_tar_zst(&staging_dir, out)?,
     };
     let archive_sha256 = sha256_file(out)?;
+    tracing::debug!(file_count, archive_bytes, "export_run: stage 3 done");
 
     // Drop the tempdir eagerly; it would happen at scope exit anyway
     // but dropping early surfaces errors here instead of at the
     // caller's `?`.
     drop(staging_root);
 
+    tracing::info!(
+        %run_id,
+        file_count,
+        archive_bytes,
+        payload_bytes,
+        archive = %out.display(),
+        "export_run: ok"
+    );
     Ok(ExportResult {
         archive_path: out.to_path_buf(),
         file_count,
@@ -220,6 +245,7 @@ pub fn export_run(
 /// Decide which files are included in the export at the requested
 /// level. Returns `(absolute, relative-to-run-dir)` pairs.
 fn collect_files(run_dir: &RunDir<'_>, level: ExportLevel) -> Result<Vec<(PathBuf, String)>> {
+    tracing::debug!(?level, "collect_files: enter");
     let always = ["manifest.json", "brief.json", "rankings/ranking.json"];
     let level_specific: &[&str] = match level {
         ExportLevel::Summary => &[
@@ -285,10 +311,12 @@ fn collect_files(run_dir: &RunDir<'_>, level: ExportLevel) -> Result<Vec<(PathBu
     }
     // Deterministic ordering so the SHA256SUMS manifest is stable.
     out.sort_by(|a, b| a.1.cmp(&b.1));
+    tracing::debug!(count = out.len(), "collect_files: ok");
     Ok(out)
 }
 
 fn write_tar(staging_dir: &Path, out: &Path) -> Result<u64> {
+    tracing::debug!(staging = %staging_dir.display(), out = %out.display(), "write_tar: enter");
     let f = File::create(out).map_err(|e| {
         Error::Io(IoError::CreateFile {
             path: out.to_path_buf(),
@@ -310,6 +338,7 @@ fn write_tar(staging_dir: &Path, out: &Path) -> Result<u64> {
 }
 
 fn write_tar_gz(staging_dir: &Path, out: &Path) -> Result<u64> {
+    tracing::debug!(staging = %staging_dir.display(), out = %out.display(), "write_tar_gz: enter");
     let f = File::create(out).map_err(|e| {
         Error::Io(IoError::CreateFile {
             path: out.to_path_buf(),
@@ -333,6 +362,7 @@ fn write_tar_gz(staging_dir: &Path, out: &Path) -> Result<u64> {
 }
 
 fn write_zip(staging_dir: &Path, out: &Path) -> Result<u64> {
+    tracing::debug!(staging = %staging_dir.display(), out = %out.display(), "write_zip: enter");
     let f = File::create(out).map_err(|e| {
         Error::Io(IoError::CreateFile {
             path: out.to_path_buf(),
@@ -354,6 +384,7 @@ fn write_zip(staging_dir: &Path, out: &Path) -> Result<u64> {
 /// module owns the writer so the export module does not need to
 /// learn zstd directly.
 fn write_tar_zst(staging_dir: &Path, out: &Path) -> Result<u64> {
+    tracing::debug!(staging = %staging_dir.display(), out = %out.display(), "write_tar_zst: enter");
     let mut zst = crate::storage::compression::ZstWriter::new(out).map_err(|e| {
         Error::Io(IoError::CreateFile {
             path: out.to_path_buf(),
@@ -397,6 +428,7 @@ fn zip_error_to_io(err: &zip::result::ZipError) -> std::io::Error {
 }
 
 fn append_dir<W: Write>(builder: &mut TarBuilder<W>, root: &Path, dir: &Path) -> Result<()> {
+    tracing::trace!(dir = %dir.display(), "append_dir: enter");
     for entry in std::fs::read_dir(dir).map_err(|e| {
         Error::Io(IoError::Read {
             path: dir.to_path_buf(),
@@ -441,6 +473,7 @@ fn append_zip_dir<W: Write + Seek>(
     dir: &Path,
     options: SimpleFileOptions,
 ) -> Result<()> {
+    tracing::trace!(dir = %dir.display(), "append_zip_dir: enter");
     for entry in std::fs::read_dir(dir).map_err(|e| {
         Error::Io(IoError::Read {
             path: dir.to_path_buf(),

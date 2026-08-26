@@ -15,11 +15,42 @@ pub const DIFFICULTY_VALUES: &[&str] = &["low", "medium", "high"];
 /// - If `difficulty` is not one of `DIFFICULTY_VALUES`, default to
 ///   `"medium"`.
 pub fn sanitise(tags: &mut SketchTags, threshold: &TaggerThreshold) {
+    tracing::debug!(
+        sketch_id = %tags.sketch_id,
+        primary = %tags.primary,
+        similarity = tags.similarity_to_category,
+        threshold = threshold.value,
+        difficulty = %tags.difficulty,
+        "tagger: sanitise enter"
+    );
+    let mut demoted = false;
+    let mut difficulty_reset = false;
     if tags.similarity_to_category < threshold.value {
+        tracing::trace!(
+            sketch_id = %tags.sketch_id,
+            similarity = tags.similarity_to_category,
+            threshold = threshold.value,
+            "tagger: similarity below threshold; demoting primary"
+        );
         tags.primary = "uncategorized".into();
+        demoted = true;
     }
     if !DIFFICULTY_VALUES.contains(&tags.difficulty.as_str()) {
+        tracing::trace!(
+            sketch_id = %tags.sketch_id,
+            difficulty = %tags.difficulty,
+            "tagger: difficulty not in whitelist; resetting to medium"
+        );
         tags.difficulty = "medium".into();
+        difficulty_reset = true;
+    }
+    if demoted || difficulty_reset {
+        tracing::debug!(
+            sketch_id = %tags.sketch_id,
+            demoted,
+            difficulty_reset,
+            "tagger: sanitise applied"
+        );
     }
 }
 
@@ -29,10 +60,25 @@ pub fn sanitise(tags: &mut SketchTags, threshold: &TaggerThreshold) {
 /// emit a warning").
 pub fn uncategorized_ratio(tags: &[SketchTags]) -> f32 {
     if tags.is_empty() {
+        tracing::trace!(count = 0, "tagger: uncategorized_ratio on empty slice");
         return 0.0;
     }
     let n = tags.iter().filter(|t| t.primary == "uncategorized").count();
-    n as f32 / tags.len() as f32
+    let ratio = n as f32 / tags.len() as f32;
+    tracing::debug!(
+        total = tags.len(),
+        uncategorized = n,
+        ratio = ratio,
+        "tagger: uncategorized_ratio"
+    );
+    if ratio > 0.3 {
+        tracing::warn!(
+            ratio = ratio,
+            threshold = 0.3,
+            "tagger: uncategorized ratio exceeds documented threshold"
+        );
+    }
+    ratio
 }
 
 #[cfg(test)]

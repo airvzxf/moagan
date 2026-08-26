@@ -43,6 +43,12 @@ impl StaleArtifact {
     /// over `telemetry/calls.jsonl.gz` finds every stale
     /// artefact the resume path noticed.
     pub fn emit(&self) {
+        tracing::trace!(
+            path = %self.path.display(),
+            age_secs = self.age_secs,
+            ttl_secs = self.ttl_secs,
+            "StaleArtifact::emit"
+        );
         tracing::warn!(
             event = "stale_artifact",
             path = %self.path.display(),
@@ -66,19 +72,66 @@ impl StaleArtifact {
 /// age) is "fresh", which is the safe direction for a
 /// resume-time check.
 pub fn detect_stale(path: &Path, ttl_secs: u64) -> Option<StaleArtifact> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    let age = modified.elapsed().ok()?;
+    tracing::trace!(
+        path = %path.display(),
+        ttl_secs,
+        "detect_stale: enter"
+    );
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::trace!(
+                path = %path.display(),
+                error = %e,
+                "detect_stale: metadata() failed; returning None"
+            );
+            return None;
+        }
+    };
+    let modified = match meta.modified() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::trace!(
+                path = %path.display(),
+                error = %e,
+                "detect_stale: modified() failed; returning None"
+            );
+            return None;
+        }
+    };
+    let age = match modified.elapsed() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::trace!(
+                path = %path.display(),
+                error = %e,
+                "detect_stale: elapsed() failed; returning None"
+            );
+            return None;
+        }
+    };
     let age_secs = age.as_secs();
     let age_ms = age.as_millis();
     let ttl_ms = u128::from(ttl_secs).saturating_mul(1000);
     if age_ms > ttl_ms {
+        tracing::debug!(
+            path = %path.display(),
+            age_secs,
+            ttl_secs,
+            "detect_stale: stale"
+        );
         Some(StaleArtifact {
             path: path.to_path_buf(),
             age_secs,
             ttl_secs,
         })
     } else {
+        tracing::trace!(
+            path = %path.display(),
+            age_secs,
+            ttl_secs,
+            "detect_stale: fresh"
+        );
         None
     }
 }

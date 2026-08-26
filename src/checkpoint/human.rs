@@ -100,24 +100,33 @@ impl FromStr for CheckpointKind {
     type Err = Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "intake" => Ok(Self::Intake),
-            "clarify" => Ok(Self::Clarify),
-            "final" => Ok(Self::Final),
+        tracing::trace!(input = %s, "checkpoint::human::CheckpointKind::from_str");
+        let kind = match s {
+            "intake" => Self::Intake,
+            "clarify" => Self::Clarify,
+            "final" => Self::Final,
             // The roll-up counts are not part of the wire form —
             // see the `Discovery` variant's doc. `FromStr` round-trip
             // therefore collapses to the all-zero triple; callers
             // that need real counts build the variant directly.
-            "discovery" => Ok(Self::Discovery {
+            "discovery" => Self::Discovery {
                 cat_count: 0,
                 facet_count: 0,
                 contradictions: 0,
-            }),
-            "custom" => Ok(Self::Custom),
-            other => Err(Error::InvalidArgs(format!(
-                "unknown checkpoint kind: {other}"
-            ))),
-        }
+            },
+            "custom" => Self::Custom,
+            other => {
+                tracing::warn!(
+                    input = %s,
+                    "checkpoint::human::CheckpointKind::from_str: unknown"
+                );
+                return Err(Error::InvalidArgs(format!(
+                    "unknown checkpoint kind: {other}"
+                )));
+            }
+        };
+        tracing::trace!(?kind, "checkpoint::human::CheckpointKind::from_str: parsed");
+        Ok(kind)
     }
 }
 
@@ -144,12 +153,24 @@ pub enum Resolution {
 impl Resolution {
     /// True when the user accepted the default / approved.
     pub fn is_approved(&self) -> bool {
-        matches!(self, Self::Approved)
+        let out = matches!(self, Self::Approved);
+        tracing::trace!(
+            ?self,
+            approved = out,
+            "checkpoint::human::Resolution::is_approved"
+        );
+        out
     }
 
     /// True when the user typed a free-form text answer.
     pub fn is_modify(&self) -> bool {
-        matches!(self, Self::Modify(_))
+        let out = matches!(self, Self::Modify(_));
+        tracing::trace!(
+            ?self,
+            modify = out,
+            "checkpoint::human::Resolution::is_modify"
+        );
+        out
     }
 }
 
@@ -171,8 +192,15 @@ impl Checkpoint {
     /// Build a checkpoint with a fresh UUID v7 id. The id is part of
     /// the persisted file name (`h_<NN>.json`).
     pub fn new(kind: CheckpointKind, question: impl Into<String>, default_yes: bool) -> Self {
+        let id = format!("h_{}", uuid::Uuid::now_v7().simple());
+        tracing::debug!(
+            id = %id,
+            ?kind,
+            default_yes,
+            "checkpoint::human::Checkpoint::new"
+        );
         Self {
-            id: format!("h_{}", uuid::Uuid::now_v7().simple()),
+            id,
             kind,
             question: question.into(),
             default_yes,
@@ -246,6 +274,11 @@ pub fn skip(
     dir: &Path,
     telemetry: Option<&crate::telemetry::Telemetry>,
 ) -> Result<Resolution> {
+    tracing::info!(
+        id = %checkpoint.id,
+        kind = %checkpoint.kind,
+        "checkpoint::human::skip: enter"
+    );
     let captured = HumanCheckpoint {
         id: checkpoint.id.clone(),
         phase: checkpoint.kind.phase_name().to_owned(),
@@ -257,11 +290,17 @@ pub fn skip(
         schema_version: "v1".to_owned(),
     };
     persist(dir, &captured, telemetry)?;
-    Ok(if checkpoint.default_yes {
+    let out = if checkpoint.default_yes {
         Resolution::Approved
     } else {
         Resolution::Rejected
-    })
+    };
+    tracing::info!(
+        id = %checkpoint.id,
+        ?out,
+        "checkpoint::human::skip: complete"
+    );
+    Ok(out)
 }
 
 /// Ask the user. Blocking on stdin. Returns the [`Resolution`] and
@@ -271,6 +310,12 @@ pub fn skip(
 /// mirrored into the SQLite index via
 /// `Telemetry::record_checkpoint` (Phase D sub-fase #6).
 pub fn ask(checkpoint: &Checkpoint, dir: &Path, opts: &CheckpointOpts) -> Result<Resolution> {
+    tracing::debug!(
+        id = %checkpoint.id,
+        kind = %checkpoint.kind,
+        interactive = opts.interactive,
+        "checkpoint::human::ask: enter"
+    );
     if !opts.interactive {
         return skip(checkpoint, dir, opts.telemetry.as_ref());
     }
@@ -290,6 +335,12 @@ pub fn ask(checkpoint: &Checkpoint, dir: &Path, opts: &CheckpointOpts) -> Result
         schema_version: "v1".to_owned(),
     };
     persist(dir, &captured, opts.telemetry.as_ref())?;
+    tracing::info!(
+        id = %checkpoint.id,
+        ?parsed,
+        accepted_default,
+        "checkpoint::human::ask: captured"
+    );
     Ok(parsed)
 }
 
@@ -299,6 +350,10 @@ fn read_line_interactive(checkpoint: &Checkpoint) -> Result<(String, bool)> {
     } else {
         "[y/N]"
     };
+    tracing::debug!(
+        id = %checkpoint.id,
+        "checkpoint::human::read_line_interactive: prompting"
+    );
     print!("[{}] {} {} ", checkpoint.kind, checkpoint.question, suffix);
     io::stdout().flush()?;
     let stdin = io::stdin();
@@ -306,11 +361,22 @@ fn read_line_interactive(checkpoint: &Checkpoint) -> Result<(String, bool)> {
     stdin.lock().read_line(&mut line).map_err(Error::from)?;
     let trimmed = line.trim().to_owned();
     let accepted_default = trimmed.is_empty();
+    tracing::trace!(
+        id = %checkpoint.id,
+        accepted_default,
+        raw_len = line.len(),
+        "checkpoint::human::read_line_interactive: read"
+    );
     Ok((trimmed, accepted_default))
 }
 
 fn parse_resolution(raw: &str, default_yes: bool) -> Resolution {
     let trimmed = raw.trim();
+    tracing::trace!(
+        raw_len = raw.len(),
+        default_yes,
+        "checkpoint::human::parse_resolution"
+    );
     if trimmed.is_empty() {
         return if default_yes {
             Resolution::Approved
@@ -340,6 +406,11 @@ fn persist(
     checkpoint: &HumanCheckpoint,
     telemetry: Option<&crate::telemetry::Telemetry>,
 ) -> Result<()> {
+    tracing::debug!(
+        id = %checkpoint.id,
+        dir = %dir.display(),
+        "checkpoint::human::persist: enter"
+    );
     std::fs::create_dir_all(dir)?;
     let path: PathBuf = dir.join(format!("{}.json", checkpoint.id));
     let json = serde_json::to_vec_pretty(checkpoint)?;
@@ -350,6 +421,11 @@ fn persist(
     if let Some(t) = telemetry {
         let _ = t.record_checkpoint(checkpoint);
     }
+    tracing::info!(
+        id = %checkpoint.id,
+        path = %path.display(),
+        "checkpoint::human::persist: ok"
+    );
     Ok(())
 }
 

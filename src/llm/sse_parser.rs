@@ -43,17 +43,24 @@ impl<R: BufRead> SseParser<R> {
             self.buf.clear();
             let bytes = self.reader.read_line(&mut self.buf).map_err(SseError::Io)?;
             if bytes == 0 {
+                tracing::trace!("sse_parser: EOF (0 bytes read)");
                 return Ok(None);
             }
             let line = self.buf.trim_end_matches(['\n', '\r']);
             if line.is_empty() {
+                tracing::trace!("sse_parser: skipping empty/heartbeat line");
                 continue;
             }
             if let Some(rest) = line.strip_prefix("data:") {
                 let payload = rest.trim();
                 if payload == "[DONE]" {
+                    tracing::trace!("sse_parser: received [DONE] sentinel");
                     return Ok(None);
                 }
+                tracing::trace!(
+                    payload_len = payload.len(),
+                    "sse_parser: data line received"
+                );
                 // Defensive control-token strip (catalog §D.7.2):
                 // upstream providers occasionally emit raw control
                 // bytes inside the JSON payload (e.g. terminal-escape
@@ -62,9 +69,13 @@ impl<R: BufRead> SseParser<R> {
                 // — the only control bytes valid inside a JSON string
                 // — and drops everything else.
                 let cleaned = control_tokens::strip(payload);
-                let parsed: T = serde_json::from_str(cleaned.as_ref()).map_err(SseError::Parse)?;
+                let parsed: T = serde_json::from_str(cleaned.as_ref()).map_err(|e| {
+                    tracing::debug!(error = %e, payload_len = payload.len(), "sse_parser: JSON parse failed");
+                    SseError::Parse(e)
+                })?;
                 return Ok(Some(parsed));
             }
+            tracing::trace!(line_len = line.len(), "sse_parser: non-data line ignored");
         }
     }
 }

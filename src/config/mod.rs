@@ -942,6 +942,15 @@ impl RankingWeights {
         clarity: f32,
         overall: f32,
     ) -> f32 {
+        tracing::trace!(
+            correctness,
+            completeness,
+            fit,
+            evidence,
+            clarity,
+            overall,
+            "RankingWeights::weighted_score: enter"
+        );
         let weights = [
             self.correctness,
             self.completeness,
@@ -962,11 +971,19 @@ impl RankingWeights {
             0.0
         };
         let total = sum + self.overall;
-        if total > 0.0 {
+        let out = if total > 0.0 {
             (sum * weighted_avg + self.overall * overall) / total
         } else {
             0.0
-        }
+        };
+        tracing::trace!(
+            weight_sum = sum,
+            overall_weight = self.overall,
+            total,
+            score = out,
+            "RankingWeights::weighted_score: ok"
+        );
+        out
     }
 }
 
@@ -1533,13 +1550,16 @@ impl ProviderConfig {
     /// back to this. Pure helper — no allocation when the section
     /// has at least one model.
     pub fn first_model_id(&self) -> &str {
-        self.models.first().map(|m| m.id.as_str()).unwrap_or("")
+        let id = self.models.first().map(|m| m.id.as_str()).unwrap_or("");
+        tracing::trace!(model_id = id, "ProviderConfig::first_model_id");
+        id
     }
 }
 
 impl Config {
     /// Build the default configuration without touching the filesystem.
     pub fn defaults() -> Self {
+        tracing::trace!("Config::defaults: building from Self::default()");
         Self::default()
     }
 
@@ -1563,6 +1583,7 @@ impl Config {
     /// new default provider (Q6 deepseek, Q7 opencode-go, etc.) doesn't
     /// break existing operator configs that only override a subset.
     pub fn load() -> Result<Self> {
+        tracing::info!("config::load: enter");
         let path = default_config_path();
         let mut cfg = match path.as_ref() {
             Some(p) if p.exists() => {
@@ -1570,10 +1591,16 @@ impl Config {
                 Self::warn_unknown_provider_keys(p, &raw);
                 tracing::info!(
                     path = %p.display(),
+                    bytes = raw.len(),
                     "config: loaded from {}",
                     p.display()
                 );
                 toml::from_str(&raw).map_err(|e| {
+                    tracing::error!(
+                        path = %p.display(),
+                        error = %e,
+                        "config: TOML parse failed"
+                    );
                     crate::Error::InvalidArgs(format!("config parse error at {p:?}: {e}"))
                 })?
             }
@@ -1584,10 +1611,21 @@ impl Config {
         };
         // Merge user's [providers] table with the defaults: user entries win.
         let defaults = default_providers();
+        let mut inserted = 0usize;
         for (name, default_spec) in defaults {
+            let was_present = cfg.providers.contains_key(&name);
             cfg.providers.entry(name).or_insert(default_spec);
+            if !was_present {
+                inserted += 1;
+            }
         }
+        tracing::trace!(
+            defaulted_provider_count = inserted,
+            final_provider_count = cfg.providers.len(),
+            "config::load: provider defaults merged"
+        );
         cfg.apply_env_overrides();
+        tracing::info!("config::load: ok");
         Ok(cfg)
     }
 
@@ -1599,6 +1637,7 @@ impl Config {
     /// dropped by serde and the operator wonders why the key is
     /// missing. The warning fires once per offending table.
     fn warn_unknown_provider_keys(path: &std::path::Path, raw: &str) {
+        tracing::trace!(path = %path.display(), "warn_unknown_provider_keys: enter");
         const KNOWN: &[&str] = &[
             "endpoint",
             "models",
@@ -1612,11 +1651,18 @@ impl Config {
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
             Ok(v) => v,
-            Err(_) => return, // the main parse will surface the error.
+            Err(_) => {
+                tracing::trace!(
+                    "warn_unknown_provider_keys: outer TOML parse failed; deferring to main loader"
+                );
+                return; // the main parse will surface the error.
+            }
         };
         let Some(table) = parsed.get("providers").and_then(|v| v.as_table()) else {
+            tracing::trace!("warn_unknown_provider_keys: no [providers] table");
             return;
         };
+        let mut warned = 0usize;
         for (name, value) in table {
             let Some(sub) = value.as_table() else {
                 continue;
@@ -1634,7 +1680,9 @@ impl Config {
                  these are ignored (api_key belongs in api_keys.toml, not moagan.toml)",
                 unknown,
             );
+            warned += 1;
         }
+        tracing::trace!(warned_count = warned, "warn_unknown_provider_keys: done");
     }
 
     /// Load a domain-specific profile by name.
@@ -1645,6 +1693,7 @@ impl Config {
     /// the caller wants the merges to take effect (e.g. after a
     /// `--profile <name>` CLI flag resolves).
     pub fn load_profile(name: &str) -> Result<Profile> {
+        tracing::debug!(name, "Config::load_profile");
         Profile::load(name)
     }
 
@@ -1658,18 +1707,30 @@ impl Config {
     /// An empty profile is a no-op so the CLI's `--profile ""`
     /// sentinel stays harmless.
     pub fn apply_profile(&mut self, profile: &Profile) {
+        tracing::debug!(
+            extends = ?profile.extends,
+            forbidden_count = profile.gate_forbidden_techs.len(),
+            "Config::apply_profile: enter"
+        );
         if profile.is_empty() {
+            tracing::trace!("Config::apply_profile: empty profile; no-op");
             return;
         }
         let mut forbidden: Vec<String> = self.gate_forbidden_techs.clone();
         forbidden.extend(profile.gate_forbidden_techs.iter().cloned());
         forbidden.sort();
         forbidden.dedup();
+        tracing::trace!(
+            merged_count = forbidden.len(),
+            "Config::apply_profile: forbidden_techs merged"
+        );
         self.gate_forbidden_techs = forbidden;
         if let Some(v) = profile.gate_min_length {
+            tracing::trace!(value = v, "Config::apply_profile: gate_min_length set");
             self.gate_min_length = v;
         }
         if let Some(v) = profile.gate_max_length {
+            tracing::trace!(value = v, "Config::apply_profile: gate_max_length set");
             self.gate_max_length = v;
         }
         // Profile-defined temperature / judge-quorum overrides are
@@ -1679,6 +1740,11 @@ impl Config {
         // per-mode judge counts) read these maps directly.
         self.profile_temperature_overrides = profile.temperature_overrides.clone();
         self.profile_judge_quorum_overrides = profile.judge_quorum_overrides.clone();
+        tracing::debug!(
+            temp_overrides = self.profile_temperature_overrides.len(),
+            quorum_overrides = self.profile_judge_quorum_overrides.len(),
+            "Config::apply_profile: ok"
+        );
     }
 
     /// Apply `MOAGAN_*` environment overrides. Any override that fails
@@ -1688,35 +1754,58 @@ impl Config {
     /// the config -> registry seam without going through the
     /// filesystem loader.
     pub(crate) fn apply_env_overrides(&mut self) {
+        tracing::debug!("Config::apply_env_overrides: enter");
         if let Ok(v) = std::env::var("MOAGAN_MAX_PARALLELISM")
             && let Ok(n) = v.parse()
         {
+            tracing::trace!(
+                var = "MOAGAN_MAX_PARALLELISM",
+                value = n,
+                "applied env override"
+            );
             self.max_parallelism = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_SKETCH_TIMEOUT")
             && let Ok(n) = v.parse()
         {
+            tracing::trace!(
+                var = "MOAGAN_SKETCH_TIMEOUT",
+                value = n,
+                "applied env override"
+            );
             self.sketch_timeout_secs = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_PHASE_TIMEOUT")
             && let Ok(n) = v.parse()
         {
+            tracing::trace!(
+                var = "MOAGAN_PHASE_TIMEOUT",
+                value = n,
+                "applied env override"
+            );
             self.phase_timeout_secs = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_TOTAL_TIMEOUT")
             && let Ok(n) = v.parse()
         {
+            tracing::trace!(
+                var = "MOAGAN_TOTAL_TIMEOUT",
+                value = n,
+                "applied env override"
+            );
             self.total_timeout_secs = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_DEFAULT_PROVIDER") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
+                tracing::trace!(var = "MOAGAN_DEFAULT_PROVIDER", value = %trimmed, "applied env override");
                 self.default_provider = trimmed.to_owned();
             }
         }
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_ENDPOINT")
             && !v.trim().is_empty()
         {
+            let mut rewritten = 0usize;
             for spec in self.providers.values_mut() {
                 if spec
                     .endpoint
@@ -1724,8 +1813,14 @@ impl Config {
                     .is_some_and(|e| e.contains("/messages"))
                 {
                     spec.endpoint = Some(v.clone());
+                    rewritten += 1;
                 }
             }
+            tracing::trace!(
+                var = "MOAGAN_MINIMAX_ENDPOINT",
+                rewritten_providers = rewritten,
+                "applied env override"
+            );
         }
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_MODEL")
             && !v.trim().is_empty()
@@ -1736,6 +1831,7 @@ impl Config {
             // `/v1/messages` path). This mirrors the legacy
             // `MOAGAN_MINIMAX_MODEL` contract for callers that
             // still rely on the env var.
+            let mut rewritten = 0usize;
             for spec in self.providers.values_mut() {
                 if spec
                     .endpoint
@@ -1744,8 +1840,15 @@ impl Config {
                     && let Some(first) = spec.models.first_mut()
                 {
                     first.id = v.clone();
+                    rewritten += 1;
                 }
             }
+            tracing::trace!(
+                var = "MOAGAN_MINIMAX_MODEL",
+                model = %v,
+                rewritten_providers = rewritten,
+                "applied env override"
+            );
         }
         if let Ok(v) = std::env::var("MOAGAN_JSON_REPAIR_V2_ENABLED") {
             let normalised = v.trim().to_ascii_lowercase();
@@ -1754,16 +1857,31 @@ impl Config {
                 "false" | "0" | "no" | "off" => self.llm.json_repair_v2_enabled = false,
                 _ => {}
             }
+            tracing::trace!(
+                var = "MOAGAN_JSON_REPAIR_V2_ENABLED",
+                enabled = self.llm.json_repair_v2_enabled,
+                "applied env override"
+            );
         }
         if let Ok(v) = std::env::var("MOAGAN_REPAIR_MAX_ROUNDS")
             && let Ok(n) = v.parse()
         {
+            tracing::trace!(
+                var = "MOAGAN_REPAIR_MAX_ROUNDS",
+                value = n,
+                "applied env override"
+            );
             self.repair_max_rounds = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_GATE_FORBIDDEN_TECHS")
             && !v.trim().is_empty()
         {
             self.gate_forbidden_techs = v.split(',').map(|s| s.trim().to_owned()).collect();
+            tracing::trace!(
+                var = "MOAGAN_GATE_FORBIDDEN_TECHS",
+                count = self.gate_forbidden_techs.len(),
+                "applied env override"
+            );
         }
         if let Ok(v) = std::env::var("MOAGAN_STARTUP_RECONCILE") {
             // Accept the canonical `true` / `false` (case-insensitive)
@@ -1776,6 +1894,11 @@ impl Config {
                 "false" | "0" | "no" | "off" => self.startup_reconcile = false,
                 _ => {}
             }
+            tracing::trace!(
+                var = "MOAGAN_STARTUP_RECONCILE",
+                value = self.startup_reconcile,
+                "applied env override"
+            );
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_ALLOW_NETWORK") {
             // Catalog §D.11.9. Accept the canonical `true`/`false`
@@ -1788,6 +1911,11 @@ impl Config {
                 "false" | "0" | "no" | "off" => self.sandbox_allow_network = false,
                 _ => {}
             }
+            tracing::trace!(
+                var = "MOAGAN_SANDBOX_ALLOW_NETWORK",
+                value = self.sandbox_allow_network,
+                "applied env override"
+            );
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_ALLOW_INJECTION") {
             // Catalog §D.11.10. Same parsing as the network flag;
@@ -1798,20 +1926,40 @@ impl Config {
                 "false" | "0" | "no" | "off" => self.sandbox_allow_injection = false,
                 _ => {}
             }
+            tracing::trace!(
+                var = "MOAGAN_SANDBOX_ALLOW_INJECTION",
+                value = self.sandbox_allow_injection,
+                "applied env override"
+            );
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_NETWORK_POLICY")
             && let Some(policy) = parse_network_policy_env(&v)
         {
+            tracing::trace!(
+                var = "MOAGAN_SANDBOX_NETWORK_POLICY",
+                policy = ?policy,
+                "applied env override"
+            );
             self.sandbox_network_policy = policy;
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_NAMESPACES")
             && let Ok(flags) = v.parse()
         {
+            tracing::trace!(
+                var = "MOAGAN_SANDBOX_NAMESPACES",
+                flags = ?flags,
+                "applied env override"
+            );
             self.sandbox_namespaces = flags;
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_SECCOMP")
             && let Some(kind) = parse_seccomp_policy_env(&v)
         {
+            tracing::trace!(
+                var = "MOAGAN_SANDBOX_SECCOMP",
+                kind = ?kind,
+                "applied env override"
+            );
             self.sandbox_seccomp = kind;
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_CGROUP") {
@@ -1832,6 +1980,11 @@ impl Config {
             } else if let Some(limits) = parse_cgroup_limits_env(normalised) {
                 self.sandbox_cgroup = Some(limits);
             }
+            tracing::trace!(
+                var = "MOAGAN_SANDBOX_CGROUP",
+                is_some = self.sandbox_cgroup.is_some(),
+                "applied env override"
+            );
         }
         // Track K (D9): bound the external research fetcher to an
         // explicit opt-in. `MOAGAN_RESEARCH_ENABLED=true` flips the
@@ -1845,6 +1998,11 @@ impl Config {
                 "false" | "0" | "no" | "off" => self.research_enabled = false,
                 _ => {}
             }
+            tracing::trace!(
+                var = "MOAGAN_RESEARCH_ENABLED",
+                value = self.research_enabled,
+                "applied env override"
+            );
         }
         // Track E (E7 partial): opt-in switch for the
         // `TiefighterCritic` adversarial cross-check sidecar.
@@ -1859,6 +2017,11 @@ impl Config {
                 "false" | "0" | "no" | "off" => self.critique.tiefighter_enabled = false,
                 _ => {}
             }
+            tracing::trace!(
+                var = "MOAGAN_CRITIQUE_TIEFIGHTER_ENABLED",
+                value = self.critique.tiefighter_enabled,
+                "applied env override"
+            );
         }
         // Track K (D9): CSV list of URLs the bounded fetcher is
         // allowed to query. Empty / whitespace exports are ignored
@@ -1874,6 +2037,11 @@ impl Config {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect();
+            tracing::trace!(
+                var = "MOAGAN_RESEARCH_URLS",
+                count = self.research_urls.len(),
+                "applied env override"
+            );
         }
         // Track K (D9): bearer-token wiring for `auth_bearer`-flagged
         // hosts (`api.github.com` in the canonical allowlist). Empty
@@ -1887,6 +2055,7 @@ impl Config {
             && !v.trim().is_empty()
         {
             self.research.api_key = Some(v);
+            tracing::trace!(var = "MOAGAN_RESEARCH_API_KEY", "applied env override");
         }
         // K.4 sub-3: per-host env var overrides. Operators can
         // set `MOAGAN_RESEARCH_AUTH_<HOST>=<env_var_name>` to
@@ -1898,6 +2067,7 @@ impl Config {
         // suffixes (no recognisable host fragment) are silently
         // dropped so a stale export does not corrupt the
         // override map.
+        let mut auth_overrides = 0usize;
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_RESEARCH_AUTH_") else {
                 continue;
@@ -1927,7 +2097,16 @@ impl Config {
                 .auth
                 .0
                 .insert(canonical, trimmed_value.to_owned());
+            auth_overrides += 1;
         }
+        if auth_overrides > 0 {
+            tracing::trace!(
+                prefix = "MOAGAN_RESEARCH_AUTH_",
+                count = auth_overrides,
+                "applied env override"
+            );
+        }
+        let mut rate_limit_overrides = 0usize;
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_RESEARCH_RATE_LIMIT_") else {
                 continue;
@@ -1938,7 +2117,15 @@ impl Config {
             }
             if let Some(config) = parse_rate_limit_env(&value) {
                 self.research.per_host_rate_limit.insert(host, config);
+                rate_limit_overrides += 1;
             }
+        }
+        if rate_limit_overrides > 0 {
+            tracing::trace!(
+                prefix = "MOAGAN_RESEARCH_RATE_LIMIT_",
+                count = rate_limit_overrides,
+                "applied env override"
+            );
         }
         // D.13.18 (v0.5 PR-18): master switch for the coordinator's
         // auto-invocation of `run_with_pickers`. The env-var name
@@ -1957,6 +2144,11 @@ impl Config {
             && let Ok(n) = v.trim().parse::<usize>()
             && n >= MIN_SKETCHES_PER_CELL
         {
+            tracing::trace!(
+                var = "MOAGAN_DISCOVERY_SKETCHES_PER_CELL",
+                value = n,
+                "applied env override"
+            );
             self.discovery_matrix.sketches_per_cell = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS") {
@@ -1966,6 +2158,11 @@ impl Config {
                 "false" | "0" | "no" | "off" => self.discovery.auto_pickers = false,
                 _ => {}
             }
+            tracing::trace!(
+                var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
+                value = self.discovery.auto_pickers,
+                "applied env override"
+            );
         }
         // Track E (catalog §D.19.6): per-provider rate-limit knobs.
         // `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>`
@@ -1979,6 +2176,7 @@ impl Config {
         // a separate prefix (`MOAGAN_RATE_LIMIT_ROLE_<role>`) and
         // are skipped here so a per-role env var is not misread as
         // a provider named `role.tagger`.
+        let mut rl_provider = 0usize;
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_RATE_LIMIT_") else {
                 continue;
@@ -1989,7 +2187,16 @@ impl Config {
             let provider = suffix.to_ascii_lowercase();
             if let Some(cfg) = parse_rate_limit_env(&value) {
                 self.rate_limit_per_provider.insert(provider, cfg);
+                rl_provider += 1;
             }
+        }
+        if rl_provider > 0 {
+            tracing::trace!(
+                prefix = "MOAGAN_RATE_LIMIT_",
+                count = rl_provider,
+                final_size = self.rate_limit_per_provider.len(),
+                "applied env override"
+            );
         }
         // Track E (catalog §D.19.6): per-role rate-limit knobs.
         // `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>`
@@ -2001,6 +2208,7 @@ impl Config {
         // values (missing colon, non-numeric tokens) are silently
         // ignored so a stale export does not corrupt an existing
         // TOML-loaded entry.
+        let mut rl_role = 0usize;
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_RATE_LIMIT_ROLE_") else {
                 continue;
@@ -2011,7 +2219,16 @@ impl Config {
             let role = suffix.to_ascii_lowercase();
             if let Some(cfg) = parse_rate_limit_env(&value) {
                 self.rate_limit_per_role.insert(role, cfg);
+                rl_role += 1;
             }
+        }
+        if rl_role > 0 {
+            tracing::trace!(
+                prefix = "MOAGAN_RATE_LIMIT_ROLE_",
+                count = rl_role,
+                final_size = self.rate_limit_per_role.len(),
+                "applied env override"
+            );
         }
         // v0.9.6: per-role adaptive-throttle governor knobs.
         // `MOAGAN_THROTTLE_PER_ROLE_<role>=<initial>:<max>:<init_backoff>:<max_backoff>:<additive_after>:<jitter>`
@@ -2020,6 +2237,7 @@ impl Config {
         // Garbage values (missing colons, non-numeric tokens) are
         // silently ignored so a stale export does not corrupt an
         // existing TOML-loaded entry.
+        let mut throttle = 0usize;
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_THROTTLE_PER_ROLE_") else {
                 continue;
@@ -2030,7 +2248,16 @@ impl Config {
             let role = suffix.to_ascii_lowercase();
             if let Some(cfg) = parse_throttle_env(&value) {
                 self.throttle_per_role.insert(role, cfg);
+                throttle += 1;
             }
+        }
+        if throttle > 0 {
+            tracing::trace!(
+                prefix = "MOAGAN_THROTTLE_PER_ROLE_",
+                count = throttle,
+                final_size = self.throttle_per_role.len(),
+                "applied env override"
+            );
         }
         // v0.9.6: per-role circuit-breaker knobs.
         // `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>=<threshold>:<window_secs>:<cooldown_secs>`
@@ -2038,6 +2265,7 @@ impl Config {
         // that trips on persistent `PlanExhausted`. The role name
         // matches `Role::as_str()` value (snake_case). Garbage
         // values are silently ignored.
+        let mut cb = 0usize;
         for (key, value) in std::env::vars() {
             let Some(suffix) = key.strip_prefix("MOAGAN_CIRCUIT_BREAKER_PER_ROLE_") else {
                 continue;
@@ -2048,7 +2276,16 @@ impl Config {
             let role = suffix.to_ascii_lowercase();
             if let Some(cfg) = parse_breaker_env(&value) {
                 self.circuit_breaker_per_role.insert(role, cfg);
+                cb += 1;
             }
+        }
+        if cb > 0 {
+            tracing::trace!(
+                prefix = "MOAGAN_CIRCUIT_BREAKER_PER_ROLE_",
+                count = cb,
+                final_size = self.circuit_breaker_per_role.len(),
+                "applied env override"
+            );
         }
         // Per-provider `omit_max_tokens` override from env vars of the
         // form `MOAGAN_<NAME>_OMIT_MAX_TOKENS=true|false`. The provider
@@ -2064,6 +2301,14 @@ impl Config {
         // disable the probe fleet-wide with a single export.
         let auto_env = std::env::var("MOAGAN_MAX_TOKEN_AUTO").ok();
         let auto_save_env = std::env::var("MOAGAN_MAX_TOKEN_AUTO_SAVE").ok();
+        if auto_env.is_some() || auto_save_env.is_some() {
+            tracing::trace!(
+                has_max_token_auto = auto_env.is_some(),
+                has_max_token_auto_save = auto_save_env.is_some(),
+                provider_count = self.providers.len(),
+                "applying global max_token_auto knobs"
+            );
+        }
         for (name, spec) in self.providers.iter_mut() {
             let env_key = format!(
                 "MOAGAN_{}_OMIT_MAX_TOKENS",
@@ -2090,6 +2335,14 @@ impl Config {
                 spec.max_token_auto_save = matches!(v.trim(), "true" | "1" | "yes" | "on" | "");
             }
         }
+        tracing::trace!(
+            provider_count = self.providers.len(),
+            rl_provider_entries = self.rate_limit_per_provider.len(),
+            rl_role_entries = self.rate_limit_per_role.len(),
+            throttle_entries = self.throttle_per_role.len(),
+            cb_entries = self.circuit_breaker_per_role.len(),
+            "Config::apply_env_overrides: ok"
+        );
     }
 }
 
@@ -2098,15 +2351,27 @@ impl Config {
 /// `None` for any value that does not parse; the caller is
 /// expected to leave the existing knob alone in that case.
 fn parse_cgroup_limits_env(s: &str) -> Option<CgroupLimits> {
-    serde_json::from_str::<CgroupLimits>(s).ok()
+    tracing::trace!(value_len = s.len(), "parse_cgroup_limits_env: enter");
+    match serde_json::from_str::<CgroupLimits>(s) {
+        Ok(limits) => {
+            tracing::trace!("parse_cgroup_limits_env: ok");
+            Some(limits)
+        }
+        Err(_) => {
+            tracing::trace!("parse_cgroup_limits_env: parse failed; returning None");
+            None
+        }
+    }
 }
 
 fn canonical_research_rate_limit_host(suffix: &str) -> String {
-    suffix
+    let host = suffix
         .trim()
         .trim_end_matches('.')
         .to_ascii_lowercase()
-        .replace('_', ".")
+        .replace('_', ".");
+    tracing::trace!(suffix, resolved = %host, "canonical_research_rate_limit_host");
+    host
 }
 
 /// Parse the `MOAGAN_RATE_LIMIT_<provider>` env var into a
@@ -2115,15 +2380,18 @@ fn canonical_research_rate_limit_host(suffix: &str) -> String {
 /// not parse so a stale / malformed export leaves the existing knob
 /// alone.
 fn parse_rate_limit_env(s: &str) -> Option<RateLimitConfig> {
+    tracing::trace!(value = s, "parse_rate_limit_env: enter");
     let s = s.trim();
     let (cap_str, refill_str) = s.split_once(':')?;
     let capacity: u32 = cap_str.trim().parse().ok()?;
     let refill_per_sec: u32 = refill_str.trim().parse().ok()?;
-    Some(RateLimitConfig {
+    let cfg = RateLimitConfig {
         capacity,
         refill_per_sec,
         initial: None,
-    })
+    };
+    tracing::trace!(capacity, refill_per_sec, "parse_rate_limit_env: ok");
+    Some(cfg)
 }
 
 /// Parse the `MOAGAN_THROTTLE_PER_ROLE_<role>` env var. The shape is
@@ -2131,6 +2399,7 @@ fn parse_rate_limit_env(s: &str) -> Option<RateLimitConfig> {
 /// Returns `None` for any value that does not parse so a stale /
 /// malformed export leaves the existing knob alone.
 fn parse_throttle_env(s: &str) -> Option<ThrottleConfig> {
+    tracing::trace!(value = s, "parse_throttle_env: enter");
     let mut tokens = s.trim().split(':').map(str::trim);
     let initial_concurrency: u32 = tokens.next()?.parse().ok()?;
     let max_concurrency: u32 = tokens.next()?.parse().ok()?;
@@ -2138,29 +2407,43 @@ fn parse_throttle_env(s: &str) -> Option<ThrottleConfig> {
     let max_backoff_ms: u64 = tokens.next()?.parse().ok()?;
     let additive_after_ms: u64 = tokens.next()?.parse().ok()?;
     let jitter_ms: u64 = tokens.next()?.parse().ok()?;
-    Some(ThrottleConfig {
+    let cfg = ThrottleConfig {
         initial_concurrency,
         max_concurrency,
         initial_backoff_ms,
         max_backoff_ms,
         additive_after_ms,
         jitter_ms,
-    })
+    };
+    tracing::trace!(
+        initial_concurrency,
+        max_concurrency,
+        "parse_throttle_env: ok"
+    );
+    Some(cfg)
 }
 
 /// Parse the `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>` env var.
 /// The shape is `THRESHOLD:WINDOW_SECS:COOLDOWN_SECS`. Returns
 /// `None` for any value that does not parse.
 fn parse_breaker_env(s: &str) -> Option<BreakerConfig> {
+    tracing::trace!(value = s, "parse_breaker_env: enter");
     let mut tokens = s.trim().split(':').map(str::trim);
     let threshold: u32 = tokens.next()?.parse().ok()?;
     let window_secs: u64 = tokens.next()?.parse().ok()?;
     let cooldown_secs: u64 = tokens.next()?.parse().ok()?;
-    Some(BreakerConfig {
+    let cfg = BreakerConfig {
         threshold,
         window_secs,
         cooldown_secs,
-    })
+    };
+    tracing::trace!(
+        threshold,
+        window_secs,
+        cooldown_secs,
+        "parse_breaker_env: ok"
+    );
+    Some(cfg)
 }
 
 /// Parse the `MOAGAN_SANDBOX_SECCOMP` env var into a
@@ -2176,16 +2459,21 @@ fn parse_breaker_env(s: &str) -> Option<BreakerConfig> {
 /// expected to leave the existing knob alone in that case so a
 /// stale / malformed export does not silently flip the install.
 fn parse_seccomp_policy_env(s: &str) -> Option<SeccompPolicyKind> {
+    tracing::trace!(value = s, "parse_seccomp_policy_env: enter");
     let s = s.trim();
     if s.eq_ignore_ascii_case("permissive") {
+        tracing::trace!("parse_seccomp_policy_env: permissive (case-insensitive)");
         return Some(SeccompPolicyKind::Permissive);
     }
     if s.eq_ignore_ascii_case("strict_rust_build") {
+        tracing::trace!("parse_seccomp_policy_env: strict_rust_build (case-insensitive)");
         return Some(SeccompPolicyKind::StrictRustBuild);
     }
     if let Ok(kind) = serde_json::from_str::<SeccompPolicyKind>(s) {
+        tracing::trace!(kind = ?kind, "parse_seccomp_policy_env: JSON parse");
         return Some(kind);
     }
+    tracing::trace!("parse_seccomp_policy_env: no match; returning None");
     None
 }
 
@@ -2206,22 +2494,32 @@ fn parse_seccomp_policy_env(s: &str) -> Option<SeccompPolicyKind> {
 /// expected to leave the existing knob alone in that case so a
 /// stale export does not silently corrupt the install.
 fn parse_network_policy_env(s: &str) -> Option<NetworkPolicy> {
+    tracing::trace!(value = s, "parse_network_policy_env: enter");
     let s = s.trim();
     if s.eq_ignore_ascii_case("off") {
+        tracing::trace!("parse_network_policy_env: off");
         return Some(NetworkPolicy::Off);
     }
     if s.eq_ignore_ascii_case("open") {
+        tracing::trace!("parse_network_policy_env: open");
         return Some(NetworkPolicy::Open);
     }
     if let Ok(list) = serde_json::from_str::<Vec<String>>(s) {
+        tracing::trace!(
+            host_count = list.len(),
+            "parse_network_policy_env: JSON array -> AllowList"
+        );
         return Some(NetworkPolicy::AllowList { hosts: list });
     }
     if let Ok(policy) = serde_json::from_str::<NetworkPolicy>(s) {
+        tracing::trace!(policy = ?policy, "parse_network_policy_env: typed JSON");
         return Some(policy);
     }
     if s.eq_ignore_ascii_case("allow_list") {
+        tracing::trace!("parse_network_policy_env: bare 'allow_list' (empty)");
         return Some(NetworkPolicy::AllowList { hosts: Vec::new() });
     }
+    tracing::trace!("parse_network_policy_env: no match; returning None");
     None
 }
 
@@ -2229,9 +2527,19 @@ impl Config {
     /// Resolve the configured provider by name. Returns
     /// `Error::InvalidArgs` if the provider is unknown.
     pub fn provider(&self, name: &str) -> Result<&ProviderConfig> {
-        self.providers
-            .get(name)
-            .ok_or_else(|| crate::Error::InvalidArgs(format!("unknown provider: {name}")))
+        tracing::trace!(name, "Config::provider: enter");
+        let res = self.providers.get(name).ok_or_else(|| {
+            tracing::warn!(name, "Config::provider: unknown provider");
+            crate::Error::InvalidArgs(format!("unknown provider: {name}"))
+        });
+        if let Ok(spec) = &res {
+            tracing::trace!(
+                name,
+                model_count = spec.models.len(),
+                "Config::provider: ok"
+            );
+        }
+        res
     }
 
     /// Resolve the operator-supplied `--provider` value (or its
@@ -2249,23 +2557,32 @@ impl Config {
     /// Empty halves and extra colons are rejected with
     /// `Error::InvalidArgs` so the CLI surface stays unambiguous.
     pub fn resolve_provider(&self, raw: &str) -> Result<(String, String)> {
+        tracing::trace!(raw, "Config::resolve_provider: enter");
         let trimmed = raw.trim();
         if trimmed.is_empty() {
+            tracing::warn!("Config::resolve_provider: empty input");
             return Err(crate::Error::InvalidArgs(
                 "--provider is empty; pass SECTION[:MODEL]".into(),
             ));
         }
         if let Some((section, model)) = trimmed.split_once(':') {
             if section.is_empty() || model.is_empty() {
+                tracing::warn!(raw, "Config::resolve_provider: empty half");
                 return Err(crate::Error::InvalidArgs(format!(
                     "--provider '{trimmed}' has an empty section or model half"
                 )));
             }
             if model.contains(':') {
+                tracing::warn!(raw, "Config::resolve_provider: too many ':'");
                 return Err(crate::Error::InvalidArgs(format!(
                     "--provider '{trimmed}' has more than one ':'; expected exactly one separator"
                 )));
             }
+            tracing::debug!(
+                section,
+                model,
+                "Config::resolve_provider: SECTION:MODEL form"
+            );
             return Ok((section.to_owned(), model.to_owned()));
         }
         // Bare SECTION: pick the section's first model (single-model
@@ -2274,11 +2591,20 @@ impl Config {
         // form so the operator picks a model explicitly).
         let spec = self.provider(trimmed)?;
         if spec.models.is_empty() {
+            tracing::warn!(
+                section = trimmed,
+                "Config::resolve_provider: bare section has no models"
+            );
             return Err(crate::Error::InvalidArgs(format!(
                 "--provider '{trimmed}' has no model configured; pass --provider {trimmed}:MODEL explicitly"
             )));
         }
         if spec.models.len() > 1 {
+            tracing::warn!(
+                section = trimmed,
+                model_count = spec.models.len(),
+                "Config::resolve_provider: bare section ambiguous"
+            );
             return Err(crate::Error::InvalidArgs(format!(
                 "--provider '{trimmed}' exposes {} models; pass --provider {trimmed}:MODEL explicitly (one of: {})",
                 spec.models.len(),
@@ -2289,6 +2615,11 @@ impl Config {
                     .join(", ")
             )));
         }
+        tracing::debug!(
+            section = trimmed,
+            model = %spec.models[0].id,
+            "Config::resolve_provider: bare section -> first model"
+        );
         Ok((trimmed.to_owned(), spec.models[0].id.clone()))
     }
 
@@ -2304,12 +2635,14 @@ impl Config {
     /// URL via [`crate::llm::wire_format::wire_format_from_url`]
     /// so the dispatcher does not have to recompute it.
     pub fn resolved_model(&self, section: &str, model_id: &str) -> Result<ResolvedModelConfig> {
+        tracing::trace!(section, model_id, "Config::resolved_model: enter");
         let spec = self.provider(section)?;
         let model_cfg = spec
             .models
             .iter()
             .find(|m| m.id == model_id)
             .ok_or_else(|| {
+                tracing::warn!(section, model_id, "Config::resolved_model: unknown model");
                 crate::Error::InvalidArgs(format!(
                     "provider '{section}' has no model '{model_id}'; \
                      registered models: [{}]",
@@ -2325,6 +2658,7 @@ impl Config {
             .clone()
             .or_else(|| spec.endpoint.clone())
             .ok_or_else(|| {
+                tracing::error!(section, model_id, "Config::resolved_model: no endpoint");
                 crate::Error::InvalidArgs(format!(
                     "provider '{section}' model '{model_id}' has no endpoint \
                      configured (neither section nor model specifies one)"
@@ -2332,9 +2666,16 @@ impl Config {
             })?;
         let wire_format =
             crate::llm::wire_format::wire_format_from_url(&endpoint).map_err(|e| {
+                tracing::error!(
+                    section,
+                    model_id,
+                    endpoint = %endpoint,
+                    error = %e,
+                    "Config::resolved_model: wire_format_from_url failed"
+                );
                 crate::Error::InvalidArgs(format!("provider '{section}' model '{model_id}': {e}"))
             })?;
-        Ok(ResolvedModelConfig {
+        let resolved = ResolvedModelConfig {
             section: section.to_owned(),
             id: model_id.to_owned(),
             endpoint,
@@ -2343,7 +2684,14 @@ impl Config {
             top_p: spec.top_p,
             wire_format,
             omit_max_tokens: spec.omit_max_tokens,
-        })
+        };
+        tracing::debug!(
+            section,
+            model_id,
+            wire_format = ?resolved.wire_format,
+            "Config::resolved_model: ok"
+        );
+        Ok(resolved)
     }
 
     /// Whether `Role::JsonRepairV2` should fire on parse failure for
@@ -2369,10 +2717,18 @@ impl Config {
     /// this helper) falls back to the explicit config flag,
     /// which preserves today's behaviour.
     pub fn json_repair_v2_enabled_for_mode(&self, mode: &str) -> bool {
-        if mode == "discover" {
-            return true;
-        }
-        self.llm.json_repair_v2_enabled
+        let enabled = if mode == "discover" {
+            true
+        } else {
+            self.llm.json_repair_v2_enabled
+        };
+        tracing::trace!(
+            mode,
+            explicit_flag = self.llm.json_repair_v2_enabled,
+            enabled,
+            "Config::json_repair_v2_enabled_for_mode"
+        );
+        enabled
     }
 }
 
@@ -2391,27 +2747,33 @@ impl Config {
 /// never mix in memory. This is the operator's "use these exact
 /// settings for this run" signal.
 fn default_config_path() -> Option<PathBuf> {
+    tracing::trace!("default_config_path: enter");
     if let Ok(env) = std::env::var("MOAGAN_CONFIG") {
         let path = PathBuf::from(env);
+        tracing::trace!(path = %path.display(), "default_config_path: from MOAGAN_CONFIG");
         return Some(path);
     }
     for cwd_candidate in ["moagan.toml", ".moagan.toml"] {
         let p = PathBuf::from(cwd_candidate);
         if p.exists() {
+            tracing::trace!(path = %p.display(), "default_config_path: from cwd candidate");
             return Some(p);
         }
     }
     if let Some(proj) = directories::ProjectDirs::from("", "", "moagan") {
-        return Some(proj.config_dir().join("config.toml"));
+        let p = proj.config_dir().join("config.toml");
+        tracing::trace!(path = %p.display(), "default_config_path: from ProjectDirs");
+        return Some(p);
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return Some(
-            PathBuf::from(home)
-                .join(".config")
-                .join("moagan")
-                .join("config.toml"),
-        );
+        let p = PathBuf::from(home)
+            .join(".config")
+            .join("moagan")
+            .join("config.toml");
+        tracing::trace!(path = %p.display(), "default_config_path: from $HOME");
+        return Some(p);
     }
+    tracing::trace!("default_config_path: falling back to ./config.toml");
     Some(PathBuf::from("config.toml"))
 }
 

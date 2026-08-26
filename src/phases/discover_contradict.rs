@@ -248,6 +248,10 @@ impl Phase for DiscoverContradictPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(
+            delta_threshold = self.delta_threshold,
+            "discover_contradict: enter"
+        );
         let clusters_dir = ctx.run_dir().clusters();
         let sketches_dir = ctx.run_dir().sketches();
         let contradictions_dir = ctx.run_dir().contradictions();
@@ -255,9 +259,18 @@ impl Phase for DiscoverContradictPhase {
 
         let clusters = Self::read_clusters(&clusters_dir)?;
         let sketches = Self::read_sketches(&sketches_dir)?;
+        tracing::debug!(
+            cluster_count = clusters.len(),
+            sketch_count = sketches.len(),
+            "discover_contradict: inputs loaded"
+        );
 
         if clusters.len() < 2 {
             // Nothing to compare.
+            tracing::info!(
+                cluster_count = clusters.len(),
+                "discover_contradict: too few clusters, writing empty"
+            );
             let path = contradictions_dir.join("contradictions.json");
             write_json(&path, &Vec::<Contradiction>::new())?;
             return Ok(PhaseOutput::Sketches(vec![path]));
@@ -325,6 +338,10 @@ impl Phase for DiscoverContradictPhase {
 
         let path = contradictions_dir.join("contradictions.json");
         write_json(&path, &items)?;
+        tracing::info!(
+            contradiction_count = items.len(),
+            "discover_contradict: contradictions persisted"
+        );
 
         // Run-id carried for the sidecar schema in case any
         // downstream tool wants to know which run produced this.

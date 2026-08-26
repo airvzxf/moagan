@@ -79,9 +79,15 @@ impl ModifyNote {
     /// parameter so tests can pin the timestamp; production calls
     /// use [`crate::time::now_unix_secs`].
     pub fn new(phase: impl Into<String>, text: impl Into<String>, captured_at_unix: i64) -> Self {
+        let phase_str: String = phase.into();
+        tracing::trace!(
+            phase = %phase_str,
+            captured_at_unix,
+            "checkpoint::modify_note::ModifyNote::new"
+        );
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
-            phase: phase.into(),
+            phase: phase_str,
             text: text.into(),
             captured_at_unix,
         }
@@ -96,7 +102,9 @@ impl ModifyNote {
 /// `prepend_to_prompt`) don't need to materialize the directory
 /// first.
 pub fn modify_note_path(run_dir: &Path) -> PathBuf {
-    run_dir.join("state").join("modify_note.json")
+    let path = run_dir.join("state").join("modify_note.json");
+    tracing::trace!(path = %path.display(), "checkpoint::modify_note::modify_note_path");
+    path
 }
 
 /// Persist `text` for `phase` to `<run_dir>/state/modify_note.json`.
@@ -107,9 +115,19 @@ pub fn modify_note_path(run_dir: &Path) -> PathBuf {
 /// contract: a crash mid-write cannot leave a half-written note
 /// that the next phase would half-consume).
 pub fn persist_modify_note(run_dir: &Path, phase: &str, text: &str) -> Result<()> {
+    tracing::debug!(
+        phase,
+        run_dir = %run_dir.display(),
+        text_len = text.len(),
+        "checkpoint::modify_note::persist_modify_note: enter"
+    );
     let note = ModifyNote::new(phase, text, crate::time::now_unix_secs());
     let bytes = serde_json::to_vec_pretty(&note).map_err(Error::from)?;
     AtomicWriter::new().write(&modify_note_path(run_dir), &bytes)?;
+    tracing::info!(
+        phase,
+        "checkpoint::modify_note::persist_modify_note: persisted"
+    );
     Ok(())
 }
 
@@ -127,6 +145,10 @@ pub fn persist_modify_note(run_dir: &Path, phase: &str, text: &str) -> Result<()
 /// abort the pipeline. The audit trail lives on
 /// `checkpoints/h_<NN>.json`; the sidecar is a convenience.
 pub fn load_modify_note(run_dir: &Path) -> Option<String> {
+    tracing::trace!(
+        run_dir = %run_dir.display(),
+        "checkpoint::modify_note::load_modify_note: enter"
+    );
     let path = modify_note_path(run_dir);
     let bytes = std::fs::read(&path).ok()?;
     let note: ModifyNote = serde_json::from_slice(&bytes).ok()?;
@@ -142,6 +164,11 @@ pub fn load_modify_note(run_dir: &Path) -> Option<String> {
 /// keyword a future prompt parser can grep for without any
 /// structural coupling.
 pub fn prepend_to_prompt(run_dir: &Path, base: &str) -> String {
+    tracing::trace!(
+        run_dir = %run_dir.display(),
+        base_len = base.len(),
+        "checkpoint::modify_note::prepend_to_prompt"
+    );
     match load_modify_note(run_dir) {
         Some(text) => format!("[operator_modify_note]\n{text}\n[/operator_modify_note]\n\n{base}"),
         None => base.to_owned(),

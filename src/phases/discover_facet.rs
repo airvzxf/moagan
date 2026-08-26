@@ -106,6 +106,7 @@ impl Phase for DiscoverFacetPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(cache_enabled = self.cache_enabled, "discover_facet: enter");
         let clusters_dir = ctx.run_dir().clusters();
         let facets_dir = ctx.run_dir().facets();
         let _ = std::fs::create_dir_all(&facets_dir);
@@ -134,10 +135,15 @@ impl Phase for DiscoverFacetPhase {
         cluster_paths.sort();
 
         if cluster_paths.is_empty() {
+            tracing::error!("discover_facet: zero clusters found");
             return Err(Error::InvalidState(
                 "discover_facet found zero clusters".into(),
             ));
         }
+        tracing::debug!(
+            cluster_count = cluster_paths.len(),
+            "discover_facet: clusters enumerated"
+        );
 
         let mut paths: Vec<PathBuf> = Vec::new();
         // Open the cross-run facet cache. The cache is keyed by
@@ -219,10 +225,15 @@ impl Phase for DiscoverFacetPhase {
         }
 
         if paths.is_empty() {
+            tracing::error!("discover_facet: zero facet lists produced");
             return Err(Error::InvalidState(
                 "discover_facet produced zero facet lists".into(),
             ));
         }
+        tracing::info!(
+            facet_lists_written = paths.len(),
+            "discover_facet: phase complete"
+        );
 
         Ok(PhaseOutput::Sketches(paths))
     }

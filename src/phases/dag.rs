@@ -180,6 +180,7 @@ pub enum EdgeKind {
 /// already `Copy`/`Clone`-friendly and callers commonly persist it
 /// (e.g. for visualisation) or pass it to multiple executors.
 pub fn build_dag_for_deep_mode() -> PhaseGraph {
+    tracing::debug!("dag: building canonical deep-mode phase DAG");
     let mut graph = PhaseGraph::new();
 
     // Add nodes in canonical order. The order of insertion does NOT
@@ -234,8 +235,14 @@ pub fn build_dag_for_deep_mode() -> PhaseGraph {
         let from_idx = idx[&from];
         let to_idx = idx[&to];
         graph.add_edge(from_idx, to_idx, EdgeKind::Data);
+        tracing::trace!(from = from.as_str(), to = to.as_str(), "dag: edge added");
     }
 
+    tracing::info!(
+        node_count = graph.node_count(),
+        edge_count = graph.edge_count(),
+        "dag: canonical deep-mode DAG built"
+    );
     graph
 }
 
@@ -255,6 +262,7 @@ pub fn build_dag_for_deep_mode() -> PhaseGraph {
 /// without re-running the test.
 pub fn topological_layers(graph: &PhaseGraph) -> Result<Vec<Vec<NodeIndex>>> {
     let n = graph.node_count();
+    tracing::debug!(n, "dag: topological_layers: start");
     // Track in-degrees in a mutable map so we can decrement on
     // every outgoing edge of a placed node and detect zero quickly.
     let mut in_degree: HashMap<NodeIndex, usize> = HashMap::with_capacity(n);
@@ -276,6 +284,12 @@ pub fn topological_layers(graph: &PhaseGraph) -> Result<Vec<Vec<NodeIndex>>> {
     while !current_layer.is_empty() {
         layers.push(current_layer.clone());
         placed += current_layer.len();
+        tracing::trace!(
+            layer_index = layers.len() - 1,
+            layer_size = current_layer.len(),
+            placed,
+            "dag: topological_layers: layer placed"
+        );
         let mut next_layer: Vec<NodeIndex> = Vec::new();
         for &node in &current_layer {
             // Remove the placed node from the map so a successor's
@@ -301,12 +315,23 @@ pub fn topological_layers(graph: &PhaseGraph) -> Result<Vec<Vec<NodeIndex>>> {
             .filter(|idx| in_degree.contains_key(idx))
             .map(|idx| graph[idx].as_str())
             .collect();
+        tracing::error!(
+            placed,
+            total = n,
+            stuck = ?stuck,
+            "dag: topological_layers: cycle detected"
+        );
         return Err(Error::InvalidState(format!(
             "phase DAG is not a DAG (cycle suspected); stuck at: [{}]",
             stuck.join(", ")
         )));
     }
 
+    tracing::debug!(
+        layers = layers.len(),
+        placed,
+        "dag: topological_layers: success"
+    );
     Ok(layers)
 }
 
@@ -347,6 +372,12 @@ pub async fn execute_dag(
     phases: &[Box<dyn Phase>],
     ctx: &RunContext,
 ) -> Result<Vec<PhaseOutput>> {
+    tracing::info!(
+        layers = "?",
+        phases = phases.len(),
+        nodes = graph.node_count(),
+        "dag: execute_dag: start"
+    );
     let layers = topological_layers(graph)?;
 
     // Build a name → impl index once so per-layer lookup is O(1).
@@ -356,7 +387,12 @@ pub async fn execute_dag(
     }
 
     let mut outputs: Vec<PhaseOutput> = Vec::with_capacity(graph.node_count());
-    for layer in layers {
+    for (i, layer) in layers.iter().enumerate() {
+        tracing::debug!(
+            layer = i,
+            layer_size = layer.len(),
+            "dag: execute_dag: layer start"
+        );
         let layer_results = futures::future::join_all(layer.iter().map(|&node| {
             let phase_id = graph[node];
             let name = phase_id.as_str();
@@ -376,7 +412,13 @@ pub async fn execute_dag(
         for result in layer_results {
             outputs.push(result?);
         }
+        tracing::trace!(
+            layer = i,
+            outputs_so_far = outputs.len(),
+            "dag: execute_dag: layer completed"
+        );
     }
+    tracing::info!(total_outputs = outputs.len(), "dag: execute_dag: complete");
     Ok(outputs)
 }
 

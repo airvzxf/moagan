@@ -7,6 +7,15 @@
 //! both the redacted text and the per-`PatternKind` match counts so
 //! the caller can persist them in the `redact_audit` SQLite table
 //! (D.8.5 / D.5.1).
+//!
+//! ## Tracing policy
+//!
+//! `apply` is the hot path of `RedactWriter`, which IS the tracing
+//! subscriber's writer. Any `tracing::xxx!` event whose level passes
+//! the active filter re-enters `RedactWriter::write` and recurses
+//! infinitely (stack overflow). This module therefore emits **no
+//! tracing events at all**. Debugging happens via `RUST_BACKTRACE`
+//! and a debugger, not via the tracing macros.
 
 use std::borrow::Cow;
 
@@ -80,8 +89,8 @@ impl RedactPolicy {
     }
 
     /// Return the active patterns for this policy.
-    pub fn active_patterns(&self) -> Vec<&Pattern> {
-        let all: Vec<&Pattern> = PATTERNS.iter().collect();
+    pub fn active_patterns(&self) -> Vec<&'static Pattern> {
+        let all: Vec<&'static Pattern> = PATTERNS.iter().collect();
         match &self.enabled_patterns {
             None => all,
             Some(enabled) => {
@@ -112,8 +121,9 @@ pub fn apply<'a>(policy: &RedactPolicy, surface: Surface, text: &'a str) -> Resu
     if !policy.is_enabled(surface) || text.is_empty() {
         return Ok(Cow::Borrowed(text));
     }
+    let active = policy.active_patterns();
     let mut owned: Option<String> = None;
-    for p in policy.active_patterns() {
+    for p in &active {
         let target = match owned.as_ref() {
             Some(s) => s.clone(),
             None => text.to_owned(),

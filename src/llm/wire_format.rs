@@ -313,6 +313,7 @@ pub(crate) fn role_requires_json(role: Role) -> bool {
 /// provider request, applying the role-based JSON output mode and
 /// the per-model opt-out from `response_format_opt_out`.
 pub(crate) fn build_openai_body(req: &Request) -> serde_json::Value {
+    tracing::trace!(role = ?req.role, model = %req.model, "build_openai_body");
     let mut value = serde_json::json!({
         "model": req.model,
         "messages": [
@@ -464,8 +465,9 @@ impl WireFormatId {
 /// Anything else returns [`Error::InvalidArgs`] so the operator gets a
 /// clear error at startup (no silent fallback to a wrong wire format).
 pub fn wire_format_from_url(url: &str) -> Result<WireFormatId> {
+    tracing::trace!(url, "wire_format_from_url");
     let path = url.split('?').next().unwrap_or(url).trim_end_matches('/');
-    if path.ends_with("/messages") {
+    let fmt = if path.ends_with("/messages") {
         Ok(WireFormatId::Anthropic)
     } else if path.ends_with("/chat/completions") {
         Ok(WireFormatId::OpenAICompatible)
@@ -476,7 +478,12 @@ pub fn wire_format_from_url(url: &str) -> Result<WireFormatId> {
             "endpoint '{url}' has no recognised wire-format suffix \
              (/messages, /chat/completions, /responses)"
         )))
+    };
+    match &fmt {
+        Ok(id) => tracing::debug!(url, id = id.as_str(), "wire_format_from_url resolved"),
+        Err(_) => tracing::warn!(url, "wire_format_from_url: unrecognised endpoint"),
     }
+    fmt
 }
 
 #[cfg(test)]

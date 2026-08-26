@@ -29,10 +29,21 @@ pub fn coverage_ratio(original: &str, refined: &str) -> f32 {
     let o = collapse_whitespace(original).chars().count();
     let r = collapse_whitespace(refined).chars().count();
     if o == 0 {
+        tracing::trace!(
+            refined_len = r,
+            "integrator: coverage_ratio (empty original)"
+        );
         return 1.0;
     }
     let ratio = r as f32 / o as f32;
-    ratio.clamp(0.0, 1.0)
+    let clamped = ratio.clamp(0.0, 1.0);
+    tracing::debug!(
+        original = o,
+        refined = r,
+        ratio = clamped,
+        "integrator: coverage_ratio"
+    );
+    clamped
 }
 
 /// Compute the fraction of citations in `original` that survive in
@@ -41,11 +52,20 @@ pub fn coverage_ratio(original: &str, refined: &str) -> f32 {
 pub fn preserved_citations_ratio(original: &str, refined: &str) -> f32 {
     let original_citations = citation_set(original);
     if original_citations.is_empty() {
+        tracing::trace!("integrator: preserved_citations_ratio (empty original citations)");
         return 1.0;
     }
     let refined_citations = citation_set(refined);
     let preserved = original_citations.intersection(&refined_citations).count();
-    preserved as f32 / original_citations.len() as f32
+    let ratio = preserved as f32 / original_citations.len() as f32;
+    tracing::debug!(
+        original_citations = original_citations.len(),
+        refined_citations = refined_citations.len(),
+        preserved,
+        ratio,
+        "integrator: preserved_citations_ratio"
+    );
+    ratio
 }
 
 /// True if the refined document passes both safeguard thresholds
@@ -54,6 +74,11 @@ pub fn preserved_citations_ratio(original: &str, refined: &str) -> f32 {
 /// Returns the failing thresholds in the error message so the
 /// warning has actionable detail.
 pub fn meets_safeguards(original: &str, refined: &str) -> Result<(), String> {
+    tracing::debug!(
+        original_len = original.len(),
+        refined_len = refined.len(),
+        "integrator: meets_safeguards"
+    );
     let cov = coverage_ratio(original, refined);
     let cit = preserved_citations_ratio(original, refined);
     let mut failures: Vec<String> = Vec::new();
@@ -68,11 +93,18 @@ pub fn meets_safeguards(original: &str, refined: &str) -> Result<(), String> {
     if failures.is_empty() {
         Ok(())
     } else {
+        tracing::warn!(
+            coverage = cov,
+            citations = cit,
+            failures = failures.len(),
+            "integrator: safeguards FAILED"
+        );
         Err(failures.join("; "))
     }
 }
 
 fn collapse_whitespace(s: &str) -> String {
+    tracing::trace!(input_len = s.len(), "integrator: collapse_whitespace");
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
     for ch in s.chars() {
@@ -120,6 +152,11 @@ fn citation_set(text: &str) -> BTreeSet<String> {
             i += 1;
         }
     }
+    tracing::trace!(
+        bytes = bytes.len(),
+        citations = set.len(),
+        "integrator: citation_set"
+    );
     set
 }
 
@@ -136,6 +173,15 @@ pub fn build_doc(
     sources: Vec<String>,
     body: String,
 ) -> CategoryDoc {
+    tracing::debug!(
+        category_id = %category_id,
+        cluster_id = %cluster_id,
+        member_count,
+        clusters_max_members,
+        sources = sources.len(),
+        body_len = body.len(),
+        "integrator: build_doc"
+    );
     let density = if clusters_max_members == 0 {
         0.0
     } else {
@@ -153,6 +199,11 @@ pub fn build_doc(
 
 /// Build the human-readable joining header for a category doc.
 pub fn category_header(category_id: &str, label: &str) -> String {
+    tracing::trace!(
+        category_id = %category_id,
+        label = %label,
+        "integrator: category_header"
+    );
     format!("# Category: {category_id} — {label}\n\n")
 }
 
@@ -160,12 +211,19 @@ pub fn category_header(category_id: &str, label: &str) -> String {
 /// phase replaces the LLM join with this local helper when the LLM
 /// call fails.
 pub fn local_join(category_id: &str, label: &str, extractions: &[FacetExtraction]) -> String {
+    tracing::debug!(
+        category_id = %category_id,
+        label = %label,
+        extractions = extractions.len(),
+        "integrator: local_join"
+    );
     let mut buf = category_header(category_id, label);
     for ext in extractions {
         buf.push_str(&format!("## {}\n\n", ext.facet_id));
         buf.push_str(ext.body.trim());
         buf.push_str("\n\n");
     }
+    tracing::trace!(total_bytes = buf.len(), "integrator: local_join done");
     buf
 }
 

@@ -19,6 +19,7 @@
 use std::collections::BTreeSet;
 
 use clap::ValueEnum;
+use tracing::{debug, trace, warn};
 
 use crate::cli::telemetry_cmd::compare as compare_helpers;
 use crate::domain::Ranking;
@@ -109,6 +110,13 @@ pub fn run(args: DiffArgs) -> Result<i32> {
         home_override,
     } = args;
     let format = format.unwrap_or_default();
+    debug!(
+        run_a = %run_a,
+        run_b = %run_b,
+        ?format,
+        include_proposals,
+        "diff::run: enter"
+    );
 
     // 1. Parse + validate run ids up-front. A self-diff is rejected
     //    here (operator error: trivially-empty result). Malformed
@@ -117,6 +125,7 @@ pub fn run(args: DiffArgs) -> Result<i32> {
     let a = parse_run_id(&run_a)?;
     let b = parse_run_id(&run_b)?;
     if a == b {
+        warn!(run_id = %a, "diff: self-diff requested");
         return Err(Error::InvalidArgs(
             "cannot diff a run against itself".into(),
         ));
@@ -209,8 +218,15 @@ pub fn run(args: DiffArgs) -> Result<i32> {
 /// `moagan validate`, giving operators one consistent failure
 /// surface across both pre-flight commands.
 pub(crate) fn parse_run_id(s: &str) -> Result<RunId> {
-    s.parse()
-        .map_err(|e| Error::InvalidArgs(format!("invalid run id '{s}': {e}")))
+    trace!(raw = s, "parse_run_id: enter");
+    let res = s
+        .parse()
+        .map_err(|e| Error::InvalidArgs(format!("invalid run id '{s}': {e}")));
+    match &res {
+        Ok(id) => debug!(run_id = %id, "parse_run_id: ok"),
+        Err(e) => warn!(error = %e, "parse_run_id: error"),
+    }
+    res
 }
 
 /// Count the number of `*.json` files inside `dir`. Returns 0 when
@@ -218,6 +234,7 @@ pub(crate) fn parse_run_id(s: &str) -> Result<RunId> {
 /// phase hasn't run yet). Other I/O failures propagate as
 /// [`Error::Io`] so a permission error doesn't masquerade as zero.
 fn count_files_in(dir: std::path::PathBuf) -> Result<usize> {
+    trace!(dir = %dir.display(), "count_files_in: enter");
     if !dir.exists() {
         return Ok(0);
     }

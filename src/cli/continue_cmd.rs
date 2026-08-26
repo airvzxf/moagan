@@ -22,6 +22,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tracing::{debug, warn};
+
 use crate::config::Config;
 use crate::domain::{Brief, Intake, Manifest};
 use crate::error::{Error, Result};
@@ -83,6 +85,13 @@ impl Default for ContinueOptions {
 /// last_phase)`, and runs it. Switch flags update the manifest
 /// before the pipeline starts.
 pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOptions) -> Result<()> {
+    debug!(
+        run_id = %run_id,
+        kind = ?opts.kind,
+        switch_provider = ?opts.switch_provider.as_deref(),
+        skip_checkpoint = opts.skip_checkpoint,
+        "run_continue: enter"
+    );
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
     let manifest = load_manifest(home, run_id)?;
@@ -94,6 +103,10 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
     if let Some(provider) = opts.switch_provider.as_deref() {
         let cfg = crate::config::Config::load().unwrap_or_default();
         if !cfg.providers.contains_key(provider) {
+            warn!(
+                provider = provider,
+                "continue: --switch-provider not in configured providers"
+            );
             return Err(Error::InvalidArgs(format!(
                 "--switch-provider '{}' is not in the configured providers; available: {}",
                 provider,
@@ -180,6 +193,12 @@ pub async fn run_rerun(
     matrix_override: Option<String>,
     same_config: bool,
 ) -> Result<()> {
+    debug!(
+        run_id = %run_id,
+        same_config,
+        has_override = matrix_override.is_some(),
+        "run_rerun: enter"
+    );
     let home = Arc::new(home.clone());
     home.ensure()?;
     let db = Db::open(&home.meta_db_path())?;
@@ -189,6 +208,7 @@ pub async fn run_rerun(
         // Default: the cloned manifest is the verbatim copy. Any
         // `--matrix-override` is folded in as a deep-merge on top.
         if let Some(raw) = matrix_override.as_deref() {
+            debug!("run_rerun: applying --matrix-override");
             apply_matrix_override(&mut new_manifest, raw)?;
             let patch: serde_json::Value = serde_json::from_str(raw)
                 .map_err(|e| Error::InvalidArgs(format!("invalid JSON: {e}")))?;
@@ -349,6 +369,10 @@ pub fn run_import(
     source_path: &Path,
     target_runs_dir: Option<&Path>,
 ) -> Result<()> {
+    debug!(
+        source = %source_path.display(),
+        "run_import: enter"
+    );
     // D.29.1: reject `..` traversal or symlink escapes in the
     // operator-supplied source directory before any I/O. The
     // canonical source dir is the natural root for the safety
@@ -356,6 +380,10 @@ pub fn run_import(
     let safe_source = safe_path(source_path.parent().unwrap_or(source_path), source_path)?;
     let source_manifest_path = safe_source.join("manifest.json");
     if !source_manifest_path.is_file() {
+        warn!(
+            path = %source_manifest_path.display(),
+            "run_import: manifest not found"
+        );
         return Err(Error::InvalidArgs(format!(
             "source manifest not found at {}",
             source_manifest_path.display()
@@ -427,8 +455,10 @@ pub async fn run_refine(
     home: &Arc<MoaganHome>,
     mock_dir: Option<&std::path::Path>,
 ) -> Result<PathBuf> {
+    debug!(run_id = %run_id, proposal = %proposal_id, "run_refine: enter");
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
+        warn!(run_id = %run_id, "run_refine: run not on disk");
         return Err(Error::InvalidState(format!(
             "run {run_id} not found under {}",
             home.runs_dir().display()
@@ -588,8 +618,14 @@ pub async fn run_refine_action(
     verdict_detail: Option<String>,
     home: &Arc<MoaganHome>,
 ) -> Result<RefineActionOutcome> {
+    debug!(
+        run_id = %run_id,
+        action = action.as_cli_str(),
+        "run_refine_action: enter"
+    );
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
+        warn!(run_id = %run_id, "run_refine_action: run not on disk");
         return Err(Error::InvalidState(format!(
             "run {run_id} not found under {}",
             home.runs_dir().display()
@@ -652,8 +688,10 @@ fn manifest_blake3_recompute(manifest: &mut Manifest) {
 /// weights in `Config::ranking_weights`. Writes a fresh
 /// `rankings/ranking.json` (overwriting the previous one).
 pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> Result<()> {
+    debug!(run_id = %run_id, "run_rerank: enter");
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
+        warn!(run_id = %run_id, "run_rerank: run not on disk");
         return Err(Error::InvalidState(format!(
             "run {run_id} not found under {}",
             home.runs_dir().display()
@@ -732,8 +770,10 @@ pub async fn run_rerank(run_id: RunId, cfg: &Config, home: &Arc<MoaganHome>) -> 
 
 /// Read the manifest at `<home>/.runs/<id>/manifest.json`.
 pub(crate) fn load_manifest(home: &MoaganHome, run_id: RunId) -> Result<Manifest> {
+    debug!(run_id = %run_id, "load_manifest: enter");
     let path = home.run_dir(run_id).manifest();
     if !path.is_file() {
+        warn!(run_id = %run_id, "load_manifest: manifest.json not on disk");
         return Err(Error::InvalidState(format!(
             "manifest.json not found for run {run_id} under {}",
             home.runs_dir().display()
@@ -923,11 +963,13 @@ pub(crate) async fn resume_pipeline(
     api_key: Option<&str>,
     non_interactive: bool,
 ) -> Result<()> {
+    debug!(run_id = %manifest.run_id, last_phase = last_phase, "resume_pipeline: enter");
     let mode = parse_mode(&manifest.mode)?;
     let cfg = Config::load().unwrap_or_default();
     let canonical = build_canonical_for_resume(&cfg, mode);
     let resumed = Pipeline::resume_with_kind(canonical, last_phase, PipelineKind::Linear)?;
     if resumed.is_empty() {
+        debug!("resume_pipeline: nothing left to do");
         eprintln!("moagan: nothing left to do after phase {last_phase:?}");
         return Ok(());
     }

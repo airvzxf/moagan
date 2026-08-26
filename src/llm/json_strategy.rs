@@ -188,13 +188,16 @@ pub fn strategy_for(
     if let Some(overrides) = profile_overrides
         && let Some(s) = overrides.get(model)
     {
+        tracing::trace!(model, strategy = ?s, "strategy_for: profile override hit");
         return *s;
     }
     for (k, v) in STRATEGY_BY_MODEL {
         if model.eq_ignore_ascii_case(k) {
+            tracing::trace!(model, table_key = k, strategy = ?v, "strategy_for: table hit");
             return *v;
         }
     }
+    tracing::trace!(model, "strategy_for: default fallback (Lenient)");
     DEFAULT_STRATEGY
 }
 

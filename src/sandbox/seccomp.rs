@@ -125,6 +125,11 @@ pub enum SeccompPolicyKind {
 /// `CONFIG_SECCOMP`, no `CAP_SYS_ADMIN`, etc.). On
 /// [`SeccompPolicyKind::Permissive`] the function is infallible.
 pub fn apply(kind: SeccompPolicyKind) -> crate::error::Result<()> {
+    tracing::debug!(
+        sandbox = "seccomp",
+        kind = ?kind,
+        "seccomp::apply dispatching"
+    );
     apply_for_target(kind)
 }
 
@@ -134,7 +139,10 @@ pub fn apply(kind: SeccompPolicyKind) -> crate::error::Result<()> {
 #[cfg(unix)]
 fn apply_for_target(kind: SeccompPolicyKind) -> crate::error::Result<()> {
     match kind {
-        SeccompPolicyKind::Permissive => Ok(()),
+        SeccompPolicyKind::Permissive => {
+            tracing::trace!(sandbox = "seccomp", "Permissive policy: no-op");
+            Ok(())
+        }
         SeccompPolicyKind::StrictRustBuild => apply_strict_rust_build(),
     }
 }
@@ -143,6 +151,7 @@ fn apply_for_target(kind: SeccompPolicyKind) -> crate::error::Result<()> {
 /// cross-platform builds link.
 #[cfg(not(unix))]
 fn apply_for_target(_kind: SeccompPolicyKind) -> crate::error::Result<()> {
+    tracing::trace!(sandbox = "seccomp", "apply_for_target: no-op on non-Unix");
     Ok(())
 }
 
@@ -164,6 +173,12 @@ fn apply_for_target(_kind: SeccompPolicyKind) -> crate::error::Result<()> {
 fn apply_strict_rust_build() -> crate::error::Result<()> {
     let allow = rust_build_allowlist();
     let program = build_bpf_program(&allow);
+    tracing::info!(
+        sandbox = "seccomp",
+        allowlist_len = allow.len(),
+        program_len = program.len(),
+        "apply_strict_rust_build: building and installing BPF filter"
+    );
 
     // Pin `no_new_privs` first. Without this bit, an unprivileged
     // child cannot install a seccomp filter — the kernel returns
@@ -183,10 +198,19 @@ fn apply_strict_rust_build() -> crate::error::Result<()> {
     };
     if prctl_ret != 0 {
         let errno = std::io::Error::last_os_error();
+        tracing::error!(
+            sandbox = "seccomp",
+            error = %errno,
+            "apply_strict_rust_build: prctl(PR_SET_NO_NEW_PRIVS) failed"
+        );
         return Err(crate::error::Error::InvalidState(format!(
             "prctl(PR_SET_NO_NEW_PRIVS, 1) failed: {errno}"
         )));
     }
+    tracing::trace!(
+        sandbox = "seccomp",
+        "apply_strict_rust_build: PR_SET_NO_NEW_PRIVS pinned"
+    );
 
     // Install the BPF program. `SECCOMP_MODE_FILTER` takes a
     // pointer to a `sock_fprog` (`len: u16`, `filter: *mut sock_filter`).
@@ -206,10 +230,20 @@ fn apply_strict_rust_build() -> crate::error::Result<()> {
     };
     if seccomp_ret != 0 {
         let errno = std::io::Error::last_os_error();
+        tracing::error!(
+            sandbox = "seccomp",
+            error = %errno,
+            "apply_strict_rust_build: seccomp(SECCOMP_MODE_FILTER) failed"
+        );
         return Err(crate::error::Error::InvalidState(format!(
             "seccomp(SECCOMP_MODE_FILTER) failed: {errno}"
         )));
     }
+    tracing::info!(
+        sandbox = "seccomp",
+        program_len = program.len(),
+        "apply_strict_rust_build: BPF filter installed"
+    );
     Ok(())
 }
 
@@ -268,6 +302,11 @@ const SECCOMP_DATA_OFFSET_ARCH: u32 = 4;
 /// on Unix.
 #[cfg(unix)]
 pub(crate) fn build_bpf_program(allow: &[i64]) -> Vec<libc::sock_filter> {
+    tracing::trace!(
+        sandbox = "seccomp",
+        allowlist_len = allow.len(),
+        "build_bpf_program: emitting BPF instructions"
+    );
     // Each BPF instruction is a `sock_filter` (code, jt, jf, k).
     // The header is 4 instructions (arch LD + arch JEQ + KILL on
     // mismatch + nr LD), the tail is 1 instruction (default KILL),
@@ -347,6 +386,12 @@ pub(crate) fn build_bpf_program(allow: &[i64]) -> Vec<libc::sock_filter> {
         4 + 2 * ALLOWLIST_LEN + 1,
         ALLOWLIST_LEN,
         prog.len()
+    );
+    tracing::trace!(
+        sandbox = "seccomp",
+        program_len = prog.len(),
+        expected_len = 4 + 2 * ALLOWLIST_LEN + 1,
+        "build_bpf_program: emitted"
     );
     prog
 }

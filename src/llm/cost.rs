@@ -45,6 +45,11 @@ pub fn cost_estimate(
     usage: &Usage,
 ) -> f64 {
     let Some(catalog) = catalog else {
+        tracing::debug!(
+            provider,
+            model,
+            "cost_estimate: no catalog attached; returning $0.00"
+        );
         return 0.0;
     };
     let Some(entry) = catalog
@@ -52,14 +57,30 @@ pub fn cost_estimate(
         .get(provider)
         .and_then(|p| p.models.get(model))
     else {
+        tracing::warn!(
+            provider,
+            model,
+            "cost_estimate: catalog miss; returning $0.00"
+        );
         return 0.0;
     };
 
     let cost = &entry.cost;
-    cost_per_token(cost.input, usage.input_tokens)
+    let total = cost_per_token(cost.input, usage.input_tokens)
         + cost_per_token(cost.output, usage.output_tokens)
         + cost_per_token(cost.cache_read, usage.cache_read)
-        + cost_per_token(cost.cache_write, usage.cache_creation)
+        + cost_per_token(cost.cache_write, usage.cache_creation);
+    tracing::trace!(
+        provider,
+        model,
+        input_tokens = usage.input_tokens,
+        output_tokens = usage.output_tokens,
+        cache_read = usage.cache_read,
+        cache_creation = usage.cache_creation,
+        total_usd = total,
+        "cost_estimate: computed"
+    );
+    total
 }
 
 /// Convert a per-million-token USD rate and a token count into a

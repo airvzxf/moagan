@@ -184,7 +184,7 @@ run_test "cluster_proposals_writes_cp_NN_naming" \
   "grep -q '\"cp_00\"' ${ROOT}/src/phases/cluster_proposals.rs"
 
 run_test "cluster_proposals_writes_empty_marker" \
-  "grep -B 1 -A 6 'items.len() < 2' ${ROOT}/src/phases/cluster_proposals.rs | grep -q 'cp_00'"
+  "grep -B 1 -A 12 'items.len() < 2' ${ROOT}/src/phases/cluster_proposals.rs | grep -q 'cp_00'"
 
 run_test "cluster_proposals_module_exported" \
   "grep -q 'pub mod cluster_proposals' ${ROOT}/src/phases/mod.rs || grep -q 'pub use cluster_proposals' ${ROOT}/src/phases/mod.rs"
@@ -215,7 +215,7 @@ run_test "synthesize_skips_singletons" \
   "grep -B 1 -A 4 'c.member_proposals.len() >= self.min_cluster_size' ${ROOT}/src/phases/synthesize.rs | grep -q 'min_cluster_size'"
 
 run_test "synthesize_handles_empty_cluster_list" \
-  "grep -B 2 -A 12 'eligible.is_empty()' ${ROOT}/src/phases/synthesize.rs | grep -q 'PhaseOutput::Synthesized(Vec::new())'"
+  "grep -B 2 -A 18 'eligible.is_empty()' ${ROOT}/src/phases/synthesize.rs | grep -q 'PhaseOutput::Synthesized(Vec::new())'"
 
 # ---------------------------------------------------------------------
 # SECTION S7 — Synthesized file structure (8 tests)

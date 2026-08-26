@@ -553,6 +553,7 @@ impl Phase for DiscoverSummaryPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!("discover_summary: enter");
         let final_dir = ctx.run_dir().final_dir();
         let _ = std::fs::create_dir_all(&final_dir);
         let _ = std::fs::create_dir_all(ctx.run_dir().tags());
@@ -713,10 +714,15 @@ impl Phase for DiscoverSummaryPhase {
         outputs.extend(uncategorized_paths);
 
         if outputs.is_empty() {
+            tracing::error!("discover_summary: zero outputs produced");
             return Err(Error::InvalidState(
                 "discover_summary produced zero outputs".into(),
             ));
         }
+        tracing::info!(
+            output_count = outputs.len(),
+            "discover_summary: phase complete"
+        );
 
         Ok(PhaseOutput::Sketches(outputs))
     }

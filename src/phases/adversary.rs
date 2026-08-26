@@ -159,6 +159,7 @@ impl Phase for AdversaryPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(enabled = self.enable, "adversary: enter");
         let evaluations_dir = ctx.run_dir().evaluations();
         let proposals_dir = ctx.run_dir().proposals();
         let rankings_dir = ctx.run_dir().rankings();
