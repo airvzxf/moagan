@@ -7,43 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Removed (BREAKING)
 
-- **Per-mode retry budget matrix (D.21.6) now allows retries across all modes.**
-  Fast/Explore/Batch previously had `max_attempts=1` for every failure reason,
-  which propagated upstream model non-determinism (e.g. `MiniMax-M3` returning
-  `{"problem":}` for the `Route` phase) as fatal `Error::SchemaViolation`
-  errors instead of recoverable parse failures. The new matrix:
-  - Parse/Schema: 5 attempts (4 retries) with `use_json_repair` in ALL modes
-  - Transport/RateLimit/Timeout: 3 attempts (2 retries) in Fast/Explore/Batch,
-    3-4 in Standard, 4-6 in Deep
-  - Truncated: 1-2 attempts (model already cut output)
-  The `max_retries` parameter on `call_with_retry_parse` remains a hard
-  ceiling so callers that want single-shot behavior (tests, mocks) keep it.
-- **Self-healing param rejection: close multi-rejection cascade + make `top_p` opt-in**
-  - `detect_rejection` now reports all parameter names rejected in a single upstream response, not just the first; the dispatch loop iterates up to `PARAM_NAMES.len()` (3) times, registering each rejection and omitting the offending field before retrying. Closes the cascade where upstreams that reject `temperature`, `max_tokens`, and `top_p` together (e.g. `opencode:gpt-5.6-luna`) used to leak the second rejection as a fatal 4xx.
-  - `parse_provider_error_body` now tolerates the `http <status> <reason-phrase>:` envelope that `llm::http::classify_status` produces for 4xx (e.g. `"http 400 Bad Request: {...}"`), not just the strict `"http <status>:"` form. Without this, the auto-heal cascade was silently no-op'ing in production because `detect_rejection` never saw the JSON body.
-  - Pattern #4B of the auto-detect (which trusts the upstream's `error.param` field) is now whitelisted against `PARAM_NAMES`: wire-required fields like `input` or `model` that the dispatcher cannot omit are ignored, falling back to the `message`-regex patterns.
-  - `top_p` is no longer force-injected as `Some(0.95)` when neither the provider config nor the role catalogue sets it. The new `resolve_top_p(role, provider_top_p)` helper honours the precedence `provider TOML > role catalogue > None`. The wire builder's `skip_serializing_if = "Option::is_none"` drops the field entirely when unset. Upstreams that reject `top_p` outright (e.g. `gpt-5.6-luna`) no longer trip the first call.
-- **Wire `max_continuation_attempts(strategy)` into `continue_truncated_response`.**
-  The helper previously hardcoded `MAX_CONTINUATIONS = 2`; the cap is
-  now sourced from the per-strategy helper so a future bump (e.g.
-  `Continuation = 3`) flows through every call site. The dispatch
-  decision is now also gated on `max_continuation_attempts > 0`, so
-  strategies with `0` (Strict, Lenient, PromptPrefill) skip the
-  focused continuation path entirely — truncated responses from
-  those models fall through to the normal parse-failure retry
-  budget (5 attempts for Parse/Schema per the per-mode matrix
-  added in the previous release). The misleading
-  `Continuation` strategy doc-comment that claimed the helper
-  fired on parse failure has been corrected to reflect that
-  it only fires on truncated responses.
+- **`--logs <PATH>` flag and `MOAGAN_RUN_LOGS` env var are removed.**
+  v0.10 shipped an opt-in file log writer as a non-standard
+  workaround. POSIX shells already provide the right primitive
+  (redirection), and the indirection only made the JSON output
+  harder to wire into `jq` / Promtail / Loki. The replacement is:
+  - stderr (FD 2): trace events, JSONL by default
+    (`moagan 2> run.jsonl | jq .` parses cleanly).
+  - stdout (FD 1): typed domain events in JSONL
+    (`moagan > events.jsonl` for `phase_start`, `llm_call`, `probe`,
+    `run_start`, `run_end`, …).
+  See `docs/events-v1.md` for the event schema.
 
 ### Added
 
-- `pub fn top_p_for_role(role: Role) -> Option<f32>` in `src/llm/prompts.rs` — mirrors `temperature_for_role` for nucleus sampling.
-- `pub fn resolve_top_p(role: Role, provider_top_p: Option<f32>) -> Option<f32>` in `src/phases/phase.rs` — central precedence helper.
-- `tests/integration_param_rejection_cascade.rs` — 3 integration tests covering the cascade end-to-end: three-param recovery, pre-flight omit of known rejections without round-trip, and `top_p` absence from the wire when neither provider nor role set it.
+- **POSIX-idiomatic stderr routing (per ADR-0002 §B).** `init_tracing`
+  now writes `fmt::layer().json()` to stderr by default when stderr
+  is not a TTY, and `fmt::layer()` with file/line/target colouring
+  when stderr IS a TTY. The auto-detection is override-able via
+  the new `--log-format <text|json|auto>` global flag and the
+  `MOAGAN_LOG_FORMAT` env var. Closes the gap that ADR-0002 §B
+  originally specified (the v0.10 implementation wrote plain text
+  to stderr).
+- **Stdout events JSONL.** A new `src/telemetry/stdout_events.rs`
+  module with a typed `Event` enum (RunStart, RunEnd, PhaseStart,
+  PhaseEnd, PhaseError, LlmCall, Probe, Warning, Decision,
+  DiscoveryIteration). Each event is one NDJSON line on stdout
+  when stdout is not a TTY, silenced in interactive mode (operators
+  get a clean terminal). Override with `--event-format
+  <jsonl|off>` or `MOAGAN_EVENT_FORMAT`. Pipe-friendly:
+  `moagan … 2>log.jsonl | jq -c 'select(.kind=="llm_call")'`.
+- **Tracing span hierarchy** (Android-2018 ambient-context model).
+  `pipeline` → `phase` → `iteration` → `llm_call` /
+  `llm_probe` / `llm_probe_background`. Every event emitted by
+  an LLM call (regular OR probe) now carries the full chain:
+  `pipeline{run_id, mode, provider, model, resumed} + phase{name,
+  seq} + iteration{n, total, cell, temperature, replica,
+  sketch_index} + llm_call{call_id, role}`. Operators can grep
+  one phase or one iteration to follow the entire timeline
+  end-to-end. The redact hot path stays event-free.
+
+### Fixed
+
+- **Plain-text errors no longer break NDJSON consumers.** The
+  dispatcher's `eprintln!("error: …")` is now conditional on
+  `std::io::stderr().is_terminal()` so the operator gets a
+  one-liner on a TTY but the JSONL stream stays clean for
+  `moagan … 2>log.jsonl | jq`.
 
 ## [0.10.0] - 2026-08-24
 

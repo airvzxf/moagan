@@ -207,6 +207,7 @@ impl ProbeTransport for ProviderProbeTransport {
     }
 
     async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
+        use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
         use tracing::Instrument;
         let req = Request {
             role: Role::Sketch, // F1: see investigation report
@@ -245,7 +246,7 @@ impl ProbeTransport for ProviderProbeTransport {
                 .instrument(probe_span.clone()),
         )
         .await;
-        match res {
+        let result: ProbeResult = match res {
             Ok(Ok((status, body))) => {
                 // Classify:
                 //   - 2xx / 3xx                       → Accepted
@@ -297,7 +298,30 @@ impl ProbeTransport for ProviderProbeTransport {
                 outcome: ProbeOutcome::Indeterminate,
                 body: String::new(),
             },
+        };
+
+        // Stdout Probe event mirror: emitted alongside the llm_probe
+        // span so `moagan … 2>log.jsonl | jq 'select(.kind=="probe")'`
+        // gives a clean candidate-by-candidate timeline. Iteration
+        // is `0` here (the orchestrator that called us tracks the
+        // bisection step itself).
+        if crate::telemetry::stdout_events::resolve_event_format(EventFormat::Jsonl) {
+            crate::telemetry::stdout_events::STDOUT_EVENTS.emit(Event::Probe {
+                schema: SCHEMA_VERSION,
+                ts: now_rfc3339(),
+                probe_kind: "max_tokens",
+                candidate: max_tokens as f32,
+                iteration: 0,
+                provider: self.provider.name(),
+                model: self.provider.model(),
+                outcome: match &result.outcome {
+                    crate::llm::probe::ProbeOutcome::Accepted => "accepted",
+                    crate::llm::probe::ProbeOutcome::Rejected => "rejected",
+                    crate::llm::probe::ProbeOutcome::Indeterminate => "indeterminate",
+                },
+            });
         }
+        result
     }
 }
 
