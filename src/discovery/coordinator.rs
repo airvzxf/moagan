@@ -956,6 +956,11 @@ impl DiscoveryCoordinator {
                                             n = n_for_attempt,
                                             total = total,
                                             angle = %sketch.angle,
+                                            cell_dim = %cell_for_angle.dimension_id,
+                                            cell_facet = %cell_for_angle.facet_id,
+                                            temperature_profile = temperature,
+                                            replica = replica,
+                                            sketch_index = sketch_index,
                                             thesis_len = sketch.thesis.len(),
                                             completed = t_completed,
                                             "discovery: sketch accepted"
