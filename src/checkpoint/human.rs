@@ -18,7 +18,7 @@
 //! without a `tokio::time::timeout`. We keep that contract: the read
 //! is blocking (no timeout).
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -354,8 +354,14 @@ fn read_line_interactive(checkpoint: &Checkpoint) -> Result<(String, bool)> {
         id = %checkpoint.id,
         "checkpoint::human::read_line_interactive: prompting"
     );
-    print!("[{}] {} {} ", checkpoint.kind, checkpoint.question, suffix);
-    io::stdout().flush()?;
+    // Checkpoint prompts are interactive-only; stdout is reserved
+    // for NDJSON events when not a TTY. Skip the prompt line when
+    // stdout is not a terminal so it cannot corrupt downstream
+    // `moagan … | jq` consumers.
+    if io::stdout().is_terminal() {
+        print!("[{}] {} {} ", checkpoint.kind, checkpoint.question, suffix);
+        io::stdout().flush()?;
+    }
     let stdin = io::stdin();
     let mut line = String::new();
     stdin.lock().read_line(&mut line).map_err(Error::from)?;

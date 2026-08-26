@@ -4,6 +4,7 @@
 //! stubbed with the v0.2-friendly error message. `telemetry` lands in
 //! v0.3 sub-fase I (T01-06 §10.7 + V4 §8.7).
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -210,9 +211,9 @@ pub struct Cli {
     /// (default) emits one NDJSON event per line on stdout whenever
     /// stdout is not a TTY, so pipelines like
     /// `moagan … 2> log.jsonl | jq -c 'select(.kind=="llm_call")'`
-    /// work out of the box. `off` silences stdout entirely; `auto`
-    /// is an alias for `jsonl` (the TTY check that gates the
-    /// output is what makes it quiet in interactive mode).
+    /// work out of the box. In an interactive TTY the same flag
+    /// stays silent — the TTY check is what makes it quiet in
+    /// interactive mode. `off` silences stdout entirely.
     #[arg(long, global = true, value_enum, default_value_t = EventFormatArg::Jsonl)]
     pub event_format: EventFormatArg,
     /// Subcommand.
@@ -1304,7 +1305,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 &cfg,
             )
             .await?;
-            println!("run id: {run_id}");
+            // The `run id: <uuid>` footer is a human affordance.
+            // When stdout is being consumed as NDJSON (i.e. it is
+            // not a TTY), writing this line corrupts the stream
+            // and breaks `moagan … | jq`. The matching
+            // `Event::RunEnd` already carries `run_id` for machine
+            // consumers. Only print on a TTY.
+            if std::io::stdout().is_terminal() {
+                println!("run id: {run_id}");
+            }
             Ok(0)
         }
         Cmd::Continue {

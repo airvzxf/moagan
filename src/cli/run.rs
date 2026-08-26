@@ -1,6 +1,7 @@
 //! `moagan run` — start a new run, build a pipeline, execute it, write
 //! the manifest, and print a summary.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -317,13 +318,22 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     )
     .await?;
 
-    println!(
-        "moagan run {} mode={} provider={} -> {}",
-        final_manifest.run_id.short(),
-        final_manifest.mode,
-        final_manifest.provider,
-        run_dir.root().display()
-    );
+    // The `moagan run <id> mode=... provider=... -> <path>` banner
+    // is a human affordance. When stdout is being consumed as
+    // NDJSON (i.e. it is not a TTY), writing this line corrupts
+    // the stream and breaks `moagan … | jq`. The matching
+    // `Event::RunStart` / `Event::RunEnd` events already carry
+    // `run_id`, `mode`, and `provider` for machine consumers.
+    // Only print on a TTY.
+    if std::io::stdout().is_terminal() {
+        println!(
+            "moagan run {} mode={} provider={} -> {}",
+            final_manifest.run_id.short(),
+            final_manifest.mode,
+            final_manifest.provider,
+            run_dir.root().display()
+        );
+    }
     info!(
         run_id = %final_manifest.run_id,
         "run: completed"
