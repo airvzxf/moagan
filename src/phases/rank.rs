@@ -233,6 +233,39 @@ impl Phase for RankPhase {
             .map(|r| r.id.clone())
             .or_else(|| ranked.first().map(|r| r.id.clone()))
             .unwrap_or_default();
+        // c2: `winner_picked` decision event. The summary-level
+        // emitter carries this for every run; `runner_up_*` fields
+        // are only present when the front has ≥ 2 entries (the
+        // common case in `standard` / `deep`, the `fast`-mode edge
+        // case where the pipeline produced a single proposal).
+        let top_score = representatives
+            .first()
+            .map(|r| r.score)
+            .or_else(|| ranked.first().map(|r| r.score))
+            .unwrap_or(0.0);
+        let runner_up = representatives
+            .get(1)
+            .or_else(|| ranked.get(1))
+            .map(|r| (r.id.clone(), r.score));
+        crate::telemetry::stdout_events::emit_decision("winner_picked", || {
+            let payload = serde_json::json!({
+                "proposal_id": winner,
+                "score": top_score,
+            });
+            // Add the runner-up fields only when there IS a
+            // runner-up. JSON `null` would be misleading (the
+            // shape is "absent when N/A"), so we omit the keys
+            // entirely when the front is a singleton.
+            match &runner_up {
+                Some((rid, rscore)) => serde_json::json!({
+                    "proposal_id": winner,
+                    "score": top_score,
+                    "runner_up_id": rid,
+                    "runner_up_score": rscore,
+                }),
+                None => payload,
+            }
+        });
 
         // Step 5.7 (Track E, E3): apply the SelectionPlan pinned
         // in `Config::selection_plan` to filter the final
@@ -473,6 +506,22 @@ impl Phase for RankPhase {
                 stability_sigma.unwrap_or(0.0),
                 ranking.winner
             );
+            // c2: `low_confidence_winner` decision event. Summary
+            // level: dashboards and audit pipelines surface this
+            // when the winner's stability dips below the sensitive
+            // threshold. Gap is `top_score - threshold` so a
+            // consumer can decide whether the instability is
+            // marginal or severe without re-deriving it.
+            let top_score_for_gap = top_score;
+            let threshold = self.config.stability.sensitive_threshold;
+            let gap = top_score_for_gap - threshold;
+            crate::telemetry::stdout_events::emit_decision("low_confidence_winner", || {
+                serde_json::json!({
+                    "top_score": top_score_for_gap,
+                    "threshold": threshold,
+                    "gap": gap,
+                })
+            });
             let cp = Checkpoint::new(CheckpointKind::Custom, question, true);
             let opts = CheckpointOpts {
                 interactive: ctx.interactive,

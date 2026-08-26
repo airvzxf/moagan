@@ -180,6 +180,42 @@ pub enum EventFormatArg {
     Off,
 }
 
+/// stdout decision-event verbosity selector. Decoupled from
+/// [`EventFormatArg`] so the high-volume cache / judge / category
+/// events can be silenced or saturated independently of the rest
+/// of the bus. See `docs/events-v1.md` for the curated list and
+/// the Summary / All split rationale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum DecisionFormatArg {
+    /// Silence every `Decision` event.
+    Off,
+    /// Emit only the curated, low-volume decisions (default).
+    /// Covers `winner_picked`, `low_confidence_winner`,
+    /// `cluster_skipped`, `repair_applied`, `portfolio_finalized`.
+    Summary,
+    /// Emit every decision, including per-LLM-call cache events
+    /// (`cache_hit` / `cache_miss`), per-proposal judge verdicts
+    /// (`judge_verdict`), and per-sketch category assignments
+    /// (`category_assigned`). Intended for dashboards and audits,
+    /// not run-of-the-mill console output.
+    All,
+}
+
+impl DecisionFormatArg {
+    /// Map the CLI-facing [`DecisionFormatArg`] to the
+    /// internal [`crate::telemetry::stdout_events::DecisionFormat`]
+    /// used by the resolution / `should_emit_decision` helpers.
+    pub fn to_internal(self) -> crate::telemetry::stdout_events::DecisionFormat {
+        use crate::telemetry::stdout_events::DecisionFormat;
+        match self {
+            Self::Off => DecisionFormat::Off,
+            Self::Summary => DecisionFormat::Summary,
+            Self::All => DecisionFormat::All,
+        }
+    }
+}
+
 /// Top-level CLI.
 #[derive(Debug, Parser)]
 #[command(
@@ -216,6 +252,24 @@ pub struct Cli {
     /// interactive mode. `off` silences stdout entirely.
     #[arg(long, global = true, value_enum, default_value_t = EventFormatArg::Jsonl)]
     pub event_format: EventFormatArg,
+    /// Verbosity of the `Decision` events emitted on stdout (the
+    /// curated audit trail of operator-facing decisions made by the
+    /// pipeline). Independent from `--event-format`: even when the
+    /// event stream is `off`, `--decision-format all` does NOT
+    /// produce output. `summary` (default) emits the curated,
+    /// low-volume decisions (`winner_picked`,
+    /// `low_confidence_winner`, `cluster_skipped`, `repair_applied`,
+    /// `portfolio_finalized`) — one per run, suitable for log
+    /// aggregation. `all` additionally emits the high-volume
+    /// decisions (`cache_hit`, `cache_miss`, `judge_verdict`,
+    /// `category_assigned`) which can produce dozens of events per
+    /// run; intended for dashboards / audits, not run-of-the-mill
+    /// console output. `off` silences every `Decision` event. The
+    /// `MOAGAN_DECISION_FORMAT` env var is honoured with the same
+    /// precedence as the explicit flag (env > flag > default).
+    #[arg(long, global = true, value_enum, default_value_t = DecisionFormatArg::Summary,
+          env = "MOAGAN_DECISION_FORMAT")]
+    pub decision_format: DecisionFormatArg,
     /// Subcommand.
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -1034,15 +1088,28 @@ impl Cmd {
     }
 }
 
-/// Dispatch the parsed CLI and convert domain errors into process exit codes.
-pub async fn dispatch(cli: Cli) -> Result<i32> {
+/// Dispatch the parsed CLI and convert domain errors into process
+/// exit codes. The returned [`DispatchResult`] carries the real
+/// `run_id` produced / referenced by the subcommand so the outer
+/// [`crate::run_with_cli`] can stamp it onto the `pipeline_span`
+/// and the
+/// [`crate::telemetry::stdout_events::Event::RunStart`] /
+/// [`crate::telemetry::stdout_events::Event::RunEnd`] events
+/// instead of the historic `"pre-dispatch"` /
+/// `<help-or-readonly>` / `<n/a>` placeholders.
+pub async fn dispatch(cli: Cli) -> Result<DispatchResult> {
     use std::io::IsTerminal;
     trace!("dispatch: enter");
     let result = dispatch_inner(cli).await;
     match &result {
-        Ok(rc) => {
-            info!(exit_code = rc, "dispatch: ok");
-            Ok(*rc)
+        Ok(dr) => {
+            info!(
+                exit_code = dr.exit_code,
+                run_id = ?dr.run_id.as_ref().map(|r| r.short()),
+                mode = ?dr.mode,
+                "dispatch: ok"
+            );
+            Ok(dr.clone())
         }
         Err(e) => {
             error!(error = %e, exit_code = e.exit_code() as i32, "dispatch: error");
@@ -1052,12 +1119,100 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             if std::io::stderr().is_terminal() {
                 eprintln!("error: {e}");
             }
-            Ok(e.exit_code() as i32)
+            Ok(DispatchResult {
+                exit_code: e.exit_code() as i32,
+                run_id: None,
+                mode: None,
+                provider: None,
+                model: None,
+                prompt_hash: None,
+            })
         }
     }
 }
 
-async fn dispatch_inner(cli: Cli) -> Result<i32> {
+/// Result of dispatching a parsed [`Cli`]. Carries the real
+/// `run_id` produced (or referenced) by the subcommand so the
+/// outer [`crate::run_with_cli`] can stamp it onto the
+/// `pipeline_span` and the
+/// [`crate::telemetry::stdout_events::Event::RunStart`] /
+/// [`crate::telemetry::stdout_events::Event::RunEnd`] events
+/// instead of the historic `"pre-dispatch"` /
+/// `<help-or-readonly>` / `<n/a>` placeholders.
+///
+/// `run_id` is `Some(_)` whenever the subcommand produced or
+/// selected a concrete run — the run that was created (Run,
+/// Discover, Preflight's discover leg), the run that was resumed
+/// (Continue / Resume / Rerun), the run that was refined / reranked
+/// (Refine, Rerank), or the run that was imported (Import). For
+/// read-only commands (Inspect, Diff, Doctor, Validate, Telemetry,
+/// Pause, List, Coverage show, Repair) and side-effect-only
+/// commands (Probe, Audit proxy/verify, Rate) the field is `None`;
+/// `run_with_cli` substitutes a `<read-only>` sentinel for the
+/// machine-facing event so `jq -c 'select(.kind=="run_start")'`
+/// keeps matching.
+#[derive(Debug, Clone)]
+pub struct DispatchResult {
+    /// Process exit code (0 = success).
+    pub exit_code: i32,
+    /// Real run id produced / referenced by the subcommand, or
+    /// `None` for read-only commands.
+    pub run_id: Option<crate::ids::RunId>,
+    /// Stable mode label (`"run"`, `"discover"`, `"continue"`,
+    /// `"resume"`, `"rerun"`, `"refine"`, `"rerank"`, `"import"`,
+    /// `"preflight"`, `"audit"`, …). Replaces the
+    /// `<help-or-readonly>` placeholder.
+    pub mode: Option<&'static str>,
+    /// Resolved provider (the full `SECTION:MODEL` string), or
+    /// `None` when no LLM-backed command ran.
+    pub provider: Option<String>,
+    /// Resolved model id (the suffix after `SECTION:`), or
+    /// `None` when no LLM-backed command ran.
+    pub model: Option<String>,
+    /// BLAKE3 hex digest of the resolved prompt. `None` for
+    /// subcommands that do not consume a prompt (read-only
+    /// commands; rerun/continue/resume use the parent run's
+    /// prompt so they inherit the parent's hash via the
+    /// manifest, not the dispatcher).
+    pub prompt_hash: Option<String>,
+}
+
+impl DispatchResult {
+    /// Build a `DispatchResult` for a read-only subcommand that
+    /// does not touch the pipeline.
+    fn read_only(exit_code: i32, mode: &'static str) -> Self {
+        Self {
+            exit_code,
+            run_id: None,
+            mode: Some(mode),
+            provider: None,
+            model: None,
+            prompt_hash: None,
+        }
+    }
+
+    /// Build a `DispatchResult` for an LLM-backed subcommand
+    /// that produced / referenced a single run.
+    fn with_run(
+        exit_code: i32,
+        mode: &'static str,
+        run_id: crate::ids::RunId,
+        provider: Option<String>,
+        model: Option<String>,
+        prompt_hash: Option<String>,
+    ) -> Self {
+        Self {
+            exit_code,
+            run_id: Some(run_id),
+            mode: Some(mode),
+            provider,
+            model,
+            prompt_hash,
+        }
+    }
+}
+
+async fn dispatch_inner(cli: Cli) -> Result<DispatchResult> {
     debug!("dispatch_inner: enter");
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
@@ -1283,6 +1438,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         .into(),
                 ));
             }
+            // Snapshot the resolved prompt + provider so the
+            // outer `run_with_cli` can stamp real values onto the
+            // `pipeline_span` / `Event::RunStart` / `RunEnd`
+            // payloads. The pipeline moves both into `RunOptions`,
+            // so the snapshot is captured here (a `String::clone`
+            // for the provider; a fresh `blake3` of the prompt).
+            let resolved_provider = provider.clone();
+            let resolved_prompt_hash = crate::ids::blake3_hex(prompt.as_bytes());
+            let resolved_model = probe::parse_provider_model(&provider).ok().map(|(_, m)| m);
             debug!(
                 provider = %provider,
                 mode = ?mode,
@@ -1314,7 +1478,14 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             if std::io::stdout().is_terminal() {
                 println!("run id: {run_id}");
             }
-            Ok(0)
+            Ok(DispatchResult::with_run(
+                0,
+                "run",
+                run_id,
+                Some(resolved_provider),
+                resolved_model,
+                Some(resolved_prompt_hash),
+            ))
         }
         Cmd::Continue {
             run_id,
@@ -1354,7 +1525,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 })?;
                 let parsed = id.parse().map_err(|e| Error::InvalidArgs(format!("{e}")))?;
                 let code = pause_cmd::run_continue_from_pause(&global_home, parsed).await?;
-                return Ok(code);
+                return Ok(DispatchResult::with_run(
+                    code, "continue", parsed, None, None, None,
+                ));
             }
             let id = run_id.ok_or_else(|| {
                 Error::InvalidArgs("--run-id is required for `moagan continue`".into())
@@ -1372,7 +1545,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 },
             )
             .await?;
-            Ok(0)
+            Ok(DispatchResult::with_run(
+                0, "continue", parsed, None, None, None,
+            ))
         }
         Cmd::Resume {
             run_id,
@@ -1383,7 +1558,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
             debug!(run_id = %parsed, "dispatching moagan resume");
             continue_cmd::run_resume(&global_home, parsed, non_interactive).await?;
-            Ok(0)
+            Ok(DispatchResult::with_run(
+                0, "resume", parsed, None, None, None,
+            ))
         }
         Cmd::Rerun {
             run_id,
@@ -1411,7 +1588,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 "rerun dispatch"
             );
             continue_cmd::run_rerun(&global_home, parsed, raw, same_config).await?;
-            Ok(0)
+            // Per the c1 plan: `Rerun` reports the input run id
+            // (the parent that was cloned). The forked child id
+            // is owned by `run_rerun` (it ends up on
+            // `manifest.run_id` of the new run dir); surfacing
+            // it here would require plumbing through the
+            // helper's return value, which the plan deferred.
+            Ok(DispatchResult::with_run(
+                0, "rerun", parsed, None, None, None,
+            ))
         }
         Cmd::Import {
             source_path,
@@ -1422,8 +1607,34 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 target = ?target_runs_dir.as_ref().map(|p| p.display().to_string()),
                 "dispatching moagan import"
             );
+            // The `run_import` helper validates the source
+            // manifest and stamps the imported run on the local
+            // home. To propagate the imported run id through the
+            // dispatcher we re-read the manifest: the file
+            // already exists at `source_path/manifest.json`
+            // (validated inside `run_import` before this
+            // dispatcher call would return `Ok(_)`).
+            let manifest_bytes = std::fs::read(source_path.join("manifest.json")).map_err(|e| {
+                Error::InvalidState(format!(
+                    "import: source manifest disappeared during dispatch: {e}"
+                ))
+            })?;
+            #[derive(serde::Deserialize)]
+            struct ManifestStub {
+                run_id: crate::ids::RunId,
+            }
+            let stub: ManifestStub = serde_json::from_slice(&manifest_bytes)
+                .map_err(|e| Error::InvalidState(format!("import: manifest malformed: {e}")))?;
+            let imported_run_id = stub.run_id;
             continue_cmd::run_import(&global_home, &source_path, target_runs_dir.as_deref())?;
-            Ok(0)
+            Ok(DispatchResult::with_run(
+                0,
+                "import",
+                imported_run_id,
+                None,
+                None,
+                None,
+            ))
         }
         Cmd::Inspect {
             limit,
@@ -1470,7 +1681,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     );
                 }
             }
-            Ok(0)
+            Ok(DispatchResult::read_only(0, "inspect"))
         }
         Cmd::Refine {
             run_id,
@@ -1512,13 +1723,27 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 if outcome.emitted_telemetry {
                     println!("refine action emitted a StaleArtifact telemetry event");
                 }
-                Ok(0)
+                Ok(DispatchResult::with_run(
+                    0,
+                    "refine",
+                    run_id_parsed,
+                    None,
+                    None,
+                    None,
+                ))
             } else if let Some(proposal) = proposal.as_deref() {
                 let cfg = Config::load()?;
                 continue_cmd::run_refine(run_id_parsed, proposal, &cfg, &home, mock_dir.as_deref())
                     .await?;
                 println!("refined proposal {proposal} for run {run_id}");
-                Ok(0)
+                Ok(DispatchResult::with_run(
+                    0,
+                    "refine",
+                    run_id_parsed,
+                    None,
+                    None,
+                    None,
+                ))
             } else {
                 // clap's `required_unless_present` should prevent
                 // this; surface a friendly error anyway so a
@@ -1533,19 +1758,23 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             debug!(run_id = %run_id, "dispatching moagan rerank");
             let cfg = Config::load()?;
             let home = Arc::new(global_home.clone());
-            continue_cmd::run_rerank(
-                run_id
-                    .parse()
-                    .map_err(|e| Error::InvalidArgs(format!("{e}")))?,
-                &cfg,
-                &home,
-            )
-            .await?;
+            let parsed = run_id
+                .parse()
+                .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
+            continue_cmd::run_rerank(parsed, &cfg, &home).await?;
             println!("reranked run {run_id}");
-            Ok(0)
+            Ok(DispatchResult::with_run(
+                0, "rerank", parsed, None, None, None,
+            ))
         }
-        Cmd::Doctor { capabilities } => doctor::run(capabilities),
-        Cmd::Probe { sub } => probe::dispatch(&sub).await,
+        Cmd::Doctor { capabilities } => {
+            let code = doctor::run(capabilities)?;
+            Ok(DispatchResult::read_only(code, "doctor"))
+        }
+        Cmd::Probe { sub } => {
+            let code = probe::dispatch(&sub).await?;
+            Ok(DispatchResult::read_only(code, "probe"))
+        }
         Cmd::Audit { sub } => match sub {
             AuditCmd::Proxy {
                 runs_dir,
@@ -1573,7 +1802,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     timeout_secs,
                 };
                 audit::proxy_cmd(args).await?;
-                Ok(0)
+                Ok(DispatchResult::read_only(0, "audit_proxy"))
             }
             AuditCmd::Verify { runs_dir, run_id } => {
                 debug!(
@@ -1582,7 +1811,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 );
                 let args = audit::VerifyArgs { runs_dir, run_id };
                 let code = audit::verify_cmd(args).await?;
-                Ok(code)
+                Ok(DispatchResult::read_only(code, "audit_verify"))
             }
         },
         Cmd::Discover {
@@ -1693,7 +1922,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 };
                 let rendered = discover_explain::build_and_format(&explain_opts, &cfg)?;
                 println!("{rendered}");
-                return Ok(0);
+                return Ok(DispatchResult::read_only(0, "discover_explain"));
             }
             // v0.10: --provider is mandatory; resolve it through
             // the same precedence as `run` so the operator sees
@@ -1710,6 +1939,12 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         .into(),
                 ));
             }
+            // Snapshot the resolved prompt + provider so the
+            // outer `run_with_cli` can stamp real values onto
+            // `pipeline_span` / `Event::RunStart` / `RunEnd`.
+            let resolved_provider = provider.clone();
+            let resolved_prompt_hash = crate::ids::blake3_hex(prompt.as_bytes());
+            let resolved_model = probe::parse_provider_model(&provider).ok().map(|(_, m)| m);
             debug!(
                 provider = %provider,
                 sketches_per_cell = sketches_per_cell,
@@ -1738,20 +1973,31 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             )
             .await?;
             println!("discovery run id: {run_id}");
-            Ok(0)
+            Ok(DispatchResult::with_run(
+                0,
+                "discover",
+                run_id,
+                Some(resolved_provider),
+                resolved_model,
+                Some(resolved_prompt_hash),
+            ))
         }
-        Cmd::Telemetry { sub } => telemetry_cmd::TelemetryCmd::dispatch(sub).await,
+        Cmd::Telemetry { sub } => {
+            let code = telemetry_cmd::TelemetryCmd::dispatch(sub).await?;
+            Ok(DispatchResult::read_only(code, "telemetry"))
+        }
         Cmd::Coverage { sub } => {
             debug!("dispatching moagan coverage");
             let rc = coverage_cmd::dispatch(&global_home, sub)?;
-            Ok(rc)
+            Ok(DispatchResult::read_only(rc, "coverage"))
         }
         Cmd::Validate { brief_path, mode } => {
             debug!(
                 brief_path = %brief_path.display(),
                 "dispatching moagan validate"
             );
-            validate::run(validate::ValidateArgs { brief_path, mode })
+            let code = validate::run(validate::ValidateArgs { brief_path, mode })?;
+            Ok(DispatchResult::read_only(code, "validate"))
         }
         Cmd::Diff {
             run_a,
@@ -1764,13 +2010,14 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 run_b = %run_b,
                 "dispatching moagan diff"
             );
-            diff::run(diff::DiffArgs {
+            let code = diff::run(diff::DiffArgs {
                 run_a,
                 run_b,
                 format,
                 include_proposals,
                 home_override: None,
-            })
+            })?;
+            Ok(DispatchResult::read_only(code, "diff"))
         }
         Cmd::Repair {
             cleanup_orphans,
@@ -1805,7 +2052,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 dry_run,
                 home_override: None,
             })?;
-            Ok(code)
+            Ok(DispatchResult::read_only(code, "repair"))
         }
         Cmd::Pause { run_id } => {
             let parsed: crate::ids::RunId = run_id
@@ -1820,7 +2067,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     completed: None,
                 },
             )?;
-            Ok(code)
+            Ok(DispatchResult::read_only(code, "pause"))
         }
         Cmd::Preflight {
             provider,
@@ -1892,6 +2139,12 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         .into(),
                 ));
             }
+            // Snapshot the resolved prompt + provider so the
+            // outer `run_with_cli` can stamp real values onto
+            // `pipeline_span` / `Event::RunStart` / `RunEnd`.
+            let resolved_provider = provider.clone();
+            let resolved_prompt_hash = crate::ids::blake3_hex(prompt.as_bytes());
+            let resolved_model = probe::parse_provider_model(&provider).ok().map(|(_, m)| m);
             let discover_run_id = discover::run(
                 discover::DiscoverOptions {
                     provider: provider.clone(),
@@ -1938,7 +2191,21 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             )
             .await?;
             println!("preflight fast run_id: {fast_run_id}");
-            Ok(0)
+            // Per the c1 plan: Preflight reports the FIRST run
+            // id produced (the discover leg). The fast leg's run
+            // id is printed on stdout for human operators but
+            // not propagated through the dispatcher — surfacing
+            // it would require changing `run::run` (or piping
+            // the second id through `PreflightCommand`); the
+            // plan defers that wiring.
+            Ok(DispatchResult::with_run(
+                0,
+                "preflight",
+                discover_run_id,
+                Some(resolved_provider),
+                resolved_model,
+                Some(resolved_prompt_hash),
+            ))
         }
         Cmd::List { paused } => {
             if !paused {
@@ -1948,7 +2215,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             }
             debug!("dispatching moagan list --paused");
             let code = pause_cmd::run_list(&global_home, pause_cmd::ListArgs {})?;
-            Ok(code)
+            Ok(DispatchResult::read_only(code, "list"))
         }
         Cmd::Rate {
             run_id,
@@ -1965,7 +2232,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 proposal_id,
                 score,
             })?;
-            Ok(code)
+            Ok(DispatchResult::read_only(code, "rate"))
         }
     }
 }

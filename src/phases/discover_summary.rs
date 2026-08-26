@@ -563,6 +563,27 @@ impl Phase for DiscoverSummaryPhase {
         let docs = DiscoverSummaryPhase::read_category_docs(ctx)?;
         let tag_index = DiscoverSummaryPhase::read_tag_index(ctx)?;
 
+        // c2: `category_assigned` decision events (one per
+        // CategoryDoc). All-only level: the volume scales with the
+        // discovery fan-out (one per category, dozens to hundreds
+        // for a deep discovery). `density` is the only "confidence"
+        // proxy available on the CategoryDoc (a f32 in `[0, 1]`
+        // measuring how packed the cluster was); we surface it
+        // under the `confidence` key so the schema is consistent
+        // with the LLM-driven `cat.label` variant a future
+        // discoverer might emit.
+        for doc in &docs {
+            let cat = doc;
+            crate::telemetry::stdout_events::emit_decision("category_assigned", || {
+                serde_json::json!({
+                    "sketch_id": cat.sources.first().cloned().unwrap_or_default(),
+                    "category": cat.category_id,
+                    "confidence": cat.density,
+                    "sources": cat.sources,
+                })
+            });
+        }
+
         let total_sketches = std::fs::read_dir(ctx.run_dir().sketches())?
             .filter_map(|r| r.ok())
             .filter(|e| {

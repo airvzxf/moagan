@@ -39,6 +39,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -246,6 +247,23 @@ pub trait TemperatureProbeTransport: Send + Sync {
     /// Send a probe with the supplied `temperature` and report
     /// whether the upstream accepted it.
     async fn probe_send_temperature(&self, temperature: f32) -> TemperatureProbeOutcome;
+
+    /// Optional shared counter that tags every `Event::Probe`
+    /// emitted with `probe_kind=temperature` with the sequential
+    /// index of the call within the parallel fan-out (0, 1, 2,
+    /// ...). The transport increments the counter on every
+    /// invocation and reads the pre-increment value as the
+    /// `iteration` field, so the first call reports `0`, the
+    /// second reports `1`, etc. Default `None` keeps existing
+    /// test doubles backward-compatible: a transport that does
+    /// not need the iteration label (e.g. the mocks in this
+    /// module's `mod tests`, or downstream consumers that wrap
+    /// an upstream provider without sharing telemetry state)
+    /// simply inherits `None` and the emission code reports
+    /// `iteration: 0` for every call.
+    fn iteration_counter(&self) -> Option<Arc<AtomicU32>> {
+        None
+    }
 }
 
 /// Default transport: wraps an existing [`Provider`] and fires a
@@ -254,6 +272,20 @@ pub trait TemperatureProbeTransport: Send + Sync {
 /// count against the circuit-breaker window.
 pub struct ProviderTemperatureProbeTransport {
     provider: Arc<dyn Provider>,
+    /// Optional shared iteration counter. Lazily allocated on the
+    /// first [`Self::iteration_counter`] call so the `new()`
+    /// constructor stays a pure move of the provider Arc (no
+    /// extra allocation when nothing reads the counter). The
+    /// counter is wrapped in a `parking_lot::Mutex` so the
+    /// lazy-init is race-free across concurrent `probe_send_temperature`
+    /// callers (the probe fan-out is `TEMPERATURE_PROBE_BATCH_SIZE`
+    /// parallel tasks, all of which may observe the empty slot
+    /// at startup). Named `iteration_counter_slot` so the field
+    /// and the [`TemperatureProbeTransport::iteration_counter`]
+    /// trait method keep distinct identifiers (Rust resolves
+    /// `self.foo` ambiguously when a field and a no-arg method
+    /// share a name).
+    iteration_counter_slot: parking_lot::Mutex<Option<Arc<AtomicU32>>>,
 }
 
 impl ProviderTemperatureProbeTransport {
@@ -262,7 +294,10 @@ impl ProviderTemperatureProbeTransport {
     /// applied around the call inside
     /// [`Self::probe_send_temperature`].
     pub fn new(provider: Arc<dyn Provider>) -> Result<Self> {
-        Ok(Self { provider })
+        Ok(Self {
+            provider,
+            iteration_counter_slot: parking_lot::Mutex::new(None),
+        })
     }
 
     /// Borrow the underlying provider. Useful for tests that
@@ -311,12 +346,70 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
                 .instrument(probe_span.clone()),
         )
         .await;
+
+        // Resolve the outcome AND derive the wire-string used by
+        // the stdout `Event::Probe`. The classifier returns one
+        // of three values, but for the event stream we collapse
+        // them into `"accepted" | "rejected" | "indeterminate"`
+        // so the JSON payload stays short. The error / timeout
+        // branches collapse to `"indeterminate"` without going
+        // through the classifier (no body to inspect).
+        let outcome_str: &'static str = match &res {
+            Ok(Ok((status, body))) => {
+                outcome_str_for_probe_response(*status, ProbeResponseView::from_response(body))
+            }
+            _ => "indeterminate",
+        };
+
+        // v0.11.1 (c4): emit an `Event::Probe` per call so the
+        // stdout timeline carries a per-candidate record with the
+        // sequential iteration index inside the parallel fan-out.
+        // Mirrors `src/llm/probe.rs::probe_send_with_body` so the
+        // two auto-probes produce a uniform wire shape.
+        let counter = self.iteration_counter();
+        let iter = counter
+            .as_ref()
+            .map(|c| c.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        if crate::telemetry::stdout_events::resolve_event_format(
+            crate::telemetry::stdout_events::EventFormat::Jsonl,
+        ) {
+            let event = build_probe_event(
+                self.provider.name(),
+                self.provider.model(),
+                temperature,
+                iter,
+                outcome_str,
+                crate::telemetry::stdout_events::now_rfc3339(),
+            );
+            crate::telemetry::stdout_events::STDOUT_EVENTS.emit(event);
+        }
+
         match res {
             Ok(Ok((status, body))) => {
                 classify_probe_response(status, ProbeResponseView::from_response(&body))
             }
             Ok(Err(_)) | Err(_) => TemperatureProbeOutcome::Indeterminate,
         }
+    }
+
+    fn iteration_counter(&self) -> Option<Arc<AtomicU32>> {
+        // Lazy-init: the counter is only allocated on the first
+        // `iteration_counter()` call, so test doubles that never
+        // read it (the typical case — the unit tests use mocks
+        // that do not opt in to the telemetry) do not pay the
+        // allocation cost. The `parking_lot::Mutex` makes the
+        // first-write race-free across the parallel fan-out; on
+        // a slow `parking_lot::Mutex::lock()` after the first
+        // caller has installed the Arc, every subsequent caller
+        // just clones the existing handle.
+        let mut guard = self.iteration_counter_slot.lock();
+        if let Some(c) = guard.as_ref() {
+            return Some(c.clone());
+        }
+        let c = Arc::new(AtomicU32::new(0));
+        *guard = Some(c.clone());
+        Some(c)
     }
 }
 
@@ -386,6 +479,66 @@ pub fn classify_probe_response(
         }
     } else {
         TemperatureProbeOutcome::Indeterminate
+    }
+}
+
+/// Wire-string variant of [`classify_probe_response`]. Maps the
+/// typed [`TemperatureProbeOutcome`] enum onto the lowercase
+/// string the `Event::Probe` event uses for its `outcome` field
+/// (`"accepted" | "rejected" | "indeterminate"`). Kept as a
+/// separate helper so the algorithm layer keeps its typed enum
+/// (no string allocations on the hot path) while the stdout
+/// event stream stays a flat string payload (NDJSON consumers
+/// do not have to pattern-match nested enums).
+///
+/// `view` is the same borrowed [`ProbeResponseView`] the
+/// classifier takes, so the helper does not duplicate the
+/// branching rules: it routes the outcome through
+/// [`classify_probe_response`] and only collapses the typed
+/// result into a static string. Any future branch added to
+/// the classifier would be picked up here for free.
+fn outcome_str_for_probe_response(status: u16, view: ProbeResponseView<'_>) -> &'static str {
+    match classify_probe_response(status, view) {
+        TemperatureProbeOutcome::Accepted => "accepted",
+        TemperatureProbeOutcome::Rejected => "rejected",
+        TemperatureProbeOutcome::Indeterminate => "indeterminate",
+    }
+}
+
+/// Build the [`Event::Probe`] payload the temperature probe
+/// emits on every `probe_send_temperature` call. The function is
+/// a pure constructor — it does not write to stdout, the caller
+/// is responsible for handing the result to
+/// [`crate::telemetry::stdout_events::STDOUT_EVENTS`]. Pulled
+/// out of the trait method so the unit tests can verify the
+/// event shape (iteration index, candidate, outcome string,
+/// provider, model) without capturing stdout or seeding a
+/// tracing harness — fragile approaches the brief explicitly
+/// warns against.
+///
+/// `ts` is taken as an owned `String` rather than computed via
+/// [`crate::telemetry::stdout_events::now_rfc3339`] so the
+/// tests can pin the field to a known literal and the
+/// production path calls `now_rfc3339()` itself before
+/// handing the timestamp in.
+fn build_probe_event<'a>(
+    provider: &'a str,
+    model: &'a str,
+    candidate: f32,
+    iter: u32,
+    outcome: &'static str,
+    ts: String,
+) -> crate::telemetry::stdout_events::Event<'a> {
+    use crate::telemetry::stdout_events::{Event, SCHEMA_VERSION};
+    Event::Probe {
+        schema: SCHEMA_VERSION,
+        ts,
+        probe_kind: "temperature",
+        candidate,
+        iteration: iter,
+        provider,
+        model,
+        outcome,
     }
 }
 
@@ -2016,5 +2169,136 @@ temperatures = [0.0, 0.5, 1.0]\n\
             out.contains("[operator_caps.minimax]"),
             "non-provider headers must be untouched; got:\n{out}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // v0.11.1 (c4) — `Event::Probe` parity between the
+    // `max_tokens` and `temperature` probes.
+    //
+    // The temperature probe had been the only `Event::Probe`
+    // emit site that did NOT carry an `iteration` field with the
+    // sequential index of the call inside the parallel fan-out.
+    // The two tests below pin the contract:
+    //
+    // - `probe_event_carries_iteration_counter`: the
+    //   `ProviderTemperatureProbeTransport` exposes a shared
+    //   `Arc<AtomicU32>` that increments on every call, so the
+    //   first probe reports `iter=0`, the second `iter=1`, the
+    //   third `iter=2`.
+    // - `probe_emits_event_with_iteration`: the
+    //   `build_probe_event` helper assembles an `Event::Probe`
+    //   payload with the right field shape (`probe_kind =
+    //   "temperature"`, `candidate = <temp>`,
+    //   `iteration = <n>`, `provider`, `model`,
+    //   `outcome = "accepted"|"rejected"|"indeterminate"`).
+    //   The production emit path forwards this exact payload
+    //   to `STDOUT_EVENTS.emit`; the test verifies the shape
+    //   without capturing stdout (the brief explicitly warns
+    //   against the stdout-capture / init_tracing approach).
+    // -----------------------------------------------------------------
+
+    /// Pin the lazy-init + sequential increment behaviour of the
+    /// [`ProviderTemperatureProbeTransport::iteration_counter`]
+    /// field. The mock provider returns a non-empty 2xx body
+    /// (`"1"`) that does not carry the rejection signature, so
+    /// the classifier maps every call to
+    /// [`TemperatureProbeOutcome::Accepted`].
+    #[tokio::test]
+    async fn probe_event_carries_iteration_counter() {
+        use crate::llm::mock::{MockProvider, MockResponse};
+        let mock = Arc::new(MockProvider::new(vec![MockResponse::plain("1")]));
+        let transport = ProviderTemperatureProbeTransport::new(mock).unwrap();
+
+        // Force the lazy-init so we can observe the counter
+        // across all three calls. The first call to
+        // `iteration_counter()` allocates the `AtomicU32` with
+        // value 0; the test pins that the first probe reads
+        // `iter=0` (the pre-increment value).
+        let counter = transport
+            .iteration_counter()
+            .expect("counter must exist after first read");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "freshly initialised counter must read 0"
+        );
+
+        // Call 1: iter value the production path would tag
+        // the Event::Probe with is 0; counter advances to 1.
+        let _ = transport.probe_send_temperature(0.0).await;
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "after probe #1 the internal counter must be 1 (the emit path read 0)"
+        );
+
+        // Call 2: iter value is 1; counter advances to 2.
+        let _ = transport.probe_send_temperature(0.5).await;
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "after probe #2 the internal counter must be 2 (the emit path read 1)"
+        );
+
+        // Call 3: iter value is 2; counter advances to 3.
+        let _ = transport.probe_send_temperature(1.0).await;
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            3,
+            "after probe #3 the internal counter must be 3 (the emit path read 2)"
+        );
+    }
+
+    /// Pin the wire shape of the `Event::Probe` payload the
+    /// temperature probe emits. Uses the [`build_probe_event`]
+    /// helper so the test inspects the struct fields directly
+    /// rather than capturing stdout (the brief explicitly
+    /// warns against the stdout-capture approach — fragile,
+    /// requires `init_tracing`, and race-prone under
+    /// `cargo test`'s parallel test runner).
+    #[test]
+    fn probe_emits_event_with_iteration() {
+        use crate::telemetry::stdout_events::Event;
+        // Pin every field the production path emits so a
+        // future refactor that drops `probe_kind`, renames
+        // `iteration`, or changes the candidate type surfaces
+        // here rather than as a regression in a downstream
+        // dashboard.
+        let ev = build_probe_event(
+            "minimax",
+            "MiniMax-M3",
+            0.6,
+            3,
+            "accepted",
+            "2026-08-26T10:00:00.000Z".to_owned(),
+        );
+        match ev {
+            Event::Probe {
+                probe_kind,
+                candidate,
+                iteration,
+                provider,
+                model,
+                outcome,
+                ts,
+                schema,
+            } => {
+                assert_eq!(probe_kind, "temperature");
+                assert!(
+                    (candidate - 0.6).abs() < 1e-9,
+                    "candidate must carry the probed temperature; got {candidate}"
+                );
+                assert_eq!(
+                    iteration, 3,
+                    "iteration must carry the sequential fan-out index"
+                );
+                assert_eq!(provider, "minimax");
+                assert_eq!(model, "MiniMax-M3");
+                assert_eq!(outcome, "accepted");
+                assert_eq!(ts, "2026-08-26T10:00:00.000Z");
+                assert_eq!(schema, crate::telemetry::stdout_events::SCHEMA_VERSION);
+            }
+            other => panic!("build_probe_event must return Event::Probe; got {other:?}"),
+        }
     }
 }

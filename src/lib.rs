@@ -102,6 +102,7 @@ pub async fn run() -> anyhow::Result<()> {
 /// the very first tracing event (before this function is called).
 /// `run()` is a convenience wrapper that parses the CLI itself.
 pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
+    use crate::cli::DispatchResult;
     use crate::telemetry::stdout_events;
     use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
     use std::io::IsTerminal;
@@ -112,80 +113,133 @@ pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
     // Pipeline span: root context for every event the run emits.
     // Operators grep `pipeline{run_id=...}` to follow the entire
     // run from `run_start` through every nested `phase` /
-    // `iteration` / `llm_call` / `probe` event.
+    // `iteration` / `llm_call` / `probe` event. The fields are
+    // declared `Empty` here so we can fill them with the real
+    // values from the [`DispatchResult`] AFTER `cli::dispatch`
+    // returns — the historical version of this span hard-coded
+    // `"pre-dispatch"` / `<help-or-readonly>` / `<n/a>`
+    // placeholders that did not match the actual command.
     let pipeline_span = tracing::info_span!(
         "pipeline",
-        run_id = "pre-dispatch",
-        mode = "<help-or-readonly>",
-        provider = "<n/a>",
-        model = "<n/a>",
+        run_id = tracing::field::Empty,
+        mode = tracing::field::Empty,
+        provider = tracing::field::Empty,
+        model = tracing::field::Empty,
         resumed = false,
     );
     let _pipeline_enter = pipeline_span.enter();
 
+    tracing::info!("moagan::run: dispatching");
+    let dispatch_result: DispatchResult =
+        match cli::dispatch(cli).instrument(pipeline_span.clone()).await {
+            Ok(dr) => {
+                tracing::info!(
+                    exit_code = dr.exit_code,
+                    run_id = ?dr.run_id.as_ref().map(|r| r.short()),
+                    mode = ?dr.mode,
+                    "moagan::run: dispatch ok"
+                );
+                // Now that we know the real values, patch the
+                // `pipeline_span` fields. `Span::record` only
+                // updates fields declared `Empty` at span
+                // construction time.
+                if let Some(id) = dr.run_id.as_ref() {
+                    pipeline_span.record("run_id", id.to_string().as_str());
+                }
+                if let Some(m) = dr.mode {
+                    pipeline_span.record("mode", m);
+                }
+                if let Some(p) = dr.provider.as_deref() {
+                    pipeline_span.record("provider", p);
+                }
+                if let Some(m) = dr.model.as_deref() {
+                    pipeline_span.record("model", m);
+                }
+                dr
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "moagan::run: dispatch failed");
+                // The plain-text error message goes to stderr ONLY when
+                // the user is on a TTY (interactive mode). When stderr
+                // is redirected/piped, the structured `tracing::error!`
+                // event above already carries the same information as
+                // JSON; an extra `eprintln!` here would break
+                // `moagan … 2> log.jsonl | jq` consumers.
+                if std::io::stderr().is_terminal() {
+                    eprintln!("error: {e}");
+                }
+                let code = i32::from(exit_code(&e));
+                // On dispatch failure, emit `RunEnd` with the
+                // `<read-only>` sentinel for the run_id and an
+                // `error` status. No `RunStart` was emitted
+                // because the dispatch never produced a
+                // `DispatchResult` to feed the fields; the
+                // operator pipeline still sees one structured
+                // event marking the error.
+                if emit_stdout {
+                    stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
+                        schema: SCHEMA_VERSION,
+                        ts: now_rfc3339(),
+                        run_id: "<read-only>",
+                        status: "error",
+                        exit_code: code,
+                        elapsed_ms: run_started.elapsed().as_millis() as u64,
+                        artefacts: serde_json::json!({}),
+                    });
+                }
+                std::process::exit(code);
+            }
+        };
+
+    // Resolve the strings we will emit onto `RunStart` and
+    // `RunEnd`. For read-only commands the run_id is `None`;
+    // we emit a `<read-only>` sentinel so the JSON shape
+    // stays stable and the operator's
+    // `jq -c 'select(.kind == "run_start")'` selector keeps
+    // matching a stable string across all sub-commands.
+    let resolved_run_id: String = dispatch_result
+        .run_id
+        .as_ref()
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| "<read-only>".to_owned());
+    let resolved_mode: &str = dispatch_result.mode.unwrap_or("<help-or-readonly>");
+    let resolved_provider: &str = dispatch_result.provider.as_deref().unwrap_or("<n/a>");
+    let resolved_model: &str = dispatch_result.model.as_deref().unwrap_or("<n/a>");
+    let resolved_prompt_hash: &str = dispatch_result.prompt_hash.as_deref().unwrap_or("<n/a>");
+
     // Stdout event: `run_start`. Always emitted (even for the
     // `moagan --help` subcommand) when stdout is not a TTY so
     // operators can `moagan … | jq 'select(.kind == "run_start")'`
-    // to confirm the binary even started. The synthetic
-    // `run_id` is only useful when the dispatch produces a real
-    // run; for the `--help` and read-only commands we emit a
-    // stable hash of the command name.
+    // to confirm the binary even started. Emitted AFTER
+    // `cli::dispatch` so we can stamp the real `run_id` /
+    // `mode` / `provider` / `model` / `prompt_hash` onto the
+    // event — the pre-dispatch version of this code emitted
+    // `"pre-dispatch"` / `<help-or-readonly>` / `<n/a>`
+    // placeholders that did not match the actual command.
     if emit_stdout {
         stdout_events::STDOUT_EVENTS.emit(Event::RunStart {
             schema: SCHEMA_VERSION,
             ts: now_rfc3339(),
-            run_id: "pre-dispatch",
-            mode: "<help-or-readonly>",
-            provider: "<n/a>",
-            model: "<n/a>",
-            prompt_hash: "<n/a>",
+            run_id: resolved_run_id.as_str(),
+            mode: resolved_mode,
+            provider: resolved_provider,
+            model: resolved_model,
+            prompt_hash: resolved_prompt_hash,
         });
     }
 
-    tracing::info!("moagan::run: dispatching");
-    let code = match cli::dispatch(cli).instrument(pipeline_span.clone()).await {
-        Ok(code) => {
-            tracing::info!(exit_code = code, "moagan::run: dispatch ok");
-            if emit_stdout {
-                stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
-                    schema: SCHEMA_VERSION,
-                    ts: now_rfc3339(),
-                    run_id: "pre-dispatch",
-                    status: "ok",
-                    exit_code: code,
-                    elapsed_ms: run_started.elapsed().as_millis() as u64,
-                    artefacts: serde_json::json!({}),
-                });
-            }
-            code
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "moagan::run: dispatch failed");
-            // The plain-text error message goes to stderr ONLY when
-            // the user is on a TTY (interactive mode). When stderr
-            // is redirected/piped, the structured `tracing::error!`
-            // event above already carries the same information as
-            // JSON; an extra `eprintln!` here would break
-            // `moagan … 2> log.jsonl | jq` consumers.
-            if std::io::stderr().is_terminal() {
-                eprintln!("error: {e}");
-            }
-            let code = i32::from(exit_code(&e));
-            if emit_stdout {
-                stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
-                    schema: SCHEMA_VERSION,
-                    ts: now_rfc3339(),
-                    run_id: "pre-dispatch",
-                    status: "error",
-                    exit_code: code,
-                    elapsed_ms: run_started.elapsed().as_millis() as u64,
-                    artefacts: serde_json::json!({}),
-                });
-            }
-            code
-        }
-    };
-    std::process::exit(code)
+    if emit_stdout {
+        stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
+            schema: SCHEMA_VERSION,
+            ts: now_rfc3339(),
+            run_id: resolved_run_id.as_str(),
+            status: "ok",
+            exit_code: dispatch_result.exit_code,
+            elapsed_ms: run_started.elapsed().as_millis() as u64,
+            artefacts: serde_json::json!({}),
+        });
+    }
+    std::process::exit(dispatch_result.exit_code)
 }
 
 /// Synchronous entry point used by `main.rs` and integration tests.

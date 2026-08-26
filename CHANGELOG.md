@@ -5,6 +5,19 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-08-26
+
+### Added
+
+- **Real `run_id` in `Event::RunStart` / `Event::RunEnd`.** The CLI dispatcher (`src/cli/mod.rs::dispatch`) now returns `DispatchResult { exit_code, run_id, mode, provider, model, prompt_hash }` so the stdout event bus carries the actual RunId (e.g. `01a03d8c-5452-7333-96db-037022b62b3b`) instead of the `"pre-dispatch"` placeholder. Read-only commands (Inspect, Doctor, Validate, …) emit `"<read-only>"` as a stable sentinel. The `pipeline` span's `run_id` field is recorded after dispatch via `Span::record`, replacing the placeholder. **Behavior change**: `Event::RunStart` is now emitted AFTER the pipeline phase events (not before) — this is required to stamp the real run_id; downstream consumers should treat `RunStart` / `RunEnd` as a completion pair.
+- **`Event::Decision` emits at 9 curated decision points**, gated by the new `--decision-format <off|summary|all>` flag (default `summary`; env `MOAGAN_DECISION_FORMAT`). The 9 sites: `winner_picked`, `low_confidence_winner`, `cluster_skipped`, `repair_applied`, `portfolio_finalized` (Summary by default); `category_assigned`, `judge_verdict`, `cache_hit`, `cache_miss` (only with `--decision-format=all` — high-volume sites opt in, not opt out). Helper in `src/telemetry/stdout_events.rs::emit_decision` keeps call sites readable.
+- **`Event::DiscoveryIteration` events from the sketch loop** in `src/discovery/coordinator.rs`. Emitted per attempt with three outcomes: `"accepted"` (thesis ≥ 30 chars), `"rejected"` (thesis too short), `"error"` (extraction failed after retries). Each event carries `n`, `total`, `cell_dim`, `cell_facet`, `temperature`, `replica`, `sketch_index`, `outcome`.
+- **`Event::Probe` parity for `probe_kind=temperature`.** `src/llm/temperature_probe.rs::probe_send_temperature` now emits the same `Event::Probe` shape that `src/llm/probe.rs` (max_tokens) already does, including a per-transport `Arc<AtomicU32>` counter that labels each call with its sequential iteration index within a fan-out. The `TemperatureProbeTransport` trait gains a default-impl `fn iteration_counter(&self) -> Option<Arc<AtomicU32>> { None }` (zero-cost; existing mocks untouched).
+
+### Fixed
+
+- **`[moagan] loaded .env from …` no longer pollutes stderr NDJSON.** The message was a pre-existing `eprintln!` in `src/main.rs:11-18` that ran before `init_tracing()` and broke the `moagan … 2>log.jsonl | jq` contract. Now emitted via `tracing::info!(target: "moagan::boot", dotenv_path = %path, "main: .env loaded (auto-discovered)")` AFTER `init_tracing()`, so it honours `--log-format` (one NDJSON line or coloured text), `RUST_LOG` filtering (e.g. `RUST_LOG=info,moagan::boot=off`), and the legacy `MOAGAN_QUIET=1` opt-out. Closes the follow-up noted on PR #618.
+
 ## [0.11.0] - 2026-08-26
 
 ### Removed (BREAKING)

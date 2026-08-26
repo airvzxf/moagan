@@ -145,6 +145,23 @@ impl Phase for RepairPhase {
                         path = %out_path_display,
                         "repair: round completed"
                     );
+                    // c2: `repair_applied` decision event. Summary
+                    // level. Emitted once per repair round that
+                    // produced an `Ok(repair)` parsed back into the
+                    // `Repair` struct — operators see one event per
+                    // per-round success, and can correlate
+                    // `attempts` (round+1) with the `proposal_id`
+                    // they need to inspect.
+                    let attempts = round + 1;
+                    let proposal_id_for_event = proposal_id.clone();
+                    let repair_kind = "patch";
+                    crate::telemetry::stdout_events::emit_decision("repair_applied", || {
+                        serde_json::json!({
+                            "proposal_id": proposal_id_for_event,
+                            "repair_kind": repair_kind,
+                            "attempts": attempts,
+                        })
+                    });
                 }
                 Ok::<Vec<PathBuf>, crate::error::Error>(paths)
             }

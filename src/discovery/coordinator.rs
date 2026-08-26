@@ -954,6 +954,42 @@ impl DiscoveryCoordinator {
 
                             match sketch_result {
                                 Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
+                                    // Stdout DiscoveryIteration mirror
+                                    // (`kind = "discovery_iteration"`):
+                                    // emitted alongside the
+                                    // `iteration_span` so
+                                    // `moagan discover … 2>log.jsonl
+                                    // | jq 'select(.kind ==
+                                    // "discovery_iteration")'`
+                                    // surfaces one line per accepted
+                                    // sketch — outcome `"accepted"`
+                                    // when the thesis clears the
+                                    // 30-char gate.
+                                    if crate::telemetry::stdout_events::resolve_event_format(
+                                        crate::telemetry::stdout_events::EventFormat::Jsonl,
+                                    ) {
+                                        use crate::telemetry::stdout_events::{
+                                            now_rfc3339, Event, SCHEMA_VERSION,
+                                        };
+                                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                            Event::DiscoveryIteration {
+                                                schema: SCHEMA_VERSION,
+                                                ts: now_rfc3339(),
+                                                n: n_for_attempt,
+                                                total,
+                                                cell_dim: cell_for_angle
+                                                    .dimension_id
+                                                    .as_str(),
+                                                cell_facet: cell_for_angle
+                                                    .facet_id
+                                                    .as_str(),
+                                                temperature,
+                                                replica,
+                                                sketch_index,
+                                                outcome: "accepted",
+                                            },
+                                        );
+                                    }
                                     let path = sketches_dir_for_task
                                         .join(format!("{}.json", sketch.id));
                                     let _ = write_json(&path, &sketch);
@@ -1015,6 +1051,39 @@ impl DiscoveryCoordinator {
                                         thesis_len = sketch.thesis.trim().len(),
                                         "discovery: sketch rejected (thesis too short)"
                                     );
+                                    // Stdout DiscoveryIteration mirror
+                                    // (`kind = "discovery_iteration"`):
+                                    // the sketch parsed cleanly but
+                                    // the thesis failed the 30-char
+                                    // gate — outcome `"rejected"` so
+                                    // operators can distinguish "LLM
+                                    // schema ok, content too thin"
+                                    // from a hard extraction error.
+                                    if crate::telemetry::stdout_events::resolve_event_format(
+                                        crate::telemetry::stdout_events::EventFormat::Jsonl,
+                                    ) {
+                                        use crate::telemetry::stdout_events::{
+                                            now_rfc3339, Event, SCHEMA_VERSION,
+                                        };
+                                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                            Event::DiscoveryIteration {
+                                                schema: SCHEMA_VERSION,
+                                                ts: now_rfc3339(),
+                                                n: n_for_attempt,
+                                                total,
+                                                cell_dim: cell_for_angle
+                                                    .dimension_id
+                                                    .as_str(),
+                                                cell_facet: cell_for_angle
+                                                    .facet_id
+                                                    .as_str(),
+                                                temperature,
+                                                replica,
+                                                sketch_index,
+                                                outcome: "rejected",
+                                            },
+                                        );
+                                    }
                                     let mut s = state_for_task.lock().expect("state poisoned");
                                     s.record_failure();
                                     let _ = s.save(&run_dir_for_task);
@@ -1026,6 +1095,39 @@ impl DiscoveryCoordinator {
                                         error = %e,
                                         "discovery: sketch extraction failed after retries; recording failure"
                                     );
+                                    // Stdout DiscoveryIteration mirror
+                                    // (`kind = "discovery_iteration"`):
+                                    // the LLM never produced a
+                                    // parseable sketch even with the
+                                    // retry budget — outcome
+                                    // `"error"` so dashboards can
+                                    // count hard failures separately
+                                    // from soft rejections.
+                                    if crate::telemetry::stdout_events::resolve_event_format(
+                                        crate::telemetry::stdout_events::EventFormat::Jsonl,
+                                    ) {
+                                        use crate::telemetry::stdout_events::{
+                                            now_rfc3339, Event, SCHEMA_VERSION,
+                                        };
+                                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                            Event::DiscoveryIteration {
+                                                schema: SCHEMA_VERSION,
+                                                ts: now_rfc3339(),
+                                                n: n_for_attempt,
+                                                total,
+                                                cell_dim: cell_for_angle
+                                                    .dimension_id
+                                                    .as_str(),
+                                                cell_facet: cell_for_angle
+                                                    .facet_id
+                                                    .as_str(),
+                                                temperature,
+                                                replica,
+                                                sketch_index,
+                                                outcome: "error",
+                                            },
+                                        );
+                                    }
                                     let mut s = state_for_task.lock().expect("state poisoned");
                                     s.record_failure();
                                     let _ = s.save(&run_dir_for_task);
@@ -2565,5 +2667,78 @@ mod tests {
                 ],
             },
         ]
+    }
+
+    // -----------------------------------------------------------
+    // c3 — `Event::DiscoveryIteration` wire-shape pin.
+    //
+    // The integration test (`tests/integration_discover.rs`) drives
+    // the real binary through `std::process::Command`, but the mock
+    // discover path bails at `discover_dimensions` when no
+    // `dimension_deriver` mock is supplied — so the sketch loop
+    // never fires end-to-end and the integration assertion can only
+    // verify the emitter compiles + serialises. This unit test
+    // pins the wire schema directly: a hand-rolled
+    // `Event::DiscoveryIteration` with all 9 fields populated must
+    // round-trip through `serde_json::to_string` with the
+    // `kind = "discovery_iteration"` discriminator and the field
+    // names documented in `docs/events-v1.md`. A future enum
+    // rename or schema break trips the assertion instead of
+    // silently changing the wire format.
+    // -----------------------------------------------------------
+    #[test]
+    fn discovery_iteration_event_serializes_with_kind_discriminator() {
+        use crate::telemetry::stdout_events::{Event, SCHEMA_VERSION, now_rfc3339};
+        let ev = Event::DiscoveryIteration {
+            schema: SCHEMA_VERSION,
+            ts: "2026-08-26T10:37:54.667Z".to_owned(),
+            n: 7,
+            total: 80,
+            cell_dim: "storage",
+            cell_facet: "sql",
+            temperature: 0.5,
+            replica: 1,
+            sketch_index: 0,
+            outcome: "accepted",
+        };
+        let s = serde_json::to_string(&ev).expect("DiscoveryIteration serialises");
+        // The event must round-trip back into a JSON object whose
+        // `kind` discriminator is the canonical snake_case wire
+        // name (`discovery_iteration`, not `DiscoveryIteration`).
+        let v: serde_json::Value = serde_json::from_str(&s)
+            .unwrap_or_else(|e| panic!("DiscoveryIteration not JSON-parseable: {e}; raw={s}"));
+        assert_eq!(
+            v["kind"],
+            serde_json::Value::String("discovery_iteration".into()),
+            "DiscoveryIteration event must serialise with kind=\"discovery_iteration\"; got {v}"
+        );
+        assert_eq!(
+            v["schema"],
+            serde_json::Value::Number(SCHEMA_VERSION.into()),
+            "DiscoveryIteration event must carry schema=SCHEMA_VERSION ({SCHEMA_VERSION})"
+        );
+        assert_eq!(v["n"], serde_json::Value::Number(7.into()));
+        assert_eq!(v["total"], serde_json::Value::Number(80.into()));
+        assert_eq!(v["cell_dim"], serde_json::Value::String("storage".into()));
+        assert_eq!(v["cell_facet"], serde_json::Value::String("sql".into()));
+        assert_eq!(
+            v["temperature"],
+            serde_json::json!(0.5),
+            "temperature must round-trip as an f32"
+        );
+        assert_eq!(v["replica"], serde_json::Value::Number(1.into()));
+        assert_eq!(v["sketch_index"], serde_json::Value::Number(0.into()));
+        assert_eq!(
+            v["outcome"],
+            serde_json::Value::String("accepted".into()),
+            "outcome must be one of accepted/rejected/error"
+        );
+        // Sanity-check the timestamp helper produces an RFC 3339
+        // string in the same format the wire schema promises.
+        let ts = now_rfc3339();
+        assert!(
+            ts.contains('T') && ts.ends_with('Z'),
+            "now_rfc3339() must produce an RFC 3339 UTC timestamp; got {ts:?}"
+        );
     }
 }

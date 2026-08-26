@@ -1041,6 +1041,27 @@ impl Provider for BreakeredProvider {
                 if cache_hit && let Some(rl) = self.rate_limiter.lock().clone() {
                     rl.refund();
                 }
+                // c2: `cache_hit` decision event (All-only). The
+                // upstream provider reported a non-zero
+                // `cache_read` — the LLM returned its own prompt
+                // cache hit rather than running a fresh completion.
+                // The `cache_key` is not available at this point in
+                // the wrapper; we use `format!("{}-{}", req.role,
+                // req.model)` as the per-call discriminator so log
+                // correlation works without inventing a hash that
+                // doesn't exist (per the brief's hard rule).
+                if cache_hit {
+                    let role_str = req.role.as_str().to_owned();
+                    let model_str = req.model.clone();
+                    let cache_key = format!("{role_str}-{model_str}");
+                    crate::telemetry::stdout_events::emit_decision("cache_hit", || {
+                        serde_json::json!({
+                            "cache_key": cache_key,
+                            "role": role_str,
+                            "model": model_str,
+                        })
+                    });
+                }
                 Ok(pair)
             }
             Err(e) => {

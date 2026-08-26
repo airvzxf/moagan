@@ -8,14 +8,17 @@ fn main() -> Result<()> {
     // (12-factor compatible: explicit env wins over .env). This makes
     // `moagan doctor` and friends work out-of-the-box when the operator
     // keeps their secrets in `.env` in the current directory.
-    if let Ok(path) = dotenvy::dotenv()
-        && std::env::var_os("MOAGAN_QUIET").is_none()
-    {
-        // No subscriber yet; print to stderr directly so the
-        // operator sees the .env load even when init_tracing
-        // decides to emit JSON instead of text.
-        eprintln!("[moagan] loaded .env from {}", path.display());
-    }
+    //
+    // The order is critical: this must run BEFORE CLI parse so that
+    // any operator-supplied env vars (e.g. `MOAGAN_RUNS_DIR`,
+    // `MOAGAN_LOG_FORMAT`) are visible to the parser and config load.
+    // We capture the resolved `PathBuf` in a local and defer the
+    // operator-facing notice (`tracing::info!` below) until AFTER
+    // `init_tracing()` runs, so the notice respects `--log-format`
+    // and `RUST_LOG` rather than corrupting NDJSON with a plain-text
+    // line. Fix for the v0.11 PR #618 follow-up that kept the legacy
+    // `eprintln!` alive here.
+    let dotenv_path = dotenvy::dotenv().ok();
 
     // The phase-L panic test must run BEFORE clap parsing so
     // `moagan --help` still panics when `MOAGAN_PHASE_L_TEST_PANIC`
@@ -61,8 +64,46 @@ fn main() -> Result<()> {
         // multi-threaded runtime starts after we return.
         unsafe { std::env::set_var("MOAGAN_EVENT_FORMAT", v) };
     }
+    // Parallel to `MOAGAN_EVENT_FORMAT` propagation above. Clap's
+    // `env = "MOAGAN_DECISION_FORMAT"` reads the env var at parse
+    // time, but we still need to forward the explicit flag value
+    // so the resolver inside `src/telemetry/stdout_events.rs` (which
+    // is consulted on every decision emit) honours it. Same
+    // `set_var`-before-`init_tracing` invariant: no concurrent
+    // reader exists yet.
+    let decision_override: Option<&str> = match cli.decision_format {
+        moagan::cli::DecisionFormatArg::Off => Some("off"),
+        moagan::cli::DecisionFormatArg::Summary => Some("summary"),
+        moagan::cli::DecisionFormatArg::All => Some("all"),
+    };
+    if let Some(v) = decision_override {
+        // SAFETY: same rationale as the MOAGAN_EVENT_FORMAT set
+        // above. No concurrent reader exists for decision events yet
+        // — the multi-threaded runtime starts after we return.
+        unsafe { std::env::set_var("MOAGAN_DECISION_FORMAT", v) };
+    }
 
     init_tracing();
+    // Best-effort .env notice. dotenv autoloads even when
+    // MOAGAN_QUIET is set; we only silence the OPERATOR-FACING
+    // notice (matching the legacy contract). The notice goes
+    // through `tracing::info!` AFTER `init_tracing()` so it
+    // respects `--log-format` (JSON when stderr is redirected,
+    // text when TTY) and `RUST_LOG` (operators can silence it
+    // with `RUST_LOG=info,moagan::boot=off`). The historic
+    // `eprintln!("[moagan] loaded .env from {path}")` emitted
+    // BEFORE `init_tracing()` corrupted NDJSON purity on
+    // stderr whenever `.env` was present and `MOAGAN_QUIET`
+    // was unset; this `tracing::info!` is the fix.
+    if let Some(path) = &dotenv_path
+        && std::env::var_os("MOAGAN_QUIET").is_none()
+    {
+        tracing::info!(
+            target: "moagan::boot",
+            dotenv_path = %path.display(),
+            "main: .env loaded (auto-discovered)"
+        );
+    }
     tracing::info!("moagan: starting");
     warn_runtime_coverage_unbounded_growth();
     let res = moagan::run_blocking_with_cli(cli);
