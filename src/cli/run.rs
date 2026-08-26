@@ -71,12 +71,22 @@ pub struct RunOptions {
     pub context_scope: ContextScope,
 }
 
-/// Run a moagan pipeline end-to-end. Returns the run id on success.
-pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
+/// Run a moagan pipeline end-to-end. Returns the run id on
+/// success.
+///
+/// `run_id` is the canonical id for THIS run. The caller
+/// (`cli::dispatch_with_run_id`) pre-allocates it so the
+/// `pipeline_span` in `run_with_cli` carries it from the very
+/// first event emitted during dispatch — every phase /
+/// `llm_call` / probe inherits the id on stderr, and the value
+/// matches the `Event::RunStart.run_id` emitted on stdout after
+/// dispatch returns.
+pub async fn run(opts: RunOptions, cfg: &Config, run_id: RunId) -> Result<RunId> {
     debug!(
         provider = %opts.provider,
         mode = ?opts.mode,
         non_interactive = opts.non_interactive,
+        run_id = %run_id,
         "run: enter"
     );
     let home = Arc::new(match opts.home.clone() {
@@ -84,7 +94,6 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         None => MoaganHome::resolve()?,
     });
     home.ensure()?;
-    let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
     info!(

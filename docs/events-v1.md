@@ -94,7 +94,7 @@ versioned independently of `moagan`'s own version. **Additive changes**
 
 | `kind`         | When emitted                                   | Notable fields |
 |----------------|------------------------------------------------|----------------|
-| `run_start`    | Before `cli::dispatch` runs.                  | `run_id`, `mode`, `provider`, `model`, `prompt_hash` |
+| `run_start`    | After `cli::dispatch_with_run_id` returns its `DispatchResult`. The `run_id` / `mode` / `provider` / `model` / `prompt_hash` fields are stamped from the resolved command; read-only commands fall back to the `"<read-only>"` sentinel for `run_id`. Removed in v0.11.2 the legacy pre-dispatch placeholder; the move to post-dispatch was required to keep `pipeline_span.run_id` and `Event::RunStart.run_id` byte-identical across the run (the pre-v0.11.2 implementation emitted `null` for ~98.9% of in-flight events because the span fields were patched AFTER dispatch returned). | `run_id`, `mode`, `provider`, `model`, `prompt_hash` |
 | `run_end`      | After the dispatcher returns (success or err). | `run_id`, `status`, `exit_code`, `elapsed_ms`, `artefacts` |
 | `phase_start`  | At the start of every `Phase::execute`.         | `phase`, `seq` |
 | `phase_end`    | On successful `Phase::execute` completion.     | `phase`, `seq`, `elapsed_ms`, `status: "ok"` |

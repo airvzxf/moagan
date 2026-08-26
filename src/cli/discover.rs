@@ -483,12 +483,21 @@ impl TemperatureProfileSpec {
 }
 
 /// Run discovery end-to-end. Returns the run id on success.
-pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
+///
+/// `run_id` is the canonical id for THIS run. The caller
+/// (`cli::dispatch_with_run_id`) pre-allocates it so the
+/// `pipeline_span` in `run_with_cli` carries it from the very
+/// first event emitted during dispatch — every coordinator /
+/// discovery_iteration / probe / sketch inherits the id on
+/// stderr, and the value matches the `Event::RunStart.run_id`
+/// emitted on stdout after dispatch returns.
+pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<RunId> {
     debug!(
         provider = %opts.provider,
         sketches_per_cell = opts.sketches_per_cell,
         cluster_threshold = opts.cluster_threshold,
         non_interactive = opts.non_interactive,
+        run_id = %run_id,
         "discover::run: enter"
     );
     let home = Arc::new(match opts.home.clone() {
@@ -496,7 +505,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         None => MoaganHome::resolve()?,
     });
     home.ensure()?;
-    let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
     info!(run_id = %run_id, "discover: allocated run directory");

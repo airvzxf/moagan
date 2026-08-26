@@ -5,6 +5,15 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-08-26
+
+### Fixed
+
+- **CRITICAL BUG: pipeline span's `run_id` was null for 697/707 events during dispatch.** PR #619's `cli::dispatch` returning `DispatchResult` was a structural improvement, but the `pipeline_span` was constructed with `tracing::field::Empty` placeholders and patched via `Span::record()` AFTER dispatch returned. Events emitted during dispatch inherited the empty span, so 98.9% of the JSONL had `pipeline.run_id = null`. Operators could grep `pipeline{run_id=...}` correctly only for RunStart/RunEnd.
+  Fix: `run_with_cli` now pre-allocates the `RunId` (parses CLI input for Resume/Rerun/Refine/Rerank/Import; generates fresh UUIDv7 for Run/Discover/Preflight/read-only) BEFORE constructing the span. The `pipeline_span` is now built with `run_id = %run_id` from the start. Cascading changes: `dispatch(cli)` → `dispatch_with_run_id(cli, run_id)`; `run::run(opts, cfg, run_id)` and `discover::run(opts, cfg, run_id)` accept the pre-allocated id; the existing `dispatch(cli)` wrapper allocates a fresh id for compatibility with the existing test callers.
+- **`Event::RunEnd.status` no longer hard-codes `"ok"` regardless of exit code.** Now `if exit_code == 0 { "ok" } else { "error" }`, matching the documented contract and enabling downstream `| jq 'select(.kind == "run_end" and .status == "error")'` filters.
+- **`docs/events-v1.md` description of `run_start` timing** is now consistent with the implementation (was a stale pre-PR #619 claim).
+
 ## [0.11.1] - 2026-08-26
 
 ### Added

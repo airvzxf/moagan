@@ -39,6 +39,9 @@ pub mod validators;
 
 pub use error::{Error, ExitCode, Result, exit_code};
 
+use crate::ids::RunId;
+use std::str::FromStr;
+
 /// Process-wide guard for tests that mutate the `MOAGAN_HOME`
 /// env var. Two tests running in parallel that both set
 /// `MOAGAN_HOME` can interleave with each other under the OS
@@ -103,93 +106,169 @@ pub async fn run() -> anyhow::Result<()> {
 /// `run()` is a convenience wrapper that parses the CLI itself.
 pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
     use crate::cli::DispatchResult;
+    use crate::ids::RunId;
     use crate::telemetry::stdout_events;
     use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
     use std::io::IsTerminal;
+    use std::str::FromStr;
     use tracing::Instrument;
     let run_started = std::time::Instant::now();
     let emit_stdout = stdout_events::resolve_event_format(EventFormat::Jsonl);
 
-    // Pipeline span: root context for every event the run emits.
-    // Operators grep `pipeline{run_id=...}` to follow the entire
-    // run from `run_start` through every nested `phase` /
-    // `iteration` / `llm_call` / `probe` event. The fields are
-    // declared `Empty` here so we can fill them with the real
-    // values from the [`DispatchResult`] AFTER `cli::dispatch`
-    // returns — the historical version of this span hard-coded
-    // `"pre-dispatch"` / `<help-or-readonly>` / `<n/a>`
-    // placeholders that did not match the actual command.
+    // Pre-allocate the `run_id` so the `pipeline_span` below is
+    // constructed with `run_id = %run_id` from the start. Events
+    // emitted DURING dispatch (intake, phases, llm_call, probe, …)
+    // inherit the span context, so any operator grepping
+    // `pipeline{run_id=...}` on stderr gets a real UUID v7 instead
+    // of `null` / `"pre-dispatch"`. The pre-v0.11.2 version
+    // declared the span fields as `Empty` and called `Span::record`
+    // AFTER dispatch returned — by that point ~98.9% of events
+    // had already been emitted and inherited a null `run_id`.
+    //
+    // For commands that produce a new run (Run / Discover /
+    // Preflight) we generate a fresh UUIDv7. For commands that
+    // operate on an existing run (Resume / Rerun / Refine /
+    // Rerank / Continue, with or without `--from-pause`) we parse
+    // the id from the CLI input — it is the canonical id, so the
+    // span matches every other event from that run. For
+    // `Continue` specifically, the dispatcher does NOT fork to a
+    // new run id; it resumes the source run with the source id,
+    // so the candidate MUST be the source id (otherwise the span
+    // carries a ghost UUID that no event under the source run
+    // directory can correlate against). For read-only commands we
+    // still allocate a real id; the downstream `Event::RunStart`
+    // substitutes a `<read-only>` sentinel, but the span stays
+    // real so events emitted during (say) an inspection query
+    // remain correlatable.
+    let candidate_run_id: RunId = match &cli.cmd {
+        cli::Cmd::Run { .. } | cli::Cmd::Discover { .. } | cli::Cmd::Preflight { .. } => {
+            RunId::new()
+        }
+        // Continue (any variant): the dispatcher resumes the
+        // source run with the source id, so the candidate must
+        // be the source id parsed from the CLI input. A
+        // malformed string falls back to a fresh UUIDv7 (the
+        // inner parser then surfaces the real error).
+        cli::Cmd::Continue {
+            run_id: Some(s), ..
+        } => RunId::from_str(s).unwrap_or_else(|_| RunId::new()),
+        cli::Cmd::Continue { run_id: None, .. } => RunId::new(),
+        cli::Cmd::Resume { run_id, .. }
+        | cli::Cmd::Rerun { run_id, .. }
+        | cli::Cmd::Refine { run_id, .. }
+        | cli::Cmd::Rerank { run_id, .. } => {
+            RunId::from_str(run_id).unwrap_or_else(|_| RunId::new())
+        }
+        cli::Cmd::Import { source_path, .. } => {
+            // Pre-read the manifest so the span carries the SAME
+            // id the importer will write to disk. Falls back to a
+            // fresh UUIDv7 if the manifest is missing or the
+            // `run_id` field is absent (the importer then
+            // re-validates and surfaces the real error).
+            read_import_run_id(source_path).unwrap_or_else(|_| RunId::new())
+        }
+        // Read-only + everything else: fresh UUIDv7. The
+        // `Event::RunStart` will swap it for `<read-only>` but the
+        // span keeps the real value so events emitted during
+        // (e.g.) inspect queries remain correlatable.
+        _ => RunId::new(),
+    };
+
+    // Best-effort stable label for the span's `mode` field. We do
+    // NOT need this to be 100% exhaustive — the dispatcher may
+    // refine it (e.g. `audit_proxy` vs `audit_verify`) inside
+    // `cli::dispatch_with_run_id`. The pre-parse here is enough
+    // for the span to carry a useful label from the very first
+    // event.
+    let mode_label: &'static str = match &cli.cmd {
+        cli::Cmd::Run { mode, .. } => mode.as_str(),
+        cli::Cmd::Discover { .. } => "discover",
+        cli::Cmd::Preflight { .. } => "preflight",
+        cli::Cmd::Continue { .. } => "continue",
+        cli::Cmd::Resume { .. } => "resume",
+        cli::Cmd::Rerun { .. } => "rerun",
+        cli::Cmd::Refine { .. } => "refine",
+        cli::Cmd::Rerank { .. } => "rerank",
+        cli::Cmd::Import { .. } => "import",
+        cli::Cmd::Inspect { .. } => "inspect",
+        cli::Cmd::Doctor { .. } => "doctor",
+        cli::Cmd::Probe { .. } => "probe",
+        cli::Cmd::Audit { .. } => "audit",
+        cli::Cmd::Telemetry { .. } => "telemetry",
+        cli::Cmd::Coverage { .. } => "coverage",
+        cli::Cmd::Validate { .. } => "validate",
+        cli::Cmd::Diff { .. } => "diff",
+        cli::Cmd::Repair { .. } => "repair",
+        cli::Cmd::Pause { .. } => "pause",
+        cli::Cmd::List { .. } => "list",
+        cli::Cmd::Rate { .. } => "rate",
+    };
+    let resumed = matches!(&cli.cmd, cli::Cmd::Resume { .. } | cli::Cmd::Rerun { .. });
+
+    // Pipeline span: every event emitted during dispatch (RunStart,
+    // phase_start, llm_call, probe, …) inherits these fields. The
+    // `provider` / `model` fields stay `Empty` here — they are
+    // resolved inside `dispatch_with_run_id` after config /
+    // provider resolution runs and the per-arm error path can
+    // patch them via the `let _pipeline_enter = …;` guard. Today
+    // no arm needs that, but leaving the `Empty` slots avoids a
+    // `Span::record` call for fields the operator rarely greps.
     let pipeline_span = tracing::info_span!(
         "pipeline",
-        run_id = tracing::field::Empty,
-        mode = tracing::field::Empty,
+        run_id = %candidate_run_id,
+        mode = mode_label,
         provider = tracing::field::Empty,
         model = tracing::field::Empty,
-        resumed = false,
+        resumed = resumed,
     );
     let _pipeline_enter = pipeline_span.enter();
 
     tracing::info!("moagan::run: dispatching");
-    let dispatch_result: DispatchResult =
-        match cli::dispatch(cli).instrument(pipeline_span.clone()).await {
-            Ok(dr) => {
-                tracing::info!(
-                    exit_code = dr.exit_code,
-                    run_id = ?dr.run_id.as_ref().map(|r| r.short()),
-                    mode = ?dr.mode,
-                    "moagan::run: dispatch ok"
-                );
-                // Now that we know the real values, patch the
-                // `pipeline_span` fields. `Span::record` only
-                // updates fields declared `Empty` at span
-                // construction time.
-                if let Some(id) = dr.run_id.as_ref() {
-                    pipeline_span.record("run_id", id.to_string().as_str());
-                }
-                if let Some(m) = dr.mode {
-                    pipeline_span.record("mode", m);
-                }
-                if let Some(p) = dr.provider.as_deref() {
-                    pipeline_span.record("provider", p);
-                }
-                if let Some(m) = dr.model.as_deref() {
-                    pipeline_span.record("model", m);
-                }
-                dr
+    let dispatch_result: DispatchResult = match cli::dispatch_with_run_id(cli, candidate_run_id)
+        .instrument(pipeline_span.clone())
+        .await
+    {
+        Ok(dr) => {
+            tracing::info!(
+                exit_code = dr.exit_code,
+                run_id = ?dr.run_id.as_ref().map(|r| r.short()),
+                mode = ?dr.mode,
+                "moagan::run: dispatch ok"
+            );
+            dr
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "moagan::run: dispatch failed");
+            // The plain-text error message goes to stderr ONLY when
+            // the user is on a TTY (interactive mode). When stderr
+            // is redirected/piped, the structured `tracing::error!`
+            // event above already carries the same information as
+            // JSON; an extra `eprintln!` here would break
+            // `moagan … 2> log.jsonl | jq` consumers.
+            if std::io::stderr().is_terminal() {
+                eprintln!("error: {e}");
             }
-            Err(e) => {
-                tracing::error!(error = %e, "moagan::run: dispatch failed");
-                // The plain-text error message goes to stderr ONLY when
-                // the user is on a TTY (interactive mode). When stderr
-                // is redirected/piped, the structured `tracing::error!`
-                // event above already carries the same information as
-                // JSON; an extra `eprintln!` here would break
-                // `moagan … 2> log.jsonl | jq` consumers.
-                if std::io::stderr().is_terminal() {
-                    eprintln!("error: {e}");
-                }
-                let code = i32::from(exit_code(&e));
-                // On dispatch failure, emit `RunEnd` with the
-                // `<read-only>` sentinel for the run_id and an
-                // `error` status. No `RunStart` was emitted
-                // because the dispatch never produced a
-                // `DispatchResult` to feed the fields; the
-                // operator pipeline still sees one structured
-                // event marking the error.
-                if emit_stdout {
-                    stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
-                        schema: SCHEMA_VERSION,
-                        ts: now_rfc3339(),
-                        run_id: "<read-only>",
-                        status: "error",
-                        exit_code: code,
-                        elapsed_ms: run_started.elapsed().as_millis() as u64,
-                        artefacts: serde_json::json!({}),
-                    });
-                }
-                std::process::exit(code);
+            let code = i32::from(exit_code(&e));
+            // On dispatch failure, emit `RunEnd` with the
+            // `<read-only>` sentinel for the run_id and an
+            // `error` status. No `RunStart` was emitted because
+            // the dispatch never produced a `DispatchResult` to
+            // feed the fields; the operator pipeline still sees
+            // one structured event marking the error.
+            if emit_stdout {
+                stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
+                    schema: SCHEMA_VERSION,
+                    ts: now_rfc3339(),
+                    run_id: "<read-only>",
+                    status: "error",
+                    exit_code: code,
+                    elapsed_ms: run_started.elapsed().as_millis() as u64,
+                    artefacts: serde_json::json!({}),
+                });
             }
-        };
+            std::process::exit(code);
+        }
+    };
 
     // Resolve the strings we will emit onto `RunStart` and
     // `RunEnd`. For read-only commands the run_id is `None`;
@@ -211,11 +290,11 @@ pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
     // `moagan --help` subcommand) when stdout is not a TTY so
     // operators can `moagan … | jq 'select(.kind == "run_start")'`
     // to confirm the binary even started. Emitted AFTER
-    // `cli::dispatch` so we can stamp the real `run_id` /
-    // `mode` / `provider` / `model` / `prompt_hash` onto the
-    // event — the pre-dispatch version of this code emitted
-    // `"pre-dispatch"` / `<help-or-readonly>` / `<n/a>`
-    // placeholders that did not match the actual command.
+    // `cli::dispatch_with_run_id` so we can stamp the real
+    // `run_id` / `mode` / `provider` / `model` / `prompt_hash`
+    // onto the event — and the value of `run_id` is byte-identical
+    // to the `pipeline_span.run_id` every event during dispatch
+    // inherited on stderr.
     if emit_stdout {
         stdout_events::STDOUT_EVENTS.emit(Event::RunStart {
             schema: SCHEMA_VERSION,
@@ -228,18 +307,54 @@ pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
         });
     }
 
+    // `Event::RunEnd.status` mirrors `dispatch_result.exit_code`:
+    // the pre-v0.11.2 version always emitted `"ok"`, which lied
+    // when the dispatcher returned a non-zero exit code (e.g. a
+    // missing provider, a reconcile error). The new contract is
+    // `status == "ok"` iff `exit_code == 0`, otherwise `"error"`.
+    // The matching stderr-side `tracing::info!("dispatch ok")` /
+    // `tracing::error!("dispatch failed")` already split on this
+    // boundary; this is the stdout counterpart.
+    let resolved_status: &'static str = if dispatch_result.exit_code == 0 {
+        "ok"
+    } else {
+        "error"
+    };
     if emit_stdout {
         stdout_events::STDOUT_EVENTS.emit(Event::RunEnd {
             schema: SCHEMA_VERSION,
             ts: now_rfc3339(),
             run_id: resolved_run_id.as_str(),
-            status: "ok",
+            status: resolved_status,
             exit_code: dispatch_result.exit_code,
             elapsed_ms: run_started.elapsed().as_millis() as u64,
             artefacts: serde_json::json!({}),
         });
     }
     std::process::exit(dispatch_result.exit_code)
+}
+
+/// Read the `run_id` from a `<source>/manifest.json` for an
+/// `moagan import` pre-allocation. The dispatcher uses the value
+/// to seed `pipeline_span.run_id` so every event emitted during
+/// the import carries the SAME id that the importer will
+/// eventually persist. Falls back to a fresh UUIDv7 on any error
+/// (missing manifest, malformed JSON, absent `run_id` field) so
+/// the span never goes null — the importer then re-validates
+/// and surfaces the real error to the operator.
+fn read_import_run_id(source_path: &std::path::Path) -> crate::error::Result<RunId> {
+    let manifest_path = source_path.join("manifest.json");
+    let body = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        crate::error::Error::InvalidState(format!(
+            "cannot read manifest for run_id pre-allocation at {}: {e}",
+            manifest_path.display()
+        ))
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| crate::error::Error::InvalidState(format!("invalid manifest.json: {e}")))?;
+    let id = v.get("run_id").and_then(|x| x.as_str()).unwrap_or("");
+    RunId::from_str(id)
+        .map_err(|e| crate::error::Error::InvalidArgs(format!("invalid run_id '{id}': {e}")))
 }
 
 /// Synchronous entry point used by `main.rs` and integration tests.
