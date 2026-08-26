@@ -102,6 +102,7 @@ impl Phase for DiscoverClusterPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(threshold = self.threshold, "discover_cluster: enter");
         let sketches_dir = ctx.run_dir().sketches();
         let clusters_dir = ctx.run_dir().clusters();
         std::fs::create_dir_all(&clusters_dir)?;
@@ -130,6 +131,7 @@ impl Phase for DiscoverClusterPhase {
         }
 
         if records.is_empty() {
+            tracing::error!("discover_cluster: zero sketches loaded");
             return Err(Error::InvalidState(
                 "discover_cluster found zero sketches".into(),
             ));
@@ -142,6 +144,10 @@ impl Phase for DiscoverClusterPhase {
         let embedder = HashingEmbedder::default();
         let chunks = cluster(&records, &embedder, self.threshold);
         let buckets = bucket_by_cluster(&records, &chunks);
+        tracing::info!(
+            chunk_count = chunks.len(),
+            "discover_cluster: embedder clustering complete"
+        );
 
         // 2. LLM refinement pass — fan-out per cluster, parallel.
         let refinement_inputs: Vec<(String, Vec<String>, String)> = chunks
@@ -218,6 +224,7 @@ impl Phase for DiscoverClusterPhase {
         }
 
         if paths.is_empty() {
+            tracing::error!("discover_cluster: zero clusters produced");
             return Err(Error::InvalidState(
                 "discover_cluster produced zero clusters".into(),
             ));
@@ -230,6 +237,10 @@ impl Phase for DiscoverClusterPhase {
             "cluster_count": paths.len(),
             "entries": index_entries,
         });
+        tracing::info!(
+            clusters_persisted = paths.len(),
+            "discover_cluster: phase complete"
+        );
         let index_path = clusters_dir.join("index.json");
         write_json(&index_path, &index)?;
 

@@ -4,6 +4,8 @@
 
 use std::str::FromStr;
 
+use tracing::{debug, info, warn};
+
 use crate::cli::RateArgs;
 use crate::error::{Error, Result};
 use crate::ids::RunId;
@@ -14,6 +16,12 @@ use crate::preferences::integration;
 /// bounds-checks the score, then forwards the rating to the
 /// integration layer for persistence.
 pub fn run(args: RateArgs) -> Result<i32> {
+    debug!(
+        run_id = %args.run_id,
+        proposal_id = %args.proposal_id,
+        score = %args.score,
+        "rate::run: enter"
+    );
     let user = std::env::var("MOAGAN_USER").unwrap_or_else(|_| "default".into());
     let run_id = RunId::from_str(&args.run_id)
         .map_err(|e| Error::InvalidArgs(format!("invalid run_id '{}': {e}", args.run_id)))?;
@@ -22,6 +30,7 @@ pub fn run(args: RateArgs) -> Result<i32> {
         .parse()
         .map_err(|e| Error::InvalidArgs(format!("invalid score '{}': {e}", args.score)))?;
     if !(0.0..=1.0).contains(&score) {
+        warn!(score, "rate: score out of range");
         return Err(Error::InvalidArgs(format!(
             "score must be in [0.0, 1.0], got {score}"
         )));
@@ -37,6 +46,7 @@ pub fn run(args: RateArgs) -> Result<i32> {
         "rated {} = {:.2} for run {}",
         args.proposal_id, score, run_id
     );
+    info!(run_id = %run_id, proposal_id = %args.proposal_id, score, "rate: recorded");
     Ok(0)
 }
 

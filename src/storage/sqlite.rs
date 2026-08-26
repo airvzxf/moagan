@@ -14,6 +14,7 @@ use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde::Serialize;
 use thiserror::Error;
+use tracing::trace;
 
 use crate::error::Result;
 use crate::ids::RunId;
@@ -122,36 +123,50 @@ impl From<SqliteError> for crate::Error {
 /// `user_version` check above normally prevents re-entry).
 fn apply_v007_idempotent(conn: &rusqlite::Connection) -> Result<()> {
     use rusqlite::params;
+    tracing::debug!("apply_v007_idempotent: enter");
     // runs.shared_brief_hash
     if !column_exists(conn, "runs", "shared_brief_hash")? {
+        tracing::debug!("apply_v007: adding runs.shared_brief_hash");
         conn.execute("ALTER TABLE runs ADD COLUMN shared_brief_hash TEXT", [])?;
+    } else {
+        tracing::trace!("apply_v007: runs.shared_brief_hash already present");
     }
     // run_context_refs.context_type
     if !column_exists(conn, "run_context_refs", "context_type")? {
+        tracing::debug!("apply_v007: adding run_context_refs.context_type");
         conn.execute(
             "ALTER TABLE run_context_refs ADD COLUMN context_type TEXT NOT NULL DEFAULT 'path'",
             params![],
         )?;
+    } else {
+        tracing::trace!("apply_v007: run_context_refs.context_type already present");
     }
     // run_siblings.relation
     if !column_exists(conn, "run_siblings", "relation")? {
+        tracing::debug!("apply_v007: adding run_siblings.relation");
         conn.execute(
             "ALTER TABLE run_siblings ADD COLUMN relation TEXT NOT NULL DEFAULT 'rerun'",
             params![],
         )?;
+    } else {
+        tracing::trace!("apply_v007: run_siblings.relation already present");
     }
     // run_siblings.created_unix
     if !column_exists(conn, "run_siblings", "created_unix")? {
+        tracing::debug!("apply_v007: adding run_siblings.created_unix");
         conn.execute(
             "ALTER TABLE run_siblings ADD COLUMN created_unix INTEGER NOT NULL DEFAULT 0",
             params![],
         )?;
+    } else {
+        tracing::trace!("apply_v007: run_siblings.created_unix already present");
     }
     // v007 also bumps any rows where the v001 column 'relation' was
     // referenced implicitly (the CHECK constraint carried the
     // vocabulary 'rerun'|'continue'|'import' but the column did not
     // exist). v001 has no relation column, so nothing to backfill.
     let _ = sql_v007::V007;
+    tracing::debug!("apply_v007_idempotent: ok");
     Ok(())
 }
 
@@ -161,16 +176,27 @@ fn apply_v007_idempotent(conn: &rusqlite::Connection) -> Result<()> {
 /// re-opened DB that already has the columns stays at v009 without
 /// an "duplicate column" error.
 fn apply_v009_idempotent(conn: &rusqlite::Connection) -> Result<()> {
+    tracing::debug!("apply_v009_idempotent: enter");
     if !column_exists(conn, "runs", "stability_score")? {
+        tracing::debug!("apply_v009: adding runs.stability_score");
         conn.execute("ALTER TABLE runs ADD COLUMN stability_score REAL", [])?;
+    } else {
+        tracing::trace!("apply_v009: runs.stability_score already present");
     }
     if !column_exists(conn, "runs", "stability_label")? {
+        tracing::debug!("apply_v009: adding runs.stability_label");
         conn.execute("ALTER TABLE runs ADD COLUMN stability_label TEXT", [])?;
+    } else {
+        tracing::trace!("apply_v009: runs.stability_label already present");
     }
     if !column_exists(conn, "runs", "stability_sigma")? {
+        tracing::debug!("apply_v009: adding runs.stability_sigma");
         conn.execute("ALTER TABLE runs ADD COLUMN stability_sigma REAL", [])?;
+    } else {
+        tracing::trace!("apply_v009: runs.stability_sigma already present");
     }
     let _ = sql_v009::V009;
+    tracing::debug!("apply_v009_idempotent: ok");
     Ok(())
 }
 
@@ -192,14 +218,25 @@ fn apply_step<F>(conn: &rusqlite::Connection, version: i64, f: F) -> Result<()>
 where
     F: FnOnce() -> Result<()>,
 {
+    tracing::debug!(version, "apply_step: begin");
     conn.execute_batch("BEGIN IMMEDIATE")?;
     match f() {
         Ok(()) => {
+            trace!(
+                version,
+                "apply_step: schema change ok, bumping user_version"
+            );
             conn.execute_batch(&format!("PRAGMA user_version = {version};"))?;
             conn.execute_batch("COMMIT")?;
+            tracing::debug!(version, "apply_step: committed");
             Ok(())
         }
         Err(e) => {
+            tracing::warn!(
+                version,
+                error = %e,
+                "apply_step: schema change failed; rolling back"
+            );
             // Best-effort ROLLBACK: if it fails the connection is
             // already in an unusable state, but the next caller's
             // error path will surface the original failure.
@@ -214,14 +251,17 @@ where
 /// introspection idiom.
 fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
     use rusqlite::params;
+    tracing::trace!(table, column, "column_exists: probe");
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query(params![])?;
     while let Some(row) = rows.next()? {
         let name: String = row.get(1)?;
         if name == column {
+            tracing::trace!(table, column, found = true, "column_exists: hit");
             return Ok(true);
         }
     }
+    tracing::trace!(table, column, found = false, "column_exists: miss");
     Ok(false)
 }
 
@@ -239,8 +279,10 @@ impl Db {
     /// Open or create the meta-database at `path` and run pending
     /// migrations.
     pub fn open(path: &Path) -> Result<Self> {
+        tracing::info!(path = %path.display(), "Db::open: enter");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            tracing::debug!(parent = %parent.display(), "Db::open: parent dir ensured");
         }
         let manager = SqliteConnectionManager::file(path).with_init(|c| {
             c.execute_batch(
@@ -263,6 +305,7 @@ impl Db {
             path: path.to_path_buf(),
         };
         db.run_migrations()?;
+        tracing::debug!("Db::open: migrations complete");
         // Force a WAL checkpoint so the next open() of this file
         // sees the latest user_version and schema state, even when
         // the previous open dropped the connection without explicit
@@ -279,6 +322,7 @@ impl Db {
         let conn = db.pool.get()?;
         let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
         drop(conn);
+        tracing::info!(path = %path.display(), "Db::open: ok");
         Ok(db)
     }
 
@@ -337,6 +381,7 @@ impl Db {
     /// exists to prevent (a v007 / v009 `ALTER TABLE ADD COLUMN`
     /// re-run on a partially-applied DB) is actually load-bearing.
     fn run_migrations(&self) -> Result<()> {
+        tracing::debug!("run_migrations: enter");
         let conn = self.pool.get()?;
 
         // v001 is special: PRAGMA synchronous=NORMAL cannot run
@@ -345,10 +390,13 @@ impl Db {
         // user_version=0 lands on the per-step probe invariant
         // used by v002 onward.
         let mut current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        tracing::info!(current, "run_migrations: starting from user_version");
         if current < 1 {
+            tracing::info!("run_migrations: applying v001");
             conn.execute_batch(sql_v001::V001)?;
             conn.execute_batch("PRAGMA user_version = 1;")?;
             current = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            tracing::debug!(current, "run_migrations: v001 committed");
         }
 
         // v002+ runs through apply_step (atomic). Re-read
@@ -476,12 +524,14 @@ impl Db {
             // already run. Mirrors the pattern used by v009.
             apply_step(&conn, 19, || -> Result<()> {
                 if column_exists(&conn, "process_locks", "last_heartbeat_unix")? {
+                    tracing::debug!("run_migrations: v019 column already present, skipping");
                     return Ok(());
                 }
                 conn.execute_batch(sql_v019::V019)?;
                 Ok(())
             })?;
         }
+        tracing::info!(final = 19_i64, "run_migrations: complete");
         Ok(())
     }
 
@@ -498,6 +548,14 @@ impl Db {
         shared_brief_hash: Option<&str>,
         parent: Option<RunId>,
     ) -> Result<()> {
+        tracing::debug!(
+            %run_id,
+            mode,
+            status,
+            client_version,
+            has_parent = parent.is_some(),
+            "register_run: enter"
+        );
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
@@ -517,17 +575,24 @@ impl Db {
                 shared_brief_hash,
             ],
         )?;
+        tracing::info!(%run_id, mode, status, "register_run: ok");
         Ok(())
     }
 
     /// Update run status.
     pub fn update_run_status(&self, run_id: RunId, status: &str) -> Result<()> {
+        tracing::debug!(%run_id, status, "update_run_status: enter");
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE runs SET status = ?, updated_unix = ? WHERE run_id = ?",
             params![status, now, run_id.to_string()],
         )?;
+        if changed == 0 {
+            tracing::warn!(%run_id, status, "update_run_status: no row matched run_id");
+        } else {
+            tracing::debug!(%run_id, status, "update_run_status: ok");
+        }
         Ok(())
     }
 
@@ -540,6 +605,7 @@ impl Db {
     /// `record_phase` write.
     #[doc(hidden)]
     pub fn _test_backdate_updated_unix(&self, run_id: RunId, unix: i64) -> Result<()> {
+        tracing::debug!(%run_id, unix, "_test_backdate_updated_unix: enter");
         let conn = self.pool.get()?;
         conn.execute(
             "UPDATE runs SET updated_unix = ? WHERE run_id = ?",
@@ -560,9 +626,16 @@ impl Db {
         label: &str,
         sigma: f32,
     ) -> Result<()> {
-        if self.user_version()? < 9 {
+        let v = self.user_version()?;
+        if v < 9 {
+            tracing::debug!(
+                %run_id,
+                user_version = v,
+                "record_run_stability: skipped, schema < v009"
+            );
             return Ok(());
         }
+        tracing::debug!(%run_id, score, label, sigma, "record_run_stability: enter");
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
@@ -570,6 +643,7 @@ impl Db {
              WHERE run_id = ?",
             params![score, label, sigma, now, run_id.to_string()],
         )?;
+        tracing::info!(%run_id, score, label, "record_run_stability: ok");
         Ok(())
     }
 
@@ -577,7 +651,14 @@ impl Db {
     /// "stability per run" view). Returns `None` when the run predates
     /// v009 or was written before the perturbation loop ran.
     pub fn get_run_stability(&self, run_id: RunId) -> Result<Option<RunStabilityRow>> {
-        if self.user_version()? < 9 {
+        tracing::debug!(%run_id, "get_run_stability: enter");
+        let v = self.user_version()?;
+        if v < 9 {
+            tracing::debug!(
+                %run_id,
+                user_version = v,
+                "get_run_stability: skipped, schema < v009"
+            );
             return Ok(None);
         }
         let conn = self.pool.get()?;
@@ -587,13 +668,16 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![run_id.to_string()])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(RunStabilityRow {
+            let row = RunStabilityRow {
                 run_id,
                 score: row.get(0)?,
                 label: row.get(1)?,
                 sigma: row.get(2)?,
-            }))
+            };
+            tracing::debug!(%run_id, label = ?row.label, "get_run_stability: hit");
+            Ok(Some(row))
         } else {
+            tracing::debug!(%run_id, "get_run_stability: miss");
             Ok(None)
         }
     }
@@ -614,6 +698,7 @@ impl Db {
         status: &str,
         error: Option<&str>,
     ) -> Result<()> {
+        tracing::trace!(%run_id, phase, seq, status, error_present = error.is_some(), "record_phase");
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
@@ -648,6 +733,20 @@ impl Db {
         error: Option<&str>,
         retry_count: u32,
     ) -> Result<()> {
+        tracing::trace!(
+            call_id,
+            %run_id,
+            phase,
+            role,
+            provider,
+            model,
+            cache_hit,
+            http_status,
+            input_tokens,
+            output_tokens,
+            retry_count,
+            "record_call: enter"
+        );
         let conn = self.pool.get()?;
         let http_status_u16 = http_status.and_then(|s| u16::try_from(s).ok());
         let status = call_status(http_status_u16, error);
@@ -692,12 +791,24 @@ impl Db {
     /// predictable. The `cost_usd > 0` filter downstream is the
     /// explicit opt-in for "real money was billed".
     pub fn record_call_cost(&self, call_id: &str, cost_usd: f64) -> Result<()> {
-        if self.user_version()? < 15 {
+        let v = self.user_version()?;
+        if v < 15 {
+            tracing::debug!(
+                call_id,
+                user_version = v,
+                "record_call_cost: skipped, schema < v015"
+            );
             return Ok(());
         }
         if !(cost_usd.is_finite() && cost_usd > 0.0) {
+            tracing::debug!(
+                call_id,
+                cost_usd,
+                "record_call_cost: skipped, non-positive or non-finite"
+            );
             return Ok(());
         }
+        tracing::debug!(call_id, cost_usd, "record_call_cost: enter");
         let conn = self.pool.get()?;
         conn.execute(
             "UPDATE calls SET cost_usd = ? WHERE call_id = ?",
@@ -716,6 +827,7 @@ impl Db {
         to: &str,
         reason: Option<&str>,
     ) -> Result<()> {
+        tracing::debug!(%run_id, seq, phase, from = ?from, to, reason, "record_provider_change: enter");
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
@@ -740,17 +852,20 @@ impl Db {
     /// run issued multiple `continue`/`rerun` actions that each
     /// recorded a provider change.
     pub fn next_provider_change_seq(&self, run_id: RunId) -> Result<i64> {
+        tracing::trace!(%run_id, "next_provider_change_seq: enter");
         let conn = self.pool.get()?;
         let next: i64 = conn.query_row(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM provider_changes WHERE run_id = ?",
             params![run_id.to_string()],
             |r| r.get(0),
         )?;
+        tracing::trace!(%run_id, next, "next_provider_change_seq: ok");
         Ok(next)
     }
 
     /// List runs ordered by creation time (descending).
     pub fn list_runs(&self, limit: u32) -> Result<Vec<RunRow>> {
+        tracing::debug!(limit, "list_runs: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id, shared_brief_hash \
@@ -770,11 +885,13 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(count = rows.len(), "list_runs: ok");
         Ok(rows)
     }
 
     /// Get a single run by id.
     pub fn get_run(&self, run_id: RunId) -> Result<Option<RunRow>> {
+        tracing::debug!(%run_id, "get_run: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT run_id, mode, status, created_unix, updated_unix, client_version, parent_run_id, shared_brief_hash \
@@ -793,8 +910,15 @@ impl Db {
             })
         })?;
         match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
+            Some(r) => {
+                let row = r?;
+                tracing::trace!(%run_id, "get_run: hit");
+                Ok(Some(row))
+            }
+            None => {
+                tracing::debug!(%run_id, "get_run: miss");
+                Ok(None)
+            }
         }
     }
 
@@ -815,6 +939,15 @@ impl Db {
         message: &str,
         details: &str,
     ) -> Result<()> {
+        tracing::trace!(
+            %run_id,
+            code,
+            level,
+            phase = ?phase,
+            role = ?role,
+            call_id = ?call_id,
+            "record_warning: enter"
+        );
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT INTO warnings \
@@ -839,6 +972,7 @@ impl Db {
     /// Count warnings for a run, grouped by code. Returns
     /// `[(code, count, first_message)]` ordered by count desc.
     pub fn warnings_summary(&self, run_id: RunId) -> Result<Vec<WarningSummaryRow>> {
+        tracing::debug!(%run_id, "warnings_summary: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT code, COUNT(*), MIN(message) \
@@ -854,11 +988,13 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(%run_id, count = rows.len(), "warnings_summary: ok");
         Ok(rows)
     }
 
     /// Full warning list for a run, ordered by `at_unix_ms` ascending.
     pub fn list_warnings(&self, run_id: RunId) -> Result<Vec<WarningRow>> {
+        tracing::debug!(%run_id, "list_warnings: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT at_unix_ms, code, level, phase, role, call_id, attempt, message, details \
@@ -879,6 +1015,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(%run_id, count = rows.len(), "list_warnings: ok");
         Ok(rows)
     }
 
@@ -891,9 +1028,21 @@ impl Db {
         &self,
         ev: &crate::telemetry::saturation::SaturationEvent,
     ) -> Result<()> {
-        if self.user_version()? < 18 {
+        let v = self.user_version()?;
+        if v < 18 {
+            tracing::debug!(
+                user_version = v,
+                "record_saturation: skipped, schema < v018"
+            );
             return Ok(());
         }
+        tracing::trace!(
+            provider = %ev.provider,
+            model = %ev.model,
+            kind = %ev.kind,
+            threshold_pct = ev.threshold_pct,
+            "record_saturation: enter"
+        );
         let conn = self.pool.get()?;
         let details_str = ev
             .details
@@ -931,7 +1080,18 @@ impl Db {
         provider: Option<&str>,
         limit: u32,
     ) -> Result<Vec<SaturationRow>> {
-        if self.user_version()? < 18 {
+        tracing::debug!(
+            ?since_unix,
+            ?provider,
+            limit,
+            "list_saturation_events: enter"
+        );
+        let v = self.user_version()?;
+        if v < 18 {
+            tracing::debug!(
+                user_version = v,
+                "list_saturation_events: skipped, schema < v018"
+            );
             return Ok(Vec::new());
         }
         let conn = self.pool.get()?;
@@ -969,12 +1129,14 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(count = rows.len(), "list_saturation_events: ok");
         Ok(rows)
     }
 
     /// Full call list for a run, ordered by `started_unix` ascending.
     /// Used by tests and the cache-hit rate analytics.
     pub fn list_calls_for_run(&self, run_id: RunId) -> Result<Vec<CallRow>> {
+        tracing::debug!(%run_id, "list_calls_for_run: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT call_id, phase, role, provider, model, cache_key, body_sha256, cache_hit, http_status, \
@@ -1006,6 +1168,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(%run_id, count = rows.len(), "list_calls_for_run: ok");
         Ok(rows)
     }
 
@@ -1026,6 +1189,13 @@ impl Db {
         accepted_default: bool,
         at_unix: i64,
     ) -> Result<()> {
+        tracing::trace!(
+            %run_id,
+            ckp_id,
+            kind,
+            accepted_default,
+            "record_checkpoint: enter"
+        );
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT OR REPLACE INTO checkpoints \
@@ -1061,6 +1231,13 @@ impl Db {
         node_count: i64,
         at_unix: i64,
     ) -> Result<()> {
+        tracing::debug!(
+            %run_id,
+            brief_blake3,
+            should_decompose,
+            node_count,
+            "record_problem_graph: enter"
+        );
         let conn = self.pool.get()?;
         // Probe the user_version so the call is a no-op on legacy
         // databases (v1..=v5). The migration runner already updates
@@ -1068,6 +1245,11 @@ impl Db {
         // a v0.3+ run, so the check is cheap.
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 6 {
+            tracing::debug!(
+                %run_id,
+                user_version = version,
+                "record_problem_graph: skipped, schema < v006"
+            );
             return Ok(());
         }
         conn.execute(
@@ -1090,6 +1272,7 @@ impl Db {
     /// recorded (e.g. when `interactive=false` and the call path
     /// short-circuits).
     pub fn list_checkpoints_for_run(&self, run_id: RunId) -> Result<Vec<CheckpointRow>> {
+        tracing::debug!(%run_id, "list_checkpoints_for_run: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT ckp_id, kind, question, response, accepted_default, at_unix \
@@ -1107,6 +1290,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(%run_id, count = rows.len(), "list_checkpoints_for_run: ok");
         Ok(rows)
     }
 
@@ -1116,6 +1300,7 @@ impl Db {
         &self,
         run_id: RunId,
     ) -> Result<std::collections::BTreeMap<String, i64>> {
+        tracing::debug!(%run_id, "checkpoint_counts_by_kind: enter");
         let conn = self.pool.get()?;
         let mut stmt =
             conn.prepare("SELECT kind, COUNT(*) FROM checkpoints WHERE run_id = ? GROUP BY kind")?;
@@ -1124,7 +1309,9 @@ impl Db {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.into_iter().collect())
+        let out: std::collections::BTreeMap<String, i64> = rows.into_iter().collect();
+        tracing::debug!(%run_id, kinds = out.len(), "checkpoint_counts_by_kind: ok");
+        Ok(out)
     }
 
     /// Phase J: mirror a single context reference into the
@@ -1140,6 +1327,13 @@ impl Db {
         run_id: RunId,
         record: &crate::context::ContextRefRecord,
     ) -> Result<()> {
+        tracing::debug!(
+            %run_id,
+            source_path = %record.source_path,
+            bytes = record.bytes,
+            context_type = %record.context_type,
+            "add_context_ref: enter"
+        );
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT OR REPLACE INTO run_context_refs \
@@ -1168,6 +1362,7 @@ impl Db {
         sibling: RunId,
         relation: &str,
     ) -> Result<()> {
+        tracing::debug!(%primary, %sibling, relation, "add_run_sibling_relation: enter");
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         conn.execute(
@@ -1186,6 +1381,7 @@ impl Db {
     /// assigns a fresh `run_id` first and then attaches the
     /// lineage). `UPDATE` so the change is recorded in-place.
     pub fn set_run_parent(&self, run_id: RunId, parent: RunId) -> Result<()> {
+        tracing::debug!(%run_id, %parent, "set_run_parent: enter");
         let conn = self.pool.get()?;
         conn.execute(
             "UPDATE runs SET parent_run_id = ?, updated_unix = ? WHERE run_id = ?",
@@ -1213,6 +1409,7 @@ impl Db {
     /// `created_unix DESC`) so a freshly appended lineage show
     /// appears at the top.
     pub fn list_lineage_pairs(&self) -> Result<Vec<(Option<String>, Option<String>)>> {
+        tracing::debug!("list_lineage_pairs: enter");
         let conn = self.pool.get()?;
         let mut stmt =
             conn.prepare("SELECT parent_run_id, run_id FROM runs ORDER BY created_unix DESC")?;
@@ -1224,6 +1421,7 @@ impl Db {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(count = rows.len(), "list_lineage_pairs: ok");
         Ok(rows)
     }
 
@@ -1232,6 +1430,7 @@ impl Db {
     /// column in v007; the column is TEXT NULL so `None` is the
     /// pre-J default.
     pub fn set_shared_brief_hash(&self, run_id: RunId, shared_brief_hash: &str) -> Result<()> {
+        tracing::debug!(%run_id, shared_brief_hash, "set_shared_brief_hash: enter");
         let conn = self.pool.get()?;
         conn.execute(
             "UPDATE runs SET shared_brief_hash = ?, updated_unix = ? WHERE run_id = ?",
@@ -1253,6 +1452,7 @@ impl Db {
     /// Tie-break rule: when multiple phases ended at the same
     /// `started_unix`, canonical pipeline order wins.
     pub fn last_completed_phase(&self, run_id: RunId) -> Result<Option<String>> {
+        tracing::debug!(%run_id, "last_completed_phase: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT phase FROM phases \
@@ -1270,8 +1470,10 @@ impl Db {
         let mut rows = stmt.query(params![run_id.to_string()])?;
         if let Some(row) = rows.next()? {
             let phase: String = row.get(0)?;
+            tracing::trace!(%run_id, phase = %phase, "last_completed_phase: hit");
             Ok(Some(phase))
         } else {
+            tracing::debug!(%run_id, "last_completed_phase: miss");
             Ok(None)
         }
     }
@@ -1281,6 +1483,7 @@ impl Db {
     /// drives `moagan inspect`'s per-phase progress view and is
     /// the source for `last_completed_phase`.
     pub fn list_completed_phases(&self, run_id: RunId) -> Result<Vec<String>> {
+        tracing::debug!(%run_id, "list_completed_phases: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT DISTINCT phase FROM phases \
@@ -1290,6 +1493,7 @@ impl Db {
         let rows = stmt
             .query_map(params![run_id.to_string()], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(%run_id, count = rows.len(), "list_completed_phases: ok");
         Ok(rows)
     }
 
@@ -1300,13 +1504,16 @@ impl Db {
     /// for runs that were paused before `db.register_run(...)`
     /// had a chance to commit).
     pub fn has_run(&self, run_id: RunId) -> Result<bool> {
+        tracing::trace!(%run_id, "has_run: enter");
         let conn = self.pool.get()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM runs WHERE run_id = ?",
             params![run_id.to_string()],
             |r| r.get(0),
         )?;
-        Ok(count > 0)
+        let found = count > 0;
+        tracing::trace!(%run_id, found, "has_run: ok");
+        Ok(found)
     }
 }
 
@@ -1605,6 +1812,7 @@ impl Db {
     /// Returns `RunAggregate::default()` for unknown runs so the
     /// caller can show "no data" without a special-case branch.
     pub fn run_aggregate(&self, run_id: RunId) -> Result<RunAggregate> {
+        tracing::debug!(%run_id, "run_aggregate: enter");
         let conn = self.pool.get()?;
         let row = conn.query_row(
             "SELECT \
@@ -1645,6 +1853,14 @@ impl Db {
                 })
             },
         )?;
+        tracing::debug!(
+            %run_id,
+            calls = row.calls,
+            error_calls = row.error_calls,
+            input_tokens = row.input_tokens,
+            output_tokens = row.output_tokens,
+            "run_aggregate: ok"
+        );
         Ok(row)
     }
 
@@ -1653,6 +1869,7 @@ impl Db {
     /// `GET /api/runs/<id>/provider_usage` endpoint and the
     /// `by-model` section of `moagan telemetry summary`.
     pub fn list_provider_usage_for_run(&self, run_id: RunId) -> Result<Vec<ProviderUsageRow>> {
+        tracing::debug!(%run_id, "list_provider_usage_for_run: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT provider, model, calls, input_tokens, output_tokens, cache_read, cache_creation, last_call_unix \
@@ -1674,6 +1891,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(%run_id, count = rows.len(), "list_provider_usage_for_run: ok");
         Ok(rows)
     }
 
@@ -1686,6 +1904,7 @@ impl Db {
     /// `INSERT OR REPLACE` semantics in `record_phase` mean the
     /// last write wins).
     pub fn list_phase_summaries_for_run(&self, run_id: RunId) -> Result<Vec<PhaseSummaryRow>> {
+        tracing::debug!(%run_id, "list_phase_summaries_for_run: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT phase, seq, status, started_unix, ended_unix, error \
@@ -1707,6 +1926,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(%run_id, count = rows.len(), "list_phase_summaries_for_run: ok");
         Ok(rows)
     }
 
@@ -1714,6 +1934,7 @@ impl Db {
     /// Powers the `moagan telemetry provider --list` view and the
     /// dashboard's provider picker.
     pub fn aggregate_provider_usage(&self) -> Result<Vec<ProviderUsageRow>> {
+        tracing::debug!("aggregate_provider_usage: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT provider, model, \
@@ -1737,6 +1958,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(count = rows.len(), "aggregate_provider_usage: ok");
         Ok(rows)
     }
 
@@ -1769,6 +1991,11 @@ impl Db {
         window_days: u32,
         provider_filter: Option<&str>,
     ) -> Result<Vec<WindowUsageRow>> {
+        tracing::debug!(
+            window_days,
+            provider = ?provider_filter,
+            "aggregate_window_usage: enter"
+        );
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         let days = i64::from(window_days);
@@ -1801,6 +2028,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(count = rows.len(), "aggregate_window_usage: ok");
         Ok(rows)
     }
 
@@ -1811,6 +2039,7 @@ impl Db {
         provider: &str,
         limit: u32,
     ) -> Result<Vec<ProviderUsageRow>> {
+        tracing::debug!(provider, limit, "recent_runs_for_provider: enter");
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT provider, model, calls, input_tokens, output_tokens, cache_read, cache_creation, last_call_unix \
@@ -1833,6 +2062,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(provider, count = rows.len(), "recent_runs_for_provider: ok");
         Ok(rows)
     }
 
@@ -1852,6 +2082,7 @@ impl Db {
         &self,
         run_id: Option<RunId>,
     ) -> Result<Vec<CostAggregateRow>> {
+        tracing::debug!(run_id = ?run_id.map(|r| r.to_string()), "aggregate_cost_by_provider_model: enter");
         let conn = self.pool.get()?;
         let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match run_id {
             Some(rid) => (
@@ -1885,6 +2116,7 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(count = rows.len(), "aggregate_cost_by_provider_model: ok");
         Ok(rows)
     }
 
@@ -1910,6 +2142,7 @@ impl Db {
     /// re-use from `moagan telemetry compare --runs ...`.
     #[allow(clippy::type_complexity)]
     pub fn compare_runs(&self, run_ids: &[RunId]) -> Result<CompareRunsResponse> {
+        tracing::debug!(count = run_ids.len(), "compare_runs: enter");
         let conn = self.pool.get()?;
         // --- 1. Per-run metadata (status, mode, ts) ---
         let placeholders: Vec<&str> = run_ids.iter().map(|_| "?").collect();
@@ -2128,7 +2361,7 @@ impl Db {
             };
             provider_error_rates.insert(provider.clone(), rate);
         }
-        Ok(CompareRunsResponse {
+        let response = CompareRunsResponse {
             runs: entries,
             shared_providers,
             diff: CompareDiff {
@@ -2138,7 +2371,14 @@ impl Db {
                 provider_token_total,
                 provider_error_rates,
             },
-        })
+        };
+        tracing::debug!(
+            runs = response.runs.len(),
+            shared_providers = response.shared_providers.len(),
+            max_duration_secs = response.diff.max_duration_secs,
+            "compare_runs: ok"
+        );
+        Ok(response)
     }
 
     /// Cross-run aggregate over the optional
@@ -2165,6 +2405,7 @@ impl Db {
         since_unix: i64,
         provider_filter: Option<&str>,
     ) -> Result<AggregateWindowRow> {
+        tracing::debug!(since_unix, provider = ?provider_filter, "aggregates_window: enter");
         let conn = self.pool.get()?;
         // --- Aggregate counts ---
         let counts_sql = "\
@@ -2238,7 +2479,7 @@ impl Db {
         } else {
             0.0
         };
-        Ok(AggregateWindowRow {
+        let row = AggregateWindowRow {
             since_unix,
             provider: provider_filter.map(str::to_owned),
             total_runs,
@@ -2251,7 +2492,14 @@ impl Db {
             p95_latency_ms,
             p99_latency_ms,
             error_rate,
-        })
+        };
+        tracing::debug!(
+            total_runs = row.total_runs,
+            total_calls = row.total_calls,
+            error_rate = row.error_rate,
+            "aggregates_window: ok"
+        );
+        Ok(row)
     }
 }
 
@@ -2418,20 +2666,29 @@ pub struct RunRow {
 pub fn call_status(http_status: Option<u16>, error: Option<&str>) -> &'static str {
     if let Some(msg) = error {
         let lower = msg.to_ascii_lowercase();
-        if lower.contains("timeout") {
-            return "timeout";
-        }
-        if lower.contains("cancel") {
-            return "cancelled";
-        }
-        return "error";
+        let verdict = if lower.contains("timeout") {
+            "timeout"
+        } else if lower.contains("cancel") {
+            "cancelled"
+        } else {
+            "error"
+        };
+        tracing::trace!(
+            http_status = ?http_status,
+            error = msg,
+            verdict,
+            "call_status: derived from error"
+        );
+        return verdict;
     }
-    match http_status {
+    let verdict = match http_status {
         Some(s) if (200..300).contains(&s) => "ok",
         Some(s) if (400..600).contains(&s) => "error",
         Some(_) => "error",
         None => "ok",
-    }
+    };
+    tracing::trace!(http_status = ?http_status, verdict, "call_status: derived from http");
+    verdict
 }
 
 /// Nearest-rank percentile for an already-sorted `f64` sample.
@@ -2447,6 +2704,7 @@ pub fn call_status(http_status: Option<u16>, error: Option<&str>) -> &'static st
 /// numbers.
 pub(crate) fn percentiles(sorted: &[f64]) -> (f64, f64, f64) {
     if sorted.is_empty() {
+        tracing::trace!("percentiles: empty input -> zeros");
         return (0.0, 0.0, 0.0);
     }
     let n = sorted.len();
@@ -2455,7 +2713,15 @@ pub(crate) fn percentiles(sorted: &[f64]) -> (f64, f64, f64) {
         let rank = rank.clamp(1, n);
         sorted[rank - 1]
     };
-    (pick(0.50), pick(0.95), pick(0.99))
+    let result = (pick(0.50), pick(0.95), pick(0.99));
+    tracing::trace!(
+        n,
+        p50 = result.0,
+        p95 = result.1,
+        p99 = result.2,
+        "percentiles: ok"
+    );
+    result
 }
 
 // -----------------------------------------------------------------
@@ -2577,14 +2843,25 @@ impl Db {
     fn user_version(&self) -> Result<i64> {
         let conn = self.pool.get()?;
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        tracing::trace!(v, "user_version: probed");
         Ok(v)
     }
 
     /// Insert a row into `outbox_events` (D.1.4).
     pub fn record_outbox_event(&self, row: &OutboxEventRow) -> Result<()> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                user_version = v,
+                "record_outbox_event: skipped, schema < v008"
+            );
             return Ok(());
         }
+        tracing::trace!(
+            run_id = %row.run_id,
+            event_type = %row.event_type,
+            "record_outbox_event: enter"
+        );
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT INTO outbox_events (run_id, event_type, payload, at_unix) \
@@ -2596,7 +2873,13 @@ impl Db {
 
     /// List every outbox event for a run, oldest first.
     pub fn list_outbox_events_for_run(&self, run_id: &str) -> Result<Vec<OutboxEventRow>> {
-        if self.user_version()? < 8 {
+        tracing::debug!(run_id, "list_outbox_events_for_run: enter");
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                user_version = v,
+                "list_outbox_events_for_run: skipped, schema < v008"
+            );
             return Ok(Vec::new());
         }
         let conn = self.pool.get()?;
@@ -2614,14 +2897,26 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(run_id, count = rows.len(), "list_outbox_events_for_run: ok");
         Ok(rows)
     }
 
     /// Insert one row into `redact_audit` (D.8.5).
     pub fn record_redact_audit(&self, row: &RedactAuditRow) -> Result<()> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                user_version = v,
+                "record_redact_audit: skipped, schema < v008"
+            );
             return Ok(());
         }
+        tracing::trace!(
+            run_id = ?row.run_id,
+            pattern_kind = %row.pattern_kind,
+            match_count = row.match_count,
+            "record_redact_audit: enter"
+        );
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT INTO redact_audit (run_id, source_path, pattern_kind, match_count, at_unix) \
@@ -2639,7 +2934,13 @@ impl Db {
 
     /// List every redact audit row for a run, oldest first.
     pub fn list_redact_audit_for_run(&self, run_id: &str) -> Result<Vec<RedactAuditRow>> {
-        if self.user_version()? < 8 {
+        tracing::debug!(run_id, "list_redact_audit_for_run: enter");
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                user_version = v,
+                "list_redact_audit_for_run: skipped, schema < v008"
+            );
             return Ok(Vec::new());
         }
         let conn = self.pool.get()?;
@@ -2658,14 +2959,25 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        tracing::debug!(run_id, count = rows.len(), "list_redact_audit_for_run: ok");
         Ok(rows)
     }
 
     /// Insert one row into `manifest_events` (D.5.1).
     pub fn record_manifest_event(&self, row: &ManifestEventRow) -> Result<()> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                user_version = v,
+                "record_manifest_event: skipped, schema < v008"
+            );
             return Ok(());
         }
+        tracing::trace!(
+            run_id = %row.run_id,
+            event_type = %row.event_type,
+            "record_manifest_event: enter"
+        );
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT INTO manifest_events (run_id, event_type, details, at_unix) \
@@ -2677,9 +2989,16 @@ impl Db {
 
     /// Acquire a process-wide lock keyed by `holder` with the given TTL.
     pub fn acquire_process_lock(&self, holder: &str, ttl_secs: u64, fence: &str) -> Result<bool> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                holder,
+                user_version = v,
+                "acquire_process_lock: skipped, schema < v008"
+            );
             return Ok(true);
         }
+        tracing::debug!(holder, ttl_secs, "acquire_process_lock: enter");
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         let expires = now + ttl_secs as i64;
@@ -2692,6 +3011,7 @@ impl Db {
             .ok();
         match current {
             None => {
+                tracing::info!(holder, fence, "acquire_process_lock: inserted (vacant)");
                 conn.execute(
                     "INSERT INTO process_locks (holder, acquired_at_unix, expires_at_unix, fence) \
                      VALUES (?, ?, ?, ?)",
@@ -2700,6 +3020,11 @@ impl Db {
                 Ok(true)
             }
             Some(existing) if existing == holder => {
+                tracing::info!(
+                    holder,
+                    fence,
+                    "acquire_process_lock: refreshed (same holder)"
+                );
                 conn.execute(
                     "UPDATE process_locks SET acquired_at_unix = ?, expires_at_unix = ?, fence = ? \
                      WHERE holder = ?",
@@ -2707,7 +3032,14 @@ impl Db {
                 )?;
                 Ok(true)
             }
-            Some(_) => Ok(false),
+            Some(other) => {
+                tracing::warn!(
+                    holder,
+                    other_holder = %other,
+                    "acquire_process_lock: contended by another holder"
+                );
+                Ok(false)
+            }
         }
     }
 
@@ -2719,9 +3051,18 @@ impl Db {
         ttl: std::time::Duration,
         expected_fence: Option<u64>,
     ) -> Result<u64> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(user_version = v, "renew_lease: skipped, schema < v008");
             return Ok(1);
         }
+        tracing::debug!(
+            %run_id,
+            holder,
+            ttl_secs = ttl.as_secs(),
+            expected_fence = ?expected_fence,
+            "renew_lease: enter"
+        );
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         let expires = now
@@ -2743,8 +3084,10 @@ impl Db {
 
         let Some((stored_key, _acquired, stored_expires, stored_fence)) = current else {
             if expected_fence.is_some() {
+                tracing::warn!(%run_id, holder, "renew_lease: no row + expected_fence -> LockHeld");
                 return Err(crate::error::Error::LockHeld(run_id.to_string()));
             }
+            tracing::info!(%run_id, holder, "renew_lease: inserted (no prior row)");
             conn.execute(
                 "INSERT INTO process_locks (holder, acquired_at_unix, expires_at_unix, fence) \
                  VALUES (?, ?, ?, ?)",
@@ -2764,9 +3107,24 @@ impl Db {
         let active = stored_expires > now;
         if let Some(expected) = expected_fence {
             if stored_holder != holder || current_fence != expected || !active {
+                tracing::warn!(
+                    %run_id,
+                    holder,
+                    stored_holder,
+                    current_fence,
+                    expected,
+                    active,
+                    "renew_lease: fence mismatch or expired -> LockHeld"
+                );
                 return Err(crate::error::Error::LockHeld(run_id.to_string()));
             }
         } else if active && stored_holder != holder {
+            tracing::warn!(
+                %run_id,
+                holder,
+                stored_holder,
+                "renew_lease: active lease held by another holder -> LockHeld"
+            );
             return Err(crate::error::Error::LockHeld(run_id.to_string()));
         }
 
@@ -2782,20 +3140,30 @@ impl Db {
              WHERE holder = ?",
             params![format!("{prefix}{holder}"), now, expires, next_fence.to_string(), stored_key],
         )?;
+        tracing::debug!(%run_id, holder, next_fence, "renew_lease: ok");
         Ok(next_fence)
     }
 
     /// Release a process lock owned by `holder`.
     pub fn release_process_lock(&self, holder: &str) -> Result<bool> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                holder,
+                user_version = v,
+                "release_process_lock: skipped, schema < v008"
+            );
             return Ok(true);
         }
+        tracing::debug!(holder, "release_process_lock: enter");
         let conn = self.pool.get()?;
         let deleted = conn.execute(
             "DELETE FROM process_locks WHERE holder = ?",
             params![holder],
         )?;
-        Ok(deleted > 0)
+        let was_deleted = deleted > 0;
+        tracing::debug!(holder, deleted = was_deleted, "release_process_lock: ok");
+        Ok(was_deleted)
     }
 
     /// Read the current fencing token for a (run_id, holder) lease.
@@ -2805,9 +3173,12 @@ impl Db {
     /// loop actually fired without exposing the private connection
     /// pool to callers.
     pub fn lease_fence(&self, run_id: RunId, holder: &str) -> Result<Option<u64>> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::trace!(user_version = v, "lease_fence: skipped, schema < v008");
             return Ok(None);
         }
+        tracing::trace!(%run_id, holder, "lease_fence: enter");
         let conn = self.pool.get()?;
         let key = format!("{run_id}|{holder}");
         let fence: Option<String> = conn
@@ -2818,6 +3189,7 @@ impl Db {
             )
             .optional()?;
         let Some(raw) = fence else {
+            tracing::trace!(%run_id, holder, "lease_fence: miss");
             return Ok(None);
         };
         let parsed = raw
@@ -2826,20 +3198,29 @@ impl Db {
                 message: "sqlite: invalid lease fence".into(),
                 http_status: None,
             })?;
+        tracing::trace!(%run_id, holder, fence = parsed, "lease_fence: hit");
         Ok(Some(parsed))
     }
 
     /// Release a run lease owned by `holder`.
     pub fn release_run_lease(&self, run_id: RunId, holder: &str) -> Result<bool> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                user_version = v,
+                "release_run_lease: skipped, schema < v008"
+            );
             return Ok(true);
         }
+        tracing::debug!(%run_id, holder, "release_run_lease: enter");
         let conn = self.pool.get()?;
         let deleted = conn.execute(
             "DELETE FROM process_locks WHERE holder = ?",
             params![format!("{run_id}|{holder}")],
         )?;
-        Ok(deleted > 0)
+        let was_deleted = deleted > 0;
+        tracing::debug!(%run_id, holder, deleted = was_deleted, "release_run_lease: ok");
+        Ok(was_deleted)
     }
 
     /// Increment the cross-run rollup counters for a (provider, model) pair.
@@ -2851,9 +3232,22 @@ impl Db {
         out_tokens: u64,
         is_error: bool,
     ) -> Result<()> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::debug!(
+                user_version = v,
+                "increment_provider_rollup: skipped, schema < v008"
+            );
             return Ok(());
         }
+        tracing::trace!(
+            provider,
+            model,
+            in_tokens,
+            out_tokens,
+            is_error,
+            "increment_provider_rollup: enter"
+        );
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
         let errors_delta: i64 = if is_error { 1 } else { 0 };
@@ -2884,9 +3278,15 @@ impl Db {
         provider: &str,
         model: &str,
     ) -> Result<Option<ProviderRollupRow>> {
-        if self.user_version()? < 8 {
+        let v = self.user_version()?;
+        if v < 8 {
+            tracing::trace!(
+                user_version = v,
+                "get_provider_rollup: skipped, schema < v008"
+            );
             return Ok(None);
         }
+        tracing::trace!(provider, model, "get_provider_rollup: enter");
         let conn = self.pool.get()?;
         let row = conn
             .query_row(
@@ -2906,6 +3306,10 @@ impl Db {
                 },
             )
             .ok();
+        match &row {
+            Some(_) => tracing::trace!(provider, model, "get_provider_rollup: hit"),
+            None => tracing::trace!(provider, model, "get_provider_rollup: miss"),
+        }
         Ok(row)
     }
 
@@ -2966,9 +3370,15 @@ impl Db {
     }
 
     fn count_run_artifact(&self, run_id: &RunId, kind: &str) -> Result<usize> {
-        if self.user_version()? < 10 {
+        let v = self.user_version()?;
+        if v < 10 {
+            tracing::trace!(
+                user_version = v,
+                "count_run_artifact: skipped, schema < v010"
+            );
             return Ok(0);
         }
+        tracing::trace!(%run_id, kind, "count_run_artifact: enter");
         let conn = self.pool.get()?;
         let count: Option<i64> = conn
             .query_row(
@@ -2977,13 +3387,21 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?;
-        Ok(count.unwrap_or(0).max(0) as usize)
+        let count = count.unwrap_or(0).max(0) as usize;
+        tracing::trace!(%run_id, kind, count, "count_run_artifact: ok");
+        Ok(count)
     }
 
     fn reindex_run_artifact(&self, run_id: &RunId, kind: &str, dir: &Path) -> Result<usize> {
-        if self.user_version()? < 10 {
+        let v = self.user_version()?;
+        if v < 10 {
+            tracing::debug!(
+                user_version = v,
+                "reindex_run_artifact: skipped, schema < v010"
+            );
             return Ok(0);
         }
+        tracing::debug!(%run_id, kind, dir = %dir.display(), "reindex_run_artifact: enter");
         let count = count_artefacts_in(dir)?;
         let conn = self.pool.get()?;
         let now = crate::time::now_unix_secs();
@@ -2995,6 +3413,7 @@ impl Db {
                 last_indexed_unix = excluded.last_indexed_unix",
             params![run_id.to_string(), kind, count as i64, now],
         )?;
+        tracing::debug!(%run_id, kind, count, "reindex_run_artifact: ok");
         Ok(count)
     }
 
@@ -3013,9 +3432,12 @@ impl Db {
     /// (the Ok pressure tier — the observer treats 0/0 as "no
     /// budget configured" and never throttles optional work).
     pub fn budget_read(&self, run_id: RunId) -> Result<(u64, u64)> {
-        if self.user_version()? < 11 {
+        let v = self.user_version()?;
+        if v < 11 {
+            tracing::trace!(user_version = v, "budget_read: skipped, schema < v011");
             return Ok((0, 0));
         }
+        tracing::trace!(%run_id, "budget_read: enter");
         let conn = self.pool.get()?;
         let row: Option<(i64, i64)> = conn
             .query_row(
@@ -3025,7 +3447,9 @@ impl Db {
             )
             .optional()?;
         let (planned, used) = row.unwrap_or((0, 0));
-        Ok((planned.max(0) as u64, used.max(0) as u64))
+        let out = (planned.max(0) as u64, used.max(0) as u64);
+        tracing::trace!(%run_id, planned = out.0, used = out.1, "budget_read: ok");
+        Ok(out)
     }
 
     /// Record `tokens` consumed by `phase` for `run_id`. Inserts
@@ -3041,9 +3465,12 @@ impl Db {
     /// Pre-v011 databases are a no-op so legacy operators
     /// upgrading the binary mid-run do not see a synthetic write.
     pub fn budget_record(&self, run_id: RunId, phase: &str, tokens: u64) -> Result<()> {
-        if self.user_version()? < 11 {
+        let v = self.user_version()?;
+        if v < 11 {
+            tracing::trace!(user_version = v, "budget_record: skipped, schema < v011");
             return Ok(());
         }
+        tracing::trace!(%run_id, phase, tokens, "budget_record: enter");
         let conn = self.pool.get()?;
         // Upsert the aggregate. `planned_tokens` is preserved on
         // the ON CONFLICT branch (we only ever set it via
@@ -3071,9 +3498,12 @@ impl Db {
     /// "unlimited") untouched when the operator omits the cap.
     /// Pre-v011 databases are a no-op.
     pub fn set_budget(&self, run_id: RunId, planned_tokens: u64) -> Result<()> {
-        if self.user_version()? < 11 {
+        let v = self.user_version()?;
+        if v < 11 {
+            tracing::debug!(user_version = v, "set_budget: skipped, schema < v011");
             return Ok(());
         }
+        tracing::debug!(%run_id, planned_tokens, "set_budget: enter");
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT INTO budget_state (run_id, planned_tokens, used_tokens) \
@@ -3110,8 +3540,15 @@ impl Db {
     /// Count orphan rows on every curated table. Returns a
     /// per-table report. Does not mutate the database.
     pub fn list_orphans(&self) -> Result<crate::telemetry::cross_run_sweep::OrphanReport> {
+        tracing::info!("list_orphans: enter");
         let conn = self.pool.get()?;
-        crate::telemetry::cross_run_sweep::list_orphans(&conn)
+        let report = crate::telemetry::cross_run_sweep::list_orphans(&conn)?;
+        tracing::info!(
+            total = report.total_rows,
+            tables = report.tables.len(),
+            "list_orphans: ok"
+        );
+        Ok(report)
     }
 
     /// Delete orphan rows on every curated table inside a single
@@ -3119,8 +3556,15 @@ impl Db {
     /// success; the transaction is rolled back on the first
     /// failure so the DB is never left in a half-purged state.
     pub fn purge_orphans(&self) -> Result<crate::telemetry::cross_run_sweep::OrphanReport> {
+        tracing::info!("purge_orphans: enter");
         let conn = self.pool.get()?;
-        crate::telemetry::cross_run_sweep::purge_orphans(&conn)
+        let report = crate::telemetry::cross_run_sweep::purge_orphans(&conn)?;
+        tracing::info!(
+            total = report.total_rows,
+            tables = report.tables.len(),
+            "purge_orphans: ok"
+        );
+        Ok(report)
     }
 }
 
@@ -3128,7 +3572,9 @@ impl Db {
 /// sidecars (`*.meta.json`) and atomic-write leftovers
 /// (`*.tmp.<hex>`). Returns 0 when the directory is missing.
 fn count_artefacts_in(dir: &Path) -> Result<usize> {
+    tracing::trace!(dir = %dir.display(), "count_artefacts_in: enter");
     if !dir.exists() {
+        tracing::trace!(dir = %dir.display(), "count_artefacts_in: missing dir -> 0");
         return Ok(0);
     }
     let mut count = 0usize;
@@ -3154,6 +3600,7 @@ fn count_artefacts_in(dir: &Path) -> Result<usize> {
                 http_status: None,
             })?;
     }
+    tracing::trace!(dir = %dir.display(), count, "count_artefacts_in: ok");
     Ok(count)
 }
 

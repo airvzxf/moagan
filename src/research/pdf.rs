@@ -68,7 +68,14 @@ const STDERR_CAP: u64 = 4 * 1024;
 /// only picks the parser path.
 pub fn looks_like_pdf_url(url: &str) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
-    path.to_ascii_lowercase().ends_with(".pdf")
+    let result = path.to_ascii_lowercase().ends_with(".pdf");
+    tracing::trace!(
+        url,
+        path,
+        looks_like_pdf = result,
+        "research::pdf::looks_like_pdf_url"
+    );
+    result
 }
 
 /// Returns `true` when `binary_name` resolves to an executable
@@ -80,7 +87,9 @@ pub fn looks_like_pdf_url(url: &str) -> bool {
 /// can skip when `poppler-utils` is not installed without
 /// shelling out a second `Command::new` probe.
 pub fn binary_in_path(binary_name: &str) -> bool {
+    tracing::trace!(binary_name, "research::pdf::binary_in_path: probing");
     let Some(paths) = std::env::var_os("PATH") else {
+        tracing::trace!("research::pdf::binary_in_path: PATH unset");
         return false;
     };
     for path in std::env::split_paths(&paths) {
@@ -91,9 +100,15 @@ pub fn binary_in_path(binary_name: &str) -> bool {
         // is the right call — `Command::new` would fail to spawn
         // it anyway.
         if path.join(binary_name).is_file() {
+            tracing::debug!(
+                binary_name,
+                path = %path.display(),
+                "research::pdf::binary_in_path: found"
+            );
             return true;
         }
     }
+    tracing::trace!(binary_name, "research::pdf::binary_in_path: not found");
     false
 }
 
@@ -118,12 +133,18 @@ pub fn binary_in_path(binary_name: &str) -> bool {
 ///   exit → [`Error::Provider`].
 /// - Empty response body → [`Error::ResearchUnavailable`].
 pub async fn fetch_pdf_text(url: &str, max_bytes: u32) -> Result<String> {
+    tracing::debug!(url, max_bytes, "research::pdf::fetch_pdf_text: enter");
     let parsed =
         reqwest::Url::parse(url).map_err(|e| Error::InvalidArgs(format!("pdf url parse: {e}")))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| Error::InvalidArgs("pdf url has no host".into()))?;
     if !allowlist::is_allowed(host) {
+        tracing::warn!(
+            url,
+            host,
+            "research::pdf::fetch_pdf_text: host not in allowlist"
+        );
         return Err(Error::InvalidArgs(format!(
             "pdf host '{host}' not in research allowlist"
         )));
@@ -142,6 +163,11 @@ pub async fn fetch_pdf_text(url: &str, max_bytes: u32) -> Result<String> {
     })?;
     let status = resp.status();
     if !status.is_success() {
+        tracing::warn!(
+            url,
+            status = status.as_u16(),
+            "research::pdf::fetch_pdf_text: non-success status"
+        );
         return Err(Error::Provider {
             message: format!("pdf fetch status {status}"),
             http_status: Some(status.as_u16()),
@@ -152,6 +178,7 @@ pub async fn fetch_pdf_text(url: &str, max_bytes: u32) -> Result<String> {
         http_status: None,
     })?;
     if bytes.is_empty() {
+        tracing::warn!(url, "research::pdf::fetch_pdf_text: empty body");
         return Err(Error::ResearchUnavailable("empty pdf response".into()));
     }
 
@@ -161,6 +188,11 @@ pub async fn fetch_pdf_text(url: &str, max_bytes: u32) -> Result<String> {
         // is `u32` and `bytes.len()` is `usize`; on 32-bit
         // targets a `u32`-sized cap can still address the full
         // `usize` range so the slice is well-formed.
+        tracing::trace!(
+            bytes_len = bytes.len(),
+            cap,
+            "research::pdf::fetch_pdf_text: truncating input"
+        );
         &bytes[..cap]
     } else {
         &bytes[..]
@@ -168,9 +200,19 @@ pub async fn fetch_pdf_text(url: &str, max_bytes: u32) -> Result<String> {
 
     let mut text = extract_pdf_text(input_slice).await?;
     if text.len() > MAX_OUTPUT_BYTES {
+        tracing::trace!(
+            text_len = text.len(),
+            max_output = MAX_OUTPUT_BYTES,
+            "research::pdf::fetch_pdf_text: truncating output"
+        );
         text.truncate(MAX_OUTPUT_BYTES);
         text.push_str("...(truncated)");
     }
+    tracing::debug!(
+        url,
+        text_len = text.len(),
+        "research::pdf::fetch_pdf_text: extracted"
+    );
     Ok(text)
 }
 
@@ -198,6 +240,11 @@ pub async fn extract_pdf_text(bytes: &[u8]) -> Result<String> {
 /// alone does not prevent `Command::new("pdftotext")` from
 /// succeeding — only an unknown absolute or relative name does).
 async fn extract_pdf_text_with_binary(binary: &str, bytes: &[u8]) -> Result<String> {
+    tracing::trace!(
+        binary,
+        input_bytes = bytes.len(),
+        "research::pdf::extract_pdf_text_with_binary: enter"
+    );
     let mut child = Command::new(binary)
         .arg("-q")
         .arg("-enc")
@@ -210,10 +257,19 @@ async fn extract_pdf_text_with_binary(binary: &str, bytes: &[u8]) -> Result<Stri
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    binary,
+                    "research::pdf::extract_pdf_text_with_binary: binary not found"
+                );
                 Error::ResearchUnavailable(
                     "pdftotext binary not found; install poppler-utils".into(),
                 )
             } else {
+                tracing::error!(
+                    binary,
+                    error = %e,
+                    "research::pdf::extract_pdf_text_with_binary: spawn failed"
+                );
                 Error::Provider {
                     message: format!("pdftotext spawn: {e}"),
                     http_status: None,
@@ -259,17 +315,30 @@ async fn extract_pdf_text_with_binary(binary: &str, bytes: &[u8]) -> Result<Stri
         http_status: None,
     })?;
     if !status.success() {
+        let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+        tracing::warn!(
+            binary,
+            code = status.code().unwrap_or(-1),
+            stderr = %stderr_str,
+            "research::pdf::extract_pdf_text_with_binary: pdftotext exited non-zero"
+        );
         return Err(Error::Provider {
             message: format!(
                 "pdftotext exit {}: {}",
                 status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&stderr_bytes)
+                stderr_str
             ),
             http_status: None,
         });
     }
 
-    Ok(String::from_utf8_lossy(&stdout_bytes).into_owned())
+    let text = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    tracing::trace!(
+        binary,
+        text_len = text.len(),
+        "research::pdf::extract_pdf_text_with_binary: extracted"
+    );
+    Ok(text)
 }
 
 /// Read up to `cap` bytes from `reader` into a `Vec`. Helper for

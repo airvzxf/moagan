@@ -26,21 +26,38 @@ use crate::preferences::cache::{PreferenceCache, Rating, unix_now};
 /// is disabled or the cache holds no ratings, so prompts without a
 /// usable history see no substitution at all.
 pub fn render_preferences_block(user: &str, limit: usize) -> String {
+    tracing::debug!(
+        user,
+        limit,
+        "preferences::integration::render_preferences_block: enter"
+    );
     if !PreferenceCache::enabled() {
+        tracing::trace!("preferences::integration::render_preferences_block: opt-out; empty");
         return String::new();
     }
     let cache = PreferenceCache::load(user);
     if cache.ratings.is_empty() {
+        tracing::trace!(
+            user,
+            "preferences::integration::render_preferences_block: empty cache"
+        );
         return String::new();
     }
+    let recent = cache.recent(limit);
     let mut s = String::from("# User preferences\n\n");
     s.push_str("Recent ratings (weighted by recency):\n");
-    for r in cache.recent(limit) {
+    for r in &recent {
         s.push_str(&format!(
             "- {} (score {:.2}, run {})\n",
             r.proposal_id, r.score, r.run_id
         ));
     }
+    tracing::debug!(
+        user,
+        ratings_in_block = recent.len(),
+        bytes = s.len(),
+        "preferences::integration::render_preferences_block: exit"
+    );
     s
 }
 
@@ -48,7 +65,14 @@ pub fn render_preferences_block(user: &str, limit: usize) -> String {
 /// of a completed run. No-op when the learning loop is opted out so
 /// the synthesis path stays side-effect-free by default.
 pub fn auto_record_run(user: &str, run_id: RunId, proposal_ids: &[String]) {
+    tracing::debug!(
+        user,
+        run_id = %run_id,
+        proposals = proposal_ids.len(),
+        "preferences::integration::auto_record_run: enter"
+    );
     if !PreferenceCache::enabled() {
+        tracing::trace!("preferences::integration::auto_record_run: opt-out; no-op");
         return;
     }
     let mut cache = PreferenceCache::load(user);
@@ -61,16 +85,52 @@ pub fn auto_record_run(user: &str, run_id: RunId, proposal_ids: &[String]) {
             run_id,
         });
     }
-    let _ = cache.save();
+    match cache.save() {
+        Ok(()) => {
+            tracing::info!(
+                user,
+                run_id = %run_id,
+                recorded = proposal_ids.len(),
+                "preferences::integration::auto_record_run: persisted"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                user,
+                run_id = %run_id,
+                error = %e,
+                "preferences::integration::auto_record_run: save failed"
+            );
+            let _ = cache.save();
+        }
+    }
 }
 
 /// Manual user rating via `moagan rate`. Surfaces persistence errors
 /// so the CLI can exit non-zero instead of swallowing a write
 /// failure.
 pub fn record_user_rating(user: &str, rating: Rating) -> Result<(), crate::error::Error> {
+    tracing::debug!(
+        user,
+        proposal_id = %rating.proposal_id,
+        score = rating.score,
+        "preferences::integration::record_user_rating: enter"
+    );
     let mut cache = PreferenceCache::load(user);
     cache.add(rating);
-    cache.save()
+    let result = cache.save();
+    match &result {
+        Ok(()) => tracing::info!(
+            user,
+            "preferences::integration::record_user_rating: persisted"
+        ),
+        Err(e) => tracing::error!(
+            user,
+            error = %e,
+            "preferences::integration::record_user_rating: save failed"
+        ),
+    }
+    result
 }
 
 /// Substitute the `${epistemic_preferences}` placeholder in
@@ -81,15 +141,32 @@ pub fn record_user_rating(user: &str, rating: Rating) -> Result<(), crate::error
 /// without usable history see no substitution at all. PR D.8.
 pub fn inject_preferences_into_prompt(prompt: &str) -> String {
     let Ok(user) = std::env::var("MOAGAN_USER") else {
+        tracing::trace!(
+            "preferences::integration::inject_preferences_into_prompt: MOAGAN_USER unset; no substitution"
+        );
         return prompt.to_owned();
     };
     if user.is_empty() {
+        tracing::trace!(
+            "preferences::integration::inject_preferences_into_prompt: empty MOAGAN_USER; no substitution"
+        );
         return prompt.to_owned();
     }
     if !PreferenceCache::enabled() {
+        tracing::trace!(
+            "preferences::integration::inject_preferences_into_prompt: opt-out; no substitution"
+        );
         return prompt.to_owned();
     }
-    crate::llm::prompts::inject_epistemic_preferences(prompt, &user)
+    let out = crate::llm::prompts::inject_epistemic_preferences(prompt, &user);
+    tracing::debug!(
+        user,
+        input_len = prompt.len(),
+        output_len = out.len(),
+        substituted = out.len() != prompt.len(),
+        "preferences::integration::inject_preferences_into_prompt"
+    );
+    out
 }
 
 #[cfg(test)]

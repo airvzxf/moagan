@@ -61,14 +61,19 @@ impl ContextScope {
 
     /// Parse from the `--context-{summary,full}` CLI flag.
     pub fn parse(s: &str) -> Result<Self> {
-        match s {
+        let out = match s {
             "summary" => Ok(Self::Summary),
             "summary_full" => Ok(Self::SummaryFull),
             "full" => Ok(Self::Full),
-            other => Err(Error::InvalidArgs(format!(
-                "unknown context scope {other:?} (expected summary | summary_full | full)"
-            ))),
-        }
+            other => {
+                tracing::warn!(input = %s, "context::loader::ContextScope::parse: unknown");
+                return Err(Error::InvalidArgs(format!(
+                    "unknown context scope {other:?} (expected summary | summary_full | full)"
+                )));
+            }
+        };
+        tracing::trace!(input = %s, ?out, "context::loader::ContextScope::parse");
+        out
     }
 
     /// Human description for `moagan run --help`.
@@ -126,11 +131,28 @@ pub struct LoadedContext {
 /// Load the contents of `cref` from disk. Returns the texts in
 /// the order they were discovered (sorted for determinism).
 pub fn load(home: &MoaganHome, cref: &ContextRef, scope: ContextScope) -> Result<LoadedContext> {
-    match cref {
+    tracing::debug!(
+        kind = cref.kind(),
+        scope = %scope.as_str(),
+        "context::loader::load: enter"
+    );
+    let result = match cref {
         ContextRef::RunId(id) => load_from_run_id(home, *id, scope),
         ContextRef::FilePath(path) => load_from_path(path, scope),
         ContextRef::DirPath(path) => load_from_path(path, scope),
+    };
+    match &result {
+        Ok(loaded) => tracing::debug!(
+            excerpt_len = loaded.brief_excerpt.len(),
+            refs = loaded.context_refs.len(),
+            "context::loader::load: ok"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "context::loader::load: failed"
+        ),
     }
+    result
 }
 
 /// Load a run's text artefacts under `<home>/.runs/<id>/`. The
@@ -148,8 +170,17 @@ pub fn load_from_run_id(
     run_id: RunId,
     scope: ContextScope,
 ) -> Result<LoadedContext> {
+    tracing::debug!(
+        run_id = %run_id,
+        scope = %scope.as_str(),
+        "context::loader::load_from_run_id: enter"
+    );
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
+        tracing::warn!(
+            run_id = %run_id,
+            "context::loader::load_from_run_id: run dir missing"
+        );
         return Err(Error::InvalidArgs(format!(
             "context run id {run_id} not found under {}",
             home.runs_dir().display()
@@ -171,12 +202,21 @@ pub fn load_from_run_id(
     let mut texts: Vec<String> = Vec::new();
     let mut records: Vec<ContextRefRecord> = Vec::new();
     let now = crate::time::now_unix_secs();
+    let mut scanned = 0usize;
     for dir in &candidate_dirs {
         if !dir.is_dir() {
             continue;
         }
+        let before_texts = texts.len();
         collect_text_files(dir, scope, &mut texts, &mut records, now)?;
+        scanned += texts.len() - before_texts;
     }
+    tracing::trace!(
+        run_id = %run_id,
+        scanned,
+        scope = %scope.as_str(),
+        "context::loader::load_from_run_id: collected"
+    );
     Ok(finalise_loaded(Some(run_id), texts, records))
 }
 
@@ -185,6 +225,11 @@ pub fn load_from_run_id(
 /// single file is always loaded as-is) and only filters
 /// extensions when walking a directory (always `.md` for paths).
 pub fn load_from_path(path: &Path, scope: ContextScope) -> Result<LoadedContext> {
+    tracing::debug!(
+        path = %path.display(),
+        scope = %scope.as_str(),
+        "context::loader::load_from_path: enter"
+    );
     let meta = fs::metadata(path).map_err(Error::from)?;
     let mut texts: Vec<String> = Vec::new();
     let mut records: Vec<ContextRefRecord> = Vec::new();
@@ -197,6 +242,10 @@ pub fn load_from_path(path: &Path, scope: ContextScope) -> Result<LoadedContext>
         let _ = scope; // documented unused; surfaces the param
         walk_dir(path, &["md"], &mut texts, &mut records, now, "dir")?;
     } else {
+        tracing::warn!(
+            path = %path.display(),
+            "context::loader::load_from_path: neither file nor directory"
+        );
         return Err(Error::InvalidArgs(format!(
             "context path {path:?} is neither a file nor a directory"
         )));
@@ -237,6 +286,7 @@ fn walk_dir(
     now_unix: i64,
     context_type: &'static str,
 ) -> Result<()> {
+    tracing::trace!(dir = %dir.display(), ?extensions, context_type, "context::loader::walk_dir: enter");
     let mut entries: Vec<PathBuf> = WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
@@ -252,6 +302,7 @@ fn walk_dir(
         .collect();
     // Sorted order so re-runs produce identical `shared_brief_hash`.
     entries.sort();
+    let before = texts.len();
     for path in entries {
         ingest_file(
             &path,
@@ -262,6 +313,11 @@ fn walk_dir(
             context_type,
         )?;
     }
+    tracing::trace!(
+        dir = %dir.display(),
+        ingested = texts.len() - before,
+        "context::loader::walk_dir: exit"
+    );
     Ok(())
 }
 
@@ -273,6 +329,7 @@ fn ingest_file(
     cap: u64,
     context_type: &'static str,
 ) -> Result<()> {
+    tracing::trace!(path = %path.display(), cap, context_type, "context::loader::ingest_file: enter");
     let bytes = fs::read(path).map_err(Error::from)?;
     let bytes_len = bytes.len() as u64;
     let truncated = bytes_len > cap;
@@ -292,6 +349,12 @@ fn ingest_file(
         bytes: used_bytes,
         added_unix: now_unix,
     });
+    tracing::trace!(
+        path = %path.display(),
+        bytes = used_bytes,
+        truncated,
+        "context::loader::ingest_file: ingested"
+    );
     Ok(())
 }
 
@@ -300,6 +363,12 @@ fn finalise_loaded(
     mut texts: Vec<String>,
     mut records: Vec<ContextRefRecord>,
 ) -> LoadedContext {
+    tracing::trace!(
+        text_count = texts.len(),
+        record_count = records.len(),
+        has_parent = parent.is_some(),
+        "context::loader::finalise_loaded: enter"
+    );
     if texts.is_empty() {
         return LoadedContext {
             parent_run_id: parent,
@@ -326,6 +395,11 @@ fn finalise_loaded(
             },
         );
     }
+    tracing::trace!(
+        excerpt_len = brief_excerpt.len(),
+        refs = records.len(),
+        "context::loader::finalise_loaded: ok"
+    );
     LoadedContext {
         parent_run_id: parent,
         shared_brief_hash,
@@ -353,13 +427,23 @@ pub fn compute_shared_brief_hash(texts: &[String]) -> String {
         }
         hasher.update(t.as_bytes());
     }
-    hex::encode(hasher.finalize())
+    let out = hex::encode(hasher.finalize());
+    tracing::trace!(
+        input_texts = texts.len(),
+        "context::loader::compute_shared_brief_hash"
+    );
+    out
 }
 
 /// Build the `brief_excerpt` — the first `max_chars` of the joined
 /// texts, with a trailing `…` when truncated. Safe with multi-byte
 /// UTF-8: walks to the next char boundary before slicing.
 pub fn brief_excerpt(texts: &[String], max_chars: usize) -> String {
+    tracing::trace!(
+        text_count = texts.len(),
+        max_chars,
+        "context::loader::brief_excerpt"
+    );
     let joined = texts.join("\n\n");
     if joined.chars().count() <= max_chars {
         return joined;

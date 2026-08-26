@@ -24,6 +24,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use tracing::{debug, info, trace, warn};
+
 use crate::config::Config;
 use crate::discovery::pause::PausePoint;
 use crate::discovery::resume;
@@ -83,8 +85,10 @@ pub struct ListArgs {}
 /// [`resume::DEFAULT_COMPLETED_PHASES`] so the pause still produces
 /// a readable `paused.json`.
 pub fn run_pause(home: &MoaganHome, args: PauseArgs) -> Result<i32> {
+    debug!(run_id = %args.run_id, "pause::run_pause: enter");
     let run_dir = home.run_dir(args.run_id);
     if !run_dir.root().exists() {
+        warn!(run_id = %args.run_id, "pause: run not on disk");
         return Err(Error::InvalidArgs(format!(
             "run {} not found at {}",
             args.run_id,
@@ -102,6 +106,12 @@ pub fn run_pause(home: &MoaganHome, args: PauseArgs) -> Result<i32> {
         format!("paused at {}", crate::time::now_unix_secs()),
     );
     pp.save(run_dir.root())?;
+    info!(
+        run_id = %args.run_id,
+        paused_at_phase = %paused_at_phase,
+        completed_phases = pp.completed_phases.len(),
+        "pause: saved"
+    );
     println!(
         "paused run {} at phase '{}' ({} completed phases)",
         args.run_id,
@@ -169,14 +179,17 @@ fn resolve_pause_state(home: &MoaganHome, args: &PauseArgs) -> Result<(String, V
 /// success. On failure the pause artefacts are kept so the operator
 /// can inspect or retry.
 pub async fn run_continue_from_pause(home: &MoaganHome, run_id: RunId) -> Result<i32> {
+    debug!(run_id = %run_id, "pause::run_continue_from_pause: enter");
     let run_dir = home.run_dir(run_id);
     if !run_dir.root().exists() {
+        warn!(run_id = %run_id, "pause::continue: run not on disk");
         return Err(Error::InvalidArgs(format!(
             "run {run_id} not found at {}",
             run_dir.root().display()
         )));
     }
     let pp = PausePoint::load(run_dir.root())?.ok_or_else(|| {
+        warn!(run_id = %run_id, "pause::continue: no paused.json");
         Error::InvalidArgs(format!(
             "no paused.json for run {run_id}; nothing to resume"
         ))
@@ -277,6 +290,7 @@ pub(crate) fn planned_resumed_pipeline(home: &MoaganHome, run_id: RunId) -> Resu
 /// `<home>/.runs/` that currently carries a `paused.json`. The
 /// returned code is always 0; the operator checks stdout instead.
 pub fn run_list(home: &MoaganHome, _args: ListArgs) -> Result<i32> {
+    debug!("pause::run_list: enter");
     let runs = home.runs_dir();
     let mut found = 0;
     if let Ok(entries) = std::fs::read_dir(&runs) {
@@ -289,6 +303,7 @@ pub fn run_list(home: &MoaganHome, _args: ListArgs) -> Result<i32> {
             }
         }
     }
+    debug!(found, "pause::run_list: done");
     if found == 0 {
         println!("(no paused runs)");
     }
@@ -307,6 +322,12 @@ fn acquire_lock(run_dir: &Path, ttl_secs: u64) -> Result<()> {
     {
         let age = modified.elapsed().unwrap_or(Duration::from_secs(u64::MAX));
         if age < Duration::from_secs(ttl_secs) {
+            warn!(
+                lock_path = %lock_path.display(),
+                age_secs = age.as_secs(),
+                ttl_secs,
+                "pause: lockfile held"
+            );
             return Err(Error::InvalidArgs(format!(
                 "paused.lock held (age {}s, ttl {}s); retry later",
                 age.as_secs(),
@@ -320,6 +341,7 @@ fn acquire_lock(run_dir: &Path, ttl_secs: u64) -> Result<()> {
             source: e,
         })
     })?;
+    trace!("pause: lock acquired");
     Ok(())
 }
 

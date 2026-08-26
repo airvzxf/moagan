@@ -575,6 +575,11 @@ impl LineagePaths {
     /// the same dual-map shape; this adapter keeps them in sync
     /// after the M sub-fase merged in.
     pub fn from_run_paths(rp: &crate::fs_layout::RunPaths) -> Self {
+        tracing::trace!(
+            relative_keys = rp.relative.len(),
+            absolute_keys = rp.absolute.len(),
+            "domain::LineagePaths::from_run_paths: enter"
+        );
         let relative = rp.relative.clone().into_iter().collect();
         let absolute = rp.absolute.clone().into_iter().collect();
         Self { relative, absolute }
@@ -592,13 +597,19 @@ impl Manifest {
     /// sidecar. Pinning the formatter on the type keeps the
     /// `"v1" -> "v2"` migration a single `const` change.
     pub fn schema_version_string() -> String {
-        format!("v{}", Self::SCHEMA_VERSION)
+        let s = format!("v{}", Self::SCHEMA_VERSION);
+        tracing::trace!(version = %s, "domain::Manifest::schema_version_string");
+        s
     }
 
     /// F5: stable accessor for the config hash. Returns the hex
     /// digest or `None` for runs that pre-date the field (legacy
     /// v1 sidecars parse it as `None`).
     pub fn config_hash(&self) -> Option<&str> {
+        tracing::trace!(
+            has_hash = self.config_hash.is_some(),
+            "domain::Manifest::config_hash"
+        );
         self.config_hash.as_deref()
     }
 
@@ -606,7 +617,13 @@ impl Manifest {
     /// least once. Equivalent to `resume_count > 0` but reads
     /// more naturally in `moagan inspect` / dashboard code.
     pub fn has_been_resumed(&self) -> bool {
-        self.resume_count > 0
+        let resumed = self.resume_count > 0;
+        tracing::trace!(
+            resume_count = self.resume_count,
+            resumed,
+            "domain::Manifest::has_been_resumed"
+        );
+        resumed
     }
 
     /// F5: record a `moagan continue` invocation. Saturates the
@@ -614,9 +631,15 @@ impl Manifest {
     /// bumps `updated_at` so the manifest sidecar's
     /// `manifest_blake3` is recomputed by the next writer.
     pub fn mark_resumed(&mut self, iso: &str) {
+        let prev = self.resume_count;
         self.resume_count = self.resume_count.saturating_add(1);
         self.last_resumed_at_iso = Some(iso.to_owned());
         self.updated_at = chrono::Utc::now();
+        tracing::info!(
+            prev,
+            new = self.resume_count,
+            "domain::Manifest::mark_resumed: incremented resume_count"
+        );
     }
 
     /// F5: stamp the ISO-8601 creation timestamp. Idempotent on
@@ -626,6 +649,12 @@ impl Manifest {
     pub fn stamp_created_at(&mut self) {
         if self.created_at_iso.is_empty() {
             self.created_at_iso = self.created_at.to_rfc3339();
+            tracing::trace!(
+                created_at_iso = %self.created_at_iso,
+                "domain::Manifest::stamp_created_at: stamped"
+            );
+        } else {
+            tracing::trace!("domain::Manifest::stamp_created_at: already stamped");
         }
     }
 }
@@ -1252,12 +1281,14 @@ impl ContradictionSeverity {
     /// back to [`Self::Minor`] so the detector never silently
     /// drops a finding on an unexpected label.
     pub fn from_str_lossy(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
+        let out = match s.trim().to_ascii_lowercase().as_str() {
             "critical" | "high" | "h" => Self::Critical,
             "major" | "medium" | "med" | "m" => Self::Major,
             "minor" | "low" | "l" => Self::Minor,
             _ => Self::Minor,
-        }
+        };
+        tracing::trace!(input = %s, ?out, "domain::ContradictionSeverity::from_str_lossy");
+        out
     }
 
     /// Map the new severity vocabulary back to the legacy string
@@ -1266,20 +1297,24 @@ impl ContradictionSeverity {
     /// `contradictions.json` schema unchanged so the integrator
     /// phase can keep consuming it byte-for-byte.
     pub fn legacy_label(&self) -> &'static str {
-        match self {
+        let out = match self {
             Self::Minor => "low",
             Self::Major => "medium",
             Self::Critical => "high",
-        }
+        };
+        tracing::trace!(?self, label = %out, "domain::ContradictionSeverity::legacy_label");
+        out
     }
 
     /// Rank used to sort findings so `Critical` lands first.
     pub fn rank(&self) -> u8 {
-        match self {
+        let out = match self {
             Self::Minor => 1,
             Self::Major => 2,
             Self::Critical => 3,
-        }
+        };
+        tracing::trace!(?self, rank = out, "domain::ContradictionSeverity::rank");
+        out
     }
 }
 
@@ -1290,9 +1325,14 @@ impl ContradictionFinding {
     /// surfaces the well-formed ones. Pairs whose `severity`
     /// string is empty default to [`ContradictionSeverity::Minor`].
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        tracing::trace!("domain::ContradictionFinding::from_json: enter");
         let pair = value.get("pair")?;
         let arr = pair.as_array()?;
         if arr.len() != 2 {
+            tracing::trace!(
+                arr_len = arr.len(),
+                "domain::ContradictionFinding::from_json: pair must be length 2"
+            );
             return None;
         }
         let id0 = arr.first()?.as_str()?.to_owned();
@@ -1312,6 +1352,12 @@ impl ContradictionFinding {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
+        tracing::trace!(
+            id0 = %id0,
+            id1 = %id1,
+            ?severity,
+            "domain::ContradictionFinding::from_json: parsed"
+        );
         Some(Self {
             pair: [id0, id1],
             severity,
@@ -1506,6 +1552,11 @@ impl ProblemGraph {
     /// node. Every downstream phase sees this as "no decomposition
     /// happened" and falls back to its non-DAG behaviour.
     pub fn trivial(brief_blake3: impl Into<String>, now_unix: i64) -> Self {
+        tracing::trace!(
+            brief_blake3 = %String::new(),
+            now_unix,
+            "domain::ProblemGraph::trivial: building trivial graph"
+        );
         Self {
             schema_version: "v1".into(),
             should_decompose: false,
@@ -1519,12 +1570,16 @@ impl ProblemGraph {
 
     /// The number of nodes the graph contains (0 for trivial).
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        let n = self.nodes.len();
+        tracing::trace!(n, "domain::ProblemGraph::len");
+        n
     }
 
     /// True when there is nothing to do.
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        let empty = self.nodes.is_empty();
+        tracing::trace!(empty, "domain::ProblemGraph::is_empty");
+        empty
     }
 
     /// Find the indices of root nodes (no dependencies). Returns
@@ -1532,12 +1587,19 @@ impl ProblemGraph {
     /// roots but non-empty `nodes` is malformed — callers should run
     /// `validate_no_cycles` first.
     pub fn roots(&self) -> Vec<usize> {
-        self.nodes
+        let roots: Vec<usize> = self
+            .nodes
             .iter()
             .enumerate()
             .filter(|(_, n)| n.dependencies.is_empty())
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        tracing::trace!(
+            node_count = self.nodes.len(),
+            root_count = roots.len(),
+            "domain::ProblemGraph::roots"
+        );
+        roots
     }
 
     /// Topological layers (Kahn's algorithm). Each layer is a `Vec<usize>`
@@ -1545,6 +1607,10 @@ impl ProblemGraph {
     /// to the (i-1)-th. Returns `Err` with the first orphan id when
     /// the graph has a cycle or a dangling reference.
     pub fn topological_layers(&self) -> Result<Vec<Vec<usize>>, String> {
+        tracing::trace!(
+            node_count = self.nodes.len(),
+            "domain::ProblemGraph::topological_layers: enter"
+        );
         let n = self.nodes.len();
         // Index nodes by id for O(1) lookup.
         let index: std::collections::HashMap<&str, usize> = self
@@ -1559,6 +1625,11 @@ impl ProblemGraph {
         for (i, node) in self.nodes.iter().enumerate() {
             for dep in &node.dependencies {
                 let parent = index.get(dep.as_str()).ok_or_else(|| {
+                    tracing::warn!(
+                        node_id = %node.id,
+                        missing_dep = %dep,
+                        "domain::ProblemGraph::topological_layers: dangling dependency"
+                    );
                     format!("node '{}' depends on missing node '{}'", node.id, dep)
                 })?;
                 rev[*parent].push(i);
@@ -1591,8 +1662,18 @@ impl ProblemGraph {
                 .collect();
             stuck.sort();
             stuck.dedup();
+            tracing::warn!(
+                visited,
+                total = n,
+                stuck = ?stuck,
+                "domain::ProblemGraph::topological_layers: cycle detected"
+            );
             return Err(format!("graph has a cycle; stuck at: {stuck:?}"));
         }
+        tracing::debug!(
+            layer_count = layers.len(),
+            "domain::ProblemGraph::topological_layers: ok"
+        );
         Ok(layers)
     }
 
@@ -1608,13 +1689,27 @@ impl ProblemGraph {
                     .push(node.id.clone());
             }
         }
+        tracing::trace!(
+            node_count = self.nodes.len(),
+            adjacency_keys = adjacency.len(),
+            "domain::ProblemGraph::adjacency"
+        );
         adjacency
     }
 
     /// Detect cycles. Returns `Ok(())` when the DAG is acyclic and
     /// well-formed, `Err(message)` otherwise.
     pub fn validate_no_cycles(&self) -> Result<(), String> {
-        self.topological_layers().map(|_| ())
+        tracing::trace!("domain::ProblemGraph::validate_no_cycles: enter");
+        let result = self.topological_layers().map(|_| ());
+        match &result {
+            Ok(()) => tracing::trace!("domain::ProblemGraph::validate_no_cycles: ok"),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "domain::ProblemGraph::validate_no_cycles: cycle"
+            ),
+        }
+        result
     }
 }
 
@@ -1627,6 +1722,12 @@ impl ProblemGraph {
 /// LLM call. The thresholds were calibrated on the v0.2 mock-provider
 /// fixtures so a typical 1-deliverable brief does not pay the cost.
 pub fn should_decompose(brief: &Brief) -> bool {
+    tracing::trace!(
+        constraints = brief.constraints.len(),
+        deliverables = brief.deliverables.len(),
+        assumptions = brief.assumptions.len(),
+        "domain::should_decompose: enter"
+    );
     // Heuristic ladder (any condition makes the brief a candidate):
     //  1. ≥ 3 hard constraints → the LLM benefits from separation.
     //  2. ≥ 3 deliverables → multiple independent outputs.
@@ -1635,9 +1736,11 @@ pub fn should_decompose(brief: &Brief) -> bool {
     //  4. Brief contains the magic word "subproblem" or "phase" → the
     //     user is already thinking in stages.
     if brief.constraints.len() >= 3 {
+        tracing::debug!("domain::should_decompose: true via constraint count");
         return true;
     }
     if brief.deliverables.len() >= 3 {
+        tracing::debug!("domain::should_decompose: true via deliverable count");
         return true;
     }
     for assumption in &brief.assumptions {
@@ -1648,9 +1751,11 @@ pub fn should_decompose(brief: &Brief) -> bool {
             || lower.contains(" subproblem")
             || lower.contains("phase ")
         {
+            tracing::debug!("domain::should_decompose: true via assumption keyword");
             return true;
         }
     }
+    tracing::debug!("domain::should_decompose: false");
     false
 }
 

@@ -70,6 +70,11 @@ pub fn render_rubric_block() -> String {
     for (k, v) in RUBRIC_ANCHORS {
         s.push_str(&format!("- **{k}**: {v}\n"));
     }
+    tracing::debug!(
+        anchor_count = RUBRIC_ANCHORS.len(),
+        bytes = s.len(),
+        "ranking::rubric::render_rubric_block: rendered"
+    );
     s
 }
 
@@ -113,6 +118,7 @@ impl Rubric {
         &self,
         response: &serde_json::Value,
     ) -> std::result::Result<(), RubricViolation> {
+        tracing::trace!("ranking::rubric::Rubric::validate: enter");
         let scores = response
             .get("criteria")
             .or_else(|| response.get("scores"))
@@ -132,12 +138,21 @@ impl Rubric {
                 .as_f64()
                 .is_some_and(|score| score.is_finite() && (0.0..=5.0).contains(&score));
             if !valid {
+                tracing::warn!(
+                    criterion,
+                    value = %value,
+                    "ranking::rubric::Rubric::validate: invalid score"
+                );
                 return Err(RubricViolation::InvalidScore {
                     criterion: (*criterion).to_owned(),
                     value: value.to_string(),
                 });
             }
         }
+        tracing::trace!(
+            criteria = RUBRIC_ANCHORS.len(),
+            "ranking::rubric::Rubric::validate: ok"
+        );
         Ok(())
     }
 }

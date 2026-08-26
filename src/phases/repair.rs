@@ -50,6 +50,7 @@ impl Phase for RepairPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(max_rounds = self.max_rounds, "repair: enter");
         let validation_dir = ctx.run_dir().validation();
         let proposals_dir = ctx.run_dir().proposals();
         let revisions_dir = ctx.run_dir().revisions();
@@ -77,8 +78,14 @@ impl Phase for RepairPhase {
 
         let total = entries.len();
         if total == 0 {
+            tracing::info!("repair: no failed gates found, returning empty");
             return Ok(PhaseOutput::Repairs(Vec::new()));
         }
+        tracing::info!(
+            failed_gates = total,
+            max_rounds = self.max_rounds,
+            "repair: collecting failed gates for repair"
+        );
         let system_arc = Arc::new(system);
         let max_rounds = self.max_rounds.max(1);
 
@@ -129,8 +136,15 @@ impl Phase for RepairPhase {
                     }
                     let out_path: PathBuf =
                         revisions_dir.join(format!("{proposal_id}_rev_{round}.json"));
+                    let out_path_display = out_path.display().to_string();
                     write_json(&out_path, &repair)?;
                     paths.push(out_path);
+                    tracing::trace!(
+                        proposal_id = %proposal_id,
+                        round = round + 1,
+                        path = %out_path_display,
+                        "repair: round completed"
+                    );
                 }
                 Ok::<Vec<PathBuf>, crate::error::Error>(paths)
             }
@@ -139,8 +153,19 @@ impl Phase for RepairPhase {
         let results = join_all(futures).await;
         let mut flat_paths: Vec<PathBuf> = Vec::with_capacity(total * max_rounds as usize);
         for r in results {
-            flat_paths.extend(r?);
+            match r {
+                Ok(paths) => flat_paths.extend(paths),
+                Err(e) => {
+                    tracing::error!(error = %e, "repair: future failed");
+                    return Err(e);
+                }
+            }
         }
+        tracing::info!(
+            repaired = flat_paths.len(),
+            failed_inputs = total,
+            "repair: phase complete"
+        );
         Ok(PhaseOutput::Repairs(flat_paths))
     }
 }

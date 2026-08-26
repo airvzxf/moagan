@@ -87,10 +87,17 @@ impl CacheEntry {
     /// - it has no `stale_at_unix` (TTL was disabled when stored), or
     /// - `stale_at_unix > now_unix`.
     pub fn is_fresh(&self, now_unix: i64) -> bool {
-        match self.stale_at_unix {
+        let fresh = match self.stale_at_unix {
             None => true,
             Some(t) => t > now_unix,
-        }
+        };
+        tracing::trace!(
+            now_unix,
+            stale_at = ?self.stale_at_unix,
+            fresh,
+            "CacheEntry::is_fresh"
+        );
+        fresh
     }
 }
 
@@ -103,6 +110,14 @@ pub struct Cache {
 impl Cache {
     /// Build a new cache rooted at `root`.
     pub fn new(config: CacheConfig) -> Self {
+        tracing::debug!(
+            root = %config.root.display(),
+            ttl_secs = ?config.ttl_secs,
+            max_bytes = ?config.max_bytes,
+            no_store = config.no_store,
+            cross_run = config.cross_run,
+            "Cache: constructed"
+        );
         Self { config }
     }
 
@@ -116,7 +131,7 @@ impl Cache {
     /// Produce the canonical cache key for `req`.
     pub fn cache_key(req: &Request, provider: &str, model: &str) -> String {
         let prompt_set_hash = prompt_set_hash();
-        canonical_hash(&[
+        let key = canonical_hash(&[
             "role",
             req.role.as_str(),
             "provider",
@@ -135,7 +150,9 @@ impl Cache {
             &req.top_p.map(|t| t.to_string()).unwrap_or_default(),
             "prompt_set_hash",
             &prompt_set_hash,
-        ])
+        ]);
+        tracing::trace!(key = %key, "Cache::cache_key");
+        key
     }
 
     /// Look up an entry. Returns `None` on miss.
@@ -162,21 +179,35 @@ impl Cache {
     /// so the sidecar check is unnecessary here.
     pub fn lookup(&self, cache_key: &str) -> Result<Option<CacheEntry>> {
         if self.config.no_store {
+            tracing::trace!("Cache::lookup: no_store, returning None");
             return Ok(None);
         }
         let path = self.path_for(cache_key);
         if !path.exists() {
+            tracing::trace!(key = %cache_key, "Cache::lookup: miss (no file)");
             return Ok(None);
         }
-        let raw = std::fs::read(&path).map_err(|e| Error::Cache(format!("read {path:?}: {e}")))?;
-        let mut entry: CacheEntry = serde_json::from_slice(&raw)
-            .map_err(|e| Error::Cache(format!("decode {path:?}: {e}")))?;
+        let raw = std::fs::read(&path).map_err(|e| {
+            tracing::warn!(error = %e, path = %path.display(), "Cache::lookup: read failed");
+            Error::Cache(format!("read {path:?}: {e}"))
+        })?;
+        let mut entry: CacheEntry = serde_json::from_slice(&raw).map_err(|e| {
+            tracing::warn!(error = %e, path = %path.display(), "Cache::lookup: decode failed");
+            Error::Cache(format!("decode {path:?}: {e}"))
+        })?;
         if !entry.is_fresh(crate::time::now_unix_secs()) {
+            tracing::trace!(key = %cache_key, "Cache::lookup: miss (stale)");
             return Ok(None);
         }
         entry.touched_at_unix = Some(crate::time::now_unix_secs());
         let bytes = serde_json::to_vec(&entry).map_err(|e| Error::Cache(format!("encode: {e}")))?;
         AtomicWriter::new().write(&path, &bytes)?;
+        tracing::trace!(
+            key = %cache_key,
+            provider = %entry.provider,
+            model = %entry.model,
+            "Cache::lookup: hit"
+        );
         Ok(Some(entry))
     }
 
@@ -199,6 +230,7 @@ impl Cache {
         resp: &Response,
     ) -> Result<()> {
         if self.config.no_store {
+            tracing::trace!("Cache::store: no_store, noop");
             return Ok(());
         }
         let created_unix = crate::time::now_unix_secs();
@@ -224,6 +256,14 @@ impl Cache {
                 .map_err(|e| Error::Cache(format!("mkdir {parent:?}: {e}")))?;
         }
         AtomicWriter::new().write(&path, &bytes)?;
+        tracing::trace!(
+            key = %cache_key,
+            provider,
+            model,
+            input_tokens = entry.usage.input_tokens,
+            output_tokens = entry.usage.output_tokens,
+            "Cache::store: wrote entry"
+        );
         if self.config.max_bytes.is_some() {
             self.evict_lru()?;
         }
@@ -262,6 +302,7 @@ impl Cache {
         // pattern: eviction is amortised O(1) per write because
         // every entry is removed at most once per cache lifetime.
         let mut current = total;
+        let mut evicted = 0usize;
         for entry in entries {
             if current <= cap {
                 break;
@@ -269,7 +310,15 @@ impl Cache {
             std::fs::remove_file(&entry.path)
                 .map_err(|e| Error::Cache(format!("remove {path:?}: {e}", path = entry.path)))?;
             current = current.saturating_sub(entry.size_bytes);
+            evicted += 1;
         }
+        tracing::info!(
+            cap,
+            before_bytes = total,
+            after_bytes = current,
+            evicted,
+            "Cache::evict_lru completed"
+        );
         Ok(())
     }
 }

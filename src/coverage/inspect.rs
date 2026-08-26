@@ -49,8 +49,15 @@ pub struct ProfrawEntry {
 /// `instrumented = false` so the CLI can print a clear "no
 /// coverage data" hint instead of a stack trace.
 pub fn scan_run(run_dir: &RunDir<'_>) -> Result<CoverageReport> {
+    tracing::debug!(
+        coverage_dir = %run_dir.coverage().display(),
+        "coverage::inspect::scan_run: enter"
+    );
     let coverage_dir = run_dir.coverage();
     if !coverage_dir.is_dir() {
+        tracing::trace!(
+            "coverage::inspect::scan_run: coverage dir missing; report not instrumented"
+        );
         return Ok(CoverageReport {
             run_id: run_dir_id(run_dir),
             coverage_dir,
@@ -59,10 +66,12 @@ pub fn scan_run(run_dir: &RunDir<'_>) -> Result<CoverageReport> {
         });
     }
     let mut profraws: Vec<ProfrawEntry> = Vec::new();
+    let mut skipped = 0usize;
     for entry in std::fs::read_dir(&coverage_dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("profraw") {
+            skipped += 1;
             continue;
         }
         let meta = entry.metadata()?;
@@ -78,6 +87,12 @@ pub fn scan_run(run_dir: &RunDir<'_>) -> Result<CoverageReport> {
     }
     profraws.sort_by(|a, b| a.name.cmp(&b.name));
     let instrumented = !profraws.is_empty();
+    tracing::debug!(
+        profraw_count = profraws.len(),
+        skipped,
+        instrumented,
+        "coverage::inspect::scan_run: exit"
+    );
     Ok(CoverageReport {
         run_id: run_dir_id(run_dir),
         coverage_dir,
@@ -160,7 +175,9 @@ fn run_dir_id(run_dir: &RunDir<'_>) -> RunId {
 /// Detect whether `grcov` is on `PATH`. Best-effort: the check
 /// itself is cheap and never fails the inspection.
 pub fn grcov_available() -> bool {
-    which("grcov").is_some()
+    let result = which("grcov").is_some();
+    tracing::trace!(grcov = result, "coverage::inspect::grcov_available");
+    result
 }
 
 fn which(cmd: &str) -> Option<PathBuf> {
@@ -179,6 +196,7 @@ fn which(cmd: &str) -> Option<PathBuf> {
 /// `moagan coverage <run_id> --since-error <code>` to narrow the
 /// output to the window around a specific event.
 pub fn filter_by_tag(report: &CoverageReport, tag: &str) -> CoverageReport {
+    tracing::debug!(tag, "coverage::inspect::filter_by_tag: enter");
     let needle = tag.to_lowercase();
     let profraws = report
         .profraws
@@ -198,6 +216,10 @@ pub fn filter_by_tag(report: &CoverageReport, tag: &str) -> CoverageReport {
 /// otherwise. The CLI uses this to map an empty report to a
 /// non-zero exit code with a friendly message.
 pub fn ensure_instrumented(report: &CoverageReport) -> Result<()> {
+    tracing::trace!(
+        instrumented = report.instrumented,
+        "coverage::inspect::ensure_instrumented"
+    );
     if !report.instrumented {
         return Err(Error::InvalidState(format!(
             "run {} has no runtime coverage data; rebuild with \
@@ -213,7 +235,13 @@ pub fn ensure_instrumented(report: &CoverageReport) -> Result<()> {
 /// snapshot tag, if any. Used by the (planned) HTML render path
 /// to pick a specific snapshot.
 pub fn find_profraw<'a>(report: &'a CoverageReport, tag: &str) -> Option<&'a ProfrawEntry> {
-    report.profraws.iter().find(|e| e.name.contains(tag))
+    let result = report.profraws.iter().find(|e| e.name.contains(tag));
+    tracing::trace!(
+        tag,
+        found = result.is_some(),
+        "coverage::inspect::find_profraw"
+    );
+    result
 }
 
 /// Path the report is rooted at. Convenience for the CLI.

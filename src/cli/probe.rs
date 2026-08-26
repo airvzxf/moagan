@@ -48,6 +48,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use tracing::{debug, trace, warn};
+
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::llm::probe::ProviderProbeTransport;
@@ -156,6 +158,7 @@ pub struct ProbeTemperatureCmd {
 
 /// `moagan probe <verb> [args]` dispatcher.
 pub async fn dispatch(cmd: &ProbeCmd) -> Result<i32> {
+    debug!(cmd = ?cmd, "probe::dispatch: enter");
     match cmd {
         ProbeCmd::MaxTokens(c) => dispatch_max_tokens(c).await,
         ProbeCmd::Temperature(c) => dispatch_temperature(c).await,
@@ -163,6 +166,12 @@ pub async fn dispatch(cmd: &ProbeCmd) -> Result<i32> {
 }
 
 async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
+    debug!(
+        pairs = cmd.providers.len(),
+        persist_min = cmd.persist_min,
+        dry_run = cmd.dry_run,
+        "probe::dispatch_max_tokens: enter"
+    );
     // Parse + validate the `provider:model` pairs up front. A
     // malformed value (missing colon, empty halves) surfaces as
     // `Error::InvalidArgs` so the CLI can return a friendly exit
@@ -330,6 +339,13 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
 /// dispatcher because every error is logged and the loop
 /// continues.
 async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
+    debug!(
+        pairs = cmd.providers.len(),
+        persist_union = cmd.persist_union,
+        batch_size = cmd.batch_size,
+        dry_run = cmd.dry_run,
+        "probe::dispatch_temperature: enter"
+    );
     // Parse + validate the `provider:model` pairs up front. Same
     // contract as `dispatch_max_tokens`: a malformed value
     // surfaces as `Error::InvalidArgs`.
@@ -602,19 +618,32 @@ fn compute_min_per_provider(results: &[ProbeResult]) -> BTreeMap<String, u32> {
 /// Parse a `provider:model` pair. Rejects empty halves and
 /// extra colons (`a:b:c`) to keep the CLI surface unambiguous.
 pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
+    trace!(raw = raw, "parse_provider_model: enter");
     let (provider, model) = raw.split_once(':').ok_or_else(|| {
+        warn!(raw = raw, "parse_provider_model: missing colon");
         Error::InvalidArgs(format!("probe: expected 'provider:model', got '{raw}'"))
     })?;
     if provider.is_empty() || model.is_empty() {
+        warn!(
+            provider = provider,
+            model = model,
+            "parse_provider_model: empty half"
+        );
         return Err(Error::InvalidArgs(format!(
             "probe: '{raw}' has an empty provider or model half"
         )));
     }
     if model.contains(':') {
+        warn!(raw = raw, "parse_provider_model: extra colon");
         return Err(Error::InvalidArgs(format!(
             "probe: '{raw}' has more than one ':'; expected exactly one separator"
         )));
     }
+    trace!(
+        provider = provider,
+        model = model,
+        "parse_provider_model: ok"
+    );
     Ok((provider.to_owned(), model.to_owned()))
 }
 

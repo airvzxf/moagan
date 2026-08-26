@@ -48,7 +48,9 @@ impl SketchId {
     /// validate the id shape; callers can pass any string (e.g.
     /// `"sk_0001"`).
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let inner = id.into();
+        tracing::trace!(id = %inner, "SketchId::new");
+        Self(inner)
     }
 
     /// Borrow the underlying string.
@@ -62,7 +64,9 @@ impl ContradictionId {
     /// validate the id shape; callers can pass any string (e.g.
     /// `"c_001"`).
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let inner = id.into();
+        tracing::trace!(id = %inner, "ContradictionId::new");
+        Self(inner)
     }
 
     /// Borrow the underlying string.
@@ -76,7 +80,9 @@ impl FacetId {
     /// validate the id shape; callers can pass any string (e.g.
     /// `"cat_01:data-flows"`).
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let inner = id.into();
+        tracing::trace!(id = %inner, "FacetId::new");
+        Self(inner)
     }
 
     /// Borrow the underlying string.

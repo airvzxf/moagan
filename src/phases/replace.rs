@@ -34,6 +34,7 @@ use crate::ranking::pareto::{QualityVector, dominates};
 /// - No source Pareto-dominates the synthesis.
 pub fn should_replace_synthesis(synthesis_v: &QualityVector, source_vs: &[QualityVector]) -> bool {
     if source_vs.is_empty() {
+        tracing::trace!("should_replace_synthesis: no sources, returns false");
         return false;
     }
 
@@ -58,7 +59,14 @@ pub fn should_replace_synthesis(synthesis_v: &QualityVector, source_vs: &[Qualit
 
     let any_source_pareto_dominates = source_vs.iter().any(|sv| dominates(sv, synthesis_v));
 
-    s_strict_best_dims >= 2 && !any_source_pareto_dominates
+    let result = s_strict_best_dims >= 2 && !any_source_pareto_dominates;
+    tracing::debug!(
+        strict_best_dims = s_strict_best_dims,
+        any_source_pareto_dominates,
+        replace = result,
+        "should_replace_synthesis"
+    );
+    result
 }
 
 #[inline]

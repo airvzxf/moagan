@@ -15,10 +15,16 @@ pub struct SynthesisRequest {
 impl SynthesisRequest {
     /// Construct an unconstrained synthesis request.
     pub fn new() -> Self {
+        tracing::trace!("domain::synthesis_request::SynthesisRequest::new");
         Self::default()
     }
     /// Add a prohibited decision.
     pub fn forbid(mut self, decision: &str) -> Self {
+        tracing::trace!(
+            decision,
+            total = self.prohibited_decisions.len(),
+            "domain::synthesis_request::SynthesisRequest::forbid"
+        );
         self.prohibited_decisions.push(decision.to_string());
         self
     }

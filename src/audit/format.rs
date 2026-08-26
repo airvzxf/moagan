@@ -67,11 +67,20 @@ pub struct AuditRecord {
 /// with keys ordered alphabetically. Non-JSON or invalid bytes fall
 /// back to a UTF-8 lossy representation.
 pub fn body_canonical(bytes: &[u8]) -> String {
-    match serde_json::from_slice::<serde_json::Value>(bytes) {
+    tracing::trace!(
+        input_bytes = bytes.len(),
+        "audit::format::body_canonical: enter"
+    );
+    let out = match serde_json::from_slice::<serde_json::Value>(bytes) {
         Ok(v) => serde_json::to_string(&canonify(v))
             .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned()),
         Err(_) => String::from_utf8_lossy(bytes).into_owned(),
-    }
+    };
+    tracing::trace!(
+        output_bytes = out.len(),
+        "audit::format::body_canonical: exit"
+    );
+    out
 }
 
 fn canonify(v: serde_json::Value) -> serde_json::Value {
@@ -93,19 +102,29 @@ fn canonify(v: serde_json::Value) -> serde_json::Value {
 
 /// SHA-256 of a byte slice, hex-encoded.
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    tracing::trace!(
+        input_bytes = bytes.len(),
+        "audit::format::sha256_hex: enter"
+    );
     let mut h = Sha256::new();
     h.update(bytes);
-    hex::encode(h.finalize())
+    let out = hex::encode(h.finalize());
+    tracing::trace!(hash_len = out.len(), "audit::format::sha256_hex: exit");
+    out
 }
 
 /// Redact sensitive header values. Names compared case-insensitively.
 pub fn redact_header(name: &str, value: &str) -> String {
     let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "x-api-key" | "authorization" | "proxy-authorization" | "cookie" | "set-cookie" => {
-            "***REDACTED***".to_owned()
-        }
-        _ => value.to_owned(),
+    let redacted = matches!(
+        lower.as_str(),
+        "x-api-key" | "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+    );
+    tracing::trace!(name = %name, redacted, "audit::format::redact_header");
+    if redacted {
+        "***REDACTED***".to_owned()
+    } else {
+        value.to_owned()
     }
 }
 
@@ -114,18 +133,31 @@ pub fn redact_header(name: &str, value: &str) -> String {
 /// excluded; the value is then injected back into the record so
 /// readers can detect torn writes.
 pub fn crc32_hex(payload: &[u8]) -> String {
+    tracing::trace!(
+        payload_bytes = payload.len(),
+        "audit::format::crc32_hex: enter"
+    );
     let mut crc = Crc::new();
     crc.update(payload);
-    format!("{:08x}", crc.sum())
+    let out = format!("{:08x}", crc.sum());
+    tracing::trace!(crc = %out, "audit::format::crc32_hex: exit");
+    out
 }
 
 fn record_crc(rec: &AuditRecord) -> io::Result<String> {
+    tracing::trace!(event = %rec.event, id = %rec.id, "audit::format::record_crc: enter");
     let mut value = serde_json::to_value(rec).map_err(io::Error::other)?;
     if let Some(obj) = value.as_object_mut() {
         obj.remove("crc32");
     }
     let payload = serde_json::to_vec(&canonify(value)).map_err(io::Error::other)?;
-    Ok(crc32_hex(&payload))
+    let crc = crc32_hex(&payload);
+    tracing::trace!(
+        payload_bytes = payload.len(),
+        crc = %crc,
+        "audit::format::record_crc: exit"
+    );
+    Ok(crc)
 }
 
 /// Append-only writer for the sidecar JSONL. Each [`Self::write_record`]
@@ -140,6 +172,7 @@ pub struct AuditWriter {
 impl AuditWriter {
     /// Open a writer at `path`, creating the file if missing.
     pub fn create(path: &Path) -> io::Result<Self> {
+        tracing::info!(path = %path.display(), "audit::AuditWriter::create: opening fresh log");
         let file = File::create(path)?;
         let sync_file = file.try_clone()?;
         Ok(Self {
@@ -151,6 +184,7 @@ impl AuditWriter {
     /// Open a writer at `path` in append mode, creating the file if
     /// missing. Used by the proxy when it swaps log files across runs.
     pub fn append(path: &Path) -> io::Result<Self> {
+        tracing::info!(path = %path.display(), "audit::AuditWriter::append: opening log in append mode");
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let sync_file = file.try_clone()?;
         Ok(Self {
@@ -161,6 +195,12 @@ impl AuditWriter {
 
     /// Write one record as a complete gzip member.
     pub fn write_record(&mut self, rec: &mut AuditRecord) -> io::Result<()> {
+        tracing::trace!(
+            event = %rec.event,
+            id = %rec.id,
+            status = rec.status.unwrap_or(0),
+            "audit::AuditWriter::write_record: enter"
+        );
         rec.crc32 = record_crc(rec)?;
         let line_value = canonify(serde_json::to_value(&*rec).map_err(io::Error::other)?);
         let mut line = serde_json::to_vec(&line_value).map_err(io::Error::other)?;
@@ -173,15 +213,23 @@ impl AuditWriter {
         if let Some(file) = &self.sync_file {
             file.sync_data()?;
         }
+        tracing::debug!(
+            event = %rec.event,
+            id = %rec.id,
+            member_bytes = member.len(),
+            "audit::AuditWriter::write_record: wrote gzip member"
+        );
         Ok(())
     }
 
     /// Flush the underlying writer.
     pub fn flush_gz(&mut self) -> io::Result<()> {
+        tracing::debug!("audit::AuditWriter::flush_gz: enter");
         self.inner.flush()?;
         if let Some(file) = &self.sync_file {
             file.sync_data()?;
         }
+        tracing::debug!("audit::AuditWriter::flush_gz: flushed");
         Ok(())
     }
 }
@@ -189,15 +237,22 @@ impl AuditWriter {
 /// Verifier for the per-line CRC. Returns the number of lines that
 /// failed the check, useful for `moagan audit verify`.
 pub fn count_invalid_crcs(jsonl: &str) -> (usize, Vec<String>) {
+    tracing::debug!(
+        total_bytes = jsonl.len(),
+        "audit::format::count_invalid_crcs: enter"
+    );
     let mut invalid = 0usize;
     let mut bad = Vec::new();
+    let mut total = 0usize;
     for line in jsonl.lines() {
         if line.is_empty() {
             continue;
         }
+        total += 1;
         let mut value: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => {
+                tracing::warn!("audit::format::count_invalid_crcs: line is not valid JSON");
                 invalid += 1;
                 bad.push(line.to_owned());
                 continue;
@@ -206,6 +261,7 @@ pub fn count_invalid_crcs(jsonl: &str) -> (usize, Vec<String>) {
         let reported = match value.get("crc32").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
             None => {
+                tracing::warn!("audit::format::count_invalid_crcs: line missing crc32 field");
                 invalid += 1;
                 bad.push(line.to_owned());
                 continue;
@@ -216,10 +272,20 @@ pub fn count_invalid_crcs(jsonl: &str) -> (usize, Vec<String>) {
         let payload = serde_json::to_vec(&canonical).unwrap_or_default();
         let expected = crc32_hex(&payload);
         if expected != reported {
+            tracing::trace!(
+                expected = %expected,
+                reported = %reported,
+                "audit::format::count_invalid_crcs: crc mismatch"
+            );
             invalid += 1;
             bad.push(line.to_owned());
         }
     }
+    tracing::debug!(
+        total_lines = total,
+        invalid,
+        "audit::format::count_invalid_crcs: exit"
+    );
     (invalid, bad)
 }
 

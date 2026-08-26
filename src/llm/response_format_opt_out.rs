@@ -31,13 +31,24 @@ pub fn model_skips_response_format(model: &str) -> bool {
     if let Ok(extra) = std::env::var("MOAGAN_RESPONSE_FORMAT_OPT_OUT") {
         for m in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             if model.eq_ignore_ascii_case(m) {
+                tracing::trace!(
+                    model,
+                    env_match = m,
+                    "response_format_opt_out: env override match"
+                );
                 return true;
             }
         }
     }
-    DEFAULT_OPT_OUT
+    let from_default = DEFAULT_OPT_OUT
         .iter()
-        .any(|m| model.eq_ignore_ascii_case(m))
+        .any(|m| model.eq_ignore_ascii_case(m));
+    tracing::trace!(
+        model,
+        from_default,
+        "response_format_opt_out: static-table lookup"
+    );
+    from_default
 }
 
 /// Stubborn-model "CRITICAL OUTPUT CONTRACT" prefix. Prepended to
@@ -98,8 +109,13 @@ fn is_stubborn_model(model: &str) -> bool {
 /// without further refactoring later.
 pub fn render_system_prompt_with_prefix(_role: &Role, model: &str, base_prompt: &str) -> String {
     if is_stubborn_model(model) {
+        tracing::debug!(
+            model,
+            "render_system_prompt_with_prefix: prefix prepended (stubborn)"
+        );
         format!("{}\n\n{}", STUBBORN_MODEL_JSON_PREFIX, base_prompt)
     } else {
+        tracing::trace!(model, "render_system_prompt_with_prefix: passthrough");
         base_prompt.to_owned()
     }
 }

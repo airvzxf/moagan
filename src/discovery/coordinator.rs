@@ -90,6 +90,12 @@ impl DiscoveryCoordinator {
         current_strategy: String,
         mode: Mode,
     ) -> Self {
+        tracing::debug!(
+            run_id = %run_id,
+            current_strategy = %current_strategy,
+            mode = ?mode,
+            "DiscoveryCoordinator::new"
+        );
         Self {
             home,
             run_id,
@@ -212,6 +218,13 @@ impl DiscoveryCoordinator {
         candidates: Vec<String>,
         clusters: Vec<String>,
     ) -> Result<DiscoveryOutcome, CoordinatorError> {
+        tracing::debug!(
+            run_id = %self.run_id,
+            candidates = candidates.len(),
+            clusters = clusters.len(),
+            mode = ?self.mode,
+            "DiscoveryCoordinator::run_with_pickers (async)"
+        );
         let DiscoveryCoordinator {
             home,
             run_id,
@@ -229,6 +242,12 @@ impl DiscoveryCoordinator {
         };
         let strategy = state.current_strategy.clone();
         let target = Cardinality::for_mode_default(mode).soft;
+        tracing::debug!(
+            run_id = %run_id,
+            strategy = %strategy,
+            target,
+            "run_with_pickers: loop params resolved"
+        );
 
         let mut state = match SketchLoopState::load(&run_dir)? {
             Some(persisted) => {
@@ -434,6 +453,13 @@ impl DiscoveryCoordinator {
         ctx: Arc<RunContext>,
         sketches_per_cell_override: Option<usize>,
     ) -> Result<DiscoveryOutcome, CoordinatorError> {
+        tracing::debug!(
+            run_id = %self.run_id,
+            sketches_per_cell_override = ?sketches_per_cell_override,
+            default_model = %ctx.default_model,
+            default_provider = %ctx.default_provider,
+            "DiscoveryCoordinator::run_with_ctx_and_target (async)"
+        );
         let DiscoveryCoordinator {
             home,
             run_id,
@@ -930,6 +956,11 @@ impl DiscoveryCoordinator {
                                             n = n_for_attempt,
                                             total = total,
                                             angle = %sketch.angle,
+                                            cell_dim = %cell_for_angle.dimension_id,
+                                            cell_facet = %cell_for_angle.facet_id,
+                                            temperature_profile = temperature,
+                                            replica = replica,
+                                            sketch_index = sketch_index,
                                             thesis_len = sketch.thesis.len(),
                                             completed = t_completed,
                                             "discovery: sketch accepted"
@@ -1084,8 +1115,18 @@ fn build_coordinator_matrix(
     sketches_per_cell: usize,
     cfg: &crate::config::DiscoveryMatrixConfig,
 ) -> crate::error::Result<ExplorationMatrix> {
+    tracing::debug!(
+        run_dir = %run_dir.display(),
+        sketches_per_cell,
+        "build_coordinator_matrix"
+    );
     // 1. Sidecar (resume + LLM-derive)
     if let Some(matrix) = ExplorationMatrix::load_or_derive(run_dir, sketches_per_cell)? {
+        tracing::info!(
+            source = "sidecar",
+            cells = matrix.cells(),
+            "build_coordinator_matrix: sourced from sidecar"
+        );
         return Ok(matrix);
     }
     // 2. Operator-supplied spec (repetible / consolidated)
@@ -1095,12 +1136,27 @@ fn build_coordinator_matrix(
         .filter(|s| !s.trim().is_empty())
         .collect();
     if !non_empty.is_empty() {
+        tracing::debug!(
+            entries = non_empty.len(),
+            "build_coordinator_matrix: parsing operator matrix_spec"
+        );
         let spec = crate::discovery::MatrixSpec::parse_all(non_empty.into_iter().cloned())?;
         spec.validate()?;
-        return Ok(ExplorationMatrix::from_spec(spec, sketches_per_cell));
+        let m = ExplorationMatrix::from_spec(spec, sketches_per_cell);
+        tracing::info!(
+            source = "matrix_spec",
+            cells = m.cells(),
+            "build_coordinator_matrix: built from operator spec"
+        );
+        return Ok(m);
     }
     // 3. Legacy `--dimensions N --facets-per-dimension M` pair
     if let (Some(dims), Some(facets)) = (cfg.dimensions, cfg.facets_per_dimension) {
+        tracing::debug!(
+            dims = dims,
+            facets = facets,
+            "build_coordinator_matrix: building from legacy dims pair"
+        );
         let mut spec = crate::discovery::MatrixSpec::default();
         for i in 0..dims.max(1) {
             let id = format!("dim-{:02}", i);
@@ -1119,7 +1175,13 @@ fn build_coordinator_matrix(
                     facets: spec_facets,
                 });
         }
-        return Ok(ExplorationMatrix::from_spec(spec, sketches_per_cell));
+        let m = ExplorationMatrix::from_spec(spec, sketches_per_cell);
+        tracing::info!(
+            source = "legacy_dims",
+            cells = m.cells(),
+            "build_coordinator_matrix: built from legacy dims"
+        );
+        return Ok(m);
     }
     // 4. Pure LLM-derive: no spec, no legacy counts — the matrix
     //    starts empty and the `discover_dimensions` phase will
@@ -1127,6 +1189,7 @@ fn build_coordinator_matrix(
     //    coordinator surfaces the empty matrix so a downstream
     //    `ExplorationMatrix::load_or_derive` call (in the matrix
     //    phase) reads the freshly-written sidecar.
+    tracing::debug!("build_coordinator_matrix: falling through to empty matrix (LLM-derive)");
     Ok(ExplorationMatrix::new(Vec::new(), sketches_per_cell))
 }
 
@@ -1137,6 +1200,12 @@ fn build_coordinator_matrix(
 /// sketch text a flat-pipeline run would, which is the parity
 /// guarantee PR-17 ships.
 fn build_user_payload(brief: &str, cell: &MatrixCell, sketch_index: usize) -> String {
+    tracing::trace!(
+        cell_dim = %cell.dimension_id,
+        cell_facet = %cell.facet_id,
+        sketch_index,
+        "build_user_payload"
+    );
     format!(
         "{brief}\n\n\
          Use dimension=\"{dim_id}\" and facet=\"{facet_id}\" (label: \"{label}\") and \
@@ -1151,7 +1220,9 @@ fn build_user_payload(brief: &str, cell: &MatrixCell, sketch_index: usize) -> St
 
 /// Returns the directory where run-specific sketch state lives.
 pub fn sketches_dir(home: &MoaganHome, run_id: &RunId) -> PathBuf {
-    home.run_dir(*run_id).sketches()
+    let p = home.run_dir(*run_id).sketches();
+    tracing::trace!(run_id = %run_id, path = %p.display(), "sketches_dir");
+    p
 }
 
 /// Count the `sk_*.json` artefacts already on disk under
@@ -1164,7 +1235,10 @@ fn count_existing_sketches(run_dir: &Path) -> usize {
     let dir = run_dir.join("sketches");
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return 0,
+        Err(_) => {
+            tracing::trace!(dir = %dir.display(), "count_existing_sketches: absent");
+            return 0;
+        }
     };
     let mut count = 0usize;
     for entry in entries.flatten() {
@@ -1176,6 +1250,11 @@ fn count_existing_sketches(run_dir: &Path) -> usize {
             count += 1;
         }
     }
+    tracing::trace!(
+        dir = %dir.display(),
+        count,
+        "count_existing_sketches result"
+    );
     count
 }
 

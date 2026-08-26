@@ -209,6 +209,10 @@ impl CapabilityResolver {
     /// default; useful for tests and for runs that disabled the
     /// catalog loader (`--offline-catalog`).
     pub fn new(catalog: Option<Arc<ModelsDevCatalog>>) -> Self {
+        tracing::debug!(
+            catalog_attached = catalog.is_some(),
+            "CapabilityResolver: constructed"
+        );
         Self {
             catalog,
             config: ResolvedConfig::default(),
@@ -227,6 +231,12 @@ impl CapabilityResolver {
     /// `source` field records which tier answered.
     pub fn resolve(&self, provider: &str, model: &str) -> ResolvedCapability {
         if let Some(override_cap) = self.config.lookup(provider, model) {
+            tracing::trace!(
+                provider,
+                model,
+                source = "config",
+                "CapabilityResolver::resolve"
+            );
             return override_cap.clone();
         }
         if let Some(catalog) = self.catalog.as_ref()
@@ -235,8 +245,20 @@ impl CapabilityResolver {
                 .get(provider)
                 .and_then(|p| p.models.get(model))
         {
+            tracing::trace!(
+                provider,
+                model,
+                source = "catalog",
+                "CapabilityResolver::resolve"
+            );
             return ResolvedCapability::from_catalog_entry(entry);
         }
+        tracing::trace!(
+            provider,
+            model,
+            source = "hardcoded",
+            "CapabilityResolver::resolve"
+        );
         ResolvedCapability::conservative_default()
     }
 
@@ -254,6 +276,11 @@ impl CapabilityResolver {
         let capability = self.resolve(provider, model);
         let mut gated = req.clone();
         if !capability.temperature {
+            tracing::debug!(
+                provider,
+                model,
+                "gate_request: dropping temperature (capability disabled)"
+            );
             gated.temperature = None;
         }
         gated

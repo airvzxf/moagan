@@ -40,6 +40,11 @@ pub(super) const SHARD_HEX_LEN: usize = 2;
 /// one byte of hex.
 pub(super) fn shard_for(key: &str) -> &str {
     let n = key.len().min(SHARD_HEX_LEN);
+    tracing::trace!(
+        key_len = key.len(),
+        shard_len = n,
+        "shard_for: computed shard prefix"
+    );
     &key[..n]
 }
 
@@ -50,7 +55,9 @@ pub(super) fn shard_for(key: &str) -> &str {
 /// the shard directory on `store`, so call sites do not have to
 /// `mkdir -p` themselves.
 pub(super) fn path_for(root: &Path, key: &str) -> PathBuf {
-    root.join(shard_for(key)).join(format!("{key}.json"))
+    let path = root.join(shard_for(key)).join(format!("{key}.json"));
+    tracing::trace!(path = %path.display(), "sharded: path_for built");
+    path
 }
 
 #[cfg(test)]

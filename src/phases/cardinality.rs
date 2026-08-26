@@ -167,8 +167,20 @@ impl Cardinality {
     /// so the operator can tell which mode drifted.
     pub fn validate(self, actual: usize) -> Result<()> {
         if actual <= self.hard {
+            tracing::debug!(
+                actual,
+                soft = self.soft,
+                hard = self.hard,
+                "cardinality: validate: ok"
+            );
             Ok(())
         } else {
+            tracing::warn!(
+                actual,
+                soft = self.soft,
+                hard = self.hard,
+                "cardinality: validate: exceeded hard ceiling"
+            );
             Err(Error::InvalidState(format!(
                 "cardinality {actual} exceeds hard ceiling {} (soft target {})",
                 self.hard, self.soft

@@ -64,7 +64,14 @@ pub const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 /// check_size("prompt", raw.len(), MAX_PROMPT_BYTES)?;
 /// ```
 pub fn check_size(label: &str, bytes: usize, cap: usize) -> Result<()> {
+    tracing::trace!(label, bytes, cap, "check_size: evaluating payload cap");
     if bytes > cap {
+        tracing::warn!(
+            label,
+            bytes,
+            cap,
+            "check_size: payload exceeds cap (PayloadTooLarge)"
+        );
         Err(Error::PayloadTooLarge(format!("{label}: {bytes} > {cap}")))
     } else {
         Ok(())

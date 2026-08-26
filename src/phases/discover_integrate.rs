@@ -108,6 +108,7 @@ impl Phase for DiscoverIntegratePhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!("discover_integrate: enter");
         let facets_dir = ctx.run_dir().facets();
         let clusters_dir = ctx.run_dir().clusters();
         let final_dir = ctx.run_dir().final_dir();
@@ -133,10 +134,15 @@ impl Phase for DiscoverIntegratePhase {
         facet_paths.sort();
 
         if facet_paths.is_empty() {
+            tracing::error!("discover_integrate: zero facet lists found");
             return Err(Error::InvalidState(
                 "discover_integrate found zero facet lists".into(),
             ));
         }
+        tracing::debug!(
+            facet_list_count = facet_paths.len(),
+            "discover_integrate: facet lists enumerated"
+        );
 
         // Compute max cluster members so density is consistent.
         let max_members: usize = {
@@ -313,10 +319,15 @@ impl Phase for DiscoverIntegratePhase {
         }
 
         if paths.is_empty() {
+            tracing::error!("discover_integrate: zero category docs produced");
             return Err(Error::InvalidState(
                 "discover_integrate produced zero category docs".into(),
             ));
         }
+        tracing::info!(
+            category_docs = paths.len(),
+            "discover_integrate: phase complete"
+        );
 
         // Index for the summary phase.
         let mut entries: Vec<serde_json::Value> = Vec::new();

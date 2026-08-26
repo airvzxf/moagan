@@ -18,6 +18,7 @@
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, trace, warn};
 
 /// Hash algorithm supported by `--hash-algo` (D.14.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -32,10 +33,14 @@ pub enum HashAlgo {
 impl FromStr for HashAlgo {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        trace!(raw = s, "HashAlgo::from_str");
         match s.to_ascii_lowercase().as_str() {
             "sha256" => Ok(Self::Sha256),
             "blake3" => Ok(Self::Blake3),
-            other => Err(format!("invalid hash algo: {other}")),
+            other => {
+                warn!(raw = s, "HashAlgo::from_str: invalid");
+                Err(format!("invalid hash algo: {other}"))
+            }
         }
     }
 }
@@ -44,11 +49,14 @@ impl FromStr for HashAlgo {
 /// dispatcher knows to read the prompt from stdin instead of
 /// using the literal string as the prompt.
 pub fn prompt_is_stdin(prompt: &str) -> bool {
-    prompt == "-"
+    let v = prompt == "-";
+    trace!(is_stdin = v, "prompt_is_stdin");
+    v
 }
 
 /// Read the prompt body from stdin when `--prompt -` is set.
 pub fn read_prompt_from_stdin() -> std::io::Result<String> {
+    debug!("flags_batch::read_prompt_from_stdin: enter");
     let mut s = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
     Ok(s)
@@ -58,6 +66,7 @@ pub fn read_prompt_from_stdin() -> std::io::Result<String> {
 /// exceed `u32::MAX` (4_294_967_295) simultaneous LLM calls.
 pub fn validate_max_parallelism(n: usize) -> Result<(), String> {
     if n > 4_294_967_295 {
+        warn!(n, "validate_max_parallelism: exceeds cap");
         Err(format!(
             "--max-parallelism={n} exceeds maximum 4_294_967_295"
         ))

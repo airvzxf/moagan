@@ -59,9 +59,14 @@ pub fn cluster(
     embedder: &dyn Embedder,
     threshold: f32,
 ) -> Vec<ClusterChunk> {
+    tracing::debug!(
+        records = records.len(),
+        threshold,
+        "clusterer: cluster enter"
+    );
     let texts: Vec<String> = records.iter().map(|r| r.text.clone()).collect();
     let groups = cluster_by_embedder(&texts, embedder, threshold);
-    groups
+    let chunks: Vec<ClusterChunk> = groups
         .into_iter()
         .map(|member_indices| {
             let texts = member_indices.iter().map(|i| texts[*i].clone()).collect();
@@ -70,7 +75,13 @@ pub fn cluster(
                 texts,
             }
         })
-        .collect()
+        .collect();
+    tracing::info!(
+        clusters = chunks.len(),
+        records = records.len(),
+        "clusterer: cluster done"
+    );
+    chunks
 }
 
 /// Embedder-based clustering helper. Embeds each text via
@@ -86,8 +97,18 @@ pub fn cluster_by_embedder(
     embedder: &dyn Embedder,
     threshold: f32,
 ) -> Vec<Vec<usize>> {
+    tracing::debug!(
+        texts = texts.len(),
+        threshold,
+        "clusterer: cluster_by_embedder enter"
+    );
     let n = texts.len();
     let embeddings: Vec<Vec<f32>> = texts.iter().map(|t| embedder.embed(t)).collect();
+    tracing::trace!(
+        embeddings = embeddings.len(),
+        dim = embeddings.first().map(|e| e.len()).unwrap_or(0),
+        "clusterer: embeddings computed"
+    );
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], mut x: usize) -> usize {
         while parent[x] != x {
@@ -104,34 +125,46 @@ pub fn cluster_by_embedder(
             parent[hi] = lo;
         }
     }
+    let mut pair_count = 0usize;
     for i in 0..n {
         for j in (i + 1)..n {
             if 1.0 - cosine(&embeddings[i], &embeddings[j]) <= threshold {
                 union(&mut parent, i, j);
+                pair_count += 1;
             }
         }
     }
+    tracing::trace!(pair_count, "clusterer: pair scan done");
     let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for i in 0..n {
         let root = find(&mut parent, i);
         clusters.entry(root).or_default().push(i);
     }
-    clusters.into_values().collect()
+    let out: Vec<Vec<usize>> = clusters.into_values().collect();
+    tracing::debug!(
+        clusters = out.len(),
+        pair_count,
+        "clusterer: cluster_by_embedder done"
+    );
+    out
 }
 
 /// Map a `ClusterChunk` index back to the sketch ids in the
 /// original records list.
 pub fn member_ids(records: &[SketchRecord], chunk: &ClusterChunk) -> Vec<String> {
-    chunk
+    let out: Vec<String> = chunk
         .member_indices
         .iter()
         .map(|i| records[*i].id.clone())
-        .collect()
+        .collect();
+    tracing::trace!(members = out.len(), "clusterer: member_ids resolved");
+    out
 }
 
 /// Build a cluster id from its zero-based cluster index
 /// (`cluster_00`, `cluster_01`, …).
 pub fn cluster_id_for(idx: usize) -> String {
+    tracing::trace!(idx, "clusterer: cluster_id_for");
     format!("cluster_{:02}", idx)
 }
 
@@ -149,9 +182,11 @@ pub fn cluster_id_for(idx: usize) -> String {
 /// module use that threshold.
 pub fn cohesion(records: &[SketchRecord], chunk: &ClusterChunk) -> f32 {
     if chunk.member_indices.is_empty() {
+        tracing::trace!("clusterer: cohesion empty cluster");
         return 0.0;
     }
     let n = chunk.member_indices.len();
+    tracing::debug!(n, "clusterer: cohesion enter");
     // Distribute the upper-triangular row scan across cores. The
     // inner `(i + 1..n)` loop stays sequential per row because the
     // chunk size is small (5–10 in the operator's runs) and
@@ -172,9 +207,12 @@ pub fn cohesion(records: &[SketchRecord], chunk: &ClusterChunk) -> f32 {
         .sum();
     let pairs = n * (n.saturating_sub(1)) / 2;
     if pairs == 0 {
+        tracing::trace!(n, "clusterer: cohesion singleton");
         1.0
     } else {
-        total / pairs as f32
+        let v = total / pairs as f32;
+        tracing::trace!(n, pairs, value = v, "clusterer: cohesion done");
+        v
     }
 }
 
@@ -185,6 +223,11 @@ pub fn bucket_by_cluster(
     records: &[SketchRecord],
     chunks: &[ClusterChunk],
 ) -> BTreeMap<String, Vec<String>> {
+    tracing::debug!(
+        records = records.len(),
+        clusters = chunks.len(),
+        "clusterer: bucket_by_cluster"
+    );
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (idx, chunk) in chunks.iter().enumerate() {
         let id = cluster_id_for(idx);

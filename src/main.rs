@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 fn main() -> Result<()> {
+    tracing::info!("moagan: starting");
     // Best-effort .env autoload. dotenvy silently does nothing if no
     // .env is found, and never overrides env vars that are already set
     // (12-factor compatible: explicit env wins over .env). This makes
@@ -9,14 +10,21 @@ fn main() -> Result<()> {
     if let Ok(path) = dotenvy::dotenv()
         && std::env::var_os("MOAGAN_QUIET").is_none()
     {
+        tracing::debug!(path = %path.display(), "moagan: loaded .env");
         eprintln!("[moagan] loaded .env from {}", path.display());
     }
     init_tracing();
     warn_runtime_coverage_unbounded_growth();
     install_panic_hook();
+    install_panic_hook();
     #[cfg(debug_assertions)]
     trigger_phase_l_test_panic();
-    moagan::run_blocking()
+    let res = moagan::run_blocking();
+    if let Err(ref e) = res {
+        tracing::error!(error = %e, "moagan: dispatcher failed");
+    }
+    tracing::info!("moagan: exit");
+    res
 }
 
 /// Emit a one-shot `tracing::warn!` at startup when the binary was
@@ -56,26 +64,7 @@ fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,moagan=debug"));
-    // Layer B of ADR-0002 (runtime coverage): every event carries the
-    // source call site (`file`, `line`, `column`) and the active
-    // span. The cost is essentially zero — the metadata is filled in
-    // by the `tracing` macros themselves, we just ask the JSON
-    // formatter to surface it. The JSON formatter emits the current
-    // span under the `span` key by default (and skips the full span
-    // list to keep the JSONL compact on deeply nested pipeline
-    // runs), so we do not need `with_current_span` / `with_span_list`
-    // — those flags only exist for the text formats.
-    //
-    // Two writers: stderr (colored for interactive terminals) and
-    // a lazy file writer (`FileLogWriter`). The file writer is
-    // controlled by the top-level `--logs` flag and the
-    // `MOAGAN_RUN_LOGS` env var; the path is plumbed in by
-    // `dispatch_inner` after clap parses (the subscriber cannot be
-    // re-initialised, so the path goes through a process-global
-    // `OnceLock`). The file layer always disables ANSI so the
-    // output is grep-friendly. Both writers are wrapped in the
-    // redaction `ReportingLayer` so secrets never leak to either
-    // destination.
+    tracing::debug!("init_tracing: starting subscriber setup");
     let stderr_layer = fmt::layer()
         .with_target(true)
         .with_file(true)
@@ -91,14 +80,19 @@ fn init_tracing() {
         .with_writer(moagan::telemetry::redact::ReportingLayer::new(
             moagan::telemetry::file_log::FileLogWriter,
         ));
-    let _ = tracing_subscriber::registry()
+    let res = tracing_subscriber::registry()
         .with(filter)
         .with(stderr_layer)
         .with(file_layer)
         .try_init();
+    match res {
+        Ok(()) => tracing::debug!("init_tracing: subscriber initialised"),
+        Err(e) => eprintln!("init_tracing: try_init failed: {e}"),
+    }
 }
 
 fn install_panic_hook() {
+    tracing::debug!("install_panic_hook: installing custom panic hook");
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => s.to_string(),
@@ -119,6 +113,10 @@ fn install_panic_hook() {
 #[cfg(debug_assertions)]
 fn trigger_phase_l_test_panic() {
     if let Ok(message) = std::env::var("MOAGAN_PHASE_L_TEST_PANIC") {
+        tracing::debug!(
+            message_len = message.len(),
+            "trigger_phase_l_test_panic: panicking"
+        );
         panic!("{message}");
     }
 }

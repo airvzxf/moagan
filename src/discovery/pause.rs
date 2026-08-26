@@ -94,6 +94,12 @@ impl PausePoint {
         pending_inputs: serde_json::Value,
         summary: String,
     ) -> Self {
+        tracing::debug!(
+            run_id = %run_id,
+            paused_at_phase = %paused_at_phase,
+            completed_phases = completed_phases.len(),
+            "PausePoint::new"
+        );
         Self {
             version: SCHEMA_VERSION,
             run_id,
@@ -111,7 +117,15 @@ impl PausePoint {
     /// `src/atomic/writer.rs`).
     pub fn save(&self, run_dir: &Path) -> Result<()> {
         let path = run_dir.join(FILENAME);
-        let json = serde_json::to_string_pretty(self).map_err(IoError::SerializeMeta)?;
+        tracing::debug!(
+            path = %path.display(),
+            paused_at_phase = %self.paused_at_phase,
+            "PausePoint::save"
+        );
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            tracing::error!(error = %e, "PausePoint::save: serialize failed");
+            IoError::SerializeMeta(e)
+        })?;
         AtomicWriter::new()
             .with_fsync(true)
             .write(&path, json.as_bytes())?;
@@ -127,10 +141,17 @@ impl PausePoint {
     /// fresh — same policy as `SketchLoopState::load`).
     pub fn load(run_dir: &Path) -> Result<Option<Self>> {
         let path = run_dir.join(FILENAME);
+        tracing::debug!(path = %path.display(), "PausePoint::load");
         if !path.exists() {
+            tracing::trace!("PausePoint::load: absent");
             return Ok(None);
         }
         let text = std::fs::read_to_string(&path).map_err(|e| {
+            tracing::error!(
+                path = %path.display(),
+                error = %e,
+                "PausePoint::load: read failed"
+            );
             Error::Io(IoError::Read {
                 path: path.clone(),
                 source: e,
@@ -155,6 +176,11 @@ impl PausePoint {
             );
             return Ok(None);
         }
+        tracing::debug!(
+            paused_at_phase = %parsed.paused_at_phase,
+            completed_phases = parsed.completed_phases.len(),
+            "PausePoint::load: ok"
+        );
         Ok(Some(parsed))
     }
 
@@ -163,8 +189,20 @@ impl PausePoint {
     /// successful resume.
     pub fn delete(run_dir: &Path) -> Result<()> {
         let path = run_dir.join(FILENAME);
+        tracing::debug!(
+            path = %path.display(),
+            exists = path.exists(),
+            "PausePoint::delete"
+        );
         if path.exists() {
-            std::fs::remove_file(&path).map_err(IoError::Raw)?;
+            std::fs::remove_file(&path).map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "PausePoint::delete: remove failed"
+                );
+                IoError::Raw(e)
+            })?;
         }
         Ok(())
     }

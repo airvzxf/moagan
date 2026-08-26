@@ -173,7 +173,7 @@ impl ErrorCode {
     /// produces with `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`,
     /// so a serde round-trip is a no-op.
     pub fn stable(&self) -> &'static str {
-        match self {
+        let s = match self {
             Self::FsNotFound => "FS_NOT_FOUND",
             Self::ProviderAuth => "PROVIDER_AUTH",
             Self::ProviderRateLimit => "PROVIDER_RATE_LIMIT",
@@ -242,7 +242,9 @@ impl ErrorCode {
             Self::Research => "RESEARCH",
             Self::Resume => "RESUME",
             Self::Discovery => "DISCOVERY",
-        }
+        };
+        tracing::trace!(code = ?self, wire = s, "ErrorCode::stable");
+        s
     }
 
     /// Should the caller retry? Returned errors include HTTP 5xx,
@@ -250,7 +252,7 @@ impl ErrorCode {
     /// User-facing errors (`Cancelled`, `InvalidArgs`, `HostilePrompt`)
     /// never retry.
     pub fn is_retriable(&self) -> bool {
-        matches!(
+        let retriable = matches!(
             self,
             Self::Http429
                 | Self::Http500
@@ -263,7 +265,9 @@ impl ErrorCode {
                 | Self::TimeoutTotal
                 | Self::ProviderOverloaded
                 | Self::ProviderRateLimit
-        )
+        );
+        tracing::trace!(code = ?self, retriable, "ErrorCode::is_retriable");
+        retriable
     }
 
     /// Does this error count toward the per-provider circuit
@@ -271,7 +275,7 @@ impl ErrorCode {
     /// rejects the credentials should be temporarily sidelined
     /// instead of hammering it on every call.
     pub fn is_circuit_opening(&self) -> bool {
-        matches!(
+        let opening = matches!(
             self,
             Self::Http429
                 | Self::Http500
@@ -281,7 +285,9 @@ impl ErrorCode {
                 | Self::TransportError
                 | Self::ProviderOverloaded
                 | Self::Auth
-        )
+        );
+        tracing::trace!(code = ?self, opening, "ErrorCode::is_circuit_opening");
+        opening
     }
 }
 

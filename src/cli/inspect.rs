@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use tracing::{debug, trace, warn};
+
 use crate::error::Result;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
@@ -40,6 +42,7 @@ pub struct RunWarningsSummary {
 
 /// List recent runs ordered by creation time, descending.
 pub fn list_recent(db: &Db, limit: u32) -> Result<Vec<InspectEntry>> {
+    trace!(limit, "inspect::list_recent: enter");
     let rows = db.list_runs(limit)?;
     Ok(rows
         .into_iter()
@@ -62,11 +65,19 @@ pub fn list_recent(db: &Db, limit: u32) -> Result<Vec<InspectEntry>> {
 /// empty (zero rows) when the run finished without any
 /// auto-correction or retry events.
 pub fn summarize_run(db: &Db, run_id: RunId) -> Result<Option<RunWarningsSummary>> {
+    debug!(run_id = %run_id, "inspect::summarize_run: enter");
     if db.get_run(run_id)?.is_none() {
+        warn!(run_id = %run_id, "inspect: run not in index");
         return Ok(None);
     }
     let by_code = db.warnings_summary(run_id)?;
     let all = db.list_warnings(run_id)?;
+    trace!(
+        run_id = %run_id,
+        by_code = by_code.len(),
+        all = all.len(),
+        "inspect::summarize_run: ok"
+    );
     Ok(Some(RunWarningsSummary {
         run_id,
         by_code,
@@ -134,9 +145,11 @@ fn truncate(s: &str, max: usize) -> String {
 /// prints a warning and returns `Ok(())` so the operator can
 /// still chain the command into shell scripts.
 pub fn print_run_capabilities(home: &MoaganHome, run_id: RunId) -> Result<()> {
+    debug!(run_id = %run_id, "inspect::print_run_capabilities: enter");
     let manifest = load_manifest(home, run_id)?;
     let catalog = crate::llm::models_dev::try_load_from_disk(home.root());
     if catalog.is_none() {
+        warn!("inspect::capabilities: models_dev catalog missing");
         println!("[WARN] models_dev catalog cache is missing; cells marked `-` are best-effort");
     }
     let provider = manifest.provider.as_str();

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -66,13 +67,15 @@ pub enum Mode {
 impl Mode {
     /// Stable lowercase string for storage and telemetry.
     pub fn as_str(&self) -> &'static str {
-        match self {
+        let s = match self {
             Self::Fast => "fast",
             Self::Standard => "standard",
             Self::Deep => "deep",
             Self::Explore => "explore",
             Self::Batch => "batch",
-        }
+        };
+        trace!(mode = s, "Mode::as_str");
+        s
     }
 
     /// Whether this mode is allowed to run sketches before proposals.
@@ -80,7 +83,9 @@ impl Mode {
     /// between route and propose. `batch` reuses the same answer as
     /// `standard` because batch determinism is a downstream concern.
     pub fn runs_sketches(&self) -> bool {
-        !matches!(self, Self::Fast)
+        let v = !matches!(self, Self::Fast);
+        trace!(mode = ?self, runs_sketches = v, "Mode::runs_sketches");
+        v
     }
 
     /// Cardinality ceiling on concurrent LLM calls for proposals in
@@ -89,13 +94,15 @@ impl Mode {
     /// commit "wire sketch_phase" once the `ProposePhase` accepts
     /// `desired_proposals` as input.
     pub fn desired_proposals(&self) -> usize {
-        match self {
+        let v = match self {
             Self::Fast => 3,
             Self::Standard => 3,
             Self::Deep => 5,
             Self::Explore => 0, // no full proposals; sketches only
             Self::Batch => 3,
-        }
+        };
+        debug!(mode = ?self, desired_proposals = v, "Mode::desired_proposals");
+        v
     }
 
     /// Cardinality ceiling for the sketches phase. `fast` returns 0
@@ -103,13 +110,15 @@ impl Mode {
     /// upper bound of its spec range; `deep` and `standard` cluster
     /// around 4-6.
     pub fn desired_sketches(&self) -> usize {
-        match self {
+        let v = match self {
             Self::Fast => 0,
             Self::Standard => 4,
             Self::Deep => 6,
             Self::Explore => 12,
             Self::Batch => 4,
-        }
+        };
+        debug!(mode = ?self, desired_sketches = v, "Mode::desired_sketches");
+        v
     }
 }
 
@@ -182,7 +191,14 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        <Self as Parser>::try_parse_from(iter).map_err(|e| Error::InvalidArgs(e.to_string()))
+        trace!("Cli::from_iter_args: parsing");
+        let res =
+            <Self as Parser>::try_parse_from(iter).map_err(|e| Error::InvalidArgs(e.to_string()));
+        match &res {
+            Ok(_) => debug!("Cli::from_iter_args: parsed ok"),
+            Err(e) => warn!(error = %e, "Cli::from_iter_args: parse failed"),
+        }
+        res
     }
 }
 
@@ -899,7 +915,7 @@ pub enum AuditCmd {
 /// `inspect` / `diff` / `validate` / `doctor` / `telemetry` skip the
 /// boot pass so their latency stays deterministic.
 fn should_reconcile_at_startup(cmd: &Cmd) -> bool {
-    matches!(
+    let v = matches!(
         cmd,
         Cmd::Run { .. }
             | Cmd::Continue { .. }
@@ -909,7 +925,9 @@ fn should_reconcile_at_startup(cmd: &Cmd) -> bool {
             | Cmd::Refine { .. }
             | Cmd::Rerank { .. }
             | Cmd::Discover { .. }
-    )
+    );
+    trace!(reconcile = v, "should_reconcile_at_startup");
+    v
 }
 
 /// Track F (D.28.3 + D.28.4): the actual startup reconcile call.
@@ -925,11 +943,20 @@ fn run_startup_reconcile(
     cfg: &Config,
 ) -> Result<Option<crate::reconcile::StartupReconcileReport>> {
     if !cfg.startup_reconcile {
+        debug!("run_startup_reconcile: skipped (startup_reconcile=false)");
         return Ok(None);
     }
+    debug!(
+        home = %home.root().display(),
+        "run_startup_reconcile: opening meta.sqlite"
+    );
     let db = Db::open(&home.meta_db_path())?;
     let report = crate::reconcile::startup_reconcile(home, &db, cfg)?;
-    tracing::info!(?report, "startup reconcile done");
+    info!(
+        orphans_removed = report.orphans_removed,
+        zombies_recovered = report.zombies_recovered,
+        "startup reconcile done"
+    );
     Ok(Some(report))
 }
 
@@ -971,9 +998,15 @@ impl Cmd {
 
 /// Dispatch the parsed CLI and convert domain errors into process exit codes.
 pub async fn dispatch(cli: Cli) -> Result<i32> {
-    match dispatch_inner(cli).await {
-        Ok(rc) => Ok(rc),
+    trace!("dispatch: enter");
+    let result = dispatch_inner(cli).await;
+    match &result {
+        Ok(rc) => {
+            info!(exit_code = rc, "dispatch: ok");
+            Ok(*rc)
+        }
         Err(e) => {
+            error!(error = %e, exit_code = e.exit_code() as i32, "dispatch: error");
             eprintln!("error: {e}");
             Ok(e.exit_code() as i32)
         }
@@ -981,8 +1014,10 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
 }
 
 async fn dispatch_inner(cli: Cli) -> Result<i32> {
+    debug!("dispatch_inner: enter");
     // Run the hard-incompatibilities guard on every entry.
     forbidden::check_local_cargo_toml()?;
+    trace!("dispatch_inner: forbidden-crates guard passed");
     // Plumb the `--logs` flag and the `MOAGAN_RUN_LOGS` env var
     // into the lazy file writer registered in
     // `src/main.rs::init_tracing`. The subscriber was
@@ -1023,6 +1058,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 );
             }
             Err(crate::telemetry::file_log::SetError::ParentDir { path, source }) => {
+                error!(
+                    path = %path.display(),
+                    error = %source,
+                    "could not create parent directory for log file"
+                );
                 return Err(Error::InvalidArgs(format!(
                     "--logs / MOAGAN_RUN_LOGS: could not create parent directory for {}: {source}",
                     path.display()
@@ -1031,8 +1071,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         }
     }
     let global_home = match cli.runs_dir {
-        Some(path) => MoaganHome::at(path),
-        None => MoaganHome::resolve()?,
+        Some(path) => {
+            trace!(path = %path.display(), "dispatch_inner: explicit runs_dir");
+            MoaganHome::at(path)
+        }
+        None => {
+            let h = MoaganHome::resolve()?;
+            trace!(home = %h.root().display(), "dispatch_inner: resolved MOAGAN_HOME");
+            h
+        }
     };
     // Track F (D.28.3 + D.28.4): reconcile filesystem vs SQLite at
     // the top of every pipeline-opening dispatch. Only commands that
@@ -1048,9 +1095,13 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     // disabled / enabled / sweep paths without going through the
     // full `Config::load()` + `Cli::parse` plumbing.
     if should_reconcile_at_startup(&cli.cmd) {
+        debug!("dispatch_inner: pipeline-opening command — running startup reconcile");
         let cfg = Config::load()?;
         run_startup_reconcile(&global_home, &cfg)?;
+    } else {
+        trace!("dispatch_inner: read-only command — skipping startup reconcile");
     }
+    info!(cmd = ?cli.cmd, "dispatch: routing command");
     match cli.cmd {
         Cmd::Run {
             mode,
@@ -1079,6 +1130,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             if let Some(m) = _model.as_deref()
                 && !m.trim().is_empty()
             {
+                warn!(model = m, "deprecated --model flag used");
                 return Err(Error::InvalidArgs(
                     "--model is no longer a separate flag; pass the model id as part of \
                      --provider (e.g. --provider opencode:kimi-k3 or \
@@ -1098,6 +1150,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 // one-model alias) or it is a typo. We surface
                 // a clear message so the operator knows what
                 // shape we expect.
+                warn!(
+                    provider = provider,
+                    "bare SECTION provider without MODEL id"
+                );
                 let cfg_early = Config::load().unwrap_or_default();
                 if let Some(spec) = cfg_early.providers.get(provider)
                     && spec.models.len() > 1
@@ -1121,6 +1177,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // mistake as `Error::InvalidArgs` so the operator does
             // not debug a "missing context" run.
             if (context_summary || context_full) && context.is_none() {
+                warn!(
+                    context_summary = context_summary,
+                    context_full = context_full,
+                    "--context-summary/--context-full without --context"
+                );
                 return Err(Error::InvalidArgs(
                     "--context-summary / --context-full require --context <ref>".into(),
                 ));
@@ -1170,8 +1231,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             if let Some(name) = profile.as_deref()
                 && !name.trim().is_empty()
             {
+                debug!(profile = name, "applying CLI profile override");
                 let profile = Config::load_profile(name.trim())?;
                 cfg.apply_profile(&profile);
+                trace!(profile = name, "profile applied");
             }
             // Q5: `--model <name>` overrides the model on the resolved
             // provider. Applied AFTER `apply_env_overrides()` (which
@@ -1195,7 +1258,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // (cache keys, redaction, intake normalisation) picks
             // up the same string.
             if flags_batch::prompt_is_stdin(&prompt) {
+                trace!("reading prompt body from stdin (-)");
                 prompt = flags_batch::read_prompt_from_stdin()?;
+                debug!(prompt_len = prompt.len(), "prompt read from stdin");
             }
             // v0.10: `--provider` is optional at the clap level so we can
             // produce a friendly error message that includes the
@@ -1211,6 +1276,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 _ => cfg.default_provider.clone(),
             };
             if provider.trim().is_empty() {
+                warn!(
+                    "--provider missing; no CLI flag, no MOAGAN_DEFAULT_PROVIDER, no config default"
+                );
                 return Err(Error::InvalidArgs(
                     "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
                      or [defaults] provider in config.toml); example:\n  \
@@ -1219,6 +1287,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         .into(),
                 ));
             }
+            debug!(
+                provider = %provider,
+                mode = ?mode,
+                "dispatching moagan run"
+            );
             let run_id = run::run(
                 run::RunOptions {
                     mode,
@@ -1248,6 +1321,12 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             skip_checkpoint,
             non_interactive,
         } => {
+            debug!(
+                from_pause = from_pause,
+                kind = ?kind,
+                skip_checkpoint = skip_checkpoint,
+                "dispatching moagan continue"
+            );
             // Track K.2b: `--from-pause` short-circuits to the
             // pause-aware resume path. PR C.3 only logs the resume
             // plan; the real loop skip that uses `paused.json` lands
@@ -1298,6 +1377,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("{e}")))?;
+            debug!(run_id = %parsed, "dispatching moagan resume");
             continue_cmd::run_resume(&global_home, parsed, non_interactive).await?;
             Ok(0)
         }
@@ -1333,6 +1413,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             source_path,
             target_runs_dir,
         } => {
+            debug!(
+                source = %source_path.display(),
+                target = ?target_runs_dir.as_ref().map(|p| p.display().to_string()),
+                "dispatching moagan import"
+            );
             continue_cmd::run_import(&global_home, &source_path, target_runs_dir.as_deref())?;
             Ok(0)
         }
@@ -1342,6 +1427,12 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             verbose,
             capabilities,
         } => {
+            debug!(
+                limit = limit,
+                run_id = ?run_id.as_deref(),
+                capabilities = capabilities,
+                "dispatching moagan inspect"
+            );
             let home = &global_home;
             let db = Db::open(&home.meta_db_path())?;
             if let Some(id) = run_id {
@@ -1354,6 +1445,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                             inspect::print_run_summary(&summary, verbose);
                         }
                         None => {
+                            warn!(run_id = %parsed, "inspect: run not in index");
                             return Err(Error::InvalidState(format!(
                                 "run {id} not found in the index"
                             )));
@@ -1362,6 +1454,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 }
             } else {
                 let entries = inspect::list_recent(&db, limit)?;
+                trace!(entries = entries.len(), "inspect: list_recent");
                 for e in entries {
                     println!(
                         "{}  {}  {:>16}  created_unix={}  updated_unix={}",
@@ -1382,6 +1475,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             verdict_detail,
             mock_dir,
         } => {
+            debug!(
+                run_id = %run_id,
+                action = ?action.as_ref().map(|a| a.as_cli_str()),
+                "dispatching moagan refine"
+            );
             let home = Arc::new(global_home.clone());
             let run_id_parsed = run_id
                 .parse()
@@ -1428,6 +1526,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             }
         }
         Cmd::Rerank { run_id } => {
+            debug!(run_id = %run_id, "dispatching moagan rerank");
             let cfg = Config::load()?;
             let home = Arc::new(global_home.clone());
             continue_cmd::run_rerank(
@@ -1454,6 +1553,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 max_body_bytes,
                 timeout_secs,
             } => {
+                debug!(
+                    upstream = %upstream,
+                    port = port,
+                    "dispatching audit proxy"
+                );
                 let args = audit::ProxyArgs {
                     runs_dir,
                     run_id,
@@ -1468,6 +1572,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             AuditCmd::Verify { runs_dir, run_id } => {
+                debug!(
+                    run_id = ?run_id.as_deref(),
+                    "dispatching audit verify"
+                );
                 let args = audit::VerifyArgs { runs_dir, run_id };
                 let code = audit::verify_cmd(args).await?;
                 Ok(code)
@@ -1491,6 +1599,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             explain,
         } => {
             if sketches_per_cell < 10 {
+                warn!(
+                    sketches_per_cell = sketches_per_cell,
+                    "sketches-per-cell below F2 floor"
+                );
                 return Err(Error::InvalidArgs(format!(
                     "sketches-per-cell {sketches_per_cell} below the minimum of 10"
                 )));
@@ -1507,6 +1619,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 && !llm_derive
                 && dimensions.is_none()
             {
+                warn!("--facets-per-dimension without --matrix-spec/--llm-derive/--dimensions");
                 return Err(Error::InvalidArgs(
                     "facets-per-dimension requires an explicit --matrix-spec; \
                      without one facets are derived per-dimension by the LLM"
@@ -1526,6 +1639,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             let cfg = Config::load()?;
             // F3 (Track G.2): `--explain` short-circuits BEFORE
             // `discover::run` so the pipeline is never invoked.
+            // `discover::run` so the pipeline is never invoked.
             // The dispatcher prints the formatted table to
             // stdout and exits 0; no `run_id` is allocated, no
             // run dir is created, the LLM is never called.
@@ -1539,6 +1653,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // short-circuiting here avoids printing a fake
             // `discovery run id: 00000000-...` placeholder).
             if explain {
+                debug!("discover: --explain short-circuit");
                 // v0.10: --provider is mandatory; resolve the
                 // optional flag into a concrete value using the
                 // same precedence as `run`.
@@ -1547,6 +1662,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     _ => cfg.default_provider.clone(),
                 };
                 if explain_provider.trim().is_empty() {
+                    warn!("discover --explain: --provider missing");
                     return Err(Error::InvalidArgs(
                         "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
                          or [defaults] provider in config.toml)"
@@ -1583,12 +1699,18 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 _ => cfg.default_provider.clone(),
             };
             if provider.trim().is_empty() {
+                warn!("discover: --provider missing");
                 return Err(Error::InvalidArgs(
                     "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
                      or [defaults] provider in config.toml)"
                         .into(),
                 ));
             }
+            debug!(
+                provider = %provider,
+                sketches_per_cell = sketches_per_cell,
+                "dispatching moagan discover"
+            );
             let run_id = discover::run(
                 discover::DiscoverOptions {
                     provider,
@@ -1616,10 +1738,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         }
         Cmd::Telemetry { sub } => telemetry_cmd::TelemetryCmd::dispatch(sub).await,
         Cmd::Coverage { sub } => {
+            debug!("dispatching moagan coverage");
             let rc = coverage_cmd::dispatch(&global_home, sub)?;
             Ok(rc)
         }
         Cmd::Validate { brief_path, mode } => {
+            debug!(
+                brief_path = %brief_path.display(),
+                "dispatching moagan validate"
+            );
             validate::run(validate::ValidateArgs { brief_path, mode })
         }
         Cmd::Diff {
@@ -1627,13 +1754,20 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             run_b,
             format,
             include_proposals,
-        } => diff::run(diff::DiffArgs {
-            run_a,
-            run_b,
-            format,
-            include_proposals,
-            home_override: None,
-        }),
+        } => {
+            debug!(
+                run_a = %run_a,
+                run_b = %run_b,
+                "dispatching moagan diff"
+            );
+            diff::run(diff::DiffArgs {
+                run_a,
+                run_b,
+                format,
+                include_proposals,
+                home_override: None,
+            })
+        }
         Cmd::Repair {
             cleanup_orphans,
             reindex_artifacts,
@@ -1642,6 +1776,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             run,
             dry_run,
         } => {
+            debug!(
+                cleanup_orphans,
+                reindex_artifacts,
+                recover_zombies,
+                yes,
+                run = ?run.as_deref(),
+                dry_run,
+                "dispatching moagan repair"
+            );
             let parsed_run = match run.as_deref() {
                 None => None,
                 Some(raw) => Some(
@@ -1664,6 +1807,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             let parsed: crate::ids::RunId = run_id
                 .parse()
                 .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run_id}': {e}")))?;
+            debug!(run_id = %parsed, "dispatching moagan pause");
             let code = pause_cmd::run_pause(
                 &global_home,
                 pause_cmd::PauseArgs {
@@ -1798,6 +1942,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     "`moagan list` today only supports `--paused`; use `moagan inspect` for the full listing".into(),
                 ));
             }
+            debug!("dispatching moagan list --paused");
             let code = pause_cmd::run_list(&global_home, pause_cmd::ListArgs {})?;
             Ok(code)
         }
@@ -1806,6 +1951,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             proposal_id,
             score,
         } => {
+            debug!(
+                run_id = %run_id,
+                proposal_id = %proposal_id,
+                "dispatching moagan rate"
+            );
             let code = rate::run(RateArgs {
                 run_id,
                 proposal_id,

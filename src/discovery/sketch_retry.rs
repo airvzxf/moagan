@@ -17,15 +17,33 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
+    tracing::debug!(max_retries, "sketch_retry: enter (async)");
     let mut attempt: u32 = 0;
     loop {
+        tracing::trace!(attempt, "sketch_retry: attempting op");
         match op().await {
-            Ok(v) => return Ok(v),
-            Err(e) if attempt >= max_retries => return Err(e),
+            Ok(v) => {
+                tracing::debug!(attempt, "sketch_retry: ok");
+                return Ok(v);
+            }
+            Err(e) if attempt >= max_retries => {
+                tracing::error!(
+                    attempt,
+                    max_retries,
+                    error = %e,
+                    "sketch_retry: exhausted budget; surfacing error"
+                );
+                return Err(e);
+            }
             Err(e) => {
                 tracing::warn!(attempt, error = %e, "sketch extraction failed; retrying");
                 attempt = attempt.saturating_add(1);
                 let backoff_ms = 100u64.saturating_mul(1u64 << attempt.min(20));
+                tracing::trace!(
+                    attempt,
+                    backoff_ms,
+                    "sketch_retry: sleeping before next attempt"
+                );
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
         }

@@ -83,19 +83,31 @@ impl std::str::FromStr for RefineAction {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        tracing::trace!(input = %s, "ranking::refine_action::RefineAction::from_str");
         let normalised = s.trim().to_ascii_lowercase().replace('-', "_");
-        match normalised.as_str() {
-            "tighten_constraint" => Ok(Self::TightenConstraint),
-            "add_evidence" => Ok(Self::AddEvidence),
-            "split_proposal" => Ok(Self::SplitProposal),
-            "merge_proposal" => Ok(Self::MergeProposal),
-            "rerun_critique" => Ok(Self::RerunCritique),
-            "drop_proposal" => Ok(Self::DropProposal),
-            "request_human_input" => Ok(Self::RequestHumanInput),
-            other => Err(format!(
-                "unknown refine action '{other}' (expected one of: tighten-constraint, add-evidence, split-proposal, merge-proposal, rerun-critique, drop-proposal, request-human-input)"
-            )),
-        }
+        let action = match normalised.as_str() {
+            "tighten_constraint" => Self::TightenConstraint,
+            "add_evidence" => Self::AddEvidence,
+            "split_proposal" => Self::SplitProposal,
+            "merge_proposal" => Self::MergeProposal,
+            "rerun_critique" => Self::RerunCritique,
+            "drop_proposal" => Self::DropProposal,
+            "request_human_input" => Self::RequestHumanInput,
+            other => {
+                tracing::warn!(
+                    input = %s,
+                    "ranking::refine_action::RefineAction::from_str: unknown action"
+                );
+                return Err(format!(
+                    "unknown refine action '{other}' (expected one of: tighten-constraint, add-evidence, split-proposal, merge-proposal, rerun-critique, drop-proposal, request-human-input)"
+                ));
+            }
+        };
+        tracing::trace!(
+            ?action,
+            "ranking::refine_action::RefineAction::from_str: parsed"
+        );
+        Ok(action)
     }
 }
 

@@ -78,6 +78,7 @@ impl Phase for DiscoverDimensionsPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!("discover_dimensions: enter");
         let run_dir = ctx.run_dir();
         let sidecar_path = run_dir.root().join(DISCOVERY_DIMENSIONS_FILENAME);
 
@@ -122,6 +123,7 @@ impl Phase for DiscoverDimensionsPhase {
             .await?;
 
         if derived.dimensions.is_empty() {
+            tracing::error!("discover_dimensions: derived dimensions are empty");
             return Err(Error::DiscoveryQualityTooLow {
                 failed: 1,
                 total: 1,

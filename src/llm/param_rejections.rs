@@ -114,16 +114,25 @@ impl ParamRejectionsFile {
     /// malformed file is `Err(Error::Provider(...))` so a typo in
     /// operator-land cannot silently break startup.
     pub fn load(path: &Path) -> Result<Self> {
+        tracing::trace!(path = %path.display(), "ParamRejectionsFile::load");
         match std::fs::read_to_string(path) {
             Ok(s) => {
-                let parsed: Self = toml::from_str(&s).map_err(|e| Error::Provider {
-                    message: format!(
-                        "param_rejections.toml at {} is malformed: {e}",
-                        path.display()
-                    ),
-                    http_status: None,
+                let parsed: Self = toml::from_str(&s).map_err(|e| {
+                    tracing::warn!(error = %e, path = %path.display(), "param_rejections.toml malformed");
+                    Error::Provider {
+                        message: format!(
+                            "param_rejections.toml at {} is malformed: {e}",
+                            path.display()
+                        ),
+                        http_status: None,
+                    }
                 })?;
                 if parsed.schema_version > Self::CURRENT_SCHEMA_VERSION {
+                    tracing::warn!(
+                        file_version = parsed.schema_version,
+                        max_supported = Self::CURRENT_SCHEMA_VERSION,
+                        "param_rejections.toml schema_version too new"
+                    );
                     return Err(Error::Provider {
                         message: format!(
                             "param_rejections.toml at {} has schema_version={}, this binary only knows up to {}",
@@ -134,10 +143,21 @@ impl ParamRejectionsFile {
                         http_status: None,
                     });
                 }
+                tracing::debug!(
+                    path = %path.display(),
+                    providers = parsed.providers.len(),
+                    "ParamRejectionsFile::load: ok"
+                );
                 Ok(parsed)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new_empty()),
-            Err(e) => Err(Error::Io(crate::error::IoError::Raw(e))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::trace!(path = %path.display(), "ParamRejectionsFile::load: missing, returning empty");
+                Ok(Self::new_empty())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "ParamRejectionsFile::load: io error");
+                Err(Error::Io(crate::error::IoError::Raw(e)))
+            }
         }
     }
 
@@ -238,12 +258,22 @@ impl ParamRejectionsTable {
     /// The hot path: every LLM call site calls this once per
     /// `PARAM_NAMES` entry before serialising the wire body.
     pub fn should_omit(&self, provider: &str, model: &str, param: &str) -> bool {
-        let inner = self.inner.read();
-        inner
-            .providers
-            .get(provider)
-            .and_then(|by_model| by_model.get(model))
-            .is_some_and(|rejects| rejects.contains(param))
+        let omit = {
+            let inner = self.inner.read();
+            inner
+                .providers
+                .get(provider)
+                .and_then(|by_model| by_model.get(model))
+                .is_some_and(|rejects| rejects.contains(param))
+        };
+        tracing::trace!(
+            provider,
+            model,
+            param,
+            omit,
+            "ParamRejectionsTable::should_omit"
+        );
+        omit
     }
 
     /// Record a rejection. Persists to TOML best-effort so a disk
@@ -266,8 +296,23 @@ impl ParamRejectionsTable {
                 inserted = true;
             }
         }
-        if inserted && let Some(path) = self.persist_path.as_ref() {
-            self.persist_to(path)?;
+        if inserted {
+            tracing::info!(
+                provider,
+                model,
+                param,
+                "ParamRejectionsTable::record: new rejection recorded"
+            );
+            if let Some(path) = self.persist_path.as_ref() {
+                self.persist_to(path)?;
+            }
+        } else {
+            tracing::trace!(
+                provider,
+                model,
+                param,
+                "ParamRejectionsTable::record: already known, noop"
+            );
         }
         Ok(())
     }
@@ -345,7 +390,9 @@ impl ParamRejectionsTable {
 /// 7. `<param>: invalid value` (DeepSeek deserialization)
 /// 8. Legacy freeform: `<param> is too large: N`
 pub fn detect_rejection(status: u16, body: &str) -> Option<String> {
-    detect_all_rejections(status, body).into_iter().next()
+    let found = detect_all_rejections(status, body).into_iter().next();
+    tracing::trace!(status, present = found.is_some(), param = ?found, "detect_rejection");
+    found
 }
 
 /// Cascade-recovery counterpart of [`detect_rejection`]. Returns
@@ -386,6 +433,7 @@ pub fn detect_all_rejections(status: u16, body: &str) -> Vec<String> {
         && let Some(capture) = parse_error_param_start(param)
         && PARAM_NAMES.contains(&capture.as_str())
     {
+        tracing::trace!(param = %capture, "detect_all_rejections: structured error.param hit");
         found.insert(capture);
     }
 

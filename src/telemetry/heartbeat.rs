@@ -19,7 +19,12 @@ pub fn spawn(
     interval: Duration,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<u64>> {
+    tracing::info!(
+        interval_ms = interval.as_millis() as u64,
+        "heartbeat::spawn: enter"
+    );
     tokio::spawn(async move {
+        tracing::debug!("heartbeat task: started");
         let mut interval = tokio::time::interval(interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut ticks: u64 = 0;
@@ -39,6 +44,7 @@ pub fn spawn(
                         return Err(e);
                     }
                     ticks += 1;
+                    tracing::trace!(ticks, "heartbeat renewed");
                 }
             }
         }

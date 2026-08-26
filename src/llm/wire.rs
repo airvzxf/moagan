@@ -172,7 +172,16 @@ pub struct Usage {
 impl Usage {
     /// Total billed tokens (input + output).
     pub fn total(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        let total = self.input_tokens + self.output_tokens;
+        tracing::trace!(
+            input = self.input_tokens,
+            output = self.output_tokens,
+            cache_read = self.cache_read,
+            cache_creation = self.cache_creation,
+            total,
+            "Usage::total"
+        );
+        total
     }
 }
 
@@ -216,6 +225,7 @@ pub enum CacheHashAlgo {
 
 impl From<crate::cli::flags_batch::HashAlgo> for CacheHashAlgo {
     fn from(algo: crate::cli::flags_batch::HashAlgo) -> Self {
+        tracing::trace!(from = ?algo, "CacheHashAlgo::from");
         match algo {
             crate::cli::flags_batch::HashAlgo::Sha256 => Self::Sha256,
             crate::cli::flags_batch::HashAlgo::Blake3 => Self::Blake3,
@@ -234,6 +244,7 @@ impl From<crate::cli::flags_batch::HashAlgo> for CacheHashAlgo {
 /// loop even when the rejection detector picks up a field the
 /// runtime cannot omit.
 pub fn omit_param(req: &mut Request, param: &str) {
+    tracing::debug!(param, "omit_param: clearing optional wire field");
     match param {
         "temperature" => req.temperature = None,
         "top_p" => req.top_p = None,
@@ -247,7 +258,9 @@ pub fn omit_param(req: &mut Request, param: &str) {
         // Unknown parameters are a no-op so the runtime can record
         // the rejection (so the next run learns) without breaking
         // the current call.
-        _ => {}
+        _ => {
+            tracing::trace!(param, "omit_param: unknown parameter, no-op");
+        }
     }
 }
 
@@ -269,6 +282,13 @@ pub fn omit_param(req: &mut Request, param: &str) {
 pub fn build_cache_key(req: &Request, provider: &str, model: &str, algo: CacheHashAlgo) -> String {
     use crate::ids::{canonical_hash, sha256_hex};
     use crate::llm::prompts::prompt_set_hash;
+    tracing::trace!(
+        provider,
+        model,
+        role = ?req.role,
+        algo = ?algo,
+        "build_cache_key"
+    );
     let prompt_set_hash = prompt_set_hash();
     let parts = [
         "role",

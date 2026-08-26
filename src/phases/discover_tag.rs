@@ -42,6 +42,7 @@ impl Phase for DiscoverTagPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!("discover_tag: enter");
         let sketches_dir = ctx.run_dir().sketches();
         let tags_dir = ctx.run_dir().tags();
         std::fs::create_dir_all(&tags_dir)?;
@@ -51,8 +52,13 @@ impl Phase for DiscoverTagPhase {
         // phantom `SketchTags` written to `tags/` per run with empty
         // `sketch_id`. Filter mirrors `discover_cluster::execute`.
         let paths: Vec<PathBuf> = crate::phases::util::primary_json_paths(&sketches_dir)?;
+        tracing::debug!(
+            sketch_count = paths.len(),
+            "discover_tag: sketches enumerated"
+        );
 
         if paths.is_empty() {
+            tracing::error!("discover_tag: zero sketches found");
             return Err(Error::InvalidState(
                 "discover_tag found zero sketches".into(),
             ));

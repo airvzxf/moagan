@@ -21,6 +21,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tracing::{debug, error, info, trace, warn};
+
 use crate::config::Config;
 use crate::domain::{Brief, Proposal};
 use crate::error::{Error, IoError, Result};
@@ -49,6 +51,7 @@ pub struct ValidateArgs {
 /// to stderr — `cargo clippy --all-targets -- -D warnings` requires
 /// that the failing case be observable from CI output.
 pub fn run(args: ValidateArgs) -> Result<i32> {
+    debug!(brief = %args.brief_path.display(), "validate::run: enter");
     let ValidateArgs {
         brief_path,
         mode: _,
@@ -69,9 +72,15 @@ pub fn run(args: ValidateArgs) -> Result<i32> {
         cfg.gate_max_length,
     );
     if gate.pass {
+        info!("validate: PASS");
         println!("validate: PASS — brief is structurally sound");
         Ok(0)
     } else {
+        warn!(
+            issues = gate.issues.len(),
+            missing = gate.missing.len(),
+            "validate: FAIL"
+        );
         for issue in &gate.issues {
             eprintln!("{issue}");
         }
@@ -95,6 +104,7 @@ pub fn run(args: ValidateArgs) -> Result<i32> {
 /// - other I/O      → `Error::Io`           (exit 8)
 /// - path traversal → `Error::PathTraversal` (D.29.1, exit 2)
 fn parse_brief(path: &Path) -> Result<Brief> {
+    trace!(path = %path.display(), "parse_brief: enter");
     // D.29.1: refuse `..` traversals and symlinks that escape the
     // brief's parent directory. The parent dir is the natural root
     // because the operator picked a specific file to validate;
@@ -104,8 +114,10 @@ fn parse_brief(path: &Path) -> Result<Brief> {
     let safe = safe_path(path.parent().unwrap_or(Path::new("/")), path)?;
     let text = std::fs::read_to_string(&safe).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
+            warn!(path = %safe.display(), "parse_brief: not found");
             Error::InvalidArgs(format!("brief not found: {}", safe.display()))
         } else {
+            error!(path = %safe.display(), error = %e, "parse_brief: I/O error");
             Error::Io(IoError::Read {
                 path: safe.clone(),
                 source: e,
@@ -113,6 +125,7 @@ fn parse_brief(path: &Path) -> Result<Brief> {
         }
     })?;
     serde_json::from_str::<Brief>(&text).map_err(|e| {
+        warn!(path = %safe.display(), error = %e, "parse_brief: invalid JSON");
         Error::InvalidArgs(format!(
             "brief at {} is not valid JSON: {e}",
             safe.display()

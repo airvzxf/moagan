@@ -83,8 +83,14 @@ pub fn startup_reconcile(
     db: &Db,
     _cfg: &Config,
 ) -> Result<StartupReconcileReport> {
+    tracing::info!("reconcile::startup_reconcile: enter");
     let orphans_removed = cleanup_orphans(home)?;
     let zombies_recovered = recover_zombies(db)?;
+    tracing::info!(
+        orphans_removed,
+        zombies_recovered,
+        "reconcile::startup_reconcile: complete"
+    );
     Ok(StartupReconcileReport {
         orphans_removed,
         zombies_recovered,
@@ -101,23 +107,47 @@ pub fn startup_reconcile(
 /// `src/cli/repair.rs` and delegates here after confirming the
 /// operator intent.
 pub fn cleanup_orphans(home: &MoaganHome) -> Result<usize> {
+    tracing::info!("reconcile::cleanup_orphans: enter");
     let target_runs = resolve_target_runs_for_cleanup(home)?;
     let plan = plan_cleanup(home, &target_runs)?;
     if plan.is_empty() {
+        tracing::info!("reconcile::cleanup_orphans: plan empty");
         return Ok(0);
     }
     let mut removed = 0usize;
+    let mut race_count = 0usize;
     for p in &plan {
         match std::fs::remove_file(p) {
-            Ok(()) => removed += 1,
+            Ok(()) => {
+                removed += 1;
+                tracing::debug!(path = %p.display(), "reconcile::cleanup_orphans: removed");
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Race: another process or a concurrent repair pass
                 // already removed it. Treat as success.
+                race_count += 1;
                 removed += 1;
+                tracing::debug!(
+                    path = %p.display(),
+                    "reconcile::cleanup_orphans: already removed (race)"
+                );
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                tracing::error!(
+                    path = %p.display(),
+                    error = %e,
+                    "reconcile::cleanup_orphans: remove failed"
+                );
+                return Err(e.into());
+            }
         }
     }
+    tracing::info!(
+        removed,
+        races = race_count,
+        planned = plan.len(),
+        "reconcile::cleanup_orphans: complete"
+    );
     Ok(removed)
 }
 
@@ -129,13 +159,20 @@ pub fn cleanup_orphans(home: &MoaganHome) -> Result<usize> {
 fn resolve_target_runs_for_cleanup(home: &MoaganHome) -> Result<Vec<RunId>> {
     let runs_root = home.runs_dir();
     if !runs_root.exists() {
+        tracing::trace!("reconcile::resolve_target_runs_for_cleanup: no runs dir");
         return Ok(Vec::new());
     }
     let mut ids: Vec<RunId> = Vec::new();
+    let mut scanned = 0usize;
+    let mut skipped_non_dir = 0usize;
+    let mut skipped_lock = 0usize;
+    let mut skipped_unparseable = 0usize;
     for entry in std::fs::read_dir(&runs_root)? {
         let entry = entry?;
+        scanned += 1;
         let path = entry.path();
         if !path.is_dir() {
+            skipped_non_dir += 1;
             continue;
         }
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
@@ -144,12 +181,23 @@ fn resolve_target_runs_for_cleanup(home: &MoaganHome) -> Result<Vec<RunId>> {
         // `.lock` files at the top of the runs dir are handled by
         // `plan_cleanup` directly, not by the per-run walker.
         if name.ends_with(".lock") {
+            skipped_lock += 1;
             continue;
         }
         if let Ok(id) = name.parse::<RunId>() {
             ids.push(id);
+        } else {
+            skipped_unparseable += 1;
         }
     }
+    tracing::debug!(
+        scanned,
+        parsed_runs = ids.len(),
+        skipped_non_dir,
+        skipped_lock,
+        skipped_unparseable,
+        "reconcile::resolve_target_runs_for_cleanup: exit"
+    );
     Ok(ids)
 }
 
@@ -165,10 +213,12 @@ pub fn plan_cleanup(home: &MoaganHome, target_runs: &[RunId]) -> Result<Vec<Path
     let mut out: Vec<PathBuf> = Vec::new();
     let runs_root = home.runs_dir();
     if !runs_root.exists() {
+        tracing::trace!("reconcile::plan_cleanup: no runs dir");
         return Ok(out);
     }
 
     // 1. *.tmp.<hex> inside every target run dir.
+    let mut atomic_count = 0usize;
     for id in target_runs {
         let run_dir = home.run_dir(*id);
         for entry in WalkDir::new(run_dir.root())
@@ -182,12 +232,18 @@ pub fn plan_cleanup(home: &MoaganHome, target_runs: &[RunId]) -> Result<Vec<Path
             }
             if is_atomic_tmp(path) {
                 out.push(path.to_path_buf());
+                atomic_count += 1;
             }
         }
     }
+    tracing::trace!(
+        atomic_count,
+        "reconcile::plan_cleanup: tmp leftovers collected"
+    );
 
     // 2. Stale `*.lock` at the top of `home.runs_dir()`.
     let now = crate::time::now_unix_secs();
+    let mut lock_count = 0usize;
     for entry in std::fs::read_dir(&runs_root)? {
         let entry = entry?;
         let path = entry.path();
@@ -207,9 +263,21 @@ pub fn plan_cleanup(home: &MoaganHome, target_runs: &[RunId]) -> Result<Vec<Path
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         if now - modified_unix > STALE_LOCK_SECS {
+            tracing::trace!(
+                path = %path.display(),
+                age_secs = now - modified_unix,
+                "reconcile::plan_cleanup: stale lock"
+            );
             out.push(path);
+            lock_count += 1;
         }
     }
+    tracing::debug!(
+        atomic = atomic_count,
+        stale_locks = lock_count,
+        total = out.len(),
+        "reconcile::plan_cleanup: exit"
+    );
     Ok(out)
 }
 
@@ -241,8 +309,14 @@ fn is_lock_file(path: &Path) -> bool {
 /// path does not need this; it just calls [`cleanup_orphans`]
 /// directly.
 pub fn plan_cleanup_for_report(home: &MoaganHome) -> Result<Vec<PathBuf>> {
+    tracing::debug!("reconcile::plan_cleanup_for_report: enter");
     let target_runs = resolve_target_runs_for_cleanup(home)?;
-    plan_cleanup(home, &target_runs)
+    let plan = plan_cleanup(home, &target_runs)?;
+    tracing::info!(
+        planned = plan.len(),
+        "reconcile::plan_cleanup_for_report: exit"
+    );
+    Ok(plan)
 }
 
 /// D.28.4 — find runs whose `status = 'running'` and
@@ -250,8 +324,10 @@ pub fn plan_cleanup_for_report(home: &MoaganHome) -> Result<Vec<PathBuf>> {
 /// `interrupted`, and emit a `run.zombie_recovered` outbox
 /// event per recovery. Returns the number of recoveries.
 pub fn recover_zombies(db: &Db) -> Result<usize> {
+    tracing::info!("reconcile::recover_zombies: enter");
     let zombies = list_zombie_run_ids(db)?;
     if zombies.is_empty() {
+        tracing::info!("reconcile::recover_zombies: no zombies");
         return Ok(0);
     }
     let now = crate::time::now_unix_secs();
@@ -268,8 +344,27 @@ pub fn recover_zombies(db: &Db) -> Result<usize> {
             event_type: "run.zombie_recovered".into(),
             payload: payload.to_string(),
         }];
-        record_with(db, &events, || db.update_run_status(*z, "interrupted"))?;
+        match record_with(db, &events, || db.update_run_status(*z, "interrupted")) {
+            Ok(()) => {
+                tracing::info!(
+                    run_id = %z,
+                    "reconcile::recover_zombies: flipped run to interrupted"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    run_id = %z,
+                    error = %e,
+                    "reconcile::recover_zombies: update failed"
+                );
+                return Err(e);
+            }
+        }
     }
+    tracing::info!(
+        recovered = zombies.len(),
+        "reconcile::recover_zombies: exit"
+    );
     Ok(zombies.len())
 }
 
@@ -278,22 +373,33 @@ pub fn recover_zombies(db: &Db) -> Result<usize> {
 /// `moagan repair --recover-zombies` dispatcher so it can
 /// print the plan in `--dry-run` mode without touching the DB.
 pub fn list_zombie_run_ids(db: &Db) -> Result<Vec<RunId>> {
+    tracing::trace!("reconcile::list_zombie_run_ids: enter");
     let now = crate::time::now_unix_secs();
     let threshold = now - ZOMBIE_HEARTBEAT_SECS;
     let rows = db.list_runs(u32::MAX)?;
     let mut zombies: Vec<RunId> = Vec::new();
+    let mut kept_fresh = 0usize;
+    let mut skipped_non_running = 0usize;
     for row in rows {
         let Ok(id) = row.run_id.parse::<RunId>() else {
             continue;
         };
         if row.status != "running" {
+            skipped_non_running += 1;
             continue;
         }
         if row.updated_unix >= threshold {
+            kept_fresh += 1;
             continue;
         }
         zombies.push(id);
     }
+    tracing::debug!(
+        zombies = zombies.len(),
+        kept_fresh,
+        skipped_non_running,
+        "reconcile::list_zombie_run_ids: exit"
+    );
     Ok(zombies)
 }
 

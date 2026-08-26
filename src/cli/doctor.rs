@@ -11,6 +11,8 @@
 
 use std::path::Path;
 
+use tracing::{debug, info, trace, warn};
+
 use crate::config::Config;
 use crate::error::Result;
 use crate::fs_layout::MoaganHome;
@@ -50,6 +52,7 @@ fn emit(check: Check, any_fail: &mut bool, any_warn: &mut bool) {
 }
 
 fn check_api_key(cfg: &Config) -> Check {
+    trace!("check_api_key: enter");
     use crate::llm::api_keys::lookup_key;
     let mut missing: Vec<String> = Vec::new();
     let mut seen_sections: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -95,6 +98,7 @@ fn check_api_key(cfg: &Config) -> Check {
 }
 
 fn check_home() -> Check {
+    trace!("check_home: enter");
     match MoaganHome::resolve() {
         Ok(home) => match home.ensure() {
             Ok(()) => {
@@ -132,6 +136,7 @@ fn check_home() -> Check {
 }
 
 fn check_sqlite() -> Check {
+    trace!("check_sqlite: enter");
     let home = match MoaganHome::resolve() {
         Ok(h) => h,
         Err(_) => {
@@ -157,6 +162,10 @@ fn check_sqlite() -> Check {
 }
 
 fn check_provider_config(cfg: &Config) -> Check {
+    trace!(
+        providers = cfg.providers.len(),
+        "check_provider_config: enter"
+    );
     if cfg.providers.is_empty() {
         return Check {
             name: "providers".to_string(),
@@ -207,6 +216,7 @@ fn models_per_provider(cfg: &Config) -> Vec<(String, Vec<String>)> {
 /// the pre-PR-7 environment-check behaviour so existing CI
 /// scripts do not regress.
 pub fn run(capabilities: bool) -> Result<i32> {
+    debug!(capabilities, "doctor::run: enter");
     if capabilities {
         return run_capabilities();
     }
@@ -235,19 +245,24 @@ pub fn run(capabilities: bool) -> Result<i32> {
     emit(check_api_key(&cfg), &mut any_fail, &mut any_warn);
     emit(check_home(), &mut any_fail, &mut any_warn);
     emit(check_sqlite(), &mut any_fail, &mut any_warn);
-    if any_fail {
+    let rc = if any_fail {
+        warn!("doctor: FAIL");
         println!();
         println!("doctor: FAIL — see [FAIL] lines above");
         Ok(1)
     } else if any_warn {
+        info!("doctor: WARN");
         println!();
         println!("doctor: WARN — see [WARN] lines above");
         Ok(0)
     } else {
+        info!("doctor: OK");
         println!();
         println!("doctor: OK");
         Ok(0)
-    }
+    };
+    debug!(exit_code = ?rc, "doctor::run: done");
+    rc
 }
 
 /// PR-7 `moagan doctor --capabilities` view. For every

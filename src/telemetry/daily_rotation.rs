@@ -14,6 +14,7 @@ pub struct DailyRotator {
 impl DailyRotator {
     /// Build a new rotator initialized to today.
     pub fn new() -> Self {
+        tracing::trace!(day = current_day(), "DailyRotator::new");
         Self {
             last_day: Mutex::new(current_day()),
         }
@@ -24,7 +25,13 @@ impl DailyRotator {
         let today = current_day();
         let mut last = self.last_day.lock().unwrap();
         if today != *last {
+            let prev = *last;
             *last = today;
+            tracing::trace!(
+                prev_day = prev,
+                today,
+                "DailyRotator::check_rotate: rollover"
+            );
             tracing::warn!(
                 kind = "stale_artifact",
                 path = "telemetry/daily.log",

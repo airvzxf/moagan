@@ -42,10 +42,18 @@ impl Phase for GatePhase {
             .iter()
             .map(|s| s.to_lowercase())
             .collect();
+        tracing::debug!(
+            min_len,
+            max_len,
+            forbidden_count = forbidden.len(),
+            "gate: enter"
+        );
 
         let brief: Brief = read_json(&ctx.run_dir().brief()).unwrap_or_default();
 
         let mut paths = Vec::new();
+        let mut passed = 0usize;
+        let mut failed = 0usize;
         for entry in std::fs::read_dir(&proposals_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -58,8 +66,19 @@ impl Phase for GatePhase {
             let id = proposal.id;
             let out_path: PathBuf = validation_dir.join(format!("{id}.json"));
             write_json(&out_path, &gate)?;
+            if gate.pass {
+                passed += 1;
+            } else {
+                failed += 1;
+                tracing::warn!(
+                    proposal_id = %id,
+                    issue_count = gate.issues.len(),
+                    "gate: proposal failed structural check"
+                );
+            }
             paths.push(out_path);
         }
+        tracing::info!(passed, failed, total = paths.len(), "gate: phase complete");
         Ok(PhaseOutput::Validations(paths))
     }
 }

@@ -8,6 +8,12 @@ use crate::domain::FacetExtraction;
 /// is intended as the LLM-generated section; the helper just adds
 /// formatting around it.
 pub fn render_body(ext: &FacetExtraction) -> String {
+    tracing::debug!(
+        facet_id = %ext.facet_id,
+        body_len = ext.body.len(),
+        sources = ext.sources.len(),
+        "extractor: render_body"
+    );
     let mut s = format!("## {}\n\n", ext.facet_id);
     s.push_str(ext.body.trim());
     s.push('\n');
@@ -18,10 +24,12 @@ pub fn render_body(ext: &FacetExtraction) -> String {
 /// document. Required facets come first; optional facets follow in
 /// the order they were supplied.
 pub fn join_markdown(extractions: &[FacetExtraction]) -> String {
+    tracing::debug!(count = extractions.len(), "extractor: join_markdown");
     let mut buf = String::new();
     for ext in extractions {
         buf.push_str(&render_body(ext));
     }
+    tracing::trace!(total_bytes = buf.len(), "extractor: join_markdown complete");
     buf
 }
 
@@ -34,7 +42,13 @@ pub fn unique_sources(extractions: &[FacetExtraction]) -> Vec<String> {
             set.insert(s.clone());
         }
     }
-    set.into_iter().collect()
+    let out: Vec<String> = set.into_iter().collect();
+    tracing::debug!(
+        extractions = extractions.len(),
+        unique = out.len(),
+        "extractor: unique_sources"
+    );
+    out
 }
 
 #[cfg(test)]

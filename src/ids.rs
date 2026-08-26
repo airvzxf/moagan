@@ -22,17 +22,22 @@ impl RunId {
     /// Mint a fresh time-ordered run id.
     pub fn new() -> Self {
         // uuid v7 is enabled by the v7 feature.
-        Self(Uuid::now_v7())
+        let id = Self(Uuid::now_v7());
+        tracing::trace!(run_id = %id, "RunId::new");
+        id
     }
 
     /// Build a `RunId` from an existing UUID (e.g. loaded from disk).
     pub fn from_uuid(uuid: Uuid) -> Self {
+        tracing::trace!(uuid = %uuid, "RunId::from_uuid");
         Self(uuid)
     }
 
     /// 8-char short hex used for log prefixes. Not unique on its own.
     pub fn short(&self) -> String {
-        self.0.simple().to_string()[..8].to_owned()
+        let short = self.0.simple().to_string()[..8].to_owned();
+        tracing::trace!(run_id = %self, short = %short, "RunId::short");
+        short
     }
 }
 
@@ -52,28 +57,38 @@ impl FromStr for RunId {
     type Err = uuid::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(Uuid::parse_str(s)?))
+        tracing::trace!(len = s.len(), "RunId::from_str: enter");
+        let parsed = Uuid::parse_str(s)?;
+        tracing::trace!(run_id = %parsed, "RunId::from_str: ok");
+        Ok(Self(parsed))
     }
 }
 
 /// BLAKE3 hex digest (lowercase). Day 1 internal hash.
 pub fn blake3_hex(data: &[u8]) -> String {
+    tracing::trace!(data_len = data.len(), "blake3_hex: enter");
     let mut hasher = blake3::Hasher::new();
     hasher.update(data);
-    hex::encode(hasher.finalize().as_bytes())
+    let out = hex::encode(hasher.finalize().as_bytes());
+    tracing::trace!(hex_len = out.len(), "blake3_hex: ok");
+    out
 }
 
 /// SHA-256 hex digest (lowercase). Kept for export sidecars.
 pub fn sha256_hex(data: &[u8]) -> String {
+    tracing::trace!(data_len = data.len(), "sha256_hex: enter");
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(data);
-    hex::encode(h.finalize())
+    let out = hex::encode(h.finalize());
+    tracing::trace!(hex_len = out.len(), "sha256_hex: ok");
+    out
 }
 
 /// Concatenate `parts` with a zero byte separator that cannot appear in
 /// UTF-8 text. Used for cache key construction.
 fn canonical_join(parts: &[&str]) -> Vec<u8> {
+    tracing::trace!(parts_count = parts.len(), "canonical_join: enter");
     let mut buf = Vec::new();
     for (i, p) in parts.iter().enumerate() {
         if i > 0 {
@@ -81,14 +96,22 @@ fn canonical_join(parts: &[&str]) -> Vec<u8> {
         }
         buf.extend_from_slice(p.as_bytes());
     }
+    tracing::trace!(byte_len = buf.len(), "canonical_join: ok");
     buf
 }
 
 /// Hash the canonical concatenation of all inputs. Used for cache keys
 /// and idempotent call lookups.
 pub fn canonical_hash(parts: &[&str]) -> String {
+    tracing::trace!(parts_count = parts.len(), "canonical_hash: enter");
     let bytes = canonical_join(parts);
-    blake3_hex(&bytes)
+    let out = blake3_hex(&bytes);
+    tracing::trace!(
+        parts_count = parts.len(),
+        hex_len = out.len(),
+        "canonical_hash: ok"
+    );
+    out
 }
 
 #[cfg(test)]

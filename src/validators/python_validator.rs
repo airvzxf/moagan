@@ -40,7 +40,12 @@ impl PythonValidator {
     /// Run `python3 -m py_compile` against the artifact inside the
     /// sandbox's scratch dir.
     pub async fn check(artifact: &CodeArtifact, sandbox: &Sandbox) -> Result<ValidationEvidence> {
+        tracing::debug!(
+            kind = %artifact.kind,
+            "validators::python::PythonValidator::check: enter"
+        );
         if !looks_like_python_source(&artifact.source) {
+            tracing::trace!("validators::python::PythonValidator::check: skipping non-executable");
             return Ok(ValidationEvidence::skipped(
                 "python",
                 "no Python identifier followed by `(` in source; artifact looks non-executable",
@@ -59,6 +64,10 @@ impl PythonValidator {
         if let Some(v) = capture_tool_version(sandbox, "python3").await {
             evidence.reproducibility.push(("python3".into(), v));
         }
+        tracing::debug!(
+            status = ?evidence.status,
+            "validators::python::PythonValidator::check: exit"
+        );
         Ok(evidence)
     }
 }
@@ -85,33 +94,46 @@ impl Validator for PythonValidator {
 fn looks_like_python_source(source: &str) -> bool {
     let bytes = source.as_bytes();
     let mut i = 0;
-    while i + 8 < bytes.len() {
-        let is_def = i + 4 <= bytes.len() && &bytes[i..i + 4] == b"def ";
-        let is_class = i + 6 <= bytes.len() && &bytes[i..i + 6] == b"class ";
-        if is_def || is_class {
-            let mut j = if is_def { i + 4 } else { i + 6 };
-            // Walk the identifier characters.
-            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                j += 1;
+    let result = (|| {
+        while i + 8 < bytes.len() {
+            let is_def = i + 4 <= bytes.len() && &bytes[i..i + 4] == b"def ";
+            let is_class = i + 6 <= bytes.len() && &bytes[i..i + 6] == b"class ";
+            if is_def || is_class {
+                let mut j = if is_def { i + 4 } else { i + 6 };
+                // Walk the identifier characters.
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                // Skip whitespace (including newlines).
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                // `def foo(`, `class Foo:` or `class Foo(` next.
+                if j < bytes.len() && (bytes[j] == b'(' || bytes[j] == b':') {
+                    return true;
+                }
+                // Advance past the keyword we just inspected so we do
+                // not loop on the same `def ` over and over.
+                i = j;
+                continue;
             }
-            // Skip whitespace (including newlines).
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            // `def foo(`, `class Foo:` or `class Foo(` next.
-            if j < bytes.len() && (bytes[j] == b'(' || bytes[j] == b':') {
-                return true;
-            }
-            // Advance past the keyword we just inspected so we do
-            // not loop on the same `def ` over and over.
-            i = j;
-            continue;
+            i += 1;
         }
-        i += 1;
-    }
-    false
+        false
+    })();
+    tracing::trace!(
+        source_len = bytes.len(),
+        looks_like_python = result,
+        "validators::python::looks_like_python_source"
+    );
+    result
 }
 fn evidence_from_result(result: SandboxResult) -> ValidationEvidence {
+    tracing::trace!(
+        status = ?result.status,
+        exit_code = result.exit_code,
+        "validators::python::evidence_from_result"
+    );
     let mut evidence = ValidationEvidence {
         validator: "python".into(),
         status: status_from_sandbox(result.status),
@@ -132,14 +154,16 @@ fn evidence_from_result(result: SandboxResult) -> ValidationEvidence {
 }
 
 fn status_from_sandbox(status: SandboxStatus) -> ValidationStatus {
-    match status {
+    let out = match status {
         SandboxStatus::Pass => ValidationStatus::Pass,
         SandboxStatus::Fail => ValidationStatus::Fail,
         SandboxStatus::Timeout => ValidationStatus::Fail,
         SandboxStatus::NotAllowed => ValidationStatus::Skipped,
         SandboxStatus::NotFound => ValidationStatus::Skipped,
         SandboxStatus::Error => ValidationStatus::Error,
-    }
+    };
+    tracing::trace!(?status, ?out, "validators::python::status_from_sandbox");
+    out
 }
 
 #[cfg(test)]

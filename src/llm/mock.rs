@@ -125,6 +125,7 @@ fn role_for_subdir(name: &str) -> Option<Role> {
 impl MockProvider {
     /// Build a mock with explicit canned responses.
     pub fn new(responses: Vec<MockResponse>) -> Self {
+        tracing::debug!(count = responses.len(), "MockProvider: constructed");
         Self {
             responses,
             index: AtomicUsize::new(0),
@@ -148,16 +149,20 @@ impl MockProvider {
     /// Tests that pin `Provider::endpoint` (telemetry, dashboards)
     /// use this to assert which entry the pool actually picked.
     pub fn set_endpoint(&mut self, endpoint: impl Into<String>) {
-        self.endpoint = endpoint.into();
+        let ep = endpoint.into();
+        tracing::trace!(endpoint = %ep, "MockProvider::set_endpoint");
+        self.endpoint = ep;
     }
 
     /// Push a response onto the queue.
     pub fn push(&mut self, response: MockResponse) {
+        tracing::trace!(text_len = response.text.len(), "MockProvider::push");
         self.responses.push(response);
     }
 
     /// Set whether exhausted calls wrap to the start. Default true.
     pub fn set_cycle(&mut self, cycle: bool) {
+        tracing::debug!(cycle, "MockProvider::set_cycle");
         self.cycle = cycle;
     }
 
@@ -199,6 +204,7 @@ impl MockProvider {
     /// alphabetically. Each per-role sub-pool gets its own cycle
     /// cursor, independent of the others and of the global pool.
     pub fn from_dir(path: &Path) -> Result<Self> {
+        tracing::debug!(path = %path.display(), "MockProvider::from_dir");
         let mut responses: Vec<MockResponse> = Vec::new();
         let mut responses_by_role: HashMap<Role, Vec<MockResponse>> = HashMap::new();
         let mut role_index: HashMap<Role, Arc<AtomicUsize>> = HashMap::new();
@@ -212,17 +218,23 @@ impl MockProvider {
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
             .collect();
         entries.sort();
+        tracing::trace!(entries = entries.len(), "MockProvider::from_dir: walked");
 
         for entry in entries {
-            let raw = fs::read_to_string(&entry).map_err(|e| Error::Provider {
-                message: format!("mock read {entry:?}: {e}"),
-                http_status: None,
+            let raw = fs::read_to_string(&entry).map_err(|e| {
+                tracing::warn!(path = %entry.display(), error = %e, "MockProvider: read failed");
+                Error::Provider {
+                    message: format!("mock read {entry:?}: {e}"),
+                    http_status: None,
+                }
             })?;
-            let resp: MockResponseJson =
-                serde_json::from_str(&raw).map_err(|e| Error::Provider {
+            let resp: MockResponseJson = serde_json::from_str(&raw).map_err(|e| {
+                tracing::warn!(path = %entry.display(), error = %e, "MockProvider: parse failed");
+                Error::Provider {
                     message: format!("mock parse {entry:?}: {e}"),
                     http_status: None,
-                })?;
+                }
+            })?;
             let resp: MockResponse = resp.into();
 
             // Route by immediate parent directory. `path.parent()`
@@ -240,9 +252,13 @@ impl MockProvider {
             });
             match routed {
                 Some(role) => {
+                    tracing::trace!(role = ?role, path = %entry.display(), "MockProvider: routing to sub-pool");
                     responses_by_role.entry(role).or_default().push(resp);
                 }
-                None => responses.push(resp),
+                None => {
+                    tracing::trace!(path = %entry.display(), "MockProvider: routing to global pool");
+                    responses.push(resp);
+                }
             }
         }
 
@@ -254,6 +270,12 @@ impl MockProvider {
         for &role in responses_by_role.keys() {
             role_index.insert(role, Arc::new(AtomicUsize::new(0)));
         }
+
+        tracing::info!(
+            global = responses.len(),
+            per_role = responses_by_role.len(),
+            "MockProvider::from_dir loaded"
+        );
 
         Ok(Self {
             responses,
@@ -311,6 +333,7 @@ impl Provider for MockProvider {
     }
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
+        tracing::trace!(role = ?req.role, "MockProvider::send");
         // Role-aware dispatch: when the request's role has its own
         // sub-pool (populated from a role-named subdirectory in
         // `from_dir`), serve from that pool and advance *its* cursor.
@@ -322,17 +345,26 @@ impl Provider for MockProvider {
             let sub_pool = self.responses_by_role.get(&req.role);
             match sub_pool {
                 Some(pool) if !pool.is_empty() => {
+                    tracing::trace!(
+                        role = ?req.role,
+                        pool_size = pool.len(),
+                        "MockProvider::send: serving from per-role sub-pool"
+                    );
                     let cursor = {
                         let map = self.role_index.lock();
                         map.get(&req.role).cloned()
                     };
-                    let cursor = cursor.ok_or(Error::MockExhausted)?;
+                    let cursor = cursor.ok_or_else(|| {
+                        tracing::error!(role = ?req.role, "MockProvider::send: missing cursor (inconsistent)");
+                        Error::MockExhausted
+                    })?;
                     let n = pool.len();
                     let i = if self.cycle {
                         cursor.fetch_add(1, Ordering::SeqCst) % n
                     } else {
                         let i = cursor.fetch_add(1, Ordering::SeqCst);
                         if i >= n {
+                            tracing::warn!(role = ?req.role, "MockProvider::send: sub-pool exhausted (cycle=false)");
                             return Err(Error::MockExhausted);
                         }
                         i
@@ -345,6 +377,7 @@ impl Provider for MockProvider {
                 _ => {
                     let n = self.responses.len();
                     if n == 0 {
+                        tracing::warn!(role = ?req.role, "MockProvider::send: global pool exhausted (empty)");
                         return Err(Error::MockExhausted);
                     }
                     let i = if self.cycle {
@@ -352,6 +385,9 @@ impl Provider for MockProvider {
                     } else {
                         let i = self.index.fetch_add(1, Ordering::SeqCst);
                         if i >= n {
+                            tracing::warn!(
+                                "MockProvider::send: global pool exhausted (cycle=false)"
+                            );
                             return Err(Error::MockExhausted);
                         }
                         i

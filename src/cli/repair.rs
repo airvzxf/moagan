@@ -37,6 +37,8 @@
 
 use std::path::Path;
 
+use tracing::{debug, trace, warn};
+
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
@@ -85,7 +87,16 @@ pub struct RepairArgs {
 /// operation flag is passed it returns `Error::InvalidArgs` so CI
 /// scripts can detect the "forgot to add a flag" failure mode.
 pub fn run(args: RepairArgs) -> Result<i32> {
+    debug!(
+        cleanup_orphans = args.cleanup_orphans,
+        reindex_artifacts = args.reindex_artifacts,
+        recover_zombies = args.recover_zombies,
+        yes = args.yes,
+        dry_run = args.dry_run,
+        "repair::run: enter"
+    );
     if !args.cleanup_orphans && !args.reindex_artifacts && !args.recover_zombies {
+        warn!("repair: no operation flag set");
         return Err(Error::InvalidArgs(
             "moagan repair requires at least one of \
              --cleanup-orphans, --reindex-artifacts, --recover-zombies"
@@ -120,12 +131,15 @@ pub fn run(args: RepairArgs) -> Result<i32> {
     }
 
     if args.cleanup_orphans {
+        debug!("repair: dispatching cleanup_orphans");
         handle_cleanup_orphans(&home, args.run, args.dry_run, args.yes)?;
     }
     if args.reindex_artifacts {
+        debug!("repair: dispatching reindex_artifacts");
         handle_reindex_artifacts(&home, &db, args.run, args.dry_run)?;
     }
     if args.recover_zombies {
+        debug!("repair: dispatching recover_zombies");
         handle_recover_zombies(&db, args.run, args.dry_run)?;
     }
 
@@ -181,6 +195,7 @@ fn handle_cleanup_orphans(
         None => crate::reconcile::plan_cleanup_for_report(home)?,
     };
     if plan.is_empty() {
+        debug!("cleanup-orphans: plan empty");
         println!("cleanup-orphans: nothing to do");
         return Ok(0);
     }
@@ -188,11 +203,14 @@ fn handle_cleanup_orphans(
     for p in &plan {
         println!("  - {}", p.display());
     }
+    debug!(plan_len = plan.len(), "cleanup-orphans: plan prepared");
 
     if dry_run {
+        debug!("cleanup-orphans: dry-run short-circuit");
         return Ok(plan.len());
     }
     if !yes {
+        warn!(plan_len = plan.len(), "cleanup-orphans: needs --yes");
         return Err(Error::NeedsInput(format!(
             "cleanup-orphans: {} file(s) queued for deletion; pass --yes to apply",
             plan.len()
@@ -238,6 +256,7 @@ fn handle_reindex_artifacts(
     scope: Option<RunId>,
     dry_run: bool,
 ) -> Result<usize> {
+    debug!(scope = ?scope, dry_run, "repair::handle_reindex_artifacts: enter");
     let target_runs = match scope {
         Some(id) => vec![id],
         None => resolve_target_runs_for_reindex(home)?,
@@ -263,9 +282,17 @@ fn handle_reindex_artifacts(
                 _ => unreachable!("kind set is closed"),
             };
             if disk_count == cached {
+                trace!(run_id = %id, kind = kind, "reindex: in-sync");
                 continue;
             }
             diffs += 1;
+            warn!(
+                run_id = %id,
+                kind = kind,
+                disk = disk_count,
+                db = cached,
+                "reindex: drift detected"
+            );
             println!(
                 "reindex: {kind} drift on {id} (db={cached}, disk={disk_count})",
                 kind = kind,
@@ -278,6 +305,7 @@ fn handle_reindex_artifacts(
             }
         }
     }
+    debug!(diffs, "repair::handle_reindex_artifacts: done");
     Ok(diffs)
 }
 
@@ -373,6 +401,7 @@ fn reindex_kind(db: &Db, id: RunId, kind: &str, root: &Path) -> Result<usize> {
 /// `moagan repair --recover-zombies` path and the auto startup
 /// reconcile path share one implementation.
 fn handle_recover_zombies(db: &Db, scope: Option<RunId>, dry_run: bool) -> Result<usize> {
+    debug!(scope = ?scope, dry_run, "repair::handle_recover_zombies: enter");
     match scope {
         Some(id) => {
             let now = crate::time::now_unix_secs();
@@ -386,6 +415,7 @@ fn handle_recover_zombies(db: &Db, scope: Option<RunId>, dry_run: bool) -> Resul
                 }
             };
             if row.status != "running" {
+                trace!(run_id = %id, status = %row.status, "recover-zombies: not running");
                 println!(
                     "recover-zombies: run {id} is not running (status={}), nothing to do",
                     row.status
@@ -393,11 +423,13 @@ fn handle_recover_zombies(db: &Db, scope: Option<RunId>, dry_run: bool) -> Resul
                 return Ok(0);
             }
             if row.updated_unix >= threshold {
+                trace!(run_id = %id, "recover-zombies: within heartbeat");
                 println!(
                     "recover-zombies: run {id} is still within the heartbeat window, nothing to do"
                 );
                 return Ok(0);
             }
+            warn!(run_id = %id, "recover-zombies: zombie detected");
             println!("recover-zombies: found 1 zombie run(s)");
             println!("  - {id}");
             if dry_run {

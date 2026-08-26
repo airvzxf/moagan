@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
+use tracing::{debug, info, warn};
 
 use crate::coverage::{CoverageReport, ensure_instrumented, filter_by_tag, render_text, scan_run};
 use crate::error::Result;
@@ -54,6 +55,7 @@ pub enum CoverageFormat {
 /// Dispatch the `moagan coverage` subcommand. Returns the
 /// process exit code (0 for success).
 pub fn dispatch(home: &MoaganHome, cmd: CoverageCmd) -> Result<i32> {
+    debug!(cmd = ?cmd, "coverage::dispatch: enter");
     match cmd {
         CoverageCmd::Show {
             run_id,
@@ -82,6 +84,7 @@ fn show(
     format: CoverageFormat,
     html_out: Option<&std::path::Path>,
 ) -> Result<i32> {
+    debug!(run_id = %run_id, ?format, "coverage::show: enter");
     let run_dir = home.run_dir(run_id);
     let mut report = scan_run(&run_dir)?;
     if let Some(tag) = since_tag {
@@ -111,7 +114,9 @@ fn show(
 /// sub-command that depends on an external tool, so a missing
 /// `grcov` does not block the text view.
 fn render_html(report: &CoverageReport, html_out: Option<&std::path::Path>) -> Result<i32> {
+    debug!("coverage::render_html: enter");
     if !crate::coverage::grcov_available() {
+        warn!("coverage: grcov not on PATH");
         return Err(crate::Error::InvalidState(
             "grcov is not on PATH; install it with `cargo install grcov` \
              (or `pacman -S grcov` on Arch) to render the HTML report. \
@@ -141,10 +146,12 @@ fn render_html(report: &CoverageReport, html_out: Option<&std::path::Path>) -> R
         .status()
         .map_err(crate::Error::from)?;
     if !status.success() {
+        warn!(status = %status, "coverage: grcov exited non-zero");
         return Err(crate::Error::InvalidState(format!(
             "grcov exited with status {status}; see stderr above for details"
         )));
     }
+    info!(out = %out.display(), "coverage: html report written");
     println!("html report written to {}", out.display());
     Ok(0)
 }

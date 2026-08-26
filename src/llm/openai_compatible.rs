@@ -76,12 +76,20 @@ impl OpenAICompatibleProvider {
     /// `"openai_compat"` as a placeholder) and the section-level
     /// `endpoint` (or `"http://localhost"` as a placeholder).
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
+        tracing::debug!(
+            endpoint = spec.endpoint.as_deref(),
+            models = spec.models.len(),
+            "OpenAICompatibleProvider::new: enter"
+        );
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .map_err(|e| Error::Provider {
-                message: format!("build http client: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::error!(error = %e, "OpenAICompatibleProvider::new: client build failed");
+                Error::Provider {
+                    message: format!("build http client: {e}"),
+                    http_status: None,
+                }
             })?;
         let name = spec
             .models
@@ -100,6 +108,12 @@ impl OpenAICompatibleProvider {
             .or_else(|| spec.endpoint.clone())
             .unwrap_or_else(|| "http://localhost".to_owned());
         let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
+        tracing::info!(
+            name = %name,
+            model = %model,
+            endpoint = %endpoint,
+            "OpenAICompatibleProvider: constructed"
+        );
         Ok(Self {
             name,
             model,
@@ -130,12 +144,16 @@ impl OpenAICompatibleProvider {
         api_key: SecretString,
         cap: Option<u32>,
     ) -> Result<Self> {
+        tracing::debug!(?cap, "OpenAICompatibleProvider::new_with_kind_cap: enter");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .map_err(|e| Error::Provider {
-                message: format!("build http client: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::error!(error = %e, "OpenAICompatibleProvider::new_with_kind_cap: client build failed");
+                Error::Provider {
+                    message: format!("build http client: {e}"),
+                    http_status: None,
+                }
             })?;
         let name = spec
             .models
@@ -154,6 +172,13 @@ impl OpenAICompatibleProvider {
             .or_else(|| spec.endpoint.clone())
             .unwrap_or_else(|| "http://localhost".to_owned());
         let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
+        tracing::info!(
+            name = %name,
+            model = %model,
+            endpoint = %endpoint,
+            kind_hard_cap = ?cap,
+            "OpenAICompatibleProvider: constructed (with kind cap)"
+        );
         Ok(Self {
             name,
             model,
@@ -182,14 +207,25 @@ impl OpenAICompatibleProvider {
     /// section-specific wrapper (see
     /// [`super::deepseek::DeepSeekProvider::from_resolved`]).
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        tracing::debug!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "OpenAICompatibleProvider::from_resolved: enter"
+        );
         let kind = super::api_keys::lookup_kind_for_resolved(resolved);
         let key = super::api_keys::lookup_key(&kind, None)
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: format!(
-                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
-                    kind.to_ascii_uppercase()
-                ),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!(
+                    kind,
+                    "OpenAICompatibleProvider::from_resolved: API key missing"
+                );
+                Error::InvalidApiKey {
+                    message: format!(
+                        "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                        kind.to_ascii_uppercase()
+                    ),
+                    http_status: None,
+                }
             })?
             .map_err(|e| match e {
                 Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
@@ -204,10 +240,18 @@ impl OpenAICompatibleProvider {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .map_err(|e| Error::Provider {
-                message: format!("build http client: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::error!(error = %e, "OpenAICompatibleProvider::from_resolved: client build failed");
+                Error::Provider {
+                    message: format!("build http client: {e}"),
+                    http_status: None,
+                }
             })?;
+        tracing::info!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "OpenAICompatibleProvider::from_resolved: constructed"
+        );
         Ok(Self {
             name: resolved.section.clone(),
             model: resolved.id.clone(),
@@ -225,6 +269,7 @@ impl OpenAICompatibleProvider {
     /// layers the discovered ceiling into the clamp chain. Wired by
     /// `registry_from_config` when the registry has a table.
     pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        tracing::debug!(name = %self.name, "OpenAICompatibleProvider::with_max_tokens_table");
         self.max_tokens_table = Some(table);
         self
     }
@@ -232,13 +277,15 @@ impl OpenAICompatibleProvider {
     /// Compute the URL for chat completions.
     fn chat_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
-        if base.ends_with("/chat/completions") {
+        let url = if base.ends_with("/chat/completions") {
             base.to_owned()
         } else if base.ends_with("/v1") {
             format!("{base}/chat/completions")
         } else {
             format!("{base}/v1/chat/completions")
-        }
+        };
+        tracing::trace!(endpoint = %self.endpoint, url = %url, "chat_url");
+        url
     }
 
     /// Build the chat-completions request body for a given provider
@@ -292,6 +339,23 @@ impl OpenAICompatibleProvider {
                 content: "{".into(),
             });
         }
+        let response_format = if role_requires_json(req.role)
+            && !response_format_opt_out::model_skips_response_format(&self.model)
+        {
+            Some(ResponseFormat {
+                kind: "json_object",
+            })
+        } else {
+            None
+        };
+        tracing::trace!(
+            model = %self.model,
+            role = ?req.role,
+            strategy = ?strategy,
+            message_count = messages.len(),
+            wants_format = response_format.is_some(),
+            "build_chat_request"
+        );
         ChatRequest {
             model: &self.model,
             messages,
@@ -299,15 +363,7 @@ impl OpenAICompatibleProvider {
             temperature: req.temperature,
             top_p: req.top_p,
             stream: false,
-            response_format: if role_requires_json(req.role)
-                && !response_format_opt_out::model_skips_response_format(&self.model)
-            {
-                Some(ResponseFormat {
-                    kind: "json_object",
-                })
-            } else {
-                None
-            },
+            response_format,
         }
     }
 }

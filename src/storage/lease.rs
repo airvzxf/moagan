@@ -54,7 +54,9 @@ pub struct LeaseGuard {
 impl LeaseGuard {
     /// Acquire a lease for `run_id`.
     pub fn acquire(db: &Db, run_id: RunId, holder: &str, ttl: Duration) -> Result<Self> {
+        tracing::debug!(%run_id, holder, ttl_secs = ttl.as_secs(), "LeaseGuard::acquire: enter");
         let fence = db.renew_lease(run_id, holder, ttl, None)?;
+        tracing::info!(%run_id, holder, fence, "LeaseGuard::acquire: ok");
         Ok(Self {
             db: db.clone(),
             run_id,
@@ -67,22 +69,47 @@ impl LeaseGuard {
 
     /// Renew the lease and advance its fencing token.
     pub fn renew(&mut self) -> Result<()> {
+        tracing::trace!(
+            %self.run_id,
+            holder = %self.holder,
+            fence = self.fence,
+            "LeaseGuard::renew: enter"
+        );
         let new_fence =
             self.db
                 .renew_lease(self.run_id, &self.holder, self.ttl, Some(self.fence))?;
         self.fence = new_fence;
         self.acquired_at = Instant::now();
+        tracing::debug!(
+            %self.run_id,
+            holder = %self.holder,
+            fence = self.fence,
+            "LeaseGuard::renew: ok"
+        );
         Ok(())
     }
 
     /// Return whether the local lease TTL has elapsed.
     pub fn is_expired(&self) -> bool {
-        self.acquired_at.elapsed() > self.ttl
+        let expired = self.acquired_at.elapsed() > self.ttl;
+        tracing::trace!(
+            %self.run_id,
+            holder = %self.holder,
+            expired,
+            "LeaseGuard::is_expired"
+        );
+        expired
     }
 }
 
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
+        tracing::debug!(
+            %self.run_id,
+            holder = %self.holder,
+            fence = self.fence,
+            "LeaseGuard::drop: releasing lease"
+        );
         let _ = self.db.release_run_lease(self.run_id, &self.holder);
     }
 }
@@ -138,6 +165,7 @@ pub fn acquire_process_lock(
     holder: Uuid,
     ttl_secs: u64,
 ) -> Result<ProcessLease> {
+    tracing::debug!(%run_id, %holder, ttl_secs, "acquire_process_lock: enter");
     let conn = db.pool().get()?;
     let key = lock_key(run_id, holder);
     let now = crate::time::now_unix_secs();
@@ -159,6 +187,13 @@ pub fn acquire_process_lock(
     if let Some((_, existing_expires)) = existing
         && existing_expires > now
     {
+        tracing::warn!(
+            %run_id,
+            %holder,
+            existing_expires,
+            now,
+            "acquire_process_lock: existing non-expired lease blocks acquire"
+        );
         return Err(Error::LockHeld(format!(
             "process lock held for run={run_id} holder={holder}"
         )));
@@ -191,6 +226,7 @@ pub fn acquire_process_lock(
         params![&key, now, expires, next_fence.to_string(), now],
     )?;
 
+    tracing::info!(%run_id, %holder, fencing_token = next_fence, expires, "acquire_process_lock: ok");
     Ok(ProcessLease {
         run_id,
         holder,
@@ -213,6 +249,12 @@ pub fn heartbeat_process_lock(
     holder: Uuid,
     fencing_token: u64,
 ) -> Result<ProcessLease> {
+    tracing::debug!(
+        %run_id,
+        %holder,
+        fencing_token,
+        "heartbeat_process_lock: enter"
+    );
     let conn = db.pool().get()?;
     let key = lock_key(run_id, holder);
     let now = crate::time::now_unix_secs();
@@ -227,6 +269,7 @@ pub fn heartbeat_process_lock(
         .optional()?;
 
     let Some((stored_fence, stored_expires, stored_acquired, _stored_heartbeat)) = row else {
+        tracing::warn!(%run_id, %holder, "heartbeat_process_lock: no row -> LockHeld");
         return Err(Error::LockHeld(format!(
             "process lock not held for run={run_id} holder={holder}"
         )));
@@ -237,6 +280,14 @@ pub fn heartbeat_process_lock(
         http_status: None,
     })?;
     if parsed_fence != fencing_token || stored_expires <= now {
+        tracing::warn!(
+            %run_id,
+            %holder,
+            stored_fence = parsed_fence,
+            stored_expires,
+            now,
+            "heartbeat_process_lock: fence mismatch or expired -> LockHeld"
+        );
         return Err(Error::LockHeld(format!(
             "process lock fence mismatch or expired for run={run_id} holder={holder}"
         )));
@@ -247,6 +298,12 @@ pub fn heartbeat_process_lock(
         params![now, &key],
     )?;
 
+    tracing::debug!(
+        %run_id,
+        %holder,
+        fencing_token = parsed_fence,
+        "heartbeat_process_lock: ok"
+    );
     Ok(ProcessLease {
         run_id,
         holder,
@@ -268,6 +325,12 @@ pub fn release_process_lock(
     holder: Uuid,
     fencing_token: u64,
 ) -> Result<()> {
+    tracing::debug!(
+        %run_id,
+        %holder,
+        fencing_token,
+        "release_process_lock: enter"
+    );
     let conn = db.pool().get()?;
     let key = lock_key(run_id, holder);
     let now = crate::time::now_unix_secs();
@@ -282,6 +345,7 @@ pub fn release_process_lock(
 
     let Some((stored_fence, stored_expires)) = row else {
         // Already released — treat as success.
+        tracing::debug!(%run_id, %holder, "release_process_lock: row gone, idempotent ok");
         return Ok(());
     };
 
@@ -290,12 +354,21 @@ pub fn release_process_lock(
         http_status: None,
     })?;
     if parsed_fence != fencing_token || stored_expires <= now {
+        tracing::warn!(
+            %run_id,
+            %holder,
+            stored_fence = parsed_fence,
+            stored_expires,
+            now,
+            "release_process_lock: fence mismatch or expired -> LockHeld"
+        );
         return Err(Error::LockHeld(format!(
             "process lock fence mismatch or expired for run={run_id} holder={holder}"
         )));
     }
 
     conn.execute("DELETE FROM process_locks WHERE holder = ?", params![&key])?;
+    tracing::info!(%run_id, %holder, fencing_token = parsed_fence, "release_process_lock: ok");
     Ok(())
 }
 

@@ -56,6 +56,12 @@ impl CircuitBreaker {
     /// Build a breaker with the given threshold / window / cooldown.
     /// Defaults mirror catalog 10-integrada-v0 §D.19.5.
     pub fn new(threshold: u32, window: Duration, cooldown: Duration) -> Self {
+        tracing::debug!(
+            threshold,
+            window_secs = window.as_secs(),
+            cooldown_secs = cooldown.as_secs(),
+            "CircuitBreaker: constructed"
+        );
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 state: State::Closed,
@@ -76,6 +82,10 @@ impl CircuitBreaker {
         Fut: std::future::Future<Output = Result<T>>,
     {
         if let Some(wait) = self.pre_check() {
+            tracing::debug!(
+                wait_ms = wait.as_millis() as u64,
+                "CircuitBreaker::run: cooling down before call"
+            );
             tokio::time::sleep(wait).await;
         }
         match f().await {
@@ -84,6 +94,7 @@ impl CircuitBreaker {
                 Ok(v)
             }
             Err(e) => {
+                tracing::debug!(error = %e, "CircuitBreaker::run: failure observed");
                 self.record_failure();
                 Err(e)
             }
@@ -93,8 +104,11 @@ impl CircuitBreaker {
     /// Force-open the breaker (used by rate limiter / plan exhausted).
     pub fn trip(&self) {
         let mut g = self.inner.lock();
+        let before = g.state;
         g.state = State::Open(Instant::now());
         g.failures = g.threshold;
+        tracing::warn!(threshold = g.threshold, "CircuitBreaker::trip: forced open");
+        let _ = before;
     }
 
     /// True iff the breaker is currently rejecting calls. Returns
@@ -128,9 +142,13 @@ impl CircuitBreaker {
     /// tail of its past outage into the next window.
     pub fn record_success(&self) {
         let mut g = self.inner.lock();
+        let before = g.failures;
         g.state = State::Closed;
         g.failures = 0;
         g.last_failure = None;
+        if before > 0 {
+            tracing::info!(before, "CircuitBreaker::record_success: reset (recovery)");
+        }
     }
 
     /// Record a failed call. Increments the failure counter; if the
@@ -158,19 +176,37 @@ impl CircuitBreaker {
         if let Some(t) = g.last_failure
             && now.duration_since(t) > g.window
         {
+            tracing::debug!(
+                since_last_ms = now.duration_since(t).as_millis() as u64,
+                window_secs = g.window.as_secs(),
+                "CircuitBreaker::record_failure: window expired, counter reset"
+            );
             g.failures = 0;
             g.state = State::Closed;
         }
         g.failures = g.failures.saturating_add(1);
         g.last_failure = Some(now);
         if g.failures >= g.threshold {
+            tracing::warn!(
+                failures = g.failures,
+                threshold = g.threshold,
+                "CircuitBreaker::record_failure: threshold reached, opening"
+            );
             g.state = State::Open(now);
+        } else {
+            tracing::trace!(
+                failures = g.failures,
+                threshold = g.threshold,
+                "CircuitBreaker::record_failure: counted"
+            );
         }
     }
 
     pub(crate) fn record_failure_if_circuit_opening(&self, err: &Error) {
         if err.is_circuit_opening() {
             self.record_failure();
+        } else {
+            tracing::trace!(error = %e_display(err), "CircuitBreaker: error not circuit-opening; ignored");
         }
     }
 
@@ -180,15 +216,31 @@ impl CircuitBreaker {
             State::Closed => None,
             State::Open(t) => {
                 if t.elapsed() >= g.cooldown {
+                    tracing::debug!(
+                        elapsed_secs = t.elapsed().as_secs(),
+                        cooldown_secs = g.cooldown.as_secs(),
+                        "CircuitBreaker::pre_check: cooldown elapsed, moving to HalfOpen"
+                    );
                     g.state = State::HalfOpen;
                     None
                 } else {
-                    Some(g.cooldown - t.elapsed())
+                    let wait = g.cooldown - t.elapsed();
+                    tracing::trace!(
+                        wait_ms = wait.as_millis() as u64,
+                        "CircuitBreaker::pre_check: still cooling down"
+                    );
+                    Some(wait)
                 }
             }
             State::HalfOpen => None,
         }
     }
+}
+
+/// Helper for `tracing::trace!` formatting that does not allocate.
+/// Mirrors `std::fmt::Display` for `&Error`.
+fn e_display(err: &Error) -> &dyn std::fmt::Display {
+    err
 }
 
 impl Default for CircuitBreaker {
@@ -262,39 +314,58 @@ impl BreakerConfig {
     /// Parse `THRESHOLD:WINDOW_SECS:COOLDOWN_SECS`. Used by
     /// `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>` env-var parsing.
     pub fn from_env_str(s: &str) -> Result<Self> {
+        tracing::trace!(input = s, "BreakerConfig::from_env_str");
         let mut tokens = s.split([':', ' ']).filter(|t| !t.is_empty());
         let threshold = tokens
             .next()
-            .ok_or_else(|| Error::Provider {
-                message: "circuit_breaker: missing threshold".into(),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::warn!("BreakerConfig::from_env_str: missing threshold");
+                Error::Provider {
+                    message: "circuit_breaker: missing threshold".into(),
+                    http_status: None,
+                }
             })?
             .parse::<u32>()
-            .map_err(|e| Error::Provider {
-                message: format!("circuit_breaker: threshold: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::warn!(error = %e, "BreakerConfig::from_env_str: threshold parse failed");
+                Error::Provider {
+                    message: format!("circuit_breaker: threshold: {e}"),
+                    http_status: None,
+                }
             })?;
         let window_secs = tokens
             .next()
-            .ok_or_else(|| Error::Provider {
-                message: "circuit_breaker: missing window_secs".into(),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::warn!("BreakerConfig::from_env_str: missing window_secs");
+                Error::Provider {
+                    message: "circuit_breaker: missing window_secs".into(),
+                    http_status: None,
+                }
             })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider {
-                message: format!("circuit_breaker: window_secs: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::warn!(error = %e, "BreakerConfig::from_env_str: window_secs parse failed");
+                Error::Provider {
+                    message: format!("circuit_breaker: window_secs: {e}"),
+                    http_status: None,
+                }
             })?;
         let cooldown_secs = tokens
             .next()
-            .ok_or_else(|| Error::Provider {
-                message: "circuit_breaker: missing cooldown_secs".into(),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::warn!("BreakerConfig::from_env_str: missing cooldown_secs");
+                Error::Provider {
+                    message: "circuit_breaker: missing cooldown_secs".into(),
+                    http_status: None,
+                }
             })?
             .parse::<u64>()
-            .map_err(|e| Error::Provider {
-                message: format!("circuit_breaker: cooldown_secs: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::warn!(error = %e, "BreakerConfig::from_env_str: cooldown_secs parse failed");
+                Error::Provider {
+                    message: format!("circuit_breaker: cooldown_secs: {e}"),
+                    http_status: None,
+                }
             })?;
         Ok(Self::new(
             threshold,
@@ -334,6 +405,7 @@ pub struct BreakerRegistry {
 
 impl BreakerRegistry {
     pub fn new() -> Self {
+        tracing::debug!("BreakerRegistry: constructed (default config)");
         Self {
             by_pair: Arc::new(RwLock::new(HashMap::new())),
             default_config: BreakerConfig::default(),
@@ -341,6 +413,12 @@ impl BreakerRegistry {
     }
 
     pub fn new_with_config(default_config: BreakerConfig) -> Self {
+        tracing::debug!(
+            threshold = default_config.threshold,
+            window_secs = default_config.window.as_secs(),
+            cooldown_secs = default_config.cooldown.as_secs(),
+            "BreakerRegistry: constructed with custom default config"
+        );
         Self {
             by_pair: Arc::new(RwLock::new(HashMap::new())),
             default_config,
@@ -352,6 +430,12 @@ impl BreakerRegistry {
     /// `breaker_for(provider, role)` returns this breaker
     /// instead of constructing a default one.
     pub fn pre_create(&mut self, provider: &str, role: Role, cfg: BreakerConfig) -> &mut Self {
+        tracing::debug!(
+            provider,
+            role = ?role,
+            threshold = cfg.threshold,
+            "BreakerRegistry: pre_create"
+        );
         let key = (provider.to_string(), role);
         let breaker = CircuitBreaker::new(cfg.threshold, cfg.window, cfg.cooldown);
         self.by_pair.write().insert(key, breaker);
@@ -379,6 +463,11 @@ impl BreakerRegistry {
             self.default_config.window,
             self.default_config.cooldown,
         );
+        tracing::debug!(
+            provider,
+            role = ?role,
+            "BreakerRegistry: breaker_for lazily created"
+        );
         w.insert(key, breaker.clone());
         breaker
     }
@@ -393,8 +482,11 @@ impl BreakerRegistry {
     pub fn snapshot(&self, provider: &str, role: Role) -> Option<(String, u32)> {
         let key = (provider.to_string(), role);
         let r = self.by_pair.read();
-        r.get(&key)
-            .map(|b| (b.state().to_string(), b.failure_count()))
+        let out = r
+            .get(&key)
+            .map(|b| (b.state().to_string(), b.failure_count()));
+        tracing::trace!(provider, role = ?role, present = out.is_some(), "BreakerRegistry::snapshot");
+        out
     }
 }
 

@@ -26,31 +26,42 @@ impl SecretString {
     /// Build a new `SecretString` from an owned `String`. The caller is
     /// responsible for ensuring the value is actually a secret.
     pub fn new(value: String) -> Self {
+        tracing::trace!(
+            value_len = value.len(),
+            empty = value.is_empty(),
+            "SecretString::new: enter"
+        );
         Self(value)
     }
 
     /// Build an empty secret. Useful as a placeholder while a key is
     /// being resolved from environment or interactive input.
     pub fn empty() -> Self {
+        tracing::trace!("SecretString::empty: enter");
         Self(String::new())
     }
 
     /// Returns true if no secret is held.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        let empty = self.0.is_empty();
+        tracing::trace!(empty, "SecretString::is_empty");
+        empty
     }
 
     /// Borrow the underlying string. Use sparingly — the borrow should
     /// not outlive the call site that needs the secret.
     pub fn expose(&self) -> &str {
+        tracing::trace!(value_len = self.0.len(), "SecretString::expose");
         &self.0
     }
 
     /// Consume the wrapper and return the inner `String`. The caller
     /// takes ownership of zeroization duties.
     pub fn into_inner(mut self) -> String {
+        tracing::trace!(value_len = self.0.len(), "SecretString::into_inner: enter");
         let inner = std::mem::take(&mut self.0);
         self.0.zeroize();
+        tracing::trace!(value_len = inner.len(), "SecretString::into_inner: ok");
         inner
     }
 }
@@ -132,6 +143,13 @@ pub enum SecretSource {
 impl SecretSource {
     /// Human-readable description of where the secret is sourced.
     pub fn describe(&self) -> String {
+        let kind = match self {
+            Self::Env(_) => "env",
+            Self::File(_) => "file",
+            Self::Interactive => "interactive",
+            Self::Keyring => "keyring",
+        };
+        tracing::trace!(kind, "SecretSource::describe");
         match self {
             Self::Env(name) => format!("env:{name}"),
             Self::File(path) => format!("file:{path}"),

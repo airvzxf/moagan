@@ -62,6 +62,7 @@ impl Profile {
     /// Construct an empty profile. Equivalent to `Profile::default()`
     /// but reads better at call sites.
     pub fn empty() -> Self {
+        tracing::trace!("Profile::empty");
         Self::default()
     }
 
@@ -71,6 +72,7 @@ impl Profile {
     /// `Err(Error::InvalidArgs)` when no file matches or when
     /// the `extends` chain has a cycle.
     pub fn load(name: &str) -> Result<Self> {
+        tracing::debug!(name, "Profile::load: enter");
         Self::load_with_history(name, &mut Vec::new())
     }
 
@@ -81,22 +83,51 @@ impl Profile {
     /// a baseline and overlay self entries on top so self wins
     /// on key collision.
     pub fn merge_with(mut self, parent: &Profile) -> Self {
+        tracing::trace!(
+            self_extends = ?self.extends,
+            parent_extends = ?parent.extends,
+            "Profile::merge_with: enter"
+        );
         let mut forbidden = parent.gate_forbidden_techs.clone();
         forbidden.extend(self.gate_forbidden_techs.iter().cloned());
         forbidden.sort();
         forbidden.dedup();
+        tracing::trace!(
+            forbidden_count = forbidden.len(),
+            "Profile::merge_with: forbidden_techs unioned+deduped"
+        );
         self.gate_forbidden_techs = forbidden;
         if self.gate_min_length.is_none() {
             self.gate_min_length = parent.gate_min_length;
+            tracing::trace!(
+                value = ?self.gate_min_length,
+                "Profile::merge_with: gate_min_length inherited from parent"
+            );
         }
         if self.gate_max_length.is_none() {
             self.gate_max_length = parent.gate_max_length;
+            tracing::trace!(
+                value = ?self.gate_max_length,
+                "Profile::merge_with: gate_max_length inherited from parent"
+            );
         }
         let mut temps = parent.temperature_overrides.clone();
+        let parent_temp_count = temps.len();
         temps.extend(self.temperature_overrides);
+        tracing::trace!(
+            parent_entries = parent_temp_count,
+            merged_entries = temps.len(),
+            "Profile::merge_with: temperature_overrides merged"
+        );
         self.temperature_overrides = temps;
         let mut quorums = parent.judge_quorum_overrides.clone();
+        let parent_quorum_count = quorums.len();
         quorums.extend(self.judge_quorum_overrides);
+        tracing::trace!(
+            parent_entries = parent_quorum_count,
+            merged_entries = quorums.len(),
+            "Profile::merge_with: judge_quorum_overrides merged"
+        );
         self.judge_quorum_overrides = quorums;
         self
     }
@@ -105,12 +136,14 @@ impl Profile {
     /// where `--profile ""` should be a no-op rather than load
     /// the literal profile named `""`.
     pub fn is_empty(&self) -> bool {
-        self.extends.is_none()
+        let empty = self.extends.is_none()
             && self.gate_forbidden_techs.is_empty()
             && self.gate_min_length.is_none()
             && self.gate_max_length.is_none()
             && self.temperature_overrides.is_empty()
-            && self.judge_quorum_overrides.is_empty()
+            && self.judge_quorum_overrides.is_empty();
+        tracing::trace!(empty, "Profile::is_empty");
+        empty
     }
 
     /// Look up a per-role temperature override by role name (e.g.
@@ -118,7 +151,9 @@ impl Profile {
     /// does not override that role — callers should fall back to
     /// the hard-coded role default in `phases::phase`.
     pub fn temperature_for(&self, role: &str) -> Option<f32> {
-        self.temperature_overrides.get(role).copied()
+        let v = self.temperature_overrides.get(role).copied();
+        tracing::trace!(role, found = v.is_some(), value = ?v, "Profile::temperature_for");
+        v
     }
 
     /// Look up a per-mode judge quorum override by mode name (e.g.
@@ -126,11 +161,23 @@ impl Profile {
     /// not override that mode — callers should fall back to
     /// [`crate::phases::cardinality::judge_quorum`].
     pub fn judge_quorum_for(&self, mode: &str) -> Option<usize> {
-        self.judge_quorum_overrides.get(mode).copied()
+        let v = self.judge_quorum_overrides.get(mode).copied();
+        tracing::trace!(mode, found = v.is_some(), value = ?v, "Profile::judge_quorum_for");
+        v
     }
 
     fn load_with_history(name: &str, chain: &mut Vec<String>) -> Result<Self> {
+        tracing::trace!(
+            name,
+            chain_depth = chain.len(),
+            "Profile::load_with_history: enter"
+        );
         if chain.iter().any(|ancestor| ancestor == name) {
+            tracing::error!(
+                name,
+                chain = ?chain,
+                "Profile::load_with_history: circular extends chain detected"
+            );
             return Err(Error::InvalidArgs(format!(
                 "circular profile extends chain detected: {} -> {name}",
                 chain.join(" -> ")
@@ -140,15 +187,29 @@ impl Profile {
         let path = match locate(name) {
             Some(p) => p,
             None => {
+                tracing::warn!(
+                    name,
+                    "Profile::load_with_history: not found in MOAGAN_HOME or XDG paths"
+                );
                 chain.pop();
                 return Err(Error::InvalidArgs(format!(
                     "profile '{name}' not found in MOAGAN_HOME or XDG paths"
                 )));
             }
         };
+        tracing::debug!(
+            name,
+            path = %path.display(),
+            "Profile::load_with_history: located"
+        );
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "Profile::load_with_history: read failed"
+                );
                 chain.pop();
                 return Err(Error::Io(IoError::Read {
                     path: path.clone(),
@@ -159,6 +220,11 @@ impl Profile {
         let parsed = match toml::from_str::<Profile>(&text) {
             Ok(p) => p,
             Err(e) => {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "Profile::load_with_history: TOML parse failed"
+                );
                 chain.pop();
                 return Err(Error::Io(IoError::Parse {
                     path: path.clone(),
@@ -166,10 +232,23 @@ impl Profile {
                 }));
             }
         };
-        let result = if let Some(parent_name) = &parsed.extends {
-            let parent = Profile::load_with_history(parent_name, chain)?;
-            Ok(parsed.merge_with(&parent))
+        let result = if let Some(parent_name) = parsed.extends.clone() {
+            tracing::debug!(
+                name,
+                parent_name = %parent_name,
+                "Profile::load_with_history: following extends chain"
+            );
+            let parent = Profile::load_with_history(&parent_name, chain)?;
+            let merged = parsed.merge_with(&parent);
+            tracing::debug!(
+                name,
+                parent_name = %parent_name,
+                forbidden_count = merged.gate_forbidden_techs.len(),
+                "Profile::load_with_history: merged with parent"
+            );
+            Ok(merged)
         } else {
+            tracing::trace!(name, "Profile::load_with_history: leaf profile");
             Ok(parsed)
         };
         // Pop on the way out so siblings (e.g. when a profile
@@ -185,10 +264,12 @@ impl Profile {
 }
 
 fn locate(name: &str) -> Option<PathBuf> {
+    tracing::trace!(name, "locate: enter");
     let filename = format!("{name}.toml");
     if let Ok(moagan_home) = std::env::var("MOAGAN_HOME") {
         let p = PathBuf::from(moagan_home).join("profiles").join(&filename);
         if p.exists() {
+            tracing::trace!(path = %p.display(), "locate: hit MOAGAN_HOME");
             return Some(p);
         }
     }
@@ -199,9 +280,11 @@ fn locate(name: &str) -> Option<PathBuf> {
             .join("profiles")
             .join(&filename);
         if p.exists() {
+            tracing::trace!(path = %p.display(), "locate: hit XDG $HOME");
             return Some(p);
         }
     }
+    tracing::trace!(name, "locate: miss");
     None
 }
 

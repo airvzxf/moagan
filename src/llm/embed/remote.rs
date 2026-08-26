@@ -166,6 +166,12 @@ impl RemoteEmbedderProvider {
             "model".to_owned(),
             serde_json::Value::String(model.to_owned()),
         );
+        tracing::trace!(
+            provider = self.as_str(),
+            model,
+            count = texts.len(),
+            "RemoteEmbedderProvider::build_body"
+        );
         serde_json::Value::Object(obj)
     }
 
@@ -363,22 +369,34 @@ impl RemoteEmbedder {
         model: &str,
         dimensions: u32,
     ) -> Result<Self> {
+        tracing::debug!(
+            provider = provider.as_str(),
+            endpoint,
+            api_key_env,
+            model,
+            dimensions,
+            "RemoteEmbedder::with_provider: enter"
+        );
         if endpoint.trim().is_empty() {
+            tracing::warn!("RemoteEmbedder: empty endpoint");
             return Err(Error::InvalidArgs(
                 "remote embedder endpoint must not be empty".into(),
             ));
         }
         if api_key_env.trim().is_empty() {
+            tracing::warn!("RemoteEmbedder: empty api_key_env");
             return Err(Error::InvalidArgs(
                 "remote embedder api_key_env must not be empty".into(),
             ));
         }
         if model.trim().is_empty() {
+            tracing::warn!("RemoteEmbedder: empty model");
             return Err(Error::InvalidArgs(
                 "remote embedder model must not be empty".into(),
             ));
         }
         if dimensions == 0 {
+            tracing::warn!("RemoteEmbedder: zero dimensions");
             return Err(Error::InvalidArgs(
                 "remote embedder dimensions must be > 0".into(),
             ));
@@ -389,10 +407,20 @@ impl RemoteEmbedder {
             .connect_timeout(Duration::from_secs(15))
             .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|e| Error::Provider {
-                message: format!("build reqwest client: {e}"),
-                http_status: None,
+            .map_err(|e| {
+                tracing::error!(error = %e, "RemoteEmbedder: reqwest client build failed");
+                Error::Provider {
+                    message: format!("build reqwest client: {e}"),
+                    http_status: None,
+                }
             })?;
+        tracing::info!(
+            provider = provider.as_str(),
+            endpoint,
+            model,
+            dimensions,
+            "RemoteEmbedder: constructed"
+        );
         Ok(Self {
             provider,
             endpoint: endpoint.trim_end_matches('/').to_owned(),
@@ -440,8 +468,14 @@ impl RemoteEmbedder {
     /// the trait method on `RemoteEmbedder`.
     async fn embed_batch_transport(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
+            tracing::trace!("RemoteEmbedder::embed_batch_transport: empty input, noop");
             return Ok(Vec::new());
         }
+        tracing::debug!(
+            provider = self.provider.as_str(),
+            count = texts.len(),
+            "RemoteEmbedder::embed_batch_transport: starting"
+        );
         let url = self.url();
         let body = self.provider.build_body(&self.model, texts);
         let headers = build_auth_headers(&self.api_key)?;
@@ -452,14 +486,20 @@ impl RemoteEmbedder {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Provider {
-                message: format!("{}: network: {e}", self.provider.as_str()),
-                http_status: None,
+            .map_err(|e| {
+                tracing::warn!(provider = self.provider.as_str(), error = %e, "RemoteEmbedder: network error");
+                Error::Provider {
+                    message: format!("{}: network: {e}", self.provider.as_str()),
+                    http_status: None,
+                }
             })?;
         let status = response.status();
-        let bytes = response.bytes().await.map_err(|e| Error::Provider {
-            message: format!("{}: read body: {e}", self.provider.as_str()),
-            http_status: None,
+        let bytes = response.bytes().await.map_err(|e| {
+            tracing::warn!(provider = self.provider.as_str(), error = %e, "RemoteEmbedder: body read failed");
+            Error::Provider {
+                message: format!("{}: read body: {e}", self.provider.as_str()),
+                http_status: None,
+            }
         })?;
         // Status check FIRST so an upstream that returns a non-JSON
         // error body (e.g. an HTML 401 page from a misconfigured
@@ -469,6 +509,11 @@ impl RemoteEmbedder {
         // provider wire format.
         if !status.is_success() {
             let body_str = String::from_utf8_lossy(&bytes).into_owned();
+            tracing::warn!(
+                provider = self.provider.as_str(),
+                status = status.as_u16(),
+                "RemoteEmbedder: non-success status"
+            );
             return Err(classify_status(status, &body_str));
         }
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
@@ -477,6 +522,7 @@ impl RemoteEmbedder {
             // sent a payload we couldn't decode. `http_status: None`
             // is correct here because the failure is at the JSON
             // layer, not the transport layer.
+            tracing::warn!(provider = self.provider.as_str(), error = %e, "RemoteEmbedder: decode failed");
             Error::Provider {
                 message: format!(
                     "{}: decode JSON (HTTP {status}): {e}",
@@ -489,6 +535,12 @@ impl RemoteEmbedder {
         // Reject mismatched vector count up-front so the caller does
         // not silently misalign inputs and outputs.
         if vectors.len() != texts.len() {
+            tracing::warn!(
+                provider = self.provider.as_str(),
+                got = vectors.len(),
+                expected = texts.len(),
+                "RemoteEmbedder: vector count mismatch"
+            );
             return Err(Error::Provider {
                 message: format!(
                     "{}: response carried {} vectors for {} inputs",
@@ -499,6 +551,11 @@ impl RemoteEmbedder {
                 http_status: None,
             });
         }
+        tracing::info!(
+            provider = self.provider.as_str(),
+            count = vectors.len(),
+            "RemoteEmbedder::embed_batch_transport: success"
+        );
         Ok(vectors)
     }
 
@@ -506,6 +563,7 @@ impl RemoteEmbedder {
     /// single input. Same cache-key contract as the rest of the
     /// public API.
     pub async fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
+        tracing::trace!(text_len = text.len(), "RemoteEmbedder::embed_one");
         let mut out = AsyncEmbedder::embed_batch(self, &[text]).await?;
         Ok(out.pop().unwrap_or_default())
     }

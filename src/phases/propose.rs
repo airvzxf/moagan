@@ -147,6 +147,7 @@ impl Phase for ProposePhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(count = self.count, "propose: enter");
         let brief: serde_json::Value = read_json(&ctx.run_dir().brief())?;
         let user = serde_json::to_string(&brief).map_err(crate::Error::from)?;
         let system = system_prompt(Role::Propose).to_owned();
@@ -155,7 +156,18 @@ impl Phase for ProposePhase {
 
         let count = self.count as usize;
         let sketch_ids = Self::load_sketch_ids(ctx);
+        tracing::debug!(
+            sketch_id_count = sketch_ids.len(),
+            "propose: loaded sketch ids"
+        );
         let problem_graph = Self::load_problem_graph(ctx);
+        if let Some(g) = problem_graph.as_ref() {
+            tracing::debug!(
+                node_count = g.nodes.len(),
+                should_decompose = g.should_decompose,
+                "propose: problem graph available for source_nodes"
+            );
+        }
         let system_arc = std::sync::Arc::new(system);
         let user_arc = std::sync::Arc::new(user);
 
@@ -178,6 +190,10 @@ impl Phase for ProposePhase {
                         5,
                     )
                     .await?;
+                tracing::trace!(
+                    proposal_id = %id_for_default,
+                    "propose: parsed proposal"
+                );
                 // PR-flake: when the model returns a parseable Proposal
                 // whose `summary` or `approach` are empty (typically
                 // because the upstream mock served the wrong fixture
@@ -231,12 +247,27 @@ impl Phase for ProposePhase {
 
         let results = join_all(futures).await;
         let mut paths = Vec::with_capacity(count);
+        let mut empty_warns = 0usize;
         for r in results {
-            let (id, proposal) = r?;
+            let (id, proposal) = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %e, "propose: future failed");
+                    return Err(e);
+                }
+            };
             let path: PathBuf = proposals_dir.join(format!("{id}.json"));
             write_json(&path, &proposal)?;
             paths.push(path);
+            if proposal.summary.trim().is_empty() || proposal.approach.trim().is_empty() {
+                empty_warns += 1;
+            }
         }
+        tracing::info!(
+            proposals_written = paths.len(),
+            empty_proposals = empty_warns,
+            "propose: phase complete"
+        );
         Ok(PhaseOutput::Proposals(paths))
     }
 }

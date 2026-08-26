@@ -67,6 +67,12 @@ pub struct BudgetObserver {
 impl BudgetObserver {
     /// Build an observer with the soft/hard defaults (50 / 90).
     pub fn new(db: Db, run_id: RunId) -> Self {
+        tracing::trace!(
+            ?run_id,
+            soft_pct = 50_u8,
+            hard_pct = 90_u8,
+            "budget_observer: new"
+        );
         Self {
             db,
             run_id,
@@ -81,25 +87,54 @@ impl BudgetObserver {
     /// budget is never artificially throttled.
     pub fn pressure(&self) -> Result<PressureLevel> {
         let (planned, used) = self.db.budget_read(self.run_id)?;
+        tracing::trace!(
+            planned,
+            used,
+            soft_pct = self.soft_pct,
+            hard_pct = self.hard_pct,
+            "budget_observer: read"
+        );
         if planned == 0 {
+            tracing::debug!(
+                planned,
+                used,
+                "budget_observer: unlimited plan resolved to Ok"
+            );
             return Ok(PressureLevel::Ok);
         }
         let pct = (used.saturating_mul(100)) / planned;
         let pct_u8 = pct.min(u64::from(u8::MAX)) as u8;
-        if pct_u8 >= self.hard_pct {
-            Ok(PressureLevel::Hard)
+        let level = if pct_u8 >= self.hard_pct {
+            PressureLevel::Hard
         } else if pct_u8 >= self.soft_pct {
-            Ok(PressureLevel::Soft)
+            PressureLevel::Soft
         } else {
-            Ok(PressureLevel::Ok)
-        }
+            PressureLevel::Ok
+        };
+        tracing::debug!(
+            planned,
+            used,
+            pct = pct_u8,
+            ?level,
+            "budget_observer: pressure computed"
+        );
+        Ok(level)
     }
 
     /// `true` when the calling phase should skip its optional
     /// work. The predicate is `true` only when the pressure is
     /// `Hard`; any other tier keeps the optional work on.
     pub fn should_skip_optional(&self) -> Result<bool> {
-        Ok(matches!(self.pressure()?, PressureLevel::Hard))
+        let level = self.pressure()?;
+        let skip = matches!(level, PressureLevel::Hard);
+        if skip {
+            tracing::info!(
+                run_id = %self.run_id,
+                ?level,
+                "budget_observer: should_skip_optional -> true"
+            );
+        }
+        Ok(skip)
     }
 
     /// Append `tokens` to the run's `used_tokens` counter, tagged
@@ -108,6 +143,12 @@ impl BudgetObserver {
     /// so a legacy operator upgrading the binary mid-run does
     /// not see a synthetic write.
     pub fn record(&self, phase: &str, tokens: u64) -> Result<()> {
+        tracing::trace!(
+            phase,
+            tokens,
+            run_id = %self.run_id,
+            "budget_observer: record"
+        );
         self.db.budget_record(self.run_id, phase, tokens)
     }
 }

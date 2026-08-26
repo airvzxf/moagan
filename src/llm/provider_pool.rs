@@ -24,6 +24,7 @@ impl ProviderPool {
     /// Build a pool from the supplied entries; the counter
     /// starts at zero.
     pub fn new(entries: Vec<Arc<dyn ProviderPoolEntry>>) -> Self {
+        tracing::debug!(count = entries.len(), "ProviderPool: constructed");
         Self {
             entries,
             counter: AtomicUsize::new(0),
@@ -36,19 +37,37 @@ impl ProviderPool {
             return None;
         }
         let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.entries.len();
+        tracing::trace!(idx, total = self.entries.len(), "ProviderPool: round_robin");
         Some(idx)
     }
     /// D.19.20: pick with allow_paused gate.
     pub async fn pick(&self, allow_paused: bool) -> Option<usize> {
         let start = self.round_robin()?;
         let n = self.entries.len();
+        tracing::debug!(
+            allow_paused,
+            start,
+            n,
+            "ProviderPool: pick begin (round-robin scan)"
+        );
         for i in 0..n {
             let idx = (start + i) % n;
             let entry = &self.entries[idx];
-            if allow_paused || entry.is_available().await {
+            let avail = if allow_paused {
+                true
+            } else {
+                entry.is_available().await
+            };
+            tracing::trace!(idx, i, avail, "ProviderPool: candidate evaluated");
+            if avail {
+                tracing::debug!(idx, allow_paused, "ProviderPool: pick returned");
                 return Some(idx);
             }
         }
+        tracing::debug!(
+            allow_paused,
+            "ProviderPool: pick returned None (all unavailable)"
+        );
         None
     }
     /// Number of entries in the pool.

@@ -118,6 +118,15 @@ pub struct StopPolicy {
 
 impl Default for StopPolicy {
     fn default() -> Self {
+        tracing::trace!(
+            saturation_threshold = DEFAULT_SATURATION_THRESHOLD,
+            reserve_ratio = DEFAULT_RESERVE_RATIO,
+            outlier_distance = DEFAULT_OUTLIER_DISTANCE,
+            min_sketches = DEFAULT_MIN_SKETCHES,
+            max_sketches = DEFAULT_MAX_SKETCHES,
+            hard_cap = DEFAULT_DISCOVERY_HARD_CAP,
+            "StopPolicy::default"
+        );
         Self {
             saturation_threshold: DEFAULT_SATURATION_THRESHOLD,
             reserve_ratio: DEFAULT_RESERVE_RATIO,

@@ -27,6 +27,7 @@ impl PromptCache {
     /// with an empty `prompt_id` index; callers populate it with
     /// [`register`] as they observe new prompts.
     pub fn new(cache: Arc<Cache>) -> Self {
+        tracing::debug!("PromptCache: constructed with empty by_id index");
         Self {
             by_id: HashMap::new(),
             cache,
@@ -39,13 +40,24 @@ impl PromptCache {
     /// never stored).
     pub fn lookup_by_id(&self, prompt_id: &str) -> Option<CacheEntry> {
         let key = self.by_id.get(prompt_id)?;
-        self.cache.lookup(key).ok().flatten()
+        let hit = self.cache.lookup(key).ok().flatten();
+        if hit.is_some() {
+            tracing::trace!(prompt_id, key, "PromptCache: lookup hit");
+        } else {
+            tracing::debug!(
+                prompt_id,
+                key,
+                "PromptCache: lookup miss (canonical key absent)"
+            );
+        }
+        hit
     }
 
     /// Register the canonical `cache_key` for a `prompt_id`. The
     /// id can then be used with [`lookup_by_id`] until the entry
     /// is evicted or overwritten.
     pub fn register(&mut self, prompt_id: &str, cache_key: String) {
+        tracing::trace!(prompt_id, key = %cache_key, "PromptCache: register");
         self.by_id.insert(prompt_id.to_string(), cache_key);
     }
 }

@@ -28,6 +28,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracing::{debug, info, trace, warn};
+
 use crate::cli::flags_batch;
 use crate::config::Config;
 use crate::discovery::matrix::ExplorationMatrix;
@@ -93,10 +95,20 @@ pub const MIN_SKETCHES_PER_CELL: usize = 10;
 /// integer-division shortfall between cardinality and cells.
 pub fn resolve_matrix(opts: &DiscoverOptions, _cfg: &Config) -> Result<(MatrixSpec, usize)> {
     let sketches_per_cell = opts.sketches_per_cell;
+    debug!(
+        sketches_per_cell,
+        matrix_spec_len = opts.matrix_spec.len(),
+        llm_derive = opts.llm_derive,
+        dimensions = ?opts.dimensions,
+        facets_per_dimension = ?opts.facets_per_dimension,
+        "resolve_matrix: enter"
+    );
     if let Some(spec) = parse_matrix_spec_inputs(&opts.matrix_spec)? {
+        debug!(dims = spec.dimensions.len(), "resolve_matrix: spec path");
         return Ok((spec, sketches_per_cell));
     }
     if opts.llm_derive {
+        debug!("resolve_matrix: llm_derive path");
         return Ok((MatrixSpec::default(), sketches_per_cell));
     }
     if let (Some(_dims), Some(facets_per_dim)) = (opts.dimensions, opts.facets_per_dimension) {
@@ -123,6 +135,10 @@ pub fn resolve_matrix(opts: &DiscoverOptions, _cfg: &Config) -> Result<(MatrixSp
                     facets,
                 });
         }
+        trace!(
+            dims = spec.dimensions.len(),
+            "resolve_matrix: legacy dim×facet path"
+        );
         return Ok((spec, sketches_per_cell));
     }
     if opts.dimensions.is_some() {
@@ -130,9 +146,11 @@ pub fn resolve_matrix(opts: &DiscoverOptions, _cfg: &Config) -> Result<(MatrixSp
         // The LLM picks the facet count asymmetrically per
         // dimension; the `discover_dimensions` phase owns the
         // selection.
+        debug!("resolve_matrix: dimensions-only, LLM picks facets");
         return Ok((MatrixSpec::default(), sketches_per_cell));
     }
     // No flag at all — full LLM-derive.
+    debug!("resolve_matrix: full LLM-derive fallback");
     Ok((MatrixSpec::default(), sketches_per_cell))
 }
 
@@ -144,6 +162,10 @@ pub fn resolve_matrix(opts: &DiscoverOptions, _cfg: &Config) -> Result<(MatrixSp
 fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
     let non_empty: Vec<&String> = entries.iter().filter(|s| !s.trim().is_empty()).collect();
     if non_empty.is_empty() {
+        trace!(
+            entries = entries.len(),
+            "parse_matrix_spec_inputs: all empty"
+        );
         return Ok(None);
     }
     let parsed = MatrixSpec::parse_all(non_empty.into_iter().cloned())?;
@@ -171,6 +193,7 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
 /// spec verbatim) and an active LLM-derive when the operator
 /// passed `--llm-derive` or no spec at all.
 pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
+    debug!("build_discovery_pipeline: enter");
     let (spec, _sketches_per_cell) =
         resolve_matrix(opts, cfg).unwrap_or((MatrixSpec::default(), 10));
     let needs_dimensions_phase = spec.dimensions.is_empty();
@@ -201,6 +224,7 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipelin
 /// pipeline preserves the pause/resume hooks at those phase
 /// boundaries.
 fn build_pre_matrix_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
+    debug!("build_pre_matrix_pipeline: enter");
     let (spec, _sketches_per_cell) =
         resolve_matrix(opts, cfg).unwrap_or((MatrixSpec::default(), 10));
     let mut pipeline = Pipeline::new().push(IntakePhase).push(ClarifyPhase);
@@ -216,6 +240,10 @@ fn build_pre_matrix_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
 /// cancel token still surfaces as a `StopDecision` at the matrix
 /// boundary when the operator presses Ctrl-C.
 fn build_post_matrix_pipeline(opts: &DiscoverOptions) -> Pipeline {
+    debug!(
+        cluster_threshold = opts.cluster_threshold,
+        "build_post_matrix_pipeline: enter"
+    );
     Pipeline::new()
         .push(DiscoverTagPhase)
         .push(DiscoverClusterPhase {
@@ -336,12 +364,14 @@ impl TemperatureProfileSpec {
     /// so the dispatcher surfaces the message through the same
     /// channel as the other CLI validators (D.15.5 pattern).
     pub fn parse(s: &str) -> crate::error::Result<Self> {
+        debug!(spec = s, "TemperatureProfileSpec::parse: enter");
         let mut provider: Option<String> = None;
         let mut temperatures: Option<Vec<f32>> = None;
         let mut replicas: Option<usize> = None;
         for kv in s.split(';') {
             let kv = kv.trim();
             if kv.is_empty() {
+                warn!(spec = s, "empty segment in temperature-profile spec");
                 return Err(crate::error::Error::InvalidArgs(format!(
                     "empty `key=value` segment in temperature-profile spec {s:?}"
                 )));
@@ -414,7 +444,7 @@ impl TemperatureProfileSpec {
                 }
             }
         }
-        Ok(Self {
+        let out = Self {
             provider: provider.ok_or_else(|| {
                 crate::error::Error::InvalidArgs(format!(
                     "missing `provider=<name>` in temperature-profile spec {s:?}"
@@ -430,7 +460,14 @@ impl TemperatureProfileSpec {
                     "missing `replicas=<n>` in temperature-profile spec {s:?}"
                 ))
             })?,
-        })
+        };
+        trace!(
+            provider = %out.provider,
+            temperatures = out.temperatures.len(),
+            replicas = out.replicas_per_temperature,
+            "TemperatureProfileSpec::parse: ok"
+        );
+        Ok(out)
     }
 
     /// Convert into the matrix's `TemperatureProfile` (the form
@@ -447,6 +484,13 @@ impl TemperatureProfileSpec {
 
 /// Run discovery end-to-end. Returns the run id on success.
 pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
+    debug!(
+        provider = %opts.provider,
+        sketches_per_cell = opts.sketches_per_cell,
+        cluster_threshold = opts.cluster_threshold,
+        non_interactive = opts.non_interactive,
+        "discover::run: enter"
+    );
     let home = Arc::new(match opts.home.clone() {
         Some(path) => MoaganHome::at(path),
         None => MoaganHome::resolve()?,
@@ -455,6 +499,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
+    info!(run_id = %run_id, "discover: allocated run directory");
 
     let default_provider = if opts.provider.is_empty() {
         cfg.default_provider.clone()
@@ -495,6 +540,10 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         None,
         Some(&active_pairs),
     )?);
+    debug!(
+        providers = providers.len(),
+        "discover: provider registry built"
+    );
     // PR-x23: pull the auto-probe tables off the registry so the
     // `RunContext` (and the pre-pipeline `await_ready` gate below)
     // sees the same handles the registry fired.
@@ -502,14 +551,20 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     let temperature_table = providers.temperature_table().cloned();
     let param_rejections = providers.param_rejections().cloned();
     let default_model = if default_provider.contains(':') {
-        crate::cli::probe::parse_provider_model(&default_provider)
+        let m = crate::cli::probe::parse_provider_model(&default_provider)
             .map(|(_, m)| m)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        trace!(model = %m, "discover: default model parsed (registry)");
+        m
     } else {
         // Bare SECTION is no longer accepted in v0.10+ (no
         // implicit "first model" fallback). Surface the error
         // early so the operator sees it before the rest of the
         // pipeline boots.
+        warn!(
+            provider = %default_provider,
+            "discover: bare SECTION without model (registry)"
+        );
         return Err(Error::InvalidArgs(format!(
             "--provider '{default_provider}' is a bare section name; \
              pass the explicit SECTION:MODEL form (e.g. \
@@ -540,6 +595,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }
     let resolved_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
+    debug!(resolved_parallelism, "discover: parallelism resolved");
     // Wire the per-provider `RateLimiter` from the resolved
     // `--max-parallelism` so `parallelism=32` actually produces
     // 32 in flight rather than being throttled at the hardcoded
@@ -583,9 +639,19 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     // `RunContext::new_with_config` so the coordinator reads the
     // merged profiles from `ctx.config.discovery_matrix`.
     let mut effective_cfg = cfg.clone();
+    debug!(
+        temperature_profiles = opts.temperature_profiles.len(),
+        "discover: merging temperature profiles"
+    );
     for spec in opts.temperature_profiles.iter() {
         let model = spec.provider.clone();
         let profile = spec.clone().into_matrix_profile();
+        trace!(
+            provider = %model,
+            temperatures = profile.temperatures.len(),
+            replicas = profile.replicas_per_temperature,
+            "discover: applied temperature profile"
+        );
         effective_cfg
             .discovery_matrix
             .temperature_profiles
@@ -731,13 +797,16 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     }
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
+    info!(run_id = %run_id, "discover: pre-matrix pipeline started");
     let _outputs = tokio::select! {
         result = &mut pipeline_future => result?,
         _ = tokio::signal::ctrl_c() => {
+            warn!(run_id = %run_id, "discover: shutdown signal received");
             ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
             return Err(ctx.cancel().into_error());
         }
     };
+    debug!(run_id = %run_id, "discover: pre-matrix pipeline done");
 
     // PR-17: drive the sketch fan-out through the discovery
     // coordinator instead of the flat `DiscoverMatrixPhase`. The
@@ -759,11 +828,13 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     let coordinator_future =
         coordinator.run_with_ctx_and_target(coordinator_ctx.clone(), Some(opts.sketches_per_cell));
     tokio::pin!(coordinator_future);
+    info!(run_id = %run_id, "discover: matrix coordinator started");
     let outcome: DiscoveryOutcome = tokio::select! {
         result = &mut coordinator_future => result.map_err(|e| match e {
             crate::discovery::coordinator::CoordinatorError::Error(inner) => inner,
         })?,
         _ = tokio::signal::ctrl_c() => {
+            warn!(run_id = %run_id, "discover: coordinator shutdown signal");
             ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
             return Err(ctx.cancel().into_error());
         }
@@ -777,16 +848,20 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
     let post_pipeline = build_post_matrix_pipeline(&opts);
     let post_future = post_pipeline.run(&ctx);
     tokio::pin!(post_future);
+    info!(run_id = %run_id, "discover: post-matrix pipeline started");
     let _outputs = tokio::select! {
         result = &mut post_future => result?,
         _ = tokio::signal::ctrl_c() => {
+            warn!(run_id = %run_id, "discover: post-matrix shutdown signal");
             ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
             return Err(ctx.cancel().into_error());
         }
     };
 
     telemetry.flush()?;
+    debug!(run_id = %run_id, "discover: telemetry flushed");
     if let Err(e) = db.update_run_status(run_id, "completed") {
+        warn!(run_id = %run_id, error = %e, "discover: failed to update run status");
         eprintln!("warn: failed to update run status: {e}");
     }
     println!(
@@ -795,6 +870,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config) -> Result<RunId> {
         default_provider,
         run_dir.root().display()
     );
+    info!(run_id = %run_id, "discover: completed");
     Ok(run_id)
 }
 

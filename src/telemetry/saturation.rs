@@ -120,10 +120,19 @@ impl SaturationEvent {
         run_id: Option<String>,
         failure_count: u32,
     ) -> Self {
+        let provider = provider.into();
+        let model = model.into();
+        tracing::info!(
+            provider = %provider,
+            model = %model,
+            failure_count,
+            has_run_id = run_id.is_some(),
+            "SaturationEvent::from_circuit_breaker"
+        );
         Self {
             run_id,
-            provider: provider.into(),
-            model: model.into(),
+            provider,
+            model,
             kind: SaturationKind::Error,
             threshold_pct: 100.0,
             observed_at_unix: now_unix_secs(),
@@ -144,10 +153,20 @@ impl SaturationEvent {
         capacity: u32,
         refill_per_sec: u32,
     ) -> Self {
+        let provider = provider.into();
+        let model = model.into();
+        tracing::warn!(
+            provider = %provider,
+            model = %model,
+            threshold_pct,
+            capacity,
+            refill_per_sec,
+            "SaturationEvent::from_rate_limit"
+        );
         Self {
             run_id,
-            provider: provider.into(),
-            model: model.into(),
+            provider,
+            model,
             kind: SaturationKind::RateLimit,
             threshold_pct,
             observed_at_unix: now_unix_secs(),
@@ -170,10 +189,18 @@ impl SaturationEvent {
         run_id: Option<String>,
         threshold_pct: f32,
     ) -> Self {
+        let provider = provider.into();
+        let model = model.into();
+        tracing::info!(
+            provider = %provider,
+            model = %model,
+            threshold_pct,
+            "SaturationEvent::from_token_saturation"
+        );
         Self {
             run_id,
-            provider: provider.into(),
-            model: model.into(),
+            provider,
+            model,
             kind: SaturationKind::Token,
             threshold_pct,
             observed_at_unix: now_unix_secs(),

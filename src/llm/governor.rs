@@ -69,6 +69,7 @@ impl ThrottleConfig {
     /// `[throttle_per_role]` in `~/.config/moagan/config.toml` or
     /// `MOAGAN_THROTTLE_PER_ROLE_<role>=...`.
     pub fn default_for_role(role: Role) -> Self {
+        tracing::trace!(role = ?role, "ThrottleConfig::default_for_role");
         match role {
             Role::Tagger => Self::new(4, 16, 500, 30_000, 5_000, 500),
             Role::Sketch => Self::new(2, 8, 500, 30_000, 5_000, 500),
@@ -95,6 +96,13 @@ impl ThrottleConfig {
         // very first 429 saturates at `max_backoff_ms`, which is
         // exactly what we want when the operator misconfigures.
         let initial_backoff_ms = initial_backoff_ms.min(max_backoff_ms);
+        tracing::trace!(
+            initial_concurrency,
+            max_concurrency,
+            initial_backoff_ms,
+            max_backoff_ms,
+            "ThrottleConfig::new"
+        );
         Self {
             initial_concurrency,
             max_concurrency,
@@ -220,6 +228,11 @@ impl ThrottleGovernor {
     /// state is `initial_concurrency` and `0` ms backoff so the
     /// first call to `pre_call` returns immediately.
     pub fn new(config: ThrottleConfig) -> Self {
+        tracing::debug!(
+            initial_concurrency = config.initial_concurrency,
+            max_concurrency = config.max_concurrency,
+            "ThrottleGovernor: constructed"
+        );
         let start = State {
             current_concurrency: config.initial_concurrency,
             current_backoff_ms: 0,
@@ -251,6 +264,12 @@ impl ThrottleGovernor {
         };
         let total_ms = backoff_ms.saturating_add(jitter);
         let dur = Duration::from_millis(total_ms);
+        tracing::trace!(
+            backoff_ms,
+            jitter,
+            total_ms,
+            "ThrottleGovernor::pre_call: sleeping"
+        );
         tokio::time::sleep(dur).await;
         dur
     }
@@ -266,6 +285,8 @@ impl ThrottleGovernor {
         g.consecutive_429s = g.consecutive_429s.saturating_add(1);
         g.consecutive_ok = 0;
         g.last_429_at = Some(now);
+        let before_concurrency = g.current_concurrency;
+        let before_backoff = g.current_backoff_ms;
         // Multiplicative decrease (floor 1). Skip when initial == 1,
         // which is the floor case.
         g.current_concurrency = (g.current_concurrency / 2).max(1);
@@ -292,6 +313,14 @@ impl ThrottleGovernor {
         } else {
             g.current_backoff_ms = next;
         }
+        tracing::info!(
+            before_concurrency,
+            after_concurrency = g.current_concurrency,
+            before_backoff_ms = before_backoff,
+            after_backoff_ms = g.current_backoff_ms,
+            retry_after = retry_after.is_some(),
+            "ThrottleGovernor::on_transient_429: applied"
+        );
     }
 
     /// Notify the governor that a call succeeded. After
@@ -327,7 +356,13 @@ impl ThrottleGovernor {
                 _ => false,
             };
             if raise {
+                let before = g.current_concurrency;
                 g.current_concurrency += 1;
+                tracing::debug!(
+                    before,
+                    after = g.current_concurrency,
+                    "ThrottleGovernor::on_success: concurrency raised"
+                );
             }
         }
     }
@@ -399,6 +434,11 @@ impl Clone for GovernorRegistry {
 
 impl GovernorRegistry {
     pub fn new() -> Self {
+        tracing::debug!(
+            default_initial_concurrency = 2,
+            default_max_concurrency = 8,
+            "GovernorRegistry: constructed"
+        );
         Self {
             by_pair: Arc::new(RwLock::new(HashMap::new())),
             default_initial_concurrency: 2,
@@ -425,6 +465,11 @@ impl GovernorRegistry {
         }
         let cfg = ThrottleConfig::default_for_role(role);
         let gov = Arc::new(ThrottleGovernor::new(cfg));
+        tracing::debug!(
+            provider,
+            role = ?role,
+            "GovernorRegistry: governor_for lazily created"
+        );
         w.insert(key, gov.clone());
         gov
     }
@@ -438,6 +483,12 @@ impl GovernorRegistry {
         role: Role,
         cfg: ThrottleConfig,
     ) -> &mut Self {
+        tracing::debug!(
+            provider,
+            role = ?role,
+            initial_concurrency = cfg.initial_concurrency,
+            "GovernorRegistry: with_config_for"
+        );
         let key = (provider.to_string(), role);
         self.by_pair
             .write()
@@ -450,7 +501,10 @@ impl GovernorRegistry {
     /// not appear until the first call).
     pub fn snapshots(&self) -> Vec<((String, Role), GovernorSnapshot)> {
         let r = self.by_pair.read();
-        r.iter().map(|(k, g)| (k.clone(), g.snapshot())).collect()
+        let out: Vec<((String, Role), GovernorSnapshot)> =
+            r.iter().map(|(k, g)| (k.clone(), g.snapshot())).collect();
+        tracing::trace!(count = out.len(), "GovernorRegistry::snapshots");
+        out
     }
 
     /// Iterate every (provider, role) pair the registry has built so

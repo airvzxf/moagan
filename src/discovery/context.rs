@@ -86,12 +86,21 @@ impl DiscoveryContext {
     /// [`crate::discovery::tagger_threshold::DEFAULT_TAGGER_THRESHOLD`]
     /// when the caller does not pass an explicit value.
     pub fn build(run_dir: &RunDir<'_>) -> Self {
+        tracing::debug!(
+            run_dir = %run_dir.root().display(),
+            "DiscoveryContext::build"
+        );
         Self::build_with_threshold(run_dir, None)
     }
 
     /// Like [`DiscoveryContext::build`] but with an explicit
     /// `tagger_threshold`. `None` falls back to the default.
     pub fn build_with_threshold(run_dir: &RunDir<'_>, tagger_threshold: Option<f32>) -> Self {
+        tracing::debug!(
+            run_dir = %run_dir.root().display(),
+            tagger_threshold = ?tagger_threshold,
+            "DiscoveryContext::build_with_threshold"
+        );
         let root = run_dir.root();
         let brief_hash = read_blake3_hex(&root.join("brief.json"));
         let matrix_hash = read_blake3_hex(&root.join("exploration_matrix.json"));
@@ -101,14 +110,24 @@ impl DiscoveryContext {
         let threshold = tagger_threshold
             .filter(|v| (0.0..=1.0).contains(v))
             .unwrap_or(crate::discovery::tagger_threshold::DEFAULT_TAGGER_THRESHOLD);
-        Self {
+        let ctx = Self {
             sketch_ids,
             contradiction_ids,
             facet_ids,
             brief_hash,
             matrix_hash,
             tagger_threshold: threshold,
-        }
+        };
+        tracing::info!(
+            sketches = ctx.sketch_ids.len(),
+            contradictions = ctx.contradiction_ids.len(),
+            facets = ctx.facet_ids.len(),
+            brief_hash_len = ctx.brief_hash.len(),
+            matrix_hash_len = ctx.matrix_hash.len(),
+            tagger_threshold = ctx.tagger_threshold,
+            "DiscoveryContext::build_with_threshold result"
+        );
+        ctx
     }
 
     /// Path to the sidecar (`<run_dir>/discovery_context.json`).
@@ -122,6 +141,11 @@ impl DiscoveryContext {
     /// snapshot.
     pub fn persist(&self, run_dir: &RunDir<'_>) -> Result<PathBuf> {
         let path = Self::path(run_dir);
+        tracing::debug!(
+            path = %path.display(),
+            sketches = self.sketch_ids.len(),
+            "DiscoveryContext::persist"
+        );
         write_json(&path, self)?;
         Ok(path)
     }
@@ -134,14 +158,25 @@ impl DiscoveryContext {
     /// silently drop).
     pub fn load(run_dir: &RunDir<'_>) -> Result<Option<Self>> {
         let path = Self::path(run_dir);
+        tracing::debug!(path = %path.display(), "DiscoveryContext::load");
         if !path.exists() {
+            tracing::trace!("DiscoveryContext::load: absent");
             return Ok(None);
         }
         match read_json::<Self>(&path) {
-            Ok(c) => Ok(Some(c)),
-            Err(e) => Err(Error::InvalidState(format!(
-                "discovery_context.json malformed: {e}"
-            ))),
+            Ok(c) => {
+                tracing::trace!(sketches = c.sketch_ids.len(), "DiscoveryContext::load: ok");
+                Ok(Some(c))
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "DiscoveryContext::load: malformed sidecar"
+                );
+                Err(Error::InvalidState(format!(
+                    "discovery_context.json malformed: {e}"
+                )))
+            }
         }
     }
 }
@@ -152,9 +187,12 @@ impl DiscoveryContext {
 /// persisted yet.
 fn read_blake3_hex(path: &Path) -> String {
     let Ok(bytes) = std::fs::read(path) else {
+        tracing::trace!(path = %path.display(), "read_blake3_hex: absent");
         return String::new();
     };
-    blake3::hash(&bytes).to_hex().to_string()
+    let hex = blake3::hash(&bytes).to_hex().to_string();
+    tracing::trace!(path = %path.display(), bytes = bytes.len(), "read_blake3_hex: ok");
+    hex
 }
 
 /// Walk a directory of `*.json` files (skipping `.meta.json`
@@ -168,6 +206,7 @@ where
     F: Fn(&str) -> T,
 {
     let Ok(read) = std::fs::read_dir(dir) else {
+        tracing::trace!(dir = %dir.display(), "scan_id_dir: absent");
         return Vec::new();
     };
     let mut out: Vec<T> = Vec::new();
@@ -191,6 +230,11 @@ where
     for stem in stems {
         out.push(ctor(&stem));
     }
+    tracing::trace!(
+        dir = %dir.display(),
+        count = out.len(),
+        "scan_id_dir result"
+    );
     out
 }
 
@@ -203,6 +247,7 @@ where
 /// partially-written run still produces a populated context.
 fn collect_contradiction_ids(dir: &Path) -> Vec<ContradictionId> {
     let Ok(read) = std::fs::read_dir(dir) else {
+        tracing::trace!(dir = %dir.display(), "collect_contradiction_ids: absent");
         return Vec::new();
     };
     let mut paths: Vec<PathBuf> = read
@@ -218,8 +263,14 @@ fn collect_contradiction_ids(dir: &Path) -> Vec<ContradictionId> {
         .collect();
     paths.sort();
     let mut out: Vec<ContradictionId> = Vec::new();
+    let mut skipped = 0usize;
     for p in paths {
         let Ok(records) = read_json::<Vec<crate::domain::Contradiction>>(&p) else {
+            skipped += 1;
+            tracing::trace!(
+                path = %p.display(),
+                "collect_contradiction_ids: skipping malformed file"
+            );
             continue;
         };
         for c in records {
@@ -228,6 +279,17 @@ fn collect_contradiction_ids(dir: &Path) -> Vec<ContradictionId> {
             }
         }
     }
+    if skipped > 0 {
+        tracing::warn!(
+            skipped,
+            "collect_contradiction_ids: skipped malformed files"
+        );
+    }
+    tracing::trace!(
+        dir = %dir.display(),
+        count = out.len(),
+        "collect_contradiction_ids result"
+    );
     out
 }
 
@@ -241,6 +303,7 @@ fn collect_contradiction_ids(dir: &Path) -> Vec<ContradictionId> {
 /// phase).
 fn collect_facet_ids(dir: &Path) -> Vec<FacetId> {
     let Ok(read) = std::fs::read_dir(dir) else {
+        tracing::trace!(dir = %dir.display(), "collect_facet_ids: absent");
         return Vec::new();
     };
     let mut out: Vec<FacetId> = Vec::new();
@@ -256,14 +319,28 @@ fn collect_facet_ids(dir: &Path) -> Vec<FacetId> {
         })
         .collect();
     paths.sort();
+    let mut skipped = 0usize;
     for p in paths {
         let Ok(list) = read_json::<crate::domain::FacetList>(&p) else {
+            skipped += 1;
+            tracing::trace!(
+                path = %p.display(),
+                "collect_facet_ids: skipping malformed file"
+            );
             continue;
         };
         for facet in &list.facets {
             out.push(FacetId(format!("{}:{}", list.category_id, facet.id)));
         }
     }
+    if skipped > 0 {
+        tracing::warn!(skipped, "collect_facet_ids: skipped malformed files");
+    }
+    tracing::trace!(
+        dir = %dir.display(),
+        count = out.len(),
+        "collect_facet_ids result"
+    );
     out
 }
 

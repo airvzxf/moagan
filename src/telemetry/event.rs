@@ -106,6 +106,7 @@ impl TelemetryEvent {
     /// Emit the event via `tracing::info!` with the JSON payload.
     pub fn emit(&self) {
         let json = serde_json::to_string(self).unwrap_or_default();
+        tracing::trace!("TelemetryEvent::emit: emitting");
         tracing::info!(event = %json, "TelemetryEvent");
     }
 }

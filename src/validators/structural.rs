@@ -37,6 +37,10 @@ impl StructuralValidator {
     /// pipeline can run the structural check first and short-circuit
     /// the expensive validators on `Fail`.
     pub fn check(proposal: &Proposal) -> ValidationEvidence {
+        tracing::debug!(
+            proposal_id = %proposal.id,
+            "validators::structural::StructuralValidator::check: enter"
+        );
         let mut evidence = ValidationEvidence {
             validator: "structural".into(),
             status: ValidationStatus::Pass,
@@ -125,6 +129,11 @@ impl StructuralValidator {
                 } else {
                     "summary"
                 };
+                tracing::warn!(
+                    proposal_id = %proposal.id,
+                    token,
+                    "validators::structural::StructuralValidator::check: forbidden tech"
+                );
                 evidence.record_failure(
                     ValidationFailure::new(
                         FailureKind::ForbiddenTech,
@@ -136,6 +145,12 @@ impl StructuralValidator {
             }
         }
 
+        tracing::debug!(
+            proposal_id = %proposal.id,
+            status = ?evidence.status,
+            failures = evidence.failures.len(),
+            "validators::structural::StructuralValidator::check: exit"
+        );
         evidence
     }
 }

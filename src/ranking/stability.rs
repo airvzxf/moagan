@@ -94,21 +94,59 @@ pub fn perturb_weights(
     sigma: f32,
     seed: u64,
 ) -> Vec<RankingWeights> {
+    tracing::trace!(n, sigma, seed, "ranking::stability::perturb_weights: enter");
     if n == 0 || sigma <= 0.0 {
+        tracing::trace!(
+            n,
+            sigma,
+            "ranking::stability::perturb_weights: short-circuit"
+        );
         return Vec::new();
     }
     let mut rng = fastrand::Rng::with_seed(seed);
     let mut out = Vec::with_capacity(n);
+    let mut clip_high_count = 0usize;
+    let mut clip_low_count = 0usize;
     for _ in 0..n {
+        let correctness = perturb_one(base.correctness, sigma, &mut rng);
+        let completeness = perturb_one(base.completeness, sigma, &mut rng);
+        let fit = perturb_one(base.fit, sigma, &mut rng);
+        let evidence = perturb_one(base.evidence, sigma, &mut rng);
+        let clarity = perturb_one(base.clarity, sigma, &mut rng);
+        let overall = perturb_one(base.overall, sigma, &mut rng);
+        if correctness == WEIGHT_CLIP_HIGH
+            || completeness == WEIGHT_CLIP_HIGH
+            || fit == WEIGHT_CLIP_HIGH
+            || evidence == WEIGHT_CLIP_HIGH
+            || clarity == WEIGHT_CLIP_HIGH
+            || overall == WEIGHT_CLIP_HIGH
+        {
+            clip_high_count += 1;
+        }
+        if correctness == WEIGHT_CLIP_LO
+            || completeness == WEIGHT_CLIP_LO
+            || fit == WEIGHT_CLIP_LO
+            || evidence == WEIGHT_CLIP_LO
+            || clarity == WEIGHT_CLIP_LO
+            || overall == WEIGHT_CLIP_LO
+        {
+            clip_low_count += 1;
+        }
         out.push(RankingWeights {
-            correctness: perturb_one(base.correctness, sigma, &mut rng),
-            completeness: perturb_one(base.completeness, sigma, &mut rng),
-            fit: perturb_one(base.fit, sigma, &mut rng),
-            evidence: perturb_one(base.evidence, sigma, &mut rng),
-            clarity: perturb_one(base.clarity, sigma, &mut rng),
-            overall: perturb_one(base.overall, sigma, &mut rng),
+            correctness,
+            completeness,
+            fit,
+            evidence,
+            clarity,
+            overall,
         });
     }
+    tracing::debug!(
+        produced = out.len(),
+        clip_high_count,
+        clip_low_count,
+        "ranking::stability::perturb_weights: exit"
+    );
     out
 }
 
@@ -143,11 +181,21 @@ pub fn stability_score(
     weights_set: &[RankingWeights],
     evaluations: &[(String, EvalSnapshot)],
 ) -> HashMap<String, f32> {
+    tracing::trace!(
+        weights = weights_set.len(),
+        evaluations = evaluations.len(),
+        "ranking::stability::stability_score: enter"
+    );
     let mut out: HashMap<String, f32> = HashMap::new();
     if weights_set.is_empty() || evaluations.is_empty() {
+        tracing::trace!("ranking::stability::stability_score: short-circuit (empty input)");
         return out;
     }
     if evaluations.len() == 1 {
+        tracing::trace!(
+            proposal = %evaluations[0].0,
+            "ranking::stability::stability_score: trivial single-proposal"
+        );
         out.insert(evaluations[0].0.clone(), 1.0);
         return out;
     }
@@ -179,6 +227,11 @@ pub fn stability_score(
         let w = wins.get(id.as_str()).copied().unwrap_or(0);
         out.insert(id.clone(), w as f32 / total);
     }
+    tracing::debug!(
+        evaluations = evaluations.len(),
+        with_wins = wins.len(),
+        "ranking::stability::stability_score: exit"
+    );
     out
 }
 
@@ -187,11 +240,18 @@ pub fn stability_score(
 /// caller chooses the threshold (typically `0.8`); the function
 /// itself does not embed a default.
 pub fn stability_label(score: f32, threshold: f32) -> StabilityLabel {
-    if score >= threshold {
+    let out = if score >= threshold {
         StabilityLabel::Stable
     } else {
         StabilityLabel::Sensitive
-    }
+    };
+    tracing::trace!(
+        score,
+        threshold,
+        ?out,
+        "ranking::stability::stability_label"
+    );
+    out
 }
 
 /// Convenience for callers that want the score + label together.
@@ -206,12 +266,26 @@ pub fn stability_check(
     seed: u64,
     threshold: f32,
 ) -> (HashMap<String, f32>, StabilityLabel, f32) {
+    tracing::debug!(
+        n,
+        sigma,
+        seed,
+        threshold,
+        evaluations = evaluations.len(),
+        "ranking::stability::stability_check: enter"
+    );
     let weights_set = perturb_weights(base_weights, n, sigma, seed);
     let score = stability_score(&weights_set, evaluations);
-    let label = match score.values().copied().reduce(f32::max) {
+    let top_score = score.values().copied().reduce(f32::max);
+    let label = match top_score {
         Some(top) => stability_label(top, threshold),
         None => StabilityLabel::Stable,
     };
+    tracing::debug!(
+        ?label,
+        top_score = ?top_score,
+        "ranking::stability::stability_check: exit"
+    );
     (score, label, sigma)
 }
 

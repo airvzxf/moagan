@@ -81,6 +81,11 @@ pub enum SandboxError {
 
 impl From<SandboxError> for Error {
     fn from(error: SandboxError) -> Self {
+        tracing::trace!(
+            sandbox = "moa",
+            error = %error,
+            "SandboxError -> Error conversion"
+        );
         Self::InvalidState(error.to_string())
     }
 }
@@ -146,25 +151,47 @@ pub static COMMAND_CONFIGS: &[CommandConfig] = &[
 
 /// Find a command policy by its logical name.
 pub fn config_for(name: &str) -> Option<&'static CommandConfig> {
-    COMMAND_CONFIGS.iter().find(|config| config.name == name)
+    let config = COMMAND_CONFIGS.iter().find(|config| config.name == name);
+    tracing::trace!(
+        sandbox = "moa",
+        name = %name,
+        found = config.is_some(),
+        "config_for lookup"
+    );
+    config
 }
 
 /// Strip secrets from `args` before spawning. Secret-looking values are
 /// redacted through the crate-wide policy while preserving argument count.
 pub fn strip_secrets(args: &[String]) -> Vec<String> {
     let policy = RedactPolicy::default();
-    args.iter()
+    let mut redactions = 0usize;
+    let result: Vec<String> = args
+        .iter()
         .map(|arg| {
             if looks_like_secret(arg) {
                 match apply(&policy, Surface::Telemetry, arg) {
-                    Ok(redacted) if redacted.as_ref() != arg => redacted.into_owned(),
-                    Ok(_) | Err(_) => "***REDACTED***".to_owned(),
+                    Ok(redacted) if redacted.as_ref() != arg => {
+                        redactions += 1;
+                        redacted.into_owned()
+                    }
+                    Ok(_) | Err(_) => {
+                        redactions += 1;
+                        "***REDACTED***".to_owned()
+                    }
                 }
             } else {
                 arg.clone()
             }
         })
-        .collect()
+        .collect();
+    tracing::debug!(
+        sandbox = "moa",
+        total = args.len(),
+        redacted = redactions,
+        "strip_secrets complete"
+    );
+    result
 }
 
 fn looks_like_secret(value: &str) -> bool {
@@ -182,26 +209,60 @@ fn looks_like_secret(value: &str) -> bool {
 /// Verify that a binary exists in `PATH` or at an absolute path before
 /// spawning. An unresolved binary returns [`SandboxError::BinaryNotFound`].
 pub fn verify_binary_exists(binary: &str) -> std::result::Result<(), SandboxError> {
+    tracing::debug!(
+        sandbox = "moa",
+        binary = %binary,
+        "verify_binary_exists probing"
+    );
     let path = Path::new(binary);
     if path.is_absolute() {
-        return if path.exists() {
-            Ok(())
+        if path.exists() {
+            tracing::trace!(
+                sandbox = "moa",
+                binary = %binary,
+                "absolute path resolved"
+            );
+            return Ok(());
         } else {
-            Err(SandboxError::BinaryNotFound(binary.to_owned()))
-        };
+            tracing::warn!(
+                sandbox = "moa",
+                binary = %binary,
+                "verify_binary_exists: absolute path missing"
+            );
+            return Err(SandboxError::BinaryNotFound(binary.to_owned()));
+        }
     }
 
     if let Some(paths) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&paths) {
+        let directories: Vec<_> = std::env::split_paths(&paths).collect();
+        for directory in &directories {
             let candidate = if directory.as_os_str().is_empty() {
                 Path::new(binary).to_path_buf()
             } else {
                 directory.join(binary)
             };
             if candidate.exists() {
+                tracing::trace!(
+                    sandbox = "moa",
+                    binary = %binary,
+                    dir = %candidate.display(),
+                    "PATH lookup resolved"
+                );
                 return Ok(());
             }
         }
+        tracing::warn!(
+            sandbox = "moa",
+            binary = %binary,
+            searched = directories.len(),
+            "verify_binary_exists: binary not on PATH"
+        );
+    } else {
+        tracing::warn!(
+            sandbox = "moa",
+            binary = %binary,
+            "verify_binary_exists: PATH unset"
+        );
     }
     Err(SandboxError::BinaryNotFound(binary.to_owned()))
 }
@@ -213,6 +274,12 @@ fn namespace_result_or_warn(flags: NamespaceFlags, result: std::io::Result<()>) 
             namespaces = %flags,
             error = %error,
             "sandbox namespace isolation failed; proceeding without namespace isolation",
+        );
+    } else {
+        tracing::trace!(
+            sandbox = "moa",
+            namespaces = %flags,
+            "sandbox namespace isolation applied"
         );
     }
 }
@@ -290,6 +357,11 @@ impl SandboxConfig {
     /// disabled, secret stripping enabled.
     #[allow(deprecated)]
     pub fn new() -> Self {
+        tracing::debug!(
+            sandbox = "moa",
+            timeout_secs = 30,
+            "SandboxConfig::new building default config"
+        );
         Self {
             timeout: Duration::from_secs(30),
             allowlist: Allowlist::default(),
@@ -308,20 +380,39 @@ impl SandboxConfig {
     /// property that every sandbox call has a deadline.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         if timeout.is_zero() {
+            tracing::warn!(
+                sandbox = "moa",
+                "SandboxConfig::with_timeout: zero rejected; kept previous"
+            );
             return self;
         }
+        tracing::debug!(
+            sandbox = "moa",
+            timeout_secs = timeout.as_secs(),
+            "SandboxConfig::with_timeout applied"
+        );
         self.timeout = timeout;
         self
     }
 
     /// Replace the allowlist with a custom one.
     pub fn with_allowlist(mut self, allowlist: Allowlist) -> Self {
+        tracing::debug!(
+            sandbox = "moa",
+            entries = allowlist.len(),
+            "SandboxConfig::with_allowlist replaced allowlist"
+        );
         self.allowlist = allowlist;
         self
     }
 
     /// Cap stdout/stderr capture per stream.
     pub fn with_max_capture(mut self, bytes: usize) -> Self {
+        tracing::debug!(
+            sandbox = "moa",
+            bytes,
+            "SandboxConfig::with_max_capture applied"
+        );
         self.max_capture_bytes = Some(bytes);
         self
     }
@@ -346,6 +437,11 @@ impl SandboxConfig {
     /// reads / writes of `cfg.allow_network` still emit the warning.
     #[allow(deprecated)]
     pub fn with_allow_network(mut self, allow: bool) -> Self {
+        tracing::debug!(
+            sandbox = "moa",
+            allow,
+            "SandboxConfig::with_allow_network: legacy bool wrapper"
+        );
         self.allow_network = allow;
         self.network_policy = if allow {
             NetworkPolicy::Open
@@ -361,6 +457,11 @@ impl SandboxConfig {
     /// value (`true` for `Open` or any `AllowList`, `false` for
     /// `Off`).
     pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        tracing::debug!(
+            sandbox = "moa",
+            policy = ?policy,
+            "SandboxConfig::with_network_policy applied"
+        );
         #[allow(deprecated)]
         {
             self.allow_network = !matches!(policy, NetworkPolicy::Off);
@@ -373,6 +474,11 @@ impl SandboxConfig {
     /// `false` (strip). When `true`, the raw args are passed to the
     /// subprocess verbatim. Catalog §D.11.10.
     pub fn with_allow_injection(mut self, allow: bool) -> Self {
+        tracing::debug!(
+            sandbox = "moa",
+            allow,
+            "SandboxConfig::with_allow_injection applied"
+        );
         self.allow_injection = allow;
         self
     }
@@ -392,8 +498,21 @@ impl SandboxConfig {
                 to_remove.push(key.clone());
             }
         }
+        let removed_count = to_remove.len();
         for k in to_remove {
             env.remove(&k);
+        }
+        if removed_count > 0 {
+            tracing::debug!(
+                sandbox = "moa",
+                removed = removed_count,
+                "SandboxConfig::strip_secrets_env: stripped secret-looking vars"
+            );
+        } else {
+            tracing::trace!(
+                sandbox = "moa",
+                "SandboxConfig::strip_secrets_env: nothing to strip"
+            );
         }
     }
 }
@@ -452,6 +571,15 @@ impl SandboxResult {
         status: SandboxStatus,
         command: String,
     ) -> Self {
+        tracing::trace!(
+            sandbox = "moa",
+            status = ?status,
+            exit_code,
+            stdout_bytes = stdout.len(),
+            stderr_bytes = stderr.len(),
+            duration_ms = duration.as_millis() as u64,
+            "SandboxResult::new constructed"
+        );
         Self {
             exit_code,
             stdout,
@@ -552,6 +680,12 @@ impl<'a> Command<'a> {
     /// stdout/stderr caps from [`MAX_STDOUT_BYTES`] /
     /// [`MAX_STDERR_BYTES`].
     pub fn new(binary: &'a Path, args: &'a [&'a str]) -> Self {
+        tracing::trace!(
+            sandbox = "moa",
+            binary = %binary.display(),
+            args_len = args.len(),
+            "Command::new constructed"
+        );
         Self {
             binary,
             args,
@@ -568,6 +702,11 @@ impl<'a> Command<'a> {
     /// in order; later calls overwrite earlier ones with the same
     /// key when merged into the spawned process's environment.
     pub fn env(mut self, k: &'a str, v: &'a str) -> Self {
+        tracing::trace!(
+            sandbox = "moa",
+            key = %k,
+            "Command::env appended env entry"
+        );
         self.env.push((k, v));
         self
     }
@@ -576,6 +715,11 @@ impl<'a> Command<'a> {
     /// set, the directory must already exist; the sandbox does not
     /// create it.
     pub fn cwd(mut self, c: &'a Path) -> Self {
+        tracing::trace!(
+            sandbox = "moa",
+            cwd = %c.display(),
+            "Command::cwd set"
+        );
         self.cwd = Some(c);
         self
     }
@@ -583,12 +727,18 @@ impl<'a> Command<'a> {
     /// Feed `bytes` to the child's stdin. When unset, stdin is
     /// closed (`Stdio::null()`) so the child gets `EOF` immediately.
     fn stdin_bytes(mut self, b: Vec<u8>) -> Self {
+        tracing::trace!(sandbox = "moa", bytes = b.len(), "Command::stdin_bytes set");
         self.stdin = Some(b);
         self
     }
 
     /// Override the per-call wall-clock timeout.
     pub fn timeout(mut self, d: Duration) -> Self {
+        tracing::trace!(
+            sandbox = "moa",
+            timeout_secs = d.as_secs(),
+            "Command::timeout set"
+        );
         self.timeout = Some(d);
         self
     }
@@ -596,6 +746,7 @@ impl<'a> Command<'a> {
     /// Cap stdout capture per call. The default is
     /// [`MAX_STDOUT_BYTES`].
     fn max_stdout(mut self, n: usize) -> Self {
+        tracing::trace!(sandbox = "moa", bytes = n, "Command::max_stdout set");
         self.max_stdout_bytes = n;
         self
     }
@@ -603,6 +754,7 @@ impl<'a> Command<'a> {
     /// Cap stderr capture per call. The default is
     /// [`MAX_STDERR_BYTES`].
     fn max_stderr(mut self, n: usize) -> Self {
+        tracing::trace!(sandbox = "moa", bytes = n, "Command::max_stderr set");
         self.max_stderr_bytes = n;
         self
     }
@@ -638,6 +790,11 @@ struct RegisteredChild<'a> {
 
 impl Drop for RegisteredChild<'_> {
     fn drop(&mut self) {
+        tracing::trace!(
+            sandbox = "moa",
+            pgid = self.pgid,
+            "RegisteredChild dropped; unregistering pgid"
+        );
         self.cancel.unregister_child(self.pgid);
     }
 }
@@ -699,19 +856,50 @@ impl Watchdog {
         grace: Duration,
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
+        tracing::debug!(
+            sandbox = "moa",
+            pgid,
+            timeout_secs = timeout.as_secs(),
+            grace_secs = grace.as_secs(),
+            "Watchdog::spawn spawning watchdog task"
+        );
         #[cfg(unix)]
         {
             tokio::spawn(async move {
                 tokio::select! {
-                    _ = tokio::time::sleep(timeout) => {}
-                    _ = cancel.cancelled() => {}
+                    _ = tokio::time::sleep(timeout) => {
+                        tracing::info!(
+                            sandbox = "moa",
+                            pgid,
+                            "Watchdog: timeout reached; firing SIGTERM"
+                        );
+                    }
+                    _ = cancel.cancelled() => {
+                        tracing::trace!(
+                            sandbox = "moa",
+                            pgid,
+                            "Watchdog: cancelled before timeout"
+                        );
+                    }
                 }
                 // SAFETY: `killpg` is safe to call from any thread; a
                 // missing group yields `ESRCH` which we ignore so the
                 // natural-completion path stays silent.
-                let _ = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
+                let term_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
+                tracing::trace!(
+                    sandbox = "moa",
+                    pgid,
+                    term_rc = term_result,
+                    "Watchdog: SIGTERM fired"
+                );
                 tokio::time::sleep(grace).await;
-                let _ = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+                let kill_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+                tracing::debug!(
+                    sandbox = "moa",
+                    pgid,
+                    kill_rc = kill_result,
+                    "Watchdog: SIGKILL fired after grace"
+                );
             })
         }
         #[cfg(not(unix))]
@@ -725,7 +913,13 @@ impl Watchdog {
 impl Sandbox {
     /// Build a new sandbox with the supplied configuration.
     pub fn new(config: SandboxConfig) -> Result<Self> {
+        tracing::debug!(
+            sandbox = "moa",
+            timeout_secs = config.timeout.as_secs(),
+            "Sandbox::new building sandbox"
+        );
         if config.timeout.is_zero() {
+            tracing::error!(sandbox = "moa", "Sandbox::new: zero timeout rejected");
             return Err(Error::InvalidState(
                 "sandbox timeout must be > 0; use with_timeout() with a positive duration".into(),
             ));
@@ -748,6 +942,10 @@ impl Sandbox {
     /// a no-op because `Cancel::register_child` requires a live handle
     /// to find its registry — a new handle starts with an empty set).
     pub fn with_cancel(mut self, cancel: Cancel) -> Self {
+        tracing::debug!(
+            sandbox = "moa",
+            "Sandbox::with_cancel: cancel handle attached"
+        );
         self.cancel = Some(cancel);
         self
     }
@@ -761,7 +959,13 @@ impl Sandbox {
     /// want the layout visible to the spawned process must hand
     /// the path explicitly to [`Sandbox::run_in`].
     pub fn new_workdir(&self) -> Result<TempDir> {
-        Ok(TempDir::new()?)
+        let dir = TempDir::new()?;
+        tracing::trace!(
+            sandbox = "moa",
+            path = %dir.path().display(),
+            "Sandbox::new_workdir created scratch"
+        );
+        Ok(dir)
     }
 
     /// Execute `cmd` with `args` inside a fresh scratch directory.
@@ -786,6 +990,12 @@ impl Sandbox {
         cmd: &str,
         args: &[&str],
     ) -> std::result::Result<SandboxResult, SandboxError> {
+        tracing::info!(
+            sandbox = "moa",
+            cmd = %cmd,
+            args_len = args.len(),
+            "Sandbox::run: legacy positional entry"
+        );
         let work = self
             .new_workdir()
             .map_err(|error| SandboxError::Io(error.to_string()))?;
@@ -802,6 +1012,13 @@ impl Sandbox {
         cmd: &str,
         args: &[&str],
     ) -> std::result::Result<SandboxResult, SandboxError> {
+        tracing::debug!(
+            sandbox = "moa",
+            cmd = %cmd,
+            work_dir = %work_dir.display(),
+            args_len = args.len(),
+            "Sandbox::run_in enter"
+        );
         let max_output_bytes = self.config.max_capture_bytes.unwrap_or_else(|| {
             let basename = Path::new(cmd)
                 .file_name()
@@ -829,6 +1046,13 @@ impl Sandbox {
         args: &[&str],
         max_output_bytes: usize,
     ) -> std::result::Result<SandboxResult, SandboxError> {
+        tracing::debug!(
+            sandbox = "moa",
+            cmd = %cmd,
+            work_dir = %work_dir.display(),
+            max_output_bytes,
+            "Sandbox::run_in_with_output_cap enter"
+        );
         let path = Path::new(cmd);
         let owned_args: Vec<&str> = args.to_vec();
         let command = Command::new(path, &owned_args)
@@ -856,6 +1080,12 @@ impl Sandbox {
         &self,
         cmd: &Command<'_>,
     ) -> std::result::Result<SandboxOutput, SandboxError> {
+        tracing::debug!(
+            sandbox = "moa",
+            binary = %cmd.binary.display(),
+            args_len = cmd.args.len(),
+            "Sandbox::run_cmd (Command struct) enter"
+        );
         self.run_in_with_limits(cmd).await
     }
 
@@ -881,6 +1111,11 @@ impl Sandbox {
         max_stdout_bytes: usize,
         max_stderr_bytes: usize,
     ) -> std::result::Result<SandboxOutput, SandboxError> {
+        tracing::warn!(
+            sandbox = "moa",
+            binary = %binary.display(),
+            "Sandbox::run_in_with_limits_legacy: deprecated positional wrapper called"
+        );
         let mut cmd = Command::new(binary, args)
             .cwd(cwd.unwrap_or_else(|| Path::new(".")))
             .stdin_bytes(stdin.unwrap_or_default())
@@ -916,22 +1151,57 @@ impl Sandbox {
         &self,
         cmd: &Command<'_>,
     ) -> std::result::Result<SandboxResult, SandboxError> {
+        tracing::trace!(sandbox = "moa", "run_in_with_legacy_translation enter");
         match self.run_in_with_limits(cmd).await {
-            Ok(output) => Ok(self.output_to_result(cmd, output)),
+            Ok(output) => {
+                tracing::trace!(
+                    sandbox = "moa",
+                    exit_code = ?output.exit_code,
+                    killed_by_timeout = output.killed_by_timeout,
+                    "run_in_with_legacy_translation: ok"
+                );
+                Ok(self.output_to_result(cmd, output))
+            }
             Err(SandboxError::NotAllowed(msg)) => {
+                tracing::warn!(
+                    sandbox = "moa",
+                    reason = %msg,
+                    "run_in_with_legacy_translation: policy rejection → NotAllowed"
+                );
                 Ok(self.output_to_status_result(cmd, msg, SandboxStatus::NotAllowed))
             }
-            Err(SandboxError::BinaryNotFound(msg)) => Ok(self.output_to_status_result(
-                cmd,
-                format!("binary not found: {msg}"),
-                SandboxStatus::NotFound,
-            )),
-            Err(SandboxError::Io(msg)) => Ok(self.output_to_status_result(
-                cmd,
-                format!("spawn failed: {msg}"),
-                SandboxStatus::Error,
-            )),
-            Err(other) => Err(other),
+            Err(SandboxError::BinaryNotFound(msg)) => {
+                tracing::warn!(
+                    sandbox = "moa",
+                    binary = %msg,
+                    "run_in_with_legacy_translation: binary missing → NotFound"
+                );
+                Ok(self.output_to_status_result(
+                    cmd,
+                    format!("binary not found: {msg}"),
+                    SandboxStatus::NotFound,
+                ))
+            }
+            Err(SandboxError::Io(msg)) => {
+                tracing::warn!(
+                    sandbox = "moa",
+                    error = %msg,
+                    "run_in_with_legacy_translation: spawn I/O failure → Error"
+                );
+                Ok(self.output_to_status_result(
+                    cmd,
+                    format!("spawn failed: {msg}"),
+                    SandboxStatus::Error,
+                ))
+            }
+            Err(other) => {
+                tracing::error!(
+                    sandbox = "moa",
+                    error = %other,
+                    "run_in_with_legacy_translation: propagating Err"
+                );
+                Err(other)
+            }
         }
     }
 
@@ -960,6 +1230,15 @@ impl Sandbox {
                 Some(_) | None => SandboxStatus::Fail,
             }
         };
+        tracing::trace!(
+            sandbox = "moa",
+            status = ?status,
+            exit_code = ?output.exit_code,
+            stdout_bytes = output.stdout.len(),
+            stderr_bytes = output.stderr.len(),
+            duration_ms = output.duration.as_millis(),
+            "output_to_result translated to legacy result"
+        );
         SandboxResult::new(
             output.exit_code.unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -982,6 +1261,12 @@ impl Sandbox {
         msg: String,
         status: SandboxStatus,
     ) -> SandboxResult {
+        tracing::trace!(
+            sandbox = "moa",
+            status = ?status,
+            msg = %msg,
+            "output_to_status_result: synthetic result for policy rejection"
+        );
         SandboxResult::new(
             -1,
             String::new(),
@@ -1010,22 +1295,39 @@ impl Sandbox {
         } else {
             strip_secrets(&raw_args)
         };
-        std::iter::once(cmd.binary.display().to_string())
+        let result = std::iter::once(cmd.binary.display().to_string())
             .chain(visible_args)
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+        tracing::trace!(
+            sandbox = "moa",
+            command = %result,
+            "command_string composed"
+        );
+        result
     }
 
     async fn run_in_with_limits(
         &self,
         cmd: &Command<'_>,
     ) -> std::result::Result<SandboxOutput, SandboxError> {
+        tracing::debug!(
+            sandbox = "moa",
+            binary = %cmd.binary.display(),
+            args_len = cmd.args.len(),
+            "run_in_with_limits enter"
+        );
         let started = Instant::now();
         // Resolve the binary name for the allowlist / denylist /
         // `verify_binary_exists` checks. The struct's `binary`
         // field is `&Path` so absolute paths are accepted; the
         // allowlist matches on the basename.
         let binary_str = cmd.binary.to_str().ok_or_else(|| {
+            tracing::error!(
+                sandbox = "moa",
+                binary = %cmd.binary.display(),
+                "binary path is not valid UTF-8"
+            );
             SandboxError::Io(format!(
                 "binary path is not valid UTF-8: {}",
                 cmd.binary.display()
@@ -1057,6 +1359,11 @@ impl Sandbox {
             .collect();
 
         if !is_allowed(binary_name, &self.config.allowlist) {
+            tracing::warn!(
+                sandbox = "moa",
+                binary = %binary_name,
+                "command rejected: not in allowlist"
+            );
             return Err(SandboxError::NotAllowed(format!(
                 "command '{binary_name}' is not in the sandbox allowlist"
             )));
@@ -1068,6 +1375,11 @@ impl Sandbox {
         }
 
         if let Err(SandboxError::BinaryNotFound(binary)) = verify_binary_exists(binary_str) {
+            tracing::warn!(
+                sandbox = "moa",
+                binary = %binary,
+                "binary not found at spawn time"
+            );
             return Err(SandboxError::BinaryNotFound(binary));
         }
 
@@ -1119,6 +1431,10 @@ impl Sandbox {
         // leader" form: the child's pid becomes the pgid.
         #[cfg(unix)]
         if self.cancel.is_some() {
+            tracing::trace!(
+                sandbox = "moa",
+                "cancel handle attached; pre_exec will setpgid"
+            );
             // SAFETY: `tokio::process::Command::pre_exec` runs the
             // closure in the child between fork and exec. `setpgid(0, 0)`
             // only mutates the child's own process-group membership.
@@ -1139,6 +1455,11 @@ impl Sandbox {
         #[cfg(unix)]
         if !self.config.namespaces.is_empty() {
             let flags = self.config.namespaces;
+            tracing::debug!(
+                sandbox = "moa",
+                namespaces = %flags,
+                "configuring namespace pre_exec"
+            );
             // SAFETY: `pre_exec` runs in the child between fork and
             // exec. Namespace setup is best-effort: failures are logged
             // and the child continues without namespace isolation.
@@ -1164,6 +1485,11 @@ impl Sandbox {
         #[cfg(unix)]
         if self.config.seccomp != SeccompPolicyKind::Permissive {
             let kind = self.config.seccomp;
+            tracing::info!(
+                sandbox = "moa",
+                kind = ?kind,
+                "configuring seccomp pre_exec"
+            );
             // SAFETY: `pre_exec` runs in the child between fork and
             // exec. A non-zero return surfaces as `Err` and aborts
             // the spawn, which is the documented failure mode for
@@ -1189,6 +1515,7 @@ impl Sandbox {
         // (`kill_on_drop` remains the backstop cleanup).
         #[cfg(unix)]
         if let Some(limits) = self.config.cgroup.clone() {
+            tracing::debug!(sandbox = "moa", "configuring cgroup pre_exec");
             // SAFETY: `pre_exec` runs in the child between fork and
             // exec. A non-zero return surfaces as `Err` and aborts
             // the spawn, but we swallow it because cgroup setup is
@@ -1226,13 +1553,30 @@ impl Sandbox {
         for (key, value) in &cmd.env {
             command.env(*key, *value);
         }
+        tracing::trace!(
+            sandbox = "moa",
+            env_entries = env.len(),
+            extra_env = cmd.env.len(),
+            "subprocess environment populated"
+        );
 
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(
+                    sandbox = "moa",
+                    binary = %binary_str,
+                    "spawn returned NotFound"
+                );
                 return Err(SandboxError::BinaryNotFound(binary_str.to_owned()));
             }
             Err(error) => {
+                tracing::error!(
+                    sandbox = "moa",
+                    binary = %binary_str,
+                    error = %error,
+                    "spawn failed"
+                );
                 return Err(SandboxError::Io(format!("spawn failed: {error}")));
             }
         };
@@ -1248,6 +1592,11 @@ impl Sandbox {
         let pgid: Option<i32> = child.id().and_then(|pid| i32::try_from(pid).ok());
         let _pgid_guard: Option<RegisteredChild<'_>> = match (&self.cancel, pgid) {
             (Some(cancel), Some(pgid)) => {
+                tracing::trace!(
+                    sandbox = "moa",
+                    pgid,
+                    "registering child pgid on cancel handle"
+                );
                 cancel.register_child(pgid);
                 Some(RegisteredChild { cancel, pgid })
             }
@@ -1262,6 +1611,11 @@ impl Sandbox {
             && let Some(mut stdin_pipe) = child.stdin.take()
         {
             use tokio::io::AsyncWriteExt;
+            tracing::trace!(
+                sandbox = "moa",
+                bytes = bytes.len(),
+                "writing stdin to child"
+            );
             let _ = stdin_pipe.write_all(bytes).await;
             let _ = stdin_pipe.shutdown().await;
         }
@@ -1280,11 +1634,18 @@ impl Sandbox {
         // Per-call `cmd.timeout` overrides the config-level timeout.
         let effective_timeout = cmd.timeout.unwrap_or(self.config.timeout);
         if effective_timeout.is_zero() {
+            tracing::error!(sandbox = "moa", "effective timeout resolved to zero");
             return Err(SandboxError::Io(
                 "sandbox timeout must be > 0; use a positive Duration".into(),
             ));
         }
         let remaining = effective_timeout.saturating_sub(started.elapsed());
+        tracing::debug!(
+            sandbox = "moa",
+            effective_timeout_secs = effective_timeout.as_secs(),
+            remaining_secs = remaining.as_secs(),
+            "timeout budget computed"
+        );
 
         // Spawn the Watchdog when the child is in its own process group
         // (i.e. a `Cancel` handle is attached, so `setpgid(0, 0)` ran in
@@ -1310,23 +1671,53 @@ impl Sandbox {
             tokio::select! {
                 result = child.wait() => {
                     match result {
-                        Ok(exit) => break (exit.code(), false, None),
-                        Err(_) => break (None, false, Some(SandboxError::Io(
-                            "waitpid failed".into(),
-                        ))),
+                        Ok(exit) => {
+                            tracing::trace!(
+                                sandbox = "moa",
+                                exit_code = ?exit.code(),
+                                "child.wait completed"
+                            );
+                            break (exit.code(), false, None);
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                sandbox = "moa",
+                                error = %error,
+                                "child.wait failed"
+                            );
+                            break (None, false, Some(SandboxError::Io(
+                                "waitpid failed".into(),
+                            )));
+                        }
                     }
                 }
                 event = event_rx.recv(), if events_open => {
                     match event {
                         Some(error) => {
+                            tracing::warn!(
+                                sandbox = "moa",
+                                error = %error,
+                                "early event from stream reader; killing child"
+                            );
                             let _ = child.start_kill();
                             let _ = child.wait().await;
                             break (None, false, Some(error));
                         }
-                        None => events_open = false,
+                        None => {
+                            tracing::trace!(
+                                sandbox = "moa",
+                                "event channel closed by stream readers"
+                            );
+                            events_open = false;
+                        }
                     }
                 }
                 _ = &mut deadline => {
+                    tracing::warn!(
+                        sandbox = "moa",
+                        remaining_secs = remaining.as_secs(),
+                        "wall-clock deadline reached; killing child"
+                    );
                     let _ = child.start_kill();
                     let _ = child.wait().await;
                     break (None, true, None);
@@ -1352,11 +1743,21 @@ impl Sandbox {
         let stdout_bytes = stdout_result?;
         let stderr_bytes = stderr_result?;
 
+        let duration = started.elapsed();
+        tracing::info!(
+            sandbox = "moa",
+            exit_code = ?exit_code_opt,
+            killed_by_timeout,
+            duration_ms = duration.as_millis() as u64,
+            stdout_bytes = stdout_bytes.len(),
+            stderr_bytes = stderr_bytes.len(),
+            "run_in_with_limits complete"
+        );
         Ok(SandboxOutput {
             stdout: stdout_bytes,
             stderr: stderr_bytes,
             exit_code: exit_code_opt,
-            duration: started.elapsed(),
+            duration,
             killed_by_timeout,
         })
     }
@@ -1425,9 +1826,21 @@ impl MoaSandbox {
         cfg: &SandboxConfig,
         network: NetworkPolicy,
     ) -> std::result::Result<Self, SandboxError> {
+        tracing::debug!(
+            sandbox = "moa",
+            policy = ?network,
+            "MoaSandbox::new building wrapper"
+        );
         let mut cfg = cfg.clone();
         cfg.network_policy = network.clone();
-        let inner = Sandbox::new(cfg).map_err(|error| SandboxError::Io(error.to_string()))?;
+        let inner = Sandbox::new(cfg).map_err(|error| {
+            tracing::error!(
+                sandbox = "moa",
+                error = %error,
+                "MoaSandbox::new: inner Sandbox::new failed"
+            );
+            SandboxError::Io(error.to_string())
+        })?;
         Ok(Self { inner, network })
     }
 
@@ -1454,8 +1867,14 @@ impl MoaSandbox {
         &self,
         cmd: &Command<'_>,
     ) -> std::result::Result<SandboxOutput, SandboxError> {
-        for host in extract_hosts(cmd) {
-            if let Some(reason) = self.network.deny_reason(&host) {
+        let hosts = extract_hosts(cmd);
+        tracing::trace!(
+            sandbox = "moa",
+            hosts = hosts.len(),
+            "MoaSandbox::run_cmd: scanning argv for host-like tokens"
+        );
+        for host in &hosts {
+            if let Some(reason) = self.network.deny_reason(host) {
                 tracing::warn!(
                     sandbox = "moa",
                     host = %host,
@@ -1493,6 +1912,11 @@ fn extract_hosts(cmd: &Command<'_>) -> Vec<String> {
             }
         }
     }
+    tracing::trace!(
+        sandbox = "moa",
+        hosts = hosts.len(),
+        "extract_hosts completed"
+    );
     hosts
 }
 
@@ -1520,21 +1944,34 @@ where
 {
     let mut output = Vec::with_capacity(max_output_bytes.min(8 * 1024));
     let mut buffer = [0_u8; 8 * 1024];
+    tracing::trace!(sandbox = "moa", max_output_bytes, "read_stream started");
     loop {
         let read = match stream.read(&mut buffer).await {
             Ok(read) => read,
             Err(error) => {
+                tracing::error!(
+                    sandbox = "moa",
+                    error = %error,
+                    "read_stream I/O failure"
+                );
                 let error = SandboxError::Io(error.to_string());
                 return Err(error);
             }
         };
         if read == 0 {
+            tracing::trace!(sandbox = "moa", bytes = output.len(), "read_stream EOF");
             return Ok(output);
         }
         if output.len().saturating_add(read) > max_output_bytes {
             let remaining = max_output_bytes.saturating_sub(output.len());
             output.extend_from_slice(&buffer[..remaining]);
             let error = SandboxError::OutputTruncated;
+            tracing::warn!(
+                sandbox = "moa",
+                cap = max_output_bytes,
+                collected = output.len(),
+                "read_stream: output cap hit, truncating"
+            );
             let _ = event_tx.send(error.clone());
             return Err(error);
         }
@@ -1546,9 +1983,14 @@ async fn await_reader(
     handle: Option<tokio::task::JoinHandle<std::result::Result<Vec<u8>, SandboxError>>>,
 ) -> std::result::Result<Vec<u8>, SandboxError> {
     match handle {
-        Some(handle) => handle
-            .await
-            .map_err(|error| SandboxError::Io(error.to_string()))?,
+        Some(handle) => handle.await.map_err(|error| {
+            tracing::error!(
+                sandbox = "moa",
+                error = %error,
+                "await_reader: reader task panicked"
+            );
+            SandboxError::Io(error.to_string())
+        })?,
         None => Ok(Vec::new()),
     }
 }

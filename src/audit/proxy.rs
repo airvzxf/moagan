@@ -54,12 +54,22 @@ pub struct ProxyConfig {
 impl ProxyConfig {
     /// Fill zero-valued limits with defaults.
     pub fn with_defaults(mut self) -> Self {
+        tracing::debug!(
+            max_body_bytes = self.max_body_bytes,
+            upstream_timeout_secs = self.upstream_timeout.as_secs(),
+            "audit::proxy::ProxyConfig::with_defaults: enter"
+        );
         if self.max_body_bytes == 0 {
             self.max_body_bytes = 32 * 1024 * 1024;
         }
         if self.upstream_timeout.is_zero() {
             self.upstream_timeout = Duration::from_secs(180);
         }
+        tracing::debug!(
+            max_body_bytes = self.max_body_bytes,
+            upstream_timeout_secs = self.upstream_timeout.as_secs(),
+            "audit::proxy::ProxyConfig::with_defaults: exit"
+        );
         self
     }
 }
@@ -83,12 +93,30 @@ impl std::fmt::Debug for ProxyHandle {
 impl ProxyHandle {
     /// Stop accepting connections and drain active handlers.
     pub async fn shutdown(mut self) -> Result<()> {
+        tracing::info!(
+            local_addr = %self.local_addr,
+            "audit::proxy::ProxyHandle::shutdown: enter"
+        );
         self.shutdown.cancel();
         let Some(task) = self.task.take() else {
+            tracing::warn!(
+                "audit::proxy::ProxyHandle::shutdown: task already taken, nothing to await"
+            );
             return Ok(());
         };
-        task.await
-            .map_err(|e| Error::InvalidState(format!("audit proxy task failed: {e}")))?
+        match task.await {
+            Ok(res) => {
+                tracing::info!("audit::proxy::ProxyHandle::shutdown: task finished cleanly");
+                res
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "audit::proxy::ProxyHandle::shutdown: task join failed"
+                );
+                Err(Error::InvalidState(format!("audit proxy task failed: {e}")))
+            }
+        }
     }
 }
 
@@ -110,7 +138,9 @@ impl AuditSink {
     }
 
     fn ensure(&mut self, path: &Path) -> Result<()> {
+        tracing::trace!(path = %path.display(), "audit::proxy::AuditSink::ensure: enter");
         if self.writers.contains_key(path) {
+            tracing::trace!(path = %path.display(), "audit::proxy::AuditSink::ensure: already installed");
             return Ok(());
         }
         if let Some(parent) = path.parent() {
@@ -118,21 +148,40 @@ impl AuditSink {
         }
         let writer = AuditWriter::append(path)?;
         self.writers.insert(path.to_path_buf(), writer);
+        tracing::debug!(path = %path.display(), "audit::proxy::AuditSink::ensure: installed new writer");
         Ok(())
     }
 
     fn write(&mut self, path: &Path, record: &mut AuditRecord) -> Result<()> {
+        tracing::trace!(
+            path = %path.display(),
+            event = %record.event,
+            id = %record.id,
+            "audit::proxy::AuditSink::write: enter"
+        );
         self.ensure(path)?;
         let writer = self
             .writers
             .get_mut(path)
             .ok_or_else(|| Error::InvalidState("audit writer was not installed".into()))?;
         writer.write_record(record)?;
+        tracing::debug!(
+            path = %path.display(),
+            event = %record.event,
+            id = %record.id,
+            "audit::proxy::AuditSink::write: wrote record"
+        );
         Ok(())
     }
 
     fn flush_all(&mut self) -> Result<()> {
-        for writer in self.writers.values_mut() {
+        let count = self.writers.len();
+        tracing::debug!(
+            writer_count = count,
+            "audit::proxy::AuditSink::flush_all: enter"
+        );
+        for (path, writer) in self.writers.iter_mut() {
+            tracing::trace!(path = %path.display(), "audit::proxy::AuditSink::flush_all: flushing writer");
             writer.flush_gz()?;
         }
         Ok(())
@@ -141,11 +190,21 @@ impl AuditSink {
 
 /// Bind and start the sidecar.
 pub async fn start(cfg: ProxyConfig) -> Result<ProxyHandle> {
+    tracing::info!(
+        listen = %cfg.listen,
+        upstream = %cfg.upstream,
+        run_id = ?cfg.run_id,
+        "audit::proxy::start: enter"
+    );
     let cfg = Arc::new(cfg.with_defaults());
     validate_upstream(&cfg.upstream)?;
     let listener = TcpListener::bind(cfg.listen).await?;
     let local_addr = listener.local_addr()?;
     validate_forward_target(&cfg, local_addr)?;
+    tracing::info!(
+        local_addr = %local_addr,
+        "audit::proxy::start: listener bound"
+    );
 
     let client = reqwest::Client::builder()
         .timeout(cfg.upstream_timeout)
@@ -153,13 +212,19 @@ pub async fn start(cfg: ProxyConfig) -> Result<ProxyHandle> {
         .redirect(Policy::none())
         .no_gzip()
         .build()
-        .map_err(|e| Error::Provider {
-            message: format!("build audit HTTP client: {e}"),
-            http_status: None,
+        .map_err(|e| {
+            tracing::error!(error = %e, "audit::proxy::start: failed to build reqwest client");
+            Error::Provider {
+                message: format!("build audit HTTP client: {e}"),
+                http_status: None,
+            }
         })?;
     let sink = Arc::new(Mutex::new(AuditSink::new()));
     if let Some(path) = resolve_log_path(&cfg)? {
+        tracing::debug!(path = %path.display(), "audit::proxy::start: pre-installing sink writer");
         sink.lock().await.ensure(&path)?;
+    } else {
+        tracing::warn!("audit::proxy::start: no active run dir on startup banner");
     }
     let shutdown = CancellationToken::new();
     let task_shutdown = shutdown.clone();
@@ -178,12 +243,37 @@ async fn serve(
     sink: Arc<Mutex<AuditSink>>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    tracing::info!(
+        local_addr = %listener.local_addr().map(|a| a.to_string()).unwrap_or_default(),
+        "audit::proxy::serve: enter"
+    );
     let mut handlers = JoinSet::new();
+    let mut accepted_count: u64 = 0;
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => break,
+            _ = shutdown.cancelled() => {
+                tracing::info!(
+                    accepted_count,
+                    "audit::proxy::serve: shutdown signalled; breaking accept loop"
+                );
+                break;
+            },
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = match accepted {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "audit::proxy::serve: listener.accept failed"
+                        );
+                        return Err(e.into());
+                    }
+                };
+                accepted_count += 1;
+                tracing::trace!(
+                    accepted_count,
+                    "audit::proxy::serve: spawning connection handler"
+                );
                 let cfg = Arc::clone(&cfg);
                 let client = client.clone();
                 let sink = Arc::clone(&sink);
@@ -205,9 +295,18 @@ async fn serve(
             report_handler_result(result);
         }
     };
-    if tokio::time::timeout(SHUTDOWN_TIMEOUT, drain).await.is_err() {
-        handlers.abort_all();
-        while handlers.join_next().await.is_some() {}
+    match tokio::time::timeout(SHUTDOWN_TIMEOUT, drain).await {
+        Ok(()) => {
+            tracing::info!("audit::proxy::serve: drain completed within shutdown timeout");
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
+                "audit::proxy::serve: drain timed out; aborting remaining handlers"
+            );
+            handlers.abort_all();
+            while handlers.join_next().await.is_some() {}
+        }
     }
     sink.lock().await.flush_all()?;
     Ok(())
@@ -215,10 +314,20 @@ async fn serve(
 
 fn report_handler_result(result: std::result::Result<Result<()>, tokio::task::JoinError>) {
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("warn: audit proxy connection failed: {e}"),
-        Err(e) if e.is_cancelled() => {}
-        Err(e) => eprintln!("warn: audit proxy handler failed: {e}"),
+        Ok(Ok(())) => {
+            tracing::trace!("audit::proxy::serve::report_handler_result: handler ok");
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "audit::proxy::serve::report_handler_result: handler returned Err");
+            eprintln!("warn: audit proxy connection failed: {e}");
+        }
+        Err(e) if e.is_cancelled() => {
+            tracing::debug!("audit::proxy::serve::report_handler_result: handler cancelled");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "audit::proxy::serve::report_handler_result: handler join failed");
+            eprintln!("warn: audit proxy handler failed: {e}");
+        }
     }
 }
 
@@ -229,16 +338,29 @@ async fn handle_connection(
     sink: Arc<Mutex<AuditSink>>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    tracing::debug!("audit::proxy::handle_connection: enter");
     let parsed = tokio::select! {
-        _ = shutdown.cancelled() => return Ok(()),
+        _ = shutdown.cancelled() => {
+            tracing::debug!("audit::proxy::handle_connection: cancelled during read_request");
+            return Ok(());
+        }
         result = tokio::time::timeout(IO_TIMEOUT, read_request(&mut stream, cfg.max_body_bytes)) => {
             match result {
                 Ok(Ok(request)) => request,
                 Ok(Err(e)) => {
+                    tracing::warn!(
+                        status = e.status,
+                        message = %e.message,
+                        "audit::proxy::handle_connection: request parse failed"
+                    );
                     write_error(&mut stream, e.status, &e.message).await?;
                     return Ok(());
                 }
                 Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = IO_TIMEOUT.as_secs(),
+                        "audit::proxy::handle_connection: request read timed out"
+                    );
                     write_error(&mut stream, 408, "request timeout").await?;
                     return Ok(());
                 }
@@ -247,6 +369,7 @@ async fn handle_connection(
     };
 
     let Some(log_path) = resolve_log_path_blocking(&cfg)? else {
+        tracing::warn!("audit::proxy::handle_connection: no active run; returning 503");
         write_error(&mut stream, 503, "no active run").await?;
         return Ok(());
     };
@@ -259,6 +382,13 @@ async fn handle_connection(
     let request_body = canonical_redacted_body(&policy, &parsed.body, cfg.include_bodies)?;
     let request_headers = redacted_headers(&policy, &parsed.headers)?;
     let logged_url = apply(&policy, Surface::Telemetry, &upstream_url)?.into_owned();
+    tracing::debug!(
+        id = %id,
+        method = %parsed.method,
+        target = %parsed.target,
+        body_size = parsed.body.len(),
+        "audit::proxy::handle_connection: parsed request"
+    );
     let mut request_record = AuditRecord {
         ts: request_ts,
         event: "request".into(),
@@ -277,24 +407,36 @@ async fn handle_connection(
     sink.lock().await.write(&log_path, &mut request_record)?;
 
     let mut forwarded_headers = reqwest::header::HeaderMap::new();
+    let mut hop_skipped = 0usize;
+    let mut forwarded = 0usize;
     for (name, value) in &parsed.headers {
         if is_hop_by_hop_request_header(name) {
+            hop_skipped += 1;
             continue;
         }
         let Ok(name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
+            tracing::trace!(name = %name, "audit::proxy::handle_connection: dropping unparseable header name");
             continue;
         };
         let Ok(value) = reqwest::header::HeaderValue::from_str(value) else {
+            tracing::trace!(name = %name, "audit::proxy::handle_connection: dropping header with invalid value");
             continue;
         };
         forwarded_headers.append(name, value);
+        forwarded += 1;
     }
+    tracing::trace!(
+        forwarded,
+        hop_skipped,
+        "audit::proxy::handle_connection: header forwarding assembled"
+    );
     let request = client
         .request(parsed.method, &upstream_url)
         .headers(forwarded_headers)
         .body(parsed.body);
     let response = tokio::select! {
         _ = shutdown.cancelled() => {
+            tracing::warn!(id = %id, "audit::proxy::handle_connection: shutting down mid-request");
             record_upstream_error(
                 &sink,
                 &log_path,
@@ -311,6 +453,7 @@ async fn handle_connection(
     let response = match response {
         Ok(response) => response,
         Err(e) => {
+            tracing::warn!(id = %id, error = %e, "audit::proxy::handle_connection: upstream request failed");
             record_upstream_error(
                 &sink,
                 &log_path,
@@ -330,6 +473,7 @@ async fn handle_connection(
     let response_body = match read_response_body(response, cfg.max_body_bytes).await {
         Ok(body) => body,
         Err(e) => {
+            tracing::warn!(id = %id, error = %e, "audit::proxy::handle_connection: response body read failed");
             record_upstream_error(&sink, &log_path, &id, started.elapsed(), &e, &policy).await?;
             write_error(&mut stream, 502, "upstream body error").await?;
             return Ok(());
@@ -346,6 +490,14 @@ async fn handle_connection(
         .collect::<Vec<_>>();
     let response_audit_headers = redacted_headers(&policy, &response_pairs)?;
     let response_canonical = canonical_redacted_body(&policy, &response_body, cfg.include_bodies)?;
+    let elapsed_ms = duration_ms(started.elapsed());
+    tracing::info!(
+        id = %id,
+        status = status.as_u16(),
+        response_bytes = response_body.len(),
+        elapsed_ms,
+        "audit::proxy::handle_connection: forwarding response"
+    );
     let mut response_record = AuditRecord {
         ts: unix_now(),
         event: "response".into(),
@@ -357,7 +509,7 @@ async fn handle_connection(
         body_canonical: response_canonical,
         body_sha256: sha256_hex(&response_body),
         body_size: response_body.len() as u64,
-        elapsed_ms: Some(duration_ms(started.elapsed())),
+        elapsed_ms: Some(elapsed_ms),
         crc32: String::new(),
         error: None,
     };
@@ -381,6 +533,7 @@ async fn record_upstream_error(
     error: &str,
     policy: &RedactPolicy,
 ) -> Result<()> {
+    tracing::warn!(id = %id, error = %error, "audit::proxy::record_upstream_error: enter");
     let error = apply(policy, Surface::Telemetry, error)?.into_owned();
     let mut record = AuditRecord {
         ts: unix_now(),
@@ -397,7 +550,19 @@ async fn record_upstream_error(
         crc32: String::new(),
         error: Some(error),
     };
-    sink.lock().await.write(path, &mut record)
+    let result = sink.lock().await.write(path, &mut record);
+    match &result {
+        Ok(()) => tracing::debug!(
+            id = %id,
+            "audit::proxy::record_upstream_error: error record persisted"
+        ),
+        Err(e) => tracing::error!(
+            id = %id,
+            error = %e,
+            "audit::proxy::record_upstream_error: failed to persist error record"
+        ),
+    }
+    result
 }
 
 struct ParsedRequest {
@@ -430,6 +595,7 @@ async fn read_request(
     stream: &mut TcpStream,
     cap: usize,
 ) -> std::result::Result<ParsedRequest, RequestReadError> {
+    tracing::trace!(cap, "audit::proxy::read_request: enter");
     let mut reader = BufReader::new(stream);
     let mut total = 0usize;
     let request_line = read_bounded_line(&mut reader, &mut total).await?;
@@ -438,12 +604,20 @@ async fn read_request(
         .split_whitespace()
         .collect::<Vec<_>>();
     if fields.len() != 3 {
+        tracing::warn!(
+            request_line = %request_line.trim_end(),
+            "audit::proxy::read_request: malformed request line"
+        );
         return Err(RequestReadError::new(400, "malformed request line"));
     }
     let method = reqwest::Method::from_bytes(fields[0].as_bytes())
         .map_err(|_| RequestReadError::new(400, "invalid HTTP method"))?;
     let target = fields[1].to_owned();
     if !target.starts_with('/') || target.starts_with("//") {
+        tracing::warn!(
+            target = %target,
+            "audit::proxy::read_request: absolute target rejected"
+        );
         return Err(RequestReadError::new(
             400,
             "absolute request targets are not allowed",
@@ -451,6 +625,7 @@ async fn read_request(
     }
     let version = fields[2].to_owned();
     if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        tracing::warn!(version = %version, "audit::proxy::read_request: unsupported HTTP version");
         return Err(RequestReadError::new(505, "unsupported HTTP version"));
     }
 
@@ -496,12 +671,26 @@ async fn read_request(
     }
     let body = match transfer_encoding.as_deref() {
         Some("chunked") => read_chunked_body(&mut reader, cap, &mut total).await?,
-        Some(_) => return Err(RequestReadError::new(501, "unsupported transfer encoding")),
+        Some(other) => {
+            tracing::warn!(
+                encoding = %other,
+                "audit::proxy::read_request: unsupported transfer encoding"
+            );
+            return Err(RequestReadError::new(501, "unsupported transfer encoding"));
+        }
         None => match content_length {
             Some(length) => read_n_body(&mut reader, length, cap).await?,
             None => Vec::new(),
         },
     };
+    tracing::trace!(
+        method = %method,
+        target = %target,
+        version = %version,
+        header_count = headers.len(),
+        body_bytes = body.len(),
+        "audit::proxy::read_request: parsed"
+    );
     Ok(ParsedRequest {
         method,
         target,
@@ -549,7 +738,9 @@ async fn read_n_body<R: AsyncRead + Unpin>(
     length: usize,
     cap: usize,
 ) -> std::result::Result<Vec<u8>, RequestReadError> {
+    tracing::trace!(length, cap, "audit::proxy::read_n_body: enter");
     if length > cap {
+        tracing::warn!(length, cap, "audit::proxy::read_n_body: payload too large");
         return Err(RequestReadError::new(413, "payload too large"));
     }
     let mut body = vec![0; length];
@@ -557,6 +748,7 @@ async fn read_n_body<R: AsyncRead + Unpin>(
         .read_exact(&mut body)
         .await
         .map_err(RequestReadError::io)?;
+    tracing::trace!(bytes = body.len(), "audit::proxy::read_n_body: exit");
     Ok(body)
 }
 
@@ -616,6 +808,7 @@ async fn read_response_body(
     cap: usize,
 ) -> std::result::Result<Vec<u8>, String> {
     use futures::StreamExt;
+    tracing::trace!(cap, "audit::proxy::read_response_body: enter");
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -625,10 +818,16 @@ async fn read_response_body(
             .checked_add(chunk.len())
             .ok_or_else(|| "upstream body exceeds size limit".to_owned())?;
         if next_len > cap {
+            tracing::warn!(
+                cap,
+                next_len,
+                "audit::proxy::read_response_body: body exceeded cap"
+            );
             return Err("upstream body exceeds size limit".into());
         }
         body.extend_from_slice(&chunk);
     }
+    tracing::trace!(bytes = body.len(), "audit::proxy::read_response_body: exit");
     Ok(body)
 }
 
@@ -640,11 +839,19 @@ async fn write_response(
     body: &[u8],
 ) -> Result<()> {
     let reason = status.canonical_reason().unwrap_or("");
+    let status_code = status.as_u16();
+    tracing::trace!(
+        status = status_code,
+        body_bytes = body.len(),
+        "audit::proxy::write_response: enter"
+    );
     stream
-        .write_all(format!("{version} {} {reason}\r\n", status.as_u16()).as_bytes())
+        .write_all(format!("{version} {status_code} {reason}\r\n").as_bytes())
         .await?;
+    let mut hop_skipped = 0usize;
     for (name, value) in headers {
         if is_hop_by_hop_response_header(name.as_str()) {
+            hop_skipped += 1;
             continue;
         }
         if let Ok(value) = value.to_str() {
@@ -653,6 +860,10 @@ async fn write_response(
                 .await?;
         }
     }
+    tracing::trace!(
+        hop_skipped,
+        "audit::proxy::write_response: response headers written"
+    );
     stream
         .write_all(
             format!(
@@ -672,6 +883,11 @@ async fn write_error(stream: &mut TcpStream, status: u16, message: &str) -> Resu
         reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
     let reason = status_code.canonical_reason().unwrap_or("");
     let body = format!("{status} {message}\n");
+    tracing::trace!(
+        status,
+        body_bytes = body.len(),
+        "audit::proxy::write_error: enter"
+    );
     stream
         .write_all(
             format!(
@@ -745,6 +961,7 @@ fn is_hop_by_hop_response_header(name: &str) -> bool {
 }
 
 fn resolve_log_path(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
+    tracing::trace!("audit::proxy::resolve_log_path: enter");
     if let Some(path) = &cfg.fixed_log_path {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -779,6 +996,7 @@ fn resolve_log_path(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
 /// Returns `Ok(None)` after the deadline so the connection
 /// handler surfaces 503 'no active run'.
 fn resolve_log_path_blocking(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
+    tracing::trace!("audit::proxy::resolve_log_path_blocking: enter");
     if let Some(path) = &cfg.fixed_log_path {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -810,11 +1028,23 @@ fn resolve_log_path_blocking(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
     // machine tested so far.
     let mut wait_ms: u64 = 5;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let started = std::time::Instant::now();
+    let mut iterations = 0u32;
     let run_id = loop {
+        iterations += 1;
         if let Some(id) = pick_latest_run(&runs_root)? {
+            tracing::debug!(
+                iterations,
+                elapsed_ms = started.elapsed().as_millis(),
+                "audit::proxy::resolve_log_path_blocking: found run dir"
+            );
             break id;
         }
         if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                iterations,
+                "audit::proxy::resolve_log_path_blocking: deadline elapsed without finding a run dir"
+            );
             return Ok(None);
         }
         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
@@ -827,7 +1057,10 @@ fn resolve_log_path_blocking(cfg: &ProxyConfig) -> Result<Option<PathBuf>> {
 
 fn pick_latest_run(runs_root: &Path) -> Result<Option<RunId>> {
     let mut latest = None;
+    let mut scanned = 0usize;
+    let mut parsed = 0usize;
     for entry in std::fs::read_dir(runs_root)? {
+        scanned += 1;
         let Ok(entry) = entry else {
             continue;
         };
@@ -837,22 +1070,46 @@ fn pick_latest_run(runs_root: &Path) -> Result<Option<RunId>> {
         let Ok(run_id) = name.parse::<RunId>() else {
             continue;
         };
+        parsed += 1;
         if latest.is_none_or(|current| run_id > current) {
             latest = Some(run_id);
         }
     }
+    tracing::trace!(
+        runs_root = %runs_root.display(),
+        scanned,
+        parsed,
+        latest = ?latest,
+        "audit::proxy::pick_latest_run"
+    );
     Ok(latest)
 }
 
 fn validate_upstream(upstream: &str) -> Result<()> {
-    let url = reqwest::Url::parse(upstream)
-        .map_err(|e| Error::InvalidArgs(format!("invalid upstream URL: {e}")))?;
+    tracing::debug!(upstream, "audit::proxy::validate_upstream: enter");
+    let url = reqwest::Url::parse(upstream).map_err(|e| {
+        tracing::error!(
+            upstream,
+            error = %e,
+            "audit::proxy::validate_upstream: invalid URL"
+        );
+        Error::InvalidArgs(format!("invalid upstream URL: {e}"))
+    })?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        tracing::error!(
+            upstream,
+            scheme = %url.scheme(),
+            "audit::proxy::validate_upstream: non-http(s) or no host"
+        );
         return Err(Error::InvalidArgs(
             "upstream must be an absolute http(s) URL".into(),
         ));
     }
     if url.fragment().is_some() {
+        tracing::error!(
+            upstream,
+            "audit::proxy::validate_upstream: URL has fragment"
+        );
         return Err(Error::InvalidArgs(
             "upstream URL must not contain a fragment".into(),
         ));
@@ -861,6 +1118,10 @@ fn validate_upstream(upstream: &str) -> Result<()> {
 }
 
 fn validate_forward_target(cfg: &ProxyConfig, local_addr: SocketAddr) -> Result<()> {
+    tracing::debug!(
+        local_addr = %local_addr,
+        "audit::proxy::validate_forward_target: enter"
+    );
     let url = reqwest::Url::parse(&cfg.upstream)
         .map_err(|e| Error::InvalidArgs(format!("invalid upstream URL: {e}")))?;
     let host = url
@@ -871,6 +1132,10 @@ fn validate_forward_target(cfg: &ProxyConfig, local_addr: SocketAddr) -> Result<
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
     if cfg.refuse_loopback_forward && !cfg.refuse_loopback_forward_allowed && is_loopback {
+        tracing::error!(
+            upstream = %cfg.upstream,
+            "audit::proxy::validate_forward_target: refusing loopback forward"
+        );
         return Err(Error::InvalidArgs(format!(
             "refusing to forward to loopback upstream {}",
             cfg.upstream
@@ -881,6 +1146,11 @@ fn validate_forward_target(cfg: &ProxyConfig, local_addr: SocketAddr) -> Result<
         && port == Some(local_addr.port())
         && (local_addr.ip().is_loopback() || local_addr.ip().is_unspecified())
     {
+        tracing::error!(
+            upstream = %cfg.upstream,
+            local_addr = %local_addr,
+            "audit::proxy::validate_forward_target: upstream resolves to the audit proxy itself"
+        );
         return Err(Error::InvalidArgs(
             "upstream resolves to the audit proxy itself".into(),
         ));
@@ -889,7 +1159,12 @@ fn validate_forward_target(cfg: &ProxyConfig, local_addr: SocketAddr) -> Result<
 }
 
 fn join_upstream(base: &str, target: &str, _host_hint: Option<&str>) -> Result<String> {
+    tracing::trace!(base, target, "audit::proxy::join_upstream: enter");
     if !target.starts_with('/') || target.starts_with("//") {
+        tracing::warn!(
+            target,
+            "audit::proxy::join_upstream: absolute target rejected"
+        );
         return Err(Error::InvalidArgs(
             "absolute request targets are not allowed".into(),
         ));
@@ -926,7 +1201,9 @@ fn join_upstream(base: &str, target: &str, _host_hint: Option<&str>) -> Result<S
     }
     url.set_query(query);
     url.set_fragment(None);
-    Ok(url.into())
+    let out: String = url.into();
+    tracing::trace!(joined_url = %out, "audit::proxy::join_upstream: exit");
+    Ok(out)
 }
 
 fn duration_ms(duration: Duration) -> u64 {

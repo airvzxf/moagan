@@ -14,14 +14,18 @@ use super::wire::{Request, Response, Usage};
 
 /// Build a `reqwest::Client` configured for the moagan transport.
 pub fn build_client() -> std::result::Result<Client, Error> {
+    tracing::debug!("build_client: constructing reqwest client (180s/15s timeouts)");
     Client::builder()
         .timeout(Duration::from_secs(180))
         .connect_timeout(Duration::from_secs(15))
         .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| Error::Provider {
-            message: format!("build reqwest client: {e}"),
-            http_status: None,
+        .map_err(|e| {
+            tracing::error!(error = %e, "build_client: reqwest::Client build failed");
+            Error::Provider {
+                message: format!("build reqwest client: {e}"),
+                http_status: None,
+            }
         })
 }
 
@@ -30,13 +34,17 @@ pub fn build_headers(
     api_key: &str,
     extra: &[(String, String)],
 ) -> std::result::Result<HeaderMap, Error> {
+    tracing::trace!(extra_count = extra.len(), "build_headers: enter");
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         HeaderName::from_static("x-api-key"),
-        HeaderValue::from_str(api_key).map_err(|e| Error::InvalidApiKey {
-            message: format!("x-api-key: {e}"),
-            http_status: None,
+        HeaderValue::from_str(api_key).map_err(|e| {
+            tracing::warn!(error = %e, "build_headers: invalid x-api-key value");
+            Error::InvalidApiKey {
+                message: format!("x-api-key: {e}"),
+                http_status: None,
+            }
         })?,
     );
     headers.insert(
@@ -44,13 +52,19 @@ pub fn build_headers(
         HeaderValue::from_static("2023-06-01"),
     );
     for (k, v) in extra {
-        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| Error::Provider {
-            message: format!("header {k}: {e}"),
-            http_status: None,
+        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+            tracing::warn!(header = k, error = %e, "build_headers: invalid header name");
+            Error::Provider {
+                message: format!("header {k}: {e}"),
+                http_status: None,
+            }
         })?;
-        let value = HeaderValue::from_str(v).map_err(|e| Error::Provider {
-            message: format!("header {k} value: {e}"),
-            http_status: None,
+        let value = HeaderValue::from_str(v).map_err(|e| {
+            tracing::warn!(header = k, error = %e, "build_headers: invalid header value");
+            Error::Provider {
+                message: format!("header {k} value: {e}"),
+                http_status: None,
+            }
         })?;
         headers.insert(name, value);
     }
@@ -77,7 +91,7 @@ pub fn build_headers(
 /// inspect the message via telemetry.
 pub fn classify_status(status: StatusCode, body: &str) -> Error {
     let code = status.as_u16();
-    match code {
+    let err = match code {
         401 | 403 => Error::InvalidApiKey {
             message: format!("http {status}: {body}"),
             http_status: Some(code),
@@ -95,6 +109,19 @@ pub fn classify_status(status: StatusCode, body: &str) -> Error {
             message: format!("http {status}: {body}"),
             http_status: Some(code),
         },
+    };
+    tracing::debug!(code, variant = ?discriminant_name(&err), "classify_status");
+    err
+}
+
+fn discriminant_name(err: &Error) -> &'static str {
+    match err {
+        Error::InvalidApiKey { .. } => "InvalidApiKey",
+        Error::Throttled { .. } => "Throttled",
+        Error::PlanExhausted { .. } => "PlanExhausted",
+        Error::Timeout { .. } => "Timeout",
+        Error::Provider { .. } => "Provider",
+        _ => "Other",
     }
 }
 
@@ -115,11 +142,13 @@ fn classify_throttled_or_plan_exhausted(body: &str) -> Error {
     let plan_exhausted_keywords = ["plan", "monthly", "quota", "subscription", "upgrade"];
     let is_plan_exhausted = plan_exhausted_keywords.iter().any(|kw| lower.contains(kw));
     if is_plan_exhausted {
+        tracing::debug!(body_len = body.len(), "429 → PlanExhausted (keyword match)");
         Error::PlanExhausted {
             message: format!("http 429: {body}"),
             http_status: Some(429),
         }
     } else {
+        tracing::debug!(body_len = body.len(), "429 → Throttled (transient)");
         Error::Throttled {
             retry_after_ms: None,
             message: body.to_string(),
@@ -137,6 +166,10 @@ fn classify_throttled_or_plan_exhausted(body: &str) -> Error {
 /// only called from the 429 throttle path; the actual status code
 /// is implicit in the call site.
 pub fn throttled_with_retry_after(body: &str, retry_after: Option<Duration>) -> Error {
+    tracing::trace!(
+        retry_after_ms = retry_after.map(|d| d.as_millis() as u64),
+        "throttled_with_retry_after"
+    );
     Error::Throttled {
         retry_after_ms: retry_after.map(|d| d.as_millis() as u64),
         message: body.to_string(),
@@ -342,11 +375,16 @@ pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
 pub(crate) fn request_body_sha256(req: &Request) -> std::result::Result<String, Error> {
     use sha2::{Digest, Sha256};
 
-    let bytes = serde_json::to_vec(&body_from_request(req)).map_err(|e| Error::Provider {
-        message: format!("encode request body: {e}"),
-        http_status: None,
+    let bytes = serde_json::to_vec(&body_from_request(req)).map_err(|e| {
+        tracing::error!(error = %e, "request_body_sha256: encode failed");
+        Error::Provider {
+            message: format!("encode request body: {e}"),
+            http_status: None,
+        }
     })?;
-    Ok(hex::encode(Sha256::digest(bytes)))
+    let digest = hex::encode(Sha256::digest(bytes));
+    tracing::trace!(digest = %digest, "request_body_sha256");
+    Ok(digest)
 }
 
 #[cfg(test)]

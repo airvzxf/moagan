@@ -100,7 +100,15 @@ pub fn plan(
     db_updated: &dyn Fn(RunId) -> Option<i64>,
     cfg: &RetentionConfig,
 ) -> Result<RetentionReport> {
+    tracing::debug!(
+        runs_dir = %runs_dir.display(),
+        keep_runs_days = cfg.keep_runs_days,
+        keep_runs_count = cfg.keep_runs_count,
+        max_storage_bytes = cfg.max_storage_bytes,
+        "retention::plan: enter"
+    );
     let mut runs = scan(runs_dir, db_updated)?;
+    tracing::trace!(scan_count = runs.len(), "retention::plan: scan done");
     runs.sort_by_key(|r| r.updated_unix);
     let mut candidates = Vec::new();
 
@@ -150,12 +158,18 @@ pub fn plan(
     candidates.dedup_by(|a, b| a.run_id == b.run_id);
     let total_bytes = candidates.iter().map(|r| r.bytes).sum();
 
-    Ok(RetentionReport {
+    let report = RetentionReport {
         candidates,
         total_bytes,
         dry_run: true,
         policy: cfg.policy,
-    })
+    };
+    tracing::info!(
+        candidate_count = report.candidates.len(),
+        total_bytes = report.total_bytes,
+        "retention::plan: ok"
+    );
+    Ok(report)
 }
 
 /// Execute the policy. When `dry_run` is `true` the report is
@@ -166,9 +180,14 @@ pub fn apply(
     cfg: &RetentionConfig,
     dry_run: bool,
 ) -> Result<RetentionReport> {
+    tracing::info!(dry_run, "retention::apply: enter");
     let mut report = plan(runs_dir, db_updated, cfg)?;
     report.dry_run = dry_run;
     if dry_run {
+        tracing::info!(
+            candidates = report.candidates.len(),
+            "retention::apply: dry-run, no fs ops"
+        );
         return Ok(report);
     }
     let archive_root = runs_dir
@@ -183,11 +202,23 @@ pub fn apply(
                     .unwrap_or("runs")
             ))
         });
+    tracing::debug!(archive_root = %archive_root.display(), "retention::apply: archive root");
     for cand in &report.candidates {
         match cfg.policy {
             RetentionPolicy::Delete => {
                 if let Err(e) = std::fs::remove_dir_all(&cand.path) {
-                    eprintln!("warn: failed to remove {}: {e}", cand.path.display());
+                    tracing::warn!(
+                        run_id = %cand.run_id,
+                        path = %cand.path.display(),
+                        error = %e,
+                        "retention::apply: delete failed"
+                    );
+                } else {
+                    tracing::info!(
+                        run_id = %cand.run_id,
+                        path = %cand.path.display(),
+                        "retention::apply: deleted"
+                    );
                 }
             }
             RetentionPolicy::Archive => {
@@ -201,10 +232,18 @@ pub fn apply(
                 })?;
                 let dest = dest_dir.join(cand.path.file_name().unwrap_or_default());
                 if let Err(e) = std::fs::rename(&cand.path, &dest) {
-                    eprintln!(
-                        "warn: failed to archive {} -> {}: {e}",
-                        cand.path.display(),
-                        dest.display()
+                    tracing::warn!(
+                        run_id = %cand.run_id,
+                        from = %cand.path.display(),
+                        to = %dest.display(),
+                        error = %e,
+                        "retention::apply: archive rename failed"
+                    );
+                } else {
+                    tracing::info!(
+                        run_id = %cand.run_id,
+                        to = %dest.display(),
+                        "retention::apply: archived"
                     );
                 }
             }
@@ -221,7 +260,9 @@ fn scan(
     runs_dir: &Path,
     db_updated: &dyn Fn(RunId) -> Option<i64>,
 ) -> Result<Vec<RetentionCandidate>> {
+    tracing::trace!(runs_dir = %runs_dir.display(), "retention::scan: enter");
     if !runs_dir.exists() {
+        tracing::trace!(runs_dir = %runs_dir.display(), "retention::scan: missing dir -> empty");
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
@@ -258,6 +299,7 @@ fn scan(
             updated_unix,
         });
     }
+    tracing::trace!(count = out.len(), "retention::scan: ok");
     Ok(out)
 }
 

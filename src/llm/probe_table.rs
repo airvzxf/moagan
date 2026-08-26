@@ -72,6 +72,12 @@ impl MaxTokensTable {
     /// probe results are persisted.
     pub fn from_home(home: &MoaganHome, floor: u32, save: bool) -> Result<Self> {
         let path = home.max_tokens_auto_path();
+        tracing::debug!(
+            path = %path.display(),
+            floor,
+            save,
+            "MaxTokensTable::from_home"
+        );
         Self::from_path(&path, floor, save)
     }
 
@@ -79,7 +85,7 @@ impl MaxTokensTable {
     /// [`Self::from_home`].
     pub fn from_path(path: &Path, floor: u32, save: bool) -> Result<Self> {
         let file = MaxTokensTableFile::load(path)?;
-        let entries = file
+        let entries: BTreeMap<(String, String), Entry> = file
             .providers
             .into_iter()
             .flat_map(|(provider, models)| {
@@ -88,6 +94,13 @@ impl MaxTokensTable {
                     .map(move |(model, entry)| ((provider.clone(), model), entry))
             })
             .collect();
+        tracing::info!(
+            path = %path.display(),
+            entries = entries.len(),
+            floor,
+            save,
+            "MaxTokensTable::from_path loaded"
+        );
         Ok(Self {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries,
@@ -101,6 +114,10 @@ impl MaxTokensTable {
 
     /// Build a fresh table with no on-disk backing. Used by tests.
     pub fn empty(floor: u32) -> Self {
+        tracing::debug!(
+            floor = floor.max(MIN_AUTOPROBE_FLOOR),
+            "MaxTokensTable::empty constructed"
+        );
         Self {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries: BTreeMap::new(),
@@ -115,11 +132,19 @@ impl MaxTokensTable {
     /// Read the cached value for `(provider, model)`. Returns
     /// `None` if no entry exists.
     pub fn get(&self, provider: &str, model: &str) -> Option<Entry> {
-        self.inner
+        let entry = self
+            .inner
             .read()
             .entries
             .get(&(provider.to_owned(), model.to_owned()))
-            .cloned()
+            .cloned();
+        tracing::trace!(
+            provider,
+            model,
+            present = entry.is_some(),
+            "MaxTokensTable::get"
+        );
+        entry
     }
 
     /// Set the per-`(provider, model)` operator floor for the next
@@ -136,7 +161,14 @@ impl MaxTokensTable {
     /// do not need to change when that lands.
     pub fn set_floor_for(&self, _provider: &str, _model: &str, floor: u32) {
         let mut inner = self.inner.write();
+        let before = inner.floor;
         inner.floor = inner.floor.max(floor.max(MIN_AUTOPROBE_FLOOR));
+        tracing::debug!(
+            before,
+            after = inner.floor,
+            requested = floor,
+            "MaxTokensTable::set_floor_for"
+        );
     }
 
     /// Resolve the effective `max_tokens` for `(provider, model)`:
@@ -175,6 +207,13 @@ impl MaxTokensTable {
         transport: Arc<dyn ProbeTransport>,
         ceiling: u32,
     ) -> Result<u32> {
+        tracing::info!(
+            provider,
+            model,
+            floor = self.inner.read().floor,
+            ceiling,
+            "MaxTokensTable::probe_and_store: starting"
+        );
         let floor = self.inner.read().floor;
         let attempts_before = self.inner.read().probe_tasks_started;
         // Single-element cell so the Phase 0 callback can write
@@ -198,6 +237,9 @@ impl MaxTokensTable {
             .ok()
             .and_then(|g| *g)
             .filter(|&c| c <= discovered);
+        if let Some(cap) = phase0_cap_value {
+            tracing::trace!(cap, discovered, "probe_and_store: phase0 cap accepted");
+        }
 
         let now = Utc::now().to_rfc3339();
         let attempts = {
@@ -234,6 +276,12 @@ impl MaxTokensTable {
                 "max_tokens_auto.toml persistence failed; in-memory entry is kept"
             );
         }
+        tracing::info!(
+            provider,
+            model,
+            discovered,
+            "MaxTokensTable::probe_and_store: completed"
+        );
         Ok(discovered)
     }
 
@@ -249,8 +297,15 @@ impl MaxTokensTable {
     ) -> Result<bool> {
         let cached = self.get(provider, model);
         let Some(entry) = cached else {
+            tracing::trace!(provider, model, "verify: no cached entry; skip");
             return Ok(false);
         };
+        tracing::debug!(
+            provider,
+            model,
+            cached_max_tokens = entry.max_tokens,
+            "verify: probing cached value"
+        );
         let outcome = transport.probe_send(entry.max_tokens).await;
         let ok = matches!(outcome, super::probe::ProbeOutcome::Accepted);
         {
@@ -263,10 +318,17 @@ impl MaxTokensTable {
                 {
                     e.verified_at = Utc::now().to_rfc3339();
                 }
+                tracing::info!(provider, model, "verify: accepted; verified_at bumped");
             } else {
                 inner
                     .entries
                     .remove(&(provider.to_owned(), model.to_owned()));
+                tracing::warn!(
+                    provider,
+                    model,
+                    max_tokens = entry.max_tokens,
+                    "verify: rejected by upstream; entry dropped (caller will re-probe)"
+                );
             }
         }
         if let Some(path) = self.persist_path.as_ref() {
@@ -287,6 +349,11 @@ impl MaxTokensTable {
                 .or_default()
                 .insert(model.clone(), entry.clone());
         }
+        tracing::trace!(
+            path = %path.display(),
+            count = inner.entries.len(),
+            "MaxTokensTable::persist_to"
+        );
         file.save(path)
     }
 
@@ -302,7 +369,13 @@ impl MaxTokensTable {
     ) {
         let _ = (provider, model);
         let mut inner = self.inner.write();
+        let pending_before = inner.pending.len();
         inner.pending.push(handle);
+        tracing::debug!(
+            pending_before,
+            pending_after = inner.pending.len(),
+            "MaxTokensTable: probe JoinHandle recorded"
+        );
     }
 
     /// Wait for every probe the registry fired at startup to
@@ -315,17 +388,21 @@ impl MaxTokensTable {
             let mut inner = self.inner.write();
             std::mem::take(&mut inner.pending)
         };
+        let count = handles.len();
+        tracing::debug!(count, "MaxTokensTable::await_ready: awaiting probes");
         for h in handles {
             if let Err(e) = h.await {
                 tracing::warn!(error = %e, "max_tokens_auto: probe task join failed");
             }
         }
+        tracing::debug!(count, "MaxTokensTable::await_ready: completed");
     }
 
     /// Persist to the path the table was built from. `None` when
     /// persistence was disabled at construction.
     pub fn persist(&self) -> Result<()> {
         let Some(path) = self.persist_path.clone() else {
+            tracing::trace!("MaxTokensTable::persist: persistence disabled; skip");
             return Ok(());
         };
         self.persist_to(&path)
@@ -340,6 +417,7 @@ impl MaxTokensTable {
     /// meaningful. `auto` is hard-coded to `false` because an
     /// operator-pinned cap is, by construction, not auto-detected.
     pub fn set_operator_cap(&self, provider: &str, min: u32) -> Result<()> {
+        tracing::info!(provider, min, "MaxTokensTable::set_operator_cap");
         let now = Utc::now().to_rfc3339();
         let path = self.persist_path.clone();
         // Re-load the file so the operator_caps map merges with

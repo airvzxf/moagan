@@ -83,6 +83,11 @@ impl OpenAICompatProvider {
     /// `"openai_compat"` as a placeholder) and the section-level
     /// `endpoint` (or `"http://localhost"` as a placeholder).
     pub fn new(spec: &ProviderConfig, api_key: SecretString) -> Result<Self> {
+        tracing::debug!(
+            endpoint = spec.endpoint.as_deref(),
+            models = spec.models.len(),
+            "OpenAICompatProvider::new: enter"
+        );
         let client = build_client()?;
         let name = spec
             .models
@@ -101,6 +106,12 @@ impl OpenAICompatProvider {
             .or_else(|| spec.endpoint.clone())
             .unwrap_or_else(|| "http://localhost".to_owned());
         let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
+        tracing::info!(
+            name = %name,
+            model = %model,
+            endpoint = %endpoint,
+            "OpenAICompatProvider: constructed"
+        );
         Ok(Self {
             name,
             model,
@@ -118,6 +129,7 @@ impl OpenAICompatProvider {
     /// layers the discovered ceiling into the clamp chain. Wired by
     /// `registry_from_config` when the registry has a table.
     pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
+        tracing::debug!(name = %self.name, "OpenAICompatProvider::with_max_tokens_table");
         self.max_tokens_table = Some(table);
         self
     }
@@ -127,13 +139,18 @@ impl OpenAICompatProvider {
     /// callers (test fixtures); new dispatcher code goes through
     /// [`Self::from_resolved`].
     pub fn from_config(spec: &ProviderConfig) -> Result<Self> {
+        tracing::debug!("OpenAICompatProvider::from_config: enter");
         let key = std::env::var("OPENCODE_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
-                    .into(),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!("OpenAICompatProvider::from_config: OPENCODE_API_KEY missing");
+                Error::InvalidApiKey {
+                    message:
+                        "OPENCODE_API_KEY not set; provide via env, --api-key, or api_keys.toml"
+                            .into(),
+                    http_status: None,
+                }
             })?;
         Self::new(spec, SecretString::new(key))
     }
@@ -149,14 +166,22 @@ impl OpenAICompatProvider {
     /// picks this constructor for endpoints whose path resolves to
     /// [`super::wire_format::WireFormatId::OpenAI`].
     pub fn from_resolved(resolved: &crate::config::ResolvedModelConfig) -> Result<Self> {
+        tracing::debug!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "OpenAICompatProvider::from_resolved: enter"
+        );
         let kind = super::api_keys::lookup_kind_for_resolved(resolved);
         let key = super::api_keys::lookup_key(&kind, None)
-            .ok_or_else(|| Error::InvalidApiKey {
-                message: format!(
-                    "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
-                    kind.to_ascii_uppercase()
-                ),
-                http_status: None,
+            .ok_or_else(|| {
+                tracing::error!(kind, "OpenAICompatProvider::from_resolved: API key missing");
+                Error::InvalidApiKey {
+                    message: format!(
+                        "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                        kind.to_ascii_uppercase()
+                    ),
+                    http_status: None,
+                }
             })?
             .map_err(|e| match e {
                 Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
@@ -169,6 +194,11 @@ impl OpenAICompatProvider {
                 other => other,
             })?;
         let client = build_client()?;
+        tracing::info!(
+            section = %resolved.section,
+            model = %resolved.id,
+            "OpenAICompatProvider::from_resolved: constructed"
+        );
         Ok(Self {
             name: resolved.section.clone(),
             model: resolved.id.clone(),
@@ -185,16 +215,23 @@ impl OpenAICompatProvider {
     /// Compute the URL for the responses endpoint.
     fn responses_url(&self) -> String {
         let base = self.endpoint.trim_end_matches('/');
-        if base.ends_with("/responses") {
+        let url = if base.ends_with("/responses") {
             base.to_owned()
         } else if base.ends_with("/v1") {
             format!("{base}/responses")
         } else {
             format!("{base}/v1/responses")
-        }
+        };
+        tracing::trace!(endpoint = %self.endpoint, url = %url, "responses_url");
+        url
     }
 
     async fn sleep_with_jitter(attempt: u32, suggested: Option<std::time::Duration>) {
+        tracing::trace!(
+            attempt,
+            suggested_ms = suggested.map(|d| d.as_millis() as u64),
+            "sleep_with_jitter"
+        );
         let base = suggested.unwrap_or(std::time::Duration::from_millis(500));
         let jitter = (fastrand::u64(..) % 250) + 1;
         let total = base + std::time::Duration::from_millis(jitter);
@@ -316,14 +353,18 @@ struct ResponsesUsage {
 }
 
 fn build_client() -> Result<reqwest::Client> {
+    tracing::trace!("build_client: reqwest client for openai_compat");
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
         .connect_timeout(std::time::Duration::from_secs(15))
         .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| Error::Provider {
-            message: format!("build reqwest client: {e}"),
-            http_status: None,
+        .map_err(|e| {
+            tracing::error!(error = %e, "build_client: failed");
+            Error::Provider {
+                message: format!("build reqwest client: {e}"),
+                http_status: None,
+            }
         })
 }
 
@@ -439,7 +480,7 @@ fn build_responses_body<'a>(
     stream: bool,
     omit_max_tokens: bool,
 ) -> ResponsesRequest<'a> {
-    ResponsesRequest {
+    let body = ResponsesRequest {
         model,
         instructions: Some(&req.system),
         input: &req.user,
@@ -456,7 +497,17 @@ fn build_responses_body<'a>(
         top_p: req.top_p,
         text: responses_text_json_object(wants_response_format(req.role, model)),
         stream,
-    }
+    };
+    tracing::trace!(
+        model,
+        role = ?req.role,
+        stream,
+        omit_max_tokens,
+        max_tokens = ?body.max_tokens,
+        wants_format = body.text.is_some(),
+        "build_responses_body"
+    );
+    body
 }
 
 /// Build the `text: { format: { type: "json_object" } }` payload
@@ -493,9 +544,11 @@ fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
     let mut parser = SseParser::new(body);
     let mut text = String::new();
     let mut usage = ResponsesUsage::default();
+    let mut deltas = 0usize;
     loop {
         match parser.next_data::<ResponsesBody>() {
             Ok(Some(delta)) => {
+                deltas += 1;
                 for out in delta.output {
                     for c in out.content {
                         if c.kind == "output_text"
@@ -511,6 +564,7 @@ fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
             }
             Ok(None) => break,
             Err(e) => {
+                tracing::warn!(error = %e, deltas, "accumulate_sse_responses: SSE parse failed");
                 return Err(match e {
                     SseError::Io(err) => Error::Provider {
                         message: format!("sse io: {err}"),
@@ -524,6 +578,13 @@ fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
             }
         }
     }
+    tracing::trace!(
+        deltas,
+        text_len = text.len(),
+        input_tokens = usage.input_tokens,
+        output_tokens = usage.output_tokens,
+        "accumulate_sse_responses: completed"
+    );
     Ok((text, usage))
 }
 

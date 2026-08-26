@@ -40,7 +40,14 @@ impl TypeScriptValidator {
     /// Run `tsc --noEmit` against the artifact inside the sandbox's
     /// scratch dir.
     pub async fn check(artifact: &CodeArtifact, sandbox: &Sandbox) -> Result<ValidationEvidence> {
+        tracing::debug!(
+            kind = %artifact.kind,
+            "validators::typescript::TypeScriptValidator::check: enter"
+        );
         if !looks_like_typescript_source(&artifact.source) {
+            tracing::trace!(
+                "validators::typescript::TypeScriptValidator::check: skipping non-executable"
+            );
             return Ok(ValidationEvidence::skipped(
                 "typescript",
                 "no function/const/let declaration found; artifact looks non-executable",
@@ -57,6 +64,10 @@ impl TypeScriptValidator {
         if let Some(v) = capture_tool_version(sandbox, "tsc").await {
             evidence.reproducibility.push(("tsc".into(), v));
         }
+        tracing::debug!(
+            status = ?evidence.status,
+            "validators::typescript::TypeScriptValidator::check: exit"
+        );
         Ok(evidence)
     }
 }
@@ -102,22 +113,35 @@ fn looks_like_typescript_source(source: &str) -> bool {
         b"export ",
         b"import ",
     ];
-    while i < bytes.len() {
-        for kw in keywords {
-            if i + kw.len() <= bytes.len() && &bytes[i..i + kw.len()] == *kw {
-                // Accept: a keyword is present, so the source
-                // looks TS-shaped. We do not require an open paren
-                // here because `const x = 1;` is a perfectly valid
-                // declaration that we still want to type-check.
-                return true;
+    let result = (|| {
+        while i < bytes.len() {
+            for kw in keywords {
+                if i + kw.len() <= bytes.len() && &bytes[i..i + kw.len()] == *kw {
+                    // Accept: a keyword is present, so the source
+                    // looks TS-shaped. We do not require an open paren
+                    // here because `const x = 1;` is a perfectly valid
+                    // declaration that we still want to type-check.
+                    return true;
+                }
             }
+            i += 1;
         }
-        i += 1;
-    }
-    false
+        false
+    })();
+    tracing::trace!(
+        source_len = bytes.len(),
+        looks_like_ts = result,
+        "validators::typescript::looks_like_typescript_source"
+    );
+    result
 }
 
 fn evidence_from_result(result: SandboxResult) -> ValidationEvidence {
+    tracing::trace!(
+        status = ?result.status,
+        exit_code = result.exit_code,
+        "validators::typescript::evidence_from_result"
+    );
     let mut evidence = ValidationEvidence {
         validator: "typescript".into(),
         status: status_from_sandbox(result.status),
@@ -138,14 +162,16 @@ fn evidence_from_result(result: SandboxResult) -> ValidationEvidence {
 }
 
 fn status_from_sandbox(status: SandboxStatus) -> ValidationStatus {
-    match status {
+    let out = match status {
         SandboxStatus::Pass => ValidationStatus::Pass,
         SandboxStatus::Fail => ValidationStatus::Fail,
         SandboxStatus::Timeout => ValidationStatus::Fail,
         SandboxStatus::NotAllowed => ValidationStatus::Skipped,
         SandboxStatus::NotFound => ValidationStatus::Skipped,
         SandboxStatus::Error => ValidationStatus::Error,
-    }
+    };
+    tracing::trace!(?status, ?out, "validators::typescript::status_from_sandbox");
+    out
 }
 
 #[cfg(test)]

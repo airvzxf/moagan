@@ -17,6 +17,7 @@ pub fn jaccard_distance(a: &str, b: &str) -> f32 {
     let set_a: HashSet<&str> = a.split_whitespace().collect();
     let set_b: HashSet<&str> = b.split_whitespace().collect();
     if set_a.is_empty() && set_b.is_empty() {
+        tracing::trace!("ranking::cluster::jaccard_distance: both empty; 0.0");
         return 0.0;
     }
     let inter = set_a.intersection(&set_b).count();
@@ -24,7 +25,14 @@ pub fn jaccard_distance(a: &str, b: &str) -> f32 {
     if union == 0 {
         0.0
     } else {
-        1.0 - (inter as f32 / union as f32)
+        let out = 1.0 - (inter as f32 / union as f32);
+        tracing::trace!(
+            intersection = inter,
+            union,
+            distance = out,
+            "ranking::cluster::jaccard_distance"
+        );
+        out
     }
 }
 
@@ -37,6 +45,11 @@ pub fn jaccard_distance(a: &str, b: &str) -> f32 {
 /// counts as "the same stack"). For very small front sizes (<= 3) the
 /// function returns one cluster per proposal.
 pub fn cluster_by_simhash(texts: &[String], threshold: f32) -> Vec<Vec<usize>> {
+    tracing::debug!(
+        n = texts.len(),
+        threshold,
+        "ranking::cluster::cluster_by_simhash: enter"
+    );
     let n = texts.len();
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -54,10 +67,12 @@ pub fn cluster_by_simhash(texts: &[String], threshold: f32) -> Vec<Vec<usize>> {
             parent[hi] = lo;
         }
     }
+    let mut union_count = 0usize;
     for i in 0..n {
         for j in (i + 1)..n {
             if jaccard_distance(&texts[i], &texts[j]) <= threshold {
                 union(&mut parent, i, j);
+                union_count += 1;
             }
         }
     }
@@ -67,7 +82,13 @@ pub fn cluster_by_simhash(texts: &[String], threshold: f32) -> Vec<Vec<usize>> {
         let root = find(&mut parent, i);
         clusters.entry(root).or_default().push(i);
     }
-    clusters.into_values().collect()
+    let out: Vec<Vec<usize>> = clusters.into_values().collect();
+    tracing::debug!(
+        clusters = out.len(),
+        unions = union_count,
+        "ranking::cluster::cluster_by_simhash: exit"
+    );
+    out
 }
 
 #[cfg(test)]

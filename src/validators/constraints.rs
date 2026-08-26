@@ -50,6 +50,11 @@ impl ConstraintsValidator {
     }
 
     fn check_inner(proposal: &Proposal, brief_constraints: &[String]) -> ValidationEvidence {
+        tracing::debug!(
+            proposal_id = %proposal.id,
+            constraints = brief_constraints.len(),
+            "validators::constraints::check_inner: enter"
+        );
         let mut evidence = ValidationEvidence {
             validator: "constraints".into(),
             status: ValidationStatus::Pass,
@@ -58,10 +63,13 @@ impl ConstraintsValidator {
 
         if brief_constraints.is_empty() {
             evidence.checks_run.push("no_constraints_in_brief".into());
+            tracing::trace!("validators::constraints::check_inner: empty constraints; skipping");
             return evidence;
         }
 
         let haystack = build_haystack(proposal);
+        let mut matched = 0usize;
+        let mut missing = 0usize;
         for constraint in brief_constraints {
             let needle = constraint.trim();
             if needle.is_empty() {
@@ -69,11 +77,18 @@ impl ConstraintsValidator {
             }
             let label = format!("constraint: {needle}");
             if haystack.contains(&needle.to_lowercase()) {
+                matched += 1;
                 evidence.checks_run.push(label);
             } else {
+                missing += 1;
                 if evidence.status == ValidationStatus::Pass {
                     evidence.status = ValidationStatus::Warn;
                 }
+                tracing::trace!(
+                    proposal_id = %proposal.id,
+                    constraint = %needle,
+                    "validators::constraints::check_inner: missing constraint"
+                );
                 evidence.record_failure(
                     ValidationFailure::new(
                         FailureKind::HardConstraintMissing,
@@ -83,7 +98,11 @@ impl ConstraintsValidator {
                 );
             }
         }
-
+        tracing::debug!(
+            matched,
+            missing,
+            "validators::constraints::check_inner: exit"
+        );
         evidence
     }
 }

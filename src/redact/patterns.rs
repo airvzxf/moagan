@@ -33,6 +33,10 @@ macro_rules! pat {
 /// specific patterns first to avoid the generic "bearer" masking an
 /// "anthropic-key".
 pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
+    // The lazy initializer must NOT emit tracing events: this is
+    // the redaction hot path (the subscriber's writer), and any
+    // event whose level passes the active filter would re-enter
+    // `RedactWriter::write` and recurse infinitely.
     vec![
         pat!(
             "minimax_sk_cp",

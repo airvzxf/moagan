@@ -290,11 +290,13 @@ impl ProbeTransport for ProviderProbeTransport {
 /// (`tests/integration_max_tokens_auto.rs`) covers the body-bearing
 /// path separately.
 pub fn classify_status(status: u16, _body: &[u8]) -> ProbeOutcome {
-    if (200..400).contains(&status) {
+    let out = if (200..400).contains(&status) {
         ProbeOutcome::Accepted
     } else {
         ProbeOutcome::Rejected
-    }
+    };
+    tracing::trace!(status, outcome = ?out, "probe::classify_status");
+    out
 }
 
 /// Heuristic: does the response body carry the "max_tokens rejected"
@@ -305,11 +307,17 @@ pub fn classify_status(status: u16, _body: &[u8]) -> ProbeOutcome {
 /// substring, so the heuristic cleanly separates the two cases.
 pub fn body_carries_max_tokens_rejection(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    lower.contains("max_tokens")
+    let hit = lower.contains("max_tokens")
         || lower.contains("max tokens")
         || lower.contains("max_tokens_override")
         || lower.contains("tokens limit")
-        || lower.contains("maximum context length")
+        || lower.contains("maximum context length");
+    tracing::trace!(
+        body_len = body.len(),
+        hit,
+        "probe::body_carries_max_tokens_rejection"
+    );
+    hit
 }
 
 /// Recover the response body from a `Provider::send_probe` error.
@@ -554,6 +562,7 @@ pub async fn detect_max_tokens(
     floor: u32,
     ceiling: u32,
 ) -> Result<u32> {
+    tracing::info!(floor, ceiling, "probe::detect_max_tokens: starting");
     detect_max_tokens_with_phase0_cap_callback(transport, floor, ceiling, |_cap| {}).await
 }
 
@@ -664,6 +673,7 @@ where
     let mut lo_strict = lo.saturating_add(1);
     let mut hi_strict = hi.saturating_sub(1);
     let mut phase2_accepted = false;
+    let mut phase2_rounds = 0usize;
     for _round in 0..32 {
         if lo_strict >= hi_strict || hi_strict == 0 {
             break;
@@ -680,6 +690,15 @@ where
             }
             (1..=20).map(|i| lo_strict + i * step).collect()
         };
+        phase2_rounds += 1;
+        tracing::trace!(
+            round = phase2_rounds,
+            lo_strict,
+            hi_strict,
+            span,
+            points = points.len(),
+            "probe::detect_max_tokens: phase 2 round"
+        );
         let results = parallel_probe(transport.clone(), &points).await;
         let mut new_lo = lo_strict;
         let mut new_hi = hi_strict;
@@ -713,7 +732,20 @@ where
     }
 
     let discovered = if phase2_accepted { lo_strict } else { lo };
+    tracing::debug!(
+        lo,
+        lo_strict,
+        hi,
+        phase2_rounds,
+        phase2_accepted,
+        discovered,
+        "probe::detect_max_tokens: phase 2 done"
+    );
     if discovered < MIN_AUTOPROBE_FLOOR {
+        tracing::warn!(
+            discovered,
+            "probe::detect_max_tokens: discovered below floor"
+        );
         return Err(Error::Provider {
             message: format!(
                 "auto-probe failed to discover a usable max_tokens (got {discovered}); provider likely rejected every probe"
@@ -721,7 +753,9 @@ where
             http_status: None,
         });
     }
-    Ok(discovered.max(floor).min(ceiling))
+    let out = discovered.max(floor).min(ceiling);
+    tracing::info!(discovered, floor, ceiling, final = out, "probe::detect_max_tokens: completed");
+    Ok(out)
 }
 
 /// M2/M3 helper: re-fire the same probe once when the first
@@ -839,6 +873,7 @@ pub async fn parallel_probe(
     transport: Arc<dyn ProbeTransport>,
     points: &[u32],
 ) -> Vec<ProbeOutcome> {
+    tracing::trace!(count = points.len(), "probe::parallel_probe");
     parallel_probe_with_cancel(transport, points, None).await
 }
 
@@ -930,16 +965,25 @@ impl MaxTokensTableFile {
     /// malformed file is `Err(Provider(...))` so a typo in
     /// operator-land cannot silently break startup.
     pub fn load(path: &std::path::Path) -> Result<Self> {
+        tracing::trace!(path = %path.display(), "MaxTokensTableFile::load");
         match std::fs::read_to_string(path) {
             Ok(s) => {
-                let parsed: Self = toml::from_str(&s).map_err(|e| Error::Provider {
-                    message: format!(
-                        "max_tokens_auto.toml at {} is malformed: {e}",
-                        path.display()
-                    ),
-                    http_status: None,
+                let parsed: Self = toml::from_str(&s).map_err(|e| {
+                    tracing::warn!(error = %e, path = %path.display(), "max_tokens_auto.toml malformed");
+                    Error::Provider {
+                        message: format!(
+                            "max_tokens_auto.toml at {} is malformed: {e}",
+                            path.display()
+                        ),
+                        http_status: None,
+                    }
                 })?;
                 if parsed.schema_version > Self::CURRENT_SCHEMA_VERSION {
+                    tracing::warn!(
+                        file_version = parsed.schema_version,
+                        max_supported = Self::CURRENT_SCHEMA_VERSION,
+                        "max_tokens_auto.toml schema_version too new"
+                    );
                     return Err(Error::Provider {
                         message: format!(
                             "max_tokens_auto.toml at {} has schema_version={}, this binary only knows up to {}",
@@ -950,10 +994,21 @@ impl MaxTokensTableFile {
                         http_status: None,
                     });
                 }
+                tracing::debug!(
+                    path = %path.display(),
+                    providers = parsed.providers.len(),
+                    "MaxTokensTableFile::load: ok"
+                );
                 Ok(parsed)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new_empty()),
-            Err(e) => Err(Error::Io(crate::error::IoError::Raw(e))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::trace!(path = %path.display(), "MaxTokensTableFile::load: missing");
+                Ok(Self::new_empty())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "MaxTokensTableFile::load: io error");
+                Err(Error::Io(crate::error::IoError::Raw(e)))
+            }
         }
     }
 

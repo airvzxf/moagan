@@ -68,6 +68,11 @@ impl Phase for RankPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!(
+            replace_sources_enabled = self.replace_sources_enabled,
+            stability_enabled = self.stability_enabled,
+            "rank: enter"
+        );
         let evaluations_dir = ctx.run_dir().evaluations();
         let proposals_dir = ctx.run_dir().proposals();
         let revisions_dir = ctx.run_dir().revisions();
@@ -108,10 +113,12 @@ impl Phase for RankPhase {
 
         let n = items.len();
         if n == 0 {
+            tracing::info!("rank: zero evaluations, writing empty ranking");
             let out_path: PathBuf = rankings_dir.join("ranking.json");
             write_json(&out_path, &Ranking::default())?;
             return Ok(PhaseOutput::Ranking(out_path));
         }
+        tracing::debug!(proposal_count = n, "rank: items loaded");
 
         // Step 2: Pareto front on the five-criterion quality vector.
         let vectors: Vec<QualityVector> = items

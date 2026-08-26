@@ -107,6 +107,7 @@ impl Phase for DiscoverExtractPhase {
     }
 
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
+        tracing::debug!("discover_extract: enter");
         let facets_dir = ctx.run_dir().facets();
         let clusters_dir = ctx.run_dir().clusters();
         let extractions_dir = ctx.run_dir().extractions();
@@ -297,10 +298,15 @@ impl Phase for DiscoverExtractPhase {
         }
 
         if paths.is_empty() {
+            tracing::error!("discover_extract: zero facet extractions produced");
             return Err(Error::InvalidState(
                 "discover_extract produced zero facet extractions".into(),
             ));
         }
+        tracing::info!(
+            extractions_written = paths.len(),
+            "discover_extract: phase complete"
+        );
 
         // Drop a tiny summary so the integrator phase can skip the
         // directory walk.

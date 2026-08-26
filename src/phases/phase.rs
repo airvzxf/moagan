@@ -237,6 +237,13 @@ impl RunContext {
         raw_prompt: String,
         mode: String,
     ) -> Self {
+        tracing::debug!(
+            %run_id,
+            default_provider = %default_provider,
+            default_model = %default_model,
+            mode = %mode,
+            "RunContext: new"
+        );
         Self::new_with_config(
             run_id,
             home,
@@ -1160,16 +1167,18 @@ impl RunContext {
             } else {
                 // PR-7 (operator-visibility): the operator wants to confirm
                 // that the temperature they declared in the matrix profile
-                // is the temperature the runtime actually sends. Trace-level
-                // so it stays silent at INFO; operators that want to
-                // validate the clamp end-to-end set
-                // `RUST_LOG=moagan::phases::phase=trace`.
-                tracing::trace!(
+                // is the temperature the runtime actually sends. Logged at
+                // `debug!` (visible at the default `moagan=debug` filter) so
+                // the operator can `grep "temperature dispatched"` and
+                // reconcile every iteration's value end-to-end without
+                // having to crank the filter to `trace`.
+                tracing::debug!(
                     provider = %self.default_provider,
                     model = %self.default_model,
                     role = %req.role.as_str(),
-                    temperature = %t,
-                    "temperature in supported set; no clamp"
+                    requested = %t,
+                    dispatched = %clamped,
+                    "temperature in supported set; dispatched as requested"
                 );
             }
             req.temperature = Some(clamped);
@@ -1256,7 +1265,24 @@ impl RunContext {
             retry_count,
             "LLM call stage"
         );
-        let mut result = provider.send(&hash_input).await;
+        // PR-correlation: open a span that carries `call_id` so every
+        // event emitted by `provider.send` (and the per-provider
+        // `BreakeredProvider dispatched via ...`, rate-limiter wait,
+        // HTTP retries, etc.) inherits the id. Operators can grep
+        // `call_id=<uuid>` and stitch the provider's wire-side
+        // timeline back to the dispatch site.
+        let call_span = tracing::info_span!(
+            "llm_call",
+            call_id = %call_id,
+            provider = %self.default_provider,
+            model = %self.default_model,
+            role = %req.role.as_str(),
+            stage = tracing::field::Empty,
+        );
+        let mut result = {
+            let _enter = call_span.enter();
+            provider.send(&hash_input).await
+        };
         // Self-healing cascade retry: when the upstream rejects
         // wire fields with HTTP 4xx and the body carries one or
         // more rejection signatures, omit every detected name and

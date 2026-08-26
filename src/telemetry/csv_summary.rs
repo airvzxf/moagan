@@ -11,6 +11,11 @@ pub type SketchSummaryRow = (String, u64, u64);
 /// Write the CSV summary next to the existing JSONL telemetry files.
 /// Creates the `<run_dir>/telemetry/` directory if missing.
 pub fn write_sketches_summary(run_dir: &Path, rows: &[SketchSummaryRow]) -> Result<()> {
+    tracing::debug!(
+        run_dir = %run_dir.display(),
+        row_count = rows.len(),
+        "write_sketches_summary: enter"
+    );
     let dir = run_dir.join("telemetry");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("sketches_summary.csv");
@@ -19,5 +24,6 @@ pub fn write_sketches_summary(run_dir: &Path, rows: &[SketchSummaryRow]) -> Resu
         out.push_str(&format!("{},{},{}\n", model, count, tokens));
     }
     std::fs::write(&path, out)?;
+    tracing::trace!(path = %path.display(), "write_sketches_summary: ok");
     Ok(())
 }

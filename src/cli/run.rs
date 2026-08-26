@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tracing::{debug, info, trace, warn};
+
 use crate::cli::{Mode, flags_batch};
 use crate::config::Config;
 use crate::context::{
@@ -70,6 +72,12 @@ pub struct RunOptions {
 
 /// Run a moagan pipeline end-to-end. Returns the run id on success.
 pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
+    debug!(
+        provider = %opts.provider,
+        mode = ?opts.mode,
+        non_interactive = opts.non_interactive,
+        "run: enter"
+    );
     let home = Arc::new(match opts.home.clone() {
         Some(path) => MoaganHome::at(path),
         None => MoaganHome::resolve()?,
@@ -78,6 +86,11 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
+    info!(
+        run_id = %run_id,
+        run_dir = %run_dir.root().display(),
+        "run: allocated run directory"
+    );
 
     // v0.10: `--provider` is mandatory. Resolution order:
     //   1. CLI flag (`opts.provider`).
@@ -93,6 +106,9 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     } else if !cfg.default_provider.trim().is_empty() {
         cfg.default_provider.clone()
     } else {
+        warn!(
+            "run: --provider missing; no CLI flag, no MOAGAN_DEFAULT_PROVIDER, no config default"
+        );
         return Err(Error::InvalidArgs(
             "--provider is required (or set MOAGAN_DEFAULT_PROVIDER, \
              or [defaults] provider in config.toml); example:\n  \
@@ -101,6 +117,10 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
                 .to_owned(),
         ));
     };
+    debug!(
+        default_provider = %default_provider,
+        "run: provider resolved"
+    );
 
     // Open the SQLite index under MOAGAN_HOME/meta.sqlite. The
     // pipeline mirrors every phase event and every LLM call into
@@ -116,8 +136,14 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // `brief.json` -> `manifest.json` -> SQLite index (T01-06 §1.1).
     let loaded_context = match opts.context.as_deref() {
         Some(raw) => {
+            debug!(context_raw = raw, "run: resolving upstream context");
             let cref = context_resolver::resolve(&home, raw)?;
             let mut loaded = context_loader::load(&home, &cref, opts.context_scope)?;
+            trace!(
+                context_kind = %cref.kind(),
+                excerpt_len = loaded.brief_excerpt.len(),
+                "run: context loaded"
+            );
             // If the loader didn't already attach a parent_run_id
             // record (it does for run_id refs), we synthesise one
             // from the resolved ContextRef so the manifest always
@@ -137,7 +163,10 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
             }
             Some((cref, loaded))
         }
-        None => None,
+        None => {
+            trace!("run: no upstream context");
+            None
+        }
     };
     let parent_run_id = loaded_context.as_ref().and_then(|(_, l)| l.parent_run_id);
     let shared_brief_hash = loaded_context
@@ -160,6 +189,7 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         shared_brief_hash.as_deref(),
         parent_run_id,
     )?;
+    trace!(run_id = %run_id, "run: registered in SQLite index");
     // Wire `Config::token_budget` into the SQLite `budget_state`
     // row so `BudgetObserver` reads the planned cap at run start.
     // Without this, `set_budget` (a v011 helper on `Db`) is
@@ -170,6 +200,9 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // "unlimited".
     if let Some(planned) = cfg.token_budget {
         db.set_budget(run_id, planned)?;
+        debug!(planned_tokens = planned, "run: token budget set");
+    } else {
+        trace!("run: token budget unlimited (cfg.token_budget is None)");
     }
     // Mirror the context refs into SQLite so post-execution
     // queries (e.g. `SELECT * FROM run_context_refs WHERE run_id = ?`)
@@ -184,6 +217,10 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
             );
         }
     }
+    debug!(
+        context_refs = context_refs.len(),
+        "run: context_refs mirrored to SQLite"
+    );
 
     // Build the lineage_paths block. The `relative` map is empty
     // here; the manifest writer fills it after the pipeline runs
@@ -218,15 +255,18 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
     // finishes; the stub just carries the fields used by the
     // lineage block).
     let default_model = if default_provider.contains(':') {
-        crate::cli::probe::parse_provider_model(&default_provider)
+        let m = crate::cli::probe::parse_provider_model(&default_provider)
             .map(|(_, m)| m)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        debug!(model = %m, "run: default model parsed");
+        m
     } else {
         // Bare SECTION is no longer accepted in v0.10+ (no
         // implicit "first model" fallback). Surface the error early
         // so the operator sees it before the rest of the pipeline
         // boots. The later sites also re-check this; surfacing it
         // here keeps the manifest stub honest too.
+        warn!(provider = %default_provider, "run: bare SECTION without model");
         return Err(Error::InvalidArgs(format!(
             "--provider '{default_provider}' is a bare section name; \
              pass the explicit SECTION:MODEL form (e.g. \
@@ -284,6 +324,10 @@ pub async fn run(opts: RunOptions, cfg: &Config) -> Result<RunId> {
         final_manifest.provider,
         run_dir.root().display()
     );
+    info!(
+        run_id = %final_manifest.run_id,
+        "run: completed"
+    );
     Ok(final_manifest.run_id)
 }
 
@@ -325,6 +369,13 @@ pub async fn run_full_pipeline(
     let run_dir = home.run_dir(run_id);
     let cfg_arc = Arc::new(cfg.clone());
     let mode = parse_mode(&stub.mode)?;
+    debug!(
+        run_id = %run_id,
+        mode = ?mode,
+        non_interactive = non_interactive,
+        max_parallelism = ?max_parallelism,
+        "run_full_pipeline: enter"
+    );
     // v0.10: the resolved provider string comes from either the
     // stub (built by the run dispatcher after the operator's CLI
     // flag + env-var resolution) or `cfg.default_provider`. Both
@@ -347,6 +398,10 @@ pub async fn run_full_pipeline(
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }
     let resolved_parallelism = max_parallelism.unwrap_or(cfg.max_parallelism);
+    debug!(
+        resolved_parallelism = resolved_parallelism,
+        "run_full_pipeline: parallelism resolved"
+    );
     // Resolve the (section, model_id) pair the registry will
     // build, so we can pin `default_model` to the same value the
     // registry keys on. v0.10 uses `Config::resolve_provider` to
@@ -371,15 +426,21 @@ pub async fn run_full_pipeline(
             .unwrap_or_else(|_| resolved_default_model.clone());
     let default_model = if resolved_default_model.contains(':') {
         // `SECTION:MODEL` shape — the model half is verbatim.
-        crate::cli::probe::parse_provider_model(&resolved_default_model)
+        let m = crate::cli::probe::parse_provider_model(&resolved_default_model)
             .map(|(_, m)| m)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        trace!(model = %m, "run_full_pipeline: default model parsed");
+        m
     } else {
         // Bare `SECTION` shape — per the v0.10 plan there is no
         // implicit "first model" fallback. The operator must
         // always pass `SECTION:MODEL` so the intent is
         // unambiguous; we error out with a clear hint rather than
         // silently picking the first entry of `models[]`.
+        warn!(
+            provider = %resolved_default_model,
+            "run_full_pipeline: bare SECTION without model"
+        );
         return Err(Error::InvalidArgs(format!(
             "--provider '{resolved_default_model}' is a bare section name; \
              pass the explicit SECTION:MODEL form (e.g. \
@@ -564,12 +625,22 @@ pub async fn run_full_pipeline(
     // `standard` keep the report off unless the operator asks.
     let adversary_enabled = adversary || mode == Mode::Deep;
     let pipeline = build_pipeline_for_mode(mode, cfg, replace_sources_enabled, adversary_enabled);
+    debug!(
+        replace_sources_enabled = replace_sources_enabled,
+        adversary_enabled = adversary_enabled,
+        "run_full_pipeline: pipeline built"
+    );
 
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
+    info!(run_id = %run_id, "run_full_pipeline: pipeline started");
     let _outputs = tokio::select! {
-        result = &mut pipeline_future => result?,
+        result = &mut pipeline_future => {
+            debug!(run_id = %run_id, "run_full_pipeline: pipeline returned");
+            result?
+        },
         signal = shutdown_signal() => {
+            warn!(run_id = %run_id, "run_full_pipeline: shutdown signal received");
             signal?;
             ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
             return Err(ctx.cancel().into_error());
@@ -606,6 +677,7 @@ pub async fn run_full_pipeline(
     // trailer) and `MultiGzDecoder` returns `UnexpectedEof`,
     // silently leaving the manifest with empty `phases`/`usage`.
     telemetry.flush()?;
+    debug!(run_id = %run_id, "run_full_pipeline: telemetry flushed");
 
     let mut manifest = build_manifest(
         &run_id,
@@ -657,7 +729,12 @@ pub async fn run_full_pipeline(
     }
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(Error::from)?;
     crate::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
+    trace!(
+        manifest_bytes = manifest_json.len(),
+        "run_full_pipeline: manifest written"
+    );
     if let Err(e) = db.update_run_status(run_id, "completed") {
+        warn!(run_id = %run_id, error = %e, "failed to update run status to completed");
         eprintln!("warn: failed to update run status: {e}");
     }
     // U1: emit a manifest_events row so the dashboard's "run.completed"
@@ -669,8 +746,14 @@ pub async fn run_full_pipeline(
         details: Some(manifest.status.clone()),
         at_unix: crate::time::now_unix_secs(),
     }) {
+        warn!(
+            run_id = %run_id,
+            error = %e,
+            "failed to record run.completed manifest event"
+        );
         eprintln!("warn: failed to record run.completed manifest event: {e}");
     }
+    info!(run_id = %run_id, "run_full_pipeline: done");
     Ok(manifest)
 }
 
@@ -678,17 +761,23 @@ pub async fn run_full_pipeline(
 /// the span from `super::continue_cmd::parse_mode`; the canonical
 /// home is here because the pipeline builder is the consumer.
 pub(crate) fn parse_mode(s: &str) -> Result<Mode> {
-    match s {
+    let result = match s {
         "fast" => Ok(Mode::Fast),
         "standard" => Ok(Mode::Standard),
         "deep" => Ok(Mode::Deep),
         "explore" => Ok(Mode::Explore),
         "batch" => Ok(Mode::Batch),
         other => Err(Error::InvalidState(format!("unknown mode {other:?}"))),
+    };
+    match &result {
+        Ok(m) => debug!(mode = ?m, "parse_mode: ok"),
+        Err(e) => warn!(raw = s, error = %e, "parse_mode: unknown mode"),
     }
+    result
 }
 
 async fn shutdown_signal() -> Result<()> {
+    trace!("shutdown_signal: enter");
     #[cfg(unix)]
     {
         let mut terminate =
@@ -715,6 +804,7 @@ pub fn build_registry_for(
     selected: &str,
     mock_dir: Option<&std::path::Path>,
 ) -> Result<ProviderRegistry> {
+    debug!(selected = %selected, "build_registry_for: enter");
     build_registry_for_with_api_key(cfg, selected, mock_dir, None)
 }
 
@@ -724,6 +814,11 @@ pub(crate) fn build_registry_for_with_api_key(
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
 ) -> Result<ProviderRegistry> {
+    debug!(
+        selected = %selected,
+        has_api_key = api_key.is_some(),
+        "build_registry_for_with_api_key: enter"
+    );
     build_registry_for_with_active(cfg, selected, mock_dir, api_key, None)
 }
 
@@ -741,6 +836,11 @@ pub(crate) fn build_registry_for_with_active(
     api_key: Option<&str>,
     active_pairs: Option<&[(String, String)]>,
 ) -> Result<ProviderRegistry> {
+    debug!(
+        selected = %selected,
+        active_pairs = ?active_pairs.map(|p| p.len()),
+        "build_registry_for_with_active: enter"
+    );
     // v0.10 (Phase 5): the CLI requires `SECTION:MODEL` for every
     // selection. There is no implicit "first model" fallback for
     // bare `SECTION` — the operator must always pass the explicit
@@ -846,7 +946,7 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
     let cardinality = Cardinality::for_mode_default(mode);
     let soft = cardinality.soft as u32;
     let judges = judge_quorum_for_mode(mode, cfg) as u32;
-    if mode == Mode::Explore {
+    let shape = if mode == Mode::Explore {
         PipelineShape {
             proposals: 0,
             judges: 0,
@@ -860,7 +960,16 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
             sketches: soft,
             critics: soft.div_ceil(4).clamp(2, 4),
         }
-    }
+    };
+    debug!(
+        mode = ?mode,
+        proposals = shape.proposals,
+        judges = shape.judges,
+        sketches = shape.sketches,
+        critics = shape.critics,
+        "pipeline_shape resolved"
+    );
+    shape
 }
 
 /// Build the canonical pipeline for a given mode. The proposal
@@ -942,6 +1051,12 @@ pub fn build_pipeline_for_mode(
     replace_sources_enabled: bool,
     adversary_enabled: bool,
 ) -> Pipeline {
+    debug!(
+        mode = ?mode,
+        replace_sources_enabled,
+        adversary_enabled,
+        "build_pipeline_for_mode: enter"
+    );
     let shape = pipeline_shape(mode, cfg);
     let proposals = shape.proposals;
     let judges = shape.judges;
@@ -1050,6 +1165,12 @@ pub(crate) fn build_manifest(
     model: &str,
 ) -> Result<Manifest> {
     use chrono::Utc;
+    debug!(
+        run_id = %run_id,
+        mode = mode,
+        status = status,
+        "build_manifest: enter"
+    );
     let now = Utc::now();
 
     // 1. Compute the brief hashes from the on-disk canonical brief.
@@ -1060,6 +1181,11 @@ pub(crate) fn build_manifest(
         Ok(bytes) => crate::phases::decompose::compute_brief_hash(&bytes),
         Err(_) => (String::new(), String::new()),
     };
+    trace!(
+        brief_sha256_present = !brief_sha256.is_empty(),
+        brief_blake3_present = !brief_blake3.is_empty(),
+        "build_manifest: brief hashes computed"
+    );
 
     // 2. Aggregate phase events from telemetry/phases.jsonl.gz into one
     //    ManifestPhase per phase name. Start events set started_unix;
@@ -1074,9 +1200,12 @@ pub(crate) fn build_manifest(
     let legacy_calls_path = run_dir.telemetry().join("calls.jsonl");
     let call_counts = count_calls_per_phase(&calls_path, &legacy_calls_path);
     let manifest_phases = aggregate_phase_events(&phase_events, &call_counts);
+    let phases_count = manifest_phases.len();
 
     // 3. Aggregate usage from telemetry/calls.jsonl[.gz].
     let usage = aggregate_usage(&calls_path, &legacy_calls_path);
+    let usage_input_tokens = usage.input_tokens;
+    let usage_output_tokens = usage.output_tokens;
 
     let mut manifest = Manifest {
         schema_version: Manifest::schema_version_string(),
@@ -1106,6 +1235,12 @@ pub(crate) fn build_manifest(
         resume_count: 0,
         prohibited_decisions: Vec::new(),
     };
+    let input_tokens = usage_input_tokens;
+    let output_tokens = usage_output_tokens;
+    debug!(
+        phases = phases_count,
+        input_tokens, output_tokens, "build_manifest: phase + usage aggregates ready"
+    );
 
     // 4. Compute the self-hash over the canonical JSON with
     //    `manifest_blake3` set to the empty string. The hash is then
@@ -1115,6 +1250,10 @@ pub(crate) fn build_manifest(
     canonical.manifest_blake3 = String::new();
     let json = serde_json::to_vec(&canonical).map_err(Error::from)?;
     let hash = blake3::hash(&json).to_hex().to_string();
+    debug!(
+        manifest_blake3 = %hash,
+        "build_manifest: self-hash stamped"
+    );
     manifest.manifest_blake3 = hash;
 
     Ok(manifest)
@@ -1168,6 +1307,7 @@ fn aggregate_phase_events(
     call_counts: &std::collections::BTreeMap<String, u32>,
 ) -> Vec<ManifestPhase> {
     use std::collections::BTreeMap;
+    trace!(events = events.len(), "aggregate_phase_events: enter");
     let mut by_name: BTreeMap<String, ManifestPhase> = BTreeMap::new();
     for ev in events {
         let phase_name = ev.phase.clone();
@@ -1195,10 +1335,15 @@ fn aggregate_phase_events(
                 entry.status = "error".into();
                 entry.error = ev.error.clone();
             }
-            _ => {}
+            _ => {
+                trace!(status = %ev.status, "aggregate_phase_events: unknown status");
+            }
         }
     }
-    by_name.into_values().collect()
+    let result: Vec<_> = by_name.into_values().collect();
+    let result_count = result.len();
+    trace!(result_count, "aggregate_phase_events: done");
+    result
 }
 
 /// Walk every `calls.jsonl[.gz]` line and count how many calls landed

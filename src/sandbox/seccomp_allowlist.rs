@@ -60,6 +60,10 @@
 /// constants in `libc` are signed; returning `i64` keeps the
 /// caller free of casts and matches the field width.
 pub fn rust_build_allowlist() -> Vec<i64> {
+    tracing::trace!(
+        sandbox = "seccomp",
+        "rust_build_allowlist: building syscall allowlist"
+    );
     let mut allow = vec![
         // -- file I/O --
         0_i64,   // read
@@ -120,6 +124,12 @@ pub fn rust_build_allowlist() -> Vec<i64> {
     ];
     allow.sort_unstable();
     allow.dedup();
+    tracing::trace!(
+        sandbox = "seccomp",
+        count = allow.len(),
+        constant = ALLOWLIST_LEN,
+        "rust_build_allowlist: built and deduplicated"
+    );
     allow
 }
 
