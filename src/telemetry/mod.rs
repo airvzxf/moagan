@@ -33,12 +33,12 @@ pub mod dashboard;
 pub mod dashboard_static;
 pub mod event;
 pub mod export;
-pub mod file_log;
 pub mod heartbeat;
 pub mod lineage_graph;
 pub mod redact;
 pub mod retention;
 pub mod saturation;
+pub mod stdout_events;
 pub mod verify;
 
 /// One phase event (start/end/error/cancel).

@@ -1,7 +1,8 @@
 use anyhow::Result;
+use clap::Parser;
+use std::io::IsTerminal;
 
 fn main() -> Result<()> {
-    tracing::info!("moagan: starting");
     // Best-effort .env autoload. dotenvy silently does nothing if no
     // .env is found, and never overrides env vars that are already set
     // (12-factor compatible: explicit env wins over .env). This makes
@@ -10,16 +11,61 @@ fn main() -> Result<()> {
     if let Ok(path) = dotenvy::dotenv()
         && std::env::var_os("MOAGAN_QUIET").is_none()
     {
-        tracing::debug!(path = %path.display(), "moagan: loaded .env");
+        // No subscriber yet; print to stderr directly so the
+        // operator sees the .env load even when init_tracing
+        // decides to emit JSON instead of text.
         eprintln!("[moagan] loaded .env from {}", path.display());
     }
-    init_tracing();
-    warn_runtime_coverage_unbounded_growth();
-    install_panic_hook();
+
+    // The phase-L panic test must run BEFORE clap parsing so
+    // `moagan --help` still panics when `MOAGAN_PHASE_L_TEST_PANIC`
+    // is set; otherwise clap exits early and the integration test
+    // `panic_message_through_main_binary_is_redacted` sees only the
+    // help text. `cfg(debug_assertions)` so release builds skip it.
+    // The panic hook is installed FIRST so the panic message goes
+    // through redact() (per the test contract).
     install_panic_hook();
     #[cfg(debug_assertions)]
     trigger_phase_l_test_panic();
-    let res = moagan::run_blocking();
+
+    // Parse CLI flags before `init_tracing` so that
+    // `--log-format <text|json>` and `--event-format <jsonl|off>`
+    // take effect on the very first emitted event. Clap does not
+    // auto-write to the env var named by `env =`, so we propagate
+    // the explicit flag value into `MOAGAN_LOG_FORMAT` /
+    // `MOAGAN_EVENT_FORMAT` if the operator passed a non-`Auto`
+    // value; `Auto` (default) leaves the env var unset and the
+    // init_tracing auto-detect decides.
+    let cli = moagan::cli::Cli::parse();
+    let format_override: Option<&str> = match cli.log_format {
+        moagan::cli::LogFormatArg::Text => Some("text"),
+        moagan::cli::LogFormatArg::Json => Some("json"),
+        moagan::cli::LogFormatArg::Auto => None,
+    };
+    if let Some(v) = format_override {
+        // SAFETY: `set_var` is `unsafe` because it can race with
+        // concurrent readers in other threads. The tracing
+        // subscriber is not initialised yet and `run_blocking_with_cli`
+        // starts the multi-threaded runtime only AFTER we return, so
+        // no other thread can observe the env var between this write
+        // and the subscriber's read in `resolve_log_format`.
+        unsafe { std::env::set_var("MOAGAN_LOG_FORMAT", v) };
+    }
+    let event_override: Option<&str> = match cli.event_format {
+        moagan::cli::EventFormatArg::Jsonl => Some("jsonl"),
+        moagan::cli::EventFormatArg::Off => Some("off"),
+    };
+    if let Some(v) = event_override {
+        // SAFETY: same rationale as the MOAGAN_LOG_FORMAT set above.
+        // No concurrent reader exists for stdout events yet — the
+        // multi-threaded runtime starts after we return.
+        unsafe { std::env::set_var("MOAGAN_EVENT_FORMAT", v) };
+    }
+
+    init_tracing();
+    tracing::info!("moagan: starting");
+    warn_runtime_coverage_unbounded_growth();
+    let res = moagan::run_blocking_with_cli(cli);
     if let Err(ref e) = res {
         tracing::error!(error = %e, "moagan: dispatcher failed");
     }
@@ -60,33 +106,80 @@ fn warn_runtime_coverage_unbounded_growth() {
     }
 }
 
+/// stderr format selected by `init_tracing`.
+///
+/// Per **ADR-0002 §B** the project committed to JSON-formatted
+/// tracing events; the implementation lived in `src/main.rs` as text
+/// until v0.11 switched it to honour this enum. Text remains the
+/// default for interactive terminals (TTY); JSON is the default for
+/// redirected / piped stderr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+/// Resolve the stderr format. Honours `MOAGAN_LOG_FORMAT` if the
+/// operator sets it explicitly; otherwise picks text when stderr is a
+/// TTY and JSON otherwise. Called *before* the tracing subscriber is
+/// initialised so the format decision shows up in the very first
+/// emitted event (the `format decision` debug event below).
+fn resolve_log_format() -> LogFormat {
+    // 1. Explicit override wins.
+    if let Ok(s) = std::env::var("MOAGAN_LOG_FORMAT") {
+        return match s.to_ascii_lowercase().as_str() {
+            "text" | "pretty" => LogFormat::Text,
+            // Default to JSON for anything unrecognised: JSON is the
+            // safe format for downstream tooling, and a typo should
+            // not silently degrade to coloured text.
+            _ => LogFormat::Json,
+        };
+    }
+    // 2. Auto-detect based on stderr TTY.
+    if std::io::stderr().is_terminal() {
+        LogFormat::Text
+    } else {
+        LogFormat::Json
+    }
+}
+
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    let format = resolve_log_format();
+    // The format decision is reported via the very first subscriber
+    // event (`init_tracing: subscriber initialised format=...`).
+    // An `eprintln!` BEFORE the subscriber would corrupt NDJSON
+    // consumers that pipe stderr into `jq`, so we do NOT print
+    // anything here.
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,moagan=debug"));
-    tracing::debug!("init_tracing: starting subscriber setup");
-    let stderr_layer = fmt::layer()
-        .with_target(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_writer(moagan::telemetry::redact::ReportingLayer::new(
-            std::io::stderr,
-        ));
-    let file_layer = fmt::layer()
-        .with_target(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_ansi(false)
-        .with_writer(moagan::telemetry::redact::ReportingLayer::new(
-            moagan::telemetry::file_log::FileLogWriter,
-        ));
+    let stderr_layer = match format {
+        LogFormat::Text => fmt::layer()
+            .with_target(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_writer(moagan::telemetry::redact::ReportingLayer::new(
+                std::io::stderr,
+            ))
+            .boxed(),
+        LogFormat::Json => fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_target(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_writer(moagan::telemetry::redact::ReportingLayer::new(
+                std::io::stderr,
+            ))
+            .boxed(),
+    };
     let res = tracing_subscriber::registry()
         .with(filter)
         .with(stderr_layer)
-        .with(file_layer)
         .try_init();
     match res {
-        Ok(()) => tracing::debug!("init_tracing: subscriber initialised"),
+        Ok(()) => tracing::debug!(?format, "init_tracing: subscriber initialised"),
         Err(e) => eprintln!("init_tracing: try_init failed: {e}"),
     }
 }
