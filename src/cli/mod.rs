@@ -270,6 +270,24 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = DecisionFormatArg::Summary,
           env = "MOAGAN_DECISION_FORMAT")]
     pub decision_format: DecisionFormatArg,
+    /// DEPRECATED — v0.12.0..v0.13.x. Removed in v0.14.0.
+    /// Historically `moagan` wrote all tracing logs to stderr; the
+    /// v0.12.0 stream routing flip (PR-04a / E-1) sends logs to
+    /// **stdout** by default (only `ERROR`-level events still go
+    /// to stderr). Set `--log-to-stderr` (or
+    /// `MOAGAN_LOG_TO_STDERR=1`) to keep the legacy
+    /// "all-logs-on-stderr" behaviour for scripts that pipe
+    /// `2> log.jsonl`. A `DEPRECATED` warning is emitted to the
+    /// tracing subscriber every time the flag is active so the
+    /// operator sees the migration deadline. Migration:
+    /// `1> out.jsonl 2> errors.jsonl` (the canonical Unix split).
+    #[arg(
+        long,
+        global = true,
+        default_value_t = false,
+        env = "MOAGAN_LOG_TO_STDERR"
+    )]
+    pub log_to_stderr: bool,
     /// Subcommand.
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -1111,7 +1129,6 @@ impl Cmd {
 /// passed on the CLI (which is what the outer pre-parse
 /// computed). Read-only arms ignore the param.
 pub async fn dispatch_with_run_id(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchResult> {
-    use std::io::IsTerminal;
     trace!(
         candidate_run_id = %run_id,
         "dispatch_with_run_id: enter"
@@ -1129,12 +1146,18 @@ pub async fn dispatch_with_run_id(cli: Cli, run_id: crate::ids::RunId) -> Result
         }
         Err(e) => {
             error!(error = %e, exit_code = e.exit_code() as i32, "dispatch: error");
-            // Same rationale as `lib.rs::run_with_cli`: the
-            // structured `tracing::error!` above is enough for
-            // machines; a plain-text line is only useful on a TTY.
-            if std::io::stderr().is_terminal() {
-                eprintln!("error: {e}");
-            }
+            // PR-04a (E-1) stream routing flip: the structured
+            // `tracing::error!` above is now the SOLE machine-facing
+            // surface for the dispatch error. v0.11 emitted a
+            // duplicate `eprintln!("error: {e}")` when stderr was
+            // a TTY, which masked the JSON line for TTY users who
+            // piped stderr into a downstream tool. With the v0.12.0
+            // routing flip, the JSON `tracing::error!` line is
+            // always emitted on stderr (uniquely so — that's the
+            // whole point of the flip) and the redundant plain-text
+            // fallback is gone. TTY users still get a readable line
+            // because `fmt::layer().text()` renders the JSON
+            // event as `ERROR … error: …` automatically.
             Ok(DispatchResult {
                 exit_code: e.exit_code() as i32,
                 run_id: None,

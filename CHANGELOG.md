@@ -5,6 +5,45 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-08-26
+
+### Changed (BREAKING)
+
+- **Stream routing flip (PR-04a / E-1): `moagan` now sends tracing logs to `stdout` by default; only `ERROR`-level events still go to `stderr`.** This unblocks the canonical Unix split:
+
+  ```text
+  moagan run …  1> out.jsonl  2> errors.jsonl
+  jq -c 'select(.kind=="llm_call")' out.jsonl   # domain NDJSON events
+  grep '"level":"ERROR"' errors.jsonl          # tracing ERRORs only
+  ```
+
+  The internal `init_tracing` registers a single `fmt::layer()` whose writer (`RoutingWriter`) uses `make_writer_for` to dispatch each event to stdout or stderr based on its `Metadata` level. The decision lives in the writer (per-event, per-thread, not per-layer-filter), which avoids a thread-local-coherence regression that the v1 draft (two layers + per-layer `filter_fn`) hit on the multi-threaded tokio runtime: `tokio::spawn` workers emitted events that bypassed the per-layer filter pipeline, leaking ~14 non-ERROR events to stderr on a real discover smoke. The writer-side decision is also simpler to reason about — one writer, one routing table — and lines up with the secret-redaction `ReportingLayer` wrapper from `src/telemetry/redact.rs` that already rides on top.
+
+  Migration timeline:
+  - **v0.12.0** (this release): routing flip is on by default.
+  - **v0.13.0**: `--log-to-stderr` warning is reinforced; no behavioural change.
+  - **v0.14.0**: flag removed; scripts that still need the legacy routing should switch to `1> out.jsonl 2> errors.jsonl`.
+
+- **Discover banner is now TTY-gated (A-2).** The human-readable `moagan discover <id> provider=… -> <path>` line printed by `src/cli/discover.rs:875` used to print unconditionally, breaking NDJSON purity for any operator piping stdout into `jq`. The print is now wrapped in `if std::io::stdout().is_terminal() { println!(…) }`; the non-TTY path emits the equivalent `tracing::info!` event so consumers see a structured line in the stdout stream.
+
+### Added
+
+- **`--log-to-stderr` global flag (deprecated).** Honours `MOAGAN_LOG_TO_STDERR=1` env var too. Restores the v0.11 "all-logs-on-stderr" behaviour for scripts that still pipe `2> log.jsonl`. A `DEPRECATED` warning is emitted via the tracing subscriber (so the operator sees the v0.14.0 removal deadline). Removed in v0.14.0.
+
+### Changed
+
+- **Redundant `eprintln!("error: …")` fallbacks removed.** `src/lib.rs:248-250` and `src/cli/mod.rs:1130-1137` previously emitted a duplicate plain-text `error: …` line gated on `stderr.is_terminal()`. With E-1, the structured `tracing::error!` is always routed to stderr (and only to stderr), so the duplicate is gone. TTY users still see a readable `error: …` line because `fmt::layer().text()` renders the JSON `error` field on the rendering side.
+- **`eprintln!` warnings migrated to `tracing::warn!` for consistent routing.** Eleven call sites in `src/cli/discover.rs` (3 sites), `src/cli/run.rs` (2), `src/cli/continue_cmd.rs` (5), and `src/phases/rank.rs` (1) used to write plain-text warnings to stderr on the failure path. They now flow through the tracing subscriber, so they honour the routing flip (`stdout`), `--log-format`, and `RUST_LOG` filtering.
+
+### Tests
+
+- New `tests/integration_stream_routing.rs` pins the routing invariants:
+  - `moagan --help` and `moagan doctor` write to stdout only (stderr empty).
+  - Clap parse errors go to stderr only (stdout empty).
+  - `--log-to-stderr` swaps the level→stream mapping (TRACE/DEBUG/INFO/WARN → stderr; ERROR → stdout) and emits the `DEPRECATED` warning to stderr.
+  - The `moagan discover` banner is suppressed when stdout is not a TTY.
+  - A clean `--event-format off` mock fast run leaves stdout free of `\"ERROR\"` literals and stderr empty.
+
 ## [0.11.2] - 2026-08-26
 
 ### Fixed

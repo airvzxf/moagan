@@ -82,6 +82,23 @@ fn main() -> Result<()> {
         // — the multi-threaded runtime starts after we return.
         unsafe { std::env::set_var("MOAGAN_DECISION_FORMAT", v) };
     }
+    // PR-04a (E-1): forward the v0.12.0 `--log-to-stderr` flag
+    // into the `MOAGAN_LOG_TO_STDERR` env var so
+    // `init_tracing`'s `resolve_log_to_stderr` helper (the only
+    // reader the subscriber has, by design — keeps the swap
+    // declarative) sees the same value the operator typed on
+    // the CLI. Clap's `#[arg(env = "MOAGAN_LOG_TO_STDERR")]`
+    // reads the env var as a *default* but does NOT mirror the
+    // flag back to it, so the explicit forward is needed. The
+    // env-var-only path (`MOAGAN_LOG_TO_STDERR=1` set, no flag)
+    // still works because `resolve_log_to_stderr` consults the
+    // env var directly.
+    if cli.log_to_stderr {
+        // SAFETY: same rationale as the three env var forwards
+        // above; no concurrent reader exists yet
+        // (`init_tracing` runs immediately after).
+        unsafe { std::env::set_var("MOAGAN_LOG_TO_STDERR", "1") };
+    }
 
     init_tracing();
     // Best-effort .env notice. dotenv autoloads even when
@@ -184,24 +201,128 @@ fn resolve_log_format() -> LogFormat {
     }
 }
 
+/// Resolve the routing of the v0.12.0 stream routing flip
+/// (PR-04a / E-1). Honours `--log-to-stderr` / `MOAGAN_LOG_TO_STDERR`
+/// so the legacy "all-logs-on-stderr" behaviour stays reachable
+/// for scripts that pipe `2> log.jsonl` until v0.14.0 removes the
+/// flag. Called *before* `init_tracing` so the layer factories
+/// can be wired with the correct writers in one pass; this
+/// function does NOT touch the subscriber, so the value is purely
+/// declarative.
+fn resolve_log_to_stderr() -> bool {
+    std::env::var("MOAGAN_LOG_TO_STDERR")
+        .ok()
+        .map(|s| {
+            let s = s.to_ascii_lowercase();
+            s == "1" || s == "true" || s == "yes" || s == "on"
+        })
+        .unwrap_or(false)
+}
+
+/// `MakeWriter` that routes through either stdout or stderr at
+/// runtime. The v0.12.0 (PR-04a / E-1) stream routing flip made
+/// per-event routing through the writer — *not* through a
+/// per-layer `filter_fn` — because the per-layer filter pipeline
+/// relies on thread-local state that does not survive cleanly
+/// across the runtime's worker threads (verified empirically on
+/// 2026-08-26: tracing JSON events for `moagan::discovery::*` and
+/// `moagan::phases::clarify::*` reached the stderr layer despite
+/// the filter returning `false`). With `make_writer_for` the
+/// routing decision moves INSIDE the writer — the writer looks at
+/// the event's metadata directly and chooses stdout vs stderr at
+/// write time, which is per-thread and per-event, not per-layer.
+///
+/// The `log_to_stderr` flag (legacy `MOAGAN_LOG_TO_STDERR=1`)
+/// swaps the level→stream mapping: tracing INFO/DEBUG/TRACE goes
+/// to stderr, ERROR goes to stdout. Default routing is the
+/// v0.12.0 contract: everything that's NOT `ERROR` goes to
+/// stdout; only `ERROR`-level events go to stderr.
+#[derive(Clone, Copy)]
+struct RoutingWriter {
+    log_to_stderr: bool,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RoutingWriter {
+    type Writer = RoutingWriterImpl;
+    fn make_writer(&'a self) -> Self::Writer {
+        // No metadata available — only the default mapping applies.
+        // `make_writer` is the no-metadata fallback; the per-event
+        // routing decision happens in `make_writer_for`. The
+        // default choice sends `INFO` (the typical event level)
+        // to stdout, matching the v0.12.0 default contract.
+        RoutingWriterImpl::Stdout(std::io::stdout())
+    }
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        let is_error = *meta.level() == tracing::Level::ERROR;
+        match (self.log_to_stderr, is_error) {
+            // Default v0.12.0 routing: non-ERROR → stdout,
+            // ERROR → stderr.
+            (false, false) => RoutingWriterImpl::Stdout(std::io::stdout()),
+            (false, true) => RoutingWriterImpl::Stderr(std::io::stderr()),
+            // Legacy `--log-to-stderr`: non-ERROR → stderr,
+            // ERROR → stdout. Restores v0.11.2 behaviour for
+            // scripts that key off `2> log.jsonl`.
+            (true, false) => RoutingWriterImpl::Stderr(std::io::stderr()),
+            (true, true) => RoutingWriterImpl::Stdout(std::io::stdout()),
+        }
+    }
+}
+
+/// Concrete writer holder. `Stdout` and `Stderr` carry their
+/// respective locked-handle and just forward bytes via `Write`.
+/// Lives only inside `RoutingWriter::make_writer_for` — never
+/// escapes the subscriber.
+enum RoutingWriterImpl {
+    Stdout(std::io::Stdout),
+    Stderr(std::io::Stderr),
+}
+
+impl std::io::Write for RoutingWriterImpl {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Stdout(w) => w.write(bytes),
+            Self::Stderr(w) => w.write(bytes),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Stdout(w) => w.flush(),
+            Self::Stderr(w) => w.flush(),
+        }
+    }
+}
+
 fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    use tracing_subscriber::{
+        EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt,
+    };
     let format = resolve_log_format();
-    // The format decision is reported via the very first subscriber
-    // event (`init_tracing: subscriber initialised format=...`).
-    // An `eprintln!` BEFORE the subscriber would corrupt NDJSON
-    // consumers that pipe stderr into `jq`, so we do NOT print
-    // anything here.
-    let filter =
+    let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,moagan=debug"));
-    let stderr_layer = match format {
+
+    let log_to_stderr = resolve_log_to_stderr();
+
+    // PR-04a (E-1) stream routing flip — single writer that
+    // chooses stdout vs stderr per event using `make_writer_for`
+    // metadata. The earlier v0.12.0-draft split into two layers
+    // with `filter_fn` per-layer filters, but the per-layer
+    // filter pipeline in `tracing-subscriber` is per-thread and
+    // does NOT survive `tokio::spawn` workers cleanly — up to
+    // ~14 non-ERROR events reached stderr on a real discover
+    // smoke despite the filter returning `false`. Moving the
+    // level→stream decision INTO the writer (`RoutingWriter`)
+    // sidesteps the per-layer filter thread-local complexity
+    // entirely: every event goes through the same `fmt::layer`
+    // and the writer picks the stream at write time.
+    let writer = RoutingWriter { log_to_stderr };
+    let redacted_writer = moagan::telemetry::redact::ReportingLayer::new(writer);
+
+    let layer = match format {
         LogFormat::Text => fmt::layer()
             .with_target(true)
             .with_file(true)
             .with_line_number(true)
-            .with_writer(moagan::telemetry::redact::ReportingLayer::new(
-                std::io::stderr,
-            ))
+            .with_writer(redacted_writer)
             .boxed(),
         LogFormat::Json => fmt::layer()
             .json()
@@ -210,17 +331,35 @@ fn init_tracing() {
             .with_target(true)
             .with_file(true)
             .with_line_number(true)
-            .with_writer(moagan::telemetry::redact::ReportingLayer::new(
-                std::io::stderr,
-            ))
+            .with_writer(redacted_writer)
             .boxed(),
     };
     let res = tracing_subscriber::registry()
-        .with(filter)
-        .with(stderr_layer)
+        .with(env_filter)
+        .with(layer)
         .try_init();
     match res {
-        Ok(()) => tracing::debug!(?format, "init_tracing: subscriber initialised"),
+        Ok(()) => {
+            tracing::debug!(
+                ?format,
+                log_to_stderr,
+                "init_tracing: subscriber initialised"
+            );
+            // Emit the DEPRECATED notice AFTER `try_init()`
+            // successfully installed the subscriber. Emitting it
+            // before init would discard the event because no
+            // subscriber was alive yet. The notice goes through
+            // `tracing::warn!` so it honours `--log-format` (NDJSON
+            // when stderr redirected, text on a TTY) and `RUST_LOG`
+            // (silence with `RUST_LOG=warn,moagan::boot=off`).
+            if log_to_stderr {
+                tracing::warn!(
+                    target: "moagan::boot",
+                    "--log-to-stderr is DEPRECATED (v0.12.0..v0.13.x); removed in v0.14.0. \
+                     Migrate scripts to `1> out.jsonl 2> errors.jsonl`."
+                );
+            }
+        }
         Err(e) => eprintln!("init_tracing: try_init failed: {e}"),
     }
 }

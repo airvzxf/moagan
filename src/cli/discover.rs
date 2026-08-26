@@ -25,6 +25,7 @@
 //! Cardinality minimum is 80 sketches; the spec says 40–500 (V4 §6.4)
 //! and the user's Plan B preferred the upper half of the lower band.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -869,15 +870,34 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     telemetry.flush()?;
     debug!(run_id = %run_id, "discover: telemetry flushed");
     if let Err(e) = db.update_run_status(run_id, "completed") {
+        // PR-04a (E-1): routing flip moves this warning to
+        // stdout (the new home for non-ERROR tracing). The
+        // pre-flip duplicate `eprintln!` polluted stderr with
+        // operator-facing noise and broke the canonical
+        // `2> errors.jsonl` pipeline.
         warn!(run_id = %run_id, error = %e, "discover: failed to update run status");
-        eprintln!("warn: failed to update run status: {e}");
     }
-    println!(
-        "moagan discover {} provider={} -> {}",
-        run_id.short(),
-        default_provider,
-        run_dir.root().display()
-    );
+    // PR-04a (A-2): the human-readable discover banner used to
+    // print unconditionally. Piping `moagan discover` through a
+    // downstream JSON consumer produced a broken half-NDJSON,
+    // half-plain-text stream. Gate the print on `stdout` being a
+    // TTY; non-interactive consumers see the equivalent
+    // `tracing::info!` event in the stdout tracing stream.
+    if std::io::stdout().is_terminal() {
+        println!(
+            "moagan discover {} provider={} -> {}",
+            run_id.short(),
+            default_provider,
+            run_dir.root().display()
+        );
+    } else {
+        info!(
+            run_id = %run_id,
+            provider = %default_provider,
+            run_dir = %run_dir.root().display(),
+            "discover: completed (banner suppressed because stdout is non-TTY)"
+        );
+    }
     info!(run_id = %run_id, "discover: completed");
     Ok(run_id)
 }
@@ -1063,8 +1083,15 @@ pub async fn run_resume(
     let canonical = build_canonical_for_resume_pipeline(manifest);
     let resumed = Pipeline::resume_with_kind(canonical, last_phase, PipelineKind::Discovery)?;
     if resumed.is_empty() {
-        eprintln!(
-            "moagan continue --kind discovery {run_id}: nothing left to do after phase {last_phase:?}"
+        // PR-04a (E-1): routed through the tracing subscriber so
+        // the operator-facing notice respects --log-format and the
+        // v0.12.0 stream routing flip (INFO → stdout, stderr only
+        // carries ERRORs). The pre-flip `eprintln!` polluted stderr
+        // unconditionally.
+        info!(
+            run_id = %run_id,
+            last_phase = ?last_phase,
+            "discover: nothing left to do after phase"
         );
         return Ok(());
     }
@@ -1226,7 +1253,14 @@ pub async fn run_resume(
 
     telemetry.flush()?;
     if let Err(e) = db.update_run_status(run_id, "completed") {
-        eprintln!("warn: failed to update run status: {e}");
+        // PR-04a (E-1): routing flip — same rationale as the
+        // matching call site above; the duplicate `eprintln!` is
+        // gone so the warning follows the stdout stream.
+        warn!(
+            run_id = %run_id,
+            error = %e,
+            "discover: failed to update run status (resume)"
+        );
     }
     println!(
         "moagan continue --kind discovery {run_id}: resumed after phase {last_phase:?}",
