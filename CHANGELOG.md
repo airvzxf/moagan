@@ -5,6 +5,23 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-08-27
+
+### Fixed (test-only)
+
+Three follow-ups to the v0.12.2 release identified by an external code review. No production behavior change; the v0.12.2 binary is functionally correct, but the test surface was hardened.
+
+- **A-2 test uselessness**: the `discover_banner_suppressed_*` integration test shipped in v0.12.2 ran `moagan discover --help`, which exits via clap parse before any banner code runs — the assertion was vacuously true. Refactored the two banner prints (`src/cli/discover.rs:886` discover / `src/cli/discover.rs:1276` resume) into helper functions `write_discover_banner<W: Write>` and `write_resume_banner<W: Write>`. Deleted `tests/integration_probe_section.rs`. Added 3 unit tests in `src/cli/discover.rs::tests` that capture the banner through `Vec<u8>` and pin the `is_terminal()` gate via `include_str!` source check.
+- **`TEST_API_KEYS_LOCK` unification**: the v0.12.2 patch added three file-local `static ENV_LOCK` instances (in `src/llm/provider.rs::tests`, `src/cli/probe.rs::tests`, and `tests/integration_auto_probe_persists_files.rs`). Replaced them with `crate::TEST_API_KEYS_LOCK` (the existing crate-wide mutex at `src/lib.rs`), so a parallel `src/cli/doctor.rs::tests` or `src/llm/api_keys.rs::tests` test can no longer race the same `MINIMAX_API_KEY` mutation through a sibling lock. Removed the `#[cfg(test)]` gate on `TEST_API_KEYS_LOCK` itself so integration tests can reach it via `moagan::TEST_API_KEYS_LOCK`; the lock is zero-sized and only the test harness touches it.
+- **Doc comment accuracy**: replaced the contradictory paragraph at `src/llm/provider.rs:2064` (claimed "The lock is held only for the set/remove pair (microseconds)" while the implementation actually holds the lock across the `await` call) with one that matches the real behaviour and explains why `await_holding_lock` is necessary.
+
+### Tests
+
+- `src/cli/discover.rs::tests::write_discover_banner_emits_expected_shape` (A-2 regression, banner content).
+- `src/cli/discover.rs::tests::write_resume_banner_emits_expected_shape` (A-2 regression, banner content).
+- `src/cli/discover.rs::tests::discover_banner_is_gated_by_is_terminal` (A-2 regression, gate pin via source check).
+- Existing 4 regression tests from v0.12.2 preserved and now run under the unified `TEST_API_KEYS_LOCK`.
+
 ## [0.12.2] - 2026-08-27
 
 ### Fixed
