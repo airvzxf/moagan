@@ -1152,11 +1152,20 @@ impl RunContext {
         // models that don't support it (e.g. `kimi-k3`) — clamping
         // first means we still log the out-of-range value when it
         // happens, even though the wire body will drop the field.
+        //
+        // PR-04b-2 (N-2): the band-dead threshold is `1e-3_f32`
+        // (was `f32::EPSILON ≈ 1.19e-7`). The wider band covers
+        // the Ryu-vs-Display rounding gap (`0.7` vs
+        // `0.70000004768` — same bits, different decimal
+        // representations) and 1-decimal operator rounding
+        // (`0.3` vs `0.30000001192`). It does NOT swallow
+        // meaningful changes (`0.5 → 1.0` is 0.5 away, well
+        // above the threshold).
         if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref())
             && let Some(clamped) =
                 table.nearest_supported(&self.default_provider, &self.default_model, t)
         {
-            if (clamped - t).abs() > f32::EPSILON {
+            if (clamped - t).abs() > 1e-3_f32 {
                 tracing::warn!(
                     provider = %self.default_provider,
                     model = %self.default_model,

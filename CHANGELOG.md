@@ -5,6 +5,31 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4] - 2026-08-27
+
+### Changed
+
+Patch v0.12.4 (PR-04b-2) — precision and observability hygiene. No breaking changes. Sidecars from v0.12.3 remain readable; the next probe-run / ranking-persist overwrites the file with the cleaner format.
+
+- **A-4 + N-6 (`serde_clean_f32`)**: `f32` values that cross the runtime boundary (TOML sidecars at `<MOAGAN_HOME>/temperatures_auto.toml`, JSON sidecars in `<run_dir>/`) are now serialised via Ryu's shortest round-trip decimal (`0.1`, not `0.10000000149011612`). New module `src/serde_util/clean_f32.rs` with three variants — `vec` for `[f32]` / `Vec<f32>` (`Entry::temperatures`, `OperatorCap::temperatures`); `scalar` for single `f32` (`JudgeScore::score`, `RankEntry::score`, `SketchTags::similarity_to_category`, `Cluster::cohesion`, `JudgeScoreEntry::score`, `AdversaryReport::disagreement_score`); `opt_scalar` for `Option<f32>` (currently unused but reserved for future fields). The helper deserialises via the default `f32` deserialiser so v0.12.3 sidecars (`"score": 0.85000002384…`) and the clean form (`"score": 0.85`) both land on the same `f32` bits. No `schema_version` bump.
+- **N-1 (`RewriteEvent` cardinality signal)**: `ExplorationMatrix::RewriteEvent` now carries `original_count`, `unique_count`, `dropped_count`, `effective_fanout_per_cell` alongside the existing `n_clamped`. The dispatcher's audit log gets an additional `tracing::info!("discovery: temperature profile collapsed after upstream clamping")` whenever `dropped_count > 0` — a profile declared as `[0.1, 0.12, 0.14, 0.5, 0.52, 0.9, 0.91]` with an upstream that only accepts `[0.1, 0.5, 0.9]` now reports `original_count=7 unique_count=3 dropped_count=4` instead of silently looking like a 7-temperature profile. Operators can `grep dropped_count > 0` to find every collapse.
+- **N-2 (`1e-3_f32` band-dead threshold)**: the gates at `src/phases/phase.rs:1159` and `src/discovery/matrix.rs:436` that compare `clamped` vs `requested` now use `1e-3_f32` (was `f32::EPSILON ≈ 1.19e-7`). The wider band catches the Ryu-vs-Display rounding gap (`0.7` vs `0.70000004768` — same bits, different decimal forms) and 1-decimal operator rounding (`0.3` vs `0.30000001192`), without swallowing meaningful changes (`0.5 → 1.0` is 0.5 away, well above the threshold).
+- **N-5 (spans use `Display::fmt`)**: four `tracing` span fields that were silently widening `f32` to `f64` now use `%` for `Display::fmt` — `temperature_profile = %temperature` at `src/discovery/coordinator.rs:878, 913, 1035` and `candidate = %temperature` at `src/llm/temperature_probe.rs:338`. JSONL span context emits `"candidate": 0.7` instead of `"candidate": 0.7000000476837158`.
+- **N-4 (docs verified, no edit needed)**: `docs/temperatures-auto.md:138-169` already documents the clean Ryu format. No doc edit; a new pin test (`persisted_sidecar_uses_ryu_shortest_round_trip`) prevents a future refactor from regressing the on-disk shape.
+
+### Tests
+
+Eight new unit tests (2281 → 2289 passing):
+
+- `src/serde_util/clean_f32.rs::tests::serde_clean_f32_emits_shortest_round_trip_decimal` — pins that `0.1`, `0.3`, `1.7` round-trip clean and the `Display::fmt` blobs (`0.10000000149`, `0.70000004768`, `1.70000004768`) never appear in serialised output.
+- `src/serde_util/clean_f32.rs::tests::serde_clean_f32_preserves_operator_precision_up_to_ryu_limit` — bit-identity via `to_bits()` for `[0.1, 0.75, 1.123, 1.1234, 1.7]`.
+- `src/serde_util/clean_f32.rs::tests::serde_clean_f32_does_not_touch_strings_outside_temperatures` — no-regresión pin for unrelated `String` fields.
+- `src/serde_util/clean_f32.rs::tests::serde_clean_f32_handles_nan_and_infinity` — `f32::NAN` / `±INFINITY` round-trip via `to_bits()` (uses the direct Ryu + `parse::<f32>()` round-trip; `serde_json`'s `f32::NAN → null` quirk is documented and pinned).
+- `src/serde_util/clean_f32.rs::tests::serde_clean_f32_scalar_variant` — `RankEntry { score: 0.85_f32 }` → JSON `"score": 0.85` and back to bit-identical `0.85_f32`.
+- `src/serde_util/clean_f32.rs::tests::serde_clean_f32_opt_scalar_variant` — `Option<f32>` with `Some(0.85)` and `None`.
+- `src/discovery/matrix.rs::tests::rewrite_event_exposes_collapse_signals` — fixture N-1: declared `[0.1, 0.12, 0.14, 0.5, 0.52, 0.9, 0.91]` vs upstream `[0.1, 0.5, 0.9]` → `original_count=7`, `unique_count=3`, `dropped_count=4`, `effective_fanout_per_cell=6`.
+- `src/llm/temperature_probe.rs::tests::persisted_sidecar_uses_ryu_shortest_round_trip` — N-4 on-disk pin: the persisted `temperatures_auto.toml` contains `0.1`/`0.5`/`0.9` and does NOT contain `0.10000000149`/`0.50000005960`/`0.89999997616`.
+
 ## [0.12.3] - 2026-08-27
 
 ### Fixed

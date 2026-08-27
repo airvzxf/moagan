@@ -558,10 +558,34 @@ impl DiscoveryCoordinator {
                 tracing::warn!(
                     provider_model = %e.provider_model,
                     n_clamped = e.n_clamped,
+                    original_count = e.original_count,
+                    unique_count = e.unique_count,
+                    dropped_count = e.dropped_count,
+                    effective_fanout_per_cell = e.effective_fanout_per_cell,
                     requested = ?e.requested,
                     clamped_to = ?e.clamped_to,
                     "temperature profile rewritten to nearest supported values"
                 );
+                // PR-04b-2 (N-1): when the rewrite *collapsed*
+                // the profile (multiple declared values snapped
+                // to the same upstream-supported value), the
+                // operator's audit log gets a second
+                // `info!`-level line that surfaces the per-cell
+                // fan-out the runtime will actually execute.
+                // Operators can `grep dropped_count > 0` to find
+                // every collapse without sifting through the
+                // per-profile `warn!` shape, and dashboards can
+                // split "rewrite" from "collapse" cleanly.
+                if e.dropped_count > 0 {
+                    tracing::info!(
+                        provider_model = %e.provider_model,
+                        original_count = e.original_count,
+                        unique_count = e.unique_count,
+                        dropped_count = e.dropped_count,
+                        effective_fanout_per_cell = e.effective_fanout_per_cell,
+                        "discovery: temperature profile collapsed after upstream clamping"
+                    );
+                }
             }
         }
         // F2: the loop target is the matrix's cardinality (cells ×
@@ -854,7 +878,7 @@ impl DiscoveryCoordinator {
                                 total = total,
                                 cell_dim = %cell.dimension_id,
                                 cell_facet = %cell.facet_id,
-                                temperature_profile = temperature,
+                                temperature_profile = %temperature,
                                 replica = replica,
                                 sketch_index = sketch_index,
                                 "discovery: iteration start"
@@ -889,7 +913,7 @@ impl DiscoveryCoordinator {
                             total = total,
                             cell_dim = %cell.dimension_id,
                             cell_facet = %cell.facet_id,
-                            temperature_profile = temperature,
+                            temperature_profile = %temperature,
                             replica = replica,
                             sketch_index = sketch_index,
                         );
@@ -1011,7 +1035,7 @@ impl DiscoveryCoordinator {
                                             angle = %sketch.angle,
                                             cell_dim = %cell_for_angle.dimension_id,
                                             cell_facet = %cell_for_angle.facet_id,
-                                            temperature_profile = temperature,
+                                            temperature_profile = %temperature,
                                             replica = replica,
                                             sketch_index = sketch_index,
                                             thesis_len = sketch.thesis.len(),
