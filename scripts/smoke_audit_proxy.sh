@@ -99,7 +99,7 @@ start_proxy() {
     sleep 1
   done
   local line
-  line="$(head -1 "$portfile" 2>/dev/null || true)"
+  line="$(grep -m1 'proxy listening' "$portfile" 2>/dev/null || true)"
   if [[ "$line" != *proxy*listening* ]]; then
     return 1
   fi

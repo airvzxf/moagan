@@ -207,7 +207,7 @@ start_proxy() {
     sleep 1
   done
   local line
-  line="$(head -1 "$portfile" 2>/dev/null || true)"
+  line="$(grep -m1 'proxy listening' "$portfile" 2>/dev/null || true)"
   if [[ "$line" != *proxy*listening* ]]; then
     echo "ERROR: proxy did not print 'proxy listening' within 10s. First 5 lines of $portfile:" >&2
     head -5 "$portfile" >&2 2>/dev/null || true
