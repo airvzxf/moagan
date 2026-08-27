@@ -5,6 +5,17 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-08-27
+
+### Fixed
+
+- **Test-only: stop two `/tmp/moagan-*` tempdir leak classes** ([#623](https://github.com/airvzxf/moagan/pull/623), [#626](https://github.com/airvzxf/moagan/pull/626)). Two distinct leak bugs in the test suite were closed in the same week. Neither changes production code, the public API, or operator-visible behavior.
+
+  - **PR #623** stopped the historical `std::env::temp_dir().join("moagan-…")` pattern in tests that left ~19 GB of cruft on tmpfs between runs (audit documented in `docs/discovery-validation-research-2026-08-13.md`). Migrated to `tempfile::TempDir` whose `Drop` impl cleans up on the panic path; added the CI guard `scripts/check-no-tempdir-leaks.sh`.
+  - **PR #626** stopped `src/discovery/coordinator::tests` (15 of 22 `#[test]` functions) leaking `/tmp/moagan-discovery-coordinator-*` dirs because `new_coordinator_with_mode` returned a `DiscoveryCoordinator` (which owns an r2d2 SQLite pool) out of `with_moagan_home`'s closure. The `TempDir::drop` raced the pool's open FDs and `remove_dir_all` returned `ENOTEMPTY`, silently swallowed by `tempfile::TempDir::drop`. Closed by adding a sibling helper `with_moagan_home_keep<F, R>(label, f) -> (TempDir, R)` that returns the tempdir to the caller so its drop runs **after** the coordinator closes its FDs. The module now leaves **0** leaked dirs per `cargo test --lib discovery::coordinator::tests` run (was 15).
+
+  No migration required. All 22 tests in `discovery::coordinator::tests` preserved (none `#[ignore]`d, no helper removed).
+
 ## [0.12.0] - 2026-08-26
 
 ### Changed (BREAKING)
