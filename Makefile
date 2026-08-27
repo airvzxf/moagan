@@ -67,10 +67,10 @@ lint:
 	cargo clippy --all-targets -- -D warnings
 
 test:
-	cargo test --all-targets
+	MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets
 
 test-ci:
-	cargo test --all-targets
+	MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets
 
 test-doc:
 	cargo test --doc

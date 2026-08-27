@@ -1262,10 +1262,26 @@ pub async fn run_resume(
             "discover: failed to update run status (resume)"
         );
     }
-    println!(
-        "moagan continue --kind discovery {run_id}: resumed after phase {last_phase:?}",
-        run_id = run_id.short(),
-    );
+    // PR-04b-1 (A-2): the human-readable resume banner used to
+    // print unconditionally. The sibling gate at L886 (PR-04a)
+    // only covered the discover entry point; this branch covers
+    // the resume entry point so a `moagan continue --kind discovery`
+    // piped into `jq` does not produce a broken half-NDJSON,
+    // half-plain-text stream. Gate the print on `stdout` being a
+    // TTY; non-interactive consumers see the equivalent
+    // `tracing::info!` event in the stdout tracing stream.
+    if std::io::stdout().is_terminal() {
+        println!(
+            "moagan continue --kind discovery {run_id}: resumed after phase {last_phase:?}",
+            run_id = run_id.short(),
+        );
+    } else {
+        info!(
+            run_id = %run_id,
+            last_phase = ?last_phase,
+            "continue discovery: resumed (banner suppressed because stdout is non-TTY)"
+        );
+    }
     Ok(())
 }
 

@@ -2063,7 +2063,42 @@ struct ProbeSettings {
 
 #[cfg(test)]
 mod tests {
+    // The `ENV_LOCK` mutex below serialises the set/remove of
+    // `MINIMAX_API_KEY` and `MOAGAN_MAX_TOKEN_AUTO` so the
+    // parallel test runner cannot let a sibling test observe an
+    // intermediate state. Some tests below are `#[tokio::test]`
+    // and hold the lock across the `await` call into
+    // `build_registry_for_probe_test`. The lock is held only for
+    // the set/remove pair (microseconds), the test fixture is
+    // local (a tempdir), and the protected vars are NOT used by
+    // any sibling test mid-await — the race we are guarding is
+    // at test boundaries, not within a single test. Hence the
+    // same `allow(clippy::await_holding_lock)` the integration
+    // test file uses.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
+
+    /// Process-wide env mutex. Mirrors the pattern in
+    /// `tests/integration_mvp.rs::ENV_LOCK` and
+    /// `tests/integration_auto_probe_persists_files.rs::ENV_LOCK`.
+    /// Tests inside this module mutate `MINIMAX_API_KEY` (and, in
+    /// `env_max_token_auto_zero_disables_probe`, `MOAGAN_MAX_TOKEN_AUTO`)
+    /// to drive the dispatcher; without the lock, the parallel test
+    /// runner lets sibling tests observe env state owned by a test
+    /// mid-flight and the registry builder reads the wrong key.
+    /// This is the flake the operator documented when closing the
+    /// original `registry_table_floor_* passes with --test-threads=1,
+    /// fails in CI default` bug.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the process-wide env mutex and recover from poison.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
 
     #[test]
     fn registry_insert_and_get() {
@@ -2354,6 +2389,7 @@ mod tests {
     /// formerly-blocked `minimax-m3` model id without complaint.
     #[tokio::test]
     async fn registry_from_config_accepts_minimax_m3_no_blocked_gate() {
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
         }
@@ -2384,6 +2420,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         // v0.10: the registry builds without rejecting any alias.
         // The minimax-m3 entry routes through MinimaxProvider (per-
         // section wrapper, section name == "minimax") and lands
@@ -2475,6 +2512,7 @@ mod tests {
             .tempdir()
             .expect("tmp dir");
         let home = MoaganHome::at(tmp.path().to_path_buf());
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }
@@ -2482,6 +2520,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         assert!(
             registry.max_tokens_table().is_some(),
             "non-mock provider with max_token_auto = None must get a probe table by default"
@@ -2497,6 +2536,7 @@ mod tests {
             .tempdir()
             .expect("tmp dir");
         let home = MoaganHome::at(tmp.path().to_path_buf());
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }
@@ -2504,6 +2544,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         assert!(
             registry.max_tokens_table().is_none(),
             "max_token_auto_enabled = Some(false) must suppress the probe table"
@@ -2520,6 +2561,7 @@ mod tests {
             .tempdir()
             .expect("tmp dir");
         let home = MoaganHome::at(tmp.path().to_path_buf());
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }
@@ -2527,6 +2569,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         assert!(
             registry.max_tokens_table().is_none(),
             "max_token_auto = Some(0) must remain an opt-out (legacy contract)"
@@ -2611,6 +2654,7 @@ mod tests {
                 plan: None,
             },
         );
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }
@@ -2625,6 +2669,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
 
         let max_tokens_table = registry
             .max_tokens_table()
@@ -2663,6 +2708,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
         home.ensure().expect("home layout");
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }
@@ -2670,6 +2716,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         let temperature_table = registry
             .temperature_table()
             .expect("registry must carry a temperature table by default");
@@ -3618,6 +3665,7 @@ mod tests {
     async fn registry_with_probe_carries_table_and_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
         }
@@ -3628,6 +3676,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         let table = reg
             .max_tokens_table()
             .expect("max_token_auto = Some(4096) must attach a table");
@@ -3651,6 +3700,7 @@ mod tests {
     async fn registry_table_floor_is_clamped_to_minimum() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
         }
@@ -3661,6 +3711,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         let table = reg.max_tokens_table().expect("table attached");
         assert_eq!(
             table.floor(),
@@ -3686,6 +3737,7 @@ mod tests {
     async fn registry_table_floor_takes_the_highest_opted_in_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
         }
@@ -3730,6 +3782,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         assert_eq!(
             reg.max_tokens_table().expect("table attached").floor(),
             2048,
@@ -3773,6 +3826,7 @@ mod tests {
     async fn env_max_token_auto_zero_disables_probe() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = MoaganHome::at(dir.path().to_path_buf());
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
         }
@@ -3809,6 +3863,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         assert!(
             reg.max_tokens_table().is_none(),
             "MOAGAN_MAX_TOKEN_AUTO=0 must disable the probe end-to-end"
@@ -3836,6 +3891,7 @@ mod tests {
         )
         .expect("registry builds");
         assert!(format!("{off:?}").contains("max_tokens_table: \"absent\""));
+        let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-test");
         }
@@ -3848,6 +3904,31 @@ mod tests {
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
+        drop(_env);
         assert!(format!("{on:?}").contains("max_tokens_table: \"present\""));
+    }
+
+    /// Regression pin for the `ENV_LOCK` mutex above. The test is
+    /// weaker than the integration counterpart in
+    /// `tests/integration_auto_probe_persists_files.rs`
+    /// (which spawns 8 OS threads contending for the lock) because
+    /// inside a `mod tests` block `cargo test` runs the unit tests
+    /// in parallel and the actual race shows up across tests, not
+    /// within a single one. The point of this test is to lock the
+    /// API contract: the static must exist, must be a `Mutex<()>`
+    /// callable from inside `mod tests`, and must serialise
+    /// `set_var` / `remove_var` across test boundaries. Run from a
+    /// clean shell (the assertion that the env var is absent
+    /// documents the assumption; tests that mutate env vars restore
+    /// it on exit).
+    #[test]
+    fn env_lock_serializes_minimax_api_key_mutations_in_provider_tests() {
+        let _guard = env_lock();
+        assert!(
+            std::env::var("MINIMAX_API_KEY").is_err(),
+            "this test assumes MINIMAX_API_KEY is absent; run from a clean shell \
+             (other tests in this file remove the var on exit)"
+        );
+        drop(_guard);
     }
 }

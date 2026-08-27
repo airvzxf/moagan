@@ -5,6 +5,23 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-08-27
+
+### Fixed
+
+- **A-1**: race `MINIMAX_API_KEY` / `MOAGAN_MAX_TOKEN_AUTO` `set_var` / `remove_var` in parallel tests. The `ENV_LOCK` pattern copied from `tests/integration_mvp.rs:36` was applied in TWO places: `tests/integration_auto_probe_persists_files.rs` (3 tests) AND `src/llm/provider.rs::tests` (11 tests, including the 2 pre-existing flakes the operator flagged on closing the original bug: `registry_table_floor_takes_the_highest_opted_in_provider` and the auto-probe fixture at `tests/integration_auto_probe_persists_files.rs:98`). CI flake eliminated under `--test-threads=4`.
+- **A-2**: banner "moagan continue --kind discovery …" is now TTY-gated in `run_resume` (`src/cli/discover.rs:1265`). The sibling gate at line 886 was already added in PR-04a; this PR extends the same pattern to the resume entry point so any `moagan continue` invocation piped into `jq` produces a clean NDJSON stream.
+- **A-3**: `build_provider_for_probe` in `src/cli/probe.rs` now propagates the section name (e.g. `"minimax"`) to `ResolvedModelConfig::section` instead of the model id. The pre-fix bug wrote `section: model_id.to_owned()`, which caused `MinimaxProvider::from_resolved` (and the deepseek wrapper) to look up the API key under the uppercased model id (e.g. `MINIMAX-M3_API_KEY`) and miss — operators running `moagan probe minimax MiniMax-M3` saw `InvalidApiKey` errors.
+- **C-1**: clap `env = "MOAGAN_NON_INTERACTIVE"` binding on every `non_interactive: bool` subcommand field (`Cmd::Run`, `Cmd::Continue`, `Cmd::Resume`, `Cmd::Discover`, `Cmd::Preflight`). The `Makefile` `test` and `test-ci` targets now export `MOAGAN_NON_INTERACTIVE=1` so `cargo test --all-targets` never blocks on a stdin prompt. CLI > env > default precedence is automatic via clap's built-in `env =` feature (matches the existing `MOAGAN_LOG_FORMAT` / `MOAGAN_RUNS_DIR` / `MOAGAN_LOG_TO_STDERR` / `MOAGAN_DECISION_FORMAT` pattern in the same file).
+
+### Tests
+
+- `tests/integration_auto_probe_persists_files.rs::env_lock_serializes_minimax_api_key_mutations` (A-1, 8 OS threads contending for the lock).
+- `tests/integration_auto_probe_persists_files.rs::probe_propagates_section_name_not_model_id` (A-3, on-disk TOML header with `model id ≠ section name`).
+- `tests/integration_probe_section.rs::discover_banner_suppressed_when_stdout_is_not_a_tty` (A-2, new file).
+- `src/llm/provider.rs::tests::env_lock_serializes_minimax_api_key_mutations_in_provider_tests` (A-1, API-contract pin).
+- `src/cli/probe.rs::tests::build_provider_for_probe_uses_section_not_model_id` (A-3, direct construction-seam test).
+
 ## [0.12.1] - 2026-08-27
 
 ### Fixed

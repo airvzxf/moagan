@@ -242,7 +242,15 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         // the same `from_config` path the registry uses, so the
         // probe observes the same wire behaviour a real run would
         // see (auth header, endpoint, rate-limit knobs).
-        let provider_arc = build_provider_for_probe(&spec, model)?;
+        //
+        // PR-04b-1 (A-3): pass `provider` (the section name) so
+        // `build_provider_for_probe` writes the section into
+        // `ResolvedModelConfig::section` — NOT the model id, which
+        // is the pre-fix bug. Per-section caps like
+        // `MINIMAX_MAX_TOKENS_CAP` resolve against the section
+        // name, so the bug caused the cap lookup to miss and the
+        // provider fell back to the hardcoded ceiling.
+        let provider_arc = build_provider_for_probe(provider, &spec, model)?;
         // Query the per-provider probe ceiling so the exponential
         // phase short-circuits at the upstream's hard cap rather
         // than walking `2^1..2^30` against values the upstream
@@ -418,7 +426,12 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
         // the registry uses, so the probe observes the same
         // wire behaviour a real run would see (auth header,
         // endpoint, rate-limit knobs).
-        let provider_arc = build_provider_for_probe(&spec, model)?;
+        //
+        // PR-04b-1 (A-3): pass `provider` (the section name) so
+        // `build_provider_for_probe` writes the section into
+        // `ResolvedModelConfig::section`. See the matching comment
+        // in `dispatch_max_tokens` for the full rationale.
+        let provider_arc = build_provider_for_probe(provider, &spec, model)?;
         let transport =
             ProviderTemperatureProbeTransport::new(provider_arc).map_err(|e| Error::Provider {
                 message: format!("probe: build temperature transport: {e}"),
@@ -652,7 +665,19 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
 /// [`crate::llm::provider::registry_from_config_with_home`] but
 /// skips the registry wrapping (the probe only needs a transport,
 /// not a pool or a breaker).
+///
+/// PR-04b-1 (A-3): the `provider_section` argument is the section
+/// name from the operator's `config.toml` (e.g. `minimax`,
+/// `opencode-go`, `deepseek`). It is written to
+/// `ResolvedModelConfig::section` so the per-section API-key
+/// lookup (`MINIMAX_API_KEY` etc.) and per-section caps
+/// (`MINIMAX_MAX_TOKENS_CAP`, `DEEPSEEK_MAX_TOKENS_CAP`) resolve
+/// correctly when the model id differs from the section name
+/// (e.g. `minimax:MiniMax-M3`). The pre-fix bug used
+/// `section: model_id.to_owned()` which caused the API-key lookup
+/// to miss when the operator ran `moagan probe minimax MiniMax-M3`.
 fn build_provider_for_probe(
+    provider_section: &str,
     spec: &crate::config::ProviderConfig,
     model_id: &str,
 ) -> Result<Arc<dyn crate::llm::provider::Provider>> {
@@ -663,7 +688,9 @@ fn build_provider_for_probe(
     // by wire format (URL path). Two sections need a per-section
     // wrapper so their kind-level cap stays in place:
     // `minimax` (`MINIMAX_MAX_TOKENS_CAP`) and `deepseek`
-    // (`DEEPSEEK_MAX_TOKENS_CAP`).
+    // (`DEEPSEEK_MAX_TOKENS_CAP`). PR-04b-1 (A-3): `section` is
+    // the section name, NOT the model id, so per-section caps
+    // resolve correctly.
     let model_cfg = spec
         .models
         .iter()
@@ -685,7 +712,7 @@ fn build_provider_for_probe(
         })?;
     let wire_format = wire_format_from_url(&endpoint)?;
     let resolved = crate::config::ResolvedModelConfig {
-        section: model_id.to_owned(),
+        section: provider_section.to_owned(),
         id: model_id.to_owned(),
         endpoint: endpoint.clone(),
         max_tokens: model_cfg.max_tokens,
@@ -721,6 +748,26 @@ fn build_provider_for_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Process-wide env mutex. Mirrors the pattern in
+    /// `tests/integration_mvp.rs::ENV_LOCK` and
+    /// `src/llm/provider.rs::tests::ENV_LOCK`. The
+    /// `build_provider_for_probe_uses_section_not_model_id` test
+    /// mutates `MINIMAX_API_KEY` to drive the dispatcher's
+    /// `from_resolved` path; without the lock, the parallel test
+    /// runner lets sibling tests observe env state owned by a test
+    /// mid-flight. The lock exists for parity with sibling modules
+    /// and to keep the API contract locked if a future test is
+    /// added.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the process-wide env mutex and recover from poison.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
 
     /// `provider:model` parsing: well-formed values split on the
     /// first colon.
@@ -1135,5 +1182,73 @@ mod tests {
         let opencode_cap = file.operator_caps.get("kimi-k3").expect("kimi-k3 cap");
         assert_eq!(opencode_cap.temperatures, vec![0.5, 1.0]);
         assert!(!opencode_cap.auto);
+    }
+
+    /// PR-04b-1 (A-3) direct regression test: `build_provider_for_probe`
+    /// must propagate the section name (`provider_section`) into
+    /// `ResolvedModelConfig::section`, NOT the model id. The visible
+    /// failure mode of the pre-fix bug was that the API-key lookup
+    /// (driven by `resolved.section`) tried
+    /// `MINIMAX-M3_API_KEY` (uppercased model id) which the operator
+    /// never sets, and `MinimaxProvider::from_resolved` returned
+    /// `Error::InvalidApiKey`. With the fix the section is `minimax`,
+    /// the lookup is `MINIMAX_API_KEY`, and the provider builds.
+    ///
+    /// The companion integration test
+    /// `tests/integration_auto_probe_persists_files.rs::probe_propagates_section_name_not_model_id`
+    /// pins the on-disk TOML header; this unit test pins the
+    /// construction seam directly without going through HTTP.
+    #[test]
+    fn build_provider_for_probe_uses_section_not_model_id() {
+        // Process-wide env mutex (mirrors the ENV_LOCK pattern at
+        // the top of this `mod tests`). The `set_var` /
+        // `remove_var` block must hold the lock so a sibling test
+        // does not observe an intermediate state.
+        let _env = env_lock();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let spec = crate::config::ProviderConfig {
+            models: vec![crate::config::ModelConfig {
+                max_tokens: None,
+                id: "MiniMax-M3".into(),
+                // The endpoint URL must carry a `/v1/messages`
+                // suffix because `wire_format_from_url` validates
+                // the path. A localhost endpoint keeps the test
+                // off the operator's network; the provider is
+                // built, not sent to.
+                endpoint: Some("http://127.0.0.1:0/v1/messages".into()),
+            }],
+            endpoint: None,
+            temperature: None,
+            top_p: None,
+            omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_enabled: None,
+            max_token_auto_save: true,
+            plan: None,
+        };
+        // Call with provider_section = "minimax" (NOT the model
+        // id "MiniMax-M3"). With the fix this succeeds; with the
+        // pre-fix bug the API-key lookup misses
+        // `MINIMAX-M3_API_KEY` and the helper returns
+        // `Error::InvalidApiKey`.
+        let result = build_provider_for_probe("minimax", &spec, "MiniMax-M3");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        drop(_env);
+        let result = match result {
+            Ok(provider) => provider,
+            Err(e) => panic!(
+                "build_provider_for_probe must use the section name (not the model id) \
+                 for the API-key lookup; got error: {e}"
+            ),
+        };
+        // Sanity: the resulting provider carries the section as
+        // its `name()` (the per-section wrappers like
+        // `MinimaxProvider` derive `name` from `resolved.section`).
+        assert_eq!(result.name(), "minimax");
+        assert_eq!(result.model(), "MiniMax-M3");
     }
 }
