@@ -872,7 +872,7 @@ mod tests {
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
         let prev_user = std::env::var("MOAGAN_USER").ok();
-        let tmp = unique_tmp_dir("synth_placeholder");
+        let (_keep, tmp) = unique_tmp_dir("synth_placeholder");
         unsafe {
             std::env::set_var("MOAGAN_HOME", &tmp);
             std::env::set_var("MOAGAN_LEARNING", "true");
@@ -902,7 +902,7 @@ mod tests {
             std::env::set_var("MOAGAN_HOME", prev_home.unwrap_or_default());
             std::env::set_var("MOAGAN_USER", prev_user.unwrap_or_default());
         }
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR D.8: when the learning loop is opted out, the prompt
@@ -916,7 +916,7 @@ mod tests {
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
         let prev_user = std::env::var("MOAGAN_USER").ok();
-        let tmp = unique_tmp_dir("synth_disabled");
+        let (_keep, tmp) = unique_tmp_dir("synth_disabled");
         unsafe {
             std::env::set_var("MOAGAN_HOME", &tmp);
             std::env::set_var("MOAGAN_LEARNING", "false");
@@ -932,7 +932,7 @@ mod tests {
             std::env::set_var("MOAGAN_HOME", prev_home.unwrap_or_default());
             std::env::set_var("MOAGAN_USER", prev_user.unwrap_or_default());
         }
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR D.8: `portfolio_proposal_ids` reads every
@@ -1074,22 +1074,21 @@ mod tests {
         Ok(())
     }
 
-    /// Local helper: build a unique tempdir under
-    /// [`std::env::temp_dir`] for a test that needs to mutate
-    /// `MOAGAN_HOME` without acquiring the global lock used by
-    /// `with_moagan_home`.
-    fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "moagan-synth-test-{}-{}",
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    /// Local helper: allocate a fresh `(TempDir, path)` pair for a
+    /// test that needs to mutate `MOAGAN_HOME` without acquiring
+    /// the global lock used by `with_moagan_home`.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp_dir(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-synth-test-{tag}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     /// Catalog I.6 (opt-in) detector wiring: end-to-end test

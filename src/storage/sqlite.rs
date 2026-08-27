@@ -5041,19 +5041,26 @@ mod tests {
         );
     }
 
-    /// Build a unique path under `temp_dir()` for a one-shot DB.
+    /// Build a unique `(TempDir, DB-path)` pair for a one-shot DB.
+    ///
     /// The tests below share a DB across multiple `Db::open`
-    /// calls, so this helper does NOT use `tempfile::tempdir()`
-    /// (which auto-deletes on drop and would race the second
-    /// open). Each test cleans up its own dir at the end.
-    fn unique_db_path() -> std::path::PathBuf {
+    /// calls, so the caller must hold onto the [`TempDir`] for
+    /// the entire test scope — the directory has to outlive the
+    /// first open so the second open can see the same WAL.
+    /// Returning the [`TempDir`] alongside the path forces the
+    /// caller to bind it; `TempDir::drop` cleans up the directory
+    /// on test return (success or panic), so the explicit
+    /// `remove_dir_all` that the previous helper required is gone.
+    fn unique_db_path() -> (tempfile::TempDir, std::path::PathBuf) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SEQ: AtomicUsize = AtomicUsize::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("moagan-mig-idem-{pid}-{n}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("meta.sqlite")
+        let _n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = tempfile::Builder::new()
+            .prefix("moagan-mig-idem-")
+            .tempdir()
+            .expect("test tempdir");
+        let path = tmp.path().join("meta.sqlite");
+        (tmp, path)
     }
 
     /// Read `PRAGMA user_version` from the file at `path` via a
@@ -5074,10 +5081,10 @@ mod tests {
     /// test would have caught that flake directly.
     #[test]
     fn migrations_are_idempotent_when_run_twice() {
-        let path = unique_db_path();
+        let (_tmp, path) = unique_db_path();
         let _ = Db::open(&path).expect("first open");
         let _ = Db::open(&path).expect("second open must not fail");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // `_tmp` drops at end of test → dir cleaned up.
     }
 
     /// `user_version` is stable across consecutive `Db::open`
@@ -5090,7 +5097,7 @@ mod tests {
     /// likely, a `duplicate column name` panic from v003/v007/v009.
     #[test]
     fn migrations_skip_applied_versions_on_reopen() {
-        let path = unique_db_path();
+        let (_tmp, path) = unique_db_path();
         let _ = Db::open(&path).unwrap();
         let v1 = read_user_version(&path);
         let _ = Db::open(&path).unwrap();
@@ -5100,7 +5107,7 @@ mod tests {
             v1, 19,
             "user_version must reach the current head (v019), got {v1}"
         );
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // `_tmp` drops at end of test → dir cleaned up.
     }
 
     /// Simulate the documented v001 failure mode: schema applied
@@ -5115,7 +5122,7 @@ mod tests {
     /// fresh bumps).
     #[test]
     fn migrations_recover_from_v001_partial_state() {
-        let path = unique_db_path();
+        let (_tmp, path) = unique_db_path();
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(sql_v001::V001).unwrap();
@@ -5129,7 +5136,7 @@ mod tests {
             v, 19,
             "user_version must reach the current head (v019) after recovery, got {v}"
         );
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // `_tmp` drops at end of test → dir cleaned up.
     }
 
     /// Db::open runs migrations and then forces a WAL checkpoint
@@ -5145,7 +5152,7 @@ mod tests {
     /// TRUNCATE ran successfully.
     #[test]
     fn db_open_checkpoints_wal_after_migrations() {
-        let path = unique_db_path();
+        let (_tmp, path) = unique_db_path();
         let _ = Db::open(&path).expect("first open");
 
         let conn = rusqlite::Connection::open(&path).expect("verify connection");
@@ -5163,7 +5170,7 @@ mod tests {
         // from the main file (no stale WAL frame masking it) and
         // must succeed without touching the schema.
         let _ = Db::open(&path).expect("second open must not fail");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // `_tmp` drops at end of test → dir cleaned up.
     }
 
     /// Open/close the same DB ten times in quick succession, mirroring
@@ -5175,7 +5182,7 @@ mod tests {
     /// the fix in place every open is a clean no-op on the schema.
     #[test]
     fn db_open_idempotent_across_many_reopens() {
-        let path = unique_db_path();
+        let (_tmp, path) = unique_db_path();
         for i in 0..10 {
             Db::open(&path).unwrap_or_else(|e| panic!("open #{i} must succeed: {e}"));
         }
@@ -5184,7 +5191,7 @@ mod tests {
             v, 19,
             "user_version must reach the current head (v019) after 10 reopens, got {v}"
         );
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // `_tmp` drops at end of test → dir cleaned up.
     }
 
     // -- Regression tests for the open/close/reopen flake ------------
@@ -5203,12 +5210,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-    fn unique_regression_path(label: &str) -> std::path::PathBuf {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("moagan-regression-{label}-{pid}-{n}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("meta.sqlite")
+    fn unique_regression_path(label: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let _n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-regression-{label}-"))
+            .tempdir()
+            .expect("test tempdir");
+        let path = tmp.path().join("meta.sqlite");
+        (tmp, path)
     }
 
     /// 50 sequential open/close cycles on the same path. The second
@@ -5219,12 +5228,12 @@ mod tests {
     /// to surface any flakiness inside a single test run.
     #[test]
     fn regression_db_open_close_50_iterations_no_duplicate_column() {
-        let path = unique_regression_path("close50");
+        let (_keep, path) = unique_regression_path("close50");
         for _ in 0..50 {
             let _ = Db::open(&path).expect("open 1");
             let _ = Db::open(&path).expect("open 2 must not duplicate column");
         }
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// 4 threads × 10 concurrent `Db::open` calls on the same path.
@@ -5241,7 +5250,8 @@ mod tests {
     fn regression_db_open_under_load_no_panic() {
         use std::sync::Arc;
         use std::thread;
-        let path = Arc::new(unique_regression_path("load"));
+        let (_keep, path) = unique_regression_path("load");
+        let path = Arc::new(path);
         let handles: Vec<_> = (0..4)
             .map(|_| {
                 let path = Arc::clone(&path);
@@ -5255,7 +5265,7 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Replicates the exact flow of the original flaky test
@@ -5273,10 +5283,10 @@ mod tests {
         let handles: Vec<_> = (0..4)
             .map(|i| {
                 thread::spawn(move || {
-                    let path = unique_regression_path(&format!("flow{i}"));
+                    let (_keep, path) = unique_regression_path(&format!("flow{i}"));
                     let _ = Db::open(&path).expect("first open");
                     let _ = Db::open(&path).expect("second open must not fail");
-                    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+                    // `_keep` (TempDir) drops at end of thread → dir cleaned up.
                 })
             })
             .collect();

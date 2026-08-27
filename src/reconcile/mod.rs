@@ -407,16 +407,20 @@ pub fn list_zombie_run_ids(db: &Db) -> Result<Vec<RunId>> {
 mod tests {
     use super::*;
     use crate::TEST_MOAGAN_HOME_LOCK;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-
-    fn unique_tmp(label: &str) -> std::path::PathBuf {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("moagan-reconcile-{pid}-{n}-{label}"));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        dir
+    /// Allocate a fresh `(TempDir, path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(label: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-reconcile-{label}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     fn lock_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
@@ -440,18 +444,18 @@ mod tests {
     /// touches anything.
     #[test]
     fn cleanup_orphans_no_targets_is_zero() {
-        let tmp = unique_tmp("clean-empty");
+        let (_keep, tmp) = unique_tmp("clean-empty");
         let home = MoaganHome::at(tmp.clone());
         let removed = cleanup_orphans(&home).expect("cleanup must succeed");
         assert_eq!(removed, 0);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Atomic-write leftover: `cleanup_orphans` removes it and
     /// reports the count.
     #[test]
     fn cleanup_orphans_removes_atomic_tmp() {
-        let tmp = unique_tmp("clean-tmp");
+        let (_keep, tmp) = unique_tmp("clean-tmp");
         let run_id = RunId::new();
         let proposals = tmp.join(".runs").join(run_id.to_string()).join("proposals");
         std::fs::create_dir_all(&proposals).unwrap();
@@ -463,14 +467,14 @@ mod tests {
         assert_eq!(removed, 1, "exactly one orphan must be removed");
         assert!(!orphan.exists(), "orphan must be gone");
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// `recover_zombies` flips a stale `running` row to
     /// `interrupted` and emits the matching outbox event.
     #[test]
     fn recover_zombies_flips_stale_running() {
-        let tmp = unique_tmp("recover-zombies");
+        let (_keep, tmp) = unique_tmp("recover-zombies");
         let home = MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
         let zombie = RunId::new();
@@ -502,7 +506,7 @@ mod tests {
         assert!(hit.payload.contains("\"kind\":\"zombie_recovered\""));
 
         drop(db);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Combined pass: a fresh `home` with both a tmp orphan and a
@@ -510,7 +514,7 @@ mod tests {
     /// `StartupReconcileReport`.
     #[test]
     fn reconcile_startup_cleans_orphans_and_zombies() {
-        let tmp = unique_tmp("reconcile-startup");
+        let (_keep, tmp) = unique_tmp("reconcile-startup");
         let guard = lock_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
@@ -545,7 +549,7 @@ mod tests {
 
         drop(db);
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// `Config::startup_reconcile = false` short-circuits the

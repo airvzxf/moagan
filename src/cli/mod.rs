@@ -2303,20 +2303,20 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
 mod tests {
     use super::*;
     use crate::TEST_MOAGAN_HOME_LOCK;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Counter so every test under this module gets a unique tmp
-    /// directory. Without it two tests could pick the same label
-    /// and step on each other when they share the process-wide
-    /// `MOAGAN_HOME` lock (the `lock_env` helper below).
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-
-    fn unique_tmp(label: &str) -> std::path::PathBuf {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("moagan-cli-{pid}-{n}-{label}"));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        dir
+    /// Allocate a fresh `(TempDir, path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(label: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-cli-{label}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     fn lock_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
@@ -2356,7 +2356,7 @@ mod tests {
     /// outcome.
     #[test]
     fn cli_run_invokes_startup_reconcile_when_enabled() {
-        let tmp = unique_tmp("reconcile-enabled");
+        let (_keep, tmp) = unique_tmp("reconcile-enabled");
         let guard = lock_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
@@ -2373,7 +2373,7 @@ mod tests {
         assert_eq!(report.zombies_recovered, 0);
 
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// D.28.3 + D.28.4 wire: when
@@ -2383,7 +2383,7 @@ mod tests {
     /// the operator who opted out pays nothing.
     #[test]
     fn cli_run_skips_startup_reconcile_when_disabled() {
-        let tmp = unique_tmp("reconcile-disabled");
+        let (_keep, tmp) = unique_tmp("reconcile-disabled");
         let guard = lock_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
@@ -2400,7 +2400,7 @@ mod tests {
         );
 
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// D.28.3 + D.28.4 wire end-to-end: the pre-dispatch
@@ -2411,7 +2411,7 @@ mod tests {
     /// disk + SQLite.
     #[test]
     fn cli_run_reconcile_sweeps_zombies_and_orphans() {
-        let tmp = unique_tmp("reconcile-sweep");
+        let (_keep, tmp) = unique_tmp("reconcile-sweep");
         let guard = lock_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
@@ -2466,7 +2466,7 @@ mod tests {
         );
 
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR-B1 (B1.2): `moagan rerun --same-config=false` is parsed

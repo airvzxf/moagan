@@ -327,18 +327,19 @@ mod tests {
     use super::*;
     use crate::TEST_MOAGAN_HOME_LOCK;
 
-    fn unique_tmp(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "moagan-prefs-test-{}-{}",
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    /// Allocate a fresh `(TempDir, path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-prefs-test-{tag}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     fn rating(score: f64, rated_unix: i64) -> Rating {
@@ -396,7 +397,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let previous_home = std::env::var("MOAGAN_HOME").ok();
         let previous_learning = std::env::var("MOAGAN_LEARNING").ok();
-        let tmp = unique_tmp("roundtrip");
+        let (_keep, tmp) = unique_tmp("roundtrip");
         unsafe {
             std::env::set_var("MOAGAN_HOME", &tmp);
             std::env::set_var("MOAGAN_LEARNING", "true");
@@ -429,7 +430,7 @@ mod tests {
                 std::env::remove_var("MOAGAN_LEARNING");
             },
         }
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     #[test]

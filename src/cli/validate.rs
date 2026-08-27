@@ -152,18 +152,20 @@ fn synthetic_proposal(brief: &Brief) -> Proposal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Atomic counter that gives every test a unique path suffix so
-    /// parallel tests do not stomp on each other's temp files.
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-
-    fn unique_tmp(label: &str) -> PathBuf {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("moagan-validate-{pid}-{n}-{label}"));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        dir.join("brief.json")
+    /// Allocate a fresh `(TempDir, brief-path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the file path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(label: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-validate-{label}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().join("brief.json");
+        (tmp, path)
     }
 
     /// Clean brief + synthetic proposal whose summary mirrors the
@@ -171,7 +173,7 @@ mod tests {
     /// no placeholder tokens, length well within the default range.
     #[test]
     fn validate_clean_brief_exits_zero() {
-        let path = unique_tmp("clean");
+        let (_tmp, path) = unique_tmp("clean");
         let brief = serde_json::json!({
             "problem": "Use the standard ROYGBIV order for the rainbow",
             "objectives": ["produce the rainbow"],
@@ -203,7 +205,7 @@ mod tests {
     /// the `hard:` prefix so CI logs surface the cause.
     #[test]
     fn validate_brief_with_hard_issues_exits_one() {
-        let path = unique_tmp("hard");
+        let (_tmp, path) = unique_tmp("hard");
         let brief = serde_json::json!({
             "problem": "Use postgres for storage",
             "objectives": [],
@@ -250,11 +252,10 @@ mod tests {
     /// "the filesystem is on fire".
     #[test]
     fn validate_missing_brief_returns_invalid_args() {
-        let path = std::env::temp_dir().join(format!(
-            "moagan-validate-does-not-exist-{}",
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+        let (tmp, path) = unique_tmp("does-not-exist");
+        // Sanity: the dir was created but the file inside it was not.
         assert!(!path.exists(), "pre-condition: path must not exist");
+        assert!(tmp.path().exists(), "tempdir parent must exist");
 
         let args = ValidateArgs {
             brief_path: path,
@@ -273,7 +274,7 @@ mod tests {
     /// the missing-brief case from the operator's perspective.
     #[test]
     fn validate_malformed_json_returns_invalid_args() {
-        let path = unique_tmp("malformed");
+        let (_tmp, path) = unique_tmp("malformed");
         std::fs::write(&path, b"{ this is not json").expect("write malformed brief");
 
         let args = ValidateArgs {
