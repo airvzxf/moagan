@@ -5,6 +5,18 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6] - 2026-08-27
+
+### Fixed
+
+Patch v0.12.6 (PR #634) — restores the `e2e-network.yml` workflow after a 4-day 100% red window (last green: run `32619993732`, 2026-08-23 05:17 UTC). **No source changes, no public API change, no schema bump.**
+
+- **`scripts/e2e_audit_proxy.sh:210` + `scripts/smoke_audit_proxy.sh:102`** — `head -1 "$portfile"` → `grep -m1 'proxy listening' "$portfile"`. The audit-proxy wrapper captures the proxy's combined stdout+stderr with `> portfile 2>&1` and was reading the first line, expecting the `proxy listening on http://...` banner. Commit `b1193ac` (2026-08-25 21:22 UTC, PR #614 `feat(observability): saturate tracing coverage`) added a `tracing::debug!("init_tracing: subscriber initialised")` at `src/main.rs:343` that fires before the banner — its JSON line became the first line of the portfile and the `head -1` started returning JSON instead of the banner, breaking the `*proxy*listening*` match. The pattern-based search is robust to any pre-banner tracing noise (current or future). The downstream port extraction (`grep -oE 'http://127.0.0.1:[0-9]+'`) is unaffected because the matched line still contains the URL.
+
+### Retracted
+
+- **`docs/ci/e2e-network-findings.md`** (shipped in `368b4f2` / PR-04c, retracted in `3f59540` / PR #634). The doc misdiagnosed the regression as the v0.12.0 stream-routing flip. The actual culprit was `b1193ac` (a tracing event added 5 days after v0.12.0). The corrected root cause fits naturally in the fix commit's message body; no standalone findings document was warranted for a 1-line wrapper fix.
+
 ## [0.12.5] - 2026-08-27
 
 ### Changed
