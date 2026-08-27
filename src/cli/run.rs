@@ -753,8 +753,11 @@ pub async fn run_full_pipeline(
         "run_full_pipeline: manifest written"
     );
     if let Err(e) = db.update_run_status(run_id, "completed") {
+        // PR-04a (E-1): the duplicate `eprintln!` is gone — the
+        // structured `warn!` above now reaches the operator via
+        // stdout (the v0.12.0 routing), honoring --log-format and
+        // RUST_LOG. Stderr stays clean for ERROR-level events.
         warn!(run_id = %run_id, error = %e, "failed to update run status to completed");
-        eprintln!("warn: failed to update run status: {e}");
     }
     // U1: emit a manifest_events row so the dashboard's "run.completed"
     // timeline has the canonical anchor (the manifest sidecar is
@@ -765,12 +768,16 @@ pub async fn run_full_pipeline(
         details: Some(manifest.status.clone()),
         at_unix: crate::time::now_unix_secs(),
     }) {
+        // PR-04a (E-1): routing flip — same rationale as above;
+        // the structured warn! is now routed through the tracing
+        // subscriber to stdout (and never to stderr), matching
+        // the v0.12.0 contract that stderr holds only
+        // ERROR-level events.
         warn!(
             run_id = %run_id,
             error = %e,
             "failed to record run.completed manifest event"
         );
-        eprintln!("warn: failed to record run.completed manifest event: {e}");
     }
     info!(run_id = %run_id, "run_full_pipeline: done");
     Ok(manifest)

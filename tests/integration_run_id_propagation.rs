@@ -278,19 +278,26 @@ fn dotenvy_load_message_respects_log_format() {
              pre-c1 eprintln! leaked into NDJSON. stderr was:\n{stderr_text}"
         );
 
-        // Positive assertion: at least one JSONL line on stderr
-        // carries `target = "moagan::boot"` and `fields.message =
-        // "main: .env loaded (auto-discovered)"`. The exact
-        // first-line ordering depends on whether other
-        // tracing events fire before the boot notice, so we
-        // scan all of stderr for the boot event.
-        let boot_lines: Vec<&str> = stderr_text
+        // PR-04a (E-1) stream routing flip: the boot event is an
+        // INFO-level tracing event, which under v0.12.0 routes to
+        // stdout (NOT stderr as it did under v0.11). The test
+        // still pins the JSONL contract — the boot event is
+        // emitted via `tracing::info!`, not `eprintln!` — but the
+        // stream it scans is now stdout.
+        let stdout_text = std::fs::read_to_string(&stdout_path).expect("read stdout");
+        let boot_lines: Vec<&str> = stdout_text
             .lines()
             .filter(|l| l.contains("\"target\":\"moagan::boot\""))
             .collect();
         assert!(
             !boot_lines.is_empty(),
-            "stderr must contain a JSONL event with target=moagan::boot; got:\n{stderr_text}"
+            "stdout must contain a JSONL event with target=moagan::boot under PR-04a routing; got:\n{stdout_text}"
+        );
+        // And the boot event must NOT have leaked onto stderr —
+        // the routing flip reserves stderr for ERROR-level only.
+        assert!(
+            !stderr_text.contains("\"target\":\"moagan::boot\""),
+            "boot event must NOT leak to stderr under PR-04a routing; stderr:\n{stderr_text}"
         );
         // Parse the first boot event to confirm it is valid
         // JSONL AND carries the expected message field.
@@ -345,13 +352,28 @@ fn dotenvy_load_message_suppressed_by_moagan_quiet() {
             .expect("spawn moagan inspect (quiet)");
         assert!(output.status.success(), "inspect must exit 0");
         let stderr_text = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-        let boot_lines: Vec<&str> = stderr_text
+        let stdout_text = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+        // PR-04a (E-1): the boot notice is an INFO-level tracing
+        // event, which routes to stdout under v0.12.0. Pre-flip
+        // the test could pin the contract by checking stderr only
+        // (the legacy routing); post-flip we have to pin BOTH
+        // streams so a regression that re-emits the boot event
+        // anywhere surfaces.
+        let stderr_boot_lines: Vec<&str> = stderr_text
+            .lines()
+            .filter(|l| l.contains("\"target\":\"moagan::boot\""))
+            .collect();
+        let stdout_boot_lines: Vec<&str> = stdout_text
             .lines()
             .filter(|l| l.contains("\"target\":\"moagan::boot\""))
             .collect();
         assert!(
-            boot_lines.is_empty(),
-            "MOAGAN_QUIET=1 must suppress the moagan::boot notice; got: {boot_lines:?}"
+            stderr_boot_lines.is_empty(),
+            "MOAGAN_QUIET=1 must suppress the moagan::boot notice on stderr; got: {stderr_boot_lines:?}"
+        );
+        assert!(
+            stdout_boot_lines.is_empty(),
+            "MOAGAN_QUIET=1 must suppress the moagan::boot notice on stdout (PR-04a routing); got: {stdout_boot_lines:?}"
         );
         assert!(
             !stderr_text.contains("[moagan] loaded .env"),
@@ -416,9 +438,16 @@ fn run_id_present_in_pipeline_span_for_every_event() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        // PR-04a (E-1) stream routing flip: the tracing JSONL events
+        // (which carry the `pipeline` span list) now route to
+        // stdout, not stderr. We scan stdout for the spans instead
+        // of stderr — the v0.11 contract under which this test
+        // was originally written had every tracing event on
+        // stderr, so the assertion silently produced 0 events.
+        let stdout_text = std::fs::read_to_string(&stdout_path).expect("read stdout");
         let stderr_text = std::fs::read_to_string(&stderr_path).expect("read stderr");
 
-        // Count every JSONL line on stderr that carries a
+        // Count every JSONL line on stdout that carries a
         // `pipeline` span with a null `run_id`. Pre-v0.11.2 this
         // would have been ~98.9% of events; post-fix it must be
         // zero because the span is constructed with `run_id =
@@ -426,7 +455,7 @@ fn run_id_present_in_pipeline_span_for_every_event() {
         let mut null_count: usize = 0;
         let mut pipeline_count: usize = 0;
         let mut null_examples: Vec<String> = Vec::new();
-        for line in stderr_text.lines() {
+        for line in stdout_text.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -454,7 +483,7 @@ fn run_id_present_in_pipeline_span_for_every_event() {
         }
         assert!(
             pipeline_count > 0,
-            "expected the mock fast run to emit at least one event with a `pipeline` span; got 0"
+            "expected the mock fast run to emit at least one event with a `pipeline` span on stdout; got 0; stderr=\n{stderr_text}"
         );
         assert_eq!(
             null_count,

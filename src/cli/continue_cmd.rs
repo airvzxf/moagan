@@ -255,7 +255,15 @@ pub async fn run_rerun(
     )?;
     db.add_run_sibling_relation(run_id, new_run_id, "rerun")?;
     if let Err(e) = db.update_run_status(new_run_id, "running") {
-        eprintln!("warn: failed to flip rerun status to running: {e}");
+        // PR-04a (E-1): routing flip — the duplicate `eprintln!`
+        // was polluting stderr on every rerun. Now the structured
+        // `warn!` is the single source and reaches the operator
+        // via stdout (the new home for non-ERROR tracing).
+        warn!(
+            new_run_id = %new_run_id,
+            error = %e,
+            "rerun: failed to flip status to running"
+        );
     }
 
     // Reconstruct the inputs the pipeline needs from the parent run
@@ -838,7 +846,14 @@ pub(crate) fn apply_continue_options(
             provider,
             Some("user --switch-provider"),
         ) {
-            eprintln!("warn: failed to record provider change: {e}");
+            // PR-04a (E-1): routing flip — duplicate gone, the
+            // structured warn! routes through the subscriber to
+            // stdout.
+            warn!(
+                run_id = %manifest.run_id,
+                error = %e,
+                "continue: failed to record provider change"
+            );
         }
     }
     if let Some(value) = api_key.as_deref() {
@@ -864,7 +879,13 @@ pub(crate) fn apply_continue_options(
                 short_sha256(value)
             )),
         ) {
-            eprintln!("warn: failed to record api-key change: {e}");
+            // PR-04a (E-1): same routing flip rationale as the
+            // provider change call site directly above.
+            warn!(
+                run_id = %manifest.run_id,
+                error = %e,
+                "continue: failed to record api-key change"
+            );
         }
     }
     if opts.skip_checkpoint {
@@ -878,7 +899,13 @@ pub(crate) fn apply_continue_options(
             &manifest.provider,
             Some("checkpoint:skipped"),
         ) {
-            eprintln!("warn: failed to record checkpoint skip: {e}");
+            // PR-04a (E-1): same routing flip rationale as the
+            // two provider-change call sites above.
+            warn!(
+                run_id = %manifest.run_id,
+                error = %e,
+                "continue: failed to record checkpoint skip"
+            );
         }
     }
     write_manifest_to_disk(home, &manifest)?;
@@ -1029,7 +1056,13 @@ pub(crate) async fn resume_pipeline(
     rebuilt.cli_prompt = manifest.cli_prompt.clone();
     write_manifest_to_disk(home, &rebuilt)?;
     if let Err(e) = db.update_run_status(run_id, status) {
-        eprintln!("warn: failed to update run status: {e}");
+        // PR-04a (E-1): same routing flip rationale as the
+        // matching call sites in cli/run.rs and cli/discover.rs.
+        warn!(
+            run_id = %run_id,
+            error = %e,
+            "continue: failed to update run status"
+        );
     }
     outcome.map(|_| ())
 }

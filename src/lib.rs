@@ -109,7 +109,6 @@ pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
     use crate::ids::RunId;
     use crate::telemetry::stdout_events;
     use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
-    use std::io::IsTerminal;
     use std::str::FromStr;
     use tracing::Instrument;
     let run_started = std::time::Instant::now();
@@ -239,15 +238,18 @@ pub async fn run_with_cli(cli: cli::Cli) -> anyhow::Result<()> {
         }
         Err(e) => {
             tracing::error!(error = %e, "moagan::run: dispatch failed");
-            // The plain-text error message goes to stderr ONLY when
-            // the user is on a TTY (interactive mode). When stderr
-            // is redirected/piped, the structured `tracing::error!`
-            // event above already carries the same information as
-            // JSON; an extra `eprintln!` here would break
-            // `moagan … 2> log.jsonl | jq` consumers.
-            if std::io::stderr().is_terminal() {
-                eprintln!("error: {e}");
-            }
+            // PR-04a (E-1) stream routing flip: the structured
+            // `tracing::error!` above is now the SOLE machine-facing
+            // surface for the dispatch error. v0.11 emitted a
+            // duplicate `eprintln!("error: {e}")` when stderr was
+            // a TTY, which masked the JSON line for TTY users and
+            // broke the symmetry with the `--log-format json`
+            // path. With the v0.12.0 routing flip, the JSON line
+            // is always emitted on stderr (uniquely so — that's the
+            // point of the flip) and the redundant plain-text
+            // fallback is gone. TTY users still get a readable
+            // `error: …` line because `fmt::layer().text()` renders
+            // the JSON event with the message on the next line.
             let code = i32::from(exit_code(&e));
             // On dispatch failure, emit `RunEnd` with the
             // `<read-only>` sentinel for the run_id and an

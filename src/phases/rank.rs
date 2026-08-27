@@ -640,7 +640,17 @@ fn apply_synthesis_replacement(
                 if let Ok(mut p) = read_json::<Proposal>(&src_path) {
                     p.replaced_by = Some(synth_id.clone());
                     if write_json(&src_path, &p).is_err() {
-                        eprintln!("warn: failed to stamp replaced_by on proposals/{sid}.json");
+                        // PR-04a (E-1): the duplicate `eprintln!`
+                        // was polluting stderr on every synthesis
+                        // drop; the structured `warn!` is now the
+                        // single source and routes through the
+                        // subscriber to stdout (the v0.12.0
+                        // non-ERROR stream).
+                        tracing::warn!(
+                            proposal_id = %sid,
+                            synth_id = %synth_id,
+                            "rank: failed to stamp replaced_by on source proposal"
+                        );
                     }
                 }
                 // PR-15 (D.22.5): every upstream-invalidating

@@ -83,15 +83,23 @@ fn doctor_loads_api_key_from_dotenv() {
     // c1 migration (Riesgos #6): the operator-facing notice
     // is now emitted via `tracing::info!` with target
     // `moagan::boot` instead of an `eprintln!` that leaked
-    // into NDJSON purity on stderr. Pin the new shape.
+    // into NDJSON purity on stderr. PR-04a (E-1) then routed
+    // the INFO-level event to **stdout** (the v0.12.0
+    // stream-routing-flip default), so the JSONL boot event
+    // pins to stdout rather than stderr — the contract still
+    // holds (a tracing event, not a plain-text `eprintln!`).
     let stderr_text = stderr(&output);
     assert!(
         !stderr_text.contains("[moagan] loaded .env from"),
         "legacy plain-text '[moagan] loaded .env from …' must NOT appear; stderr:\n{stderr_text}"
     );
     assert!(
-        stderr_text.contains("\"target\":\"moagan::boot\""),
-        "expected JSONL boot event; stderr:\n{stderr_text}"
+        stdout.contains("\"target\":\"moagan::boot\""),
+        "expected JSONL boot event on stdout under PR-04a routing; stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr_text.contains("\"target\":\"moagan::boot\""),
+        "boot event must NOT be on stderr under PR-04a routing (stderr is for ERROR-level only); stderr:\n{stderr_text}"
     );
 }
 
