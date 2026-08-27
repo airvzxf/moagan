@@ -1394,56 +1394,80 @@ mod tests {
     /// and the coordinator's tests need to probe the file's existence.
     const STATE_FILE: &str = ".discovery_state.json";
 
-    fn new_coordinator(brief: Brief) -> (DiscoveryCoordinator, RunId, PathBuf) {
+    fn new_coordinator(brief: Brief) -> (tempfile::TempDir, DiscoveryCoordinator, RunId, PathBuf) {
         new_coordinator_with_mode(brief, Mode::Fast)
     }
 
     fn new_coordinator_with_mode(
         brief: Brief,
         mode: Mode,
-    ) -> (DiscoveryCoordinator, RunId, PathBuf) {
-        with_moagan_home("discovery-coordinator", |path| {
-            EpistemicLegacy::empty()
-                .save_to(&path.join("epistemic_legacy.json"))
-                .unwrap();
-            let run_id = RunId::new();
-            let coordinator = DiscoveryCoordinator::new(
-                MoaganHome::at(path.to_path_buf()),
-                run_id,
-                Cancel::new(),
-                brief,
-                "deployment-model:serverless".to_owned(),
-                mode,
-            );
-            (coordinator, run_id, path.to_path_buf())
-        })
+    ) -> (tempfile::TempDir, DiscoveryCoordinator, RunId, PathBuf) {
+        // Returned `TempDir` must outlive the `DiscoveryCoordinator`
+        // so its `Drop` removes the tempdir from `/tmp` AFTER the
+        // coordinator and any SQLite pool FDs it owns have closed —
+        // see `with_moagan_home_keep` for the rationale and
+        // `tests::with_moagan_home_keep_outlives_closure_result` for
+        // the drop-order contract.
+        let (tmp, (coordinator, run_id, path)) =
+            crate::test_support::with_moagan_home_keep("discovery-coordinator", |path| {
+                EpistemicLegacy::empty()
+                    .save_to(&path.join("epistemic_legacy.json"))
+                    .unwrap();
+                let run_id = RunId::new();
+                let coordinator = DiscoveryCoordinator::new(
+                    MoaganHome::at(path.to_path_buf()),
+                    run_id,
+                    Cancel::new(),
+                    brief,
+                    "deployment-model:serverless".to_owned(),
+                    mode,
+                );
+                (coordinator, run_id, path.to_path_buf())
+            });
+        (tmp, coordinator, run_id, path)
     }
 
-    fn new_coordinator_with_cancel(brief: Brief) -> (DiscoveryCoordinator, RunId, PathBuf, Cancel) {
+    fn new_coordinator_with_cancel(
+        brief: Brief,
+    ) -> (
+        tempfile::TempDir,
+        DiscoveryCoordinator,
+        RunId,
+        PathBuf,
+        Cancel,
+    ) {
         new_coordinator_with_cancel_and_mode(brief, Mode::Fast)
     }
 
     fn new_coordinator_with_cancel_and_mode(
         brief: Brief,
         mode: Mode,
-    ) -> (DiscoveryCoordinator, RunId, PathBuf, Cancel) {
-        with_moagan_home("discovery-coordinator-cancel", |path| {
-            EpistemicLegacy::empty()
-                .save_to(&path.join("epistemic_legacy.json"))
-                .unwrap();
-            let run_id = RunId::new();
-            let cancel = Cancel::new();
-            let cancel_clone = cancel.clone();
-            let coordinator = DiscoveryCoordinator::new(
-                MoaganHome::at(path.to_path_buf()),
-                run_id,
-                cancel,
-                brief,
-                "deployment-model:serverless".to_owned(),
-                mode,
-            );
-            (coordinator, run_id, path.to_path_buf(), cancel_clone)
-        })
+    ) -> (
+        tempfile::TempDir,
+        DiscoveryCoordinator,
+        RunId,
+        PathBuf,
+        Cancel,
+    ) {
+        let (tmp, (coordinator, run_id, path, cancel)) =
+            crate::test_support::with_moagan_home_keep("discovery-coordinator-cancel", |path| {
+                EpistemicLegacy::empty()
+                    .save_to(&path.join("epistemic_legacy.json"))
+                    .unwrap();
+                let run_id = RunId::new();
+                let cancel = Cancel::new();
+                let cancel_clone = cancel.clone();
+                let coordinator = DiscoveryCoordinator::new(
+                    MoaganHome::at(path.to_path_buf()),
+                    run_id,
+                    cancel,
+                    brief,
+                    "deployment-model:serverless".to_owned(),
+                    mode,
+                );
+                (coordinator, run_id, path.to_path_buf(), cancel_clone)
+            });
+        (tmp, coordinator, run_id, path, cancel)
     }
 
     /// Spin up a single-threaded tokio runtime for async tests.
@@ -1465,7 +1489,7 @@ mod tests {
             problem: "Coordinate discovery".to_owned(),
             ..Brief::default()
         };
-        let (coordinator, run_id, _) = new_coordinator(brief);
+        let (_keep, coordinator, run_id, _) = new_coordinator(brief);
 
         assert_eq!(coordinator.run_id(), &run_id);
         assert_eq!(coordinator.brief().problem, "Coordinate discovery");
@@ -1476,7 +1500,7 @@ mod tests {
 
     #[test]
     fn coordinator_legacy_default_is_empty() {
-        let (coordinator, _, _) = new_coordinator(Brief::default());
+        let (_keep, coordinator, _, _) = new_coordinator(Brief::default());
 
         assert_eq!(coordinator.legacy().version, SCHEMA_VERSION);
         assert!(coordinator.legacy().known_failures.is_empty());
@@ -1491,7 +1515,7 @@ mod tests {
     /// completion without deadlock).
     #[test]
     fn coordinator_run_is_async() {
-        let (coordinator, run_id, _) = new_coordinator(Brief::default());
+        let (_keep, coordinator, run_id, _) = new_coordinator(Brief::default());
 
         let outcome = block_on(coordinator.run()).expect("fresh run should succeed");
 
@@ -1506,7 +1530,8 @@ mod tests {
     /// constant. Standard mode soft = midpoint(5..10) = 7.
     #[test]
     fn coordinator_run_uses_target_cardinality_from_config() {
-        let (coordinator, _, _) = new_coordinator_with_mode(Brief::default(), Mode::Standard);
+        let (_keep, coordinator, _, _) =
+            new_coordinator_with_mode(Brief::default(), Mode::Standard);
 
         let outcome = block_on(coordinator.run()).expect("run should succeed");
 
@@ -1526,7 +1551,7 @@ mod tests {
     /// must not re-emit ids that already exist on disk.
     #[test]
     fn coordinator_run_resume_detects_existing_sketches() {
-        let (coordinator, run_id, home) = new_coordinator(Brief::default());
+        let (_keep, coordinator, run_id, home) = new_coordinator(Brief::default());
 
         let sketches_dir = home.join(".runs").join(run_id.to_string()).join("sketches");
         std::fs::create_dir_all(&sketches_dir).unwrap();
@@ -1550,7 +1575,7 @@ mod tests {
 
     #[test]
     fn coordinator_run_creates_state_when_no_persisted_state() {
-        let (coordinator, run_id, home) = new_coordinator(Brief::default());
+        let (_keep, coordinator, run_id, home) = new_coordinator(Brief::default());
 
         let outcome = block_on(coordinator.run()).expect("fresh run should succeed");
 
@@ -1568,7 +1593,7 @@ mod tests {
 
     #[test]
     fn coordinator_run_resumes_from_persisted_state() {
-        let (coordinator, run_id, home) = new_coordinator(Brief::default());
+        let (_keep, coordinator, run_id, home) = new_coordinator(Brief::default());
 
         let run_dir_root = home.join(".runs").join(run_id.to_string());
         std::fs::create_dir_all(&run_dir_root).unwrap();
@@ -1589,7 +1614,7 @@ mod tests {
 
     #[test]
     fn coordinator_run_completes_when_target_sketches_reached() {
-        let (coordinator, run_id, _) = new_coordinator(Brief::default());
+        let (_keep, coordinator, run_id, _) = new_coordinator(Brief::default());
 
         let outcome = block_on(coordinator.run()).expect("run should reach target");
 
@@ -1603,7 +1628,7 @@ mod tests {
         use crate::cancel::CancelReason;
 
         let brief = Brief::default();
-        let (coordinator, _, _, cancel) = new_coordinator_with_cancel(brief);
+        let (_keep, coordinator, _, _, cancel) = new_coordinator_with_cancel(brief);
         cancel.cancel(CancelReason::UserInterrupt);
 
         let err = block_on(coordinator.run()).expect_err("cancelled run must surface an error");
@@ -1645,7 +1670,7 @@ mod tests {
 
     #[test]
     fn coordinator_run_cleans_up_state_file_on_completion() {
-        let (coordinator, run_id, home) = new_coordinator(Brief::default());
+        let (_keep, coordinator, run_id, home) = new_coordinator(Brief::default());
 
         let _ = block_on(coordinator.run()).expect("run should complete");
 

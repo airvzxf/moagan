@@ -105,6 +105,84 @@ where
     // All three run on the panic path too.
 }
 
+/// Same as [`with_moagan_home`], but **returns the [`tempfile::TempDir`]**
+/// alongside the closure's result so the caller can keep the
+/// directory alive for as long as anything references it.
+///
+/// Use this when `R` holds a value (e.g. a `DiscoveryCoordinator`
+/// that owns a `MoaganHome` whose run-directory tree is still
+/// being read or written after the closure returns) whose drop
+/// order must run **before** the tempdir is removed. With
+/// [`with_moagan_home`] the `TempDir` drops inside the helper,
+/// before the caller's locals — `remove_dir_all` then fails with
+/// `ENOTEMPTY` on any subdir still referenced by `R`, and
+/// `tempfile::TempDir::drop` swallows the error, leaving the dir
+/// behind on `/tmp`.
+///
+/// Bind the returned `TempDir` as `_keep` (or any name) at the
+/// call site so it outlives everything that points into the
+/// tempdir:
+///
+/// ```ignore
+/// let (_keep, coord) = with_moagan_home_keep("...", |path| {
+///     // build coord using `path`
+/// });
+/// ```
+///
+/// Drop order on return: `_restore` → return tuple → caller drops
+/// `_keep` last (because it is declared first in the let-binding).
+/// All steps (env restore, helper-scope teardown, caller drops,
+/// env-lock release) run on the panic path too.
+///
+/// Acquired lock, env-var set, and prefix format are identical to
+/// [`with_moagan_home`]. Tests that use `keep` form cannot run
+/// concurrently with tests that use the non-keep form (the same
+/// `ENV_LOCK` serialises both), so the helper is safe to add
+/// alongside.
+pub fn with_moagan_home_keep<F, R>(label: &str, f: F) -> (tempfile::TempDir, R)
+where
+    F: FnOnce(&Path) -> R,
+{
+    let _guard = ENV_LOCK.lock();
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!("moagan-{label}-"))
+        .tempdir()
+        .expect("create unique tempdir");
+    let dir = tmp.path().to_path_buf();
+
+    struct EnvRestore(Option<std::ffi::OsString>);
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: serialised by ENV_LOCK, same as the matching
+            // `set_var` above.
+            unsafe {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("MOAGAN_HOME", v),
+                    None => std::env::remove_var("MOAGAN_HOME"),
+                }
+            }
+        }
+    }
+    let prev = std::env::var_os("MOAGAN_HOME");
+    // SAFETY: serialised by ENV_LOCK; no other thread reads or
+    // mutates MOAGAN_HOME while the guard is held.
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", &dir);
+    }
+    let _restore = EnvRestore(prev);
+
+    let result = f(&dir);
+    // Restore the env-var while we still hold the lock and the
+    // caller's `tmp` is alive (so any subsequent cleanup that
+    // inspects `MOAGAN_HOME` observes the restored value).
+    drop(_restore);
+    (tmp, result)
+    // Drop order on normal return from the helper:
+    //   dir   → dropped (no-op, PathBuf)
+    //   _guard → releases ENV_LOCK
+    // Caller drops `tmp` last (after dropping `result`).
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +274,48 @@ mod tests {
             !path.exists(),
             "tempdir must be removed after the closure returns, found {}",
             path.display()
+        );
+    }
+
+    /// Verifies the drop-order contract of [`with_moagan_home_keep`]:
+    /// the returned [`tempfile::TempDir`] must outlive the closure
+    /// result so callers can place it first in a `let` binding and
+    /// rely on it being removed **after** anything that holds a
+    /// `PathBuf` into the tempdir drops.
+    #[test]
+    fn with_moagan_home_keep_outlives_closure_result() {
+        struct HoldsPath(PathBuf);
+        impl Drop for HoldsPath {
+            fn drop(&mut self) {
+                // If the TempDir dropped first, `path.exists()` would
+                // already be false; if our drop runs first (correct
+                // order), the dir still exists.
+                assert!(
+                    self.0.exists(),
+                    "HoldsPath must drop before TempDir, but {} already removed",
+                    self.0.display(),
+                );
+            }
+        }
+
+        let (keep, _held) =
+            with_moagan_home_keep("keep_outlives", |path| HoldsPath(path.to_path_buf()));
+        // Rust drops bindings in reverse declaration order, so
+        // `_held` (HoldsPath) drops before `keep` (TempDir). The
+        // assertion inside `HoldsPath::drop` confirms the dir still
+        // exists at that moment — i.e. `keep` has not dropped yet.
+        let kept_path = keep.path().to_path_buf();
+        assert!(
+            kept_path.exists(),
+            "tempdir must exist while keep is alive, found {}",
+            kept_path.display(),
+        );
+        drop(_held);
+        drop(keep);
+        assert!(
+            !kept_path.exists(),
+            "TempDir::drop must remove the directory, found {}",
+            kept_path.display(),
         );
     }
 }
