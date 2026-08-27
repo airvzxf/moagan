@@ -5,6 +5,14 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.9] - 2026-08-27
+
+### Fixed
+
+Patch v0.12.9 (PR #640) — fourth regression blocking `e2e-network.yml`, exposed after PR #638 (v0.12.8) restored the wire_format URL. **No source changes, no public API change, no schema bump.**
+
+- **`scripts/e2e_audit_proxy.sh:289, 471, 499`** — added `--max-tokens 131072` to the 3 minimax invocations. `MiniMax-M2.7` rejects `max_tokens > 131072` per models.dev (operator-confirmed 2026-08-27); when the models.dev catalog is unreachable, the runtime falls back to `MINIMAX_MAX_TOKENS_CAP = 524_288` (src/llm/capabilities.rs:35) and the upstream rejects the call. The explicit flag forces the `effective_max_tokens` chain below the M2.7 ceiling. Per-model output cap overrides in `default_providers()` is the long-term fix and belongs to v0.13.0's config-schema redesign.
+
 ## [0.12.8] - 2026-08-27
 
 ### Fixed
