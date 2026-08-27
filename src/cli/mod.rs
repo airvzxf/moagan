@@ -355,8 +355,21 @@ pub enum Cmd {
         /// an empty queue and the call fails on the first request.
         #[arg(long)]
         mock_dir: Option<std::path::PathBuf>,
-        /// Non-interactive: no prompts.
-        #[arg(long, default_value_t = false)]
+        /// Non-interactive: no prompts. Honours the
+        /// `MOAGAN_NON_INTERACTIVE` env var so CI / smoke scripts
+        /// that forget the flag still skip checkpoints instead of
+        /// blocking on stdin. CLI > env > default precedence.
+        /// The parser is `BoolishValueParser` so the env var
+        /// accepts the shell-conventional `1`/`0` (alongside
+        /// `true`/`false` / `yes`/`no`); clap's strict `bool`
+        /// parser only takes `true`/`false` and would reject
+        /// `MOAGAN_NON_INTERACTIVE=1` from the Makefile.
+        #[arg(
+            long,
+            default_value_t = false,
+            env = "MOAGAN_NON_INTERACTIVE",
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
         non_interactive: bool,
         /// Override the global cap on concurrent LLM calls. The
         /// value is parsed as `usize`; the constructor (`Parallelism::new`)
@@ -508,8 +521,16 @@ pub enum Cmd {
         /// Non-interactive: every checkpoint is a
         /// `<skipped:non_interactive>` marker instead of blocking
         /// on stdin. Useful for CI runs that drive `continue` from
-        /// a non-TTY stdin.
-        #[arg(long, default_value_t = false)]
+        /// a non-TTY stdin. Honours the `MOAGAN_NON_INTERACTIVE`
+        /// env var with CLI > env > default precedence. Parser is
+        /// `BoolishValueParser` so the env var accepts `1`/`0`
+        /// alongside `true`/`false` / `yes`/`no`.
+        #[arg(
+            long,
+            default_value_t = false,
+            env = "MOAGAN_NON_INTERACTIVE",
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
         non_interactive: bool,
     },
     /// Resume a run mid-phase (continue without switch flags).
@@ -519,8 +540,17 @@ pub enum Cmd {
         run_id: String,
         /// Non-interactive: every checkpoint is a
         /// `<skipped:non_interactive>` marker instead of blocking
-        /// on stdin. Useful for CI runs.
-        #[arg(long, default_value_t = false)]
+        /// on stdin. Useful for CI runs. Honours the
+        /// `MOAGAN_NON_INTERACTIVE` env var with CLI > env >
+        /// default precedence. Parser is `BoolishValueParser` so
+        /// the env var accepts `1`/`0` alongside `true`/`false` /
+        /// `yes`/`no`.
+        #[arg(
+            long,
+            default_value_t = false,
+            env = "MOAGAN_NON_INTERACTIVE",
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
         non_interactive: bool,
     },
     /// Rerun an existing run with optional overrides.
@@ -814,8 +844,16 @@ pub enum Cmd {
         /// Non-interactive: no prompts. Every checkpoint becomes a
         /// `<skipped:non_interactive>` marker. Required for CI / smoke
         /// runs where stdin is not a TTY (otherwise `discover` would
-        /// hang on `intake`'s yes/no prompt).
-        #[arg(long, default_value_t = false)]
+        /// hang on `intake`'s yes/no prompt). Honours the
+        /// `MOAGAN_NON_INTERACTIVE` env var with CLI > env > default
+        /// precedence. Parser is `BoolishValueParser` so the env var
+        /// accepts `1`/`0` alongside `true`/`false` / `yes`/`no`.
+        #[arg(
+            long,
+            default_value_t = false,
+            env = "MOAGAN_NON_INTERACTIVE",
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
         non_interactive: bool,
         /// Opt-in switch for the cross-run facet cache (V4 §6.8 +
         /// catalog D.13.13). When set, the `discover_facet` phase
@@ -904,8 +942,18 @@ pub enum Cmd {
         /// Override the global concurrent-LLM cap.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
-        /// Non-interactive: no prompts.
-        #[arg(long, default_value_t = false)]
+        /// Non-interactive: no prompts. Honours the
+        /// `MOAGAN_NON_INTERACTIVE` env var so CI / smoke scripts
+        /// that forget the flag still skip checkpoints instead of
+        /// blocking on stdin. CLI > env > default precedence.
+        /// Parser is `BoolishValueParser` so the env var accepts
+        /// `1`/`0` alongside `true`/`false` / `yes`/`no`.
+        #[arg(
+            long,
+            default_value_t = false,
+            env = "MOAGAN_NON_INTERACTIVE",
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
         non_interactive: bool,
     },
     /// `moagan telemetry` — read-only inspection, dashboard, export,

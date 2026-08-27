@@ -884,11 +884,12 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // TTY; non-interactive consumers see the equivalent
     // `tracing::info!` event in the stdout tracing stream.
     if std::io::stdout().is_terminal() {
-        println!(
-            "moagan discover {} provider={} -> {}",
-            run_id.short(),
-            default_provider,
-            run_dir.root().display()
+        let mut stdout = std::io::stdout().lock();
+        let _ = write_discover_banner(
+            &mut stdout,
+            &run_id.short(),
+            &default_provider,
+            &run_dir.root().display(),
         );
     } else {
         info!(
@@ -1262,10 +1263,24 @@ pub async fn run_resume(
             "discover: failed to update run status (resume)"
         );
     }
-    println!(
-        "moagan continue --kind discovery {run_id}: resumed after phase {last_phase:?}",
-        run_id = run_id.short(),
-    );
+    // PR-04b-1 (A-2): the human-readable resume banner used to
+    // print unconditionally. The sibling gate at L886 (PR-04a)
+    // only covered the discover entry point; this branch covers
+    // the resume entry point so a `moagan continue --kind discovery`
+    // piped into `jq` does not produce a broken half-NDJSON,
+    // half-plain-text stream. Gate the print on `stdout` being a
+    // TTY; non-interactive consumers see the equivalent
+    // `tracing::info!` event in the stdout tracing stream.
+    if std::io::stdout().is_terminal() {
+        let mut stdout = std::io::stdout().lock();
+        let _ = write_resume_banner(&mut stdout, &run_id.short(), last_phase);
+    } else {
+        info!(
+            run_id = %run_id,
+            last_phase = ?last_phase,
+            "continue discovery: resumed (banner suppressed because stdout is non-TTY)"
+        );
+    }
     Ok(())
 }
 
@@ -1317,6 +1332,40 @@ fn build_canonical_for_resume_pipeline(home: &MoaganHome, manifest: &Manifest) -
 #[allow(dead_code)]
 pub(crate) fn load_manifest_for_resume(home: &MoaganHome, run_id: RunId) -> Result<Manifest> {
     load_manifest(home, run_id)
+}
+
+/// Build the human-readable discover banner (the line that prints
+/// `moagan discover <id> provider=<name> -> <path>`). Public-ish so
+/// unit tests can capture it through `Vec<u8>` without touching the
+/// real stdout. The shape is exactly the format string the
+/// production print statement at L886 emits; if you change one,
+/// change both (and update `write_discover_banner_emits_expected_shape`).
+fn write_discover_banner<W: std::io::Write>(
+    out: &mut W,
+    run_id_short: &str,
+    provider: &str,
+    run_dir: &dyn std::fmt::Display,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "moagan discover {} provider={} -> {}",
+        run_id_short, provider, run_dir
+    )
+}
+
+/// Build the human-readable resume banner (the line that prints
+/// `moagan continue --kind discovery <id>: resumed after phase <name>`).
+/// Mirrors `write_discover_banner` so the resume entry point can be
+/// unit-tested through `Vec<u8>` too.
+fn write_resume_banner<W: std::io::Write>(
+    out: &mut W,
+    run_id_short: &str,
+    last_phase: &str,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "moagan continue --kind discovery {run_id_short}: resumed after phase {last_phase}",
+    )
 }
 
 #[cfg(test)]
@@ -1613,5 +1662,78 @@ mod tests {
         .unwrap();
         let v = resume_sketches_per_cell(&home, run_id);
         assert_eq!(v, 11);
+    }
+
+    // ------------------------------------------------------------
+    // PR-04b-1 (A-2): unit tests for the banner helpers. The
+    // original `discover_banner_suppressed_when_stdout_is_not_a_tty`
+    // integration test was useless (it ran `moagan discover --help`
+    // which exits via clap parse before any banner code runs; the
+    // assertion was vacuously true). These unit tests capture the
+    // banner through `Vec<u8>` and pin the gate via `include_str!`
+    // so the contract is locked without touching a real stdout.
+    // ------------------------------------------------------------
+
+    /// `write_discover_banner` must produce the exact line the
+    /// production print statement emits. If the format string
+    /// drifts, this test breaks immediately.
+    #[test]
+    fn write_discover_banner_emits_expected_shape() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_discover_banner(
+            &mut buf,
+            "abc123",
+            "minimax",
+            &std::path::Path::new("/tmp/run").display(),
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "moagan discover abc123 provider=minimax -> /tmp/run\n");
+    }
+
+    /// `write_resume_banner` mirrors the discover banner for the
+    /// `moagan continue --kind discovery` entry point. Pins the
+    /// resume contract.
+    #[test]
+    fn write_resume_banner_emits_expected_shape() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_resume_banner(&mut buf, "abc123", "rank").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            s,
+            "moagan continue --kind discovery abc123: resumed after phase rank\n"
+        );
+    }
+
+    /// Pin the gate: both banner prints are wrapped in
+    /// `if std::io::stdout().is_terminal()`. We can't unit-test the
+    /// gate directly because `is_terminal()` depends on the OS, so
+    /// we read the source to confirm (a) the gate is present at the
+    /// discover call site, (b) it precedes the helper call, and
+    /// (c) a second gate precedes the resume helper call.
+    #[test]
+    fn discover_banner_is_gated_by_is_terminal() {
+        let src = include_str!("discover.rs");
+        // First gate (discover entry point, L886).
+        let gate_idx = src
+            .find("if std::io::stdout().is_terminal()")
+            .expect("the is_terminal gate must exist in discover.rs");
+        let helper_call = src
+            .find("write_discover_banner(")
+            .expect("the helper must be called at least once");
+        let resume_helper = src
+            .find("write_resume_banner(")
+            .expect("the resume helper must be called");
+        assert!(
+            gate_idx < helper_call,
+            "the gate must precede the helper call"
+        );
+        // Second gate (resume entry point). Search from after the
+        // first gate so we don't match the same occurrence.
+        let second_gate = src[gate_idx + 1..]
+            .find("if std::io::stdout().is_terminal()")
+            .map(|i| i + gate_idx + 1);
+        let second_gate = second_gate.expect("a second is_terminal gate for resume must exist");
+        assert!(second_gate < resume_helper, "resume helper must be gated");
     }
 }

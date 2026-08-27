@@ -60,8 +60,12 @@ pub static TEST_MOAGAN_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 /// across the LLM provider tests (`llm::api_keys::tests`),
 /// `cli::doctor::tests`, and any future caller that touches those
 /// env vars — without it, parallel `cargo test` runs observe
-/// each other's mutations and report flakes.
-#[cfg(test)]
+/// each other's mutations and report flakes. Not gated by
+/// `#[cfg(test)]` so the integration tests in `tests/` can also
+/// acquire it (they live in a separate compilation unit where
+/// `cfg(test)` of the lib is *not* active). The lock is a
+/// zero-sized `Mutex<()>`; it costs ~8 bytes per process and is
+/// only ever touched by the test harness.
 pub static TEST_API_KEYS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serialises every test that mutates the process-wide `PATH`
