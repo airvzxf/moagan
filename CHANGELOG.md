@@ -5,6 +5,15 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.10] - 2026-08-27
+
+### Fixed
+
+Patch v0.12.10 (PR #642) — restorer for `e2e-network.yml` after v0.12.9 was published with a broken script fix. **No source changes, no public API change, no schema bump.**
+
+- **`scripts/e2e_audit_proxy.sh`** — replace the broken `--max-tokens` CLI flag (v0.12.9 was based on a false assumption; `moagan run` doesn't expose that flag) with the correct mechanism: `MOAGAN_CONFIG=<path>` + a per-proxy TOML config that pins `[providers.minimax.models] max_tokens = 131072` for `MiniMax-M2.7` (per the models.dev catalog, operator-confirmed 2026-08-27). New helper `write_minimax_config` writes the TOML into each work dir. Also fixes a pre-existing flaky test: the wrapper was greping for the literal `run id` substring that only appears when stdout is a TTY (`src/cli/mod.rs:1580-1582`); in CI (piped stdout) the footer never appears, so the test failed even on successful runs. New pattern greps for `"kind":"run_(start|end)"` which is always present in the NDJSON event stream.
+- **`.github/workflows/e2e-network.yml`** — `MAX_ATTEMPTS` set to 3 (operator-requested final value, absorbs occasional upstream flakes via the 60 s backoff tail).
+
 ## [0.12.9] - 2026-08-27
 
 ### Fixed
