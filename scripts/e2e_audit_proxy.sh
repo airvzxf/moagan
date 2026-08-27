@@ -286,7 +286,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     if start_proxy "$WORK_PROXY_1" "$PORTFILE_1"; then
       PROXY_PORT_1="$(cat "${PORTFILE_1}.port")"
       run_test "proxy_e2e_card80_discovers_summary" \
-        "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1 MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M3 --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_PROXY_1/discover.out; test \$? -le 1"
+        "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_PROXY_1/discover.out; test \$? -le 1"
 
       # Find the run dir
       PROXY_RUN_ID="$(ls "$WORK_PROXY_1/.runs/" 2>/dev/null | sort -r | head -1)"
@@ -468,7 +468,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   if start_proxy "$WORK_PROXY_2" "$PORTFILE_2"; then
     PROXY_PORT_2="$(cat "${PORTFILE_2}.port")"
     run_test "proxy_e2e_mode_fast_audit_log_exists" \
-      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_2/anthropic/v1 MOAGAN_HOME=$WORK_PROXY_2 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN run --mode fast --provider minimax:MiniMax-M3 --prompt 'What is the capital of France?' --max-parallelism 4 --non-interactive > $WORK_PROXY_2/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_2/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_2/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_2/run.out; exit 1; }"
+      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_2/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_2 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN run --mode fast --provider minimax:MiniMax-M2.7 --prompt 'What is the capital of France?' --max-parallelism 4 --non-interactive > $WORK_PROXY_2/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_2/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_2/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_2/run.out; exit 1; }"
 
     PROXY_RUN_ID_2="$(ls "$WORK_PROXY_2/.runs/" 2>/dev/null | sort -r | head -1)"
     if [[ -n "$PROXY_RUN_ID_2" ]]; then
@@ -496,7 +496,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   if start_proxy "$WORK_PROXY_3" "$PORTFILE_3"; then
     PROXY_PORT_3="$(cat "${PORTFILE_3}.port")"
     run_test "proxy_e2e_mode_explore_audit_log_exists" \
-      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_3/anthropic/v1 MOAGAN_HOME=$WORK_PROXY_3 RUST_LOG=warn timeout $MOAGAN_SMOKE_EXPLORE_TIMEOUT $BIN run --mode explore --provider minimax:MiniMax-M3 --prompt 'Design a microservices architecture for an e-commerce platform' --max-parallelism 4 --non-interactive > $WORK_PROXY_3/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_3/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_3/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_3/run.out; exit 1; }"
+      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_3/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_3 RUST_LOG=warn timeout $MOAGAN_SMOKE_EXPLORE_TIMEOUT $BIN run --mode explore --provider minimax:MiniMax-M2.7 --prompt 'Design a microservices architecture for an e-commerce platform' --max-parallelism 4 --non-interactive > $WORK_PROXY_3/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_3/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_3/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_3/run.out; exit 1; }"
 
     PROXY_RUN_ID_3="$(ls "$WORK_PROXY_3/.runs/" 2>/dev/null | sort -r | head -1)"
     if [[ -n "$PROXY_RUN_ID_3" ]]; then
