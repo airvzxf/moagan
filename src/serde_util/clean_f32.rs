@@ -3,32 +3,62 @@
 //! helper is `pub` so any downstream `serde` derive can adopt
 //! it without duplicating the conversion.
 //!
+//! ## Why this exists
+//!
+//! `Rust 1.55+` already formats `f32` via Ryu (so
+//! `format!("{0.1_f32}")` is `"0.1"`), but the **TOML encoder
+//! used by the runtime** does not. `toml_edit::ValueSerializer`
+//! widens every `f32` to `f64` via `serialize_f32(v) →
+//! serialize_f64(v as f64)`. The `as f64` cast preserves the
+//! `f32` bit pattern verbatim (so `0.1_f32` becomes
+//! `0.10000000149011612_f64`), and TOML emits the latter as a
+//! 17-digit decimal. JSON encoders (`serde_json`) already use
+//! Ryu on `f32` directly, so the helper is mostly a no-op for
+//! JSON sidecars — but applying it explicitly is cheap,
+//! future-proofs against a backend that widens `f32 → f64`
+//! before emitting, and keeps TOML / JSON wire shapes uniform.
+//!
 //! Three variants are exposed:
 //!
 //! - [`vec`] — for `[f32]` / `Vec<f32>` fields like the
 //!   temperature probe sidecar.
 //! - [`scalar`] — for single `f32` fields (judge scores, cluster
-//!   cohesion, …).
+//!   cohesion, …). Used by `Ranking::score`,
+//!   `Cluster::cohesion`, `AdversaryReport::score_delta`, …
 //! - [`opt_scalar`] — for `Option<f32>` fields where `None` should
 //!   round-trip as JSON `null` and `Some(v)` should reuse the
-//!   same Ryu helper.
+//!   same Ryu helper. Used by `Ranking::stability_sigma`.
 //!
 //! Deserialisation uses the default `f32` deserialiser for every
-//! variant: the operator can keep writing `"score": 0.85` in
-//! TOML or `"score": 0.85000002384…` from a pre-Ryu sidecar and
-//! both land on the same `0.85_f32` bits. Sidecars are therefore
-//! forward- and backward-compatible across the v0.12.4 migration.
+//! variant: the operator can keep writing `score = 0.85` in TOML
+//! or `"score": 0.85` in JSON, and the legacy long form
+//! (`0.85000002384…`) from a pre-v0.12.4 sidecar lands on the same
+//! `0.85_f32` bits. Sidecars are therefore forward- and
+//! backward-compatible across the v0.12.4 migration.
+//!
+//! ## NaN / infinity
+//!
+//! `clean_float(f32::NAN)` returns `f64::NAN`. `serde_json`
+//! serialises NaN as JSON `null` and the subsequent
+//! deserialisation fails with `invalid type: null, expected
+//! f32` — a deliberate guardrail against silent data corruption
+//! on an upstream that emits a pathological value. Operators
+//! who legitimately need NaN should switch the field to
+//! `Option<f32>` and handle the `None` arm explicitly. The
+//! TOML encoder rejects `nan` outright (per the TOML spec).
 
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serializer};
 
 /// Convert an `f32` to its shortest round-trip decimal,
-/// represented as `f64` so it survives every JSON / TOML
-/// serializer without widening noise. Operator-written `0.1`
-/// round-trips as `0.1`; native `0.1_f32` (which is
-/// `0.10000000149011612` in `Display::fmt`) round-trips as
-/// `0.1` because Ryu emits the shortest string that parses
-/// back to the same `f32` bits.
+/// represented as `f64` so it survives the TOML encoder's
+/// `f32 → f64` widening without leaking the original `f32`
+/// bit pattern into a 17-digit decimal. Operator-written `0.1`
+/// round-trips as `0.1`; native `0.1_f32` (which is the bit
+/// pattern `0x3dcccccd`) round-trips as `0.1` because Ryu
+/// (`format!("{f32}")`, Rust ≥1.55) emits the shortest string
+/// that parses back to the same `f32` bits — *not* the
+/// TOML-side `0.10000000149011612` widening artefact.
 pub fn clean_float(t: f32) -> f64 {
     format!("{t}")
         .parse::<f64>()
@@ -202,29 +232,65 @@ mod tests {
     }
 
     // 3. `serde_clean_f32_does_not_touch_strings_outside_temperatures`:
-    //    pin no-regresión: timestamps y strings arbitrarios NO
-    //    se ven afectados.
+    //    pin no-regresión: strings en un struct mixto (un campo
+    //    `String` y un campo `f32` con helper) NO se ven
+    //    afectados por el helper — el `f32` sí pasa por Ryu,
+    //    el `String` queda verbatim. Pin crítico contra una
+    //    refactor que accidentalmente aplique `clean_f32` a
+    //    tipos no-f32.
     #[test]
     fn serde_clean_f32_does_not_touch_strings_outside_temperatures() {
-        let inputs = [
-            "20:21:56.123456",
-            "custom-v2.1234",
-            "anything",
-            "temperature = 0.7", // Pin: this stays untouched.
-        ];
-        for s in inputs {
-            let v: String = s.parse().expect("parse");
-            let back = s.to_string();
-            assert_eq!(v, back, "string passthrough changed value: {s:?}");
-            // Sanity: serde_json treats this as a plain string
-            // (no helper applies).
-            let j = serde_json::to_string(&v).expect("serialise");
-            assert!(j.contains(s), "expected literal substring {s:?} in {j:?}");
+        #[derive(Serialize, Deserialize, Debug)]
+        struct Wrapper {
+            #[serde(with = "scalar")]
+            score: f32,
+            timestamp: String,
+            label: String,
         }
+        let original = Wrapper {
+            score: 0.7_f32,
+            timestamp: "2026-08-26T20:21:56.123456Z".to_owned(),
+            label: "custom-v2.1234".to_owned(),
+        };
+        let j = serde_json::to_string(&original).expect("serialise");
+        // `f32` pasa por Ryu.
+        assert!(
+            j.contains("\"score\":0.7"),
+            "score must be Ryu-clean, got {j}"
+        );
+        assert!(
+            !j.contains("0.70000004768"),
+            "score must NOT carry widening noise, got {j}"
+        );
+        // `String` queda verbatim (ni escapeado ni tocado).
+        assert!(
+            j.contains("\"timestamp\":\"2026-08-26T20:21:56.123456Z\""),
+            "timestamp must be untouched, got {j}"
+        );
+        assert!(
+            j.contains("\"label\":\"custom-v2.1234\""),
+            "label must be untouched, got {j}"
+        );
+        // Round-trip bit-equal.
+        let back: Wrapper = serde_json::from_str(&j).expect("deserialise");
+        assert_eq!(back.score.to_bits(), original.score.to_bits());
+        assert_eq!(back.timestamp, original.timestamp);
+        assert_eq!(back.label, original.label);
     }
 
     // 4. `serde_clean_f32_handles_nan_and_infinity`: NaN, ±inf
-    //    round-trip via `to_bits()`.
+    //    round-trip via `to_bits()`. **Pins the contract**: the
+    //    helper itself never panics on NaN/inf (Ryu emits the
+    //    parseable forms `NaN` / `inf` / `-inf`), BUT a field
+    //    annotated with `#[serde(with = "crate::serde_util::
+    //    clean_f32::scalar")]` whose value is NaN serialises
+    //    to JSON `null` (because `serde_json::serialize_f64`
+    //    rejects non-finite numbers per RFC 8259), and the
+    //    subsequent deserialisation fails with
+    //    `invalid type: null, expected f32`. This is the
+    //    documented load-bearing behaviour — operators who
+    //    encounter NaN in production must treat the sidecar
+    //    as poisoned and re-probe from scratch.
     #[test]
     fn serde_clean_f32_handles_nan_and_infinity() {
         // Display strings — Rust's Ryu for f32 emits
@@ -246,9 +312,7 @@ mod tests {
 
         // The `clean_float` helper converts to `f64` via
         // `f64::parse`. NaN / ±inf must NOT panic and must
-        // round-trip as themselves. (`serde_json::to_string`
-        // emits NaN as `null` and refuses to round-trip it, so
-        // we test the helper directly.)
+        // round-trip as themselves.
         let nan_f64 = clean_float(f32::NAN);
         assert!(nan_f64.is_nan(), "NaN must round-trip as NaN: {nan_f64}");
         assert_eq!(clean_float(f32::INFINITY), f64::INFINITY);
@@ -262,6 +326,38 @@ mod tests {
                 back.to_bits(),
                 v.to_bits(),
                 "finite round-trip changed bits for {v:?}: {s}"
+            );
+        }
+
+        // **End-to-end via `serde_json`**: a `scalar`-annotated
+        // field whose value is NaN serialises to JSON `null` and
+        // the round-trip fails on deserialize. This is the
+        // load-bearing behaviour the module doc-comment
+        // promises. If a future `serde_json` release changes
+        // this (e.g. emits `"NaN"` literally) the test will
+        // flip and force a re-evaluation.
+        #[derive(Serialize, Deserialize, Debug)]
+        struct Holder {
+            #[serde(with = "scalar")]
+            v: f32,
+        }
+        for v in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let j = serde_json::to_string(&Holder { v }).expect("serialise");
+            assert!(
+                j.contains("null"),
+                "serde_json serialises non-finite f32 as `null`; got {j}"
+            );
+            // Deserialisation back into `f32` MUST fail (this
+            // is the guardrail against silent data corruption).
+            let back: Result<Holder, _> = serde_json::from_str(&j);
+            assert!(
+                back.is_err(),
+                "deserialising `null` as f32 must fail; back={back:?}"
+            );
+            let err = back.unwrap_err().to_string();
+            assert!(
+                err.contains("invalid type") || err.contains("null"),
+                "expected an `invalid type` error mentioning `null`; got {err}"
             );
         }
     }

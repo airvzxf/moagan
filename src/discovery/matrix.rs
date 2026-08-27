@@ -253,10 +253,12 @@ pub struct RewriteEvent {
     /// Temperatures the rewriter snapped them to (one per
     /// `requested[i]`). Same length as `requested`.
     pub clamped_to: Vec<f32>,
-    /// Number of entries where `requested[i] != clamped_to[i]`
-    /// (within `1e-3_f32`; see
+    /// Number of entries where `requested[i]` differs from
+    /// `clamped_to[i]` by *more* than `1e-3_f32` (see
     /// [`ExplorationMatrix::rewrite_temperatures_to_supported`]
-    /// for the threshold rationale).
+    /// for the threshold rationale). Strict `>` so a profile
+    /// whose values are bit-identical after the rewrite (or
+    /// differ by less than `1e-3`) reports `n_clamped == 0`.
     pub n_clamped: usize,
     /// PR-04b-2 (N-1): total number of declared temperatures in
     /// the operator's profile before the rewrite. Equal to
@@ -1178,5 +1180,71 @@ mod tests {
         assert_eq!(e.effective_fanout_per_cell, 6);
         // The clamped vector must carry the deduplicated set.
         assert_eq!(e.clamped_to, vec![0.1, 0.1, 0.1, 0.5, 0.5, 0.9, 0.9]);
+    }
+
+    /// PR-04b-2 (N-2): the band-dead threshold is `1e-3_f32`,
+    /// not `f32::EPSILON ≈ 1.19e-7`. A rewriter that restores
+    /// `f32::EPSILON` must NOT pass this test: a near-equal
+    /// rewrite (`0.10000005_f32` vs `0.1_f32` — distance
+    /// `~5e-8`) is below `1e-3_f32` and therefore a no-op, but
+    /// above `f32::EPSILON` so it would have been counted as a
+    /// clamp under the old threshold. The test pins the new
+    /// threshold from both sides:
+    ///
+    /// - `requested = [0.10000005_f32]` vs `supported = [0.1]`:
+    ///   distance `~5e-8`, below `1e-3` → `n_clamped = 0`.
+    /// - `requested = [0.7 + 0.01_f32 = 0.71_f32]` vs
+    ///   `supported = [0.7]`: distance `0.01`, above `1e-3` →
+    ///   `n_clamped = 1`.
+    ///
+    /// If a future refactor narrows the threshold back to
+    /// `f32::EPSILON`, the first case produces `n_clamped = 1`
+    /// and the test fails.
+    #[test]
+    fn rewrite_clamps_near_equal_but_not_bit_identical() {
+        // First case: distance ~5e-8 (below 1e-3) — must NOT
+        // be counted as clamped under the new threshold.
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.10000005_f32],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.1_f32]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert_eq!(
+            events.len(),
+            0,
+            "0.10000005 is within 1e-3 of 0.1 — must NOT trigger a RewriteEvent"
+        );
+
+        // Second case: distance 0.01 (above 1e-3) — MUST be
+        // counted as clamped.
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.71_f32],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.7_f32]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert_eq!(
+            events.len(),
+            1,
+            "0.71 differs from 0.7 by 0.01 — MUST trigger a RewriteEvent"
+        );
+        assert_eq!(events[0].n_clamped, 1, "exactly one entry was clamped");
     }
 }

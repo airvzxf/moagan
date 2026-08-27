@@ -361,8 +361,14 @@ pub struct Ranking {
     pub stability_label: Option<StabilityLabel>,
     /// Sigma used for the perturbations that produced `stability_score`.
     /// Recorded for telemetry so operators can correlate sensitivity
-    /// with the perturbation magnitude.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// with the perturbation magnitude. Serialised via Ryu's
+    /// shortest round-trip decimal so the ranking sidecar carries
+    /// `0.7`, not `0.7000000476837158`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "crate::serde_util::clean_f32::opt_scalar"
+    )]
     pub stability_sigma: Option<f32>,
 }
 
@@ -1114,7 +1120,7 @@ pub struct JudgeScoreEntry {
     pub judge: String,
     /// Score the judge assigned on the 0..=10 scale. Serialised
     /// via Ryu's shortest round-trip decimal so the report
-    /// sidecar carries `7.5`, not `7.5000001…`.
+    /// sidecar carries `0.85`, not `0.8500000238418579`.
     #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub score: f32,
 }
@@ -1394,7 +1400,7 @@ pub struct AdversaryReport {
     pub consensus_check: String,
     /// Disagreement score that triggered the adversary (0..=10).
     /// Serialised via Ryu's shortest round-trip decimal so the
-    /// report sidecar carries `8.0`, not `8.00000095367…`.
+    /// report sidecar carries `0.85`, not `0.8500000238418579`.
     #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub disagreement_score: f32,
     /// Free-form weaknesses the adversary surfaced.
@@ -1403,6 +1409,9 @@ pub struct AdversaryReport {
     pub unverified_claims: Vec<String>,
     /// Score delta applied to the aggregated evaluation. Negative
     /// pulls the proposal down; positive boosts it. Range -2..=+2.
+    /// Serialised via Ryu's shortest round-trip decimal so the
+    /// report sidecar carries `0.6`, not `0.6000000238418579`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub score_delta: f32,
     /// Short rationale.
     pub rationale: String,
