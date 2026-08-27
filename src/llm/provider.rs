@@ -2063,41 +2063,34 @@ struct ProbeSettings {
 
 #[cfg(test)]
 mod tests {
-    // The `ENV_LOCK` mutex below serialises the set/remove of
-    // `MINIMAX_API_KEY` and `MOAGAN_MAX_TOKEN_AUTO` so the
-    // parallel test runner cannot let a sibling test observe an
-    // intermediate state. Some tests below are `#[tokio::test]`
-    // and hold the lock across the `await` call into
-    // `build_registry_for_probe_test`. The lock is held only for
-    // the set/remove pair (microseconds), the test fixture is
-    // local (a tempdir), and the protected vars are NOT used by
-    // any sibling test mid-await — the race we are guarding is
-    // at test boundaries, not within a single test. Hence the
-    // same `allow(clippy::await_holding_lock)` the integration
-    // test file uses.
+    // `TEST_API_KEYS_LOCK` (in `src/lib.rs`) serialises every test
+    // in this module that mutates `MINIMAX_API_KEY` or
+    // `MOAGAN_MAX_TOKEN_AUTO` so the parallel test runner cannot let
+    // a sibling test observe an intermediate state. The lock is held
+    // across the entire test body — including the `await` call into
+    // `build_registry_for_probe_test` — because the env vars that drive
+    // the construction are read by the awaited code; releasing the
+    // lock between `set_var` and the await would re-introduce the
+    // race. Hence the `allow(clippy::await_holding_lock)` allow at
+    // the module level (same reasoning as the integration test file
+    // at `tests/integration_auto_probe_persists_files.rs`).
     #![allow(clippy::await_holding_lock)]
 
     use super::*;
+    use crate::TEST_API_KEYS_LOCK;
 
-    /// Process-wide env mutex. Mirrors the pattern in
-    /// `tests/integration_mvp.rs::ENV_LOCK` and
-    /// `tests/integration_auto_probe_persists_files.rs::ENV_LOCK`.
-    /// Tests inside this module mutate `MINIMAX_API_KEY` (and, in
-    /// `env_max_token_auto_zero_disables_probe`, `MOAGAN_MAX_TOKEN_AUTO`)
-    /// to drive the dispatcher; without the lock, the parallel test
-    /// runner lets sibling tests observe env state owned by a test
-    /// mid-flight and the registry builder reads the wrong key.
-    /// This is the flake the operator documented when closing the
-    /// original `registry_table_floor_* passes with --test-threads=1,
-    /// fails in CI default` bug.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Acquire the process-wide env mutex and recover from poison.
+    /// Thin local alias over the crate-wide `TEST_API_KEYS_LOCK`
+    /// (declared in `src/lib.rs:65`). Tests inside this module mutate
+    /// `MINIMAX_API_KEY` (and, in `env_max_token_auto_zero_disables_probe`,
+    /// `MOAGAN_MAX_TOKEN_AUTO`) to drive the dispatcher; without the
+    /// lock, the parallel test runner lets sibling tests observe env
+    /// state owned by a test mid-flight and the registry builder
+    /// reads the wrong key. Sharing the crate-wide mutex (instead of
+    /// a file-local one) coordinates with the sibling test modules
+    /// `src/llm/api_keys.rs::tests` and `src/cli/doctor.rs::tests`,
+    /// which already use the same lock to serialise the same env vars.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        match ENV_LOCK.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        }
+        TEST_API_KEYS_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     #[test]
@@ -3908,9 +3901,9 @@ mod tests {
         assert!(format!("{on:?}").contains("max_tokens_table: \"present\""));
     }
 
-    /// Regression pin for the `ENV_LOCK` mutex above. The test is
-    /// weaker than the integration counterpart in
-    /// `tests/integration_auto_probe_persists_files.rs`
+    /// Regression pin for the crate-wide `TEST_API_KEYS_LOCK` mutex
+    /// (in `src/lib.rs`). The test is weaker than the integration
+    /// counterpart in `tests/integration_auto_probe_persists_files.rs`
     /// (which spawns 8 OS threads contending for the lock) because
     /// inside a `mod tests` block `cargo test` runs the unit tests
     /// in parallel and the actual race shows up across tests, not

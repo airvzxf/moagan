@@ -41,26 +41,24 @@ use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Process-wide env mutex. Mirrors the pattern in
-/// `tests/integration_mvp.rs::ENV_LOCK` (which serialises
-/// `MOAGAN_HOME` / `MOAGAN_CONFIG`). The three integration tests
-/// below mutate `MINIMAX_API_KEY` to satisfy the dispatcher's
-/// `AnthropicCompatProvider::from_resolved` constructor; without
-/// the lock, the parallel test runner lets one test observe the
-/// env var set by a sibling mid-flight, and the registry builder
+/// Thin local alias over the crate-wide `TEST_API_KEYS_LOCK`
+/// (declared in `src/lib.rs:65` as a `pub static`). The three
+/// integration tests below mutate `MINIMAX_API_KEY` to satisfy the
+/// dispatcher's `AnthropicCompatProvider::from_resolved` constructor;
+/// without the lock, the parallel test runner lets one test observe
+/// the env var set by a sibling mid-flight, and the registry builder
 /// reads the wrong key (this is the flake the operator documented
 /// when closing the original `registry_auto_probe_persists_both_*
-/// passes with --test-threads=1, fails in CI default` bug).
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Acquire the process-wide env mutex and recover from poison
-/// (the only way the mutex can be poisoned is if another test
-/// panicked mid-mutation, which is already a hard failure).
+/// passes with --test-threads=1, fails in CI default` bug). Sharing
+/// the crate-wide mutex (instead of a file-local one) coordinates
+/// with the sibling test modules `src/llm/api_keys.rs::tests`,
+/// `src/cli/doctor.rs::tests`, `src/llm/provider.rs::tests`, and
+/// `src/cli/probe.rs::tests`, which already use the same lock to
+/// serialise the same env vars.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    match ENV_LOCK.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    }
+    moagan::TEST_API_KEYS_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Build a single-section provider map with the supplied endpoint
@@ -350,16 +348,16 @@ async fn registry_zero_still_means_opt_out() {
     );
 }
 
-/// Regression pin for the process-wide `ENV_LOCK` mutex above. Eight
-/// OS threads contend for the mutex; if anyone removes the static
-/// or shortens its scope, the parallel race between
-/// `set_var` / `remove_var` is observable as a flake where two
-/// tests see `MINIMAX_API_KEY` set to `"x"` at once and the join
-/// still completes (the assertion would still pass — the regression
-/// is in the broader suite, not in this test). The point of this
-/// test is to lock the API contract: the static must exist, must be
-/// a `Mutex<()>`, and must serialise `set_var` / `remove_var`
-/// across thread boundaries.
+/// Regression pin for the crate-wide `TEST_API_KEYS_LOCK` mutex
+/// (in `src/lib.rs`). Eight OS threads contend for the mutex; if
+/// anyone removes the static or shortens its scope, the parallel
+/// race between `set_var` / `remove_var` is observable as a flake
+/// where two tests see `MINIMAX_API_KEY` set to `"x"` at once and
+/// the join still completes (the assertion would still pass — the
+/// regression is in the broader suite, not in this test). The
+/// point of this test is to lock the API contract: the static must
+/// exist, must be a `Mutex<()>`, and must serialise `set_var` /
+/// `remove_var` across thread boundaries.
 ///
 /// The main thread does NOT hold the lock while the workers
 /// spin up (that would deadlock — the workers cannot acquire a
@@ -376,7 +374,7 @@ fn env_lock_serializes_minimax_api_key_mutations() {
     for _ in 0..8 {
         let c = Arc::clone(&counter);
         handles.push(thread::spawn(move || {
-            let _g = match ENV_LOCK.lock() {
+            let _g = match moagan::TEST_API_KEYS_LOCK.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };

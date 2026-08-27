@@ -748,25 +748,21 @@ fn build_provider_for_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_API_KEYS_LOCK;
 
-    /// Process-wide env mutex. Mirrors the pattern in
-    /// `tests/integration_mvp.rs::ENV_LOCK` and
-    /// `src/llm/provider.rs::tests::ENV_LOCK`. The
+    /// Thin local alias over the crate-wide `TEST_API_KEYS_LOCK`
+    /// (declared in `src/lib.rs:65`). The
     /// `build_provider_for_probe_uses_section_not_model_id` test
     /// mutates `MINIMAX_API_KEY` to drive the dispatcher's
     /// `from_resolved` path; without the lock, the parallel test
     /// runner lets sibling tests observe env state owned by a test
-    /// mid-flight. The lock exists for parity with sibling modules
-    /// and to keep the API contract locked if a future test is
-    /// added.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Acquire the process-wide env mutex and recover from poison.
+    /// mid-flight. Sharing the crate-wide mutex (instead of a
+    /// file-local one) coordinates with the sibling test modules
+    /// `src/llm/api_keys.rs::tests`, `src/cli/doctor.rs::tests`, and
+    /// `src/llm/provider.rs::tests`, which already use the same lock
+    /// to serialise the same env vars.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        match ENV_LOCK.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        }
+        TEST_API_KEYS_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// `provider:model` parsing: well-formed values split on the
@@ -1200,10 +1196,11 @@ mod tests {
     /// construction seam directly without going through HTTP.
     #[test]
     fn build_provider_for_probe_uses_section_not_model_id() {
-        // Process-wide env mutex (mirrors the ENV_LOCK pattern at
-        // the top of this `mod tests`). The `set_var` /
-        // `remove_var` block must hold the lock so a sibling test
-        // does not observe an intermediate state.
+        // Process-wide env mutex (thin alias over
+        // `crate::TEST_API_KEYS_LOCK` defined at the top of this
+        // `mod tests`). The `set_var` / `remove_var` block must
+        // hold the lock so a sibling test does not observe an
+        // intermediate state.
         let _env = env_lock();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
