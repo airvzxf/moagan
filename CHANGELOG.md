@@ -5,6 +5,14 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.8] - 2026-08-27
+
+### Fixed
+
+Patch v0.12.8 (PR #638) — third regression blocking `e2e-network.yml`, exposed after PR #636 (v0.12.7) restored the `--provider minimax:model` invocation. **No source changes, no public API change, no schema bump.**
+
+- **`scripts/e2e_audit_proxy.sh:289, 471, 499`** — `MOAGAN_MINIMAX_ENDPOINT=http://...:PORT/anthropic/v1` → `.../anthropic/v1/messages`. `src/llm/wire_format.rs:484` (introduced in PR #589, v0.10 schema refactor) rejects any URL without a recognised wire-format suffix (`/messages`, `/chat/completions`, `/responses`); the `/messages` suffix lets the client select the Anthropic-compatible wire format when sending through the proxy. The proxy's `--upstream` argument is unchanged (it forwards any path under that base). Default MiniMax model in the e2e harness is now `MiniMax-M2.7` (was `MiniMax-M3` in v0.12.7) per operator request; `MiniMax-M3` remains available as a section alias.
+
 ## [0.12.7] - 2026-08-27
 
 ### Fixed
