@@ -194,7 +194,7 @@ jobs:
           MOAGAN_SMOKE_SECTION: fast
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: |
-          MAX_ATTEMPTS=4
+          MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"
             echo "Attempt $attempt / $MAX_ATTEMPTS for section=fast"
@@ -253,7 +253,7 @@ jobs:
           MOAGAN_SMOKE_SECTION: explore
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: |
-          MAX_ATTEMPTS=4
+          MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"
             echo "Attempt $attempt / $MAX_ATTEMPTS for section=explore"
