@@ -31,6 +31,7 @@ pub mod redact;
 pub mod research;
 pub mod sandbox;
 pub mod secret;
+pub mod serde_util;
 pub mod storage;
 pub mod telemetry;
 pub mod test_support;

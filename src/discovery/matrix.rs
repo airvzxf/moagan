@@ -231,6 +231,17 @@ impl DiscoveryDimensions {
 /// clamped to, and the count of cells that were rewritten. The
 /// `provider_model` field carries the same MODEL name string as
 /// [`ExplorationMatrix::temperature_profiles`].
+///
+/// PR-04b-2 (N-1): the event now also carries the *cardinality*
+/// of the declared profile and the *post-collapse* cardinality,
+/// so the dispatcher can distinguish a profile that was rewritten
+/// verbatim from one that collapsed after upstream clamping. The
+/// classic case is a declared `[0.1, 0.12, 0.14, 0.5, 0.52, 0.9,
+/// 0.91]` with an upstream that only accepts `[0.1, 0.5, 0.9]` —
+/// the operator's audit log now reads
+/// `original_count=7 unique_count=3 dropped_count=4`
+/// alongside the existing `n_clamped` count, so a future grep on
+/// `dropped_count > 0` surfaces the collapse.
 #[derive(Debug, Clone)]
 pub struct RewriteEvent {
     /// Provider MODEL name (the map key of
@@ -242,9 +253,37 @@ pub struct RewriteEvent {
     /// Temperatures the rewriter snapped them to (one per
     /// `requested[i]`). Same length as `requested`.
     pub clamped_to: Vec<f32>,
-    /// Number of entries where `requested[i] != clamped_to[i]`
-    /// (within `f32::EPSILON`).
+    /// Number of entries where `requested[i]` differs from
+    /// `clamped_to[i]` by *more* than `1e-3_f32` (see
+    /// [`ExplorationMatrix::rewrite_temperatures_to_supported`]
+    /// for the threshold rationale). Strict `>` so a profile
+    /// whose values are bit-identical after the rewrite (or
+    /// differ by less than `1e-3`) reports `n_clamped == 0`.
     pub n_clamped: usize,
+    /// PR-04b-2 (N-1): total number of declared temperatures in
+    /// the operator's profile before the rewrite. Equal to
+    /// `requested.len()`; surfaced as a first-class field so the
+    /// dispatcher can log `original_count` without re-deriving
+    /// it from `requested.len()`.
+    pub original_count: usize,
+    /// PR-04b-2 (N-1): number of *unique* temperatures in the
+    /// post-rewrite profile, measured via `f32::to_bits()` to
+    /// collapse bit-identical duplicates. Smaller than
+    /// `original_count` when the rewrite clamped several
+    /// declared values to the same upstream-supported value.
+    pub unique_count: usize,
+    /// PR-04b-2 (N-1): `original_count - unique_count`, clamped
+    /// via `saturating_sub` so an out-of-band rewriter that
+    /// expanded the profile reports `0` instead of panicking on
+    /// a `usize` underflow. `> 0` is the canonical
+    /// "profile collapsed after upstream clamping" signal.
+    pub dropped_count: usize,
+    /// PR-04b-2 (N-1): `profile.replicas_per_temperature *
+    /// unique_count` — the per-cell fan-out the runtime will
+    /// actually execute after the rewrite. Exposed so the
+    /// dispatcher's audit log shows the runtime the operator
+    /// will see, not the one they asked for.
+    pub effective_fanout_per_cell: usize,
 }
 
 /// The full exploration matrix.
@@ -429,11 +468,22 @@ impl ExplorationMatrix {
                 .iter()
                 .map(|t| crate::llm::temperature_probe::nearest_in_set(supported, *t).unwrap_or(*t))
                 .collect();
+            // PR-04b-2 (N-2): the band-dead threshold is `1e-3_f32`
+            // (not the pre-change `f32::EPSILON ≈ 1.19e-7`). The
+            // wider band covers:
+            //   - the Ryu-vs-Display rounding gap (`0.7` vs
+            //     `0.70000004768` — same bits, different decimal
+            //     representations),
+            //   - 1-decimal operator rounding (`0.3` vs
+            //     `0.30000001192`),
+            //   - upstream clamping noise.
+            // It does NOT swallow meaningful changes (`0.5 → 1.0`
+            // is 0.5 away, well above the threshold).
             let n_clamped = profile
                 .temperatures
                 .iter()
                 .zip(rewritten.iter())
-                .filter(|(a, b)| (*a - *b).abs() > f32::EPSILON)
+                .filter(|(a, b)| (*a - *b).abs() > 1e-3_f32)
                 .count();
             if n_clamped == 0 {
                 tracing::trace!(model = %model, "rewrite: nothing to clamp");
@@ -441,9 +491,26 @@ impl ExplorationMatrix {
             }
             let requested = profile.temperatures.clone();
             profile.temperatures = rewritten.clone();
+            // PR-04b-2 (N-1): collapse-visibility signals so the
+            // operator can tell a profile rewrite from a profile
+            // collapse. `to_bits()` deduplicates bit-identical
+            // floats so the count is exact.
+            let original_count = requested.len();
+            let unique_count = rewritten
+                .iter()
+                .map(|t| t.to_bits())
+                .collect::<std::collections::BTreeSet<u32>>()
+                .len();
+            let dropped_count = original_count.saturating_sub(unique_count);
+            let effective_fanout_per_cell = profile
+                .replicas_per_temperature
+                .saturating_mul(unique_count);
             tracing::trace!(
                 model = %model,
                 n_clamped,
+                original_count,
+                unique_count,
+                dropped_count,
                 "rewrite: clamping temperatures"
             );
             events.push(RewriteEvent {
@@ -451,6 +518,10 @@ impl ExplorationMatrix {
                 requested,
                 clamped_to: rewritten,
                 n_clamped,
+                original_count,
+                unique_count,
+                dropped_count,
+                effective_fanout_per_cell,
             });
         }
         tracing::debug!(events = events.len(), "rewrite complete");
@@ -933,7 +1004,10 @@ mod tests {
     /// supported set. The plan listed `n_clamped = 7` in this
     /// case; the correct value matches the implementation
     /// (counts only entries where the requested value differs
-    /// from the clamped value by more than `f32::EPSILON`).
+    /// from the clamped value by more than `1e-3_f32` — see the
+    /// doc-comment on
+    /// [`ExplorationMatrix::rewrite_temperatures_to_supported`]
+    /// for the threshold rationale, PR-04b-2 N-2).
     #[test]
     fn rewrite_temperatures_to_supported_clamps_to_nearest() {
         let mut profiles = HashMap::new();
@@ -1069,5 +1143,108 @@ mod tests {
         assert!(events.is_empty());
         let p = m.profile_for("MiniMax-M3");
         assert_eq!(p.temperatures, vec![0.7]);
+    }
+
+    /// PR-04b-2 (N-1): when the upstream collapses several
+    /// declared temperatures to a smaller supported set, the
+    /// `RewriteEvent` must surface the cardinality signals so the
+    /// dispatcher can distinguish "rewrite verbatim" from
+    /// "rewrite + collapse". The canonical case is
+    /// `[0.1, 0.12, 0.14, 0.5, 0.52, 0.9, 0.91]` declared by the
+    /// operator and `[0.1, 0.5, 0.9]` supported by the upstream
+    /// → `original_count = 7`, `unique_count = 3`,
+    /// `dropped_count = 4`.
+    #[test]
+    fn rewrite_event_exposes_collapse_signals() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.1, 0.12, 0.14, 0.5, 0.52, 0.9, 0.91],
+                replicas_per_temperature: 2,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.1, 0.5, 0.9]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.original_count, 7);
+        assert_eq!(e.unique_count, 3);
+        assert_eq!(e.dropped_count, 4);
+        // effective_fanout_per_cell = replicas_per_temperature *
+        // unique_count = 2 * 3 = 6.
+        assert_eq!(e.effective_fanout_per_cell, 6);
+        // The clamped vector must carry the deduplicated set.
+        assert_eq!(e.clamped_to, vec![0.1, 0.1, 0.1, 0.5, 0.5, 0.9, 0.9]);
+    }
+
+    /// PR-04b-2 (N-2): the band-dead threshold is `1e-3_f32`,
+    /// not `f32::EPSILON ≈ 1.19e-7`. A rewriter that restores
+    /// `f32::EPSILON` must NOT pass this test: a near-equal
+    /// rewrite (`0.10000005_f32` vs `0.1_f32` — distance
+    /// `~5e-8`) is below `1e-3_f32` and therefore a no-op, but
+    /// above `f32::EPSILON` so it would have been counted as a
+    /// clamp under the old threshold. The test pins the new
+    /// threshold from both sides:
+    ///
+    /// - `requested = [0.10000005_f32]` vs `supported = [0.1]`:
+    ///   distance `~5e-8`, below `1e-3` → `n_clamped = 0`.
+    /// - `requested = [0.7 + 0.01_f32 = 0.71_f32]` vs
+    ///   `supported = [0.7]`: distance `0.01`, above `1e-3` →
+    ///   `n_clamped = 1`.
+    ///
+    /// If a future refactor narrows the threshold back to
+    /// `f32::EPSILON`, the first case produces `n_clamped = 1`
+    /// and the test fails.
+    #[test]
+    fn rewrite_clamps_near_equal_but_not_bit_identical() {
+        // First case: distance ~5e-8 (below 1e-3) — must NOT
+        // be counted as clamped under the new threshold.
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.10000005_f32],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.1_f32]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert_eq!(
+            events.len(),
+            0,
+            "0.10000005 is within 1e-3 of 0.1 — must NOT trigger a RewriteEvent"
+        );
+
+        // Second case: distance 0.01 (above 1e-3) — MUST be
+        // counted as clamped.
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.71_f32],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        let mut supported: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
+        supported.insert("MiniMax-M3".to_owned(), vec![0.7_f32]);
+        let events = m.rewrite_temperatures_to_supported(&supported);
+        assert_eq!(
+            events.len(),
+            1,
+            "0.71 differs from 0.7 by 0.01 — MUST trigger a RewriteEvent"
+        );
+        assert_eq!(events[0].n_clamped, 1, "exactly one entry was clamped");
     }
 }

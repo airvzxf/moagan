@@ -310,7 +310,10 @@ pub struct Repair {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JudgeScore {
-    /// Overall score (0..=10).
+    /// Overall score (0..=10). Serialised via Ryu's shortest
+    /// round-trip decimal so the sidecar carries `0.85`, not
+    /// `0.8500000238418579`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub score: f32,
     /// Per-criterion breakdown.
     pub criteria: JudgeCriteria,
@@ -358,8 +361,14 @@ pub struct Ranking {
     pub stability_label: Option<StabilityLabel>,
     /// Sigma used for the perturbations that produced `stability_score`.
     /// Recorded for telemetry so operators can correlate sensitivity
-    /// with the perturbation magnitude.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// with the perturbation magnitude. Serialised via Ryu's
+    /// shortest round-trip decimal so the ranking sidecar carries
+    /// `0.7`, not `0.7000000476837158`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "crate::serde_util::clean_f32::opt_scalar"
+    )]
     pub stability_sigma: Option<f32>,
 }
 
@@ -369,7 +378,10 @@ pub struct Ranking {
 pub struct RankEntry {
     /// Proposal id.
     pub id: String,
-    /// Score.
+    /// Score. Serialised via Ryu's shortest round-trip decimal
+    /// so the ranking sidecar carries `0.85`, not
+    /// `0.8500000238418579`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub score: f32,
     /// Human-readable reason.
     pub reason: String,
@@ -711,7 +723,10 @@ pub struct SketchTags {
     pub difficulty: String,
     /// Cosine-like similarity score against the primary category's
     /// centroid (0..=1). Below `0.6` the sketch is bucketed as
-    /// `uncategorized` (V4 §6.5).
+    /// `uncategorized` (V4 §6.5). Serialised via Ryu's shortest
+    /// round-trip decimal so the sidecar carries `0.74`, not
+    /// `0.74000000953…`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub similarity_to_category: f32,
     /// Optional free-form notes from the tagger.
     pub notes: String,
@@ -736,7 +751,10 @@ pub struct Cluster {
     /// SimHash centroid (hex). Optional, only present when the
     /// SimHash refinement produced one.
     pub centroid_simhash: String,
-    /// Mean intra-cluster similarity score (0..=1).
+    /// Mean intra-cluster similarity score (0..=1). Serialised
+    /// via Ryu's shortest round-trip decimal so the clusters
+    /// sidecar carries `0.74`, not `0.74000000953…`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub cohesion: f32,
     /// Schema version.
     pub schema_version: String,
@@ -1100,7 +1118,10 @@ pub struct FinalDisagreementReport {
 pub struct JudgeScoreEntry {
     /// Judge identifier (e.g. "judge-a").
     pub judge: String,
-    /// Score the judge assigned on the 0..=10 scale.
+    /// Score the judge assigned on the 0..=10 scale. Serialised
+    /// via Ryu's shortest round-trip decimal so the report
+    /// sidecar carries `0.85`, not `0.8500000238418579`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub score: f32,
 }
 /// Per-candidate entry carried by `FinalDisagreementReport`.
@@ -1378,6 +1399,9 @@ pub struct AdversaryReport {
     /// Did the adversary find a hidden weakness?
     pub consensus_check: String,
     /// Disagreement score that triggered the adversary (0..=10).
+    /// Serialised via Ryu's shortest round-trip decimal so the
+    /// report sidecar carries `0.85`, not `0.8500000238418579`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub disagreement_score: f32,
     /// Free-form weaknesses the adversary surfaced.
     pub weaknesses: Vec<String>,
@@ -1385,6 +1409,9 @@ pub struct AdversaryReport {
     pub unverified_claims: Vec<String>,
     /// Score delta applied to the aggregated evaluation. Negative
     /// pulls the proposal down; positive boosts it. Range -2..=+2.
+    /// Serialised via Ryu's shortest round-trip decimal so the
+    /// report sidecar carries `0.6`, not `0.6000000238418579`.
+    #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub score_delta: f32,
     /// Short rationale.
     pub rationale: String,

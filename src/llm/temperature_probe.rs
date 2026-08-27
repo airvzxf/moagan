@@ -335,7 +335,7 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
         let probe_span = tracing::info_span!(
             "llm_probe",
             probe_kind = "temperature",
-            candidate = temperature,
+            candidate = %temperature,
             provider = %self.provider.name(),
             model = %self.provider.model(),
         );
@@ -837,7 +837,10 @@ pub struct Entry {
     /// Temperatures the upstream accepted during the last
     /// successful probe. Order matches
     /// [`TEMPERATURE_PROBE_VALUES`] so the file diffs are
-    /// deterministic.
+    /// deterministic. Serialised via Ryu's shortest round-trip
+    /// decimal (`0.1`, not `0.10000000149011612`) so the
+    /// sidecar reads like the operator's input.
+    #[serde(with = "crate::serde_util::clean_f32::vec")]
     pub temperatures: Vec<f32>,
     /// ISO-8601 timestamp of the last successful probe.
     pub detected_at: String,
@@ -872,6 +875,9 @@ pub struct OperatorCap {
     /// The temperatures the operator allows for this provider.
     /// Order is not significant; the runtime sorts by distance
     /// to the requested value when picking the nearest.
+    /// Serialised via Ryu's shortest round-trip decimal so the
+    /// sidecar reads like the operator's input.
+    #[serde(with = "crate::serde_util::clean_f32::vec")]
     pub temperatures: Vec<f32>,
     /// Always `false` for an operator-pinned entry. Explicit so
     /// a grep-friendly TOML diff between auto-discovered and
@@ -2168,6 +2174,70 @@ temperatures = [0.0, 0.5, 1.0]\n\
         assert!(
             out.contains("[operator_caps.minimax]"),
             "non-provider headers must be untouched; got:\n{out}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // PR-04b-2 (A-4 / N-4): pin the on-disk sidecar contract —
+    // `temperatures_auto.toml` MUST carry Ryu's shortest
+    // round-trip decimal (`0.1`, `0.5`, `0.9`), NOT the
+    // pre-PR `Display::fmt` blobs (`0.10000000149011612`,
+    // `0.50000005960…`). The test builds a `TemperatureTable`
+    // pointing at a `tempdir`-backed path, inserts a row with
+    // `Entry::temperatures = [0.1, 0.5, 0.9]`, calls
+    // `persist_to` (private) via the public `persist()` entry
+    // point, and asserts the body. A regression here means a
+    // future refactor swapped the `serde_clean_f32::vec` helper
+    // for the default `Vec<f32>` serialiser (the Display::fmt
+    // path) and the operator will start seeing the long form
+    // again on next probe-run.
+    // -----------------------------------------------------------------
+    #[test]
+    fn persisted_sidecar_uses_ryu_shortest_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("temperatures_auto.toml");
+        let _table = TemperatureTable::from_path(&path, true).expect("from_path");
+        let mut file = TemperatureTableFile::new_empty();
+        file.providers
+            .entry("minimax".to_owned())
+            .or_default()
+            .insert(
+                "MiniMax-M3".to_owned(),
+                Entry {
+                    temperatures: vec![0.1, 0.5, 0.9],
+                    detected_at: "2026-08-26T10:00:00Z".to_owned(),
+                    verified_at: "2026-08-26T10:00:00Z".to_owned(),
+                    auto: true,
+                    attempts: 7,
+                },
+            );
+        file.save(&path).expect("save");
+        let body = std::fs::read_to_string(&path).expect("read");
+        // Ryu MUST emit the clean decimal form…
+        assert!(
+            body.contains("0.1"),
+            "Ryu must emit `0.1`; got body:\n{body}"
+        );
+        assert!(
+            body.contains("0.5"),
+            "Ryu must emit `0.5`; got body:\n{body}"
+        );
+        assert!(
+            body.contains("0.9"),
+            "Ryu must emit `0.9`; got body:\n{body}"
+        );
+        // …and the `Display::fmt` blobs MUST NOT appear.
+        assert!(
+            !body.contains("0.10000000149"),
+            "Display::fmt blob leaked: {body}"
+        );
+        assert!(
+            !body.contains("0.50000005960"),
+            "Display::fmt blob leaked: {body}"
+        );
+        assert!(
+            !body.contains("0.89999997616"),
+            "Display::fmt blob leaked: {body}"
         );
     }
 
