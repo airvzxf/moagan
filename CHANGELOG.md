@@ -5,6 +5,16 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.5] - 2026-08-27
+
+### Changed
+
+Patch v0.12.5 (PR-04c) — CI hygiene + e2e debug. **No source changes, no public API change, no schema bump.**
+
+- **C-2 (CI JSONL artifacts)**: `.github/workflows/ci.yml` now uploads moagan JSONL sidecars (`**/*.jsonl.gz`, `**/*.jsonl`) as GitHub Actions artifacts with **retention 7 days** on the 5 code-running jobs (`test-tests`, `test-lib`, `test-doc`, `smoke`, `e2e`). The 3 non-code jobs (`fmt-check`, `guard-deps`, `clippy`) are intentionally untouched. `MOAGAN_HOME` is pinned to `$GITHUB_WORKSPACE/.moagan-home` per-job so the `actions/upload-artifact` glob resolves under the workspace (the default `$HOME/.local/share/moagan` would be outside the artifact scope). `actions/upload-artifact` is SHA-pinned to `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1`, matching the existing pin in `e2e-network.yml:133` and `cargo-audit.yml:62` (consistency across all 4 upload sites). `if-no-files-found: warn` keeps a green job green when no sidecars were produced. The operator can now download the JSONL stream of any failed CI run within 7 days, instead of having to reproduce locally.
+
+- **C-3 (e2e-network investigation)**: timeboxed 2 h budget; the investigation finished in ~6 minutes with **no actionable CI fix identified**. 38 of 38 in-scope failures (Aug 20–27 UTC, post-restructure) are categorised as `moagan-bug`, not CI infra (`upstream-flake` = 0%, `ci-timeout` = 0%, `infra-flake` = 0%). Two regression patterns are documented: (a) `moagan-bug-proxy-start` (12 runs) — `moagan audit proxy` hangs after the `dispatching` log and never prints `proxy listening` within the script's 10 s timeout; (b) `moagan-bug-audit-log` (26 runs) — proxy starts but `moagan run` returns rc=2 or rc=7 and the wrapper fails the audit-log assertion. Last green run was `32619993732` (2026-08-23 05:17 UTC). The hypothesis is that the v0.12.0 stream-routing flip (`feat!: route tracing logs to stdout by default [v0.12.0]`) changed how the proxy's startup message reaches the wrapper, but the root cause requires triage in `src/cli/audit/proxy.rs` — **explicitly out of scope for PR-04c, deferred to v0.13.0+**. Full categorised run table + next-step triage checklist: `docs/ci/e2e-network-findings.md`.
+
 ## [0.12.4] - 2026-08-27
 
 ### Changed
