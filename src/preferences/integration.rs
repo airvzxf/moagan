@@ -176,18 +176,19 @@ mod tests {
     use crate::ids::RunId;
     use std::path::PathBuf;
 
-    fn unique_tmp(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "moagan-prefs-integ-test-{}-{}",
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    /// Allocate a fresh `(TempDir, path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-prefs-integ-test-{tag}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     fn set_env(key: &str, value: Option<&str>) {
@@ -209,7 +210,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
-        let tmp = unique_tmp("disabled");
+        let (_keep, tmp) = unique_tmp("disabled");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", None);
         assert!(!PreferenceCache::enabled());
@@ -219,7 +220,7 @@ mod tests {
 
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// When learning is enabled but the cache is empty, the block
@@ -232,7 +233,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
-        let tmp = unique_tmp("empty");
+        let (_keep, tmp) = unique_tmp("empty");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", Some("true"));
 
@@ -244,7 +245,7 @@ mod tests {
 
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Three ratings → the top three should appear in the rendered
@@ -257,7 +258,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
-        let tmp = unique_tmp("top");
+        let (_keep, tmp) = unique_tmp("top");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", Some("true"));
         assert!(PreferenceCache::enabled());
@@ -299,7 +300,7 @@ mod tests {
 
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// `auto_record_run` must be a no-op when learning is disabled —
@@ -311,7 +312,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
-        let tmp = unique_tmp("noop");
+        let (_keep, tmp) = unique_tmp("noop");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", None);
         assert!(!PreferenceCache::enabled());
@@ -326,7 +327,7 @@ mod tests {
 
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR D.8: when the learning loop is enabled AND the cache has
@@ -340,7 +341,7 @@ mod tests {
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
         let prev_user = std::env::var("MOAGAN_USER").ok();
-        let tmp = unique_tmp("inject_enabled");
+        let (_keep, tmp) = unique_tmp("inject_enabled");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", Some("true"));
         set_env("MOAGAN_USER", Some("alice"));
@@ -369,7 +370,7 @@ mod tests {
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
         set_env("MOAGAN_USER", prev_user.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR D.8: when `MOAGAN_USER` is unset (regardless of whether
@@ -383,7 +384,7 @@ mod tests {
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
         let prev_user = std::env::var("MOAGAN_USER").ok();
-        let tmp = unique_tmp("inject_no_user");
+        let (_keep, tmp) = unique_tmp("inject_no_user");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", Some("true"));
         set_env("MOAGAN_USER", None);
@@ -395,7 +396,7 @@ mod tests {
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
         set_env("MOAGAN_USER", prev_user.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR D.8: when the learning loop is opted out (regardless of
@@ -408,7 +409,7 @@ mod tests {
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
         let prev_user = std::env::var("MOAGAN_USER").ok();
-        let tmp = unique_tmp("inject_disabled");
+        let (_keep, tmp) = unique_tmp("inject_disabled");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", None);
         set_env("MOAGAN_USER", Some("alice"));
@@ -420,7 +421,7 @@ mod tests {
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
         set_env("MOAGAN_USER", prev_user.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR D.8: `auto_record_run` must persist a neutral
@@ -434,7 +435,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
-        let tmp = unique_tmp("auto_record");
+        let (_keep, tmp) = unique_tmp("auto_record");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", Some("true"));
         assert!(PreferenceCache::enabled());
@@ -471,6 +472,6 @@ mod tests {
 
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 }

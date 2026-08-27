@@ -2470,9 +2470,11 @@ mod tests {
     /// a `MaxTokensTable` attached to the registry.
     #[tokio::test]
     async fn registry_defaults_to_probe_for_non_mock_provider() {
-        let home = MoaganHome::at(
-            std::env::temp_dir().join(format!("moagan-probe-default-{}", std::process::id())),
-        );
+        let tmp = tempfile::Builder::new()
+            .prefix("moagan-probe-default-")
+            .tempdir()
+            .expect("tmp dir");
+        let home = MoaganHome::at(tmp.path().to_path_buf());
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }
@@ -2490,9 +2492,11 @@ mod tests {
     /// knob: the registry must NOT carry a probe table.
     #[tokio::test]
     async fn registry_respects_opt_out() {
-        let home = MoaganHome::at(
-            std::env::temp_dir().join(format!("moagan-probe-optout-{}", std::process::id())),
-        );
+        let tmp = tempfile::Builder::new()
+            .prefix("moagan-probe-optout-")
+            .tempdir()
+            .expect("tmp dir");
+        let home = MoaganHome::at(tmp.path().to_path_buf());
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }
@@ -2511,9 +2515,11 @@ mod tests {
     /// with that TOML do not silently flip behaviour.
     #[tokio::test]
     async fn registry_zero_still_means_off() {
-        let home = MoaganHome::at(
-            std::env::temp_dir().join(format!("moagan-probe-zero-{}", std::process::id())),
-        );
+        let tmp = tempfile::Builder::new()
+            .prefix("moagan-probe-zero-")
+            .tempdir()
+            .expect("tmp dir");
+        let home = MoaganHome::at(tmp.path().to_path_buf());
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
         }

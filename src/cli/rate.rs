@@ -58,18 +58,19 @@ mod tests {
     use crate::preferences::PreferenceCache;
     use std::path::PathBuf;
 
-    fn unique_tmp(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "moagan-rate-test-{}-{}",
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    /// Allocate a fresh `(TempDir, path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-rate-test-{tag}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     fn set_env(key: &str, value: Option<&str>) {
@@ -92,7 +93,7 @@ mod tests {
         let prev_learning = std::env::var("MOAGAN_LEARNING").ok();
         let prev_home = std::env::var("MOAGAN_HOME").ok();
         let prev_user = std::env::var("MOAGAN_USER").ok();
-        let tmp = unique_tmp("persist");
+        let (_keep, tmp) = unique_tmp("persist");
         set_env("MOAGAN_HOME", Some(tmp.to_str().unwrap()));
         set_env("MOAGAN_LEARNING", Some("true"));
         set_env("MOAGAN_USER", Some("alice"));
@@ -119,7 +120,7 @@ mod tests {
         set_env("MOAGAN_LEARNING", prev_learning.as_deref());
         set_env("MOAGAN_HOME", prev_home.as_deref());
         set_env("MOAGAN_USER", prev_user.as_deref());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Scores outside `[0.0, 1.0]` must surface as

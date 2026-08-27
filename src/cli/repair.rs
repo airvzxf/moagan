@@ -477,16 +477,20 @@ fn handle_recover_zombies(db: &Db, scope: Option<RunId>, dry_run: bool) -> Resul
 mod tests {
     use super::*;
     use crate::TEST_MOAGAN_HOME_LOCK;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-
-    fn unique_tmp(label: &str) -> std::path::PathBuf {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("moagan-repair-{pid}-{n}-{label}"));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        dir
+    /// Allocate a fresh `(TempDir, path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(label: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-repair-{label}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     fn args_with(flags: &[&str]) -> RepairArgs {
@@ -549,7 +553,7 @@ mod tests {
     /// filesystem.
     #[test]
     fn dry_run_with_cleanup_orphans_no_fs_changes() {
-        let tmp = unique_tmp("empty-cleanup");
+        let (_keep, tmp) = unique_tmp("empty-cleanup");
         let guard = lock_env(&tmp);
         let rc = run(args_with(&["cleanup", "dry", "yes"])).expect("dry-run must not error");
         assert_eq!(rc, 0);
@@ -558,14 +562,14 @@ mod tests {
             "dry-run must not create spurious files"
         );
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Plan with matches: dry-run must not delete any file, and
     /// must report the count it would have deleted.
     #[test]
     fn cleanup_orphans_dry_run_does_not_delete() {
-        let tmp = unique_tmp("dry-run");
+        let (_keep, tmp) = unique_tmp("dry-run");
         let run_id = RunId::new();
         let run_dir = tmp.join(".runs").join(run_id.to_string()).join("proposals");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -577,14 +581,14 @@ mod tests {
         assert_eq!(rc, 0);
         assert!(target.exists(), "dry-run must not delete the file");
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Plan with matches and `--yes`: the dispatcher must delete
     /// the queued files and report a non-zero count.
     #[test]
     fn cleanup_orphans_with_yes_deletes() {
-        let tmp = unique_tmp("with-yes");
+        let (_keep, tmp) = unique_tmp("with-yes");
         let run_id = RunId::new();
         let run_dir = tmp.join(".runs").join(run_id.to_string()).join("proposals");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -596,7 +600,7 @@ mod tests {
         assert_eq!(rc, 0);
         assert!(!target.exists(), "with-yes must delete the file");
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Plan with matches and **no** `--yes`: the dispatcher must
@@ -604,7 +608,7 @@ mod tests {
     /// untouched.
     #[test]
     fn cleanup_orphans_without_yes_returns_needs_input() {
-        let tmp = unique_tmp("no-yes");
+        let (_keep, tmp) = unique_tmp("no-yes");
         let run_id = RunId::new();
         let run_dir = tmp.join(".runs").join(run_id.to_string()).join("proposals");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -621,7 +625,7 @@ mod tests {
         assert_eq!(err.exit_code() as i32, 10);
         assert!(target.exists(), "no-yes must not delete the file");
         unlock_env(guard);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Reindex with the disk and DB already in sync must report
@@ -635,7 +639,7 @@ mod tests {
     /// name: status` panic.
     #[test]
     fn reindex_no_diff_returns_zero() {
-        let tmp = unique_tmp("reindex-sync");
+        let (_keep, tmp) = unique_tmp("reindex-sync");
         let run_id = RunId::new();
         let run_dir_root = tmp.join(".runs").join(run_id.to_string());
         let proposals = run_dir_root.join("proposals");
@@ -661,7 +665,7 @@ mod tests {
         args.home_override = Some(home);
         let rc = run(args).expect("reindex must not error");
         assert_eq!(rc, 0);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// A proposal written to disk after the cached count was
@@ -671,7 +675,7 @@ mod tests {
     /// `reindex_no_diff_returns_zero`.
     #[test]
     fn reindex_missing_in_db_catches_up() {
-        let tmp = unique_tmp("reindex-drift");
+        let (_keep, tmp) = unique_tmp("reindex-drift");
         let run_id = RunId::new();
         let run_dir_root = tmp.join(".runs").join(run_id.to_string());
         let proposals = run_dir_root.join("proposals");
@@ -694,7 +698,7 @@ mod tests {
         args.home_override = Some(home);
         let rc = run(args).expect("dry reindex must not error");
         assert_eq!(rc, 0);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// D.28.4 — `--recover-zombies` flips a stale `running`
@@ -704,7 +708,7 @@ mod tests {
     /// and asserts the row is now `interrupted`.
     #[test]
     fn recovers_zombie_running_runs() {
-        let tmp = unique_tmp("zombies-recover");
+        let (_keep, tmp) = unique_tmp("zombies-recover");
         let home = crate::fs_layout::MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
         let zombie = RunId::new();
@@ -740,7 +744,7 @@ mod tests {
             .expect("zombie_recovered event must exist");
         assert!(hit.payload.contains("\"kind\":\"zombie_recovered\""));
         drop(db);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// `--recover-zombies --dry-run` must list the zombie but
@@ -748,7 +752,7 @@ mod tests {
     /// not emit any outbox event.
     #[test]
     fn recover_zombies_dry_run_does_not_update_db() {
-        let tmp = unique_tmp("zombies-dry-run");
+        let (_keep, tmp) = unique_tmp("zombies-dry-run");
         let home = crate::fs_layout::MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
         let zombie = RunId::new();
@@ -777,7 +781,7 @@ mod tests {
             "dry-run must not emit any outbox events; got {events:?}"
         );
         drop(db);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// Track F refactor pin: the `moagan repair --cleanup-orphans`
@@ -790,7 +794,7 @@ mod tests {
     /// (the dispatcher prints `recover-zombies: found 1 zombie`).
     #[test]
     fn repair_refactor_still_passes() {
-        let tmp = unique_tmp("refactor-pin");
+        let (_keep, tmp) = unique_tmp("refactor-pin");
         let home = crate::fs_layout::MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
         let zombie = RunId::new();
@@ -828,7 +832,7 @@ mod tests {
         );
 
         drop(db);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR-B1 (B1.3): `--run <RUN_ID>` scopes `--cleanup-orphans`
@@ -840,7 +844,7 @@ mod tests {
     /// only the target's orphan.
     #[test]
     fn cleanup_orphans_with_run_scope_only_touches_target_run() {
-        let tmp = unique_tmp("run-scope-cleanup");
+        let (_keep, tmp) = unique_tmp("run-scope-cleanup");
         let target = RunId::new();
         let other = RunId::new();
         // Target run gets one orphan.
@@ -884,7 +888,7 @@ mod tests {
             "unscoped plan must contain both orphans; got {unscoped_plan:?}"
         );
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR-B1 (B1.3): `--run <RUN_ID> --cleanup-orphans --yes`
@@ -893,7 +897,7 @@ mod tests {
     /// destructive side of the scoping contract.
     #[test]
     fn cleanup_orphans_with_run_scope_deletes_only_target() {
-        let tmp = unique_tmp("run-scope-cleanup-yes");
+        let (_keep, tmp) = unique_tmp("run-scope-cleanup-yes");
         let target = RunId::new();
         let other = RunId::new();
         let target_proposals = tmp.join(".runs").join(target.to_string()).join("proposals");
@@ -920,7 +924,7 @@ mod tests {
             other_orphan.exists(),
             "scoped apply must NOT delete the other run's orphan"
         );
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR-B1 (B1.3): `--run <RUN_ID>` scopes `--recover-zombies`
@@ -930,7 +934,7 @@ mod tests {
     /// alive, the other is a zombie.
     #[test]
     fn recover_zombies_with_run_scope_skips_non_zombie_target() {
-        let tmp = unique_tmp("run-scope-zombies-skip");
+        let (_keep, tmp) = unique_tmp("run-scope-zombies-skip");
         let home = crate::fs_layout::MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
         let alive_target = RunId::new();
@@ -980,7 +984,7 @@ mod tests {
         );
 
         drop(db);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     /// PR-B1 (B1.3): `--run <RUN_ID>` scopes `--recover-zombies`
@@ -989,7 +993,7 @@ mod tests {
     /// zombie rows alone.
     #[test]
     fn recover_zombies_with_run_scope_flips_only_target() {
-        let tmp = unique_tmp("run-scope-zombies-yes");
+        let (_keep, tmp) = unique_tmp("run-scope-zombies-yes");
         let home = crate::fs_layout::MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
         let zombie_target = RunId::new();
@@ -1041,6 +1045,6 @@ mod tests {
         );
 
         drop(db);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 }

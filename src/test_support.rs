@@ -13,15 +13,19 @@
 //!
 //! 1. Acquires [`ENV_LOCK`] so no other test in this process can
 //!    read or mutate `MOAGAN_HOME` while the closure runs.
-//! 2. Creates a fresh tempdir keyed on `label`, the current PID,
-//!    and the current nanosecond timestamp, so two concurrent
-//!    calls get distinct paths even under `cargo test` parallelism.
+//! 2. Creates a fresh `tempfile::TempDir` whose OS-level cleanup
+//!    runs in `Drop`. The panic path also cleans up — no leaked
+//!    `/tmp/moagan-*` directories between runs.
 //! 3. Sets `MOAGAN_HOME` to that tempdir for the duration of the
 //!    closure (saving the previous value).
 //! 4. Restores the previous `MOAGAN_HOME` value (or removes the
-//!    var if there was none) on the way out.
-//! 5. Removes the tempdir best-effort so the OS does not slowly
-//!    fill up with `/tmp/moagan-*` directories between runs.
+//!    var if there was none) on the way out via a `Drop` guard
+//!    so the panic path also restores the env.
+//!
+//! Drop order on return (normal or panic) is the reverse of
+//! declaration: env-var restore runs before tempdir removal,
+//! before lock release. All three cleanup steps run regardless of
+//! whether `f` returns or panics.
 //!
 //! The closure receives the tempdir path as `&Path`. Tests that
 //! need to hand the path to a child process should pass it via
@@ -50,11 +54,11 @@ pub static ENV_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMut
 
 /// Run `f` with `MOAGAN_HOME` set to a unique tempdir.
 ///
-/// Acquires [`ENV_LOCK`], creates a fresh tempdir named
-/// `moagan-<pid>-<nanos>-<label>` under [`std::env::temp_dir`],
-/// points `MOAGAN_HOME` at it, runs `f` with the path, then
-/// restores the previous `MOAGAN_HOME` value and removes the
-/// tempdir.
+/// Acquires [`ENV_LOCK`], creates a fresh `tempfile::TempDir`
+/// (auto-removed on `Drop`, including the panic path), points
+/// `MOAGAN_HOME` at it, runs `f` with the path, then restores the
+/// previous `MOAGAN_HOME` value via a `Drop` guard (also covers
+/// the panic path).
 ///
 /// The closure is sync; async tests can drive it with
 /// `tokio::runtime::Builder::new_current_thread()` (matching the
@@ -64,33 +68,41 @@ where
     F: FnOnce(&Path) -> R,
 {
     let _guard = ENV_LOCK.lock();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before unix epoch")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("moagan-{pid}-{nanos}-{label}"));
-    std::fs::create_dir_all(&dir).expect("create unique tempdir");
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!("moagan-{label}-"))
+        .tempdir()
+        .expect("create unique tempdir");
+    let dir = tmp.path().to_path_buf();
+
+    // Restore the previous MOAGAN_HOME value (or unset it) on
+    // drop — both normal return and unwind paths run this.
+    struct EnvRestore(Option<std::ffi::OsString>);
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: serialised by ENV_LOCK, same as the matching
+            // `set_var` above.
+            unsafe {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("MOAGAN_HOME", v),
+                    None => std::env::remove_var("MOAGAN_HOME"),
+                }
+            }
+        }
+    }
     let prev = std::env::var_os("MOAGAN_HOME");
     // SAFETY: serialised by ENV_LOCK; no other thread reads or
     // mutates MOAGAN_HOME while the guard is held.
     unsafe {
         std::env::set_var("MOAGAN_HOME", &dir);
     }
-    let result = f(&dir);
-    // SAFETY: serialised by ENV_LOCK; restore the previous value
-    // (or remove the var if there was none) so the next test does
-    // not inherit this tempdir.
-    match prev {
-        Some(value) => unsafe {
-            std::env::set_var("MOAGAN_HOME", value);
-        },
-        None => unsafe {
-            std::env::remove_var("MOAGAN_HOME");
-        },
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    let _restore = EnvRestore(prev);
+
+    f(&dir)
+    // Drop order on return / unwind (reverse of declaration):
+    //   _restore → restores MOAGAN_HOME
+    //   tmp      → removes the tempdir from /tmp
+    //   _guard   → releases ENV_LOCK
+    // All three run on the panic path too.
 }
 
 #[cfg(test)]
@@ -132,10 +144,13 @@ mod tests {
         // points the env var at the fresh tempdir for the
         // duration of the closure, then restores the previous
         // value.
-        let previous = std::env::temp_dir().join("moagan-pre-existing-home");
-        std::fs::create_dir_all(&previous).unwrap();
+        let previous = tempfile::Builder::new()
+            .prefix("moagan-pre-existing-home-")
+            .tempdir()
+            .unwrap();
+        let previous_path = previous.path().to_path_buf();
         unsafe {
-            std::env::set_var("MOAGAN_HOME", &previous);
+            std::env::set_var("MOAGAN_HOME", &previous_path);
         }
         let new_dir = with_moagan_home("sets_restores_2", |home| {
             let current = std::env::var_os("MOAGAN_HOME").unwrap();
@@ -148,25 +163,27 @@ mod tests {
             "inside the closure MOAGAN_HOME must point at the fresh tempdir"
         );
         assert_ne!(
-            new_dir, previous,
+            new_dir, previous_path,
             "fresh tempdir must differ from the pre-existing value"
         );
         let after = std::env::var_os("MOAGAN_HOME").unwrap();
         assert_eq!(
             after.to_str().unwrap(),
-            previous.to_str().unwrap(),
+            previous_path.to_str().unwrap(),
             "MOAGAN_HOME must be restored to its previous value on exit"
         );
-        std::fs::remove_dir_all(&previous).unwrap();
+        // `previous` (TempDir) drops at end of test → automatic cleanup.
     }
 
     #[test]
     fn with_moagan_home_creates_unique_dir_per_call() {
         // Two consecutive calls (both holding the lock) must get
-        // different tempdir paths even if their nanosecond
-        // timestamp collides — the directory creation fails if
-        // the path already exists, so a duplicate would manifest
-        // as a panic here.
+        // different tempdir paths. `tempfile::Builder::tempdir`
+        // appends a random suffix on top of the prefix, so a
+        // duplicate would require the random source to repeat —
+        // vanishingly unlikely. If a future change ever lost the
+        // uniqueness, `tempdir()` itself would error on the
+        // second `create_dir_all` and panic here.
         let a = with_moagan_home("unique_a", |home| home.to_path_buf());
         let b = with_moagan_home("unique_b", |home| home.to_path_buf());
         assert_ne!(a, b, "two calls must yield distinct tempdir paths");

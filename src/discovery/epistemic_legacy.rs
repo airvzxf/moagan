@@ -266,18 +266,19 @@ fn xdg_fallback_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn unique_tmp(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "moagan-epistemic-legacy-test-{}-{}",
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    /// Allocate a fresh `(TempDir, path)` pair.
+    ///
+    /// Returning the [`tempfile::TempDir`] alongside the path
+    /// forces the caller to bind it so the directory outlives the
+    /// test scope (and is auto-removed by `Drop` on success or
+    /// panic — no `/tmp/moagan-*` leak).
+    fn unique_tmp(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("moagan-epistemic-legacy-test-{tag}-"))
+            .tempdir()
+            .expect("tmp dir");
+        let path = tmp.path().to_path_buf();
+        (tmp, path)
     }
 
     #[test]
@@ -293,7 +294,7 @@ mod tests {
 
     #[test]
     fn legacy_load_returns_empty_if_absent() {
-        let tmp = unique_tmp("absent");
+        let (_keep, tmp) = unique_tmp("absent");
         let path = tmp.join(FILENAME);
         // File does not exist; load_from returns Err(Io) which the
         // caller converts to "empty". Verify the same path explicitly.
@@ -302,24 +303,24 @@ mod tests {
             LoadError::Io(_)
         ));
         // Cleanup so we don't litter /tmp.
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     #[test]
     fn legacy_load_returns_empty_on_corrupt_file() {
-        let tmp = unique_tmp("corrupt");
+        let (_keep, tmp) = unique_tmp("corrupt");
         let path = tmp.join(FILENAME);
         std::fs::write(&path, b"{{{ this is not json :::").unwrap();
         assert!(matches!(
             EpistemicLegacy::load_from(&path).unwrap_err(),
             LoadError::Parse(_)
         ));
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     #[test]
     fn legacy_save_then_load_round_trip() {
-        let tmp = unique_tmp("roundtrip");
+        let (_keep, tmp) = unique_tmp("roundtrip");
         let path = tmp.join(FILENAME);
         let mut l = EpistemicLegacy::empty();
         l.known_failures.push("flaky-json-parser-v2".to_owned());
@@ -330,7 +331,7 @@ mod tests {
         l.save_to(&path).unwrap();
         let loaded = EpistemicLegacy::load_from(&path).unwrap();
         assert_eq!(loaded, l);
-        let _ = std::fs::remove_dir_all(&tmp);
+        // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
     #[test]
