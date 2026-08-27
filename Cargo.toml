@@ -112,3 +112,19 @@ proptest = "1.4"
 inherits = "release"
 debug = true
 incremental = false
+
+# T1 build profile: keep file:line in panic backtraces but drop
+# full DWARF location/type info so each `libmoagan-*.rlib` shrinks
+# from ~350 MB to a few MB. CI runs the release profile for full
+# debug info; local dev gets fast incremental rebuilds without
+# losing the panic-message locality that ADR-0002's post-mortem
+# correlation depends on.
+#
+# Trade-off: variable inspection in interactive debuggers
+# (rust-analyzer / CodeLLDB / gdb) is reduced to line locations;
+# step-debug still works but you cannot hover-print local `let`
+# bindings. For deep debugging, temporarily override with
+# `CARGO_PROFILE_DEV_DEBUG=2 cargo build` or
+# `CARGO_PROFILE_DEV_DEBUG=true cargo build`.
+[profile.dev]
+debug = "line-tables-only"
