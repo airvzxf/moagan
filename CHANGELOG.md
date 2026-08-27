@@ -5,6 +5,14 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.7] - 2026-08-27
+
+### Fixed
+
+Patch v0.12.7 (PR #636) — second of two regressions blocking `e2e-network.yml`, exposed after PR #634 (v0.12.6) restored the wrapper's ability to find the proxy's banner. **No source changes, no public API change, no schema bump.**
+
+- **`scripts/e2e_audit_proxy.sh:289, 471, 499`** — `--provider minimax` (bare section) → `--provider minimax:MiniMax-M3`. The `minimax` section grew to 4 models (recently adding `MiniMax-M2.7-highspeed`), and `src/cli/mod.rs:1402` (introduced in PR #589, `refactor(config)!: v0.10 schema refactor`) rejects bare-section providers when the section has >1 model with exit code 2. The canonical first model (`MiniMax-M3`) matches what `docs/e2e-loop-2026-08-12.md` used when fast mode was last green. The sibling `opencode_go` and `deepseek` sections are single-model aliases, so their bare-provider invocations (lines 566, 681) keep working.
+
 ## [0.12.6] - 2026-08-27
 
 ### Fixed
