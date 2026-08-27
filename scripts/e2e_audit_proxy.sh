@@ -235,6 +235,22 @@ stop_proxy() {
   fi
 }
 
+# Write a per-proxy TOML config that pins `minimax` max_tokens to
+# 131072 (the M2.7 ceiling per models.dev). Without this the
+# runtime falls back to `MINIMAX_MAX_TOKENS_CAP = 524288` when the
+# startup auto-probe can't reach models.dev, and the upstream
+# rejects with HTTP 400 "does not support max tokens > N". The
+# config is written into the same work dir as the run so each
+# proxy invocation gets its own scoped config (referenced via
+# `MOAGAN_CONFIG=<home>/config.toml` in each `run_test` body).
+write_minimax_config() {
+  local home="$1"
+  cat > "$home/config.toml" <<'EOF'
+[providers.minimax]
+max_tokens = 131072
+EOF
+}
+
 # ---------------------------------------------------------------------
 # SECTION A — Real audit proxy round-trip against minimax
 #
@@ -284,9 +300,10 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     WORK_PROXY_1=$(mkhome)
     PORTFILE_1="$WORK_PROXY_1/portfile"
     if start_proxy "$WORK_PROXY_1" "$PORTFILE_1"; then
+      write_minimax_config "$WORK_PROXY_1"
       PROXY_PORT_1="$(cat "${PORTFILE_1}.port")"
       run_test "proxy_e2e_card80_discovers_summary" \
-        "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --max-tokens 131072 --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_PROXY_1/discover.out; test \$? -le 1"
+        "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 MOAGAN_CONFIG=$WORK_PROXY_1/config.toml RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_PROXY_1/discover.out; test \$? -le 1"
 
       # Find the run dir
       PROXY_RUN_ID="$(ls "$WORK_PROXY_1/.runs/" 2>/dev/null | sort -r | head -1)"
@@ -466,9 +483,10 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   WORK_PROXY_2=$(mkhome)
   PORTFILE_2="$WORK_PROXY_2/portfile"
   if start_proxy "$WORK_PROXY_2" "$PORTFILE_2"; then
+    write_minimax_config "$WORK_PROXY_2"
     PROXY_PORT_2="$(cat "${PORTFILE_2}.port")"
     run_test "proxy_e2e_mode_fast_audit_log_exists" \
-      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_2/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_2 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN run --mode fast --provider minimax:MiniMax-M2.7 --max-tokens 131072 --prompt 'What is the capital of France?' --max-parallelism 4 --non-interactive > $WORK_PROXY_2/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_2/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_2/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_2/run.out; exit 1; }"
+      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_2/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_2 MOAGAN_CONFIG=$WORK_PROXY_2/config.toml RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN run --mode fast --provider minimax:MiniMax-M2.7 --prompt 'What is the capital of France?' --max-parallelism 4 --non-interactive > $WORK_PROXY_2/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_2/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_2/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_2/run.out; exit 1; }"
 
     PROXY_RUN_ID_2="$(ls "$WORK_PROXY_2/.runs/" 2>/dev/null | sort -r | head -1)"
     if [[ -n "$PROXY_RUN_ID_2" ]]; then
@@ -494,9 +512,10 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   WORK_PROXY_3=$(mkhome)
   PORTFILE_3="$WORK_PROXY_3/portfile"
   if start_proxy "$WORK_PROXY_3" "$PORTFILE_3"; then
+    write_minimax_config "$WORK_PROXY_3"
     PROXY_PORT_3="$(cat "${PORTFILE_3}.port")"
     run_test "proxy_e2e_mode_explore_audit_log_exists" \
-      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_3/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_3 RUST_LOG=warn timeout $MOAGAN_SMOKE_EXPLORE_TIMEOUT $BIN run --mode explore --provider minimax:MiniMax-M2.7 --max-tokens 131072 --prompt 'Design a microservices architecture for an e-commerce platform' --max-parallelism 4 --non-interactive > $WORK_PROXY_3/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_3/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_3/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_3/run.out; exit 1; }"
+      "MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_3/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_3 MOAGAN_CONFIG=$WORK_PROXY_3/config.toml RUST_LOG=warn timeout $MOAGAN_SMOKE_EXPLORE_TIMEOUT $BIN run --mode explore --provider minimax:MiniMax-M2.7 --prompt 'Design a microservices architecture for an e-commerce platform' --max-parallelism 4 --non-interactive > $WORK_PROXY_3/run.out 2>&1; RC=\$?; if [ \"\$RC\" -ne 0 ]; then echo \"FAIL: moagan run returned \$RC\"; cat $WORK_PROXY_3/run.out; exit 1; fi; grep -qE 'run id' $WORK_PROXY_3/run.out || { echo \"FAIL: no 'run id' line found in run.out\"; cat $WORK_PROXY_3/run.out; exit 1; }"
 
     PROXY_RUN_ID_3="$(ls "$WORK_PROXY_3/.runs/" 2>/dev/null | sort -r | head -1)"
     if [[ -n "$PROXY_RUN_ID_3" ]]; then
