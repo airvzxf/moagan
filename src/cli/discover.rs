@@ -1080,7 +1080,7 @@ pub async fn run_resume(
     // correctly resolves and produces `discover_matrix + ... +
     // discover_summary` instead of the linear `unknown phase`
     // error that motivated PR-24.
-    let canonical = build_canonical_for_resume_pipeline(manifest);
+    let canonical = build_canonical_for_resume_pipeline(home, manifest);
     let resumed = Pipeline::resume_with_kind(canonical, last_phase, PipelineKind::Discovery)?;
     if resumed.is_empty() {
         // PR-04a (E-1): routed through the tracing subscriber so
@@ -1271,25 +1271,24 @@ pub async fn run_resume(
 
 /// Build the canonical 10-phase discovery pipeline used as the
 /// reference list for [`Pipeline::resume_with_kind`] in
-/// [`run_resume`]. The matrix's `cardinality` field is sourced
-/// from `exploration_matrix.json` if present, otherwise the
-/// default; this keeps the resumed matrix shape consistent with
-/// the original run. The remaining dimensions/threshold knobs
-/// fall back to the documented defaults because the canonical
+/// [`run_resume`].
+///
+/// The matrix's `cardinality` field is sourced from
+/// `exploration_matrix.json` if present, otherwise the default;
+/// this keeps the resumed matrix shape consistent with the
+/// original run. The remaining dimensions/threshold knobs fall
+/// back to the documented defaults because the canonical
 /// pipeline only uses them at the matrix boundary.
-fn build_canonical_for_resume_pipeline(manifest: &Manifest) -> Pipeline {
-    let target = resume_sketches_per_cell(
-        &MoaganHome::resolve().unwrap_or_else(|_| {
-            // Fall back to a tempdir-anchored home if `MOAGAN_HOME`
-            // is unset; `run_resume` always overwrites the run_dir
-            // via `home.run_dir(run_id)` so this synthetic home is
-            // only used for the per-cell probe. Operators running
-            // `moagan continue` always have a real `MOAGAN_HOME`.
-            let tmp = std::env::temp_dir().join(format!("moagan-resume-{}", manifest.run_id));
-            MoaganHome::at(tmp)
-        }),
-        manifest.run_id,
-    );
+///
+/// `home` is passed in by the caller (`run_resume`) so the
+/// canonical-pipeline probe reads the same `<MOAGAN_HOME>/.runs/`
+/// tree the actual resume will. We deliberately do NOT re-resolve
+/// here — if `MOAGAN_HOME` and `$HOME` are both unset, that is
+/// already an error upstream and we want it to surface as one,
+/// not be silently papered over with a synthetic tempdir that
+/// would only ever produce the default `sketches_per_cell`.
+fn build_canonical_for_resume_pipeline(home: &MoaganHome, manifest: &Manifest) -> Pipeline {
+    let target = resume_sketches_per_cell(home, manifest.run_id);
     let opts = DiscoverOptions {
         provider: manifest.provider.clone(),
         prompt: String::new(),
