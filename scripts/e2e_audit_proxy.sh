@@ -247,6 +247,10 @@ write_minimax_config() {
   local home="$1"
   cat > "$home/config.toml" <<'EOF'
 [providers.minimax]
+endpoint = "https://api.minimax.io/anthropic/v1/messages"
+
+[[providers.minimax.models]]
+id = "MiniMax-M2.7"
 max_tokens = 131072
 EOF
 }
