@@ -785,7 +785,7 @@ cli::dispatch → Cmd::Audit::Verify → audit::verify_cmd(VerifyArgs)
   → run_dir.telemetry/calls.jsonl.gz
   → verify_mod::verify_with_db(&run_dir, &calls_path, &db)
        → on SQLite failure: report.internal_file_invalid=true + verify(&run_dir, &calls_path)
-  → write_tsv(&report, &run_dir/external_audit_verify.tsv)
+  → write_tsv(&report, &run_dir/external_audit.verify.tsv)
   → println TSV + eprintln path
   → exit report.exit_code() (0 ok / 1 mismatch / 2 missing/invalid / 90 export_failed)
 ```
@@ -1039,9 +1039,9 @@ window_days  = 7
 
 ---
 
-### 15.11 `moagan telemetry cost --run <run_id>`
+### 15.11 `moagan telemetry cost --run <run_id> | --all`
 
-**👁 What it is** — Per-run USD aggregate for a finished run. Reads the `cost_usd` column added by SQLite migration v015 (§D.32.6 in `docs/proposal-03-add-ons.md`), groups by role and model, and prints a small table with the total. Lets an operator answer "how much did this run cost me" without joining the catalog and the calls table by hand. When the run predates v0.7.1 (no `cost_usd` column) or the `(provider, model)` pair has no `cost.*` flags in the catalog, the row prints `(no cost data)` instead of `0`.
+**👁 What it is** — Per-run (or per-index) USD aggregate. Reads the `cost_usd` column added by SQLite migration v015 (§D.32.6 in `docs/proposal-03-add-ons.md`), groups by role and model, and prints a small table with the total. With `--run <run_id>` the aggregation is scoped to one run; with `--all` it spans every run in the index. Lets an operator answer "how much did this run cost me" without joining the catalog and the calls table by hand. When the run predates v0.7.1 (no `cost_usd` column) or the `(provider, model)` pair has no `cost.*` flags in the catalog, the row prints `(no cost data)` instead of `0`.
 
 **🧩 Flag matrix**
 
@@ -1520,7 +1520,7 @@ run 01a0178c  coverage report
 | `repair` | `repair (dry-run|applied): cleanup=N reindex=N zombies=N` | filesystem + DB rows + outbox events |
 | `doctor` | `[OK] / [WARN] / [FAIL]` lines + verdict | (read-only, writes probe then removes it) |
 | `audit proxy` | `proxy listening on http://...` | `<run_dir>/telemetry/external_audit.jsonl.gz` |
-| `audit verify` | TSV rows + `OK: N verified, M failed` | `<run_dir>/external_audit_verify.tsv` |
+| `audit verify` | TSV rows + `OK: N verified, M failed` | `<run_dir>/external_audit.verify.tsv` |
 | `discover` | `discovery run id: <uuid>` | `<run_dir>/{tags,clusters,facets,extractions,final(cat_NN.md, summary.md)}/` |
 | `telemetry list/summary/compare/provider/config` | tables / text | (read-only) |
 | `telemetry view` | `dashboard listening on http://...` + endpoints list | HTTP dashboard running |

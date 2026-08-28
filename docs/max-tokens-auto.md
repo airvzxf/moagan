@@ -40,9 +40,11 @@ Or in `~/.config/moagan/config.toml`:
 
 ```toml
 [providers.minimax]
-name = "minimax"
-model = "MiniMax-M3"
 max_token_auto = 0   # disable entirely (Some(0) ≡ None)
+
+[[providers.minimax.models]]
+id = "MiniMax-M3"
+max_tokens = 1000000
 ```
 
 `Some(0)` is equivalent to `None` (both mean "off"). `Some(N>0)` enables

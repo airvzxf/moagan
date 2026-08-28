@@ -207,14 +207,14 @@ the new `src/coverage/` module is a no-op stub when
   report reflects the *coverage* build, not the *release* build,
   even though the source is identical.
 - **`*.profraw` volume.** A long run emits one `profraw` per phase
-  start and one per `tracing::error!`. The runtime side does not
-  prune these files; the `daily_rotation` helper in
-  `src/telemetry/daily_rotation.rs` only emits a `stale_artifact`
-  warning on day-rollover for the regular `telemetry/daily.log`
-  stream. Pruning of the `coverage/` directory is the operator's
-  responsibility (no follow-up is currently scheduled; if the
-  volume becomes a real problem, file an issue and we'll add a
-  `MoaganHome::prune_coverage(max_age)` helper).
+  start and one per `tracing::error!`. PR #563 (commit `2d10fc9`)
+  added `CoverageRecorder::start_rotation` (`src/coverage/mod.rs:399-441`)
+  which spawns a background thread that rotates the active
+  `profraw` (the `profraw` file is renamed to a `<run_id>-<tag>-<seq>.profraw`
+  snapshot and a new active `profraw` is created). The
+  `daily_rotation` helper in `src/telemetry/daily_rotation.rs` is a
+  separate concern — it only emits a `stale_artifact` warning on
+  day-rollover for the regular `telemetry/daily.log` stream.
 - **The "line that caused the error" is still approximate.** The
   coverage report tells you which lines ran *before* the error,
   not the exact line that raised. The panic hook in

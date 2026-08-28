@@ -8,7 +8,7 @@ return HTTP 400 + `temperature must be between 0 and 1` otherwise. Hard-coding
 a global cap is the same brittleness the [`max_tokens` auto-probe](max-tokens-auto.md)
 removes — a relay can tighten the cap without warning and the next run breaks.
 
-`moagan` (v0.12.14+) probes each `(provider, model)` pair at first startup
+`moagan` (v0.9.11+) probes each `(provider, model)` pair at first startup
 to discover the discrete set of supported sampling temperatures. The result
 is cached at `~/.local/share/moagan/temperatures_auto.toml` and consulted on
 every subsequent call: out-of-range requests are rewritten to the nearest
@@ -34,7 +34,7 @@ HTTP timeout) and classified by HTTP status plus body fingerprint:
 
 | Outcome | Meaning |
 |---|---|
-| `Accepted` | HTTP 2xx/3xx with a non-empty response body that does not carry the rejection signature, **or** HTTP 2xx/3xx with an empty body AND the truncation signal (`stop_reason = "max_tokens"` with `output_tokens > 0`). The second case is the wire shape MiniMax returns when the model thinks too hard and exhausts its output budget mid-emit: the upstream unambiguously accepted the request, the model simply had no budget to emit trailing tokens. Classifying that shape as `Accepted` is what lets the probe survive the `max_tokens = 16` budget. |
+| `Accepted` | HTTP 2xx/3xx with a non-empty response body that does not carry the rejection signature, **or** HTTP 2xx/3xx with an empty body AND the truncation signal (`stop_reason = "max_tokens"` with `output_tokens > 0`). The second case is the wire shape MiniMax returns when the model thinks too hard and exhausts its output budget mid-emit: the upstream unambiguously accepted the request, the model simply had no budget to emit trailing tokens. Classifying that shape as `Accepted` is what lets the probe survive the `max_tokens = 1024` budget. |
 | `Rejected` | HTTP 2xx/3xx with a non-empty body that carries the rejection signature, or HTTP 4xx (`400`, `422`) with the rejection signature in the body — the upstream rejects the value as out-of-range. |
 | `Indeterminate` | Timeout, 5xx, transport error, 4xx without the rejection signature, or 2xx/3xx with an empty body WITHOUT the truncation signal. The empty-body-without-truncation shape is genuinely ambiguous (silent parameter drop, decoder-absorbed error, 200 envelope with no content); the algorithm's `retry_once_on_indeterminate` path fires a second probe and the second outcome is treated as terminal for the batch boundary. The runtime's dispatch gate falls back to the operator's requested temperature instead of locking the discovered set to a wrong value. |
 
