@@ -18,7 +18,7 @@ permissions:
 # and on manual dispatch. NOT a PR gate — moved out of ci.yml to
 # (a) reduce per-PR runner cost, (b) eliminate refs/pull/N/merge cache
 # pollution, (c) align with the existing e2e-network post-merge pattern
-# (and mirror the sibling test-ignored-opencode-go workflow).
+# (and mirror the sibling test-ignored-opencode workflow).
 #
 # Timeout 60 min accommodates the rare case of a degraded MiniMax
 # upstream; the test itself early-returns when MINIMAX_API_KEY is

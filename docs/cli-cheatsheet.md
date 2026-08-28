@@ -98,7 +98,7 @@ The cheatsheet was last touched in PR #319 (commit `1590877`). Since then the v0
 | Knob | Before | v0.6.0 | Source |
 |---|---|---|---|
 | `DEFAULT_MAX_TOKENS` (every role, every provider) | varies | `1_000_000` | `src/llm/prompts.rs:20` |
-| OpenCode Go `max_tokens` cap (every wire shape) | propagated from `DEFAULT_MAX_TOKENS` (upstream rejected > 393_216) | hard-capped at `16_384` | `src/llm/capabilities.rs:43` (`OPENCODE_GO_MAX_TOKENS_CAP`) |
+| OpenCode Go `max_tokens` cap (every wire shape) | propagated from `DEFAULT_MAX_TOKENS` (upstream rejected > 393_216) | hard-capped at `16_384` (`OPENCODE_GO_MAX_TOKENS_CAP`, **removed in v0.10**; replaced by the per-`(provider, model)` auto-probe persisted in `max_tokens_auto.toml`) | `src/llm/capabilities.rs` |
 | `moagan discover --sketches-per-cell` floor | `50` (legacy `cardinality`) | `10` (F2) | `src/cli/mod.rs`, `src/cli/discover.rs` |
 | `moagan run --hash-algo` default | `blake3` | `blake3` (unchanged; verified `src/config/mod.rs:294` + `src/cli/flags_batch.rs:13-20`) | — |
 
@@ -130,11 +130,13 @@ moagan run --prompt "design my secret project"
 
 If you want the user-level XDG file again, `unset MOAGAN_CONFIG` and remove the cwd `moagan.toml` (or pass `--config <path>` style through `MOAGAN_CONFIG=/path/to/xdg-config.toml moagan ...`).
 
-### opencode_go `max_tokens` is hard-capped at 16_384 (PR #364)
+### OpenCode `max_tokens` ceiling (v0.6 → v0.10)
 
-Every OpenCode Go provider entry — `opencode_go_anthropic`, `opencode_go_responses` (both `send` and `send_streaming`), and the chat-completions path inside `openai_compat` (via the new `OpenAiCompatProvider::new_with_kind_cap` constructor) — clamps `req.max_tokens = req.max_tokens.min(min(provider_max_tokens, OPENCODE_GO_MAX_TOKENS_CAP))` at request time. The default for every `make_opencode_go(...)` row in `default_providers()` is now `Some(OPENCODE_GO_MAX_TOKENS_CAP)` (down from `Some(DEFAULT_MAX_TOKENS)`); MiniMax-direct and DeepSeek-direct are deliberately untouched.
+**v0.6 → v0.9 (PR #364, removed in v0.10):** every OpenCode provider entry clamped `req.max_tokens = req.max_tokens.min(min(provider_max_tokens, OPENCODE_GO_MAX_TOKENS_CAP))` at request time, where `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`. The constant lived at `src/llm/capabilities.rs:43`; the v0.9 default for every `make_opencode_go(...)` row in `default_providers()` was `Some(OPENCODE_GO_MAX_TOKENS_CAP)`.
 
-**Operators no longer need the per-provider `max_tokens` override in `~/.config/moagan/config.toml` to dodge the upstream HTTP 400.** The cap is enforced in code. The constant lives at `src/llm/capabilities.rs:43` (`pub const OPENCODE_GO_MAX_TOKENS_CAP: u32 = 16_384;`) — bump it in one place if a future OpenCode Go model needs more.
+**v0.10+:** the global `OPENCODE_GO_MAX_TOKENS_CAP` clamp is gone. The per-`(provider, model)` ceiling is now auto-probed at startup (see [`docs/max-tokens-auto.md`](max-tokens-auto.md)) and persisted to `~/.local/share/moagan/max_tokens_auto.toml`. The runtime `effective_max_tokens` reads the auto-probed value with the per-provider override as a floor; the wire body's `max_tokens` field is clamped to that ceiling before request time.
+
+Operators no longer need the per-provider `max_tokens` override in `~/.config/moagan/config.toml` to dodge the upstream HTTP 400 — the auto-probe handles it per-model.
 
 ---
 
@@ -159,7 +161,7 @@ Every OpenCode Go provider entry — `opencode_go_anthropic`, `opencode_go_respo
 | `--profile <name>` | looks up `<name>.toml` under `$MOAGAN_HOME/profiles/` or `~/.config/moagan/profiles/` |
 | `--hash-algo <x>` | only `sha256` or `blake3`; anything else → exit 2 |
 | `--hash-algo` absent | default `blake3` (`Config::export.hash_algo::default()` = `Blake3`, even though the bare `HashAlgo` enum default is `Sha256` — see `src/config/mod.rs:294`) |
-| OpenCode Go provider | `max_tokens` is hard-capped at `16_384` (`OPENCODE_GO_MAX_TOKENS_CAP`) regardless of `--hash-algo` / config / `DEFAULT_MAX_TOKENS`; the cap is enforced inside the wire body, not via user config |
+| OpenCode provider (pre-v0.10) | `max_tokens` was hard-capped at `16_384` (`OPENCODE_GO_MAX_TOKENS_CAP`) regardless of `--hash-algo` / config / `DEFAULT_MAX_TOKENS`; the cap was enforced inside the wire body. **Removed in v0.10** — the per-model auto-probe replaces it. |
 | `--prompt -` | reads the prompt from stdin |
 | `--max-parallelism > 64` | rejected by `validate_max_parallelism` |
 | `--allow-injection` | disables the sandbox's secret-strip pass |
@@ -1213,12 +1215,12 @@ cli::dispatch → Cmd::Probe → probe::run_max_tokens(ProbeMaxTokensArgs { prov
 $ moagan probe max_tokens \
     --provider minimax:MiniMax-M3 \
     --provider minimax:MiniMax-M2.7 \
-    --provider opencode_go:qwen3.x \
+    --provider opencode:qwen3.7-max \
     --floor 1024 --save
 
 minimax:MiniMax-M3          ceiling=524288   floor=1024   source=probe
 minimax:MiniMax-M2.7        ceiling=131072   floor=1024   source=probe
-opencode_go:qwen3.x         ceiling=16384    floor=1024   source=probe
+opencode:qwen3.7-max        ceiling=524288   floor=1024   source=probe
 (3/3 probes succeeded; cache: ~/.local/share/moagan/max_tokens_auto.toml)
 ```
 
@@ -1281,18 +1283,18 @@ cli::dispatch → Cmd::Probe → probe::dispatch_temperature(ProbeTemperatureCmd
 ```bash
 $ moagan probe temperature \
     --provider minimax:MiniMax-M3 \
-    --provider opencode_go:kimi-k3 \
+    --provider opencode:kimi-k3 \
     --persist-union \
     --batch-size 3
 
 PROBE TEMPERATURE
 --batch-size: 3 (runtime default: 3)
   Probing minimax:MiniMax-M3 ... accepted set: [0.0, 0.1, ..., 1.0]
-  Probing opencode_go:kimi-k3 ... accepted set: [1.0]
+  Probing opencode:kimi-k3 ... accepted set: [1.0]
 
 --persist-union: operator caps written to temperatures_auto.toml:
   minimax:     UNION [0.0, 0.1, 0.2, ..., 1.0]  (auto=false)
-  opencode_go: UNION [1.0]  (auto=false)
+  opencode:    UNION [1.0]  (auto=false)
 ```
 
 The probe sends a tiny deterministic payload

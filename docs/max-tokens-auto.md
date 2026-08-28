@@ -76,7 +76,7 @@ max_tokens = 4096
 | Field | Meaning |
 |---|---|
 | `schema_version` | File format version. `v1` today. Bumped if the schema changes. |
-| `entries[].provider` | The provider name (e.g. `minimax`, `opencode-go`). |
+| `entries[].provider` | The provider name (e.g. `minimax`, `opencode`). |
 | `entries[].model` | The model identifier (e.g. `MiniMax-M3`). |
 | `entries[].detected_at` | Unix epoch (seconds) when the initial probe resolved. |
 | `entries[].verified_at` | Unix epoch of the most recent successful verify probe. `0` if the entry has never been re-verified. |

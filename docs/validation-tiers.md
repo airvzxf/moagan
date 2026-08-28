@@ -91,7 +91,7 @@ Plus one fast orthogonal check on the commit message itself:
    │  Manual-only siblings (workflow_dispatch, no auto on main):       │
    │    - e2e-network-card80.yml              ~25 min, MiniMax card80   │
    │    - test-ignored-deepseek.yml           stub (budget exhausted)  │
-   │    - test-ignored-opencode-go.yml        stub (budget exhausted)  │
+   │    - test-ignored-opencode.yml          active on manual dispatch │
    │    - test-ignored-minimax.yml            ~? min, real --ignored run│
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘
@@ -204,7 +204,7 @@ $ head -1 .git/hooks/pre-commit
 | CI workflow (9 parallel jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 | CI real-LLM e2e (main only, fast+explore auto) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
 | CI real-LLM e2e (manual-only card80) | [`.github/workflows/e2e-network-card80.yml`](../.github/workflows/e2e-network-card80.yml) |
-| CI `--ignored` test runs (post-merge) | [`.github/workflows/test-ignored-{minimax,deepseek,opencode-go}.yml`](../.github/workflows/) |
+| CI `--ignored` test runs (post-merge) | [`.github/workflows/test-ignored-{minimax,deepseek,opencode}.yml`](../.github/workflows/) |
 | CI informational: code scanning | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) |
 | CI informational: dependency audit | [`.github/workflows/cargo-audit.yml`](../.github/workflows/cargo-audit.yml) |
 | CI release pipeline (tag-triggered) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
