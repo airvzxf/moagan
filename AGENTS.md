@@ -104,41 +104,63 @@ because cross-branch restore works there: tag pushes inherit `main`'s
 cache scope as a fallback, and same-branch restore hits the cache on
 re-runs of the same job.
 
-## Working with workflow (regression-aware)
+## ⚠️ Red / failed workflows: do NOT merge, repair until green
 
 **The invariant: validation comes before release, never after.**
 
 A tag is irreversible. Once `release.yml` has published a release, a
 workflow bug found afterwards can only be fixed with another release.
 So the workflow that a change touches must be proven green *while the
-change is still revertible* — that is, on the branch and then on
-`main`, before any version bump or tag exists.
+change is still revertible* — i.e. on the branch BEFORE any merge, on
+the trunk AFTER the merge, and on the release branch BEFORE the tag.
+**A red workflow is a stop-the-line event at every step, not a
+"fix-it-later" task.** Partial greens are not acceptable; a single
+red required check blocks the pipeline until the agent has read the
+log, fixed the cause locally, committed + pushed the fix, and
+re-dispatched.
 
-### When the change touches CI (`.github/workflows/**`, `scripts/*e2e*`, `scripts/*smoke*`)
+```
+   ┌─→ push ─→ dispatch ─→ CI red? ─yes─→ read logs ─┐
+   │                                                │
+   └────── no ──── proceed to next step ─────────────┤
+                                                    │
+                                  fix locally ←─────┘
+                                  commit + sign
+                                  push
+```
 
-Local tiers (T0-T2) cannot exercise these paths: `make smoke` and
-`make e2e` run against `mock:mock-model`, so only a real dispatch
-proves a workflow edit works. Dispatch it from the branch:
+Concretely:
 
 1. Work on a local branch. Implement, commit (GPG-signed), push.
-2. Dispatch the affected workflow against that branch:
-   `gh workflow run <workflow>.yml --ref <branch>`
+2. Dispatch the affected workflow against the branch:
+   `gh workflow run <workflow>.yml --ref <branch>`.
 3. Watch it: `gh run watch <run-id>` / `gh run view <run-id> --log-failed`.
-4. Verify **every** required job passes. If any is red, fix the cause,
-   commit, push, re-dispatch, and repeat 2-4. Do not proceed on a
-   partially green run, and do not dismiss a red job as flake without
-   evidence from the log.
-5. Open the PR and merge to `main` once required checks are green.
-6. Re-validate on `main` if the workflow behaves differently there
-   (e.g. steps gated on `github.ref`, or caches scoped per-branch).
-7. **Only then** open the release PR (CHANGELOG + `Cargo.toml` bump).
-8. After the release PR merges, tag. `release.yml` runs automatically.
+4. **If any required job is red**: read the failure log
+   (`gh run view <run-id> --log-failed` → narrow to the failed step),
+   reproduce locally if possible, fix the cause, commit, push, then
+   **go back to step 2**. Do NOT proceed until every required job
+   is green. Do NOT dismiss a red job as flake without evidence from
+   the log (an empirical reproduction, a stack trace, or a
+   deterministic test failure).
+5. Only when the branch CI is fully green: open the PR and merge.
+6. The trunk now runs CI on the merged commit. **If the trunk CI
+   comes back red**: read the trunk run's logs, fix locally on a
+   follow-up commit, push, and loop back to step 2. Do NOT open a
+   release PR until the trunk is green.
+7. Only when the trunk is green: open the release PR (CHANGELOG +
+   `Cargo.toml` bump). Run CI on the release branch.
+8. **If the release branch CI is red**: same repair loop — read the
+   log, fix, commit, push, re-dispatch, repeat. Do NOT tag until the
+   release branch is fully green.
+9. Only when the release branch is green: merge the release PR.
+10. Only after the release PR is merged: tag. `release.yml` runs
+    automatically.
 
 ### When the change does not touch CI
 
-Steps 2-4 and 6 collapse into the normal required checks on the PR.
-The ordering constraint still holds: merge the fix, confirm `main` is
-green, and only then bump and tag.
+Steps 2–4 and 6 collapse into the normal required checks on the PR.
+The "loop until green" rule is unchanged — a red required check on
+the PR or on the trunk still blocks the merge / tag / release.
 
 ### The failure mode this prevents
 
@@ -146,7 +168,9 @@ Never: merge fix → release PR → tag → `release.yml` → *then* discover
 the workflow was broken. At that point the release is already public
 and the only remedy is another release.
 
-Always: merge fix → validate the workflow → release PR → tag.
+Always: branch green → trunk green → release-branch green → merge →
+tag. Any step that comes back red sends the agent back to the repair
+loop, never forward.
 
 ## No-go list
 
