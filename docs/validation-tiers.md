@@ -54,15 +54,17 @@ Plus one fast orthogonal check on the commit message itself:
    │    │ (T0) ~1s    │  │ (T0) ~1s     │  │ (T1) ~60s  │               │
    │    └─────────────┘  └──────────────┘  └────────────┘               │
    │                                                                   │
-   │  round 2 (depend on build, no artifact sharing):                 │
+   │  round 2 (no inter-job deps; each job triggers its own        │
+   │  cargo build/test via Swatinem/rust-cache, since the          │
+   │  shared `build` job was removed in PR #525 / commit f6e33a6):  │
    │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
    │    │ test-lib    │  │ test-tests   │  │ test-doc   │  │ smoke  │ │
    │    │ (T2) ~30s   │  │ (T2) ~3min   │  │ (T2) ~30s  │  │(T3)~2s │ │
    │    └─────────────┘  └──────────────┘  └────────────┘  └────────┘ │
    │    ┌─────────────┐                                               │
-   │    │ e2e         │  ← all 5 jobs run `cargo build` themselves;   │
-   │    │ (T3) ~1min  │    Swatinem/rust-cache keeps the link step    │
-   │    └─────────────┘    at ~5–15 s.                              │
+   │    │ e2e         │  ← runs its own `cargo build` via the        │
+   │    │ (T3) ~1min  │    Swatinem/rust-cache workspace `target/`    │
+   │    └─────────────┘    (the link step is ~5–15 s warm).         │
    │                                                                   │
    │  Total wall-clock: ~6 min cold / ~3 min warm                      │
    │  (vs. ~5-8 min before the parallel refactor)                     │

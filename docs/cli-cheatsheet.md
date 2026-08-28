@@ -77,6 +77,16 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 | `MOAGAN_RATE_LIMIT_<provider>` | (empty) | per-provider token bucket |
 | `MOAGAN_RESEARCH_RATE_LIMIT_<host>` | (empty) | per-host token bucket |
 
+> **Note:** the following env vars are NOT read by
+> `Config::apply_env_overrides` and have no effect: `MOAGAN_INSPECT_JSON`,
+> `MOAGAN_CONTINUE_FROM_PHASE`, `MOAGAN_FORCE_EVAL`,
+> `MOAGAN_BATCH_PROPOSALS`, `MOAGAN_TELEMETRY_VACUUM`. They are
+> listed in older revisions of this cheatsheet from before the
+> refactors that removed the corresponding CLI flags. Do not
+> rely on them; if the env var name appears here, treat it as
+> documentation drift until the corresponding `apply_env_overrides`
+> block in `src/config/mod.rs` is updated.
+
 ## 0.3 What's new in v0.12.14 (since the 2026-08-08 cheatsheet)
 
 The cheatsheet has tracked the CLI surface through v0.6.0 → v0.12.14. Between those releases the v0.10 telemetry refactor renamed several env vars and the v0.12 line added the `MOAGAN_LOG_FORMAT` / `MOAGAN_DECISION_FORMAT` / `MOAGAN_LOG_TO_STDERR` globals listed in §0.2. Per-flag details live in the matching sub-section further down.

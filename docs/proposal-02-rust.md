@@ -32,7 +32,7 @@ timestamp_utc: 2026-07-25T08:14:11.210415+00:00
 > The **normative claim** is that the *decisions* (the §0.5 table and
 > the architectural mandates throughout) remain authoritative; the
 > *implementation details* (Cargo pin, src/ tree, env var table) are
-> now historical. See [`docs/cli-cheatsheet.md`](../cli-cheatsheet.md)
+> now historical. See [`docs/cli-cheatsheet.md`](cli-cheatsheet.md)
 > for the live CLI surface and `Cargo.toml` for the live pin.
 
 ## 0. Decisiones globales de arquitectura
@@ -59,7 +59,7 @@ Antes de aterrizar cada componente, fijo las decisiones que afectan a todo el si
 > referencia histórica del spec original; no refleja la
 > implementación actual.** El árbol vivo está en `src/` y el pin vivo
 > está en `Cargo.toml` (v0.12.14 al día de hoy; ver
-> [`docs/cli-cheatsheet.md`](../cli-cheatsheet.md) §0.2 para la
+> [`docs/cli-cheatsheet.md`](cli-cheatsheet.md) §0.2 para la
 > tabla de env vars vigente).
 
 ```text
@@ -324,7 +324,7 @@ insta = { version = "1.39", features = ["yaml"] }
 > **Estado (2026-08-28) — rows 1 + 2:** el `1_000_000` uniforme fue
 > válido en v0.6 pero en v0.10+ el techo es per-`(provider, model)`,
 > auto-descubierto en runtime y persistido en `max_tokens_auto.toml`
-> (ver [`docs/max-tokens-auto.md`](../max-tokens-auto.md)). El path
+> (ver [`docs/max-tokens-auto.md`](max-tokens-auto.md)). El path
 > `prompts/registry.rs` tampoco existe como tal; la lógica vive
 > ahora en `src/llm/prompts/` (varios módulos) más los defaults por
 > rol en `src/phases/phase.rs`. La **decisión** (uniformidad por rol)
