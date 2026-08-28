@@ -104,6 +104,20 @@ because cross-branch restore works there: tag pushes inherit `main`'s
 cache scope as a fallback, and same-branch restore hits the cache on
 re-runs of the same job.
 
+## Working with workflow (regression-aware)
+
+1. Work in the local branch.
+2. Implement + commit + push.
+3. Dispatch e2e-network (workflow) via `gh workflow run <workflow>.yml --ref <branch>`.
+4. Verify ALL Tier jobs pass. If any check is red, fix the cause, commit, push, and re-dispatch — repeat steps 2-4 until every required check is green.
+5. Merge to main.
+6. **Only then** create the release PR (CHANGELOG + Cargo.toml bump).
+7. After release PR merges, tag.
+8. release.yml runs automatically.
+
+Never: merge fix → release PR → tag → release.yml.
+Always: merge fix → validate e2e → release PR → tag.
+
 ## No-go list
 
 - No Anthropic SDK crates (`anthropic-*`, `claude-*`).
