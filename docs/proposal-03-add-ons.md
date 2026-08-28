@@ -4331,6 +4331,20 @@ Env overrides: `MOAGAN_MAX_TOKEN_AUTO=0` (disable), `=4096`
 (enable with floor 4K), `MOAGAN_MAX_TOKEN_AUTO_SAVE=false` (do
 not persist).
 
+The temperature auto-probe is the sibling auto-probe. It runs a
+21-point fan-out (`TEMPERATURE_PROBE_VALUES = [0.0, 0.1, ..., 2.0]`)
+in batches of 3, classifies each candidate as Accepted / Rejected /
+Indeterminate, and persists the accepted set to
+`<MOAGAN_HOME>/temperatures_auto.toml`. Same opt-out surface as the
+max-tokens side: `MOAGAN_TEMPERATURE_AUTO=false` (env var, accepted
+spellings `false` / `0` / `no` / `off`, mirroring
+`MOAGAN_<name>_OMIT_MAX_TOKENS`) or
+`[providers.<name>] temperature_auto_enabled = false` (per-provider
+TOML). The table itself still attaches to the registry so cached /
+operator-supplied entries continue to clamp runtime temperatures —
+only the background probe fan-out is suppressed. Added in v0.12.15
+(issue #657 fix #3).
+
 Mock provider skips the probe and returns `DEFAULT_MAX_TOKENS =
 1_000_000`.
 

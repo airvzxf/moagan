@@ -165,48 +165,6 @@ async fn mount_minimax_mock(server: &MockServer) {
         .await;
 }
 
-/// Pre-populate `<MOAGAN_HOME>/temperatures_auto.toml` with a
-/// single entry for `(minimax, MiniMax-M2.7)` so the registry's
-/// background temperature probe
-/// (`src/llm/provider.rs:1521-1550` + `:1921-2047`) sees the
-/// `(provider, model)` pair as already-cached and skips the
-/// 21-candidate fan-out. The cache file is the documented
-/// opt-out path for the temperature probe (see
-/// `src/llm/provider.rs:1950-1967`); pre-populating it is the
-/// only mechanism that does not require a new env var / config
-/// field on the `src/` side.
-///
-/// FOLLOW-UP: there is currently no env var or `ProviderConfig`
-/// field that disables the temperature probe on a per-provider
-/// or fleet-wide basis the way `MOAGAN_MAX_TOKEN_AUTO=false`
-/// disables the `max_tokens` probe
-/// (`src/config/mod.rs:2338-2339` → `src/llm/provider.rs:1663`).
-/// Operators who want to skip the probe without leaving a
-/// cached entry on disk must either pre-populate the cache (as
-/// this test does) or accept the 21 HTTP round-trips at startup.
-/// A future change could add a `MOAGAN_TEMPERATURE_AUTO=false`
-/// knob mirroring `MOAGAN_MAX_TOKEN_AUTO`; that change is out
-/// of scope here and must come with a `[providers.X]
-/// .temperature_auto_enabled` field for parity with the
-/// `max_token_auto_enabled` gate.
-fn write_minimax_temperature_cache(home: &Path) {
-    let body = r#"# Pre-populated by tests/integration_e2e_script_paths.rs so the
-# registry treats (minimax, MiniMax-M2.7) as already-cached and
-# skips the 21-candidate temperature fan-out. See
-# src/llm/provider.rs:1950-1967 for the cache-skip path.
-schema_version = 1
-
-[providers.minimax."MiniMax-M2.7"]
-temperatures = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0]
-detected_at = "2026-08-28T00:00:00Z"
-verified_at = "2026-08-28T00:00:00Z"
-auto = true
-attempts = 1
-"#;
-    std::fs::write(home.join("temperatures_auto.toml"), body)
-        .expect("write temperatures_auto.toml override");
-}
-
 /// Read every recorded request body on the mock and extract the
 /// maximum `max_tokens` value. Returns 0 when the mock saw zero
 /// requests so a caller assertion can distinguish "no traffic"
@@ -477,17 +435,16 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
     let config_path = tmp.path().join("moagan.toml");
     write_minimax_cap_config(&config_path);
 
-    // Pre-populate `<MOAGAN_HOME>/temperatures_auto.toml` so the
-    // run's startup temperature probe sees
-    // `(minimax, MiniMax-M2.7)` as already-cached and skips the
-    // 21-candidate fan-out
-    // (`src/llm/provider.rs:1950-1967`). The mock answers every
-    // temperature probe with HTTP 200 so the probe WOULD succeed,
-    // but it would still cost 21 sequential round-trips against
-    // the proxy and inflate the test well past its current
-    // 10 s wall-clock. See `write_minimax_temperature_cache`
-    // for the FOLLOW-UP note on the design gap this works around.
-    write_minimax_temperature_cache(&runs_dir);
+    // The `temperature` startup auto-probe is disabled via the
+    // `MOAGAN_TEMPERATURE_AUTO=false` env var below (issue
+    // #657 fix #3, v0.12.15). Pre-v0.12.15 this test had to
+    // pre-populate `<MOAGAN_HOME>/temperatures_auto.toml` to
+    // avoid the 21-candidate fan-out inflating the wall-clock
+    // past 10 s; the workaround function was removed when the
+    // env var landed. The mock answers every temperature probe
+    // with HTTP 200 so the probe WOULD succeed without the
+    // opt-out, but each candidate is still a sequential HTTP
+    // round-trip against the proxy.
 
     // Boot the proxy on an ephemeral loopback port, pointed at the
     // wiremock upstream. `--upstream` is a **base** URL (no
@@ -556,44 +513,39 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
             format!("http://127.0.0.1:{port}/anthropic/v1/messages"),
         )
         .env("MINIMAX_API_KEY", "test-key")
-        // Disable the `max_tokens` startup auto-probe: with the
-        // override TOML setting `max_tokens = 131072` directly,
-        // the probe is redundant — the operator-side cap is the
-        // source of truth. The env var maps to
-        // `ProviderConfig::max_token_auto = Some(0)`, which the
-        // gate at `src/llm/provider.rs:1663` honours to skip the
-        // probe entirely. The temperature probe is disabled
-        // separately by pre-populating
-        // `<MOAGAN_HOME>/temperatures_auto.toml` above (the
-        // documented opt-out path; see the FOLLOW-UP note on
-        // `write_minimax_temperature_cache` for why no env var
-        // exists for it).
+        // Disable the `max_tokens` and `temperature` startup
+        // auto-probes. The override TOML sets
+        // `max_tokens = 131072` directly, so the max-tokens
+        // probe is redundant — the operator-side cap is the
+        // source of truth. The temperature probe is the
+        // matching env-var opt-out added in v0.12.15 (issue
+        // #657 fix #3); pre-v0.12.15 this test pre-populated
+        // `<MOAGAN_HOME>/temperatures_auto.toml` to skip it.
+        // Both env vars map to the per-provider
+        // `Some(0)` / `Some(false)` opt-out sentinels, which the
+        // gates at `src/llm/provider.rs:1663` and `:1952-1962`
+        // honour to skip the probes entirely.
         .env("MOAGAN_MAX_TOKEN_AUTO", "false")
         .env("MOAGAN_MAX_TOKEN_AUTO_SAVE", "false")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
         // Quiet tracing: WARN/ERROR only, so the run stdout is
         // a clean NDJSON stream. NDJSON emission is itself
         // conditional on `stdout` not being a TTY, which is
         // automatically true here (we read `.output()`).
         .env("RUST_LOG", "warn")
         .env_remove("MOAGAN_QUIET")
-        // Strip any inherited `MOAGAN_EVENT_FORMAT` /
-        // `MOAGAN_LOG_FORMAT` so the `run_start` NDJSON event
-        // assertion cannot be masked by a parent-process override.
+        // Strip any inherited `MOAGAN_LOG_FORMAT` so the
+        // `run_start` NDJSON event assertion cannot be masked by a
+        // parent-process override. A non-JSON value changes the
+        // tracing layer shape and does break the assertions
+        // (verified by mutation).
         //
-        // `MOAGAN_LOG_FORMAT` is load-bearing: a non-JSON value
-        // changes the tracing layer shape and does break the
-        // assertions (verified by mutation).
-        //
-        // `MOAGAN_EVENT_FORMAT` is defence in depth only, NOT an
-        // active protection today: `src/main.rs:57-66` overwrites that
-        // variable unconditionally from `cli.event_format`, whose
-        // default arm maps to `Some("jsonl")`. An inherited
-        // `MOAGAN_EVENT_FORMAT=off` is therefore discarded, and only
-        // the `--event-format=off` flag actually silences emission
-        // (verified empirically). Keep the `env_remove` so this test
-        // stays correct if that precedence is ever fixed, but do not
-        // read it as the reason the assertion holds.
-        .env_remove("MOAGAN_EVENT_FORMAT")
+        // `MOAGAN_EVENT_FORMAT` is NOT stripped: issue #657 fix #2
+        // (v0.12.15) made `MOAGAN_EVENT_FORMAT=off` reach the
+        // runtime resolver end-to-end, so any inherited value
+        // here is intentional. See
+        // `tests/integration_stream_routing.rs::env_event_format_off_suppresses_stdout_events`
+        // for the canonical proof.
         .env_remove("MOAGAN_LOG_FORMAT")
         .output()
         .await

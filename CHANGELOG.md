@@ -5,6 +5,61 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.16] - 2026-08-28
+
+### Changed
+
+- **`docs/temperatures-auto.md`** — the "How to disable the probe"
+  section previously claimed *"There is no env-var toggle"* (line 91-94,
+  pre-#657). Rewritten to document the new `MOAGAN_TEMPERATURE_AUTO`
+  env var (off-spelling set `false`/`0`/`no`/`off`) and the matching
+  per-provider `[providers.<name>] temperature_auto_enabled = false`
+  TOML field as the operator-facing opt-out, with the hand-edit /
+  delete-the-cache-file path kept as a last-resort fallback. The
+  troubleshooting section's matching block was rewritten in the
+  same shape.
+
+- **`docs/cli-cheatsheet.md`** — the §0.2 env-var table now lists
+  `MOAGAN_EVENT_FORMAT` and `MOAGAN_TEMPERATURE_AUTO` alongside
+  `MOAGAN_LOG_FORMAT` / `MOAGAN_DECISION_FORMAT` /
+  `MOAGAN_LOG_TO_STDERR`; the `MOAGAN_LOG_TO_STDERR` row notes the
+  `BoolishValueParser` accepts `1`/`0`/`true`/`false`/`yes`/`no` /
+  `on`/`off`. §0.3 ("What's new") is bumped from v0.12.14 to
+  v0.12.15, and the default-value table grows an `--event-format`
+  row recording the v0.12.15 default flip from `jsonl` to `auto`.
+
+- **`docs/proposal-03-add-ons.md`** — §D.30.5 ("max-tokens
+  auto-probe env overrides") grows a sibling paragraph for the
+  temperature auto-probe documenting
+  `MOAGAN_TEMPERATURE_AUTO` and the per-provider TOML field.
+
+### Fixed
+
+- **`src/cli/mod.rs`** — shrank the `EventFormatArg::Auto` and
+  `event_format` field docstrings from 8 / 13 lines to 2 / 4 lines.
+  The "issue #657 fix #N" historical paragraphs that grew out
+  of the merge commits were moved to the commit message where
+  they belong; the docstrings now read at the same density as
+  the sibling `LogFormatArg::Auto` and `--log-format` field.
+
+- **`tests/integration_e2e_script_paths.rs`** — dropped the
+  pre-v0.12.15 workaround function `write_minimax_temperature_cache`
+  (which hand-wrote a `temperatures_auto.toml` sidecar to dodge
+  the 21-candidate temperature fan-out). Replaced with the new
+  `MOAGAN_TEMPERATURE_AUTO=false` env var at the `moagan run`
+  invocation site. The stale `FOLLOW-UP` note that predicted the
+  fix and the stale `src/main.rs:57-66` overwrite-precedence
+  comment were rewritten. The defence-in-depth
+  `.env_remove("MOAGAN_EVENT_FORMAT")` was removed because the
+  env var is now honoured end-to-end (issue #657 fix #2 closed
+  the precedence gap; canonical proof lives in
+  `tests/integration_stream_routing.rs::env_event_format_off_suppresses_stdout_events`).
+
+**No public API change; no schema bump.** Docs + test-fixture
+cleanup only — the runtime behaviour was already correct in
+v0.12.15. Closes the follow-up flagged in the v0.12.15 release
+body.
+
 ## [0.12.15] - 2026-08-28
 
 ### Fixed

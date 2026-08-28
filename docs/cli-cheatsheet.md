@@ -71,8 +71,11 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 | `MOAGAN_QUIET` | (unset) | silence `.env` notice |
 | `MOAGAN_FACET_CACHE_TTL_SECS` | `604800` (7d) | `discover --cache-facets` |
 | `MOAGAN_LOG_FORMAT` | (empty) | JSONL log format selector (see `src/cli/mod.rs:244`) |
+| `MOAGAN_EVENT_FORMAT` | (empty) | stdout event format selector (`off` silences; honoured via `--event-format` `env =` binding) |
 | `MOAGAN_DECISION_FORMAT` | (empty) | stdout event decision format (`off` silences) |
-| `MOAGAN_LOG_TO_STDERR` | (unset) | mirror JSONL logs to stderr |
+| `MOAGAN_LOG_TO_STDERR` | (unset) | mirror JSONL logs to stderr; accepts `1`/`0`/`true`/`false`/`yes`/`no`/`on`/`off` via `BoolishValueParser` |
+| `MOAGAN_MAX_TOKEN_AUTO` | (empty) | max-tokens auto-probe kill-switch (`false`/`0`/`off` opts out) |
+| `MOAGAN_TEMPERATURE_AUTO` | (empty) | temperature auto-probe kill-switch (`false`/`0`/`no`/`off` opts out; per-provider override is `[providers.<name>] temperature_auto_enabled = false`) |
 | `MOAGAN_PHASE_L_TEST_PANIC` | (unset) | debug: forced panic |
 | `MOAGAN_RATE_LIMIT_<provider>` | (empty) | per-provider token bucket |
 | `MOAGAN_RESEARCH_RATE_LIMIT_<host>` | (empty) | per-host token bucket |
@@ -87,9 +90,9 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 > documentation drift until the corresponding `apply_env_overrides`
 > block in `src/config/mod.rs` is updated.
 
-## 0.3 What's new in v0.12.14 (since the 2026-08-08 cheatsheet)
+## 0.3 What's new in v0.12.15 (since the 2026-08-28 cheatsheet)
 
-The cheatsheet has tracked the CLI surface through v0.6.0 → v0.12.14. Between those releases the v0.10 telemetry refactor renamed several env vars and the v0.12 line added the `MOAGAN_LOG_FORMAT` / `MOAGAN_DECISION_FORMAT` / `MOAGAN_LOG_TO_STDERR` globals listed in §0.2. Per-flag details live in the matching sub-section further down.
+The cheatsheet has tracked the CLI surface through v0.6.0 → v0.12.15. v0.12.15 ships the three issue #657 fixes (one squash, one release): `MOAGAN_LOG_TO_STDERR=1` is now accepted by clap (parity with `--non-interactive`), `MOAGAN_EVENT_FORMAT=off` is now honoured at runtime instead of being silently overwritten, and the temperature auto-probe has a new `MOAGAN_TEMPERATURE_AUTO` kill-switch plus the per-provider `[providers.<name>] temperature_auto_enabled = false` TOML field. Per-flag details live in the matching sub-section further down; the env-var catalogue is in §0.2.
 
 ### New flags (added since v0.6.0; full per-release changelog in CHANGELOG.md)
 
@@ -103,12 +106,13 @@ The cheatsheet has tracked the CLI surface through v0.6.0 → v0.12.14. Between 
 
 ### Default-value changes
 
-| Knob | Before | v0.6.0 | Source |
+| Knob | Before | v0.12.15 | Source |
 |---|---|---|---|
 | `DEFAULT_MAX_TOKENS` (every role, every provider) | varies | `1_000_000` | `src/llm/prompts.rs:20` |
 | OpenCode Go `max_tokens` cap (every wire shape) | propagated from `DEFAULT_MAX_TOKENS` (upstream rejected > 393_216) | hard-capped at `16_384` (`OPENCODE_GO_MAX_TOKENS_CAP`, **removed in v0.10**; replaced by the per-`(provider, model)` auto-probe persisted in `max_tokens_auto.toml`) | `src/llm/capabilities.rs` |
 | `moagan discover --sketches-per-cell` floor | `50` (legacy `cardinality`) | `10` (F2) | `src/cli/mod.rs`, `src/cli/discover.rs` |
 | `moagan run --hash-algo` default | `blake3` | `blake3` (unchanged; verified `src/config/mod.rs:294` + `src/cli/flags_batch.rs:13-20`) | — |
+| `--event-format` default | `jsonl` (v0.12.0..v0.12.14) | `auto` (TTY-aware jsonl-when-not-TTY; honours `MOAGAN_EVENT_FORMAT` env var; issue #657 fix #2) | `src/cli/mod.rs:172-190`, `src/cli/mod.rs:255-272` |
 
 ### Config-file precedence — strict cwd-overrides-user (PR-B2 / #342)
 
