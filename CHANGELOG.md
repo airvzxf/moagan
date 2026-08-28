@@ -5,6 +5,53 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.14] - 2026-08-28
+
+### Added
+
+- **`tests/integration_e2e_script_paths.rs`** — new integration test that
+  exercises the real-LLM CLI path against a `wiremock` upstream, closing
+  the §2.4 gap where `make smoke` and `make e2e` (both `mock:mock-model`)
+  could not detect the chain of four bugs fixed in v0.12.6–v0.12.10.
+  It spawns `moagan audit proxy` against the mock and drives
+  `moagan run --mode fast --provider minimax:MiniMax-M2.7` through it.
+  Four tests, one per bug: the bare-provider rejection
+  (`src/cli/mod.rs`), the wire-format suffix rejection
+  (`src/llm/wire_format.rs`), the NDJSON `run_start` event plus the
+  `max_tokens` operator cap (`src/llm/minimax.rs`), and the
+  pattern-based proxy banner lookup (`src/cli/audit.rs`). Runs in ~9 s
+  and joins T2; every assertion was verified discriminative by
+  reintroducing the bug it pins.
+
+### Fixed
+
+- **`.github/workflows/e2e-network.yml`** — the retry loop always logged
+  `rc=0`. `END_TS=$(date +%s)` reset `$?` before `RC=$?` read it, so the
+  diagnostic reported `date`'s exit code instead of `make`'s, in both the
+  `test-fast` and `test-explore` jobs. Every future e2e-network failure
+  would have reported the wrong code. The loop also avoids
+  `if make ...; then ... fi`, since an `if` compound with no `else`
+  reports exit 0 when the condition is false.
+- **`docs/e2e-loop-2026-08-12.md`** — the summary counts contradicted
+  their own iteration lists (`3 fully green` listing four iterations,
+  `7 with one flake` listing six). Corrected to 4 and 6.
+
+### Documentation
+
+- **`.github/workflows/e2e-network.yml`** — recorded the rationale for
+  `MAX_ATTEMPTS=3` (§2.7), derived from the run distribution in
+  `docs/e2e-loop-2026-08-12.md`, and corrected the `retry x4` labels to
+  match the actual value. The comment separates what the run-log table
+  records from what it only implies.
+- **`AGENTS.md`** — rewrote the "Working with workflow" section around
+  the invariant that validation precedes release because a tag is
+  irreversible, and split the guidance by whether a change touches CI,
+  since local T0–T2 run against `mock:mock-model` and cannot exercise a
+  workflow edit.
+
+**No source behavior change; no public API change; no schema bump.** No
+files under `src/` were modified.
+
 ## [0.12.13] - 2026-08-28
 
 ### Fixed
