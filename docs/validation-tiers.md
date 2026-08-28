@@ -90,6 +90,9 @@ Plus one fast orthogonal check on the commit message itself:
    │                                                                   │
    │  Manual-only siblings (workflow_dispatch, no auto on main):       │
    │    - e2e-network-card80.yml              ~25 min, MiniMax card80   │
+   │    - e2e-network-discover-deepseek.yml   DeepSeek discover         │
+   │    - e2e-network-discover-opencode.yml   OpenCode discover (single)│
+   │    - e2e-network-discover-opencode-models.yml  OpenCode 7-model sweep│
    │    - test-ignored-deepseek.yml           workflow_dispatch only    │
    │    - test-ignored-opencode.yml           workflow_dispatch only    │
    │                                                                   │

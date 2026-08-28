@@ -85,10 +85,15 @@ cap. The cap is set with `moagan probe max_tokens --persist-min
 --provider PROVIDER:MODEL` (the `--persist-min` flag is the `max_tokens`
 analogue of `--persist-union` for temperatures; see
 [`temperatures-auto.md`](temperatures-auto.md) for the temperatures
-sidecar). The runtime intersects the auto-discovered value with the
-operator cap when one is set, so an operator who has pinned a lower
-cap cannot accidentally regress to a value the auto-probe happens to
-discover on a permissive relay.
+sidecar). **As of v0.12.14 the `operator_caps` map is write-only**:
+`set_operator_cap` writes to the file (`src/llm/probe_table.rs:419-448`)
+but the runtime dispatch path (`src/llm/minimax.rs:400-444` and
+analogous per-provider paths) reads the per-provider
+`ProviderConfig::max_tokens` directly, not the `operator_caps` map.
+The cap survives across runs as a paper trail (so an operator can
+see what was pinned) but does not currently clamp the runtime
+dispatch. Pinning via `ProviderConfig::max_tokens` in
+`~/.config/moagan/config.toml` is the active mechanism.
 
 Delete the file to force a fresh probe. There is no `*.disabled`
 rename — the runtime only consults the canonical filename.
@@ -113,9 +118,8 @@ The upper bound is fixed at `MAX_AUTOPROBE_CEILING = 1u32 << MAX_PROBE_SHIFT
 - **"Probe timed out"** — the provider rejected every probe without
   returning a response, or the network is unreachable. The probe exits
   cleanly with the cached value (or `MIN_AUTOPROBE_FLOOR` if no cache).
-  Check `~/.local/share/moagan/max_tokens_auto.toml`; if the entry's
-  `verified_at` is older than `detected_at` (or the entry is missing
-  entirely), the cache file is stale and the probe never re-ran.
+  Check `~/.local/share/moagan/max_tokens_auto.toml`; if the entry is
+  missing entirely, the cache file is stale and the probe never re-ran.
 - **"Provider rejects everything"** — some providers return 4xx for any
   `max_tokens` larger than they support. The probe treats 4xx as a
   "ceiling" and bisects down. If the provider changes the limit between

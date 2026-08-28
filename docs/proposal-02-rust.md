@@ -320,6 +320,16 @@ insta = { version = "1.39", features = ["yaml"] }
 |---|---|---|---|
 | 1 | "Sketches de 400–800 tokens" sin tope duro para outputs de LLM | `max_tokens` uniforme por rol en `prompts/registry.rs`; todos los roles usan 1_000_000 como techo. | Evita truncamientos ambiguos con un techo uniforme para todos los roles. |
 | 2 | "Tagger ligero" sin parámetros | Tagger: `temperature=0`, `top_p=0.2`, `max_tokens=1_000_000`, JSON mode forzado. | Determinismo + techo uniforme para todos los roles. |
+
+> **Estado (2026-08-28) — rows 1 + 2:** el `1_000_000` uniforme fue
+> válido en v0.6 pero en v0.10+ el techo es per-`(provider, model)`,
+> auto-descubierto en runtime y persistido en `max_tokens_auto.toml`
+> (ver [`docs/max-tokens-auto.md`](../max-tokens-auto.md)). El path
+> `prompts/registry.rs` tampoco existe como tal; la lógica vive
+> ahora en `src/llm/prompts/` (varios módulos) más los defaults por
+> rol en `src/phases/phase.rs`. La **decisión** (uniformidad por rol)
+> sigue vigente; la **implementación** (1M uniforme vía
+> `prompts/registry.rs`) es histórica.
 | 3 | "Embedding ligero" para clustering | **No se descargan modelos**. Clustering usa `hash_lsh` sobre texto tokenizado (SimHash 64-bit) + segunda pasada con LLM sólo si se piden `cluster_label` y `cluster_summary`. Embeddings locales (fastText) son demasiado pesados para MVP; se documenta como mejora. | Mantiene binario sin assets externos. |
 | 4 | Forma de "JSON mode forzado" en providers que no lo soportan | Proveedor implementa `supports_json_mode()`; si false, prompt indica `Responde únicamente con un JSON válido. Sin texto fuera del JSON.` y se valida con `jsonschema`. | Portabilidad. |
 | 5 | "Sin seeds" pero hace falta reproducibilidad | Sistema detecta duplicados por hash del input completo (prompt + parámetros_llm + fase + modelo). No garantiza misma salida, sí garantiza que no se duplican inputs. | Honra la propuesta. |

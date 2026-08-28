@@ -74,12 +74,13 @@ Disable the auto-probe when the cost of a 21-shot HTTP sweep is
 prohibitive or when the provider cannot be reached from the test runner:
 
 - **Smoke tests against a real provider.** Every CI run would otherwise
-  pay 21 sequential probes per fresh model. `scripts/smoke.sh`,
-  `scripts/smoke_multimodel.sh`, and `scripts/e2e_audit_proxy.sh` all
-  `rm -rf "$MOAGAN_HOME"` (and export `MOAGAN_MAX_TOKEN_AUTO=false`
-  to also skip the max-tokens probe) before each run, so neither
-  auto-probe can write or read a stale cache. `temperatures_auto.toml`
-  is then rebuilt from scratch on the first LLM call.
+  pay 21 sequential probes per fresh model. The smoke/e2e scripts
+  create a fresh `MOAGAN_HOME` per run via the `mkhome()` mktemp
+  helper (e.g. `WORK_PROXY_1=$(mkhome)` in
+  `scripts/e2e_audit_proxy.sh`) and export `MOAGAN_MAX_TOKEN_AUTO=false`
+  to also skip the max-tokens probe, so neither auto-probe can write
+  or read a stale cache. `temperatures_auto.toml` is then rebuilt
+  from scratch on the first LLM call.
 - **Sandboxed / offline runs.** The probe needs at least one successful
   round-trip; if the network is locked down the probe exits cleanly
   with the cached value (or an empty set if there is no cache).
@@ -95,7 +96,8 @@ either pin every entry by hand or delete the cache file.
 ## How the runtime uses the cached set
 
 Every LLM dispatch goes through `RunContext::dispatch_to_provider`
-(`src/phases/phase.rs:1072`). When the runtime carries a
+(`src/phases/phase.rs:1072`); the temperature-clamp gate lives at
+`src/phases/phase.rs:1164`. When the runtime carries a
 `TemperatureTable` (it always does after the v0.9.11 wiring), the gate
 runs **before** the capability resolver:
 

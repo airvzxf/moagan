@@ -62,7 +62,7 @@ kinds default to Summary so every emit site is visible until classified.
 | `judge_verdict` | `src/phases/judge.rs` | AllOnly | `{proposal_id, score, passed, threshold}` |
 | `portfolio_finalized` | `src/phases/deliver.rs` | Summary | `{proposal_id, ranking_strategy, alternatives}` |
 | `cache_hit` | `src/llm/provider.rs` | AllOnly | `{cache_key, role, model}` |
-| `cache_miss` | `src/llm/prompt_cache.rs` | AllOnly | `{cache_key, prompt_id?, reason}` |
+| `cache_miss` | `src/llm/prompt_cache.rs` | AllOnly | `{cache_key, reason}` |
 
 ## Wire format
 

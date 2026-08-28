@@ -3410,8 +3410,10 @@ fn invalidate_downstream(p: &Proposal, action: &RefineAction, graph: &ArtifactGr
 (Inspirado en T18-06 §8.2; T06-08 §8.2.)
 
 > **Closure note (2026-08-13):** the `invalidate_downstream` implementation
-> was intentionally removed in PR #434 (per
-> `docs/inconsistencies-audit-2026-08-12-round-2.md` §B.7). No
+> was intentionally removed in PR #434 (the doc
+> `inconsistencies-audit-2026-08-12-round-2.md` was itself retired
+> in the 2026-08-28 docs prune; traceability survives in git history
+> at commit `926f1b8`, §B.7). No
 > production code is wired for this entry, and the `RefineAction::Focus`
 > case effectively no-ops. The spec block is retained as a design
 > reference for any future re-introduction.
@@ -4343,7 +4345,9 @@ Mock provider skips the probe and returns `DEFAULT_MAX_TOKENS =
 > quede atrapado por la cap que está intentando descubrir. La
 > dependencia `tiktoken-rs = "0.5"` (pin en `Cargo.toml:60`,
 > RETIRED en v0.10) es
-> ortogonal: pre-flight en `src/llm/budget.rs:6` (cl100k_base).
+> ortogonal: pre-flight (RETIRED en v0.10 junto con la
+> dependencia `tiktoken-rs`; ver `docs/max-tokens-auto.md` para
+> la implementación actual del pre-flight de cardinalidad).
 > Documentación: `docs/max-tokens-auto.md`. Tests: la nueva
 > `tests/integration_max_tokens_auto.rs` (296 líneas, 6 tests) +
 > ~36 nuevos tests en `src/llm/probe.rs` (13) /

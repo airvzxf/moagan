@@ -37,7 +37,7 @@ The catalogue ships three different access patterns:
 
 - **`petgraph`** is **optional**: T01-06 keeps `phases/` as a `Vec`
   by default; `petgraph` is only the backend for `DagNode` when
-  `--mode deep` is selected (T01-06 §3.6.2, §3.5.2).
+  `--mode deep` is selected (T01-06 §3.5).
 - **`comfy-table`** is **cosmetic**: text-mode tables work today and
   the catalogue notes (D.14.23) that the dependency is a polish item,
   not a functional requirement.
@@ -73,7 +73,7 @@ guard-rails. Each verdict is enforceable by a CI guard in
 - **Default build** (`cargo build` with no features) does **not**
   pull `petgraph`; the linear `phases/` vector from T01-06 stays the
   default path (§D.2 in `proposal-03-add-ons.md`).
-- **Rationale**: T01-06 §3.6.2 + §3.5.2 already sketches the
+- **Rationale**: T01-06 §3.5 already sketches the
   `DagNode` trait that wraps `petgraph`. Default-off keeps the
   release binary footprint unchanged and the no-go rule
   retro-compatible (no crate is added unless the operator opts in).
@@ -193,7 +193,7 @@ Until then, the verdicts above are authoritative.
 
 A blanket prohibition would have foreclosed legitimate uses:
 
-- **`petgraph`**: the normative spec (T01-06 §3.6.2) sketches the
+- **`petgraph`**: the normative spec (T01-06 §3.5) sketches the
   `DagNode` trait as a wrapper over a DAG backend. The wrapper is
   meaningless without *some* DAG library, and `petgraph` is the only
   credible candidate for this codebase (small, `serde`-aware, no
@@ -216,7 +216,7 @@ A blanket prohibition would have foreclosed legitimate uses:
 - `comfy-table`: `proposal-03-add-ons.md §D.14.23`
   (T12-09 §6.2; T20-06 §6.3).
 - `proptest`: `proposal-03-add-ons.md §D.18.2` (T00-05 D20).
-  Pre-existing rationale note in `proposal-02-rust.md:1626-1628`:
+  Pre-existing rationale note in `proposal-02-rust.md:1647-1649`:
   *"proptest no se añade como dep — los invariantes de la
   perturbación (clip, monotonicidad de sigma, fracciones suman 1.0)
   están cubiertos por tests unitarios con seeds fijos."* — this ADR

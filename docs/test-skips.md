@@ -65,7 +65,7 @@ The skip list is empty. The historical three skip sites
 (`Makefile::test-ci`, `ci.yml::test-lib`, `ci.yml::test-tests`)
 have been collapsed back to plain `cargo test` invocations:
 
-- `Makefile:65-66` — `test-ci` runs `cargo test --all-targets`
+- `Makefile:72-73` — `test-ci` runs `MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`
 - `.github/workflows/ci.yml::test-lib` — runs `cargo test --lib --bins`
 - `.github/workflows/ci.yml::test-tests` — runs `cargo test --tests --no-fail-fast`
 

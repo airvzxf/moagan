@@ -81,7 +81,7 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 
 The cheatsheet has tracked the CLI surface through v0.6.0 → v0.12.14. Between those releases the v0.10 telemetry refactor renamed several env vars and the v0.12 line added the `MOAGAN_LOG_FORMAT` / `MOAGAN_DECISION_FORMAT` / `MOAGAN_LOG_TO_STDERR` globals listed in §0.2. Per-flag details live in the matching sub-section further down.
 
-### New flags (added in v0.6.0)
+### New flags (added since v0.6.0; full per-release changelog in CHANGELOG.md)
 
 | Subcommand | Flag | Where |
 |---|---|---|
@@ -161,7 +161,7 @@ Operators no longer need the per-provider `max_tokens` override in `~/.config/mo
 | `--hash-algo` absent | default `blake3` (`Config::export.hash_algo::default()` = `Blake3`, even though the bare `HashAlgo` enum default is `Sha256` — see `src/config/mod.rs:294`) |
 | OpenCode provider (pre-v0.10) | `max_tokens` was hard-capped at `16_384` (`OPENCODE_GO_MAX_TOKENS_CAP`) regardless of `--hash-algo` / config / `DEFAULT_MAX_TOKENS`; the cap was enforced inside the wire body. **Removed in v0.10** — the per-model auto-probe replaces it. |
 | `--prompt -` | reads the prompt from stdin |
-| `--max-parallelism > 64` | rejected by `validate_max_parallelism` |
+| `--max-parallelism > 4_294_967_295` | rejected by `validate_max_parallelism` |
 | `--allow-injection` | disables the sandbox's secret-strip pass |
 | `--model <alias>` (e.g. `minimax-m3`) | resolves to canonical `MiniMax-M3` when the alias is in `cfg.providers` and matches the kind |
 
@@ -211,7 +211,7 @@ Phases executed (via `build_pipeline_for_mode`):
 | Missing `--prompt` | clap parse error | 2 |
 | `--hash-algo foo` | `InvalidArgs` | 2 |
 | `--context-summary` without `--context` | `InvalidArgs` | 2 |
-| `--max-parallelism > 64` | `InvalidArgs` | 2 |
+| `--max-parallelism > 4_294_967_295` | `InvalidArgs` | 2 |
 | Provider not in config | `InvalidArgs` ("provider 'x' is not in config") | 2 |
 | API key missing (provider=minimax) | `InvalidApiKey` | 3 |
 | Quota / HTTP 429 upstream | `PlanExhausted` | 4 |
@@ -238,7 +238,7 @@ Phases executed (via `build_pipeline_for_mode`):
 |---|---|
 | no `--run-id` | uses the most recent run in the DB |
 | `--from-pause` | short-circuits to `pause_cmd::run_continue_from_pause`; `--kind` is **silently ignored** (pause path always uses the linear pipeline because `paused.json` records linear phase names); requires `--run-id` |
-| `--from-pause` + `--kind discovery` | **not** a clap conflict — `--kind` is silently dropped because the pause branch returns before reading it (verified at `src/cli/mod.rs:1016-1024`); not an error |
+| `--from-pause` + `--kind discovery` | **not** a clap conflict — `--kind` is silently dropped because the pause branch returns before reading it (verified at `src/cli/mod.rs:1592-1629`); not an error |
 | `--kind discovery` + `manifest.mode = "linear"` | `InvalidArgs` ("requires manifest.mode = 'discover'") |
 | `--kind discovery` + `manifest.mode = "discover"` | enters `discover::run_resume` |
 | `--switch-provider <x>` not in config | `InvalidArgs` (validated up-front) |
