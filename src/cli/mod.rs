@@ -172,13 +172,7 @@ pub enum LogFormatArg {
 #[clap(rename_all = "lowercase")]
 pub enum EventFormatArg {
     /// Pick `jsonl` when stdout is not a TTY and stay silent
-    /// on a TTY (the v0.12.0 contract). Honours
-    /// `MOAGAN_EVENT_FORMAT` if set; the explicit
-    /// `--event-format <value>` flag wins on conflict. This is
-    /// the default — keeping `Auto` as the default is what makes
-    /// an inherited `MOAGAN_EVENT_FORMAT=off` actually take
-    /// effect instead of being silently overwritten by
-    /// `src/main.rs` (issue #657 fix #2).
+    /// on a TTY. Honours `MOAGAN_EVENT_FORMAT` if set.
     Auto,
     /// Emit one NDJSON event per line on stdout when stdout is
     /// not a TTY; stay silent in interactive mode so the
@@ -254,19 +248,9 @@ pub struct Cli {
     pub log_format: LogFormatArg,
     /// Format of the structured events emitted to stdout. `auto`
     /// (default) picks `jsonl` when stdout is not a TTY and stays
-    /// silent on a TTY, so pipelines like
-    /// `moagan … 2> log.jsonl | jq -c 'select(.kind=="llm_call")'`
-    /// work out of the box. In an interactive TTY the same
-    /// default stays silent — the TTY check is what makes it
-    /// quiet in interactive mode. `off` silences stdout entirely
-    /// (mirrors `--event-format off`). The `MOAGAN_EVENT_FORMAT`
-    /// env var is honoured with the same precedence as the
-    /// explicit flag (env > flag > default); the parser is
-    /// `env =`-aware so `MOAGAN_EVENT_FORMAT=off` reaches the
-    /// runtime resolver even when no flag is passed (issue #657
-    /// fix #2 — the prior `Some("jsonl")` default arm in
-    /// `src/main.rs` overwrote the env var unconditionally and
-    /// silently dropped it).
+    /// silent on a TTY. `off` silences stdout entirely. The
+    /// `MOAGAN_EVENT_FORMAT` env var is honoured with the same
+    /// precedence as the explicit flag (env > flag > default).
     #[arg(long, global = true, value_enum, default_value_t = EventFormatArg::Auto,
           env = "MOAGAN_EVENT_FORMAT")]
     pub event_format: EventFormatArg,

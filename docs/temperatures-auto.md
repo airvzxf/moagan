@@ -88,10 +88,15 @@ prohibitive or when the provider cannot be reached from the test runner:
   warm path it took during the previous run, freeze the probe so the
   cache file is not rewritten.
 
-Disable by hand-editing `temperatures_auto.toml` and marking every
-entry with `auto = false`. There is no env-var toggle — the probe is
-wired into the runtime startup path and the only way to skip it is to
-either pin every entry by hand or delete the cache file.
+Disable with `MOAGAN_TEMPERATURE_AUTO=false` (env var, accepted
+spellings: `false` / `0` / `no` / `off`, mirroring
+`MOAGAN_<name>_OMIT_MAX_TOKENS`). The same env var is consulted in
+`src/config/mod.rs::apply_env_overrides` for every provider entry.
+For per-provider opt-out, set
+`[providers.<name>] temperature_auto_enabled = false` in
+`config.toml` (parity with `max_token_auto_enabled`). The
+hand-edit / delete-the-cache-file path is still supported as a last
+resort but is no longer the only path.
 
 ## How the runtime uses the cached set
 
@@ -271,10 +276,12 @@ manually first and let the next startup read the cached value.
   delete the file to force a fresh discovery.
 - **"Saved cache is being overwritten every run"** — the cache file
   is rewritten when the auto-probe is enabled (the default) and the
-  current probe returns a different set. There is no env-var
-  toggle; pin the entry by setting
-  `providers[provider][model].auto = false` (or simply delete the
-  cache file to force a fresh probe on the next startup).
+  current probe returns a different set. Disable the background
+  probe with `MOAGAN_TEMPERATURE_AUTO=false` (or set
+  `[providers.<name>] temperature_auto_enabled = false`) to keep the
+  cached entry untouched across runs. The hand-edit
+  (`providers[provider][model].auto = false`) and delete-the-cache-file
+  paths remain as fallbacks.
 - **"Operator cap is being ignored"** — the runtime always intersects
   the auto-discovered set with the operator cap; the cap cannot
   *expand* the discovered set, only narrow it. To accept a value the
