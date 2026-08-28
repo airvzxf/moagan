@@ -22,7 +22,7 @@ events.
 What the telemetry does **not** carry is the source-level answer to
 "which lines of code did this run actually execute?" Today, an operator
 facing an unexpected `Error::Provider("http 500: boom")` (or any of
-the other variants in `src/error/mod.rs:90`) has to:
+the other variants in `src/error/mod.rs:177`) has to:
 
 1. Re-derive the call site by reading the JSONL `phase / role / call_id`
    triple and locating the matching `tracing::error!(...)` in the code.
@@ -50,7 +50,7 @@ this:
   `tracing_subscriber::fmt::Layer` already supports
   `with_file(true)`, `with_line_number(true)`, and
   `with_current_span(true)`. Today the subscriber in
-  `src/main.rs:21-31` uses none of these, so a `tracing::error!` only
+  `src/main.rs:295` uses none of these, so a `tracing::error!` only
   carries the message and the target, not the call site.
 - **External eBPF / `bpftrace` uprobes**: a userspace tracer that
   attaches to a running process via uprobes. Powerful but
@@ -186,14 +186,16 @@ the new `src/coverage/` module is a no-op stub when
   report reflects the *coverage* build, not the *release* build,
   even though the source is identical.
 - **`*.profraw` volume.** A long run emits one `profraw` per phase
-  start and one per `tracing::error!`. The plan mitigates by
-  routing the `coverage/` directory through the existing
-  `daily_rotation` in `src/telemetry/daily_rotation.rs` so old
-  runs get pruned alongside the rest of telemetry.
+  start and one per `tracing::error!`. The runtime side does not
+  prune these files; the `daily_rotation` helper in
+  `src/telemetry/daily_rotation.rs` only emits a `stale_artifact`
+  warning on day-rollover for the regular `telemetry/daily.log`
+  stream. Pruning of the `coverage/` directory is the operator's
+  responsibility (a future enhancement; see Re-evaluation §3).
 - **The "line that caused the error" is still approximate.** The
   coverage report tells you which lines ran *before* the error,
   not the exact line that raised. The panic hook in
-  `src/main.rs:33-49` already gives the exact line for panics;
+  `src/main.rs:367` already gives the exact line for panics;
   for non-panic `Error` values, layer B's enriched tracing is the
   best we can do without per-error `#[track_caller]` propagation
   (left as a future improvement, not in scope).

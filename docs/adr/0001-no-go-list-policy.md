@@ -4,12 +4,13 @@
 > **Date**: 2026-08-16
 > **Deciders**: `airvzxf/moagan` operator + Phase A subagent (session-5)
 > **Supersedes**: implicit three-forbidden-crates rule in
-> [`AGENTS.md`](../../AGENTS.md) and
-> [`docs/pending-items-2026-08-13.md` §6.2](../pending-items-2026-08-13.md)
+> [`AGENTS.md`](../../AGENTS.md) (the prior
+> `docs/pending-items-2026-08-13.md §6.2` / §11 B#19 traces of the
+> policy gap were retired in the 2026-08-28 docs prune; their
+> resolution lives here).
 > **Relates to**:
 > [`docs/proposal-02-rust.md` T01-06 §0.5](../proposal-02-rust.md),
 > [`docs/proposal-03-add-ons.md` §D.7, §D.14.23, §D.18.2](../proposal-03-add-ons.md),
-> [`docs/pending-items-2026-08-13.md` §6.2 + §11 B#19](../pending-items-2026-08-13.md),
 > [`AGENTS.md` §"No-go list"](../../AGENTS.md).
 
 ## Context
@@ -18,11 +19,9 @@
 appear in `Cargo.toml`. Three of those entries — `comfy-table`,
 `proptest`, and `petgraph` — have been on the list since v0.5 but the
 list itself has never been ratified by an explicit decision document;
-`docs/pending-items-2026-08-13.md §6.2` (`"Los tres están en la no-go
-list explícita de AGENTS.md por decisión de diseño, no por accidente.
-Abrir cualquiera de ellos es primero un cambio de política y después
-una PR."`) and §11 B#19 (`"Decisión de política sobre la no-go list …
-primero política, después código"`) flag the policy gap as Tier B #19.
+the prior `docs/pending-items-2026-08-13.md` had flagged this gap
+as Tier B #19 (the doc itself was retired in the 2026-08-28 docs
+prune; the resolution lives in this ADR).
 
 `docs/proposal-03-add-ons.md` (the additive patch catalogue) **does**
 list each of the three crates with a target version, a target use case,
@@ -112,7 +111,7 @@ guard-rails. Each verdict is enforceable by a CI guard in
   entropy). The catalogue example at D.18.2 uses it to verify
   `CallKey::hash` determinism. Such tests are inherently
   property-based and writing them by hand (as
-  `src/ranking/stability.rs:386-396` does today for the monotonicity
+  `src/ranking/stability.rs:461-466` does today for the monotonicity
   invariants) is brittle and coverage-bounded by the chosen seeds.
 - **Coverage targets**: properties for `CallKey::hash`,
   `RunId` UUID-v7 monotonicity, `blake3` short-input stability,
@@ -201,7 +200,7 @@ A blanket prohibition would have foreclosed legitimate uses:
   async runtime). Forbidding it would force the spec to be rewritten
   or the trait to stay a stub.
 - **`proptest`**: the hand-written seed grid in
-  `src/ranking/stability.rs:386-396` is a workaround, not a strategy.
+  `src/ranking/stability.rs:461-466` is a workaround, not a strategy.
   The comment in that file says so explicitly:
   *"Phase H originally intended proptest for the monotonicity
   invariants … the brief's rule about following existing libraries
