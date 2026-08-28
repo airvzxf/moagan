@@ -155,13 +155,14 @@ Since v0.12.0 the two streams are no longer split by event type:
 they are split by **level** via the `RoutingWriter` in
 `src/main.rs` (around `fn init_tracing`, line 295).
 
-- **Default** — `INFO`-and-below events go to **stdout**; `WARN`,
-  `ERROR`, and the panic hook go to **stderr**. The split is
-  implemented in the writer (per-event `make_writer_for` decision),
-  not in two `tracing_subscriber` layers, so it survives
-  `tokio::spawn` workers cleanly.
+- **Default** — `INFO`/`DEBUG`/`WARN` events go to **stdout**; `ERROR`
+  and the panic hook go to **stderr**. The split is
+  implemented in the writer (per-event `make_writer_for` decision
+  on `Level::ERROR`), not in two `tracing_subscriber` layers,
+  so it survives `tokio::spawn` workers cleanly.
 - **`--log-to-stderr` / `MOAGAN_LOG_TO_STDERR=1`** — inverts the
-  default: everything goes to stderr, nothing to stdout. The flag
+  default: `INFO`/`DEBUG`/`WARN` events go to **stderr**,
+  `ERROR` events go to **stdout**. The flag
   is **deprecated** as of v0.12.0 and is scheduled for removal in
   v0.14.0; new scripts should use shell redirection
   (`1> out.jsonl 2> errors.jsonl`) instead.

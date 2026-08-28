@@ -460,6 +460,19 @@ Razón: `jsonl.gz` es append-only (no requiere reescribir el archivo completo al
 
 ## 2. SQLite: schema exacto y orden de mutaciones
 
+> **Estado (2026-08-28):** §2 describe el schema SQLite con
+> v001 + v002; el schema vivo ha divergido significativamente.
+> La migración actual es **`v019_process_lease_last_heartbeat.sql`**
+> (19 archivos en `src/storage/migrations/` al día de hoy).
+> El spec sigue siendo **normativo en intención** (los
+> principios — `journal_mode = WAL`, `foreign_keys = ON`,
+> migraciones idempotentes, etc. — siguen vigentes) pero
+> el schema vivo y el orden de mutaciones han evolucionado.
+> Para el schema vivo, ver `src/storage/migrations/` y
+> `src/storage/sqlite.rs`. El wire del `cost_usd` column
+> (v015) y la normalización de tablas vacías (v016) son
+> ejemplos de cambios posteriores que el spec no anticipa.
+
 ### 2.1. Schema (literal, sin más tablas)
 
 ```sql

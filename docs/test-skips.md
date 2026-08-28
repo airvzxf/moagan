@@ -355,7 +355,7 @@ check from a clean state.
 | 3 | `#[ignore]` Rust attribute | 6 tests | ❌ no (run via `--ignored`) |
 | 4 | Source silent-skip (binary on PATH) | 13 tests | ✅ partially (binaries present) |
 | 5 | `ValidationEvidence::skipped()` runtime | 11 sites | n/a (per-artifact) |
-| 6a | `MINIMAX_API_KEY` missing → 21 tests | 21 tests | ❌ no (key present in CI) |
+| 6a | `MINIMAX_API_KEY` missing → 67 tests | 67 tests | ❌ no (key present in CI) |
 | 6b | `MOAGAN_SMOKE_LONG_DISCOVER=1` | 37 tests | ❌ no (env var unset) |
 | 6c | card80 partial-skips on timeout | 14 conditional | conditional |
 | 6d | `OPENCODE_API_KEY` missing → 7 tests + 1 OC fallback | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
@@ -365,16 +365,16 @@ check from a clean state.
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.
-**Total tests in conditional skip code paths:** 75
-(21 `MINIMAX_API_KEY` (6a) + 37 card80 (6b/6c) + 7 OPENCODE + 1
-OC_RUN_ID fallback (6d) + 7 DEEPSEEK + 1 DS_RUN_ID fallback (6e)
-+ 1 gauntlet `MINIMAX_API_KEY` re-check (6f) + 1 additional
-`MINIMAX_API_KEY` re-check inside `gauntlet.sh:143` already
-counted in 6f; the 14 card80 partial-skips in 6c are counted
-inside the 37 card80 figure, not on top of it; the 6g block
-(35 tests, 5 × 7 models) is not in this total because it is
-dormant in CI by design (`MOAGAN_SMOKE_SECTION` is never set
-in the workflow)).
+**Total tests in conditional skip code paths:** 110
+(67 `MINIMAX_API_KEY` (6a, the entire real-proxy block from
+`if [[ -n "${MINIMAX_API_KEY` to the closing `fi` of the
+SECTION A.bis) + 7 OPENCODE + 1 OC_RUN_ID fallback (6d) + 7
+DEEPSEEK + 1 DS_RUN_ID fallback (6e) + 1 gauntlet `MINIMAX_API_KEY`
+re-check (6f); the card80 37-test block (6b) and the 14
+partial-skips (6c) are subsets of the 6a total, not additions.
+The 6g block (35 tests, 5 × 7 models) is not in this total
+because it is dormant in CI by design (`MOAGAN_SMOKE_SECTION`
+is never set in the workflow)).
 
 ## How to add a new skip
 

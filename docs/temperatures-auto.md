@@ -127,7 +127,8 @@ if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref(
             model = %self.default_model,
             role = %req.role.as_str(),
             requested = %t,
-            "temperature inside supported set; no clamp"
+            dispatched = %clamped,
+            "temperature in supported set; dispatched as requested"
         );
     }
     req.temperature = Some(clamped);
@@ -137,8 +138,8 @@ if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref(
 `nearest_supported` is the absolute-distance minimiser. On ties (two
 cached temperatures equally close to `requested`) the **first appearance
 in `temperatures`** wins; because `TEMPERATURE_PROBE_VALUES` is sorted
-ascending, the tiebreak resolves to the lower temperature on a half-step
-tie and to the higher on a non-half-step tie.
+ascending, the tiebreak resolves to the lower temperature on a
+half-step tie and to the higher on a non-half-step tie.
 
 The `tracing::debug!` event above fires at the **default filter
 level** (`moagan=debug` is the default `EnvFilter` per
