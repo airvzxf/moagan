@@ -365,14 +365,16 @@ check from a clean state.
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.
-**Total tests in conditional skip code paths:** 67
+**Total tests in conditional skip code paths:** 75
 (21 `MINIMAX_API_KEY` (6a) + 37 card80 (6b/6c) + 7 OPENCODE + 1
 OC_RUN_ID fallback (6d) + 7 DEEPSEEK + 1 DS_RUN_ID fallback (6e)
-+ 1 gauntlet `MINIMAX_API_KEY` re-check (6f); the 14 card80
-partial-skips in 6c are counted inside the 37 card80 figure, not
-on top of it). The 6g block (35 tests, 5 × 7 models) is not
-in this total because it is dormant in CI by design
-(`MOAGAN_SMOKE_SECTION` is never set in the workflow).
++ 1 gauntlet `MINIMAX_API_KEY` re-check (6f) + 1 additional
+`MINIMAX_API_KEY` re-check inside `gauntlet.sh:143` already
+counted in 6f; the 14 card80 partial-skips in 6c are counted
+inside the 37 card80 figure, not on top of it; the 6g block
+(35 tests, 5 × 7 models) is not in this total because it is
+dormant in CI by design (`MOAGAN_SMOKE_SECTION` is never set
+in the workflow)).
 
 ## How to add a new skip
 

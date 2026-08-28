@@ -81,7 +81,7 @@ consumer) can split on `\n` and parse each line independently.
 …
 {"kind":"probe","schema":1,"ts":"…","probe_kind":"temperature","candidate":0.6,"iteration":3,"provider":"minimax","model":"MiniMax-M3","outcome":"accepted"}
 …
-{"kind":"run_end","schema":1,"ts":"…","run_id":"…","status":"success","exit_code":0,"elapsed_ms":241823,"artefacts":{}}
+{"kind":"run_end","schema":1,"ts":"…","run_id":"…","status":"ok","exit_code":0,"elapsed_ms":241823,"artefacts":{}}
 ```
 
 Every event carries a top-level `schema: 1` field. The schema is

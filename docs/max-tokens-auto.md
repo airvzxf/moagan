@@ -40,7 +40,8 @@ Or in `~/.config/moagan/config.toml`:
 
 ```toml
 [providers.minimax]
-max_token_auto = 0   # disable entirely (Some(0) ≡ None)
+max_token_auto = 0         # disable entirely (Some(0) ≡ None)
+max_token_auto_enabled = false  # also disables; supersedes the floor value above
 
 [[providers.minimax.models]]
 id = "MiniMax-M3"
@@ -48,7 +49,15 @@ max_tokens = 1000000
 ```
 
 `Some(0)` is equivalent to `None` (both mean "off"). `Some(N>0)` enables
-the probe with a floor of `N` tokens.
+the probe with a floor of `N` tokens. The `max_token_auto_enabled:
+Option<bool>` knob (declared at `src/config/mod.rs:1086`) is a hard
+kill switch: when set to `Some(false)` it suppresses the probe
+table entirely regardless of the `max_token_auto` floor. Operators
+who want the probe disabled even if the floor is nonzero should
+use `max_token_auto_enabled = false`; operators who want the probe
+to run with a different floor just set `max_token_auto = N` (with
+`max_token_auto_enabled` left as `None`, which means "use the
+floor's nonzero-ness as the gate").
 
 ## How to read `max_tokens_auto.toml`
 

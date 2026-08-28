@@ -44,7 +44,8 @@ Plus one fast orthogonal check on the commit message itself:
                                   │
                                   ▼
    ┌─────────────────────────────────────────────────────────────────────┐
-   │  GitHub Actions — ci.yml (8 required + 2 informational)          │
+   │  GitHub Actions — ci.yml (8 required)                             │
+   │  + 2 standalone informational workflows (codeql, cargo-audit)     │
    │  ───────────────────                                              │
    │                                                                   │
    │  round 1 (no deps, max wall-clock):                               │
@@ -78,9 +79,11 @@ Plus one fast orthogonal check on the commit message itself:
    │  GitHub Actions — e2e-network.yml (post-merge, auto on main)     │
    │  ────────────────────────────────────────────                      │
    │                                                                   │
-   │  e2e-network (2 jobs, real LLM, ~8 min wall-clock)                │
+   │  e2e-network (4 jobs, real LLM, ~8 min warm / ~15 min cold)        │
    │    - fast     ~2  min   (timeout-minutes: 55)                     │
    │    - explore  ~8  min   (timeout-minutes: 120)                    │
+   │  plus build-e2e-network (~5 min cold) and preflight-minimax       │
+   │  (~30 s); 4 jobs run in two waves gated on the preflight.         │
    │    - both run in parallel after `build-e2e-network`               │
    │      completes; gated by `preflight-minimax`                      │
    │    - builds release binary                                        │
@@ -205,7 +208,7 @@ $ head -1 .git/hooks/pre-commit
 | Local validator aggregator | [`scripts/gauntlet.sh`](../scripts/gauntlet.sh) (`--fast`, `--skip-smoke`, …) |
 | Makefile targets (`validate`, `fmt-check`, `lint`, `test-ci`, `smoke`, `e2e`, `e2e-network`) | [`Makefile`](../Makefile) |
 | Composite action (checkout + toolchain + cache) | [`.github/actions/rust-setup/action.yml`](../.github/actions/rust-setup/action.yml) |
-| CI workflow (8 required + 2 informational jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
+| CI workflow (8 required jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 | CI real-LLM e2e (main only, fast+explore auto) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
 | CI real-LLM e2e (manual-only card80) | [`.github/workflows/e2e-network-card80.yml`](../.github/workflows/e2e-network-card80.yml) |
 | CI `--ignored` test runs (post-merge) | [`.github/workflows/test-ignored-{minimax,deepseek,opencode}.yml`](../.github/workflows/) |

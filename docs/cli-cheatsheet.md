@@ -1047,13 +1047,13 @@ window_days  = 7
 
 | Combination | Behaviour |
 |---|---|
-| `--run <id>` absent | `InvalidArgs` ("missing --run") |
+| `--run <id>` and `--all` both omitted | `InvalidArgs` ("specify --run <id> or --all") |
+| `--run <id>` and `--all` both present | `InvalidArgs` (clap conflict — the `Cost` variant declares `conflicts_with = "all"`) |
 | `--run <id>` malformed | `InvalidArgs` |
 | `--run <id>` not in DB | `InvalidState` |
-| `--by role` | group rows by `role` (default) |
-| `--by model` | group rows by `(provider, model)` |
-| `--json` | print a single JSON object instead of a table |
-| `--limit N` | show the top-N rows only (default 20) |
+| `--all` (no `--run`) | scans every run in the index; no single-run scoping |
+| pre-set `MOAGAN_HOME` / `MOAGAN_RUNS_DIR` | respected (no flag needed) |
+| (no extra flag) | table grouped by role, top 20 rows |
 
 **⚙️ Internal flow**
 
@@ -1070,7 +1070,10 @@ cli::dispatch → Cmd::Telemetry → telemetry::run_cost(CostArgs { run_id, by, 
 ```
 
 ```text
-$ moagan telemetry cost --run 018f3a2b --by model
+$ moagan telemetry cost --run 018f3a2b
+$ moagan telemetry cost --all
+# honour the global env vars for redirection
+$ MOAGAN_LOG_FORMAT=json moagan telemetry cost --all 2>errors.jsonl 1>out.jsonl
 provider     model          calls=200    total_usd=$1.42
 minimax      MiniMax-M3     200          $1.42
 (1 row(s); $1.42 total)
@@ -1564,6 +1567,7 @@ run 01a0178c  coverage report
 | `moagan telemetry verify` | Re-hash an exported bundle against `SHA256SUMS` |
 | `moagan telemetry config` | Print effective configuration (no API keys) |
 | `moagan telemetry cost` | Per-run USD aggregate (cost_usd column, §15.11) |
+| `moagan telemetry alerts list` | List saturation events (catalog §D.23 + §D.27) recorded by the runtime; flags `--since <unix-timestamp\|YYYY-MM-DD>` (best-effort parse, falls back to "no lower bound" on parse errors) and `--provider <name>` (filter by inner provider name) |
 | `moagan pause` | Serialize current run state to `paused.json` |
 | `moagan list` | Enumerate runs with `paused.json` |
 | `moagan rate` | Manually rate a proposal (preference cache) |

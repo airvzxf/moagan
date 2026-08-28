@@ -140,6 +140,11 @@ in `temperatures`** wins; because `TEMPERATURE_PROBE_VALUES` is sorted
 ascending, the tiebreak resolves to the lower temperature on a half-step
 tie and to the higher on a non-half-step tie.
 
+The `tracing::debug!` event above fires at the **default filter
+level** (`moagan=debug` is the default `EnvFilter` per
+`src/main.rs:301`); no `RUST_LOG=moagan=trace` override is needed to
+see it. The same goes for the in-set `tracing::debug!` event.
+
 The discovery pipeline has a parallel rewriter in
 `src/discovery/matrix.rs:451` (`ExplorationMatrix::rewrite_temperatures_to_supported`):
 every per-provider temperature profile in the matrix is rewritten against the auto-discovered set so

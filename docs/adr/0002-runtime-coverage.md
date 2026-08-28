@@ -123,9 +123,9 @@ today's binary.
 When the feature is on, a new `moagan::coverage::CoverageRecorder`
 injects a `LLVM_PROFILE_FILE` env var pointing at
 `<run_dir>/telemetry/coverage/<run_id>-<tag>.profraw`, snapshots
-counters on every `Telemetry::record_phase()` and
-`Telemetry::record_call()` (see `src/telemetry/mod.rs:569-590,
-649-678` and `src/coverage/mod.rs:281-441`), and rotates the active
+counters on every `Telemetry::phase()` and
+`Telemetry::call()` (see `src/telemetry/mod.rs:557,610` and
+`src/coverage/mod.rs:281-441`), and rotates the active
 `profraw` so the snapshot list stays bounded. The recorder is a
 no-op when the binary is not instrumented (i.e. when the env var
 is not honoured by the runtime), mirroring `Telemetry::noop()`.
