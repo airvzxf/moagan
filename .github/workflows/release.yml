@@ -174,7 +174,7 @@ jobs:
         uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: "moagan v${{ steps.meta.outputs.version }}"
+          name: "v${{ steps.meta.outputs.version }}"
           generate_release_notes: true
           # Upload all artefacts in the bundle (binary + sha256 + sha512 + SBOM).
           files: |
