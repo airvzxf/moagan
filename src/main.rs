@@ -57,6 +57,16 @@ fn main() -> Result<()> {
     let event_override: Option<&str> = match cli.event_format {
         moagan::cli::EventFormatArg::Jsonl => Some("jsonl"),
         moagan::cli::EventFormatArg::Off => Some("off"),
+        // Issue #657 fix #2: `Auto` is the new default arm
+        // (`src/cli/mod.rs::EventFormatArg`). Leaving it as
+        // `Some("jsonl")` (the pre-fix behaviour) overwrote an
+        // inherited `MOAGAN_EVENT_FORMAT=off` unconditionally so
+        // the env var was silently discarded. Yielding `None`
+        // here preserves the env var so downstream
+        // `resolve_event_format` honours it. Mirrors the
+        // `MOAGAN_LOG_FORMAT` propagation above (same `Auto`
+        // shape).
+        moagan::cli::EventFormatArg::Auto => None,
     };
     if let Some(v) = event_override {
         // SAFETY: same rationale as the MOAGAN_LOG_FORMAT set above.

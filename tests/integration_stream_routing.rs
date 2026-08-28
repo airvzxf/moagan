@@ -347,3 +347,103 @@ fn no_panic_in_stderr_for_clean_run() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// §4.5 — Issue #657 regression tests (env-var / opt-out defects).
+// ---------------------------------------------------------------------------
+
+/// Issue #657 fix #1: the documented `MOAGAN_LOG_TO_STDERR=1`
+/// shell idiom reaches the runtime resolver without a clap parse
+/// failure. Before the fix, clap's strict `bool` parser rejected
+/// `1` with `error: invalid value '1' for '--log-to-stderr'`, so
+/// the operator following the docstring hit a hard startup
+/// failure. The `BoolishValueParser` now accepts `1`/`0` /
+/// `true`/`false` / `yes`/`no` / `on`/`off`. The assertion is the
+/// end-to-end signal: the `DEPRECATED` warning reaches stderr
+/// (the same path the explicit `--log-to-stderr` flag exercises).
+///
+/// We intentionally do NOT assert `out.status.success()`: the
+/// `doctor` subcommand can exit non-zero on a fresh
+/// `<MOAGAN_HOME>` without API keys (`moagan doctor` exits 1 when
+/// the `[WARN]` checks fail). What matters here is that the
+/// binary parses the env var cleanly (no `clap` error), reaches
+/// `init_tracing`, and routes the legacy DEPRECATED warning to
+/// stderr — exactly the same signals the explicit-flag test
+/// (`log_to_stderr_routes_tracing_to_stderr`) checks.
+#[test]
+fn env_log_to_stderr_one_is_accepted_and_routes_to_stderr() {
+    let label = "stream_routing__env_log_to_stderr_one";
+    moagan::test_support::with_moagan_home(label, |_home_dir| {
+        let out = moagan()
+            .env("MOAGAN_LOG_TO_STDERR", "1")
+            .env("MOAGAN_LOG_FORMAT", "text")
+            .arg("doctor")
+            .output()
+            .expect("spawn moagan doctor with MOAGAN_LOG_TO_STDERR=1");
+        let stderr_str = String::from_utf8_lossy(&out.stderr);
+        // The pre-fix clap parse error was
+        // `error: invalid value '1' for '--log-to-stderr'`. The
+        // post-fix stderr carries the trace layer's structured
+        // events, so a clap parse error would NOT reach here.
+        assert!(
+            !stderr_str.contains("invalid value '1' for '--log-to-stderr'"),
+            "MOAGAN_LOG_TO_STDERR=1 must NOT trip clap's strict bool parser; stderr={stderr_str:?}"
+        );
+        assert!(
+            stderr_str.contains("DEPRECATED"),
+            "stderr must carry the DEPRECATED warning under MOAGAN_LOG_TO_STDERR=1; got {stderr_str:?}"
+        );
+        assert!(
+            stderr_str.contains("subscriber initialised"),
+            "stderr must carry the boot debug event from init_tracing; got {stderr_str:?}"
+        );
+    });
+}
+
+/// Issue #657 fix #2: an inherited `MOAGAN_EVENT_FORMAT=off` is
+/// honoured at runtime. Before the fix, `src/main.rs` overwrote
+/// the env var unconditionally from `cli.event_format`'s default
+/// arm (`Some("jsonl")`), so the env var was silently discarded.
+/// The new `Auto`-aware propagation leaves the env var alone when
+/// the operator did not pass the explicit flag. The assertion is
+/// the end-to-end signal: a clean `moagan run` with
+/// `MOAGAN_EVENT_FORMAT=off` produces NO `run_start` NDJSON event
+/// on stdout (the inverse of the existing run-start assertion in
+/// `tests/integration_e2e_script_paths.rs`).
+#[test]
+fn env_event_format_off_suppresses_stdout_events() {
+    let mock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mock_provider");
+    let label = "stream_routing__env_event_format_off";
+    moagan::test_support::with_moagan_home(label, |_home_dir| {
+        let out = moagan()
+            .env("MOAGAN_EVENT_FORMAT", "off")
+            .arg("run")
+            .arg("--mode")
+            .arg("fast")
+            .arg("--provider")
+            .arg("mock:mock-model")
+            .arg("--prompt")
+            .arg("Enumera los 7 colores del arcoiris en orden")
+            .arg("--mock-dir")
+            .arg(&mock_dir)
+            .arg("--non-interactive")
+            .arg("--log-format")
+            .arg("json")
+            .output()
+            .expect("spawn moagan run with MOAGAN_EVENT_FORMAT=off");
+        assert!(
+            out.status.success(),
+            "mock fast run must succeed; status={:?}; stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout_str = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout_str.contains("\"kind\":\"run_start\""),
+            "stdout must NOT contain the NDJSON run_start event under MOAGAN_EVENT_FORMAT=off; got {stdout_str:?}"
+        );
+    });
+}
