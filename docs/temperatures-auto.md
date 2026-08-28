@@ -119,9 +119,10 @@ if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref(
         // PR-7 (operator-visibility): the operator wants to confirm
         // that the temperature they declared in the matrix profile
         // is the temperature the runtime actually sends. Logged at
-        // debug! level so the default env filter does not flood the
-        // NDJSON output; `RUST_LOG=moagan=trace` flips it on for the
-        // operator who wants to see the matrix-vs-runtime diff.
+        // `debug!` (visible at the default `moagan=debug` filter) so
+        // the operator can `grep "temperature dispatched"` and
+        // reconcile every iteration's value end-to-end without
+        // having to crank the filter to `trace`.
         tracing::debug!(
             provider = %self.default_provider,
             model = %self.default_model,
