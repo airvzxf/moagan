@@ -448,14 +448,22 @@ fn minimax_endpoint_without_messages_suffix_is_rejected() {
 ///
 /// Decision on the run-exit-code contract: the mock returns a
 /// well-shaped Anthropic body so `Mode::Fast` can finish a full
-/// proposal → judge → portfolio cycle. If the pipeline ever
-/// drifts (judge schema changes, additional phases added) the
-/// test relaxes to "non-zero exit code is acceptable as long as
-/// `run_start` fired and no `max_tokens > 131072` request was
-/// observed". We keep `assert!(run.status.success(), ...)` as the
-/// primary check so a broken fast-mode pipeline surfaces as a
-/// test failure rather than a silent drift; see the assertion
-/// message for the relaxed contract.
+/// proposal → judge → portfolio cycle. The hard contract this
+/// test enforces is **only**:
+///   1. the NDJSON `run_start` event fires on stdout;
+///   2. the largest observed `max_tokens` over the wire is
+///      `<= 131072` (the operator-side cap from the TOML);
+///   3. the proxy wrote its gzip audit log under the run dir.
+///
+/// The pipeline's exit code is **not** asserted: `Mode::Fast`
+/// can fail for reasons unrelated to any of the four pinned bugs
+/// (judge schema drift, additional required phases, transient
+/// process-lifecycle issues under the multi-thread runtime), and
+/// none of those failures should mask a real regression on the
+/// bugs the test exists to cover. If the run does exit non-zero,
+/// the helper at the end of the test prints the exit status and
+/// stderr as a diagnostic via `eprintln!` but does not fail the
+/// test — the relaxed contract above is by design.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
     let server = MockServer::start().await;
@@ -568,6 +576,16 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
         // automatically true here (we read `.output()`).
         .env("RUST_LOG", "warn")
         .env_remove("MOAGAN_QUIET")
+        // Strip any inherited `MOAGAN_EVENT_FORMAT` /
+        // `MOAGAN_LOG_FORMAT` so the `run_start` NDJSON event
+        // assertion is not silently masked by a parent-process
+        // override (`MOAGAN_EVENT_FORMAT=off` flips event
+        // emission off entirely — see
+        // `src/telemetry/stdout_events.rs:65-78`; a non-JSON
+        // `MOAGAN_LOG_FORMAT` would change the tracing layer
+        // shape so other NDJSON consumers drift).
+        .env_remove("MOAGAN_EVENT_FORMAT")
+        .env_remove("MOAGAN_LOG_FORMAT")
         .output()
         .await
         .expect("spawn moagan run");
@@ -592,6 +610,21 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
     // as both a 400 in the audit log AND a value above 131072
     // here. We assert on the value, not on the 400, because the
     // value is the direct evidence of the clamp's correctness.
+    //
+    // What the test actually pins: `phase.rs:1217-1224` rewrites
+    // `hash_input.max_tokens` with `effective_max_tokens`
+    // (`src/llm/minimax.rs:424-447`) BEFORE calling
+    // `MinimaxProvider::send`, so the clamp that fixes the wire
+    // body is the `effective_max_tokens` chain. The test
+    // therefore pins that no request exceeds the operator cap.
+    // It does NOT distinguish that chain from the redundant
+    // inner clamp at `src/llm/minimax.rs:398-422` inside
+    // `MinimaxProvider::send`: deleting either chain in
+    // isolation leaves the wire body still clamped via the
+    // other, and the test stays green. Only deleting both
+    // chains surfaces here. Distinguishing the two belongs to a
+    // more targeted unit test that pins the inner clamp
+    // directly; that test is out of scope for this PR.
     let max_seen = max_tokens_seen_by_mock(&server).await;
     let requests = server.received_requests().await.unwrap_or_default();
     assert!(
@@ -724,6 +757,14 @@ async fn proxy_banner_is_locatable_by_pattern_not_by_position() {
         // banner `eprintln!` stays on stderr. The combination is
         // what produced the original `head -1` failure.
         .env("RUST_LOG", "debug")
+        // Strip any inherited log-format override so the
+        // `"level":"DEBUG"` / `"level":"INFO"` line scan below
+        // matches the JSON shape emitted by the default
+        // tracing-subscriber JSON layer. An inherited
+        // `MOAGAN_LOG_FORMAT=text` (or `MOAGAN_LOG_FORMAT=Text`)
+        // would switch the layer to the text formatter and the
+        // stdout line scan would silently never match.
+        .env_remove("MOAGAN_LOG_FORMAT")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -836,12 +877,45 @@ async fn proxy_banner_is_locatable_by_pattern_not_by_position() {
 
     // Sanity-check the asymmetry the prompt calls out: with
     // `RUST_LOG=debug`, DEBUG/INFO tracing lands on stdout
-    // (v0.12.0 routing). stdout must therefore NOT contain the
-    // banner — the banner is on stderr. This is the cross-stream
-    // half of the contract the script broke.
+    // (v0.12.0 routing). Two halves of the contract together make
+    // the inversion test load-bearing:
+    //
+    //   1. stdout must NOT contain the proxy banner (the
+    //      banner-`eprintln!` lives on stderr);
+    //   2. stdout must contain JSON tracing events at DEBUG or
+    //      INFO level — under v0.12.0 routing those are exactly
+    //      the events that go to stdout, so their presence is the
+    //      direct evidence the routing layer is doing the
+    //      redirection in the right direction. Without (2) the
+    //      test passes vacuously under legacy routing
+    //      (`MOAGAN_LOG_TO_STDERR=true`), because all tracing
+    //      then goes to stderr and stdout is empty: the assertion
+    //      `!stdout.contains(banner)` is trivially true on an
+    //      empty stream. Asserting on a non-empty stdout with
+    //      DEBUG/INFO events pins the v0.12.0 routing itself.
     assert!(
         !stdout_text.contains("proxy listening on http://"),
         "proxy banner must NOT appear on stdout under v0.12.0 \
          routing; stdout:\n{stdout_text}\nstderr:\n{stderr_buf}"
+    );
+    // `tracing-subscriber`'s default JSON layer emits each event
+    // as one JSON object per line. The level appears as the
+    // `"level"` field at the top level of the object (`DEBUG`,
+    // `INFO`, `WARN`, `ERROR`). We scan for either DEBUG or INFO
+    // to avoid coupling to the exact level the binary happens to
+    // emit at startup; both are routed to stdout by the v0.12.0
+    // writer (see `src/main.rs:255-267`).
+    let stdout_has_tracing_event = stdout_text
+        .lines()
+        .any(|line| line.contains("\"level\":\"DEBUG\"") || line.contains("\"level\":\"INFO\""));
+    assert!(
+        stdout_has_tracing_event,
+        "stdout must contain at least one DEBUG or INFO \
+         tracing event under RUST_LOG=debug + v0.12.0 routing; \
+         if this fails after a routing-layer change, check that \
+         the fix did not roll the stream routing back to the \
+         pre-v0.12.0 behaviour (the bug the test pins is exactly \
+         that `head -1` could match a tracing line instead of \
+         the banner). stdout:\n{stdout_text}\nstderr:\n{stderr_buf}"
     );
 }
