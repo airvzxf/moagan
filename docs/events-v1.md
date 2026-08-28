@@ -12,7 +12,7 @@ By default the emitter writes whenever stdout is not a TTY (i.e. when
 override with the new global flag:
 
 ```bash
-moagan … --event-format jsonl   # always write
+moagan … --event-format jsonl   # TTY-aware default (write when not TTY, silent on TTY)
 moagan … --event-format off     # silence
 MOAGAN_EVENT_FORMAT=off moagan …   # env var
 ```

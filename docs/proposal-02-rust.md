@@ -636,6 +636,17 @@ Si el paso 3 falla, el paso 4 no se ejecuta; el paso 5 sí, con `event='error'`.
 
 ## 3. Identificadores, hashing y cache
 
+> **Estado (2026-08-28):** §3 describe el hashing canónico y la
+> cache LLM con BLAKE3 como algoritmo por defecto (v0.10+). El
+> código real vive en `src/llm/wire.rs::build_cache_key` con el
+> enum `CacheHashAlgo::{Blake3, Sha256}`; la elección histórica
+> de SHA-256 en este spec fue reemplazada por BLAKE3 por
+> rendimiento (BLAKE3 es ~5× más rápido en hardware moderno y
+> produce el mismo tamaño de digest para nuestro uso). El
+> spec de la API y la forma de la cache key no han cambiado
+> (mismo separador `\x1f`, mismos campos); solo el hash
+> function.
+
 ### 3.1. `run_id`
 
 UUID v7. Generado por `ids::new_run_id()`:
@@ -651,7 +662,7 @@ pub fn new_run_id() -> Uuid {
 Para detectar duplicados y alimentar el cache:
 
 ```text
-hash_input = sha256(
+hash_input = blake3(
   role_id || \x1f ||            # "intake" | "sketch" | "judge" | ...
   phase_name || \x1f ||
   brief_hash || \x1f ||
@@ -664,35 +675,18 @@ hash_input = sha256(
 )
 ```
 
-Esto se computa en `llm/cache.rs::key_for(...)`. La implementación:
+Esto se computa en `llm/wire.rs::build_cache_key(...)` con el
+algoritmo por defecto `CacheHashAlgo::Blake3` (el enum
+`CacheHashAlgo` también soporta `Sha256` para backward
+compatibility, pero BLAKE3 es el default desde v0.10). La
+implementación:
 
 ```rust
-pub struct CallKey {
-    pub role: String,
-    pub phase: String,
-    pub brief_hash: String,
-    pub provider: String,
-    pub model: String,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub max_tokens: u32,
-    pub prompt: String,
-}
-
-impl CallKey {
-    pub fn hash(&self) -> String {
-        let mut h = Sha256::new();
-        for part in [
-            &self.role, &self.phase, &self.brief_hash,
-            &self.provider, &self.model,
-            &self.temperature.to_string(), &self.top_p.to_string(),
-            &self.max_tokens.to_string(),
-            &self.prompt,
-        ] {
-            h.update(part.as_bytes());
-            h.update(&[0x1f]);
-        }
-        hex::encode(h.finalize())
+pub fn build_cache_key(req: &Request, provider: &str, model: &str, algo: CacheHashAlgo) -> String {
+    // ... serializa los campos con \x1f como separador ...
+    match algo {
+        CacheHashAlgo::Blake3 => blake3_hex(&serialized),
+        CacheHashAlgo::Sha256 => sha256_hex(&serialized),
     }
 }
 ```
