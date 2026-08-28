@@ -151,8 +151,24 @@ not a test exclusion.
 
 ## Layer 6 — Bash script conditional runs
 
-The e2e proxy suite (`scripts/e2e_audit_proxy.sh`) has 46
-`run_test` calls, but several are conditionally executed:
+The e2e proxy suite (`scripts/e2e_audit_proxy.sh`) has **69**
+`run_test` invocations in total (counted via
+`grep -c "run_test" scripts/e2e_audit_proxy.sh`); only the
+subset that runs in a default `make e2e-network` invocation
+is documented below. The MINIMAX_API_KEY-gated block (6a)
+contributes 21; the OPENCODE_API_KEY-gated discover block
+(6d) contributes 7 (+ 1 OC_RUN_ID skip fallback); the
+DEEPSEEK_API_KEY-gated discover block (6e) contributes 7
+(+ 1 DS_RUN_ID skip fallback); the MOAGAN_SMOKE_SECTION-gated
+discover_opencode_models block (6g) contributes 5 per model
+× 7 models = 35; the gauntlet.sh `MINIMAX_API_KEY` re-check
+(6f) contributes 1. The remaining ~20 `run_test` invocations
+in the script are for upstream-side assertions (per-run audits,
+post-run health checks, the proxy-e2e `moagan run` mode
+block) that are not currently gated on a secret and always
+run on `make e2e-network`.
+
+Several of the gated blocks are conditionally executed:
 
 ### 6a. Real proxy e2e tests skipped when `MINIMAX_API_KEY` is missing
 
@@ -196,7 +212,7 @@ PASS to keep totals consistent:
 
 Total: 14 of the 37 card80 tests have a partial-skip path.
 
-### 6d. `OPENCODE_API_KEY` → 8 discover_oc tests (PR #460)
+### 6d. `OPENCODE_API_KEY` → 7 discover_oc tests (PR #460)
 
 ```bash
 if [[ -n "${OPENCODE_API_KEY:-}" ]]; then
@@ -208,7 +224,7 @@ fi
 
 - **Location:** `scripts/e2e_audit_proxy.sh:580–662` (the
   `discover_opencode` block, conditional on `OPENCODE_API_KEY`).
-- **Tests:** 8 `run_test` invocations
+- **Tests:** 7 `run_test` invocations + 1 `OC_RUN_ID` skip fallback
   (`proxy_e2e_discover_oc_run_id_present`,
   `proxy_e2e_discover_oc_tags_nonempty`,
   `proxy_e2e_discover_oc_facets_nonempty`,
@@ -231,7 +247,7 @@ fi
   `discover_opencode_writes_four_subdirs` `#[ignore]` integration
   test, which is also gated on the same secret.
 
-### 6e. `DEEPSEEK_API_KEY` → 8 discover_ds tests (PR #462)
+### 6e. `DEEPSEEK_API_KEY` → 7 discover_ds tests (PR #462)
 
 ```bash
 if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
@@ -243,9 +259,9 @@ fi
 
 - **Location:** `scripts/e2e_audit_proxy.sh:683–781` (the
   `discover_deepseek` block, conditional on `DEEPSEEK_API_KEY`).
-- **Tests:** 8 `run_test` invocations — parallel structure to 6d
-  (`proxy_e2e_discover_ds_{run_id_present,tags_nonempty,facets_nonempty,extractions_subdirs,drafts_nonempty,telemetry_plan_reports_weekly,telemetry_plan_used_positive}`
-  plus the `DS_RUN_ID` skip fallback).
+- **Tests:** 7 `run_test` invocations + 1 `DS_RUN_ID` skip fallback —
+  parallel structure to 6d
+  (`proxy_e2e_discover_ds_{run_id_present,tags_nonempty,facets_nonempty,extractions_subdirs,drafts_nonempty,telemetry_plan_reports_weekly,telemetry_plan_used_positive}`).
 - **CI behaviour:** the `DEEPSEEK_API_KEY` secret IS registered on
   the runner, but the auto-triggered `e2e-network.yml` no longer
   consumes it (the discover path moved to the manual-only
@@ -306,11 +322,14 @@ fi
   - `minimax-m2.7`
   - `muse-spark-1.2-contributor`
   - `qwen3.7-max`
-- **CI behaviour:** the block is gated on `MOAGAN_SMOKE_SECTION`
-  not on a missing secret, so on a default `make e2e-network` run
-  the block SKIPs unless the operator explicitly passes
-  `MOAGAN_SMOKE_SECTION=discover_opencode_models`. The CI workflow
-  never sets this env var, so the block is dormant in CI.
+- **CI behaviour:** the block is **double-gated** on both
+  `MOAGAN_SMOKE_SECTION` and `OPENCODE_API_KEY` (the latter is
+  checked by the inner `moagan discover --provider opencode:$MODEL`
+  invocations, which fail to start without a key). On a default
+  `make e2e-network` run, the block SKIPs unless the operator
+  explicitly passes `MOAGAN_SMOKE_SECTION=discover_opencode_models`
+  AND has `OPENCODE_API_KEY` set. The CI workflow never sets
+  either, so the block is dormant in CI.
 
 ## Layer 7 — Lefthook escape hatches (developer-side)
 
@@ -336,20 +355,24 @@ check from a clean state.
 | 3 | `#[ignore]` Rust attribute | 6 tests | ❌ no (run via `--ignored`) |
 | 4 | Source silent-skip (binary on PATH) | 13 tests | ✅ partially (binaries present) |
 | 5 | `ValidationEvidence::skipped()` runtime | 11 sites | n/a (per-artifact) |
-| 6a | `MINIMAX_API_KEY` missing → 46 tests | 46 tests | ❌ no (key present in CI) |
+| 6a | `MINIMAX_API_KEY` missing → 21 tests | 21 tests | ❌ no (key present in CI) |
 | 6b | `MOAGAN_SMOKE_LONG_DISCOVER=1` | 37 tests | ❌ no (env var unset) |
 | 6c | card80 partial-skips on timeout | 14 conditional | conditional |
-| 6d | `OPENCODE_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
-| 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
+| 6d | `OPENCODE_API_KEY` missing → 7 tests + 1 OC fallback | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
+| 6e | `DEEPSEEK_API_KEY` missing → 7 tests + 1 DS fallback | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
 | 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
-| 6g | `MOAGAN_SMOKE_SECTION=discover_opencode_models` (manual) | 35 tests (5 × 7 models) | ❌ no (env var never set in CI) |
+| 6g | `MOAGAN_SMOKE_SECTION=discover_opencode_models` + `OPENCODE_API_KEY` (manual) | 35 tests (5 × 7 models) | ❌ no (env var + key never set in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.
-**Total tests in conditional skip code paths:** 78
-(46 `MINIMAX_API_KEY` + 37 card80 + 8 OPENCODE + 8 DEEPSEEK
-+ 1 gauntlet `MINIMAX_API_KEY` re-check; the 14 card80 partial-skips
-in 6c are counted inside the 37 card80 figure, not on top of it).
+**Total tests in conditional skip code paths:** 67
+(21 `MINIMAX_API_KEY` (6a) + 37 card80 (6b/6c) + 7 OPENCODE + 1
+OC_RUN_ID fallback (6d) + 7 DEEPSEEK + 1 DS_RUN_ID fallback (6e)
++ 1 gauntlet `MINIMAX_API_KEY` re-check (6f); the 14 card80
+partial-skips in 6c are counted inside the 37 card80 figure, not
+on top of it). The 6g block (35 tests, 5 × 7 models) is not
+in this total because it is dormant in CI by design
+(`MOAGAN_SMOKE_SECTION` is never set in the workflow).
 
 ## How to add a new skip
 

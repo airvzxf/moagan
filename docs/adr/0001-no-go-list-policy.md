@@ -37,7 +37,7 @@ The catalogue ships three different access patterns:
 
 - **`petgraph`** is **optional**: T01-06 keeps `phases/` as a `Vec`
   by default; `petgraph` is only the backend for `DagNode` when
-  `--mode deep` is selected (T01-06 §3.5).
+  `--mode deep` is selected (T01-06 §0.5 row 18).
 - **`comfy-table`** is **cosmetic**: text-mode tables work today and
   the catalogue notes (D.14.23) that the dependency is a polish item,
   not a functional requirement.
@@ -73,7 +73,7 @@ guard-rails. Each verdict is enforceable by a CI guard in
 - **Default build** (`cargo build` with no features) does **not**
   pull `petgraph`; the linear `phases/` vector from T01-06 stays the
   default path (§D.2 in `proposal-03-add-ons.md`).
-- **Rationale**: T01-06 §3.5 already sketches the
+- **Rationale**: T01-06 §0.5 row 18 already sketches the
   `DagNode` trait that wraps `petgraph`. Default-off keeps the
   release binary footprint unchanged and the no-go rule
   retro-compatible (no crate is added unless the operator opts in).
@@ -193,7 +193,7 @@ Until then, the verdicts above are authoritative.
 
 A blanket prohibition would have foreclosed legitimate uses:
 
-- **`petgraph`**: the normative spec (T01-06 §3.5) sketches the
+- **`petgraph`**: the normative spec (T01-06 §0.5 row 18) sketches the
   `DagNode` trait as a wrapper over a DAG backend. The wrapper is
   meaningless without *some* DAG library, and `petgraph` is the only
   credible candidate for this codebase (small, `serde`-aware, no
