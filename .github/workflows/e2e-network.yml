@@ -51,11 +51,11 @@ permissions:
 #                                  test-fast and test-explore. ~30 s.
 #   test-fast                    — needs: [build-e2e-network,
 #                                  preflight-minimax]; runs on every
-#                                  push to main. retry x4 with 60 s
+#                                  push to main. 3 attempts with 60 s
 #                                  backoff. ~2 min.
 #   test-explore                 — needs: [build-e2e-network,
 #                                  preflight-minimax]; runs on every
-#                                  push to main. retry x4. ~8 min.
+#                                  push to main. 3 attempts. ~8 min.
 #
 # Wall-clock on push: ~max(build ~5 min, slowest row ≈ test-explore ~8 min)
 # ≈ 8 min plus artifact upload overlap. Total ~8 min per push to main
@@ -187,13 +187,27 @@ jobs:
       - name: Change to executable binary
         run: chmod +x target/release/moagan
 
-      - name: T3 · e2e-network (fast, real LLM, retry x4)
+      - name: T3 · e2e-network (fast, real LLM, 3 attempts)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: fast
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: |
+          # MAX_ATTEMPTS=3 (1 initial + 2 retries), derived from the run
+          # distribution recorded in docs/e2e-loop-2026-08-12.md (10
+          # consecutive real-LLM iterations):
+          #   - 3/10 passed on the first attempt;
+          #   - 7/10 hit exactly one upstream/model flake (JSON schema
+          #     violation, decode error) and every one of them passed on the
+          #     first retry — 0 needed a second retry;
+          #   - 1/10 (iter 8) hit a MiniMax 429 on its retry and needed the
+          #     extra attempt to clear the ~5-min rate-limit window.
+          # So 2 attempts covers the observed flake population and the 3rd is
+          # the margin for the rate-limit case. Going higher only lengthens the
+          # feedback loop: a deterministic regression fails all attempts
+          # anyway, because the audit-log and run-id assertions in
+          # scripts/e2e_audit_proxy.sh re-run on every attempt.
           MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"
@@ -246,13 +260,14 @@ jobs:
       - name: Change to executable binary
         run: chmod +x target/release/moagan
 
-      - name: T3 · e2e-network (explore, real LLM, retry x4)
+      - name: T3 · e2e-network (explore, real LLM, 3 attempts)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: explore
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: |
+          # Rationale for MAX_ATTEMPTS=3: see the fast job above.
           MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"
