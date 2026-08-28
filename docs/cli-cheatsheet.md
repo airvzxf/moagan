@@ -1376,7 +1376,7 @@ planner.
 → `dispatch` arm at `src/cli/mod.rs:2175-2317`. Two steps in
 sequence:
 
-1. `moagan discover` with cardinalidad 8 (one sketch per
+1. `moagan discover` with cardinality 8 (one sketch per
    dimension × facets_per_dimension = 1), single temperature
    (1.0), single replica. Produces a `run_id` with a persisted
    `sketches/` library (~3 MB).

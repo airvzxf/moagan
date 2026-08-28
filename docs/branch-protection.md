@@ -186,7 +186,8 @@ Expected output after step 5:
     "non_fast_forward",
     "pull_request",
     "required_linear_history",
-    "required_status_checks"
+    "required_status_checks",
+    "required_signatures"
   ]
 }
 ```
