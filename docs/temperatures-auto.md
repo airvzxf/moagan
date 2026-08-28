@@ -150,7 +150,7 @@ verified_at = "2026-08-22T11:30:00Z"
 auto = true
 attempts = 7
 
-[providers.opencode_go.kimi-k3]
+[providers.opencode.kimi-k3]
 temperatures = [1.0]
 detected_at = "2026-08-21T10:00:05Z"
 verified_at = "2026-08-22T11:30:05Z"
@@ -162,7 +162,7 @@ temperatures = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 auto = false
 detected_at = "2026-08-22T12:00:00Z"
 
-[operator_caps.opencode_go]
+[operator_caps.opencode]
 temperatures = [1.0]
 auto = false
 detected_at = "2026-08-22T12:00:01Z"

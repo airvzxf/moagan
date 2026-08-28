@@ -106,7 +106,7 @@ remain informational — none of them are required status checks:
 
 The manual-only `e2e-network-card80.yml` (single job `test-card80`,
 display name `Tier 3 · e2e — card80 (manual dispatch)`) and the
-`test-ignored-{deepseek,minimax,opencode-go}.yml` workflows are also
+`test-ignored-{deepseek,minimax,opencode}.yml` workflows are also
 informational; they show up as checks but do not block merges.
 
 The `codeql` and `cargo-audit` workflows are also informational; they

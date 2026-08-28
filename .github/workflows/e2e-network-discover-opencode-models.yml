@@ -1,0 +1,81 @@
+name: e2e-network · discover opencode models (manual)
+
+on:
+  workflow_dispatch:
+
+# Manual-only per-model coverage loop over the operator's published
+# opencode roster (7 aliases, §10-integrada-v0 OpenCode All Models
+# catalog; effective 2026-08-28). Extracted from `e2e-network.yml`
+# on 2026-08-19 (when the opencode roster was 14 models) and kept
+# separate from the auto workflow to keep `e2e-network.yml` cheap
+# on every push to main.
+#
+# Self-builds the release binary locally instead of depending on the
+# artifact uploaded by `e2e-network.yml`'s `build-e2e-network` job,
+# because GitHub's `actions/upload-artifact` retention is 1 day and
+# manual dispatches can land days after the last auto run. The ~5 min
+# `cargo build --release` cost is dwarfed by the ~35 min of per-model
+# round-trip, so the trade-off is acceptable.
+#
+# Concurrency: keyed on this run's id so two operator dispatches in
+# flight at the same time don't fight over a stale target/.
+
+concurrency:
+  group: e2e-network-discover-opencode-models-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test-discover-opencode-models:
+    name: 'Tier 3 · e2e — opencode per-model coverage (manual dispatch)'
+    runs-on: ubuntu-latest
+    # Budget ~5 min per model × 7 models = ~35 min; degraded upstream
+    # can stretch past 60 min.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./.github/actions/rust-setup
+
+      - name: Show toolchain
+        run: |
+          cargo --version
+          rustc --version
+
+      - name: Build release binary
+        env:
+          CARGO_INCREMENTAL: '1'
+        run: cargo build --release
+
+      - name: Change to executable binary
+        run: chmod +x target/release/moagan
+
+      - name: Verify OpenCode API key is present
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if [[ -z "${OPENCODE_API_KEY:-}" ]]; then
+            echo "ERROR: OPENCODE_API_KEY secret is not configured on this runner." >&2
+            echo "Add it via: gh secret set OPENCODE_API_KEY --repo airvzxf/moagan" >&2
+            exit 1
+          fi
+          echo "OK: OPENCODE_API_KEY is set ($(echo -n "$OPENCODE_API_KEY" | wc -c) chars)"
+
+      - name: T3 · e2e-network (opencode per-model coverage, real LLM)
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          BIN: ${{ github.workspace }}/target/release/moagan
+          MOAGAN_SMOKE_SECTION: discover_opencode_models
+        run: make e2e-network-discover-opencode-models
+
+      - name: upload opencode-models artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-opencode-models-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
+          include-hidden-files: true

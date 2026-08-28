@@ -1,6 +1,6 @@
 //! End-to-end discovery validation against the native `deepseek`
 //! provider (PR #462; companion to the opencode_go close-out in
-//! `tests/integration_discover_opencode_go.rs`).
+//! `tests/integration_discover_opencode.rs`).
 //!
 //! `#[ignore]`d by default; only runs locally / via
 //! `.github/workflows/test-ignored-deepseek.yml` (post-PR #555, manual
@@ -72,7 +72,7 @@ fn discover_deepseek_writes_four_subdirs() {
         .args([
             "discover",
             "--provider",
-            "deepseek:deepseek-chat",
+            "deepseek:deepseek-v4-flash",
             "--prompt",
             PROMPT,
             "--sketches-per-cell",

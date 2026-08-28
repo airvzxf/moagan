@@ -1,0 +1,80 @@
+name: e2e-network · discover deepseek (manual)
+
+on:
+  workflow_dispatch:
+
+# Manual-only discover validation against the native deepseek
+# provider (model `deepseek-v4-flash` per the 2026-08-28 operator
+# spec; the v0.12.x default of `deepseek-chat` was retired). Extracted
+# from `e2e-network.yml` on 2026-08-19 to keep the auto workflow
+# cheap on every push to main. Trigger from the Actions tab → this
+# workflow → "Run workflow".
+#
+# Self-builds the release binary locally instead of depending on the
+# artifact uploaded by `e2e-network.yml`'s `build-e2e-network` job,
+# because GitHub's `actions/upload-artifact` retention is 1 day and
+# manual dispatches can land days after the last auto run. The ~5 min
+# `cargo build --release` cost is dwarfed by the ~20 min of discover
+# round-trip, so the trade-off is acceptable.
+#
+# Concurrency: keyed on this run's id so two operator dispatches in
+# flight at the same time don't fight over a stale target/.
+
+concurrency:
+  group: e2e-network-discover-deepseek-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test-discover-deepseek:
+    name: 'Tier 3 · e2e — discover deepseek (manual dispatch)'
+    runs-on: ubuntu-latest
+    # Budget ~20 min; degraded upstream can stretch past 60 min.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048fb273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./.github/actions/rust-setup
+
+      - name: Show toolchain
+        run: |
+          cargo --version
+          rustc --version
+
+      - name: Build release binary
+        env:
+          CARGO_INCREMENTAL: '1'
+        run: cargo build --release
+
+      - name: Change to executable binary
+        run: chmod +x target/release/moagan
+
+      - name: Verify DeepSeek API key is present
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+            echo "ERROR: DEEPSEEK_API_KEY secret is not configured on this runner." >&2
+            echo "Add it via: gh secret set DEEPSEEK_API_KEY --repo airvzxf/moagan" >&2
+            exit 1
+          fi
+          echo "OK: DEEPSEEK_API_KEY is set ($(echo -n "$DEEPSEEK_API_KEY" | wc -c) chars)"
+
+      - name: T3 · e2e-network (discover deepseek, real LLM)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          BIN: ${{ github.workspace }}/target/release/moagan
+          MOAGAN_SMOKE_SECTION: discover_deepseek
+        run: make e2e-network-discover-deepseek
+
+      - name: upload discover-deepseek artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-e2e-discover-deepseek-logs
+          path: ${{ github.workspace }}/.runs/
+          retention-days: 1
+          if-no-files-found: warn
+          include-hidden-files: true

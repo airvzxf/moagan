@@ -1,5 +1,5 @@
 //! End-to-end discovery validation against the native `minimax`
-//! provider (companion to `tests/integration_discover_opencode_go.rs`
+//! provider (companion to `tests/integration_discover_opencode.rs`
 //! and `tests/integration_discover_deepseek.rs`; closes the
 //! `docs/discovery-validation-research-2026-08-13.md` gap for the
 //! Anthropic-compatible `minimax` wire at
@@ -62,7 +62,7 @@ fn discover_minimax_writes_four_subdirs() {
         // MINIMAX_MAX_TOKENS_CAP = 524_288) does not race the
         // 80-sketch matrix fan-out. Same rationale as
         // `tests/integration_discover_deepseek.rs` and
-        // `tests/integration_discover_opencode_go.rs`: the probe is
+        // `tests/integration_discover_opencode.rs`: the probe is
         // background-only by design, but on a fresh CI runner with
         // no cached `max_tokens_auto.toml` the upstream probe
         // timeouts (5 s × ~19 steps) compound with the matrix +
