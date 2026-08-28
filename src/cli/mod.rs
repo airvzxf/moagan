@@ -171,6 +171,15 @@ pub enum LogFormatArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum EventFormatArg {
+    /// Pick `jsonl` when stdout is not a TTY and stay silent
+    /// on a TTY (the v0.12.0 contract). Honours
+    /// `MOAGAN_EVENT_FORMAT` if set; the explicit
+    /// `--event-format <value>` flag wins on conflict. This is
+    /// the default — keeping `Auto` as the default is what makes
+    /// an inherited `MOAGAN_EVENT_FORMAT=off` actually take
+    /// effect instead of being silently overwritten by
+    /// `src/main.rs` (issue #657 fix #2).
+    Auto,
     /// Emit one NDJSON event per line on stdout when stdout is
     /// not a TTY; stay silent in interactive mode so the
     /// terminal output stays uncluttered.
@@ -243,14 +252,23 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = LogFormatArg::Auto,
           env = "MOAGAN_LOG_FORMAT")]
     pub log_format: LogFormatArg,
-    /// Format of the structured events emitted to stdout. `jsonl`
-    /// (default) emits one NDJSON event per line on stdout whenever
-    /// stdout is not a TTY, so pipelines like
+    /// Format of the structured events emitted to stdout. `auto`
+    /// (default) picks `jsonl` when stdout is not a TTY and stays
+    /// silent on a TTY, so pipelines like
     /// `moagan … 2> log.jsonl | jq -c 'select(.kind=="llm_call")'`
-    /// work out of the box. In an interactive TTY the same flag
-    /// stays silent — the TTY check is what makes it quiet in
-    /// interactive mode. `off` silences stdout entirely.
-    #[arg(long, global = true, value_enum, default_value_t = EventFormatArg::Jsonl)]
+    /// work out of the box. In an interactive TTY the same
+    /// default stays silent — the TTY check is what makes it
+    /// quiet in interactive mode. `off` silences stdout entirely
+    /// (mirrors `--event-format off`). The `MOAGAN_EVENT_FORMAT`
+    /// env var is honoured with the same precedence as the
+    /// explicit flag (env > flag > default); the parser is
+    /// `env =`-aware so `MOAGAN_EVENT_FORMAT=off` reaches the
+    /// runtime resolver even when no flag is passed (issue #657
+    /// fix #2 — the prior `Some("jsonl")` default arm in
+    /// `src/main.rs` overwrote the env var unconditionally and
+    /// silently dropped it).
+    #[arg(long, global = true, value_enum, default_value_t = EventFormatArg::Auto,
+          env = "MOAGAN_EVENT_FORMAT")]
     pub event_format: EventFormatArg,
     /// Verbosity of the `Decision` events emitted on stdout (the
     /// curated audit trail of operator-facing decisions made by the
@@ -281,11 +299,20 @@ pub struct Cli {
     /// tracing subscriber every time the flag is active so the
     /// operator sees the migration deadline. Migration:
     /// `1> out.jsonl 2> errors.jsonl` (the canonical Unix split).
+    ///
+    /// The parser is `BoolishValueParser` so the env var accepts the
+    /// shell-conventional `1`/`0` (alongside `true`/`false` /
+    /// `yes`/`no` / `on`/`off`); clap's strict `bool` parser only
+    /// takes `true`/`false` and would reject
+    /// `MOAGAN_LOG_TO_STDERR=1` from the Makefile with
+    /// `error: invalid value '1' for '--log-to-stderr'`. Issue #657
+    /// fix #1.
     #[arg(
         long,
         global = true,
         default_value_t = false,
-        env = "MOAGAN_LOG_TO_STDERR"
+        env = "MOAGAN_LOG_TO_STDERR",
+        value_parser = clap::builder::BoolishValueParser::new(),
     )]
     pub log_to_stderr: bool,
     /// Subcommand.
@@ -2562,5 +2589,144 @@ mod tests {
             }
             other => panic!("expected Cmd::Rerun, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #657 regression tests
+    // -----------------------------------------------------------------------
+
+    /// Issue #657 fix #1: the documented `MOAGAN_LOG_TO_STDERR=1`
+    /// shell idiom now parses through clap. Before the fix the
+    /// strict `bool` parser rejected `1` with
+    /// `error: invalid value '1' for '--log-to-stderr'`, so an
+    /// operator following the docstring hit a hard startup failure.
+    /// The `BoolishValueParser` accepts every canonical spelling
+    /// (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+    #[test]
+    fn log_to_stderr_env_accepts_shell_idiomatic_one() {
+        // SAFETY: tests in this module serialize on
+        // `TEST_MOAGAN_HOME_LOCK` (the upper scope); env mutations
+        // are scoped to this test body and undone in the cleanup.
+        let _guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_LOG_TO_STDERR", "1");
+        }
+        let cli = Cli::try_parse_from(["moagan", "doctor"])
+            .expect("MOAGAN_LOG_TO_STDERR=1 must parse through clap");
+        assert!(
+            cli.log_to_stderr,
+            "MOAGAN_LOG_TO_STDERR=1 must round-trip as `true`"
+        );
+        unsafe {
+            std::env::remove_var("MOAGAN_LOG_TO_STDERR");
+        }
+    }
+
+    /// Issue #657 fix #1: `MOAGAN_LOG_TO_STDERR=false` (the
+    /// canonical off-spelling) parses as `false` through clap.
+    /// Pin the round-trip so a future clap refactor cannot
+    /// silently regress the BoolishValueParser on the off side.
+    #[test]
+    fn log_to_stderr_env_accepts_false() {
+        let _guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_LOG_TO_STDERR", "false");
+        }
+        let cli = Cli::try_parse_from(["moagan", "doctor"])
+            .expect("MOAGAN_LOG_TO_STDERR=false must parse through clap");
+        assert!(
+            !cli.log_to_stderr,
+            "MOAGAN_LOG_TO_STDERR=false must round-trip as `false`"
+        );
+        unsafe {
+            std::env::remove_var("MOAGAN_LOG_TO_STDERR");
+        }
+    }
+
+    /// Issue #657 fix #1: the explicit `--log-to-stderr` flag
+    /// still works after the BoolishValueParser swap (regression
+    /// guard — the parser change must NOT break the CLI flag
+    /// path).
+    #[test]
+    fn log_to_stderr_flag_still_parses() {
+        let cli = Cli::try_parse_from(["moagan", "--log-to-stderr", "doctor"])
+            .expect("--log-to-stderr flag must still parse");
+        assert!(cli.log_to_stderr);
+    }
+
+    /// Issue #657 fix #2: the new `auto` arm is the documented
+    /// default. `Cli::try_parse_from(["moagan", "doctor"])` with
+    /// no `--event-format` and no `MOAGAN_EVENT_FORMAT` env var
+    /// lands on `EventFormatArg::Auto` so the env-var propagation
+    /// in `src/main.rs` is a no-op (preserving any inherited
+    /// `MOAGAN_EVENT_FORMAT=off`).
+    #[test]
+    fn event_format_default_is_auto() {
+        let _guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("MOAGAN_EVENT_FORMAT");
+        }
+        let cli = Cli::try_parse_from(["moagan", "doctor"]).expect("parse must succeed");
+        assert_eq!(
+            cli.event_format,
+            EventFormatArg::Auto,
+            "default for --event-format must be Auto (issue #657 fix #2)"
+        );
+    }
+
+    /// Issue #657 fix #2: an inherited `MOAGAN_EVENT_FORMAT=off`
+    /// reaches the CLI parser as `EventFormatArg::Off` via the
+    /// `env = "MOAGAN_EVENT_FORMAT"` clap binding. The pre-fix
+    /// `Some("jsonl")` arm in `src/main.rs` overwrote the env
+    /// var unconditionally; the new `Auto`-aware propagation
+    /// leaves it alone when the operator did not pass the flag
+    /// explicitly. The propagation logic itself lives in
+    /// `src/main.rs` and is exercised end-to-end by the
+    /// integration test in
+    /// `tests/integration_e2e_script_paths.rs` (the
+    /// `MOAGAN_EVENT_FORMAT` inherited-off case).
+    #[test]
+    fn event_format_env_off_reaches_parser() {
+        let _guard = TEST_MOAGAN_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_EVENT_FORMAT", "off");
+        }
+        let cli = Cli::try_parse_from(["moagan", "doctor"]).expect("parse must succeed");
+        assert_eq!(
+            cli.event_format,
+            EventFormatArg::Off,
+            "MOAGAN_EVENT_FORMAT=off must reach the parser as Off (issue #657 fix #2)"
+        );
+        unsafe {
+            std::env::remove_var("MOAGAN_EVENT_FORMAT");
+        }
+    }
+
+    /// Issue #657 fix #2: the explicit `--event-format jsonl` flag
+    /// still parses as `Jsonl` (regression guard — the
+    /// default-arm swap to `Auto` must NOT change the spelled-out
+    /// `jsonl` arm).
+    #[test]
+    fn event_format_explicit_jsonl_flag() {
+        let cli = Cli::try_parse_from(["moagan", "--event-format", "jsonl", "doctor"])
+            .expect("parse must succeed");
+        assert_eq!(cli.event_format, EventFormatArg::Jsonl);
+    }
+
+    /// Issue #657 fix #2: the explicit `--event-format off` flag
+    /// still parses as `Off`.
+    #[test]
+    fn event_format_explicit_off_flag() {
+        let cli = Cli::try_parse_from(["moagan", "--event-format", "off", "doctor"])
+            .expect("parse must succeed");
+        assert_eq!(cli.event_format, EventFormatArg::Off);
     }
 }

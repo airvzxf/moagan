@@ -81,6 +81,7 @@ fn provider_map(
         max_token_auto,
         max_token_auto_enabled,
         max_token_auto_save: true,
+        temperature_auto_enabled: None,
         plan: None,
     }
 }
@@ -429,6 +430,7 @@ async fn probe_propagates_section_name_not_model_id() {
             max_token_auto: None,
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         },
     );

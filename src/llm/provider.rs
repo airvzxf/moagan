@@ -1526,11 +1526,22 @@ pub fn registry_from_config_with_home_and_sink(
         // "send whatever the operator asked for" path — every
         // out-of-range temperature gets clamped to the nearest
         // supported value rather than producing an HTTP 400.
+        //
+        // Issue #657 fix #3: `ProviderConfig::temperature_auto_enabled =
+        // Some(false)` opts a provider out of the probe; this is
+        // operator-facing so CI / smoke scripts that pre-populate
+        // `<MOAGAN_HOME>/temperatures_auto.toml` can skip the
+        // 21-request fan-out entirely without having to set the env
+        // var on every command. The table itself is still attached to
+        // the registry so cached / operator-supplied entries continue
+        // to clamp runtime temperatures — only the background probe
+        // fan-out is suppressed.
         match TemperatureTable::from_home(home, /* save= */ true) {
             Ok(table) => {
                 let table = Arc::new(table);
                 spawn_pending_temperature_probes(
                     &wrapped_entries,
+                    cfg,
                     Arc::clone(&table),
                     active_pairs,
                 );
@@ -1920,12 +1931,32 @@ fn spawn_pending_probes(
 /// [`super::temperature_probe::TEMPERATURE_PROBE_BATCH_SIZE`] (3).
 fn spawn_pending_temperature_probes(
     wrapped_entries: &[(String, Arc<BreakeredProvider>)],
+    cfg: &std::collections::BTreeMap<String, ProviderConfig>,
     table: Arc<TemperatureTable>,
     active_pairs: Option<&[(String, String)]>,
 ) {
     for (_key, wrapped) in wrapped_entries {
         let inner = wrapped.inner();
         if inner.name() == "mock" {
+            continue;
+        }
+        // Issue #657 fix #3: per-provider opt-out via
+        // `ProviderConfig::temperature_auto_enabled`. The
+        // `mock` section is skipped above; here we honour
+        // `Some(false)` so CI / smoke scripts that pre-populate
+        // `<MOAGAN_HOME>/temperatures_auto.toml` can opt the
+        // probe out fleet-wide via the
+        // `MOAGAN_TEMPERATURE_AUTO=false` env var without
+        // losing the cached / operator-supplied table (which
+        // still clamps runtime temperatures).
+        if let Some(spec) = cfg.get(inner.name())
+            && spec.temperature_auto_enabled == Some(false)
+        {
+            tracing::debug!(
+                provider = %inner.name(),
+                model = %inner.model(),
+                "temperature_probe: provider opted out (temperature_auto_enabled = Some(false)); skipping background probe"
+            );
             continue;
         }
         // Scope the probe fan-out to the pairs the run is going
@@ -2153,6 +2184,7 @@ mod tests {
                 max_token_auto: None,
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2193,6 +2225,7 @@ mod tests {
                 max_token_auto: None,
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2406,6 +2439,7 @@ mod tests {
                 // `minimax-m3` endpoint. Opt out explicitly.
                 max_token_auto_enabled: Some(false),
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2482,6 +2516,7 @@ mod tests {
                 max_token_auto,
                 max_token_auto_enabled,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2644,6 +2679,7 @@ mod tests {
                 max_token_auto: None,
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2729,6 +2765,127 @@ mod tests {
             "temperatures_auto.toml must NOT leak the registry key into the section \
              name (regression: spawn_pending_temperature_probes must use \
              inner.name()); got:\n{body}"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #657 fix #3 — `ProviderConfig::temperature_auto_enabled`
+    // skips the background probe fan-out.
+    //
+    // The default behaviour (registry probe runs for every non-mock
+    // provider) is the existing contract; the regression the
+    // operator hit was the absence of an opt-out. Pin both halves
+    // of the new contract here:
+    //
+    // * `temperature_auto_enabled = Some(false)` skips the probe
+    //   for that provider (no probe task is spawned, and the
+    //   persisted sidecar stays empty).
+    // * `temperature_auto_enabled = None` keeps the existing
+    //   "probe runs" behaviour (the sidecar gains an entry even
+    //   when every probe was rejected).
+    // ----------------------------------------------------------------
+
+    /// `temperature_auto_enabled = Some(false)` MUST skip the
+    /// background probe for that provider. The probe-task counter
+    /// on the table is the cheapest signal: with no probe task
+    /// spawned, `probe_tasks_started() == 0`. We also assert the
+    /// persisted sidecar is empty so a future refactor that
+    /// persists an entry without firing the probe is caught.
+    #[tokio::test]
+    async fn registry_skips_temperature_probe_when_opted_out() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        home.ensure().expect("home layout");
+        let _env = env_lock();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        // Build a registry with `temperature_auto_enabled = Some(false)`
+        // on the only provider. The temperature table still attaches
+        // (so cached / operator-supplied entries continue to clamp),
+        // but no background probe task is spawned.
+        let mut cfg = std::collections::BTreeMap::new();
+        cfg.insert(
+            "minimax".into(),
+            crate::config::ProviderConfig {
+                models: vec![crate::config::ModelConfig {
+                    max_tokens: None,
+                    id: "minimax-test".into(),
+                    endpoint: None,
+                }],
+                endpoint: Some("https://probe-test.invalid/anthropic/v1/messages".to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: Some(false),
+                plan: None,
+            },
+        );
+        let registry = registry_from_config_with_home_and_sink(
+            &cfg,
+            &CircuitBreakerConfig::default(),
+            Some(&home),
+            None,
+            None,
+        )
+        .expect("registry must build");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        drop(_env);
+
+        let temperature_table = registry.temperature_table().expect(
+            "registry must carry a temperature table (the table itself stays, \
+                     only the background probe fan-out is suppressed)",
+        );
+        // Give any spawned probe tasks a moment to land before we
+        // assert the counter. With the opt-out in effect the
+        // counter stays at zero because no task is scheduled.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            temperature_table.probe_tasks_started(),
+            0,
+            "temperature_auto_enabled = Some(false) must suppress the background probe fan-out"
+        );
+    }
+
+    /// Regression guard: the default `None` keeps the existing
+    /// probe-runs behaviour. The probe-task counter is the signal
+    /// here too — with the probe on, the counter increments when
+    /// the spawned task runs `verify` (the first thing it does).
+    /// We use `await_ready` to deterministically wait for the
+    /// probe to finish; the counter is guaranteed to be `>= 1` by
+    /// then because `verify` is the first call inside the task
+    /// body (see `spawn_pending_temperature_probes`).
+    ///
+    /// `await_ready` is preferred over a polling loop because CI
+    /// environments can deschedule the spawned task for longer
+    /// than a 200 ms polling window; awaiting the JoinHandle
+    /// removes the timing dependency entirely.
+    #[tokio::test]
+    async fn registry_default_still_fires_temperature_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        home.ensure().expect("home layout");
+        let _env = env_lock();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let registry = build_registry_for_probe_test(&home, None, None).await;
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        drop(_env);
+        let temperature_table = registry
+            .temperature_table()
+            .expect("registry must carry a temperature table by default");
+        temperature_table.await_ready().await;
+        assert!(
+            temperature_table.probe_tasks_started() >= 1,
+            "default temperature_auto_enabled must keep the background probe firing"
         );
     }
 
@@ -2870,6 +3027,7 @@ mod tests {
             max_token_auto: None,
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         };
         let minimax = MinimaxProvider::new(&spec, crate::secret::SecretString::new("dummy".into()))
@@ -3104,6 +3262,7 @@ mod tests {
             max_token_auto: None,
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         };
         let minimax =
@@ -3122,6 +3281,7 @@ mod tests {
             max_token_auto: None,
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         };
         let deepseek =
@@ -3145,6 +3305,7 @@ mod tests {
             max_token_auto: None,
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         };
         let oc_a =
@@ -3243,6 +3404,7 @@ mod tests {
                     max_token_auto: None,
                     max_token_auto_enabled: None,
                     max_token_auto_save: true,
+                    temperature_auto_enabled: None,
                     plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
@@ -3266,6 +3428,7 @@ mod tests {
                     max_token_auto: None,
                     max_token_auto_enabled: None,
                     max_token_auto_save: true,
+                    temperature_auto_enabled: None,
                     plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
@@ -3294,6 +3457,7 @@ mod tests {
                     max_token_auto: None,
                     max_token_auto_enabled: None,
                     max_token_auto_save: true,
+                    temperature_auto_enabled: None,
                     plan: None,
                 },
                 crate::secret::SecretString::new("dummy".into()),
@@ -3565,6 +3729,7 @@ mod tests {
                 max_token_auto,
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );
@@ -3601,6 +3766,7 @@ mod tests {
                 max_token_auto,
                 max_token_auto_enabled,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );
@@ -3766,6 +3932,7 @@ mod tests {
                 max_token_auto: Some(2048),
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );

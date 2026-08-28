@@ -93,6 +93,7 @@ fn build_provider(uri: String) -> Arc<MinimaxProvider> {
         max_token_auto: None,
         max_token_auto_enabled: None,
         max_token_auto_save: true,
+        temperature_auto_enabled: None,
     };
     Arc::new(
         MinimaxProvider::new(&cfg, SecretString::new("sk-test".to_owned()))
@@ -460,6 +461,7 @@ async fn top_p_absent_from_wire_when_provider_and_role_unset() {
         max_token_auto: None,
         max_token_auto_enabled: None,
         max_token_auto_save: true,
+        temperature_auto_enabled: None,
     };
     let cfg = cfg_with_minimax_provider_section(Config::default(), Some(minimax_section));
     let ctx = build_ctx(run_id, Arc::clone(&home), registry, cfg);

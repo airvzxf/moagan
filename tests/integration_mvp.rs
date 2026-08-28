@@ -1543,6 +1543,7 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         max_token_auto: None,
         max_token_auto_enabled: None,
         max_token_auto_save: true,
+        temperature_auto_enabled: None,
         plan: None,
     };
     let provider: Arc<dyn Provider> = Arc::new(MinimaxProvider::new(

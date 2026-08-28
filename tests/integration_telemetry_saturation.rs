@@ -417,6 +417,7 @@ fn registry_from_config_with_sink_attaches_sink_at_construction() -> Result<()> 
                 max_token_auto: None,
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
+                temperature_auto_enabled: None,
                 plan: None,
             },
         );

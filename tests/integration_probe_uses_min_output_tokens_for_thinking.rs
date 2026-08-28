@@ -61,6 +61,7 @@ fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
         max_token_auto: None,
         max_token_auto_enabled: None,
         max_token_auto_save: true,
+        temperature_auto_enabled: None,
     };
     Arc::new(
         MinimaxProvider::new(&cfg, SecretString::new("sk-test".to_owned()))
