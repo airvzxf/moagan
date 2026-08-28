@@ -5,6 +5,27 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.11] - 2026-08-28
+
+### Fixed
+
+Patch v0.12.11 (PRs #647 + #648) — fixes the §2.2 CI flake in `phases::util::tests::parse_json_with_recovery_preserves_extraction_metadata_via_tracing` (intermittent failures in PR #641, the release PR for v0.12.9). **No source-code changes; no public API change; no schema bump.** All edits are test-only or doc-only.
+
+- **`src/phases/util.rs`** — removed `parse_json_with_recovery_preserves_extraction_metadata_via_tracing` from the `phases::util::tests` module (PR #647, –69 lines). The flake's root cause was structural: `src/sandbox/process.rs:2525`'s `moa_sandbox_run_cmd_with_off_logs_denial` calls `tracing_subscriber::fmt::try_init()`, which installs a process-global subscriber whose `EnvFilter` defaults to `LevelFilter::ERROR` when `RUST_LOG` is unset. That sets `LevelFilter::current()` (a process-global `AtomicUsize`) to `ERROR` for the whole test binary, silencing every `tracing::trace!` / `tracing::debug!` callsite on every thread. `tracing::subscriber::with_default` (thread-local) cannot reliably override this. The narrow race during `Dispatch::new → register_dispatch → rebuild_interest` was the actual flake surface. The fix moves the test to a fresh integration binary that gets its own `LevelFilter::current()` atomic and callsite registry — eliminating the contention entirely.
+- **`tests/integration_parse_json_recovery.rs`** — new integration test binary (PR #647, +89 lines; PR #648, +20 / –2 lines). Reproduces the tolerant-extraction `tracing::debug!` event with structured `start, end` byte-range assertions, plus poison-recovery on the shared `Mutex<Vec<u8>>` buffer (a `PoisonError` still holds the bytes that were already written; the old `unwrap_or_default()` silently dropped them). Module doc carries an explicit "do not add additional `#[test]` functions to this binary" invariant to prevent reintroduction of the §2.2 flake. PR #648 also removes a no-op `.with_max_level(Level::TRACE)` writer wrapper (`WithMaxLevel::make_writer_for` always returns `Some` when the wrapper level is `TRACE`, the most permissive value) and the now-dead `MakeWriterExt` import.
+- **`src/sandbox/process.rs:2514-2534`** — rewrite of the misleading docstring on `moa_sandbox_run_cmd_with_off_logs_denial` (PR #648, +14 / –4 lines). The original comment described `tracing_subscriber::fmt::try_init()` backwards: it claimed the only failure mode is "no subscriber installed", when `try_init` actually returns `Err` precisely when a global subscriber IS already installed. The new comment states the real side effect: `try_init` sets `LevelFilter::current()` to `LevelFilter::ERROR` for the entire test binary, and any new tracing-dependent unit test in this binary must live in its own integration test binary.
+- **`src/phases/util.rs:469-481`** — breadcrumb added to the `parse_json_with_recovery` docstring (PR #648, +9 / –0 lines) pointing at `tests/integration_parse_json_recovery.rs` and explaining why the test must live in its own binary (cross-references the §2.2 flake and commit `1e3bb18`).
+
+### Out of scope (deferred)
+
+- M3 strategy `tracing::debug!` events (`src/phases/util.rs:495` and `:502`) have no tracing-test coverage. Adding them would conflict with the "single-test binary" invariant from PR #648; a separate `tests/integration_parse_json_recovery_m3.rs` binary is the right home for them and is tracked outside this patch.
+
+### Verification
+
+- `make test-ci`: 0 failures across 60 test binaries.
+- `e2e-network` on main (run #33143518223): 4/4 jobs GREEN — Build · release binary, T3 · preflight — minimax, Tier 3 · e2e — fast, Tier 3 · e2e — explore.
+- `e2e-network` retry history: run #33139298895 initially failed with HTTP 429 ("Token Plan rate limit reached") on the upstream MiniMax API, not on the new code; run #33139628433 (retry 1) and run #33143518223 (retry 2) both passed.
+
 ## [0.12.10] - 2026-08-27
 
 ### Fixed
