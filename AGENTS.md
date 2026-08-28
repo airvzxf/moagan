@@ -106,17 +106,47 @@ re-runs of the same job.
 
 ## Working with workflow (regression-aware)
 
-1. Work in the local branch.
-2. Implement + commit + push.
-3. Dispatch e2e-network (workflow) via `gh workflow run <workflow>.yml --ref <branch>`.
-4. Verify ALL Tier jobs pass. If any check is red, fix the cause, commit, push, and re-dispatch — repeat steps 2-4 until every required check is green.
-5. Merge to main.
-6. **Only then** create the release PR (CHANGELOG + Cargo.toml bump).
-7. After release PR merges, tag.
-8. release.yml runs automatically.
+**The invariant: validation comes before release, never after.**
 
-Never: merge fix → release PR → tag → release.yml.
-Always: merge fix → validate e2e → release PR → tag.
+A tag is irreversible. Once `release.yml` has published a release, a
+workflow bug found afterwards can only be fixed with another release.
+So the workflow that a change touches must be proven green *while the
+change is still revertible* — that is, on the branch and then on
+`main`, before any version bump or tag exists.
+
+### When the change touches CI (`.github/workflows/**`, `scripts/*e2e*`, `scripts/*smoke*`)
+
+Local tiers (T0-T2) cannot exercise these paths: `make smoke` and
+`make e2e` run against `mock:mock-model`, so only a real dispatch
+proves a workflow edit works. Dispatch it from the branch:
+
+1. Work on a local branch. Implement, commit (GPG-signed), push.
+2. Dispatch the affected workflow against that branch:
+   `gh workflow run <workflow>.yml --ref <branch>`
+3. Watch it: `gh run watch <run-id>` / `gh run view <run-id> --log-failed`.
+4. Verify **every** required job passes. If any is red, fix the cause,
+   commit, push, re-dispatch, and repeat 2-4. Do not proceed on a
+   partially green run, and do not dismiss a red job as flake without
+   evidence from the log.
+5. Open the PR and merge to `main` once required checks are green.
+6. Re-validate on `main` if the workflow behaves differently there
+   (e.g. steps gated on `github.ref`, or caches scoped per-branch).
+7. **Only then** open the release PR (CHANGELOG + `Cargo.toml` bump).
+8. After the release PR merges, tag. `release.yml` runs automatically.
+
+### When the change does not touch CI
+
+Steps 2-4 and 6 collapse into the normal required checks on the PR.
+The ordering constraint still holds: merge the fix, confirm `main` is
+green, and only then bump and tag.
+
+### The failure mode this prevents
+
+Never: merge fix → release PR → tag → `release.yml` → *then* discover
+the workflow was broken. At that point the release is already public
+and the only remedy is another release.
+
+Always: merge fix → validate the workflow → release PR → tag.
 
 ## No-go list
 
