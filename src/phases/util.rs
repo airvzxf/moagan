@@ -470,6 +470,15 @@ pub enum ParseError {
 /// Each strategy that fires emits a `tracing::debug!` event so
 /// post-execution reviewers can see which strategy recovered the
 /// payload.
+///
+/// The tolerant-extraction path's `tracing::debug!` event (the
+/// `start, end` byte range) is pinned by
+/// `tests/integration_parse_json_recovery.rs`. That test MUST stay
+/// in its own integration binary — a unit-test sibling in
+/// `src/phases/util::tests` flakes because `sandbox::process::tests`
+/// installs a `tracing_subscriber` global subscriber whose default
+/// `EnvFilter` is `LevelFilter::ERROR` (§2.2 flake, see commit
+/// `1e3bb18`).
 pub fn parse_json_with_recovery(input: &str) -> std::result::Result<serde_json::Value, ParseError> {
     tracing::trace!(
         input_len = input.len(),
