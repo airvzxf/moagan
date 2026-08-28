@@ -5,6 +5,49 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.15] - 2026-08-28
+
+### Fixed
+
+- **`src/cli/mod.rs`** — `MOAGAN_LOG_TO_STDERR=1` was rejected by
+  clap's strict `bool` parser (`error: invalid value '1' for
+  '--log-to-stderr' [possible values: true, false]`), so an
+  operator following the docstring hit a hard startup failure even
+  though `resolve_log_to_stderr` already accepted the canonical
+  `1`/`0`/`true`/`false`/`yes`/`no`/`on`/`off` spellings. The flag
+  is now wired through `BoolishValueParser::new()` (same parser
+  `--non-interactive` has used since v0.10). Issue #657 fix #1.
+
+- **`src/cli/mod.rs` + `src/main.rs`** — an inherited
+  `MOAGAN_EVENT_FORMAT=off` was silently discarded because
+  `src/main.rs` overwrote the env var unconditionally from the
+  CLI's `EventFormatArg::Jsonl` default arm. `EventFormatArg` now
+  has an `Auto` variant (mirror of `LogFormatArg::Auto`), the
+  default flips to `Auto`, and the `Auto => None` arm in the
+  `event_override` match leaves the env var alone when the
+  operator did not pass the explicit flag. The `env =` clap
+  binding now also reads the variable at parse time. Issue #657
+  fix #2.
+
+- **`src/config/mod.rs` + `src/llm/provider.rs`** — the temperature
+  auto-probe had no configurable opt-out; it fired for every
+  non-mock `(provider, model)` and cost 21 requests in a fresh
+  run. The pre-fix workaround (pre-populating
+  `<MOAGAN_HOME>/temperatures_auto.toml`) is what #656's wiremock
+  e2e test relied on. The new `MOAGAN_TEMPERATURE_AUTO` env var
+  (plus `ProviderConfig::temperature_auto_enabled`) mirrors the
+  `MOAGAN_MAX_TOKEN_AUTO` shape: `false`/`0`/`no`/`off` opts every
+  provider out of the background fan-out; truthy values leave the
+  default on; unrecognised values are silently ignored so a typo
+  cannot silently disable the probe. The `TemperatureTable` still
+  attaches to the registry so cached / operator-supplied entries
+  continue to clamp runtime temperatures — only the background
+  probe is suppressed. Issue #657 fix #3.
+
+**No public API change; no schema bump.** Three pre-existing
+operator-facing defects that the new wiremock e2e test had to
+work around now work without the workaround.
+
 ## [0.12.14] - 2026-08-28
 
 ### Added
