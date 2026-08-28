@@ -51,11 +51,11 @@ permissions:
 #                                  test-fast and test-explore. ~30 s.
 #   test-fast                    — needs: [build-e2e-network,
 #                                  preflight-minimax]; runs on every
-#                                  push to main. retry x4 with 60 s
+#                                  push to main. 3 attempts with 60 s
 #                                  backoff. ~2 min.
 #   test-explore                 — needs: [build-e2e-network,
 #                                  preflight-minimax]; runs on every
-#                                  push to main. retry x4. ~8 min.
+#                                  push to main. 3 attempts. ~8 min.
 #
 # Wall-clock on push: ~max(build ~5 min, slowest row ≈ test-explore ~8 min)
 # ≈ 8 min plus artifact upload overlap. Total ~8 min per push to main
@@ -187,13 +187,38 @@ jobs:
       - name: Change to executable binary
         run: chmod +x target/release/moagan
 
-      - name: T3 · e2e-network (fast, real LLM, retry x4)
+      - name: T3 · e2e-network (fast, real LLM, 3 attempts)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: fast
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: |
+          # MAX_ATTEMPTS=3 (1 initial + 2 retries), derived from the run
+          # distribution recorded in docs/e2e-loop-2026-08-12.md (10
+          # consecutive real-LLM iterations):
+          #   - 4/10 (iters 2, 4, 6, 10) passed on the first attempt;
+          #   - 6/10 (iters 1, 3, 5, 7, 8, 9) hit exactly one
+          #     upstream/model flake (JSON schema violation, decode
+          #     error). Four of them (iters 1, 3, 5, 7) have an
+          #     explicit retry row in the table showing the first
+          #     retry passed. Iter 9's retry is not recorded. Iter 8's
+          #     first retry was itself 429-ed by MiniMax (row 8r1,
+          #     "rate-limit — paused"), so it needed at least a third
+          #     attempt to clear the window; the successful attempt is
+          #     not recorded either, but the doc's summary states no
+          #     flake stayed stuck.
+          #   - arithmetic: 4 + 6 = 10. The largest attempt count the
+          #     table can substantiate is 3, and it comes from iter 8.
+          # So 2 attempts cover every flake with a recorded recovery,
+          # and the 3rd is what the one rate-limited iteration
+          # demonstrably needed. The "~5-min rate-limit window" is the
+          # upstream's window, not the end-to-end retry cycle (which is
+          # bounded by MAX_ATTEMPTS × inter-attempt backoff). Going
+          # higher only lengthens the feedback loop: a deterministic
+          # regression fails all attempts anyway, because the audit-log
+          # and run-id assertions in scripts/e2e_audit_proxy.sh re-run
+          # on every attempt.
           MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"
@@ -201,13 +226,26 @@ jobs:
             echo "Started at $(date -u +%H:%M:%SZ)"
             echo "================================================================"
             START_TS=$(date +%s)
-            if make e2e-network-fast; then
-              END_TS=$(date +%s)
+            # Run `make` and capture its exit code BEFORE any
+            # other command. A subsequent $(date +%s) command
+            # substitution would set $? to 0 (date always
+            # succeeds) and clobber the real failure code, making
+            # the diagnostic line below print rc=0 even when
+            # `make` returned non-zero. We also avoid the
+            # `if CMD; then ... fi` pattern: in bash, an `if`
+            # compound with no `else` clause reports a zero exit
+            # status when the condition is false, so $? after
+            # `fi` is 0 regardless of CMD — verified locally with
+            # a fake_make that returns 42. The straight
+            # `CMD; RC=$?; if [ "$RC" -eq 0 ]` form is the only
+            # one that preserves make's real exit code here.
+            make e2e-network-fast
+            RC=$?
+            END_TS=$(date +%s)
+            if [ "$RC" -eq 0 ]; then
               echo "Attempt $attempt succeeded in $((END_TS - START_TS))s"
               exit 0
             fi
-            END_TS=$(date +%s)
-            RC=$?
             echo "Attempt $attempt failed with rc=$RC after $((END_TS - START_TS))s"
             if [ $attempt -lt $MAX_ATTEMPTS ]; then
               echo "Sleeping 60s before next attempt (backoff to let upstream recover)..."
@@ -246,13 +284,14 @@ jobs:
       - name: Change to executable binary
         run: chmod +x target/release/moagan
 
-      - name: T3 · e2e-network (explore, real LLM, retry x4)
+      - name: T3 · e2e-network (explore, real LLM, 3 attempts)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: explore
           MOAGAN_SMOKE_LONG_DISCOVER: ${{ inputs.skip_long_discover == 'true' && '1' || '0' }}
         run: |
+          # Rationale for MAX_ATTEMPTS=3: see the fast job above.
           MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"
@@ -260,13 +299,16 @@ jobs:
             echo "Started at $(date -u +%H:%M:%SZ)"
             echo "================================================================"
             START_TS=$(date +%s)
-            if make e2e-network-explore; then
-              END_TS=$(date +%s)
+            # `make` first, `RC=$?` immediately after, then END_TS:
+            # see the fast job above for why this exact order and why
+            # the `if CMD; then ... fi` form must not be used here.
+            make e2e-network-explore
+            RC=$?
+            END_TS=$(date +%s)
+            if [ "$RC" -eq 0 ]; then
               echo "Attempt $attempt succeeded in $((END_TS - START_TS))s"
               exit 0
             fi
-            END_TS=$(date +%s)
-            RC=$?
             echo "Attempt $attempt failed with rc=$RC after $((END_TS - START_TS))s"
             if [ $attempt -lt $MAX_ATTEMPTS ]; then
               echo "Sleeping 60s before next attempt (backoff to let upstream recover)..."
