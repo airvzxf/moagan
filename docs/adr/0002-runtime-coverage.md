@@ -1,6 +1,6 @@
 # ADR 0002 — Runtime coverage for source-level error correlation
 
-> **Status**: Proposed
+> **Status**: Accepted
 > **Date**: 2026-08-18
 > **Deciders**: `airvzxf/moagan` operator
 > **Supersedes**: nothing
@@ -65,12 +65,12 @@ The user has explicitly asked for the first two techniques
 The project will adopt a **two-layer observability upgrade** that
 combines LLVM source-based runtime coverage (layer A, opt-in) with
 `tracing` enriched with `file:line:column` metadata (layer B, always
-on). A new `moagan inspect coverage <run_id>` subcommand closes the
+on). A new `moagan coverage show <run_id>` subcommand closes the
 loop by post-processing the `profraw` files emitted by layer A.
 
 ### A.1 — Layer B: enriched `tracing` subscriber (always on, cost ~0)
 
-Change `init_tracing` in `src/main.rs:21-31` to enable file/line/column
+Change `init_tracing` in `src/main.rs:295` to enable file/line/column
 metadata on the JSON `fmt` layer:
 
 ```rust
@@ -122,28 +122,32 @@ post-mortem story becomes:
 2. Read the `coverage_snapshot` field to find the
    `<run_id>-<seq>.profraw` file that was active at the moment of
    the error.
-3. Run `moagan inspect coverage <run_id> --since-error
-   PROVIDER_ERROR` (or `--phase <phase>`) to dump the lines that were
-   visited in that window.
+3. Run `moagan coverage show <run_id> --since-tag <tag>` (e.g. the
+   phase name or call id stored in the `profraw` filename) to dump
+   the lines that were visited in that window.
 
-### A.4 — New CLI subcommand: `moagan inspect coverage`
+### A.4 — New CLI subcommand: `moagan coverage show`
 
-Add `moagan inspect coverage <run_id>` to `src/cli/inspect.rs`,
-following the existing pattern for `moagan inspect` and
-`moagan telemetry provider`. Sub-options:
+Add `moagan coverage show <run_id>` to `src/cli/coverage_cmd.rs`
+(`CoverageCmd::Show` at `src/cli/coverage_cmd.rs:14-42`), following the
+existing pattern for `moagan inspect` and `moagan telemetry provider`.
+Sub-options:
 
-- `--phase <name>`: filter by phase name (joins against
-  `phases.jsonl.gz`).
-- `--since-error <error_code>`: filter by error code (joins against
-  the same JSONL).
-- `--format {html,text}`: `html` (default) writes
-  `coverage/<run_id>/index.html`; `text` writes a columnar
-  `file:line:count` view to stdout for pipelines.
+- `--since-tag <tag>`: filter the snapshot list to files whose name
+  contains the given tag (case-insensitive). Useful for narrowing to
+  a single phase or call id.
+- `--format {text,html}`: `text` (default) writes a columnar
+  `file:line:count` view to stdout for pipelines; `html` writes a
+  navigable `coverage.html` next to the run dir via `grcov`.
+- `--html-out <path>`: override the path the HTML report is written
+  to (defaults to `<run_dir>/coverage.html`). Ignored when the format
+  is `text`.
 
 The subcommand shells out to `grcov` (or `llvm-profdata merge` +
 `llvm-cov show` as a fallback) via `std::process::Command` — neither
 is added as a crate dependency. When neither tool is on `PATH` the
-subcommand fails with a clear, copy-pasteable error message.
+HTML view fails with a clean error; the text view always works (it
+just prints a "not instrumented" hint when the report is empty).
 
 ### A.5 — Default-off, no release binary impact
 
@@ -206,7 +210,7 @@ the new `src/coverage/` module is a no-op stub when
 |---|---|---|
 | `coverage` feature flag | `Cargo.toml` `[features]` | existing `check-no-forbidden-crates.sh` (no change; `coverage` is not on the no-go list) |
 | `moagan::coverage` module | `src/coverage/mod.rs` | `make build` (T1) + `make test-ci` (T2) |
-| `moagan inspect coverage` | `src/cli/inspect.rs` | `make test-ci` integration test |
+| `moagan coverage show` | `src/cli/coverage_cmd.rs:14-42` | `make test-ci` integration test |
 | JSONL `coverage_snapshot` field | `src/telemetry/mod.rs` | `serde(default)` for backwards compat |
 | ADR 0002 | `docs/adr/0002-runtime-coverage.md` | this document |
 

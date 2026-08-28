@@ -72,13 +72,14 @@ when invoked with `cargo test -- --ignored` or `cargo test <name> -- --ignored`.
 
 | Test | File | Reason |
 |---|---|---|
-| `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:396` | Mutates process-wide RLIMIT_NPROC (side-effects other tests) |
-| `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:441` | Mutates process-wide RLIMIT_AS (side-effects other tests) |
+| `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:465` | Mutates process-wide RLIMIT_NPROC (side-effects other tests) |
+| `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:510` | Mutates process-wide RLIMIT_AS (side-effects other tests) |
 | `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); exercised by `make e2e-network` |
 | `discover_opencode_writes_four_subdirs` | `tests/integration_discover_opencode.rs:32` | Requires `OPENCODE_API_KEY`; only runs locally / in `e2e-network` |
 | `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:32` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
+| `discover_minimax_writes_four_subdirs` | `tests/integration_discover_minimax.rs:40` | Requires `MINIMAX_API_KEY`; only runs locally / in `e2e-network` |
 
-Total: **5 tests marked `#[ignore]`**.
+Total: **6 tests marked `#[ignore]`**.
 
 Note: these are NOT included in `cargo test --skip`. To run them:
 
@@ -184,18 +185,18 @@ PASS to keep totals consistent:
 
 Total: 14 of the 37 card80 tests have a partial-skip path.
 
-### 6d. `OPENCODE_GO_API_KEY` → 8 discover_oc tests (PR #460)
+### 6d. `OPENCODE_API_KEY` → 8 discover_oc tests (PR #460)
 
 ```bash
-if [[ -n "${OPENCODE_GO_API_KEY:-}" ]]; then
+if [[ -n "${OPENCODE_API_KEY:-}" ]]; then
   # 8 run_test calls inside the opencode_go discover block
 else
-  echo "SKIP: opencode_go discovery e2e tests (OPENCODE_GO_API_KEY not present)"
+  echo "SKIP: opencode_go discovery e2e tests (OPENCODE_API_KEY not present)"
 fi
 ```
 
 - **Location:** `scripts/e2e_audit_proxy.sh:490–546` (the
-  `discover_opencode_go` block, conditional on `OPENCODE_GO_API_KEY`).
+  `discover_opencode_go` block, conditional on `OPENCODE_API_KEY`).
 - **Tests:** 8 `run_test` invocations
   (`proxy_e2e_discover_oc_run_id_present`,
   `proxy_e2e_discover_oc_tags_nonempty`,
@@ -273,22 +274,22 @@ check from a clean state.
 
 | Layer | Mechanism | Count | Auto-skipped on CI? |
 |---|---|---|---|
-| 1 | Ruleset required_status_checks | 9 jobs required, 1 not | n/a |
+| 1 | Ruleset required_status_checks | 8 jobs required, 1 not | n/a |
 | 2 | `cargo test --skip` CLI flag | 0 tests | n/a (closed) |
-| 3 | `#[ignore]` Rust attribute | 5 tests | ❌ no (run via `--ignored`) |
+| 3 | `#[ignore]` Rust attribute | 6 tests | ❌ no (run via `--ignored`) |
 | 4 | Source silent-skip (binary on PATH) | 13 tests | ✅ partially (binaries present) |
 | 5 | `ValidationEvidence::skipped()` runtime | 11 sites | n/a (per-artifact) |
 | 6a | `MINIMAX_API_KEY` missing → 46 tests | 46 tests | ❌ no (key present in CI) |
 | 6b | `MOAGAN_SMOKE_LONG_DISCOVER=1` | 37 tests | ❌ no (env var unset) |
 | 6c | card80 partial-skips on timeout | 14 conditional | conditional |
-| 6d | `OPENCODE_GO_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
+| 6d | `OPENCODE_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
 | 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
 | 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.
 **Total tests in conditional skip code paths:** 78
-(46 `MINIMAX_API_KEY` + 37 card80 + 8 OPENCODE_GO + 8 DEEPSEEK
+(46 `MINIMAX_API_KEY` + 37 card80 + 8 OPENCODE + 8 DEEPSEEK
 + 1 gauntlet `MINIMAX_API_KEY` re-check; the 14 card80 partial-skips
 in 6c are counted inside the 37 card80 figure, not on top of it).
 
@@ -350,42 +351,10 @@ in 6c are counted inside the 37 card80 figure, not on top of it).
 
 ### Removed skips (Aug 2026 cleanup)
 
-The 8 entries in Layer 2 were all closed in a single cleanup
-session (#240, #242, #244, #246, #248). The pattern that worked:
-
-1. **Diagnose** the actual root cause (NOT just patch the test or
-   mute the symptom). Three of the four PRs discovered the
-   orchestrator's predicted root cause was wrong:
-
-   - The mutex fix (PR #238) was incomplete — the `ENV_LOCK` only
-     wrapped `set_var` / `remove_var`, not the asserts in between
-     (PR #246 discovered this and folded the two `with_lock`
-     blocks into one that covers the entire test body).
-   - The "prewarm cargo" diagnosis was correct, but the
-     implementation had to thread `CARGO_HOME` through the
-     sandbox env (PR #242 discovered the sandbox overrides
-     `HOME` per-invocation, which silently shadowed the
-     prewarmed target dir).
-   - The redaction regex catches 16-digit UUIDs and a few
-     credit-card-shaped decimals; the audit verify was
-     in-process while the SQLite cross-check was not
-     (PR #244 discovered the divergence path).
-
-2. **Fix the source** in the test setup (helper, validator
-   fixture, or call pattern), not the test assertion. The 8
-   fixes are split roughly 50/50 between new helpers
-   (`DiffArgs::home_override`, the `CARGO_HOME` `OnceLock`) and
-   pattern rewrites (the merged `ENV_LOCK` scope, the
-   in-process verify bypass).
-
-3. **Re-validate** with a stress run (20+ invocations under
-   `--test-threads=4`) before removing from the skip list. None
-   of the four PRs removed the skip in the same commit as the
-   fix; they landed the fix first, watched the skipped test pass
-   for several CI runs, then landed a follow-up commit removing
-   the skip entry.
-
-4. **Remove from all 3 skip sites** (Makefile + ci.yml × 2
-   jobs). PR squash-merges that "touched the file but did not
-   delete the line" bit us twice — always `grep -rn -- --skip`
-   after the merge lands.
+All 8 entries in Layer 2 were closed by PRs #240, #242, #244, #246,
+#248. The winning pattern: diagnose the actual root cause, fix the
+test setup (helper, fixture, or call pattern) rather than the test
+assertion, stress-run with `--test-threads=4`, then remove from all
+three skip sites (Makefile + ci.yml × 2 jobs) and `grep -rn -- --skip`
+to confirm no stale references remain. Layer 2 has been empty since
+2026-08-07.

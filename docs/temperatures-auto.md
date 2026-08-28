@@ -8,7 +8,7 @@ return HTTP 400 + `temperature must be between 0 and 1` otherwise. Hard-coding
 a global cap is the same brittleness the [`max_tokens` auto-probe](max-tokens-auto.md)
 removes — a relay can tighten the cap without warning and the next run breaks.
 
-`moagan` (v0.9.11+) probes each `(provider, model)` pair at first startup
+`moagan` (v0.12.14+) probes each `(provider, model)` pair at first startup
 to discover the discrete set of supported sampling temperatures. The result
 is cached at `~/.local/share/moagan/temperatures_auto.toml` and consulted on
 every subsequent call: out-of-range requests are rewritten to the nearest
@@ -26,10 +26,10 @@ The probe tests 21 candidate temperatures per `(provider, model)`:
 
 Spans `0.0` (deterministic decoding) through `2.0` (the OpenAI-compat
 baseline) in `0.1` increments. The canonical constant lives at
-`TEMPERATURE_PROBE_VALUES` in `src/llm/temperature_probe.rs:61`.
+`TEMPERATURE_PROBE_VALUES` in `src/llm/temperature_probe.rs:90`.
 
 Each candidate is tried in isolation with a tiny deterministic payload
-(`"Reply with the single character: 1"`, `max_tokens = 16`, 5 s per-probe
+(`"Reply with the single character: 1"`, `max_tokens = 1024`, 15 s per-probe
 HTTP timeout) and classified by HTTP status plus body fingerprint:
 
 | Outcome | Meaning |
@@ -76,11 +76,10 @@ prohibitive or when the provider cannot be reached from the test runner:
 - **Smoke tests against a real provider.** Every CI run would otherwise
   pay 21 sequential probes per fresh model. `scripts/smoke.sh`,
   `scripts/smoke_multimodel.sh`, and `scripts/e2e_audit_proxy.sh` all
-  disable the temperature auto-probe for exactly this reason (the
-  variable name mirrors the `max_tokens` auto-probe:
-  `MOAGAN_TEMPERATURE_AUTO=false` — see `src/llm/temperature_probe.rs`
-  for the exact env var name your build accepts; older builds may use
-  the same knob via `config.toml`).
+  pin every cache entry with `auto = false` (or delete the cache
+  file) for exactly this reason — there is no env-var toggle for the
+  runtime probe, so the script-level disable is purely a hand-edit of
+  `temperatures_auto.toml`.
 - **Sandboxed / offline runs.** The probe needs at least one successful
   round-trip; if the network is locked down the probe exits cleanly
   with the cached value (or an empty set if there is no cache).
@@ -95,7 +94,7 @@ entry with `auto = false`.
 ## How the runtime uses the cached set
 
 Every LLM dispatch goes through `RunContext::dispatch_to_provider`
-(`src/phases/phase.rs:1016`). When the runtime carries a
+(`src/phases/phase.rs:1072`). When the runtime carries a
 `TemperatureTable` (it always does after the v0.9.11 wiring), the gate
 runs **before** the capability resolver:
 
@@ -124,8 +123,8 @@ ascending, the tiebreak resolves to the lower temperature on a half-step
 tie and to the higher on a non-half-step tie.
 
 The discovery pipeline has a parallel rewriter in
-`src/discovery/coordinator.rs:520`: every per-provider temperature
-profile in the matrix is rewritten against the auto-discovered set so
+`src/discovery/matrix.rs:451` (`ExplorationMatrix::rewrite_temperatures_to_supported`):
+every per-provider temperature profile in the matrix is rewritten against the auto-discovered set so
 the per-cell fan-out and the cache-key cardinality reflect the
 post-clamp reality (a `0.7` that gets clamped to `0.5` no longer counts
 as a distinct cell from the explicit `0.5` in the same profile).

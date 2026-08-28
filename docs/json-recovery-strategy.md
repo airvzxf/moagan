@@ -1,6 +1,6 @@
 # JSON recovery strategy — per-model enum
 
-> **Status**: shipped in PR #1 (this branch). The parse chain in
+> **Status**: shipped in PR #360. The parse chain in
 > `src/llm/json_extractor.rs` and the dispatcher retry loop in
 > `src/phases/phase.rs::call_with_retry_parse` both consult the
 > per-model table to decide which recovery strategy to apply.
@@ -77,7 +77,7 @@ then:
 
 ## How the OpenAI-compat body builder uses the table
 
-`llm/openai_compat.rs::build_chat_request` consults
+`llm/openai_compatible.rs::build_chat_request` consults
 `json_strategy::strategy_for(&self.model, None)` and, when the
 strategy is `PromptPrefill`, appends an assistant prefill of `{`
 after the user turn so the model sees
@@ -124,7 +124,7 @@ pin this contract.
   the retry-loop behaviour for each strategy.
 - 9 wrapper tests in `src/llm/json_extractor.rs::tests`
   covering `parse_with_strategy` for each variant.
-- 3 prefill-injection tests in `src/llm/openai_compat.rs::tests`
+- 3 prefill-injection tests in `src/llm/openai_compatible.rs::tests`
   covering the wire shape on PromptPrefill, non-prefill models,
   and caller-supplied `extra_messages`.
 - 3 cache-key tests in `src/llm/wire.rs::tests` covering the

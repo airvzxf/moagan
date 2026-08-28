@@ -9,7 +9,7 @@ each check lives at the moment it does. Read it once, then trust it.
 |---|---|---|---|---|
 | **T0** | <2 s | pre-commit (parallel) | `make fmt-check`, `make guard-deps` | Cheap checks that catch 80 % of "obviously wrong" commits. Fail = don't waste anyone's time. |
 | **T1** | 30–90 s | pre-commit (parallel) | `make lint` (`cargo clippy -D warnings`), `make build` | Real lint + the binary actually compiles. Run in parallel since they share no state. |
-| **T2** | 1–5 min | pre-push | `make test-ci` (`cargo test --all-targets`, skips known-flaky `audit_e2e` + `cli::diff::*`) | The 21 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
+| **T2** | 1–5 min | pre-push | `make test-ci` (`cargo test --all-targets`, skips known-flaky `audit_e2e`) | The 58 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
 | **T3** | 5–30 min | CI on PR + post-merge | `make smoke` + `make e2e` (PR); `make e2e-network` (post-merge, fast+explore rows) | Full gauntlet: static smokes, local e2e against the mock pipeline, and the real-LLM e2e (only on `main`, see below). Heavy card80 + 14-model opencode_go sweep + per-provider `--ignored` discovery live in dedicated manual-only workflows. |
 
 Plus one fast orthogonal check on the commit message itself:
@@ -44,14 +44,14 @@ Plus one fast orthogonal check on the commit message itself:
                                   │
                                   ▼
    ┌─────────────────────────────────────────────────────────────────────┐
-   │  GitHub Actions — ci.yml (9 parallel jobs)                         │
+   │  GitHub Actions — ci.yml (8 required + 1 informational)          │
    │  ───────────────────                                              │
    │                                                                   │
    │  round 1 (no deps, max wall-clock):                               │
-   │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
-   │    │ fmt-check   │  │ guard-deps   │  │ clippy     │  │ build  │ │
-   │    │ (T0) ~1s    │  │ (T0) ~1s     │  │ (T1) ~60s  │  │(T1)~60s│ │
-   │    └─────────────┘  └──────────────┘  └────────────┘  └────────┘ │
+   │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐               │
+   │    │ fmt-check   │  │ guard-deps   │  │ clippy     │               │
+   │    │ (T0) ~1s    │  │ (T0) ~1s     │  │ (T1) ~60s  │               │
+   │    └─────────────┘  └──────────────┘  └────────────┘               │
    │                                                                   │
    │  round 2 (depend on build, no artifact sharing):                 │
    │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
@@ -117,11 +117,10 @@ Plus one fast orthogonal check on the commit message itself:
    │  GitHub ruleset `protect-main` (id 19743104)                      │
    │  ──────────────────────────────────────────                       │
    │                                                                   │
-   │  Required checks before merge (all 9 must be green):             │
+   │  Required checks before merge (all 8 must be green):             │
    │    ✓ fmt-check                                                    │
    │    ✓ guard-deps                                                   │
    │    ✓ clippy                                                       │
-   │    ✓ build                                                        │
    │    ✓ test-lib                                                     │
    │    ✓ test-tests                                                   │
    │    ✓ test-doc                                                     │
@@ -146,9 +145,9 @@ checks from commit to push, not by removing them.
   context-switch anyway while CI runs.
 - **CI is the audit**, not the bottleneck. It re-runs everything in a clean
   environment so a corrupted local cache can never mask a real regression.
-- **Parallelism inside CI** is the second layer of speedup. The 9 jobs run
-  concurrently in two rounds; total wall-clock is ~4 min cold vs. ~5-8 min
-  sequentially.
+- **Parallelism inside CI** is the second layer of speedup. The 8 required
+  jobs run concurrently in two rounds; total wall-clock is ~4 min cold vs.
+  ~5-8 min sequentially.
 
 ## Escape hatches
 
@@ -201,7 +200,7 @@ $ head -1 .git/hooks/pre-commit
 | Local validator aggregator | [`scripts/gauntlet.sh`](../scripts/gauntlet.sh) (`--fast`, `--skip-smoke`, …) |
 | Makefile targets (`validate`, `fmt-check`, `lint`, `test-ci`, `smoke`, `e2e`, `e2e-network`) | [`Makefile`](../Makefile) |
 | Composite action (checkout + toolchain + cache) | [`.github/actions/rust-setup/action.yml`](../.github/actions/rust-setup/action.yml) |
-| CI workflow (9 parallel jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
+| CI workflow (8 required + 1 informational job) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 | CI real-LLM e2e (main only, fast+explore auto) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
 | CI real-LLM e2e (manual-only card80) | [`.github/workflows/e2e-network-card80.yml`](../.github/workflows/e2e-network-card80.yml) |
 | CI `--ignored` test runs (post-merge) | [`.github/workflows/test-ignored-{minimax,deepseek,opencode}.yml`](../.github/workflows/) |
