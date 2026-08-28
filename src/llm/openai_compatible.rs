@@ -890,7 +890,7 @@ mod tests {
             "deepseek-v4-pro",
             "kimi-k3",
         ] {
-            let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", model);
+            let p = provider_with_model("opencode", "https://opencode.ai/zen/go/v1", model);
             let body = p.build_chat_request(&json_request(crate::llm::Role::Route, model));
             let value = serde_json::to_value(&body).unwrap();
             assert!(
@@ -918,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_go_request_omits_response_format_for_opted_out_models() {
+    fn opencode_request_omits_response_format_for_opted_out_models() {
         // Pin the OpenCode Go contract: even when role_requires_json
         // is true (Route), the chat-completions body for an opted-out
         // model must NOT carry the `response_format` field so the
@@ -1004,12 +1004,12 @@ mod tests {
     }
 
     #[test]
-    fn opencode_go_request_keeps_response_format_for_non_opted_out_models() {
+    fn opencode_request_keeps_response_format_for_non_opted_out_models() {
         // The flip side of the previous test: an OpenCode Go model
         // NOT on the opt-out list (mimo-v2.5, deepseek-v4-flash, hy3)
         // still gets response_format = json_object for JSON roles.
         for model in ["mimo-v2.5", "deepseek-v4-flash", "hy3"] {
-            let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", model);
+            let p = provider_with_model("opencode", "https://opencode.ai/zen/go/v1", model);
             let body = p.build_chat_request(&json_request(crate::llm::Role::Route, model));
             let value = serde_json::to_value(&body).unwrap();
             assert_eq!(
@@ -1055,7 +1055,7 @@ mod tests {
     /// behaviour for non-deepseek models is bit-identical.
     #[test]
     fn non_prefill_models_skip_assistant_message() {
-        let p = provider_with_model("opencode_go", "https://opencode.ai/zen/go/v1", "kimi-k3");
+        let p = provider_with_model("opencode", "https://opencode.ai/zen/go/v1", "kimi-k3");
         let body = p.build_chat_request(&json_request(crate::llm::Role::Route, "kimi-k3"));
         let value = serde_json::to_value(&body).unwrap();
         let messages = value
@@ -1103,7 +1103,7 @@ mod tests {
         );
     }
 
-    /// PR-fix (opencode_go hard cap): when the dispatcher wires an
+    /// PR-fix (opencode hard cap): when the dispatcher wires an
     /// `OpenAICompatibleProvider` for an OpenCode Go model
     /// (`new_with_kind_cap(_, _, Some(u32::MAX))`)
     /// the wire body must clamp `request.max_tokens` to 16_384 even
@@ -1113,7 +1113,7 @@ mod tests {
     /// defence at the integration boundary (`send` + recorded
     /// request body).
     #[test]
-    fn opencode_go_backed_provider_clamps_max_tokens_to_hard_cap() {
+    fn opencode_backed_provider_clamps_max_tokens_to_hard_cap() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let rt = tokio::runtime::Runtime::new().unwrap();

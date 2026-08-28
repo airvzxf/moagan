@@ -668,7 +668,7 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
 ///
 /// PR-04b-1 (A-3): the `provider_section` argument is the section
 /// name from the operator's `config.toml` (e.g. `minimax`,
-/// `opencode-go`, `deepseek`). It is written to
+/// `opencode`, `deepseek`). It is written to
 /// `ResolvedModelConfig::section` so the per-section API-key
 /// lookup (`MINIMAX_API_KEY` etc.) and per-section caps
 /// (`MINIMAX_MAX_TOKENS_CAP`, `DEEPSEEK_MAX_TOKENS_CAP`) resolve
@@ -772,11 +772,11 @@ mod tests {
         let (p, m) = parse_provider_model("minimax:MiniMax-M3").unwrap();
         assert_eq!(p, "minimax");
         assert_eq!(m, "MiniMax-M3");
-        // Multi-segment model names (e.g. `opencode-go:kimi-k3`)
+        // Multi-segment model names (e.g. `opencode:kimi-k3`)
         // are preserved verbatim — the model half is not split on
         // any internal separator.
-        let (p, m) = parse_provider_model("opencode-go:kimi-k3").unwrap();
-        assert_eq!(p, "opencode-go");
+        let (p, m) = parse_provider_model("opencode:kimi-k3").unwrap();
+        assert_eq!(p, "opencode");
         assert_eq!(m, "kimi-k3");
     }
 

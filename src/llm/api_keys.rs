@@ -50,7 +50,7 @@ fn env_var_value(env_var: &str) -> Option<String> {
 }
 
 /// Look up the API key for `kind` (e.g. `"minimax"`, `"deepseek"`,
-/// `"opencode_go"`).
+/// `"opencode"`).
 ///
 /// Returns:
 ///

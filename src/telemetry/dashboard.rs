@@ -1343,7 +1343,7 @@ mod tests {
             "b2",
             b,
             "rank",
-            "opencode_go",
+            "opencode",
             "gpt-4o",
             Some(200),
             300,
@@ -1363,10 +1363,10 @@ mod tests {
         assert_eq!(v["diff"]["min_duration_secs"], 100);
         assert_eq!(v["diff"]["max_error_calls"], 1);
         // Run A: 100+50=150 (minimax). Run B: 200+80=280
-        // (minimax) + 300+120=420 (opencode_go). minimax union
+        // (minimax) + 300+120=420 (opencode). minimax union
         // = 150 + 280 = 430.
         assert_eq!(v["diff"]["provider_token_total"]["minimax"], 430);
-        assert_eq!(v["diff"]["provider_token_total"]["opencode_go"], 420);
+        assert_eq!(v["diff"]["provider_token_total"]["opencode"], 420);
     }
 
     /// /api/compare-runs returns 400 when fewer than two ids
@@ -1533,7 +1533,7 @@ mod tests {
             "o1",
             run,
             "intake",
-            "opencode_go",
+            "opencode",
             "gpt-4o",
             Some(200),
             20,

@@ -235,7 +235,7 @@ impl Provider for DeepSeekProvider {
     /// `Some(DEEPSEEK_MAX_TOKENS_CAP)`, so the probe short-circuits
     /// at `2^19 = 524_288` instead of probing values DeepSeek
     /// rejects with HTTP 400. Mirrors the `u32::MAX`
-    /// delegation on `OpenCodeGoProvider`.
+    /// delegation on the opencode Anthropic-compatible provider.
     fn max_tokens_probe_ceiling(&self) -> u32 {
         self.0.max_tokens_probe_ceiling()
     }

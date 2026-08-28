@@ -1580,7 +1580,7 @@ pub struct ProviderUsageRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WindowUsageRow {
     /// Provider name as recorded on the `calls` row (e.g.
-    /// `"minimax"`, `"opencode_go"`).
+    /// `"minimax"`, `"opencode"`).
     pub provider: String,
     /// Model name as recorded on the `calls` row.
     pub model: String,
@@ -5383,10 +5383,10 @@ mod tests {
             now - 30,
             None,
         );
-        // One call on (opencode_go, deepseek-v4-flash): 80+20 = 100 tokens.
+        // One call on (opencode, deepseek-v4-flash): 80+20 = 100 tokens.
         seed_call(
             &db,
-            "opencode_go",
+            "opencode",
             "deepseek-v4-flash",
             80,
             20,
@@ -5408,7 +5408,7 @@ mod tests {
         assert_eq!(first.error_count, 0);
 
         let second = &rows[1];
-        assert_eq!(second.provider, "opencode_go");
+        assert_eq!(second.provider, "opencode");
         assert_eq!(second.model, "deepseek-v4-flash");
         assert_eq!(second.call_count, 1);
         assert_eq!(second.total_tokens, 100);
@@ -5923,7 +5923,7 @@ mod tests {
             21,
             Some("server error"),
         );
-        // Run B: minimax + opencode_go, 3 calls, all ok.
+        // Run B: minimax + opencode, 3 calls, all ok.
         seed_cross_call(
             &db,
             "b1",
@@ -5945,7 +5945,7 @@ mod tests {
             "b2",
             b,
             "rank",
-            "opencode_go",
+            "opencode",
             "gpt-4o",
             Some(200),
             300,
@@ -5961,7 +5961,7 @@ mod tests {
             "b3",
             b,
             "rank",
-            "opencode_go",
+            "opencode",
             "gpt-4o",
             Some(200),
             100,
@@ -5996,10 +5996,10 @@ mod tests {
         assert_eq!(entry_b.output_tokens, 240);
         assert_eq!(
             entry_b.providers,
-            vec!["minimax".to_string(), "opencode_go".to_string()]
+            vec!["minimax".to_string(), "opencode".to_string()]
         );
         assert_eq!(entry_b.tokens_per_provider.get("minimax"), Some(&280));
-        assert_eq!(entry_b.tokens_per_provider.get("opencode_go"), Some(&560));
+        assert_eq!(entry_b.tokens_per_provider.get("opencode"), Some(&560));
 
         // Only `minimax` is shared across both runs.
         assert_eq!(resp.shared_providers, vec!["minimax".to_string()]);
@@ -6010,12 +6010,9 @@ mod tests {
         assert_eq!(resp.diff.min_duration_secs, 100);
         assert_eq!(resp.diff.max_error_calls, 1);
         assert_eq!(resp.diff.provider_token_total.get("minimax"), Some(&430));
-        assert_eq!(
-            resp.diff.provider_token_total.get("opencode_go"),
-            Some(&560)
-        );
+        assert_eq!(resp.diff.provider_token_total.get("opencode"), Some(&560));
         // Provider error rates: minimax = 1/3 errors across
-        // the union (a2 errored, b1/b3 did not), opencode_go
+        // the union (a2 errored, b1/b3 did not), opencode
         // = 0/2.
         let minimax_rate = resp.diff.provider_error_rates.get("minimax").unwrap();
         assert!(
@@ -6023,7 +6020,7 @@ mod tests {
             "minimax_rate={minimax_rate}"
         );
         assert_eq!(
-            resp.diff.provider_error_rates.get("opencode_go").unwrap(),
+            resp.diff.provider_error_rates.get("opencode").unwrap(),
             &0.0
         );
     }
@@ -6209,7 +6206,7 @@ mod tests {
 
     /// The `provider` filter narrows the per-call side AND the
     /// `total_runs` count to the runs that have at least one
-    /// matching call. A run that only touched `opencode_go`
+    /// matching call. A run that only touched `opencode`
     /// must not appear in the totals when the caller asks
     /// for `provider="minimax"`.
     #[test]
@@ -6244,7 +6241,7 @@ mod tests {
             "o1",
             opencode_run,
             "intake",
-            "opencode_go",
+            "opencode",
             "gpt-4o",
             Some(200),
             20,

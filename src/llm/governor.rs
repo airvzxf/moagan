@@ -619,7 +619,7 @@ mod tests {
         let reg = GovernorRegistry::new();
         let a = reg.governor_for("minimax", Role::Tagger);
         let b = reg.governor_for("minimax", Role::FacetDeriver);
-        let c = reg.governor_for("opencode_go", Role::Tagger);
+        let c = reg.governor_for("opencode", Role::Tagger);
         assert!(!Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
     }
