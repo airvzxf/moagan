@@ -12,8 +12,9 @@ purpose. Use this when:
 
 The ruleset protects `main` via `gh api /repos/airvzxf/moagan/rulesets/19743104`.
 
-It has **5 rules** (`deletion`, `non_fast_forward`, `pull_request`,
-`required_linear_history`, `required_status_checks`). None of them "skip"
+It has **6 rules** (`deletion`, `non_fast_forward`, `pull_request`,
+`required_linear_history`, `required_status_checks`,
+`required_signatures`). None of them "skip"
 a check per se; they require what to pass.
 
 The closest thing to a skip is **`required_status_checks.contexts`** — the
@@ -109,8 +110,9 @@ them).
 | `sql_validator` | `sqlite_engine_passes_on_valid_select`, `sqlite_engine_fails_on_broken_select` | `sqlite3` |
 
 Pattern (from `src/validators/rust_validator.rs:558`, the first
-silent-skip site; the same shape repeats at :603 for `python3`/`tsc`
-style validators):
+silent-skip site for `cargo`; the same shape repeats at
+`src/validators/python_validator.rs:235` for `python3` and at
+`src/validators/typescript_validator.rs:241` for `tsc`):
 
 ```rust
 if std::process::Command::new("cargo").arg("--version").output().is_err() {
@@ -222,11 +224,12 @@ fi
   moved to the manual-only `e2e-network-discover-opencode.yml` /
   `e2e-network-discover-opencode-models.yml` workflows). On
   `make e2e-network` runs, all 8 tests print a single `SKIP` line
-  because the section is gated on `MOAGAN_SMOKE_SECTION`; only the
-  manual discover workflows actually exercise the key. Pair this
-  block with `Layer 3`'s `discover_opencode_writes_four_subdirs`
-  `#[ignore]` integration test, which is also gated on the same
-  secret.
+  because the env var `OPENCODE_API_KEY` is not set in the
+  default local-dev shell; only the manual discover workflows
+  (which set the key in their own `secrets:` block) actually
+  exercise it. Pair this block with `Layer 3`'s
+  `discover_opencode_writes_four_subdirs` `#[ignore]` integration
+  test, which is also gated on the same secret.
 
 ### 6e. `DEEPSEEK_API_KEY` → 8 discover_ds tests (PR #462)
 
@@ -272,6 +275,29 @@ fi
   Layer 6a (which guards the e2e proxy block in
   `e2e_audit_proxy.sh`) — both gates exist independently.
 
+### 6g. `MOAGAN_SMOKE_SECTION=discover_opencode_models` → 7-model sweep (manual)
+
+```bash
+if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_opencode_models" ]]; then
+  # 7 run_test calls inside the discover_opencode_models block
+else
+  echo "SKIP: 7-model opencode sweep (MOAGAN_SMOKE_SECTION=$MOAGAN_SMOKE_SECTION)"
+fi
+```
+
+- **Location:** `scripts/e2e_audit_proxy.sh:803+` (the
+  `discover_opencode_models` block, conditional on
+  `MOAGAN_SMOKE_SECTION`). Cost ~5 min per model × 7 = ~35 min
+  total.
+- **Tests:** 7 `run_test` invocations mirroring the opencode
+  discover block (one per model: kimi-k2.6, kimi-k2.7-code,
+  kimi-k3, glm-5.1, glm-5.2, hy3, mimo-v2.5-pro).
+- **CI behaviour:** the block is gated on `MOAGAN_SMOKE_SECTION`
+  not on a missing secret, so on a default `make e2e-network` run
+  the block SKIPs unless the operator explicitly passes
+  `MOAGAN_SMOKE_SECTION=discover_opencode_models`. The CI workflow
+  never sets this env var, so the block is dormant in CI.
+
 ## Layer 7 — Lefthook escape hatches (developer-side)
 
 `lefthook.yml` doesn't skip any test by default. It offers three
@@ -302,6 +328,7 @@ check from a clean state.
 | 6d | `OPENCODE_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
 | 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
 | 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
+| 6g | `MOAGAN_SMOKE_SECTION=discover_opencode_models` (manual) | 7 tests | ❌ no (env var never set in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.

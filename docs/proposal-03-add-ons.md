@@ -63,8 +63,10 @@ El método seguido en este barrido fue:
 >   `1491d7f`; refinado en
 >   [#401](https://github.com/airvzxf/moagan/pull/401), squash
 >   `a9682d9`). Reemplaza los `*_MAX_TOKENS_CAP` hardcoded con
->   probe en `src/llm/probe.rs` (619 líneas) + cache en
->   `src/llm/probe_table.rs` (556 líneas). Mock provider skip +
+>   probe en `src/llm/probe.rs` (2256 líneas en v0.12.14; era
+>   619 en el momento del PR) + cache en
+>   `src/llm/probe_table.rs` (618 líneas en v0.12.14; era
+>   556 en el momento del PR). Mock provider skip +
 >   `DEFAULT_MAX_TOKENS = 1_000_000`. Documentación en
 >   `docs/max-tokens-auto.md`.
 

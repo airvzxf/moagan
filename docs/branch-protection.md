@@ -51,14 +51,6 @@ The classic branch-protection endpoint returns HTTP 404
 (`/branches/main/protection`) — that endpoint is deprecated in favour of
 rulesets. Don't try to apply rules there.
 
-## What we add
-
-A single new rule to the existing ruleset:
-
-| Rule | Value | Why |
-|---|---|---|
-| `required_status_checks` | `strict: true`, 8 contexts: `fmt-check`, `guard-deps`, `clippy`, `test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e` | Each of the 8 parallel jobs in `.github/workflows/ci.yml` must be green before merge. `strict: true` forces the PR to be up to date with `main` first. The `T1 · build` job that used to be in this list was removed in PR #397: the consumers (`test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e`) do their own incremental `cargo build` via the Swatinem/rust-cache `target/` cache, so the shared-artifact handoff was redundant. |
-
 ## Job IDs vs display names
 
 The ruleset `required_status_checks` rule uses the human-readable
@@ -234,8 +226,8 @@ Re-run the GET-modify-PUT cycle whenever:
   they are case-sensitive and are the `name:` field of the job, not the
   `jobs.<id>` key; see [Job IDs vs display names](#job-ids-vs-display-names)).
 - You move from solo to team (set `required_approving_review_count > 0` on
-  the `pull_request` rule, and flip `require_code_owner_review: true` once
-  co-maintainers are added to `.github/CODEOWNERS`).
+  the `pull_request` rule; `require_code_owner_review` is already `true`
+  on the ruleset, see line 42 above).
 - `.github/CODEOWNERS` is added or its paths change — the ruleset
   `pull_request` rule must be re-PUT to toggle
   `require_code_owner_review` accordingly (see [Optional hardening](#optional-hardeningskip-already-applied--kept-here-for-reference) below).

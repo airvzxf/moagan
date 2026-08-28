@@ -210,13 +210,13 @@ A blanket prohibition would have foreclosed legitimate uses:
 ## Appendix B — Cross-references back to the catalogue
 
 - `petgraph`: `proposal-03-add-ons.md §D.2` (T18-06 §0,
-  T16-09 §7.2, T07-10 §1217). Note §D.3 specifies *"petgraph se
-  usa como opcional; por defecto T01-06 mantiene su phases/
-  vector (DAG solo en deep)"*.
+  T16-09 §7.2, T07-10 §1217). The §D.2 crates table specifies
+  *"petgraph se usa como opcional; por defecto T01-06 mantiene su
+  phases/ vector (DAG solo en deep)"*.
 - `comfy-table`: `proposal-03-add-ons.md §D.14.23`
   (T12-09 §6.2; T20-06 §6.3).
 - `proptest`: `proposal-03-add-ons.md §D.18.2` (T00-05 D20).
-  Pre-existing rationale note in `proposal-02-rust.md:1597-1599`:
+  Pre-existing rationale note in `proposal-02-rust.md:1611-1614`:
   *"proptest no se añade como dep — los invariantes de la
   perturbación (clip, monotonicidad de sigma, fracciones suman 1.0)
   están cubiertos por tests unitarios con seeds fijos."* — this ADR

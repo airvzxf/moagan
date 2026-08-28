@@ -90,8 +90,10 @@ Plus one fast orthogonal check on the commit message itself:
    │                                                                   │
    │  Manual-only siblings (workflow_dispatch, no auto on main):       │
    │    - e2e-network-card80.yml              ~25 min, MiniMax card80   │
-   │    - test-ignored-deepseek.yml           stub (budget exhausted)  │
-   │    - test-ignored-opencode.yml          active on manual dispatch │
+   │    - test-ignored-deepseek.yml           workflow_dispatch only    │
+   │    - test-ignored-opencode.yml           workflow_dispatch only    │
+   │                                                                   │
+   │  Post-merge auto-trigger siblings (push to main, not a merge gate): │
    │    - test-ignored-minimax.yml            ~? min, real --ignored run│
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘

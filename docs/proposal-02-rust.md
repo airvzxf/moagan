@@ -204,13 +204,27 @@ moagan/
 
 ### 0.3. Dependencias pin
 
+> **Estado (2026-08-28):** §0.3 describe el `Cargo.toml` pin tal
+> como estaba cuando T01-06 se congeló (synthesis_date 2026-07-25).
+> El pin vivo en `Cargo.toml` ha divergido significativamente —
+> la versión actual es **0.12.14** (no 0.4.0), la licencia es
+> **AGPL-3.0-or-later** (no MIT/Apache-2.0), y se han añadido/
+> quitado varias dependencias (rustls en lugar de native-tls, r2d2
+> + rusqlite en lugar de sqlx, etc.). **Esta sección se conserva
+> como referencia histórica del spec original; no refleja la
+> implementación actual.** El pin vivo está en `Cargo.toml` (ver
+> también `AGENTS.md` §"Differentiated allow-list" para la
+> política de crates admitidos).
+
 ```toml
 [package]
 name = "moagan"
-version = "0.4.0"
+version = "0.4.0"      # historical: T01-06 v0.4 spec time
+                       # current:  0.12.14 (see Cargo.toml)
 edition = "2024"
 rust-version = "1.97.1"
-license = "MIT OR Apache-2.0"
+license = "MIT OR Apache-2.0"  # historical: T01-06 v0.4 spec time
+                                # current:  AGPL-3.0-or-later (see Cargo.toml)
 
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }
@@ -2733,11 +2747,11 @@ Las tests usan `MockProvider` en lugar de HTTP real. `wiremock` está disponible
 ### 15.1. Registro
 
 ```rust
-pub struct ProviderRegistry {
+pub struct ProviderPool {
     by_name: HashMap<String, Arc<dyn Provider>>,
 }
 
-impl ProviderRegistry {
+impl ProviderPool {
     pub fn from_config(cfg: &Config) -> Result<Self> {
         let mut r = Self { by_name: HashMap::new() };
         for (name, spec) in &cfg.providers {
@@ -4024,7 +4038,7 @@ fn main() -> Result<()> {
 | Hash de input | `CallKey::hash` |
 | LLM cache | `llm::cache` |
 | Provider trait | `llm::provider::Provider` |
-| Multi-provider | `ProviderRegistry` |
+| Multi-provider | `ProviderPool` (formerly `ProviderRegistry`; renamed in v0.10) |
 | Plan limits | `PlanTracker` |
 | Hibernación | `phases::handle_pause` |
 | Switch mid-run | `moagan continue --switch-provider` |

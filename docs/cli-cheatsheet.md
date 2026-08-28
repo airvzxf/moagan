@@ -1334,6 +1334,66 @@ clamp policy (`TemperatureTable::nearest_supported(...)`).
 | `--since-tag <needle>` | filters the snapshot list to files whose name contains the needle (case-insensitive substring match); handy for narrowing to one phase or call id |
 | `--html-out <path>` | override the HTML output path (default `<run_dir>/coverage.html`) |
 
+## 22. `moagan preflight --provider <section[:model]> --prompt <text>`
+
+**👁 What it is** — Smoke-test the END-TO-END pipeline (discover
++ run --mode fast) against the real provider in a single CLI
+invocation. The two steps are linked through `--context`: the
+discover run produces a library of `sketches/*.json`, and the
+fast-mode run consumes that library as its input corpus. Both run
+ids are printed on stdout so the operator can inspect either side
+independently. Replaces the pre-PR-564 single-`discover` wrapper
+(which missed upstream intake/clarify) and the PR-565 single-`fast`
+wrapper (which duplicated fast-mode test coverage); the
+two-step flow exercises the cross-run plumbing AND the per-run
+planner.
+
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| `--provider <section[:model]>` | Required. Resolved via the same order as `moagan run --provider` (v0.10 mandatory semantics). |
+| `--prompt <text>` | Required. The same prompt is passed to both phases. |
+| `--runs-dir <path>` | `global = true`. Where both runs are written (default `$MOAGAN_HOME/.runs`). |
+| `--mock-dir <path>` | Optional. When set, the fast-mode leg runs against the mocks recorded under this dir (no upstream traffic). |
+| `--max-parallelism <n>` | Default 4. Forwarded to both phases. |
+| `--non-interactive` | Default false. When set, both phases skip the checkpoint prompt and write `<skipped:non_interactive>` markers. |
+
+**⚙️ Internal flow** — `cli::Cmd::Preflight` (`src/cli/mod.rs:927`)
+→ `dispatch` arm at `src/cli/mod.rs:2175-2317`. Two steps in
+sequence:
+
+1. `moagan discover` with cardinalidad 8 (one sketch per
+   dimension × facets_per_dimension = 1), single temperature
+   (1.0), single replica. Produces a `run_id` with a persisted
+   `sketches/` library (~3 MB).
+2. `moagan run --mode fast --context <discover_run_id>
+   --context-full` that consumes the discover run's library as
+   its input corpus (the `Full` scope loads every text-like file
+   under the run dir, including `sketches/*.json`).
+
+Cost: ~30-60 s of API budget per step (~60-120 s total), ~3 MB
+of disk per run. A preflight that succeeds is a strong
+end-to-end signal (every phase from intake → clarify → sketch →
+judges → tag → cluster → facets → portfolio has fired at least
+once). A preflight that fails tells the operator exactly which
+step regressed because both run ids are printed.
+
+**❌ Errors / exit codes** —
+
+- `Config::load` failure → `Error::Config` (exit 3).
+- `discover` leg fails (any phase error, upstream 5xx, sandbox
+  rejection) → the discover `run_id` is printed and the process
+  exits with that run's exit code. The fast-mode leg does NOT
+  run.
+- `run --mode fast` leg fails (LLM 4xx, parse failure after
+  retries, validation rejection) → BOTH run ids are printed and
+  the process exits with the fast-mode run's exit code. The
+  discover run is preserved on disk so the operator can inspect
+  the upstream state.
+- `--provider` resolves to a missing section / model → `InvalidArgs`
+  (exit 2).
+
 **⚙️ Internal flow**
 
 ```
@@ -1510,3 +1570,4 @@ run 01a0178c  coverage report
 | `moagan probe max_tokens` | Bulk-probe `(provider, model)` ceilings and persist (§19) |
 | `moagan probe temperature` | Bulk-probe supported temperature sets and persist (§20) |
 | `moagan coverage show` | Render the SanCov runtime coverage report for one run (§21, ADR-0002) |
+| `moagan preflight` | Smoke-test the end-to-end pipeline (discover + run --mode fast) against the real provider (§22) |
