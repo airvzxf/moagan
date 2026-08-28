@@ -85,12 +85,16 @@ guard-rails. Each verdict is enforceable by a CI guard in
 - **Status**: stays on the no-go list for the entire v0.8 cycle.
 - **No code change** in this PR. Plain-text tables continue to ship
   for `moagan inspect`, `moagan telemetry provider`, and
-  `moagan telemetry plan`. `insta` snapshots already cover
-  regressions of those tables.
+  `moagan telemetry plan`. There is no `insta` snapshot suite
+  in this repo (tests use plain `assert!` / integration scripts),
+  so any table-renderer regression would surface as a CLI exit
+  code or assertion failure, not a snapshot diff.
 - **Rationale**: cosmetic, not blocking. The catalogue estimate
   (D.14.23) is 1 day, but the marginal UX gain over the current
-  text output is small and any breakage in the table renderer
-  ripples into snapshot churn across the snapshot suite.
+  text output is small. The deferral window has slipped from
+  the original "v0.9" target through v0.12 without a re-review;
+  a follow-up ADR should formalise the current decision window
+  (e.g. "v0.13+ or until a UX-blocking issue is filed").
 - **Re-review trigger**: any PR that proposes to add `comfy-table`
   in v0.8 must first amend this ADR with a *Re-evaluation* section
   and re-vote the decision (no silent relaxation).

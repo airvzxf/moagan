@@ -1063,20 +1063,21 @@ window_days  = 7
 | `--run <id>` not in DB | `InvalidState` |
 | `--all` (no `--run`) | scans every run in the index; no single-run scoping |
 | pre-set `MOAGAN_HOME` / `MOAGAN_RUNS_DIR` | respected (no flag needed) |
-| (no extra flag) | table grouped by role, top 20 rows |
+| (no extra flag) | table grouped by (provider, model), no LIMIT clause |
 
 **⚙️ Internal flow**
 
 ```
-cli::dispatch → Cmd::Telemetry → telemetry::run_cost(CostArgs { run_id, by, json, limit })
-  → RunId::from_str(run_id) → bounds check
+cli::dispatch → Cmd::Telemetry { sub: TelemetryCmd::Cost { runs_dir, run, all } }
+  → RunId::from_str(run_id)? → bounds check
   → Db::open(home.meta_db_path)
   → db.get_run(run_id)? → None → InvalidState
-  → db.aggregate_cost(run_id, group_by = by)? → rows: Vec<CostRow>
-       // SQL: SELECT role|provider|model, SUM(cost_usd), COUNT(*) FROM calls
-       //       WHERE run_id = ? AND cost_usd IS NOT NULL
-       //       GROUP BY <group_by> ORDER BY total_usd DESC LIMIT ?
-  → format_table(rows) | format_json(rows)
+  → db.aggregate_cost_by_provider_model(run_id)? → rows: Vec<CostAggregateRow>
+       // SQL: SELECT provider, model, COUNT(*), COALESCE(SUM(cost_usd), 0.0) FROM calls
+       //       WHERE run_id = ?
+       //       GROUP BY provider, model
+       //       ORDER BY (COALESCE(SUM(cost_usd), 0.0)) DESC, provider ASC, model ASC
+  → println!("RUN: <id>\nTotal cost: $X.XXXX\nBy provider/model: ...") | serde_json
 ```
 
 ```text
@@ -1199,26 +1200,22 @@ cli::dispatch → Cmd::Rate → rate::run(RateArgs { run_id, proposal_id, score 
 
 **🧩 Flag matrix**
 
-| Combination | Behaviour |
-|---|---|
-| no `--provider` | `InvalidArgs` ("missing --provider") |
-| `--provider <kind>:<model>` repeated | probed in the order given; per-provider failures are reported but do not abort the batch |
-| `--floor <N>` | clamp the discovered value to `>= N` (default `1024`, mirrors `ProviderConfig::max_token_auto`) |
-| `--save` (default `true`) | write the result to `max_tokens_auto.toml` |
-| `--no-save` | run the probe but leave the cache file untouched |
-| `--timeout-secs <N>` | per-provider probe timeout (default 60 s); the probe exits cleanly with the cache value on timeout |
-| `--provider <kind>` not configured | `InvalidArgs` ("provider '<kind>' not in config") |
+| Flag | Default | Meaning |
+|---|---|---|
+| `--provider PROVIDER:MODEL` | required, repeatable | Probe this pair; repeat the flag once per pair to bulk-probe. The value is the literal `provider:model` string. |
+| `--persist-min` | `false` | Take the minimum across every probed model under the same provider and write the cap into `max_tokens_auto.toml` as the operator-level cap (`auto = false`). |
+| `--dry-run` | `false` | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts. |
 
 **⚙️ Internal flow**
 
 ```
-cli::dispatch → Cmd::Probe → probe::run_max_tokens(ProbeMaxTokensArgs { providers, floor, save, timeout })
+cli::dispatch → Cmd::Probe::MaxTokens(ProbeMaxTokensCmd { providers, persist_min, dry_run })
   → Config::load() → MoaganHome::resolve() + ensure
   → for each (kind, model) in providers:
        builder = ProviderBuilder::for_kind(&cfg, kind)?
-       ceiling = probe::probe_ceiling(&builder, model, floor, timeout_secs)?  // exponential + bisect
-       if save: max_tokens_table.upsert(kind, model, ceiling)
-       println! "{kind}:{model}  ceiling={ceiling}  floor={floor}  source=probe"
+       ceiling = probe::probe_ceiling(&builder, model, MIN_AUTOPROBE_FLOOR, timeout)?  // exponential + bisect
+       if persist_min: max_tokens_table.upsert(kind, model, ceiling)
+       println! "{kind}:{model}  ceiling={ceiling}  source=probe"
   → exit 0 on success; exit 1 if every probe failed
 ```
 
@@ -1343,9 +1340,9 @@ clamp policy (`TemperatureTable::nearest_supported(...)`).
 | `<run_id>` malformed | `InvalidArgs` |
 | `--format text` (default) | writes the snapshot table to stdout, always exit 0 |
 | `--format html` without `grcov` on `PATH` | `InvalidState` (exit 80) with a copy-pasteable `grcov` invocation hint |
-| `--format html` with `grcov` | writes `<run_dir>/coverage.html` and exits 0 |
+| `--format html` with `grcov` | writes `<run_dir>/telemetry/coverage.html` and exits 0 |
 | `--since-tag <needle>` | filters the snapshot list to files whose name contains the needle (case-insensitive substring match); handy for narrowing to one phase or call id |
-| `--html-out <path>` | override the HTML output path (default `<run_dir>/coverage.html`) |
+| `--html-out <path>` | override the HTML output path (default `<run_dir>/telemetry/coverage.html`) |
 
 ## 22. `moagan preflight --provider <section[:model]> --prompt <text>`
 

@@ -156,13 +156,13 @@ The e2e proxy suite (`scripts/e2e_audit_proxy.sh`) has **69**
 `grep -c "run_test" scripts/e2e_audit_proxy.sh`); only the
 subset that runs in a default `make e2e-network` invocation
 is documented below. The MINIMAX_API_KEY-gated block (6a)
-contributes 21; the OPENCODE_API_KEY-gated discover block
+contributes 46; the OPENCODE_API_KEY-gated discover block
 (6d) contributes 7 (+ 1 OC_RUN_ID skip fallback); the
 DEEPSEEK_API_KEY-gated discover block (6e) contributes 7
 (+ 1 DS_RUN_ID skip fallback); the MOAGAN_SMOKE_SECTION-gated
 discover_opencode_models block (6g) contributes 5 per model
 × 7 models = 35; the gauntlet.sh `MINIMAX_API_KEY` re-check
-(6f) contributes 1. The remaining ~20 `run_test` invocations
+(6f) contributes 1. The remaining ~6 `run_test` invocations
 in the script are for upstream-side assertions (per-run audits,
 post-run health checks, the proxy-e2e `moagan run` mode
 block) that are not currently gated on a secret and always
@@ -355,7 +355,7 @@ check from a clean state.
 | 3 | `#[ignore]` Rust attribute | 6 tests | ❌ no (run via `--ignored`) |
 | 4 | Source silent-skip (binary on PATH) | 13 tests | ✅ partially (binaries present) |
 | 5 | `ValidationEvidence::skipped()` runtime | 11 sites | n/a (per-artifact) |
-| 6a | `MINIMAX_API_KEY` missing → 67 tests | 67 tests | ❌ no (key present in CI) |
+| 6a | `MINIMAX_API_KEY` missing → 46 tests | 46 tests | ❌ no (key present in CI) |
 | 6b | `MOAGAN_SMOKE_LONG_DISCOVER=1` | 37 tests | ❌ no (env var unset) |
 | 6c | card80 partial-skips on timeout | 14 conditional | conditional |
 | 6d | `OPENCODE_API_KEY` missing → 7 tests + 1 OC fallback | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
@@ -365,8 +365,8 @@ check from a clean state.
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.
-**Total tests in conditional skip code paths:** 110
-(67 `MINIMAX_API_KEY` (6a, the entire real-proxy block from
+**Total tests in conditional skip code paths:** 63
+(46 `MINIMAX_API_KEY` (6a, the entire real-proxy block from
 `if [[ -n "${MINIMAX_API_KEY` to the closing `fi` of the
 SECTION A.bis) + 7 OPENCODE + 1 OC_RUN_ID fallback (6d) + 7
 DEEPSEEK + 1 DS_RUN_ID fallback (6e) + 1 gauntlet `MINIMAX_API_KEY`

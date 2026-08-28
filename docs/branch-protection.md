@@ -72,7 +72,7 @@ key. The YAML below shows the two layers for each job from
 Note: the `T1 · build (populates cargo cache)` row is no longer in this
 table. The job was removed in PR #525 (commit `f6e33a6`, the
 `ci(workflows): restructure ci.yml + cache cleanup + bump timeouts`
-restructure on 2026-08-08). The PR #397 reference in older revisions
+restructure on 2026-08-16). The PR #397 reference in older revisions
 of this section is a misattribution — #397 is the
 `ci(perf): fix e2e-network warm-cache build (270s → 80-120s)` perf
 fix, unrelated. The consumers now run their own incremental

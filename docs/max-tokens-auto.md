@@ -6,7 +6,7 @@ chat-completion surface accepts another, and the streaming-vs-non-streaming
 paths often disagree. Hard-coding a `MAX_TOKENS_CAP` per provider is a
 losing bet: the moment a vendor rolls a new model the constant is wrong.
 
-`moagan` (v0.7.0+) probes each `(provider, model)` pair at first startup
+`moagan` (v0.10+) probes each `(provider, model)` pair at first startup
 to discover the actual ceiling. The discovered value is cached at
 `~/.local/share/moagan/max_tokens_auto.toml` and verified with a single
 lightweight probe on every subsequent startup. The probe is opt-in but
@@ -50,7 +50,7 @@ max_tokens = 1000000
 
 `Some(0)` is equivalent to `None` (both mean "off"). `Some(N>0)` enables
 the probe with a floor of `N` tokens. The `max_token_auto_enabled:
-Option<bool>` knob (declared at `src/config/mod.rs:1086`) is a hard
+Option<bool>` knob (declared at `src/config/mod.rs:1462`) is a hard
 kill switch: when set to `Some(false)` it suppresses the probe
 table entirely regardless of the `max_token_auto` floor. Operators
 who want the probe disabled even if the floor is nonzero should
@@ -86,7 +86,7 @@ max_tokens = 4096
 | `schema_version` | File format version. Numeric `u32` (`1` today). Bumped if the schema changes. |
 | `providers[provider][model].detected_at` | ISO-8601 timestamp of the initial successful probe. |
 | `providers[provider][model].verified_at` | ISO-8601 timestamp of the most recent successful verify probe. On the first probe the algorithm initialises it to the same value as `detected_at` (via `Utc::now().to_rfc3339()` in `src/llm/probe_table.rs`), so a fresh entry is never an empty string. |
-| `providers[provider][model].auto` | Always `true` while the probe is responsible for the value. Operators can hand-edit to `false` to freeze a known good value without removing the entry. |
+| `providers[provider][model].auto` | Always `true` while the probe is responsible for the value. A `false` value is **just a marker** indicating the entry has been hand-curated; it does NOT freeze the value (see Troubleshooting below). |
 | `providers[provider][model].attempts` | How many probe batches the algorithm ran for this entry. Diagnostic. |
 | `providers[provider][model].ceiling` | The per-provider hard ceiling the algorithm started the bisect from. Diagnostic. |
 | `providers[provider][model].max_tokens` | The discovered ceiling. Clamped to `[MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING]`. |

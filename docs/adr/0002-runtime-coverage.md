@@ -21,7 +21,7 @@ events.
 
 What the telemetry does **not** carry is the source-level answer to
 "which lines of code did this run actually execute?" Today, an operator
-facing an unexpected `Error::Provider("http 500: boom")` (or any of
+facing an unexpected `Error::Provider { message: "http 500", http_status: 500 }` (or any of
 the other variants in `src/error/mod.rs:177`) has to:
 
 1. Re-derive the call site by reading the JSONL `phase / role / call_id`
@@ -122,7 +122,7 @@ today's binary.
 
 When the feature is on, a new `moagan::coverage::CoverageRecorder`
 injects a `LLVM_PROFILE_FILE` env var pointing at
-`<run_dir>/telemetry/coverage/<run_id>-<tag>.profraw`, snapshots
+`<run_dir>/telemetry/coverage/<run_id>.profraw`, snapshots
 counters on every `Telemetry::phase()` and
 `Telemetry::call()` (see `src/telemetry/mod.rs:557,610` and
 `src/coverage/mod.rs:281-441`), and rotates the active

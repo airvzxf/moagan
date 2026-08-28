@@ -54,8 +54,11 @@ Antes de aterrizar cada componente, fijo las decisiones que afectan a todo el si
 > `src/ranking/`, `src/atomic/`, `src/sandbox/`, `src/redact/`, etc.
 > se añadieron después; `src/prompts/` nunca existió; muchos providers
 > se consolidaron en `src/llm/openai_compatible.rs` /
-> `openai_compat.rs` / `minimax.rs` / `deepseek.rs` / `mock.rs` /
-> `kimi.rs` / `opencode.rs`. **Esta sección se conserva como
+> `openai_compat.rs` / `minimax.rs` / `deepseek.rs` / `mock.rs`
+> (actuales: `anthropic_compat.rs`, `openai_compatible.rs` también
+> viven en `src/llm/`; `kimi.rs` y `opencode.rs` no existen como
+> archivos pero sus nombres siguen apareciendo como secciones
+> en `config.toml`). **Esta sección se conserva como
 > referencia histórica del spec original; no refleja la
 > implementación actual.** El árbol vivo está en `src/` y el pin vivo
 > está en `Cargo.toml` (v0.12.14 al día de hoy; ver

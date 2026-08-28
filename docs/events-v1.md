@@ -127,8 +127,8 @@ moagan run --mode fast --provider mock:mock-model --prompt "x" \
     > events.jsonl
 jq -c 'select(.kind == "run_end")' events.jsonl
 # { "kind":"run_end", "schema":1, "ts":"…", "run_id":"…",
-#   "status":"success", "exit_code":0, "elapsed_ms":241823,
-#   "artefacts":{"final_md":"…/final/portfolio.md", …} }
+#   "status":"ok", "exit_code":0, "elapsed_ms":241823,
+#   "artefacts":{} }
 ```
 
 ### Stream LLM calls to a dashboard

@@ -84,7 +84,7 @@ Plus one fast orthogonal check on the commit message itself:
    │  e2e-network (4 jobs, real LLM, ~8 min warm / ~15 min cold)        │
    │    - fast     ~2  min   (timeout-minutes: 55)                     │
    │    - explore  ~8  min   (timeout-minutes: 120)                    │
-   │  plus build-e2e-network (~5 min cold) and preflight-minimax       │
+   │  plus build-e2e-network (~5 min warm / ~12 min cold) and           │
    │  (~30 s); 4 jobs run in two waves gated on the preflight.         │
    │    - both run in parallel after `build-e2e-network`               │
    │      completes; gated by `preflight-minimax`                      │
@@ -217,12 +217,12 @@ $ head -1 .git/hooks/pre-commit
 | CI informational: code scanning | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) |
 | CI informational: dependency audit | [`.github/workflows/cargo-audit.yml`](../.github/workflows/cargo-audit.yml) |
 | CI release pipeline (tag-triggered) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
-| Dependabot config (cargo + github-actions) | [`.github/dependabot.yml`](../.github/dependabot.yml) |
-| Code ownership / review fan-out | [`.github/CODEOWNERS`](../.github/CODEOWNERS) |
-| Security policy (private disclosure channel) | [`.github/SECURITY.md`](../.github/SECURITY.md) |
-| Contributing guide | [`.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md) |
-| PR template | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) |
-| Issue templates (bug / feature / security) | [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/) |
-| GitHub Copilot instructions | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) |
-| Branch protection (ruleset apply) | [`docs/branch-protection.md`](../branch-protection.md) |
-| Architectural authority | [`docs/proposal-02-rust.md`](../proposal-02-rust.md) |
+| Dependabot config (cargo + github-actions) | [`.github/dependabot.yml`](.github/dependabot.yml) |
+| Code ownership / review fan-out | [`.github/CODEOWNERS`](.github/CODEOWNERS) |
+| Security policy (private disclosure channel) | [`.github/SECURITY.md`](.github/SECURITY.md) |
+| Contributing guide | [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) |
+| PR template | [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) |
+| Issue templates (bug / feature / security) | [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/) |
+| GitHub Copilot instructions | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
+| Branch protection (ruleset apply) | [`docs/branch-protection.md`](branch-protection.md) |
+| Architectural authority | [`docs/proposal-02-rust.md`](proposal-02-rust.md) |

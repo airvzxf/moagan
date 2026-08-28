@@ -29,7 +29,7 @@ El método seguido en este barrido fue:
 
 ---
 
-> **v0.6.0 batch (released 2026-08-11)** — los siguientes items del
+> **v0.6.0 batch (released 2026-08-10)** — los siguientes items del
 > catálogo entraron juntos como parte de v0.6.0 (PR-B1 / PR-B2 / PR-B3).
 > La nota de cada sección enlaza el PR y el commit squash correspondientes:
 >
@@ -72,8 +72,8 @@ El método seguido en este barrido fue:
 
 ---
 
-> **v0.7.1 batch (released 2026-08-12)** — the following add-ons
-> entered together as part of v0.7.1:
+> **v0.7.2 batch (released 2026-08-15)** — the following add-ons
+> entered together as part of v0.7.2:
 >
 > - **D.30.5** — `models.dev/api.json` static catalog with 1 h TTL
 >   cache + capability gating (10 flags: `temperature`, `reasoning`,
@@ -3857,9 +3857,10 @@ Static, read-only index of every LLM provider models.dev tracks
 (183 as of August 2026, 3.6 MB JSON, refreshed hourly upstream).
 The runtime downloads the catalog on first startup, gzip-compresses
 it under `${MOAGAN_HOME}/models_dev.json`, and re-fetches when the
-TTL (default 1 h, override `MOAGAN_MODELS_DEV_REFRESH_HOURS`) elapses.
-Force the offline path with `MOAGAN_MODELS_DEV_OFFLINE=true` (smoke
-tests, air-gapped runners).
+TTL (default 1 h, const `DEFAULT_REFRESH_HOURS = 1` en
+`src/llm/models_dev.rs:55`; no hay env override público) elapses.
+Force the offline path with la flag inline de `load_or_fetch_at`
+`offline = true` (smoke tests, air-gapped runners).
 
 Ten flags per `(provider, model)` pair gate runtime decisions:
 
@@ -4340,16 +4341,18 @@ Mock provider skips the probe and returns `DEFAULT_MAX_TOKENS =
 > + bisect paralelo de 20 puntos en hasta 32 rondas). El cache
 > in-memory + on-disk vive en `src/llm/probe_table.rs` (556
 > líneas, `MaxTokensTable` + `MaxTokensTableFile`). PR #401
-> introdujo `ProbeOutcome::Indeterminate` (5xx → no retry) y
-> `bypass_all_caps: true` en `send_probe` para que el probe nunca
-> quede atrapado por la cap que está intentando descubrir. La
+> introdujo `ProbeOutcome::Indeterminate` (5xx → no retry) y un
+> bypass interno del operator_cap en `send_probe` (sin flag
+> público `bypass_all_caps`; el cap se omite durante el probe
+> para que no quede atrapado por la cap que está intentando
+> descubrir). La
 > dependencia `tiktoken-rs = "0.5"` (pin en `Cargo.toml:60`,
 > RETIRED en v0.10) es
 > ortogonal: pre-flight (RETIRED en v0.10 junto con la
 > dependencia `tiktoken-rs`; ver `docs/max-tokens-auto.md` para
 > la implementación actual del pre-flight de cardinalidad).
 > Documentación: `docs/max-tokens-auto.md`. Tests: la nueva
-> `tests/integration_max_tokens_auto.rs` (296 líneas, 6 tests) +
+> `tests/integration_max_tokens_auto.rs` (299 líneas, 6 tests) +
 > ~36 nuevos tests en `src/llm/probe.rs` (13) /
 > `src/llm/probe_table.rs` (10) / `src/llm/capabilities.rs::tests`
 > (7). Detalles en `docs/v0.7-final-report.md §D.30` (retired
