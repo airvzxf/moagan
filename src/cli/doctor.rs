@@ -484,7 +484,7 @@ mod tests {
     // PR-B2: `check_api_key` covers every keyed provider kind.
     //
     // These tests pin the contract that `moagan doctor` reports the
-    // MINIMAX / DEEPSEEK / OPENCODE_GO env vars through the unified
+    // MINIMAX / DEEPSEEK / OPENCODE env vars through the unified
     // `api_keys::lookup_key` helper (not just MINIMAX_API_KEY as the
     // pre-PR-B2 check did).
     // ----------------------------------------------------------------
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn check_api_key_fails_when_opencode_go_key_missing() {
+    fn check_api_key_fails_when_opencode_key_missing() {
         let _lock = TEST_DOCTOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _api_lock = crate::TEST_API_KEYS_LOCK
             .lock()

@@ -1143,7 +1143,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     //
     // * `/v1/chat/completions` (OpenAI-compatible) — 10 models
     // * `/v1/messages` (Anthropic-compatible) — 7 models
-    // * `/v1/responses` (OpenAI Responses) — 1 model
+    // * `/v1/responses` (OpenAI Responses) — 2 models
     //
     // Per-model aliases (the v0.9 single-model section shape) are
     // gone: callers reach every model via
@@ -1616,7 +1616,7 @@ impl Config {
     /// it with `default_providers()`: any provider in the user's TOML
     /// replaces the default with the same name; providers absent from
     /// the user's TOML keep their built-in defaults. This way adding a
-    /// new default provider (Q6 deepseek, Q7 opencode-go, etc.) doesn't
+    /// new default provider (Q6 deepseek, Q7 opencode, etc.) doesn't
     /// break existing operator configs that only override a subset.
     pub fn load() -> Result<Self> {
         tracing::info!("config::load: enter");
@@ -3340,7 +3340,7 @@ mod tests {
     /// `models[].max_tokens` (v0.10 canonical); the probe narrows
     /// it to the real upstream boundary.
     #[test]
-    fn default_opencode_go_providers_enable_max_tokens_auto_probe() {
+    fn default_opencode_providers_enable_max_tokens_auto_probe() {
         let cfg = Config::default();
         let oc_spec = cfg
             .providers

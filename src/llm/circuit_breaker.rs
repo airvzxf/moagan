@@ -643,12 +643,12 @@ fn breaker_registry_failure_only_affects_target_pair() {
         BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
     );
     reg.pre_create(
-        "opencode_go",
+        "opencode",
         Role::Tagger,
         BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
     );
     let m = reg.breaker_for("minimax", Role::Tagger);
-    let o = reg.breaker_for("opencode_go", Role::Tagger);
+    let o = reg.breaker_for("opencode", Role::Tagger);
     m.trip();
     assert!(m.is_open());
     assert!(!o.is_open());

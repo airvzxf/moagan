@@ -89,7 +89,7 @@ impl std::str::FromStr for SaturationKind {
 pub struct SaturationEvent {
     /// Run id (optional so pre-pipeline probes still record).
     pub run_id: Option<String>,
-    /// Provider name (e.g. `minimax`, `mock`, `opencode_go`).
+    /// Provider name (e.g. `minimax`, `mock`, `opencode`).
     pub provider: String,
     /// Model name (e.g. `MiniMax-M3`).
     pub model: String,
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn from_rate_limit_preserves_threshold() {
-        let ev = SaturationEvent::from_rate_limit("opencode_go", "go-mini", None, 12.5, 60, 1);
+        let ev = SaturationEvent::from_rate_limit("opencode", "go-mini", None, 12.5, 60, 1);
         assert_eq!(ev.kind, SaturationKind::RateLimit);
         assert!((ev.threshold_pct - 12.5).abs() < 1e-3);
         let details = ev.details.as_ref().unwrap();

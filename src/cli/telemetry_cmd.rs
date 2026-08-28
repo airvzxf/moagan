@@ -2584,7 +2584,7 @@ mod tests {
             r1,
             "intake",
             "intake",
-            "opencode_go",
+            "opencode",
             "k3",
             "",
             None,
@@ -2608,7 +2608,7 @@ mod tests {
         let minimax = rows.iter().find(|r| r.provider == "minimax").unwrap();
         assert_eq!(minimax.calls, 2);
         assert!((minimax.cost_usd - 0.30).abs() < 1e-9);
-        let oc = rows.iter().find(|r| r.provider == "opencode_go").unwrap();
+        let oc = rows.iter().find(|r| r.provider == "opencode").unwrap();
         assert_eq!(oc.calls, 1);
         assert_eq!(oc.cost_usd, 0.0, "no cost recorded => zero");
     }

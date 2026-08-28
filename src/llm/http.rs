@@ -159,7 +159,7 @@ fn classify_throttled_or_plan_exhausted(body: &str) -> Error {
 
 /// Construct an [`Error::Throttled`] directly when the upstream
 /// `Retry-After` header was already parsed by the caller. Keeps
-/// the wire layer (`opencode_go_anthropic.rs`) free of `http.rs`
+/// the wire layer free of `http.rs`
 /// internals — it just hands the parsed duration to this helper.
 ///
 /// `http_status: Some(429)` is hard-coded because this helper is
