@@ -216,7 +216,7 @@ A blanket prohibition would have foreclosed legitimate uses:
 - `comfy-table`: `proposal-03-add-ons.md §D.14.23`
   (T12-09 §6.2; T20-06 §6.3).
 - `proptest`: `proposal-03-add-ons.md §D.18.2` (T00-05 D20).
-  Pre-existing rationale note in `proposal-02-rust.md:1647-1649`:
+  Pre-existing rationale note in `proposal-02-rust.md:1657-1659`:
   *"proptest no se añade como dep — los invariantes de la
   perturbación (clip, monotonicidad de sigma, fracciones suman 1.0)
   están cubiertos por tests unitarios con seeds fijos."* — this ADR

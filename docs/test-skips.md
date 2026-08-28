@@ -82,7 +82,7 @@ when invoked with `cargo test -- --ignored` or `cargo test <name> -- --ignored`.
 |---|---|---|
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:465` | Mutates process-wide RLIMIT_NPROC (side-effects other tests) |
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:510` | Mutates process-wide RLIMIT_AS (side-effects other tests) |
-| `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); exercised by `make e2e-network` |
+| `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); only runnable via `cargo test -- --ignored` (the test is `#[ignore]`d and `make e2e-network` does not auto-invoke it) |
 | `discover_opencode_writes_four_subdirs` | `tests/integration_discover_opencode.rs:37` | Requires `OPENCODE_API_KEY`; only runs locally / in `e2e-network` |
 | `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:37` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
 | `discover_minimax_writes_four_subdirs` | `tests/integration_discover_minimax.rs:40` | Requires `MINIMAX_API_KEY`; only runs locally / in `e2e-network` |

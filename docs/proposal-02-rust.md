@@ -2591,10 +2591,10 @@ impl Default for Config {
                 hard_limit: 0.95,
             },
             retention: RetentionConfig {
-                keep_runs_days: 365,
-                keep_runs_count: 9000,
-                max_storage_gb: 50,
-                policy: "archive".into(),
+                keep_runs_days: 30,
+                keep_runs_count: 100,
+                max_storage_bytes: 50 * 1024 * 1024 * 1024,
+                policy: "delete".into(),
             },
             storage: StorageConfig {
                 jsonl_compression: "gz".into(),

@@ -105,16 +105,31 @@ runs **before** the capability resolver:
 if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref())
     && let Some(clamped) =
         table.nearest_supported(&self.default_provider, &self.default_model, t)
-    && (clamped - t).abs() > 1e-3_f32
 {
-    tracing::warn!(
-        provider = %self.default_provider,
-        model = %self.default_model,
-        role = %req.role.as_str(),
-        requested = %t,
-        clamped_to = %clamped,
-        "temperature outside supported set; clamped at dispatch (safety net)"
-    );
+    if (clamped - t).abs() > 1e-3_f32 {
+        tracing::warn!(
+            provider = %self.default_provider,
+            model = %self.default_model,
+            role = %req.role.as_str(),
+            requested = %t,
+            clamped_to = %clamped,
+            "temperature outside supported set; clamped at dispatch (safety net)"
+        );
+    } else {
+        // PR-7 (operator-visibility): the operator wants to confirm
+        // that the temperature they declared in the matrix profile
+        // is the temperature the runtime actually sends. Logged at
+        // debug! level so the default env filter does not flood the
+        // NDJSON output; `RUST_LOG=moagan=trace` flips it on for the
+        // operator who wants to see the matrix-vs-runtime diff.
+        tracing::debug!(
+            provider = %self.default_provider,
+            model = %self.default_model,
+            role = %req.role.as_str(),
+            requested = %t,
+            "temperature inside supported set; no clamp"
+        );
+    }
     req.temperature = Some(clamped);
 }
 ```
@@ -182,8 +197,11 @@ detected_at = "2026-08-22T12:00:01Z"
 | `operator_caps[provider].auto` | Always `false` for an operator-pinned entry. |
 | `operator_caps[provider].detected_at` | ISO-8601 timestamp the cap was written. |
 
-Delete the file to force a fresh probe. Rename the file to `*.disabled`
-to keep the entries on disk while skipping the probe.
+Delete the file to force a fresh probe. There is no `*.disabled`
+rename — the runtime only consults the canonical
+`temperatures_auto.toml` filename (and not the sibling
+`max_tokens_auto.toml` either; the two sidecars are read by
+different loaders and have no shared prefix logic).
 
 ## The `operator_caps` map
 
@@ -205,9 +223,14 @@ the moment one model rejects a value another model accepts.
 
 ## Tuning the batch size
 
-`TEMPERATURE_PROBE_BATCH_SIZE = 3` matches the v0.7.1 `max_tokens`
-tightening-batch size so the two auto-probes share the same fan-out
-semantics; a future refactor can tune one without touching the other.
+`TEMPERATURE_PROBE_BATCH_SIZE = 3` matches the v0.7.1
+`max_tokens` tightening-batch size (per the in-code rationale
+comment in `src/llm/temperature_probe.rs`; the comment in turn
+asserts parity with the historical v0.7.1 batch size — if the
+historical value ever changes, both this doc and the in-code
+comment need to be updated together) so the two auto-probes
+share the same fan-out semantics; a future refactor can tune
+one without touching the other.
 
 | Value | Effect |
 |---|---|

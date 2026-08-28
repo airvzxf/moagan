@@ -102,6 +102,8 @@ versioned independently of `moagan`'s own version. **Additive changes**
 | `llm_call`     | On successful `provider.send` (non-probe).     | `call_id`, `phase`, `role`, `provider`, `model`, `elapsed_ms`, `ok`, `input_tokens`, `output_tokens`, `retry_count` |
 | `discovery_iteration` | Per sketch loop iteration in discovery. | `n`, `total`, `cell_dim`, `cell_facet`, `temperature`, `replica`, `sketch_index`, `outcome` |
 | `probe`        | Per auto-probe call (temperature / max_tokens). | `probe_kind`, `candidate`, `iteration`, `provider`, `model`, `outcome: "accepted"\|"rejected"\|"indeterminate"` |
+| `warning`      | When `Telemetry::warn` is called.               | `code`, `level`, `phase?`, `details` |
+| `decision`     | At curated decision points throughout the pipeline (see `--decision-format` below). Verbosity controlled by `--decision-format`. | `decision_kind`, `payload` |
 
 > **v0.11.1**: `iteration` is now populated for `probe_kind=temperature`
 > as well as `probe_kind=max_tokens`. The temperature probe tags every
@@ -111,8 +113,6 @@ versioned independently of `moagan`'s own version. **Additive changes**
 > `max_tokens` probe had already been emitting `iteration: 0` since
 > v0.11.0, and the parity closes the gap that the temperature
 > auto-probe emitted no `iteration` field at all.
-| `warning`      | When `Telemetry::warn` is called.               | `code`, `level`, `phase?`, `details` |
-| `decision`     | At curated decision points throughout the pipeline (see `--decision-format` below). Verbosity controlled by `--decision-format`. | `decision_kind`, `payload` |
 
 The list grows over time. Consumers SHOULD ignore unknown `kind`s
 (forwards compatibility) and unknown fields (per the JSON-LD

@@ -9,7 +9,7 @@ each check lives at the moment it does. Read it once, then trust it.
 |---|---|---|---|---|
 | **T0** | <2 s | pre-commit (parallel) | `make fmt-check`, `make guard-deps` | Cheap checks that catch 80 % of "obviously wrong" commits. Fail = don't waste anyone's time. |
 | **T1** | 30–90 s | pre-commit (parallel) | `make lint` (`cargo clippy -D warnings`), `make build` | Real lint + the binary actually compiles. Run in parallel since they share no state. |
-| **T2** | 1–5 min | pre-push | `make test-ci` (`cargo test --all-targets`, skips known-flaky `audit_e2e`) | The 58 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
+| **T2** | 1–5 min | pre-push | `make test-ci` (`MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`; `#[ignore]`-marked tests are not run by default) | The 58 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
 | **T3** | 5–30 min | CI on PR + post-merge | `make smoke` + `make e2e` (PR); `make e2e-network` (post-merge, fast+explore rows) | Full gauntlet: static smokes, local e2e against the mock pipeline, and the real-LLM e2e (only on `main`, see below). Heavy card80 + 7-model opencode sweep + per-provider `--ignored` discovery live in dedicated manual-only workflows. |
 
 Plus one fast orthogonal check on the commit message itself:
