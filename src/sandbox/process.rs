@@ -2516,10 +2516,20 @@ mod tests {
     /// line for each one, and proceeds to spawn the subprocess.
     /// Socket-level enforcement is left to D.11.7 / D.11.1, so the
     /// observable contract at D.11.13 is "logs a denial, lets the
-    /// run complete". The `tracing_subscriber` initialisation is a
-    /// best-effort `try_init`: a parallel test that already installed
-    /// a subscriber is fine; the only failure mode is "no subscriber
-    /// installed", which does not affect the assertions below.
+    /// run complete".
+    ///
+    /// `tracing_subscriber::fmt::try_init()` returns `Err` when a
+    /// global subscriber is already installed; we discard the result
+    /// either way. **Side effect to be aware of**: on success
+    /// `try_init` sets `LevelFilter::current()` (a process-global
+    /// atomic) to `LevelFilter::ERROR` for the entire test binary.
+    /// Every `tracing::trace!` / `tracing::debug!` callsite on every
+    /// thread short-circuits at the callsite level via that atomic.
+    /// `tracing::subscriber::with_default` (thread-local) cannot
+    /// reliably override this — see the §2.2 flake (commit `1e3bb18`)
+    /// and `tests/integration_parse_json_recovery.rs` for the
+    /// worked example. Any new tracing-dependent unit test in this
+    /// binary must live in its own integration test binary.
     #[tokio::test]
     async fn moa_sandbox_run_cmd_with_off_logs_denial() {
         let _ = tracing_subscriber::fmt::try_init();

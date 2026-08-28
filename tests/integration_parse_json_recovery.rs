@@ -10,13 +10,18 @@
 //! Pins the `tracing::debug!` event that documents the tolerant
 //! extraction byte range: if a future refactor drops the
 //! `tracing::debug!` call, this test fails.
+//!
+//! **Invariant**: do not add additional `#[test]` functions to this
+//! binary. A second test in this file would share the `tracing-core`
+//! runtime and re-introduce the §2.2 flake that this binary was created
+//! to isolate. New tracing-dependent tests belong in their own
+//! integration binary (e.g. `integration_*_tracing.rs`).
 
 use std::io;
 use std::sync::{Arc, Mutex};
 
 use moagan::phases::util::parse_json_with_recovery;
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::prelude::*;
 
 #[derive(Clone, Default)]
@@ -59,7 +64,7 @@ fn parse_json_with_recovery_preserves_extraction_metadata_via_tracing() {
         tracing_subscriber::fmt::layer()
             .without_time()
             .with_ansi(false)
-            .with_writer(buf.clone().with_max_level(tracing::Level::TRACE)),
+            .with_writer(buf.clone()),
     );
 
     tracing::subscriber::with_default(subscriber, || {
@@ -85,5 +90,18 @@ fn parse_json_with_recovery_preserves_extraction_metadata_via_tracing() {
     assert!(
         captured.contains("tolerant extraction"),
         "tolerant extraction event missing: {captured}"
+    );
+    // The tolerant-extraction `tracing::debug!` carries structured
+    // `start` / `end` byte-range fields. The test name promises this
+    // metadata is preserved; assert it explicitly so a future refactor
+    // that drops the structured fields (and keeps only the message)
+    // cannot pass silently.
+    assert!(
+        captured.contains("start="),
+        "extraction start field missing: {captured}"
+    );
+    assert!(
+        captured.contains("end="),
+        "extraction end field missing: {captured}"
     );
 }
