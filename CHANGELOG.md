@@ -5,6 +5,68 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.13] - 2026-08-28
+
+### Fixed
+
+Patch v0.12.13 (closes the §2.3 F2 follow-up cleanup) — drops 30+ stale
+`opencode_go` / `opencode-go` / `OPENCODE_GO` references identified by
+the F2 explorer subagents after the v0.12.12 §2.3 audit. **No source
+behavior change; no public API change; no schema bump.** All edits
+are cosmetic — comment updates, opaque test-fixture labels, and test
+function renames where the body already uses the canonical v0.10
+`opencode` name.
+
+- **`src/cli/probe.rs`** — doc examples (`--provider opencode-go:kimi-k3`
+  → `--provider opencode:kimi-k3`, ×3) and the `parse_provider_model`
+  test now exercise the canonical v0.10 section name.
+- **`src/cli/doctor.rs`** — test name `check_api_key_fails_when_opencode_go_key_missing`
+  → `check_api_key_fails_when_opencode_key_missing`; comment
+  `OPENCODE_GO` → `OPENCODE`.
+- **`src/cli/telemetry_cmd.rs`** — test fixture `"opencode_go"` →
+  `"opencode"`.
+- **`src/config/mod.rs`** — comments (×2): `(Q7 opencode-go, etc.)`
+  → `(Q7 opencode, etc.)`; `/v1/responses — 1 model` → `— 2 models`;
+  test name `default_opencode_go_providers_*` → `default_opencode_providers_*`.
+- **`src/llm/api_keys.rs`** — doc comment example `(e.g. "opencode_go")`
+  → `(e.g. "opencode")`.
+- **`src/llm/circuit_breaker.rs`** — test fixture strings.
+- **`src/llm/deepseek.rs`** — doc comment `OpenCodeGoProvider` →
+  `the opencode Anthropic-compatible provider`.
+- **`src/llm/governor.rs`** — test fixture string.
+- **`src/llm/http.rs`** — comment `(opencode_go_anthropic.rs)` removed.
+- **`src/llm/openai_compatible.rs`** — test fixture strings (×3) +
+  test names (×3) + comment.
+- **`src/storage/sqlite.rs`** — test fixture strings + comments (×9).
+- **`src/telemetry/dashboard.rs`** — test fixture strings + comment.
+- **`src/telemetry/saturation.rs`** — test fixture string + comment.
+
+### Verification
+
+- `cargo build --release`: clean.
+- `cargo test --all-targets`: 0 failures.
+- `cargo clippy --all-targets -- -D warnings`: 0 warnings.
+- `cargo fmt --all -- --check`: clean.
+
+### Out of scope (deliberately kept)
+
+Per the F2 'intentional' list, these remain on the v0.10 → v0.12.x
+migration list and are NOT touched in this patch:
+
+- `src/llm/capabilities.rs::{146, 167}` — `for_opencode_go()` /
+  `for_opencode_go_responses()` constructors (back-compat).
+- `src/llm/probe.rs::{486, 510, 512, 540, 1945}` — `RE_OPENCODE_GO`
+  regex + `parse_cap_opencode_go_is_not_less_or_equal` test.
+- `src/llm/openai_compat.rs::{1429-1583}` /
+  `src/llm/anthropic_compat.rs::{892, 969}` / `src/llm/openai_compatible.rs`
+  — v0.10 'legacy `OPENCODE_GO_MAX_TOKENS_CAP` is gone' breadcrumb
+  comments.
+- `src/phases/util.rs` `MiniMax-M3` references — canonical smoke-gate
+  model + 'missing opening brace' pathology tests.
+- `CHANGELOG.md` / `docs/*final-report.md` / `docs/pending-items-*` /
+  `docs/discovery-validation-*` / `docs/proposal-*.md` — historical
+  record of v0.6–v0.9 dispatching.
+
 ## [0.12.12] - 2026-08-28
 
 ### Fixed
