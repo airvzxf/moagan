@@ -212,7 +212,9 @@ the new `src/coverage/` module is a no-op stub when
   `src/telemetry/daily_rotation.rs` only emits a `stale_artifact`
   warning on day-rollover for the regular `telemetry/daily.log`
   stream. Pruning of the `coverage/` directory is the operator's
-  responsibility (a future enhancement; see Re-evaluation §3).
+  responsibility (no follow-up is currently scheduled; if the
+  volume becomes a real problem, file an issue and we'll add a
+  `MoaganHome::prune_coverage(max_age)` helper).
 - **The "line that caused the error" is still approximate.** The
   coverage report tells you which lines ran *before* the error,
   not the exact line that raised. The panic hook in

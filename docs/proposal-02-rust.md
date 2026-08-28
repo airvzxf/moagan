@@ -14,6 +14,27 @@ timestamp_utc: 2026-07-25T08:14:11.210415+00:00
 
 # Especificación Técnica Implementable — `moagan` (MoA Orchestrator en Rust)
 
+> **Status (2026-08-28):** This is the **T01-06 frozen spec** (synthesis_date
+> 2026-07-25, response_id `06b3a1c2`). It is the **normative Rust
+> implementation spec** per `AGENTS.md` ("T01-06 wins" on conflicts), but
+> the **live state** has diverged in several places:
+>
+> - The Cargo.toml pin (version 0.12.14, AGPL-3.0-or-later, current
+>   deps including rustls, r2d2, rusqlite) — see `Cargo.toml`.
+> - The src/ tree (additions: `audit/`, `coverage/`, `ranking/`,
+>   `atomic/`, `sandbox/`, `redact/`; renames:
+>   `ProviderRegistry` → `ProviderPool` in v0.10).
+> - The §0.5 decisions table (some entries stale, e.g. cache hash
+>   now BLAKE3 not sha256, retention 30d not 365d).
+> - The env vars (`MOAGAN_LOG_FORMAT`, `MOAGAN_DECISION_FORMAT`,
+>   `MOAGAN_LOG_TO_STDERR` were added in v0.10/v0.12).
+>
+> The **normative claim** is that the *decisions* (the §0.5 table and
+> the architectural mandates throughout) remain authoritative; the
+> *implementation details* (Cargo pin, src/ tree, env var table) are
+> now historical. See [`docs/cli-cheatsheet.md`](../cli-cheatsheet.md)
+> for the live CLI surface and `Cargo.toml` for the live pin.
+
 ## 0. Decisiones globales de arquitectura
 
 Antes de aterrizar cada componente, fijo las decisiones que afectan a todo el sistema. Cada una proviene de la propuesta `14-integrada-v4.md` y se justifica aquí para evitar re-imaginación por parte del siguiente modelo.

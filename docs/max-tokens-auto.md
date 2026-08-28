@@ -82,7 +82,7 @@ max_tokens = 4096
 
 `operator_caps[provider]` is an optional operator-pinned per-provider
 cap. The cap is set with `moagan probe max_tokens --persist-min
---provider PROVIDER` (the `--persist-min` flag is the `max_tokens`
+--provider PROVIDER:MODEL` (the `--persist-min` flag is the `max_tokens`
 analogue of `--persist-union` for temperatures; see
 [`temperatures-auto.md`](temperatures-auto.md) for the temperatures
 sidecar). The runtime intersects the auto-discovered value with the
@@ -126,11 +126,15 @@ The upper bound is fixed at `MAX_AUTOPROBE_CEILING = 1u32 << MAX_PROBE_SHIFT
   file to force a fresh discovery.
 - **"Saved cache is being overwritten every run"** — the cache file is
   rewritten when `max_token_auto_save = true` (the default) and the
-  current probe returns a different value. Set
-  `MOAGAN_MAX_TOKEN_AUTO_SAVE=false` to freeze the cache, or set
-  `providers[provider][model].auto = false` on a specific entry
-  to hand-pick a value (the auto-probe will not touch entries with
-  `auto = false`).
+  current probe returns a different value. To freeze the cache
+  globally, set `MOAGAN_MAX_TOKEN_AUTO_SAVE=false`. Per-entry
+  `auto = false` is **just a marker** (not a freeze flag): the
+  auto-probe still overwrites the entry on a fresh probe. The
+  reliable ways to pin a value are: (a) hand-edit the cache file
+  to your preferred `max_tokens` AND set `auto = false` so a
+  reviewer can tell the entry is hand-curated, or (b) set
+  `MOAGAN_MAX_TOKEN_AUTO_SAVE=false` to skip persistence entirely
+  (the in-memory table still uses your hand-edited file).
 - **"Mock provider returns 1_000_000"** — by design. The mock provider
   skips the probe and uses `DEFAULT_MAX_TOKENS = 1_000_000` so
   per-phase `max_tokens` decisions are deterministic in tests.

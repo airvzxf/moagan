@@ -183,10 +183,9 @@ slice of the same event stream.
 
 - The emitter swallows write errors silently. A broken stdout
   (e.g. `head |` closing the pipe, SIGPIPE on a downstream filter)
-  must not crash the run. Operators who need to know about
-  emission errors can set `MOAGAN_QUIET=1` and check the run's
-  exit code (still 0 on a normal run, even if stdout events
-  failed to flush).
+  must not crash the run. The run's exit code is the operator's
+  signal: 0 on a normal run even if stdout events failed to
+  flush, non-zero if the underlying pipeline failed.
 - The `schema` field is the only contract. New fields can be
   added; new `kind`s can be added; existing field types can
   only be widened (e.g. `i32 → i64`), never narrowed.

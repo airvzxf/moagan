@@ -279,7 +279,9 @@ fi
 
 ```bash
 if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_opencode_models" ]]; then
-  # 7 run_test calls inside the discover_opencode_models block
+  for MODEL in "${OPENCODE_COVERAGE_MODELS[@]}"; do
+    # 5 run_test calls per model
+  done
 else
   echo "SKIP: 7-model opencode sweep (MOAGAN_SMOKE_SECTION=$MOAGAN_SMOKE_SECTION)"
 fi
@@ -289,9 +291,21 @@ fi
   `discover_opencode_models` block, conditional on
   `MOAGAN_SMOKE_SECTION`). Cost ~5 min per model × 7 = ~35 min
   total.
-- **Tests:** 7 `run_test` invocations mirroring the opencode
-  discover block (one per model: kimi-k2.6, kimi-k2.7-code,
-  kimi-k3, glm-5.1, glm-5.2, hy3, mimo-v2.5-pro).
+- **Tests:** 5 `run_test` invocations per model × 7 models = **35
+  total**, mirroring the opencode discover block: per model the
+  script asserts `proxy_e2e_discover_oc_model_${MODEL}_run_id_present`,
+  `_tags_nonempty`, `_facets_nonempty`, `_extractions_subdirs`, and
+  `_drafts_nonempty`.
+- **Models:** per `OPENCODE_COVERAGE_MODELS` array in
+  `scripts/e2e_audit_proxy.sh:122-130`:
+  - `deepseek-v4-flash` (opencode alias, distinct from native
+    `deepseek` provider)
+  - `glm-5.3-flash`
+  - `gpt-5.6-luna`
+  - `mimo-v2.5` (also the smoke-test model in A.bis)
+  - `minimax-m2.7`
+  - `muse-spark-1.2-contributor`
+  - `qwen3.7-max`
 - **CI behaviour:** the block is gated on `MOAGAN_SMOKE_SECTION`
   not on a missing secret, so on a default `make e2e-network` run
   the block SKIPs unless the operator explicitly passes
@@ -328,7 +342,7 @@ check from a clean state.
 | 6d | `OPENCODE_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
 | 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
 | 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
-| 6g | `MOAGAN_SMOKE_SECTION=discover_opencode_models` (manual) | 7 tests | ❌ no (env var never set in CI) |
+| 6g | `MOAGAN_SMOKE_SECTION=discover_opencode_models` (manual) | 35 tests (5 × 7 models) | ❌ no (env var never set in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.

@@ -200,7 +200,7 @@ A blanket prohibition would have foreclosed legitimate uses:
   async runtime). Forbidding it would force the spec to be rewritten
   or the trait to stay a stub.
 - **`proptest`**: the hand-written seed grid in
-  `src/ranking/stability.rs:461-466` is a workaround, not a strategy.
+  `src/ranking/stability.rs:461-470` is a workaround, not a strategy.
   The comment in that file says so explicitly:
   *"Phase H originally intended proptest for the monotonicity
   invariants … the brief's rule about following existing libraries
@@ -216,7 +216,7 @@ A blanket prohibition would have foreclosed legitimate uses:
 - `comfy-table`: `proposal-03-add-ons.md §D.14.23`
   (T12-09 §6.2; T20-06 §6.3).
 - `proptest`: `proposal-03-add-ons.md §D.18.2` (T00-05 D20).
-  Pre-existing rationale note in `proposal-02-rust.md:1611-1614`:
+  Pre-existing rationale note in `proposal-02-rust.md:1626-1628`:
   *"proptest no se añade como dep — los invariantes de la
   perturbación (clip, monotonicidad de sigma, fracciones suman 1.0)
   están cubiertos por tests unitarios con seeds fijos."* — this ADR
