@@ -9,8 +9,8 @@ each check lives at the moment it does. Read it once, then trust it.
 |---|---|---|---|---|
 | **T0** | <2 s | pre-commit (parallel) | `make fmt-check`, `make guard-deps` | Cheap checks that catch 80 % of "obviously wrong" commits. Fail = don't waste anyone's time. |
 | **T1** | 30–90 s | pre-commit (parallel) | `make lint` (`cargo clippy -D warnings`), `make build` | Real lint + the binary actually compiles. Run in parallel since they share no state. |
-| **T2** | 1–5 min | pre-push | `make test-ci` (`cargo test --all-targets`, skips known-flaky `audit_e2e`) | The 58 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
-| **T3** | 5–30 min | CI on PR + post-merge | `make smoke` + `make e2e` (PR); `make e2e-network` (post-merge, fast+explore rows) | Full gauntlet: static smokes, local e2e against the mock pipeline, and the real-LLM e2e (only on `main`, see below). Heavy card80 + 14-model opencode_go sweep + per-provider `--ignored` discovery live in dedicated manual-only workflows. |
+| **T2** | 1–5 min | pre-push | `make test-ci` (`MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`; `#[ignore]`-marked tests are not run by default) | The 58 `tests/integration_*.rs` files. The slow ones. They run before push so the dev catches breakage locally instead of waiting on CI, but they do **not** block commit. |
+| **T3** | 5–30 min | CI on PR + post-merge | `make smoke` + `make e2e` (PR); `make e2e-network` (post-merge, fast+explore rows) | Full gauntlet: static smokes, local e2e against the mock pipeline, and the real-LLM e2e (only on `main`, see below). Heavy card80 + 7-model opencode sweep + per-provider `--ignored` discovery live in dedicated manual-only workflows. |
 
 Plus one fast orthogonal check on the commit message itself:
 
@@ -44,7 +44,8 @@ Plus one fast orthogonal check on the commit message itself:
                                   │
                                   ▼
    ┌─────────────────────────────────────────────────────────────────────┐
-   │  GitHub Actions — ci.yml (8 required + 1 informational)          │
+   │  GitHub Actions — ci.yml (8 required)                             │
+   │  + 2 standalone informational workflows (codeql, cargo-audit)     │
    │  ───────────────────                                              │
    │                                                                   │
    │  round 1 (no deps, max wall-clock):                               │
@@ -53,17 +54,19 @@ Plus one fast orthogonal check on the commit message itself:
    │    │ (T0) ~1s    │  │ (T0) ~1s     │  │ (T1) ~60s  │               │
    │    └─────────────┘  └──────────────┘  └────────────┘               │
    │                                                                   │
-   │  round 2 (depend on build, no artifact sharing):                 │
+   │  round 2 (no inter-job deps; each job triggers its own        │
+   │  cargo build/test via Swatinem/rust-cache, since the          │
+   │  shared `build` job was removed in PR #525 / commit f6e33a6):  │
    │    ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌────────┐ │
    │    │ test-lib    │  │ test-tests   │  │ test-doc   │  │ smoke  │ │
    │    │ (T2) ~30s   │  │ (T2) ~3min   │  │ (T2) ~30s  │  │(T3)~2s │ │
    │    └─────────────┘  └──────────────┘  └────────────┘  └────────┘ │
    │    ┌─────────────┐                                               │
-   │    │ e2e         │  ← all 5 jobs run `cargo build` themselves;   │
-   │    │ (T3) ~1min  │    Swatinem/rust-cache keeps the link step    │
-   │    └─────────────┘    at ~5–15 s.                              │
+   │    │ e2e         │  ← runs its own `cargo build` via the        │
+   │    │ (T3) ~1min  │    Swatinem/rust-cache workspace `target/`    │
+   │    └─────────────┘    (the link step is ~5–15 s warm).         │
    │                                                                   │
-   │  Total wall-clock: ~4 min cold / ~2 min warm                      │
+   │  Total wall-clock: ~6 min cold / ~3 min warm                      │
    │  (vs. ~5-8 min before the parallel refactor)                     │
    │                                                                   │
    │  Informational scans (NOT merge gates, run on every PR):         │
@@ -78,9 +81,11 @@ Plus one fast orthogonal check on the commit message itself:
    │  GitHub Actions — e2e-network.yml (post-merge, auto on main)     │
    │  ────────────────────────────────────────────                      │
    │                                                                   │
-   │  e2e-network (2 jobs, real LLM, ~8 min wall-clock)                │
+   │  e2e-network (4 jobs, real LLM, ~8 min warm / ~15 min cold)        │
    │    - fast     ~2  min   (timeout-minutes: 55)                     │
    │    - explore  ~8  min   (timeout-minutes: 120)                    │
+   │  plus build-e2e-network (~5 min warm / ~12 min cold) and           │
+   │  (~30 s); 4 jobs run in two waves gated on the preflight.         │
    │    - both run in parallel after `build-e2e-network`               │
    │      completes; gated by `preflight-minimax`                      │
    │    - builds release binary                                        │
@@ -90,8 +95,13 @@ Plus one fast orthogonal check on the commit message itself:
    │                                                                   │
    │  Manual-only siblings (workflow_dispatch, no auto on main):       │
    │    - e2e-network-card80.yml              ~25 min, MiniMax card80   │
-   │    - test-ignored-deepseek.yml           stub (budget exhausted)  │
-   │    - test-ignored-opencode.yml          active on manual dispatch │
+   │    - e2e-network-discover-deepseek.yml   DeepSeek discover         │
+   │    - e2e-network-discover-opencode.yml   OpenCode discover (single)│
+   │    - e2e-network-discover-opencode-models.yml  OpenCode 7-model sweep│
+   │    - test-ignored-deepseek.yml           workflow_dispatch only    │
+   │    - test-ignored-opencode.yml           workflow_dispatch only    │
+   │                                                                   │
+   │  Post-merge auto-trigger siblings (push to main, not a merge gate): │
    │    - test-ignored-minimax.yml            ~? min, real --ignored run│
    │                                                                   │
    └─────────────────────────────────────────────────────────────────────┘
@@ -146,7 +156,7 @@ checks from commit to push, not by removing them.
 - **CI is the audit**, not the bottleneck. It re-runs everything in a clean
   environment so a corrupted local cache can never mask a real regression.
 - **Parallelism inside CI** is the second layer of speedup. The 8 required
-  jobs run concurrently in two rounds; total wall-clock is ~4 min cold vs.
+  jobs run concurrently in two rounds; total wall-clock is ~6 min cold vs.
   ~5-8 min sequentially.
 
 ## Escape hatches
@@ -200,19 +210,19 @@ $ head -1 .git/hooks/pre-commit
 | Local validator aggregator | [`scripts/gauntlet.sh`](../scripts/gauntlet.sh) (`--fast`, `--skip-smoke`, …) |
 | Makefile targets (`validate`, `fmt-check`, `lint`, `test-ci`, `smoke`, `e2e`, `e2e-network`) | [`Makefile`](../Makefile) |
 | Composite action (checkout + toolchain + cache) | [`.github/actions/rust-setup/action.yml`](../.github/actions/rust-setup/action.yml) |
-| CI workflow (8 required + 1 informational job) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
+| CI workflow (8 required jobs) | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 | CI real-LLM e2e (main only, fast+explore auto) | [`.github/workflows/e2e-network.yml`](../.github/workflows/e2e-network.yml) |
 | CI real-LLM e2e (manual-only card80) | [`.github/workflows/e2e-network-card80.yml`](../.github/workflows/e2e-network-card80.yml) |
 | CI `--ignored` test runs (post-merge) | [`.github/workflows/test-ignored-{minimax,deepseek,opencode}.yml`](../.github/workflows/) |
 | CI informational: code scanning | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) |
 | CI informational: dependency audit | [`.github/workflows/cargo-audit.yml`](../.github/workflows/cargo-audit.yml) |
 | CI release pipeline (tag-triggered) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
-| Dependabot config (cargo + github-actions) | [`.github/dependabot.yml`](../.github/dependabot.yml) |
-| Code ownership / review fan-out | [`.github/CODEOWNERS`](../.github/CODEOWNERS) |
-| Security policy (private disclosure channel) | [`.github/SECURITY.md`](../.github/SECURITY.md) |
-| Contributing guide | [`.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md) |
-| PR template | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) |
-| Issue templates (bug / feature / security) | [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/) |
-| GitHub Copilot instructions | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) |
+| Dependabot config (cargo + github-actions) | [`.github/dependabot.yml`](.github/dependabot.yml) |
+| Code ownership / review fan-out | [`.github/CODEOWNERS`](.github/CODEOWNERS) |
+| Security policy (private disclosure channel) | [`.github/SECURITY.md`](.github/SECURITY.md) |
+| Contributing guide | [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) |
+| PR template | [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) |
+| Issue templates (bug / feature / security) | [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/) |
+| GitHub Copilot instructions | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
 | Branch protection (ruleset apply) | [`docs/branch-protection.md`](branch-protection.md) |
 | Architectural authority | [`docs/proposal-02-rust.md`](proposal-02-rust.md) |

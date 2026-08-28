@@ -51,14 +51,6 @@ The classic branch-protection endpoint returns HTTP 404
 (`/branches/main/protection`) — that endpoint is deprecated in favour of
 rulesets. Don't try to apply rules there.
 
-## What we add
-
-A single new rule to the existing ruleset:
-
-| Rule | Value | Why |
-|---|---|---|
-| `required_status_checks` | `strict: true`, 8 contexts: `fmt-check`, `guard-deps`, `clippy`, `test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e` | Each of the 8 parallel jobs in `.github/workflows/ci.yml` must be green before merge. `strict: true` forces the PR to be up to date with `main` first. The `T1 · build` job that used to be in this list was removed in PR #397: the consumers (`test-lib`, `test-tests`, `test-doc`, `smoke`, `e2e`) do their own incremental `cargo build` via the Swatinem/rust-cache `target/` cache, so the shared-artifact handoff was redundant. |
-
 ## Job IDs vs display names
 
 The ruleset `required_status_checks` rule uses the human-readable
@@ -78,10 +70,15 @@ key. The YAML below shows the two layers for each job from
 | `e2e` | `T3 · make e2e (local mock pipeline)` |
 
 Note: the `T1 · build (populates cargo cache)` row is no longer in this
-table. The job was removed in PR #397; the consumers run their own
-incremental `cargo build` against the Swatinem/rust-cache `target/`
-namespace (the workspace's `target/` is shared across all jobs in
-the same workflow via the same cache key).
+table. The job was removed in PR #525 (commit `f6e33a6`, the
+`ci(workflows): restructure ci.yml + cache cleanup + bump timeouts`
+restructure on 2026-08-16). The PR #397 reference in older revisions
+of this section is a misattribution — #397 is the
+`ci(perf): fix e2e-network warm-cache build (270s → 80-120s)` perf
+fix, unrelated. The consumers now run their own incremental
+`cargo build` against the Swatinem/rust-cache `target/` namespace
+(the workspace's `target/` is shared across all jobs in the same
+workflow via the same cache key).
 
 The `context` strings in the `required_status_checks` JSON block are
 the right-hand column. They are case-sensitive and must match what
@@ -91,18 +88,22 @@ GitHub renders in the PR's "Checks" tab.
 post-merge on `main` (it's the real-LLM audit, not a PR gate). As of
 PR #555 the auto path runs on every push to `main` and carries two
 matrix jobs (fast + explore); the heavy `card80` job was extracted
-into `e2e-network-card80.yml` (manual dispatch) and the per-provider
-discovery jobs (`preflight-deepseek`, `test-discover-deepseek`,
-`discover-deepseek`, `preflight-opencode_go`,
-`test-discover-opencode-go`, `discover-opencode-go`,
-`test-discover-opencode-go-models`) were removed outright. The
-remaining two jobs surface under the following display names and
+into `e2e-network-card80.yml` (manual dispatch). The per-provider
+discovery / ignored jobs were extracted from `e2e-network.yml` on
+2026-08-19 (per the `Jobs removed on 2026-08-19` block at the top
+of that file) to dedicated manual-only workflows:
+
+- `e2e-network-discover-deepseek.yml`
+- `e2e-network-discover-opencode.yml`
+- `e2e-network-discover-opencode-models.yml`
+
+The remaining two jobs surface under the following display names and
 remain informational — none of them are required status checks:
 
 | Job ID (`jobs.<id>`) | Display name (`name:`) |
 |---|---|
-| `e2e-network` | `Tier 3 · e2e — fast` |
-| `e2e-network` | `Tier 3 · e2e — explore` |
+| `test-fast` | `Tier 3 · e2e — fast` |
+| `test-explore` | `Tier 3 · e2e — explore` |
 
 The manual-only `e2e-network-card80.yml` (single job `test-card80`,
 display name `Tier 3 · e2e — card80 (manual dispatch)`) and the
@@ -185,7 +186,8 @@ Expected output after step 5:
     "non_fast_forward",
     "pull_request",
     "required_linear_history",
-    "required_status_checks"
+    "required_status_checks",
+    "required_signatures"
   ]
 }
 ```
@@ -225,8 +227,8 @@ Re-run the GET-modify-PUT cycle whenever:
   they are case-sensitive and are the `name:` field of the job, not the
   `jobs.<id>` key; see [Job IDs vs display names](#job-ids-vs-display-names)).
 - You move from solo to team (set `required_approving_review_count > 0` on
-  the `pull_request` rule, and flip `require_code_owner_review: true` once
-  co-maintainers are added to `.github/CODEOWNERS`).
+  the `pull_request` rule; `require_code_owner_review` is already `true`
+  on the ruleset, see line 42 above).
 - `.github/CODEOWNERS` is added or its paths change — the ruleset
   `pull_request` rule must be re-PUT to toggle
   `require_code_owner_review` accordingly (see [Optional hardening](#optional-hardeningskip-already-applied--kept-here-for-reference) below).

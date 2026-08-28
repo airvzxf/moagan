@@ -12,7 +12,7 @@ By default the emitter writes whenever stdout is not a TTY (i.e. when
 override with the new global flag:
 
 ```bash
-moagan … --event-format jsonl   # always write
+moagan … --event-format jsonl   # TTY-aware default (write when not TTY, silent on TTY)
 moagan … --event-format off     # silence
 MOAGAN_EVENT_FORMAT=off moagan …   # env var
 ```
@@ -62,7 +62,7 @@ kinds default to Summary so every emit site is visible until classified.
 | `judge_verdict` | `src/phases/judge.rs` | AllOnly | `{proposal_id, score, passed, threshold}` |
 | `portfolio_finalized` | `src/phases/deliver.rs` | Summary | `{proposal_id, ranking_strategy, alternatives}` |
 | `cache_hit` | `src/llm/provider.rs` | AllOnly | `{cache_key, role, model}` |
-| `cache_miss` | `src/llm/prompt_cache.rs` | AllOnly | `{cache_key, prompt_id?, reason}` |
+| `cache_miss` | `src/llm/prompt_cache.rs` | AllOnly | `{cache_key, reason}` |
 
 ## Wire format
 
@@ -81,7 +81,7 @@ consumer) can split on `\n` and parse each line independently.
 …
 {"kind":"probe","schema":1,"ts":"…","probe_kind":"temperature","candidate":0.6,"iteration":3,"provider":"minimax","model":"MiniMax-M3","outcome":"accepted"}
 …
-{"kind":"run_end","schema":1,"ts":"…","run_id":"…","status":"success","exit_code":0,"elapsed_ms":241823,"artefacts":{"final_md":"…/final/portfolio.md","ranking_json":"…/rankings/ranking.json"}}
+{"kind":"run_end","schema":1,"ts":"…","run_id":"…","status":"ok","exit_code":0,"elapsed_ms":241823,"artefacts":{}}
 ```
 
 Every event carries a top-level `schema: 1` field. The schema is
@@ -102,6 +102,8 @@ versioned independently of `moagan`'s own version. **Additive changes**
 | `llm_call`     | On successful `provider.send` (non-probe).     | `call_id`, `phase`, `role`, `provider`, `model`, `elapsed_ms`, `ok`, `input_tokens`, `output_tokens`, `retry_count` |
 | `discovery_iteration` | Per sketch loop iteration in discovery. | `n`, `total`, `cell_dim`, `cell_facet`, `temperature`, `replica`, `sketch_index`, `outcome` |
 | `probe`        | Per auto-probe call (temperature / max_tokens). | `probe_kind`, `candidate`, `iteration`, `provider`, `model`, `outcome: "accepted"\|"rejected"\|"indeterminate"` |
+| `warning`      | When `Telemetry::warn` is called.               | `code`, `level`, `phase?`, `details` |
+| `decision`     | At curated decision points throughout the pipeline (see `--decision-format` below). Verbosity controlled by `--decision-format`. | `decision_kind`, `payload` |
 
 > **v0.11.1**: `iteration` is now populated for `probe_kind=temperature`
 > as well as `probe_kind=max_tokens`. The temperature probe tags every
@@ -111,8 +113,6 @@ versioned independently of `moagan`'s own version. **Additive changes**
 > `max_tokens` probe had already been emitting `iteration: 0` since
 > v0.11.0, and the parity closes the gap that the temperature
 > auto-probe emitted no `iteration` field at all.
-| `warning`      | When `Telemetry::warn` is called.               | `code`, `level`, `phase?`, `details` |
-| `decision`     | At curated decision points throughout the pipeline (see `--decision-format` below). Verbosity controlled by `--decision-format`. | `decision_kind`, `payload` |
 
 The list grows over time. Consumers SHOULD ignore unknown `kind`s
 (forwards compatibility) and unknown fields (per the JSON-LD
@@ -127,8 +127,8 @@ moagan run --mode fast --provider mock:mock-model --prompt "x" \
     > events.jsonl
 jq -c 'select(.kind == "run_end")' events.jsonl
 # { "kind":"run_end", "schema":1, "ts":"…", "run_id":"…",
-#   "status":"success", "exit_code":0, "elapsed_ms":241823,
-#   "artefacts":{"final_md":"…/final/portfolio.md", …} }
+#   "status":"ok", "exit_code":0, "elapsed_ms":241823,
+#   "artefacts":{} }
 ```
 
 ### Stream LLM calls to a dashboard
@@ -151,26 +151,42 @@ moagan … 2>log.jsonl | jq -c 'select(.kind == "phase_error" or .kind == "warni
 
 ## Cross-reference: stderr
 
-stderr is the **logging** stream (`tracing-subscriber::fmt::layer().json()`
-when redirected, coloured text when a TTY). It carries the same
-information as the stdout events but with `file:line:column` source
-attribution, the `target: "moagan::..."` module path, and the span
-context (pipeline, phase, iteration, llm_call, probe).
+Since v0.12.0 the two streams are no longer split by event type:
+they are split by **level** via the `RoutingWriter` in
+`src/main.rs` (around `fn init_tracing`, line 295).
 
-Operators use stderr for **debugging** (where did the panic happen?)
-and stdout for **monitoring** (what happened across the run?). The
-two are intentionally disjoint streams: stderr is line-oriented
-logs, stdout is typed events. They are not redundant because
-each serves a different audience.
+- **Default** — `INFO`/`DEBUG`/`WARN` events go to **stdout**; `ERROR`
+  and the panic hook go to **stderr**. The split is
+  implemented in the writer (per-event `make_writer_for` decision
+  on `Level::ERROR`), not in two `tracing_subscriber` layers,
+  so it survives `tokio::spawn` workers cleanly.
+- **`--log-to-stderr` / `MOAGAN_LOG_TO_STDERR=1`** — inverts the
+  default: `INFO`/`DEBUG`/`WARN` events go to **stderr**,
+  `ERROR` events go to **stdout**. The flag
+  is **deprecated** as of v0.12.0 and is scheduled for removal in
+  v0.14.0; new scripts should use shell redirection
+  (`1> out.jsonl 2> errors.jsonl`) instead.
+
+In both modes the **content** of stderr is the same `tracing`
+event stream that goes to stdout: `file:line:column` source
+attribution, `target: "moagan::..."` module path, span context
+(pipeline, phase, iteration, llm_call, probe). The split is by
+stream, not by audience — operators pipe whichever stream carries
+the level they care about.
+
+Operators use stderr for **errors and warnings** (the panic hook,
+the `tracing::warn!` audit logs) and stdout for **everything else**
+(events + INFO logs). The two are intentionally disjoint streams;
+they are not redundant because each carries a different level
+slice of the same event stream.
 
 ## Compatibility
 
 - The emitter swallows write errors silently. A broken stdout
   (e.g. `head |` closing the pipe, SIGPIPE on a downstream filter)
-  must not crash the run. Operators who need to know about
-  emission errors can set `MOAGAN_QUIET=1` and check the run's
-  exit code (still 0 on a normal run, even if stdout events
-  failed to flush).
+  must not crash the run. The run's exit code is the operator's
+  signal: 0 on a normal run even if stdout events failed to
+  flush, non-zero if the underlying pipeline failed.
 - The `schema` field is the only contract. New fields can be
   added; new `kind`s can be added; existing field types can
   only be widened (e.g. `i32 → i64`), never narrowed.

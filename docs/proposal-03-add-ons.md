@@ -29,7 +29,7 @@ El método seguido en este barrido fue:
 
 ---
 
-> **v0.6.0 batch (released 2026-08-11)** — los siguientes items del
+> **v0.6.0 batch (released 2026-08-10)** — los siguientes items del
 > catálogo entraron juntos como parte de v0.6.0 (PR-B1 / PR-B2 / PR-B3).
 > La nota de cada sección enlaza el PR y el commit squash correspondientes:
 >
@@ -53,37 +53,39 @@ El método seguido en este barrido fue:
 >
 > - **D.13.4** — `tiktoken-rs` pre-flight token estimation
 >   ([#400](https://github.com/airvzxf/moagan/pull/400), squash
->   `1491d7f`). El pre-flight `cl100k_base` ya está en uso en
->   `src/llm/budget.rs:6`; la dependencia `tiktoken-rs = "0.5"` está
->   pin en `Cargo.toml:60`. La inexactitud del pre-flight no rompe
->   `accounting` (sólo se usa cuando el provider no reporta conteo
->   exacto). **Resuelve** el `Diferido v0.6+` previo.
+>   `1491d7f`). **RETIRED en v0.10** — la dependencia `tiktoken-rs`
+>   se eliminó del pin. La función de pre-flight queda cubierta por
+>   `moagan probe max_tokens` (catálogo D.X1 + D.31.5) y el
+>   sidecar `max_tokens_auto.toml` documentado en
+>   [`docs/max-tokens-auto.md`](../max-tokens-auto.md).
 > - **D.X1** — runtime-probe `max_tokens` per `(provider, model)`
 >   ([#400](https://github.com/airvzxf/moagan/pull/400), squash
 >   `1491d7f`; refinado en
 >   [#401](https://github.com/airvzxf/moagan/pull/401), squash
 >   `a9682d9`). Reemplaza los `*_MAX_TOKENS_CAP` hardcoded con
->   probe en `src/llm/probe.rs` (619 líneas) + cache en
->   `src/llm/probe_table.rs` (556 líneas). Mock provider skip +
+>   probe en `src/llm/probe.rs` (2256 líneas en v0.12.14; era
+>   619 en el momento del PR) + cache en
+>   `src/llm/probe_table.rs` (618 líneas en v0.12.14; era
+>   556 en el momento del PR). Mock provider skip +
 >   `DEFAULT_MAX_TOKENS = 1_000_000`. Documentación en
 >   `docs/max-tokens-auto.md`.
 
 ---
 
-> **v0.7.1 batch (released 2026-08-12)** — the following add-ons
-> entered together as part of v0.7.1:
+> **v0.7.2 batch (released 2026-08-15)** — the following add-ons
+> entered together as part of v0.7.2:
 >
 > - **D.30.5** — `models.dev/api.json` static catalog with 1 h TTL
 >   cache + capability gating (10 flags: `temperature`, `reasoning`,
 >   `reasoning_options`, `tool_call`, `modalities`, `attachment`,
 >   `interleaved`, `family`, `limit`, `cost`). Probed cap >
 >   catalog limit > config TOML > hardcoded constant. PR-1
->   through PR-8. Documentation in `docs/models-dev-catalog.md`.
+>   through PR-8. Catalog snapshot at `docs/v0.7-final-report.md §D.30` (the doc `models-dev-catalog.md` was retired in the 2026-08 docs prune).
 > - **D.31.5** — `moagan probe max_tokens` sub-command for bulk
 >   probing multiple `(provider, model)` pairs and persisting the
 >   minimum to `max_tokens_auto.toml`. PR-9.
 > - **D.32.6** — `cost_usd` column in `calls` table (SQLite
->   migration v014). Per-call USD estimate derived from
+>   migration v015). Per-call USD estimate derived from
 >   `cost.{input,output,cache_read,cache_write}` in the catalog.
 >   PR-6. Surfaced through `moagan telemetry cost --run <id>`.
 
@@ -295,7 +297,7 @@ impl Drop for SecretString { /* zeroize::Zeroize::zeroize(&mut self.0) */ }
 | Crate | Versión | Propósito | Fuente |
 |---|---:|---|---|
 | `time` | NO añadir | T01-06 ya tiene `chrono 0.4`. | (rechazado de T15-01, T02-02) |
-| `tiktoken-rs` | `0.5` con `cl100k_base` | Estimación de tokens previa a la llamada | T06-07 §13.2; T04-04 §12.1; T13-04 §6.6 |
+| `tiktoken-rs` | RETIRED en v0.10 (era `0.5` con `cl100k_base`) | Estimación de tokens previa a la llamada — **ya no en el pin**; ver `docs/max-tokens-auto.md` | T06-07 §13.2; T04-04 §12.1; T13-04 §6.6 |
 | `secrecy` | `0.8` (opcional, feature flag `secrecy`) | Tipo `SecretString` con `Zeroize` y `ZeroizeOnDrop` | T00-05 §13.2; T15-01 §5.5; T18-06 §7.1; T07-10 §1287-1299; T08-03 §7.1; T04-04 §12.1 |
 | `zeroize` | `1.7` (sin feature flag) | Base para `SecretString` y `SecretBox` | igual |
 | `rpassword` | `7.3` | Reemplaza `dialoguer::Password` para API keys | T15-01 §5.5; T09-07 §10.3 |
@@ -336,7 +338,7 @@ impl Drop for SecretString { /* zeroize::Zeroize::zeroize(&mut self.0) */ }
 | `csv` | ya | ya | (no añadir) |
 
 Notas de pin:
-- `tiktoken-rs` se usa solo para pre-flight (no para contar tokens facturados), por lo que su inexactitud no rompe accounting.
+- ~~`tiktoken-rs` se usa solo para pre-flight~~ (RETIRED en v0.10; ver `docs/max-tokens-auto.md` para la implementación actual).
 - `nix` y `cgroupfs` van detrás de `#[cfg(target_os = "linux")]` y feature flags.
 - `petgraph` se usa como **opcional**; por defecto T01-06 mantiene su `phases/` vector (DAG solo en `deep`).
 - `secrecy` puede omitirse: la implementación manual con `zeroize 1.7` es ~30 LoC.
@@ -1981,15 +1983,14 @@ pub fn validate_cardinality(matrix: &ExplorationMatrix, avg_tokens: u64, max_sto
 
 (Inspirado en T19-09 D15; T18-04 §4.3; T04-05.)
 
-> **Implementación v0.7.1 (PR #400, squash `1491d7f`):**
-> el pre-flight `tiktoken-rs` está implementado y en uso en
-> `src/llm/budget.rs:6` (encoder `cl100k_base`, dependencia
-> `tiktoken-rs = "0.5"` pin en `Cargo.toml:60`). Se usa como
-> best-effort cuando el provider no reporta conteo exacto; su
-> inexactitud no rompe `accounting`. La superficie pública y la
-> `Error::CardinalityExceedsStorage` siguen exactamente el spec
-> de arriba. **Resuelve** el `Diferido v0.6+` previo. Detalles
-> en `docs/v0.7-final-report.md §4` y `docs/max-tokens-auto.md`.
+> **Implementación v0.7.1 (PR #400, squash `1491d7f`)** — RETIRED en
+> v0.10: la dependencia `tiktoken-rs` se eliminó del pin y la
+> función de pre-flight de cardinalidad de discovery queda
+> cubierta por `moagan probe max_tokens` y el sidecar
+> `max_tokens_auto.toml` documentado en
+> [`docs/max-tokens-auto.md`](../max-tokens-auto.md). La
+> superficie pública y `Error::CardinalityExceedsStorage` siguen
+> exactamente el spec de arriba.
 
 #### D.13.5. `DiscoveryContext` con `category_id`
 
@@ -3409,8 +3410,10 @@ fn invalidate_downstream(p: &Proposal, action: &RefineAction, graph: &ArtifactGr
 (Inspirado en T18-06 §8.2; T06-08 §8.2.)
 
 > **Closure note (2026-08-13):** the `invalidate_downstream` implementation
-> was intentionally removed in PR #434 (per
-> `docs/inconsistencies-audit-2026-08-12-round-2.md` §B.7). No
+> was intentionally removed in PR #434 (the doc
+> `inconsistencies-audit-2026-08-12-round-2.md` was itself retired
+> in the 2026-08-28 docs prune; traceability survives in git history
+> at commit `926f1b8`, §B.7). No
 > production code is wired for this entry, and the `RefineAction::Focus`
 > case effectively no-ops. The spec block is retained as a design
 > reference for any future re-introduction.
@@ -3748,6 +3751,12 @@ pub const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 
 #### D.29.3. `tiktoken-rs` token estimation
 
+> **Estado: RETIRED en v0.10** — la dependencia `tiktoken-rs` se
+> eliminó del pin. El spec de la API (`estimate_tokens`) sigue
+> vigente como punto de extensión interno; ver
+> [`docs/max-tokens-auto.md`](../max-tokens-auto.md) para la
+> implementación actual.
+
 ```rust
 pub fn estimate_tokens(text: &str) -> u64 {
     let bpe = cl100k_base().unwrap();
@@ -3848,9 +3857,10 @@ Static, read-only index of every LLM provider models.dev tracks
 (183 as of August 2026, 3.6 MB JSON, refreshed hourly upstream).
 The runtime downloads the catalog on first startup, gzip-compresses
 it under `${MOAGAN_HOME}/models_dev.json`, and re-fetches when the
-TTL (default 1 h, override `MOAGAN_MODELS_DEV_REFRESH_HOURS`) elapses.
-Force the offline path with `MOAGAN_MODELS_DEV_OFFLINE=true` (smoke
-tests, air-gapped runners).
+TTL (default 1 h, const `DEFAULT_REFRESH_HOURS = 1` en
+`src/llm/models_dev.rs:55`; no hay env override público) elapses.
+Force the offline path with la flag inline de `load_or_fetch_at`
+`offline = true` (smoke tests, air-gapped runners).
 
 Ten flags per `(provider, model)` pair gate runtime decisions:
 
@@ -3877,7 +3887,9 @@ Catalog flag  > Config default   (per flag)
 Provider-name aliasing: `opencode_go_anthropic` and
 `opencode_go_responses` both map to the catalog id `opencode_go`;
 `mock` and `openai_compat` skip the lookup entirely. Documentation:
-`docs/models-dev-catalog.md`. PR-1 through PR-8.
+catalog snapshot at `docs/v0.7-final-report.md §D.30` (the doc
+`models-dev-catalog.md` was retired in the 2026-08 docs prune).
+PR-1 through PR-8.
 
 ---
 
@@ -3988,15 +4000,15 @@ pub struct Budget {
 
 (Inspirado en T19-01 §0.4.2; T05-07 §2.6; T15-02 §6.1.)
 
-#### D.32.6. `cost_usd` column in `calls` table (SQLite migration v014)
+#### D.32.6. `cost_usd` column in `calls` table (SQLite migration v015)
 
 Adds a `cost_usd REAL` column to the `calls` table. SQLite
-migration `v014` runs on first startup after the v0.7.1 release;
+migration `v015` runs on first startup after the v0.7.1 release;
 the migration is idempotent (`ALTER TABLE calls ADD COLUMN cost_usd
 REAL`) so re-running it is safe.
 
 ```sql
--- src/storage/migrations/v014__cost_usd.sql
+-- src/storage/migrations/v015__calls_cost_usd.sql
 ALTER TABLE calls ADD COLUMN cost_usd REAL;
 ```
 
@@ -4329,16 +4341,22 @@ Mock provider skips the probe and returns `DEFAULT_MAX_TOKENS =
 > + bisect paralelo de 20 puntos en hasta 32 rondas). El cache
 > in-memory + on-disk vive en `src/llm/probe_table.rs` (556
 > líneas, `MaxTokensTable` + `MaxTokensTableFile`). PR #401
-> introdujo `ProbeOutcome::Indeterminate` (5xx → no retry) y
-> `bypass_all_caps: true` en `send_probe` para que el probe nunca
-> quede atrapado por la cap que está intentando descubrir. La
-> dependencia `tiktoken-rs = "0.5"` (pin en `Cargo.toml:60`) es
-> ortogonal: pre-flight en `src/llm/budget.rs:6` (cl100k_base).
+> introdujo `ProbeOutcome::Indeterminate` (5xx → no retry) y un
+> bypass interno del operator_cap en `send_probe` (sin flag
+> público `bypass_all_caps`; el cap se omite durante el probe
+> para que no quede atrapado por la cap que está intentando
+> descubrir). La
+> dependencia `tiktoken-rs = "0.5"` (pin en `Cargo.toml:60`,
+> RETIRED en v0.10) es
+> ortogonal: pre-flight (RETIRED en v0.10 junto con la
+> dependencia `tiktoken-rs`; ver `docs/max-tokens-auto.md` para
+> la implementación actual del pre-flight de cardinalidad).
 > Documentación: `docs/max-tokens-auto.md`. Tests: la nueva
-> `tests/integration_max_tokens_auto.rs` (296 líneas, 6 tests) +
+> `tests/integration_max_tokens_auto.rs` (299 líneas, 6 tests) +
 > ~36 nuevos tests en `src/llm/probe.rs` (13) /
 > `src/llm/probe_table.rs` (10) / `src/llm/capabilities.rs::tests`
-> (7). Detalles en `docs/v0.7-final-report.md §4`.
+> (7). Detalles en `docs/v0.7-final-report.md §D.30` (retired
+> docs; survives in git history).
 
 ---
 

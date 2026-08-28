@@ -70,20 +70,28 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 | `MOAGAN_USER` | `default` | `rate` |
 | `MOAGAN_QUIET` | (unset) | silence `.env` notice |
 | `MOAGAN_FACET_CACHE_TTL_SECS` | `604800` (7d) | `discover --cache-facets` |
-| `MOAGAN_INSPECT_JSON` | `0` | inspect JSON output |
-| `MOAGAN_CONTINUE_FROM_PHASE` | (empty) | resume from phase |
-| `MOAGAN_FORCE_EVAL` | `0` | force eval pass |
-| `MOAGAN_BATCH_PROPOSALS` | (empty) | batch cardinality |
-| `MOAGAN_TELEMETRY_VACUUM` | `0` | `telemetry cleanup` analogue |
+| `MOAGAN_LOG_FORMAT` | (empty) | JSONL log format selector (see `src/cli/mod.rs:244`) |
+| `MOAGAN_DECISION_FORMAT` | (empty) | stdout event decision format (`off` silences) |
+| `MOAGAN_LOG_TO_STDERR` | (unset) | mirror JSONL logs to stderr |
 | `MOAGAN_PHASE_L_TEST_PANIC` | (unset) | debug: forced panic |
 | `MOAGAN_RATE_LIMIT_<provider>` | (empty) | per-provider token bucket |
 | `MOAGAN_RESEARCH_RATE_LIMIT_<host>` | (empty) | per-host token bucket |
 
-## 0.3 What's new in v0.6.0 (since the 2026-08-08 cheatsheet)
+> **Note:** the following env vars are NOT read by
+> `Config::apply_env_overrides` and have no effect: `MOAGAN_INSPECT_JSON`,
+> `MOAGAN_CONTINUE_FROM_PHASE`, `MOAGAN_FORCE_EVAL`,
+> `MOAGAN_BATCH_PROPOSALS`, `MOAGAN_TELEMETRY_VACUUM`. They are
+> listed in older revisions of this cheatsheet from before the
+> refactors that removed the corresponding CLI flags. Do not
+> rely on them; if the env var name appears here, treat it as
+> documentation drift until the corresponding `apply_env_overrides`
+> block in `src/config/mod.rs` is updated.
 
-The cheatsheet was last touched in PR #319 (commit `1590877`). Since then the v0.6.0 release landed 14 PRs that change the CLI surface; this section is the audit summary and every claim below is verified against the current source. Per-flag details live in the matching sub-section further down.
+## 0.3 What's new in v0.12.14 (since the 2026-08-08 cheatsheet)
 
-### New flags (added in v0.6.0)
+The cheatsheet has tracked the CLI surface through v0.6.0 → v0.12.14. Between those releases the v0.10 telemetry refactor renamed several env vars and the v0.12 line added the `MOAGAN_LOG_FORMAT` / `MOAGAN_DECISION_FORMAT` / `MOAGAN_LOG_TO_STDERR` globals listed in §0.2. Per-flag details live in the matching sub-section further down.
+
+### New flags (added since v0.6.0; full per-release changelog in CHANGELOG.md)
 
 | Subcommand | Flag | Where |
 |---|---|---|
@@ -163,7 +171,7 @@ Operators no longer need the per-provider `max_tokens` override in `~/.config/mo
 | `--hash-algo` absent | default `blake3` (`Config::export.hash_algo::default()` = `Blake3`, even though the bare `HashAlgo` enum default is `Sha256` — see `src/config/mod.rs:294`) |
 | OpenCode provider (pre-v0.10) | `max_tokens` was hard-capped at `16_384` (`OPENCODE_GO_MAX_TOKENS_CAP`) regardless of `--hash-algo` / config / `DEFAULT_MAX_TOKENS`; the cap was enforced inside the wire body. **Removed in v0.10** — the per-model auto-probe replaces it. |
 | `--prompt -` | reads the prompt from stdin |
-| `--max-parallelism > 64` | rejected by `validate_max_parallelism` |
+| `--max-parallelism > 4_294_967_295` | rejected by `validate_max_parallelism` |
 | `--allow-injection` | disables the sandbox's secret-strip pass |
 | `--model <alias>` (e.g. `minimax-m3`) | resolves to canonical `MiniMax-M3` when the alias is in `cfg.providers` and matches the kind |
 
@@ -213,7 +221,7 @@ Phases executed (via `build_pipeline_for_mode`):
 | Missing `--prompt` | clap parse error | 2 |
 | `--hash-algo foo` | `InvalidArgs` | 2 |
 | `--context-summary` without `--context` | `InvalidArgs` | 2 |
-| `--max-parallelism > 64` | `InvalidArgs` | 2 |
+| `--max-parallelism > 4_294_967_295` | `InvalidArgs` | 2 |
 | Provider not in config | `InvalidArgs` ("provider 'x' is not in config") | 2 |
 | API key missing (provider=minimax) | `InvalidApiKey` | 3 |
 | Quota / HTTP 429 upstream | `PlanExhausted` | 4 |
@@ -240,7 +248,7 @@ Phases executed (via `build_pipeline_for_mode`):
 |---|---|
 | no `--run-id` | uses the most recent run in the DB |
 | `--from-pause` | short-circuits to `pause_cmd::run_continue_from_pause`; `--kind` is **silently ignored** (pause path always uses the linear pipeline because `paused.json` records linear phase names); requires `--run-id` |
-| `--from-pause` + `--kind discovery` | **not** a clap conflict — `--kind` is silently dropped because the pause branch returns before reading it (verified at `src/cli/mod.rs:1016-1024`); not an error |
+| `--from-pause` + `--kind discovery` | **not** a clap conflict — `--kind` is silently dropped because the pause branch returns before reading it (verified at `src/cli/mod.rs:1592-1629`); not an error |
 | `--kind discovery` + `manifest.mode = "linear"` | `InvalidArgs` ("requires manifest.mode = 'discover'") |
 | `--kind discovery` + `manifest.mode = "discover"` | enters `discover::run_resume` |
 | `--switch-provider <x>` not in config | `InvalidArgs` (validated up-front) |
@@ -448,7 +456,7 @@ cli::dispatch → Cmd::Inspect → inspect::run_capabilities(&db, run_id, verbos
 ```
 
 The snapshot is captured at the start of each phase and persisted
-to the `calls` table (migration v014; see §15.11). On a run that
+to the `calls` table (migration v015; see §15.11). On a run that
 predates v0.7.1 the snapshot is absent and the command prints
 `no capability snapshot for this run`.
 
@@ -787,7 +795,7 @@ cli::dispatch → Cmd::Audit::Verify → audit::verify_cmd(VerifyArgs)
   → run_dir.telemetry/calls.jsonl.gz
   → verify_mod::verify_with_db(&run_dir, &calls_path, &db)
        → on SQLite failure: report.internal_file_invalid=true + verify(&run_dir, &calls_path)
-  → write_tsv(&report, &run_dir/external_audit_verify.tsv)
+  → write_tsv(&report, &run_dir/external_audit.verify.tsv)
   → println TSV + eprintln path
   → exit report.exit_code() (0 ok / 1 mismatch / 2 missing/invalid / 90 export_failed)
 ```
@@ -1041,38 +1049,42 @@ window_days  = 7
 
 ---
 
-### 15.11 `moagan telemetry cost --run <run_id>`
+### 15.11 `moagan telemetry cost --run <run_id> | --all`
 
-**👁 What it is** — Per-run USD aggregate for a finished run. Reads the `cost_usd` column added by SQLite migration v014 (§D.32.6 in `docs/proposal-03-add-ons.md`), groups by role and model, and prints a small table with the total. Lets an operator answer "how much did this run cost me" without joining the catalog and the calls table by hand. When the run predates v0.7.1 (no `cost_usd` column) or the `(provider, model)` pair has no `cost.*` flags in the catalog, the row prints `(no cost data)` instead of `0`.
+**👁 What it is** — Per-run (or per-index) USD aggregate. Reads the `cost_usd` column added by SQLite migration v015 (§D.32.6 in `docs/proposal-03-add-ons.md`), groups by role and model, and prints a small table with the total. With `--run <run_id>` the aggregation is scoped to one run; with `--all` it spans every run in the index. Lets an operator answer "how much did this run cost me" without joining the catalog and the calls table by hand. When the run predates v0.7.1 (no `cost_usd` column) or the `(provider, model)` pair has no `cost.*` flags in the catalog, the row prints `(no cost data)` instead of `0`.
 
 **🧩 Flag matrix**
 
 | Combination | Behaviour |
 |---|---|
-| `--run <id>` absent | `InvalidArgs` ("missing --run") |
+| `--run <id>` and `--all` both omitted | `InvalidArgs` ("specify --run <id> or --all") |
+| `--run <id>` and `--all` both present | `InvalidArgs` (clap conflict — the `Cost` variant declares `conflicts_with = "all"`) |
 | `--run <id>` malformed | `InvalidArgs` |
 | `--run <id>` not in DB | `InvalidState` |
-| `--by role` | group rows by `role` (default) |
-| `--by model` | group rows by `(provider, model)` |
-| `--json` | print a single JSON object instead of a table |
-| `--limit N` | show the top-N rows only (default 20) |
+| `--all` (no `--run`) | scans every run in the index; no single-run scoping |
+| pre-set `MOAGAN_HOME` / `MOAGAN_RUNS_DIR` | respected (no flag needed) |
+| (no extra flag) | table grouped by (provider, model), no LIMIT clause |
 
 **⚙️ Internal flow**
 
 ```
-cli::dispatch → Cmd::Telemetry → telemetry::run_cost(CostArgs { run_id, by, json, limit })
-  → RunId::from_str(run_id) → bounds check
+cli::dispatch → Cmd::Telemetry { sub: TelemetryCmd::Cost { runs_dir, run, all } }
+  → RunId::from_str(run_id)? → bounds check
   → Db::open(home.meta_db_path)
   → db.get_run(run_id)? → None → InvalidState
-  → db.aggregate_cost(run_id, group_by = by)? → rows: Vec<CostRow>
-       // SQL: SELECT role|provider|model, SUM(cost_usd), COUNT(*) FROM calls
-       //       WHERE run_id = ? AND cost_usd IS NOT NULL
-       //       GROUP BY <group_by> ORDER BY total_usd DESC LIMIT ?
-  → format_table(rows) | format_json(rows)
+  → db.aggregate_cost_by_provider_model(run_id)? → rows: Vec<CostAggregateRow>
+       // SQL: SELECT provider, model, COUNT(*), COALESCE(SUM(cost_usd), 0.0) FROM calls
+       //       WHERE run_id = ?
+       //       GROUP BY provider, model
+       //       ORDER BY (COALESCE(SUM(cost_usd), 0.0)) DESC, provider ASC, model ASC
+  → println!("RUN: <id>\nTotal cost: $X.XXXX\nBy provider/model: ...") | serde_json
 ```
 
 ```text
-$ moagan telemetry cost --run 018f3a2b --by model
+$ moagan telemetry cost --run 018f3a2b
+$ moagan telemetry cost --all
+# honour the global env vars for redirection
+$ MOAGAN_LOG_FORMAT=json moagan telemetry cost --all 2>errors.jsonl 1>out.jsonl
 provider     model          calls=200    total_usd=$1.42
 minimax      MiniMax-M3     200          $1.42
 (1 row(s); $1.42 total)
@@ -1188,26 +1200,22 @@ cli::dispatch → Cmd::Rate → rate::run(RateArgs { run_id, proposal_id, score 
 
 **🧩 Flag matrix**
 
-| Combination | Behaviour |
-|---|---|
-| no `--provider` | `InvalidArgs` ("missing --provider") |
-| `--provider <kind>:<model>` repeated | probed in the order given; per-provider failures are reported but do not abort the batch |
-| `--floor <N>` | clamp the discovered value to `>= N` (default `1024`, mirrors `ProviderConfig::max_token_auto`) |
-| `--save` (default `true`) | write the result to `max_tokens_auto.toml` |
-| `--no-save` | run the probe but leave the cache file untouched |
-| `--timeout-secs <N>` | per-provider probe timeout (default 60 s); the probe exits cleanly with the cache value on timeout |
-| `--provider <kind>` not configured | `InvalidArgs` ("provider '<kind>' not in config") |
+| Flag | Default | Meaning |
+|---|---|---|
+| `--provider PROVIDER:MODEL` | required, repeatable | Probe this pair; repeat the flag once per pair to bulk-probe. The value is the literal `provider:model` string. |
+| `--persist-min` | `false` | Take the minimum across every probed model under the same provider and write the cap into `max_tokens_auto.toml` as the operator-level cap (`auto = false`). |
+| `--dry-run` | `false` | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts. |
 
 **⚙️ Internal flow**
 
 ```
-cli::dispatch → Cmd::Probe → probe::run_max_tokens(ProbeMaxTokensArgs { providers, floor, save, timeout })
+cli::dispatch → Cmd::Probe::MaxTokens(ProbeMaxTokensCmd { providers, persist_min, dry_run })
   → Config::load() → MoaganHome::resolve() + ensure
   → for each (kind, model) in providers:
        builder = ProviderBuilder::for_kind(&cfg, kind)?
-       ceiling = probe::probe_ceiling(&builder, model, floor, timeout_secs)?  // exponential + bisect
-       if save: max_tokens_table.upsert(kind, model, ceiling)
-       println! "{kind}:{model}  ceiling={ceiling}  floor={floor}  source=probe"
+       ceiling = probe::probe_ceiling(&builder, model, MIN_AUTOPROBE_FLOOR, timeout)?  // exponential + bisect
+       if persist_min: max_tokens_table.upsert(kind, model, ceiling)
+       println! "{kind}:{model}  ceiling={ceiling}  source=probe"
   → exit 0 on success; exit 1 if every probe failed
 ```
 
@@ -1332,9 +1340,69 @@ clamp policy (`TemperatureTable::nearest_supported(...)`).
 | `<run_id>` malformed | `InvalidArgs` |
 | `--format text` (default) | writes the snapshot table to stdout, always exit 0 |
 | `--format html` without `grcov` on `PATH` | `InvalidState` (exit 80) with a copy-pasteable `grcov` invocation hint |
-| `--format html` with `grcov` | writes `<run_dir>/coverage.html` and exits 0 |
+| `--format html` with `grcov` | writes `<run_dir>/telemetry/coverage.html` and exits 0 |
 | `--since-tag <needle>` | filters the snapshot list to files whose name contains the needle (case-insensitive substring match); handy for narrowing to one phase or call id |
-| `--html-out <path>` | override the HTML output path (default `<run_dir>/coverage.html`) |
+| `--html-out <path>` | override the HTML output path (default `<run_dir>/telemetry/coverage.html`) |
+
+## 22. `moagan preflight --provider <section[:model]> --prompt <text>`
+
+**👁 What it is** — Smoke-test the END-TO-END pipeline (discover
++ run --mode fast) against the real provider in a single CLI
+invocation. The two steps are linked through `--context`: the
+discover run produces a library of `sketches/*.json`, and the
+fast-mode run consumes that library as its input corpus. Both run
+ids are printed on stdout so the operator can inspect either side
+independently. Replaces the pre-PR-564 single-`discover` wrapper
+(which missed upstream intake/clarify) and the PR-565 single-`fast`
+wrapper (which duplicated fast-mode test coverage); the
+two-step flow exercises the cross-run plumbing AND the per-run
+planner.
+
+**🧩 Flag matrix**
+
+| Combination | Behaviour |
+|---|---|
+| `--provider <section[:model]>` | Required. Resolved via the same order as `moagan run --provider` (v0.10 mandatory semantics). |
+| `--prompt <text>` | Required. The same prompt is passed to both phases. |
+| `--runs-dir <path>` | `global = true`. Where both runs are written (default `$MOAGAN_HOME/.runs`). |
+| `--mock-dir <path>` | Optional. When set, the fast-mode leg runs against the mocks recorded under this dir (no upstream traffic). |
+| `--max-parallelism <n>` | Default 4. Forwarded to both phases. |
+| `--non-interactive` | Default false. When set, both phases skip the checkpoint prompt and write `<skipped:non_interactive>` markers. |
+
+**⚙️ Internal flow** — `cli::Cmd::Preflight` (`src/cli/mod.rs:927`)
+→ `dispatch` arm at `src/cli/mod.rs:2175-2317`. Two steps in
+sequence:
+
+1. `moagan discover` with cardinality 8 (one sketch per
+   dimension × facets_per_dimension = 1), single temperature
+   (1.0), single replica. Produces a `run_id` with a persisted
+   `sketches/` library (~3 MB).
+2. `moagan run --mode fast --context <discover_run_id>
+   --context-full` that consumes the discover run's library as
+   its input corpus (the `Full` scope loads every text-like file
+   under the run dir, including `sketches/*.json`).
+
+Cost: ~30-60 s of API budget per step (~60-120 s total), ~3 MB
+of disk per run. A preflight that succeeds is a strong
+end-to-end signal (every phase from intake → clarify → sketch →
+judges → tag → cluster → facets → portfolio has fired at least
+once). A preflight that fails tells the operator exactly which
+step regressed because both run ids are printed.
+
+**❌ Errors / exit codes** —
+
+- `Config::load` failure → `Error::Config` (exit 3).
+- `discover` leg fails (any phase error, upstream 5xx, sandbox
+  rejection) → the discover `run_id` is printed and the process
+  exits with that run's exit code. The fast-mode leg does NOT
+  run.
+- `run --mode fast` leg fails (LLM 4xx, parse failure after
+  retries, validation rejection) → BOTH run ids are printed and
+  the process exits with the fast-mode run's exit code. The
+  discover run is preserved on disk so the operator can inspect
+  the upstream state.
+- `--provider` resolves to a missing section / model → `InvalidArgs`
+  (exit 2).
 
 **⚙️ Internal flow**
 
@@ -1462,7 +1530,7 @@ run 01a0178c  coverage report
 | `repair` | `repair (dry-run|applied): cleanup=N reindex=N zombies=N` | filesystem + DB rows + outbox events |
 | `doctor` | `[OK] / [WARN] / [FAIL]` lines + verdict | (read-only, writes probe then removes it) |
 | `audit proxy` | `proxy listening on http://...` | `<run_dir>/telemetry/external_audit.jsonl.gz` |
-| `audit verify` | TSV rows + `OK: N verified, M failed` | `<run_dir>/external_audit_verify.tsv` |
+| `audit verify` | TSV rows + `OK: N verified, M failed` | `<run_dir>/external_audit.verify.tsv` |
 | `discover` | `discovery run id: <uuid>` | `<run_dir>/{tags,clusters,facets,extractions,final(cat_NN.md, summary.md)}/` |
 | `telemetry list/summary/compare/provider/config` | tables / text | (read-only) |
 | `telemetry view` | `dashboard listening on http://...` + endpoints list | HTTP dashboard running |
@@ -1506,9 +1574,11 @@ run 01a0178c  coverage report
 | `moagan telemetry verify` | Re-hash an exported bundle against `SHA256SUMS` |
 | `moagan telemetry config` | Print effective configuration (no API keys) |
 | `moagan telemetry cost` | Per-run USD aggregate (cost_usd column, §15.11) |
+| `moagan telemetry alerts list` | List saturation events (catalog §D.23 + §D.27) recorded by the runtime; flags `--since <unix-timestamp\|YYYY-MM-DD>` (best-effort parse, falls back to "no lower bound" on parse errors) and `--provider <name>` (filter by inner provider name) |
 | `moagan pause` | Serialize current run state to `paused.json` |
 | `moagan list` | Enumerate runs with `paused.json` |
 | `moagan rate` | Manually rate a proposal (preference cache) |
 | `moagan probe max_tokens` | Bulk-probe `(provider, model)` ceilings and persist (§19) |
 | `moagan probe temperature` | Bulk-probe supported temperature sets and persist (§20) |
 | `moagan coverage show` | Render the SanCov runtime coverage report for one run (§21, ADR-0002) |
+| `moagan preflight` | Smoke-test the end-to-end pipeline (discover + run --mode fast) against the real provider (§22) |

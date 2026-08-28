@@ -12,8 +12,9 @@ purpose. Use this when:
 
 The ruleset protects `main` via `gh api /repos/airvzxf/moagan/rulesets/19743104`.
 
-It has **5 rules** (`deletion`, `non_fast_forward`, `pull_request`,
-`required_linear_history`, `required_status_checks`). None of them "skip"
+It has **6 rules** (`deletion`, `non_fast_forward`, `pull_request`,
+`required_linear_history`, `required_status_checks`,
+`required_signatures`). None of them "skip"
 a check per se; they require what to pass.
 
 The closest thing to a skip is **`required_status_checks.contexts`** — the
@@ -25,13 +26,20 @@ list is implicitly **not enforced**.
 | `T0 · fmt-check` | ✅ required | |
 | `T0 · guard-deps` | ✅ required | |
 | `T1 · clippy` | ✅ required | |
-| `T1 · build (populates cargo cache)` | ✅ required | |
 | `T2 · cargo test --lib --bins` | ✅ required | |
 | `T2 · cargo test --tests (integration)` | ✅ required | |
 | `T2 · cargo test --doc` | ✅ required | |
 | `T3 · make smoke` | ✅ required | |
 | `T3 · make e2e (local mock pipeline)` | ✅ required | |
 | `e2e-network` workflow (post-merge) | ❌ **not required** | Runs only on push to main; not a merge gate |
+
+Plus the ruleset-level `required_signatures` rule, which enforces
+GPG signing on every commit landing on `main` (the same invariant
+that `commit.gpgsign=true` enforces locally; the ruleset entry is
+the last-resort guard so a bypass at the local hook still gets
+caught at the ruleset gate). See
+[`docs/branch-protection.md`](branch-protection.md) for the full
+`gh api` block.
 
 To update these, edit the ruleset via `gh api` (see
 `docs/branch-protection.md` for the PUT block).
@@ -57,7 +65,7 @@ The skip list is empty. The historical three skip sites
 (`Makefile::test-ci`, `ci.yml::test-lib`, `ci.yml::test-tests`)
 have been collapsed back to plain `cargo test` invocations:
 
-- `Makefile:65-66` — `test-ci` runs `cargo test --all-targets`
+- `Makefile:72-73` — `test-ci` runs `MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`
 - `.github/workflows/ci.yml::test-lib` — runs `cargo test --lib --bins`
 - `.github/workflows/ci.yml::test-tests` — runs `cargo test --tests --no-fail-fast`
 
@@ -74,9 +82,9 @@ when invoked with `cargo test -- --ignored` or `cargo test <name> -- --ignored`.
 |---|---|---|
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:465` | Mutates process-wide RLIMIT_NPROC (side-effects other tests) |
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:510` | Mutates process-wide RLIMIT_AS (side-effects other tests) |
-| `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); exercised by `make e2e-network` |
-| `discover_opencode_writes_four_subdirs` | `tests/integration_discover_opencode.rs:32` | Requires `OPENCODE_API_KEY`; only runs locally / in `e2e-network` |
-| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:32` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
+| `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); only runnable via `cargo test -- --ignored` (the test is `#[ignore]`d and `make e2e-network` does not auto-invoke it) |
+| `discover_opencode_writes_four_subdirs` | `tests/integration_discover_opencode.rs:37` | Requires `OPENCODE_API_KEY`; only runs locally / in `e2e-network` |
+| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:37` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
 | `discover_minimax_writes_four_subdirs` | `tests/integration_discover_minimax.rs:40` | Requires `MINIMAX_API_KEY`; only runs locally / in `e2e-network` |
 
 Total: **6 tests marked `#[ignore]`**.
@@ -101,7 +109,10 @@ them).
 | `python_validator` | `good_python_passes_when_python_present`, `broken_python_fails_when_python_present` | `python3` |
 | `sql_validator` | `sqlite_engine_passes_on_valid_select`, `sqlite_engine_fails_on_broken_select` | `sqlite3` |
 
-Pattern (from `src/validators/rust_validator.rs:407`):
+Pattern (from `src/validators/rust_validator.rs:558`, the first
+silent-skip site for `cargo`; the same shape repeats at
+`src/validators/python_validator.rs:235` for `python3` and at
+`src/validators/typescript_validator.rs:241` for `tsc`):
 
 ```rust
 if std::process::Command::new("cargo").arg("--version").output().is_err() {
@@ -123,25 +134,41 @@ but reports `Skipped` instead of `Pass`/`Fail`.
 
 | File | Line | Reason |
 |---|---|---|
-| `src/validators/python_validator.rs` | 44 | Source doesn't look like Python |
-| `src/validators/python_validator.rs` | 76 | Per-artifact check skipped (Validator trait default) |
-| `src/validators/rust_validator.rs` | 68 | Source doesn't look like Rust |
-| `src/validators/rust_validator.rs` | 214 | Per-artifact check skipped (Validator trait default) |
-| `src/validators/typescript_validator.rs` | 44 | Source doesn't look like TypeScript |
-| `src/validators/typescript_validator.rs` | 74 | Per-artifact check skipped |
-| `src/validators/schema_validator.rs` | 68 | No schema to validate |
-| `src/validators/schema_validator.rs` | 133 | Per-artifact check skipped |
-| `src/validators/sql_validator.rs` | 90 | No SQL detected |
-| `src/validators/sql_validator.rs` | 102 | SQLite binary missing on PATH |
-| `src/validators/sql_validator.rs` | 182 | Per-artifact check skipped |
+| `src/validators/python_validator.rs` | 49 | Source doesn't look like Python |
+| `src/validators/python_validator.rs` | 85 | Per-artifact check skipped (Validator trait default) |
+| `src/validators/rust_validator.rs` | 73 | Source doesn't look like Rust |
+| `src/validators/rust_validator.rs` | 224 | Per-artifact check skipped (Validator trait default) |
+| `src/validators/typescript_validator.rs` | 51 | Source doesn't look like TypeScript |
+| `src/validators/typescript_validator.rs` | 85 | Per-artifact check skipped |
+| `src/validators/schema_validator.rs` | 75 | No schema to validate |
+| `src/validators/schema_validator.rs` | 146 | Per-artifact check skipped |
+| `src/validators/sql_validator.rs` | 100 | No SQL detected |
+| `src/validators/sql_validator.rs` | 113 | Source splits into zero SQL statements (per-statement split on `;`) |
+| `src/validators/sql_validator.rs` | 215 | Per-artifact check skipped |
 
 Total: **11 runtime `skipped` returns**. Each is a normal code path,
 not a test exclusion.
 
 ## Layer 6 — Bash script conditional runs
 
-The e2e proxy suite (`scripts/e2e_audit_proxy.sh`) has 46
-`run_test` calls, but several are conditionally executed:
+The e2e proxy suite (`scripts/e2e_audit_proxy.sh`) has **69**
+`run_test` invocations in total (counted via
+`grep -c "run_test" scripts/e2e_audit_proxy.sh`); only the
+subset that runs in a default `make e2e-network` invocation
+is documented below. The MINIMAX_API_KEY-gated block (6a)
+contributes 46; the OPENCODE_API_KEY-gated discover block
+(6d) contributes 7 (+ 1 OC_RUN_ID skip fallback); the
+DEEPSEEK_API_KEY-gated discover block (6e) contributes 7
+(+ 1 DS_RUN_ID skip fallback); the MOAGAN_SMOKE_SECTION-gated
+discover_opencode_models block (6g) contributes 5 per model
+× 7 models = 35; the gauntlet.sh `MINIMAX_API_KEY` re-check
+(6f) contributes 1. The remaining ~6 `run_test` invocations
+in the script are for upstream-side assertions (per-run audits,
+post-run health checks, the proxy-e2e `moagan run` mode
+block) that are not currently gated on a secret and always
+run on `make e2e-network`.
+
+Several of the gated blocks are conditionally executed:
 
 ### 6a. Real proxy e2e tests skipped when `MINIMAX_API_KEY` is missing
 
@@ -185,7 +212,7 @@ PASS to keep totals consistent:
 
 Total: 14 of the 37 card80 tests have a partial-skip path.
 
-### 6d. `OPENCODE_API_KEY` → 8 discover_oc tests (PR #460)
+### 6d. `OPENCODE_API_KEY` → 7 discover_oc tests (PR #460)
 
 ```bash
 if [[ -n "${OPENCODE_API_KEY:-}" ]]; then
@@ -195,9 +222,9 @@ else
 fi
 ```
 
-- **Location:** `scripts/e2e_audit_proxy.sh:490–546` (the
-  `discover_opencode_go` block, conditional on `OPENCODE_API_KEY`).
-- **Tests:** 8 `run_test` invocations
+- **Location:** `scripts/e2e_audit_proxy.sh:580–662` (the
+  `discover_opencode` block, conditional on `OPENCODE_API_KEY`).
+- **Tests:** 7 `run_test` invocations + 1 `OC_RUN_ID` skip fallback
   (`proxy_e2e_discover_oc_run_id_present`,
   `proxy_e2e_discover_oc_tags_nonempty`,
   `proxy_e2e_discover_oc_facets_nonempty`,
@@ -207,13 +234,20 @@ fi
   `proxy_e2e_discover_oc_telemetry_plan_used_positive`,
   plus the `OC_RUN_ID` skip fallback that counts each missing subdir as
   one PASS).
-- **CI behaviour:** the key is currently NOT registered in any
-  workflow secret, so all 8 tests print a single `SKIP` line on
-  `make e2e-network` runs. Pair this block with `Layer 3`'s
-  `discover_opencode_go_writes_four_subdirs` `#[ignore]` integration
-  test which is also gated on the same secret.
+- **CI behaviour:** the `OPENCODE_API_KEY` secret IS registered on
+  the runner (alongside `DEEPSEEK_API_KEY`), but the auto-triggered
+  `e2e-network.yml` no longer consumes it (the discover-heavy path
+  moved to the manual-only `e2e-network-discover-opencode.yml` /
+  `e2e-network-discover-opencode-models.yml` workflows). On
+  `make e2e-network` runs, all 8 tests print a single `SKIP` line
+  because the env var `OPENCODE_API_KEY` is not set in the
+  default local-dev shell; only the manual discover workflows
+  (which set the key in their own `secrets:` block) actually
+  exercise it. Pair this block with `Layer 3`'s
+  `discover_opencode_writes_four_subdirs` `#[ignore]` integration
+  test, which is also gated on the same secret.
 
-### 6e. `DEEPSEEK_API_KEY` → 8 discover_ds tests (PR #462)
+### 6e. `DEEPSEEK_API_KEY` → 7 discover_ds tests (PR #462)
 
 ```bash
 if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
@@ -223,16 +257,18 @@ else
 fi
 ```
 
-- **Location:** `scripts/e2e_audit_proxy.sh:573–629` (the
+- **Location:** `scripts/e2e_audit_proxy.sh:683–781` (the
   `discover_deepseek` block, conditional on `DEEPSEEK_API_KEY`).
-- **Tests:** 8 `run_test` invocations — parallel structure to 6d
-  (`proxy_e2e_discover_ds_{run_id_present,tags_nonempty,facets_nonempty,extractions_subdirs,drafts_nonempty,telemetry_plan_reports_weekly,telemetry_plan_used_positive}`
-  plus the `DS_RUN_ID` skip fallback).
-- **CI behaviour:** the key is currently NOT registered in any
-  workflow secret, so all 8 tests print a single `SKIP` line on
-  `make e2e-network` runs. Pair with `Layer 3`'s
-  `discover_deepseek_writes_four_subdirs` `#[ignore]` integration
-  test.
+- **Tests:** 7 `run_test` invocations + 1 `DS_RUN_ID` skip fallback —
+  parallel structure to 6d
+  (`proxy_e2e_discover_ds_{run_id_present,tags_nonempty,facets_nonempty,extractions_subdirs,drafts_nonempty,telemetry_plan_reports_weekly,telemetry_plan_used_positive}`).
+- **CI behaviour:** the `DEEPSEEK_API_KEY` secret IS registered on
+  the runner, but the auto-triggered `e2e-network.yml` no longer
+  consumes it (the discover path moved to the manual-only
+  `e2e-network-discover-deepseek.yml` workflow). On `make
+  e2e-network` runs, all 8 tests print a single `SKIP` line. Pair
+  with `Layer 3`'s `discover_deepseek_writes_four_subdirs`
+  `#[ignore]` integration test.
 
 ### 6f. `MINIMAX_API_KEY` re-check inside `scripts/gauntlet.sh` (1 test)
 
@@ -254,6 +290,46 @@ fi
   triggers for local developer runs without a key. Distinct from
   Layer 6a (which guards the e2e proxy block in
   `e2e_audit_proxy.sh`) — both gates exist independently.
+
+### 6g. `MOAGAN_SMOKE_SECTION=discover_opencode_models` → 7-model sweep (manual)
+
+```bash
+if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_opencode_models" ]]; then
+  for MODEL in "${OPENCODE_COVERAGE_MODELS[@]}"; do
+    # 5 run_test calls per model
+  done
+else
+  echo "SKIP: 7-model opencode sweep (MOAGAN_SMOKE_SECTION=$MOAGAN_SMOKE_SECTION)"
+fi
+```
+
+- **Location:** `scripts/e2e_audit_proxy.sh:803+` (the
+  `discover_opencode_models` block, conditional on
+  `MOAGAN_SMOKE_SECTION`). Cost ~5 min per model × 7 = ~35 min
+  total.
+- **Tests:** 5 `run_test` invocations per model × 7 models = **35
+  total**, mirroring the opencode discover block: per model the
+  script asserts `proxy_e2e_discover_oc_model_${MODEL}_run_id_present`,
+  `_tags_nonempty`, `_facets_nonempty`, `_extractions_subdirs`, and
+  `_drafts_nonempty`.
+- **Models:** per `OPENCODE_COVERAGE_MODELS` array in
+  `scripts/e2e_audit_proxy.sh:122-130`:
+  - `deepseek-v4-flash` (opencode alias, distinct from native
+    `deepseek` provider)
+  - `glm-5.3-flash`
+  - `gpt-5.6-luna`
+  - `mimo-v2.5` (also the smoke-test model in A.bis)
+  - `minimax-m2.7`
+  - `muse-spark-1.2-contributor`
+  - `qwen3.7-max`
+- **CI behaviour:** the block is **double-gated** on both
+  `MOAGAN_SMOKE_SECTION` and `OPENCODE_API_KEY` (the latter is
+  checked by the inner `moagan discover --provider opencode:$MODEL`
+  invocations, which fail to start without a key). On a default
+  `make e2e-network` run, the block SKIPs unless the operator
+  explicitly passes `MOAGAN_SMOKE_SECTION=discover_opencode_models`
+  AND has `OPENCODE_API_KEY` set. The CI workflow never sets
+  either, so the block is dormant in CI.
 
 ## Layer 7 — Lefthook escape hatches (developer-side)
 
@@ -282,16 +358,23 @@ check from a clean state.
 | 6a | `MINIMAX_API_KEY` missing → 46 tests | 46 tests | ❌ no (key present in CI) |
 | 6b | `MOAGAN_SMOKE_LONG_DISCOVER=1` | 37 tests | ❌ no (env var unset) |
 | 6c | card80 partial-skips on timeout | 14 conditional | conditional |
-| 6d | `OPENCODE_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
-| 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
+| 6d | `OPENCODE_API_KEY` missing → 7 tests + 1 OC fallback | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
+| 6e | `DEEPSEEK_API_KEY` missing → 7 tests + 1 DS fallback | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
 | 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
+| 6g | `MOAGAN_SMOKE_SECTION=discover_opencode_models` + `OPENCODE_API_KEY` (manual) | 35 tests (5 × 7 models) | ❌ no (env var + key never set in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 
 **Total tests actively skipped on CI:** 0.
-**Total tests in conditional skip code paths:** 78
-(46 `MINIMAX_API_KEY` + 37 card80 + 8 OPENCODE + 8 DEEPSEEK
-+ 1 gauntlet `MINIMAX_API_KEY` re-check; the 14 card80 partial-skips
-in 6c are counted inside the 37 card80 figure, not on top of it).
+**Total tests in conditional skip code paths:** 63
+(46 `MINIMAX_API_KEY` (6a, the entire real-proxy block from
+`if [[ -n "${MINIMAX_API_KEY` to the closing `fi` of the
+SECTION A.bis) + 7 OPENCODE + 1 OC_RUN_ID fallback (6d) + 7
+DEEPSEEK + 1 DS_RUN_ID fallback (6e) + 1 gauntlet `MINIMAX_API_KEY`
+re-check (6f); the card80 37-test block (6b) and the 14
+partial-skips (6c) are subsets of the 6a total, not additions.
+The 6g block (35 tests, 5 × 7 models) is not in this total
+because it is dormant in CI by design (`MOAGAN_SMOKE_SECTION`
+is never set in the workflow)).
 
 ## How to add a new skip
 

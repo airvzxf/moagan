@@ -4,12 +4,13 @@
 > **Date**: 2026-08-16
 > **Deciders**: `airvzxf/moagan` operator + Phase A subagent (session-5)
 > **Supersedes**: implicit three-forbidden-crates rule in
-> [`AGENTS.md`](../../AGENTS.md) and
-> [`docs/pending-items-2026-08-13.md` §6.2](../pending-items-2026-08-13.md)
+> [`AGENTS.md`](../../AGENTS.md) (the prior
+> `docs/pending-items-2026-08-13.md §6.2` / §11 B#19 traces of the
+> policy gap were retired in the 2026-08-28 docs prune; their
+> resolution lives here).
 > **Relates to**:
 > [`docs/proposal-02-rust.md` T01-06 §0.5](../proposal-02-rust.md),
 > [`docs/proposal-03-add-ons.md` §D.7, §D.14.23, §D.18.2](../proposal-03-add-ons.md),
-> [`docs/pending-items-2026-08-13.md` §6.2 + §11 B#19](../pending-items-2026-08-13.md),
 > [`AGENTS.md` §"No-go list"](../../AGENTS.md).
 
 ## Context
@@ -18,11 +19,9 @@
 appear in `Cargo.toml`. Three of those entries — `comfy-table`,
 `proptest`, and `petgraph` — have been on the list since v0.5 but the
 list itself has never been ratified by an explicit decision document;
-`docs/pending-items-2026-08-13.md §6.2` (`"Los tres están en la no-go
-list explícita de AGENTS.md por decisión de diseño, no por accidente.
-Abrir cualquiera de ellos es primero un cambio de política y después
-una PR."`) and §11 B#19 (`"Decisión de política sobre la no-go list …
-primero política, después código"`) flag the policy gap as Tier B #19.
+the prior `docs/pending-items-2026-08-13.md` had flagged this gap
+as Tier B #19 (the doc itself was retired in the 2026-08-28 docs
+prune; the resolution lives in this ADR).
 
 `docs/proposal-03-add-ons.md` (the additive patch catalogue) **does**
 list each of the three crates with a target version, a target use case,
@@ -38,7 +37,7 @@ The catalogue ships three different access patterns:
 
 - **`petgraph`** is **optional**: T01-06 keeps `phases/` as a `Vec`
   by default; `petgraph` is only the backend for `DagNode` when
-  `--mode deep` is selected (T01-06 §3.6.2, §3.5.2).
+  `--mode deep` is selected (T01-06 §0.5 row 18).
 - **`comfy-table`** is **cosmetic**: text-mode tables work today and
   the catalogue notes (D.14.23) that the dependency is a polish item,
   not a functional requirement.
@@ -74,7 +73,7 @@ guard-rails. Each verdict is enforceable by a CI guard in
 - **Default build** (`cargo build` with no features) does **not**
   pull `petgraph`; the linear `phases/` vector from T01-06 stays the
   default path (§D.2 in `proposal-03-add-ons.md`).
-- **Rationale**: T01-06 §3.6.2 + §3.5.2 already sketches the
+- **Rationale**: T01-06 §0.5 row 18 already sketches the
   `DagNode` trait that wraps `petgraph`. Default-off keeps the
   release binary footprint unchanged and the no-go rule
   retro-compatible (no crate is added unless the operator opts in).
@@ -86,12 +85,16 @@ guard-rails. Each verdict is enforceable by a CI guard in
 - **Status**: stays on the no-go list for the entire v0.8 cycle.
 - **No code change** in this PR. Plain-text tables continue to ship
   for `moagan inspect`, `moagan telemetry provider`, and
-  `moagan telemetry plan`. `insta` snapshots already cover
-  regressions of those tables.
+  `moagan telemetry plan`. There is no `insta` snapshot suite
+  in this repo (tests use plain `assert!` / integration scripts),
+  so any table-renderer regression would surface as a CLI exit
+  code or assertion failure, not a snapshot diff.
 - **Rationale**: cosmetic, not blocking. The catalogue estimate
   (D.14.23) is 1 day, but the marginal UX gain over the current
-  text output is small and any breakage in the table renderer
-  ripples into snapshot churn across the snapshot suite.
+  text output is small. The deferral window has slipped from
+  the original "v0.9" target through v0.12 without a re-review;
+  a follow-up ADR should formalise the current decision window
+  (e.g. "v0.13+ or until a UX-blocking issue is filed").
 - **Re-review trigger**: any PR that proposes to add `comfy-table`
   in v0.8 must first amend this ADR with a *Re-evaluation* section
   and re-vote the decision (no silent relaxation).
@@ -112,7 +115,7 @@ guard-rails. Each verdict is enforceable by a CI guard in
   entropy). The catalogue example at D.18.2 uses it to verify
   `CallKey::hash` determinism. Such tests are inherently
   property-based and writing them by hand (as
-  `src/ranking/stability.rs:386-396` does today for the monotonicity
+  `src/ranking/stability.rs:461-466` does today for the monotonicity
   invariants) is brittle and coverage-bounded by the chosen seeds.
 - **Coverage targets**: properties for `CallKey::hash`,
   `RunId` UUID-v7 monotonicity, `blake3` short-input stability,
@@ -167,7 +170,7 @@ After this ADR lands:
 | `secrecy`    | nowhere                                      | unchanged (already in forbidden list)                                                      |
 | `axum`, `hyper`, `sqlx`, `governor`, `figment`, `refinery`, `askama`, `handlebars`, `lettre`, `inquire`, `time` | nowhere | unchanged (already in forbidden list) |
 
-The blanket prohibition rule is **kept** for the eight crates that
+The blanket prohibition rule is **kept** for the thirteen crates that
 stay forbidden (`comfy-table`, `secrecy`, `axum`, `hyper`, `sqlx`,
 `governor`, `figment`, `refinery`, `askama`, `handlebars`, `lettre`,
 `inquire`, `time`). The differentiation in this ADR only opens the
@@ -194,14 +197,14 @@ Until then, the verdicts above are authoritative.
 
 A blanket prohibition would have foreclosed legitimate uses:
 
-- **`petgraph`**: the normative spec (T01-06 §3.6.2) sketches the
+- **`petgraph`**: the normative spec (T01-06 §0.5 row 18) sketches the
   `DagNode` trait as a wrapper over a DAG backend. The wrapper is
   meaningless without *some* DAG library, and `petgraph` is the only
   credible candidate for this codebase (small, `serde`-aware, no
   async runtime). Forbidding it would force the spec to be rewritten
   or the trait to stay a stub.
 - **`proptest`**: the hand-written seed grid in
-  `src/ranking/stability.rs:386-396` is a workaround, not a strategy.
+  `src/ranking/stability.rs:461-470` is a workaround, not a strategy.
   The comment in that file says so explicitly:
   *"Phase H originally intended proptest for the monotonicity
   invariants … the brief's rule about following existing libraries
@@ -211,13 +214,13 @@ A blanket prohibition would have foreclosed legitimate uses:
 ## Appendix B — Cross-references back to the catalogue
 
 - `petgraph`: `proposal-03-add-ons.md §D.2` (T18-06 §0,
-  T16-09 §7.2, T07-10 §1217). Note §D.3 specifies *"petgraph se
-  usa como opcional; por defecto T01-06 mantiene su phases/
-  vector (DAG solo en deep)"*.
+  T16-09 §7.2, T07-10 §1217). The §D.2 crates table specifies
+  *"petgraph se usa como opcional; por defecto T01-06 mantiene su
+  phases/ vector (DAG solo en deep)"*.
 - `comfy-table`: `proposal-03-add-ons.md §D.14.23`
   (T12-09 §6.2; T20-06 §6.3).
 - `proptest`: `proposal-03-add-ons.md §D.18.2` (T00-05 D20).
-  Pre-existing rationale note in `proposal-02-rust.md:1597-1599`:
+  Pre-existing rationale note in `proposal-02-rust.md:1664-1666`:
   *"proptest no se añade como dep — los invariantes de la
   perturbación (clip, monotonicidad de sigma, fracciones suman 1.0)
   están cubiertos por tests unitarios con seeds fijos."* — this ADR

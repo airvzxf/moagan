@@ -8,7 +8,7 @@ return HTTP 400 + `temperature must be between 0 and 1` otherwise. Hard-coding
 a global cap is the same brittleness the [`max_tokens` auto-probe](max-tokens-auto.md)
 removes — a relay can tighten the cap without warning and the next run breaks.
 
-`moagan` (v0.12.14+) probes each `(provider, model)` pair at first startup
+`moagan` (v0.12+) probes each `(provider, model)` pair at first startup
 to discover the discrete set of supported sampling temperatures. The result
 is cached at `~/.local/share/moagan/temperatures_auto.toml` and consulted on
 every subsequent call: out-of-range requests are rewritten to the nearest
@@ -34,7 +34,7 @@ HTTP timeout) and classified by HTTP status plus body fingerprint:
 
 | Outcome | Meaning |
 |---|---|
-| `Accepted` | HTTP 2xx/3xx with a non-empty response body that does not carry the rejection signature, **or** HTTP 2xx/3xx with an empty body AND the truncation signal (`stop_reason = "max_tokens"` with `output_tokens > 0`). The second case is the wire shape MiniMax returns when the model thinks too hard and exhausts its output budget mid-emit: the upstream unambiguously accepted the request, the model simply had no budget to emit trailing tokens. Classifying that shape as `Accepted` is what lets the probe survive the `max_tokens = 16` budget. |
+| `Accepted` | HTTP 2xx/3xx with a non-empty response body that does not carry the rejection signature, **or** HTTP 2xx/3xx with an empty body AND the truncation signal (`stop_reason = "max_tokens"` with `output_tokens > 0`). The second case is the wire shape MiniMax returns when the model thinks too hard and exhausts its output budget mid-emit: the upstream unambiguously accepted the request, the model simply had no budget to emit trailing tokens. Classifying that shape as `Accepted` is what lets the probe survive the `max_tokens = 1024` budget. |
 | `Rejected` | HTTP 2xx/3xx with a non-empty body that carries the rejection signature, or HTTP 4xx (`400`, `422`) with the rejection signature in the body — the upstream rejects the value as out-of-range. |
 | `Indeterminate` | Timeout, 5xx, transport error, 4xx without the rejection signature, or 2xx/3xx with an empty body WITHOUT the truncation signal. The empty-body-without-truncation shape is genuinely ambiguous (silent parameter drop, decoder-absorbed error, 200 envelope with no content); the algorithm's `retry_once_on_indeterminate` path fires a second probe and the second outcome is treated as terminal for the batch boundary. The runtime's dispatch gate falls back to the operator's requested temperature instead of locking the discovered set to a wrong value. |
 
@@ -74,12 +74,13 @@ Disable the auto-probe when the cost of a 21-shot HTTP sweep is
 prohibitive or when the provider cannot be reached from the test runner:
 
 - **Smoke tests against a real provider.** Every CI run would otherwise
-  pay 21 sequential probes per fresh model. `scripts/smoke.sh`,
-  `scripts/smoke_multimodel.sh`, and `scripts/e2e_audit_proxy.sh` all
-  pin every cache entry with `auto = false` (or delete the cache
-  file) for exactly this reason — there is no env-var toggle for the
-  runtime probe, so the script-level disable is purely a hand-edit of
-  `temperatures_auto.toml`.
+  pay 21 sequential probes per fresh model. The smoke/e2e scripts
+  create a fresh `MOAGAN_HOME` per run via the `mkhome()` mktemp
+  helper (e.g. `WORK_PROXY_1=$(mkhome)` in
+  `scripts/e2e_audit_proxy.sh`) and export `MOAGAN_MAX_TOKEN_AUTO=false`
+  to also skip the max-tokens probe, so neither auto-probe can write
+  or read a stale cache. `temperatures_auto.toml` is then rebuilt
+  from scratch on the first LLM call.
 - **Sandboxed / offline runs.** The probe needs at least one successful
   round-trip; if the network is locked down the probe exits cleanly
   with the cached value (or an empty set if there is no cache).
@@ -87,31 +88,50 @@ prohibitive or when the provider cannot be reached from the test runner:
   warm path it took during the previous run, freeze the probe so the
   cache file is not rewritten.
 
-Disable via the standard env var (`MOAGAN_TEMPERATURE_AUTO=0` or
-`=false`) or by hand-editing `temperatures_auto.toml` and marking every
-entry with `auto = false`.
+Disable by hand-editing `temperatures_auto.toml` and marking every
+entry with `auto = false`. There is no env-var toggle — the probe is
+wired into the runtime startup path and the only way to skip it is to
+either pin every entry by hand or delete the cache file.
 
 ## How the runtime uses the cached set
 
 Every LLM dispatch goes through `RunContext::dispatch_to_provider`
-(`src/phases/phase.rs:1072`). When the runtime carries a
-`TemperatureTable` (it always does after the v0.9.11 wiring), the gate
+(`src/phases/phase.rs:1072`); the temperature-clamp gate lives at
+`src/phases/phase.rs:1164`. When the runtime carries a
+`TemperatureTable` (it always does after the v0.12 wiring), the gate
 runs **before** the capability resolver:
 
 ```rust
 if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref())
     && let Some(clamped) =
         table.nearest_supported(&self.default_provider, &self.default_model, t)
-    && (clamped - t).abs() > f32::EPSILON
 {
-    tracing::warn!(
-        provider = %self.default_provider,
-        model = %self.default_model,
-        role = %req.role.as_str(),
-        requested = %t,
-        clamped_to = %clamped,
-        "temperature outside supported set; clamped at dispatch (safety net)"
-    );
+    if (clamped - t).abs() > 1e-3_f32 {
+        tracing::warn!(
+            provider = %self.default_provider,
+            model = %self.default_model,
+            role = %req.role.as_str(),
+            requested = %t,
+            clamped_to = %clamped,
+            "temperature outside supported set; clamped at dispatch (safety net)"
+        );
+    } else {
+        // PR-7 (operator-visibility): the operator wants to confirm
+        // that the temperature they declared in the matrix profile
+        // is the temperature the runtime actually sends. Logged at
+        // `debug!` (visible at the default `moagan=debug` filter) so
+        // the operator can `grep "temperature dispatched"` and
+        // reconcile every iteration's value end-to-end without
+        // having to crank the filter to `trace`.
+        tracing::debug!(
+            provider = %self.default_provider,
+            model = %self.default_model,
+            role = %req.role.as_str(),
+            requested = %t,
+            dispatched = %clamped,
+            "temperature in supported set; dispatched as requested"
+        );
+    }
     req.temperature = Some(clamped);
 }
 ```
@@ -119,8 +139,13 @@ if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref(
 `nearest_supported` is the absolute-distance minimiser. On ties (two
 cached temperatures equally close to `requested`) the **first appearance
 in `temperatures`** wins; because `TEMPERATURE_PROBE_VALUES` is sorted
-ascending, the tiebreak resolves to the lower temperature on a half-step
-tie and to the higher on a non-half-step tie.
+ascending, the tiebreak resolves to the lower temperature on a
+half-step tie and to the higher on a non-half-step tie.
+
+The `tracing::debug!` event above fires at the **default filter
+level** (`moagan=debug` is the default `EnvFilter` per
+`src/main.rs:301`); no `RUST_LOG=moagan=trace` override is needed to
+see it. The same goes for the in-set `tracing::debug!` event.
 
 The discovery pipeline has a parallel rewriter in
 `src/discovery/matrix.rs:451` (`ExplorationMatrix::rewrite_temperatures_to_supported`):
@@ -179,8 +204,11 @@ detected_at = "2026-08-22T12:00:01Z"
 | `operator_caps[provider].auto` | Always `false` for an operator-pinned entry. |
 | `operator_caps[provider].detected_at` | ISO-8601 timestamp the cap was written. |
 
-Delete the file to force a fresh probe. Rename the file to `*.disabled`
-to keep the entries on disk while skipping the probe.
+Delete the file to force a fresh probe. There is no `*.disabled`
+rename — the runtime only consults the canonical
+`temperatures_auto.toml` filename (and not the sibling
+`max_tokens_auto.toml` either; the two sidecars are read by
+different loaders and have no shared prefix logic).
 
 ## The `operator_caps` map
 
@@ -202,9 +230,14 @@ the moment one model rejects a value another model accepts.
 
 ## Tuning the batch size
 
-`TEMPERATURE_PROBE_BATCH_SIZE = 3` matches the v0.7.1 `max_tokens`
-tightening-batch size so the two auto-probes share the same fan-out
-semantics; a future refactor can tune one without touching the other.
+`TEMPERATURE_PROBE_BATCH_SIZE = 3` matches the v0.7.1
+`max_tokens` tightening-batch size (per the in-code rationale
+comment in `src/llm/temperature_probe.rs`; the comment in turn
+asserts parity with the historical v0.7.1 batch size — if the
+historical value ever changes, both this doc and the in-code
+comment need to be updated together) so the two auto-probes
+share the same fan-out semantics; a future refactor can tune
+one without touching the other.
 
 | Value | Effect |
 |---|---|
@@ -238,9 +271,10 @@ manually first and let the next startup read the cached value.
   delete the file to force a fresh discovery.
 - **"Saved cache is being overwritten every run"** — the cache file
   is rewritten when the auto-probe is enabled (the default) and the
-  current probe returns a different set. Disable the auto-probe via
-  `MOAGAN_TEMPERATURE_AUTO=false`, or set
-  `providers[provider][model].auto = false` to hand-pick a set.
+  current probe returns a different set. There is no env-var
+  toggle; pin the entry by setting
+  `providers[provider][model].auto = false` (or simply delete the
+  cache file to force a fresh probe on the next startup).
 - **"Operator cap is being ignored"** — the runtime always intersects
   the auto-discovered set with the operator cap; the cap cannot
   *expand* the discovered set, only narrow it. To accept a value the

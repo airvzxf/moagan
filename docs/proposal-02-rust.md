@@ -14,6 +14,27 @@ timestamp_utc: 2026-07-25T08:14:11.210415+00:00
 
 # Especificación Técnica Implementable — `moagan` (MoA Orchestrator en Rust)
 
+> **Status (2026-08-28):** This is the **T01-06 frozen spec** (synthesis_date
+> 2026-07-25, response_id `06b3a1c2`). It is the **normative Rust
+> implementation spec** per `AGENTS.md` ("T01-06 wins" on conflicts), but
+> the **live state** has diverged in several places:
+>
+> - The Cargo.toml pin (version 0.12.14, AGPL-3.0-or-later, current
+>   deps including rustls, r2d2, rusqlite) — see `Cargo.toml`.
+> - The src/ tree (additions: `audit/`, `coverage/`, `ranking/`,
+>   `atomic/`, `sandbox/`, `redact/`; renames:
+>   `ProviderRegistry` → `ProviderPool` in v0.10).
+> - The §0.5 decisions table (some entries stale, e.g. cache hash
+>   now BLAKE3 not sha256, retention 30d not 365d).
+> - The env vars (`MOAGAN_LOG_FORMAT`, `MOAGAN_DECISION_FORMAT`,
+>   `MOAGAN_LOG_TO_STDERR` were added in v0.10/v0.12).
+>
+> The **normative claim** is that the *decisions* (the §0.5 table and
+> the architectural mandates throughout) remain authoritative; the
+> *implementation details* (Cargo pin, src/ tree, env var table) are
+> now historical. See [`docs/cli-cheatsheet.md`](cli-cheatsheet.md)
+> for the live CLI surface and `Cargo.toml` for the live pin.
+
 ## 0. Decisiones globales de arquitectura
 
 Antes de aterrizar cada componente, fijo las decisiones que afectan a todo el sistema. Cada una proviene de la propuesta `14-integrada-v4.md` y se justifica aquí para evitar re-imaginación por parte del siguiente modelo.
@@ -25,6 +46,24 @@ Antes de aterrizar cada componente, fijo las decisiones que afectan a todo el si
 - **Idempotencia por hash.** Toda llamada LLM se identifica por `hash(input_completo + parámetros_llm)`. Si ya existe `output` con ese hash, se reusa sin re-llamar. Esto cubre caché intra-run y, opcionalmente, cross-run.
 
 ### 0.2. Layout de directorios (código fuente)
+
+> **Estado (2026-08-28):** §0.2 y §0.3 describen el árbol de directorios y
+> el `Cargo.toml` pin tal como estaban cuando T01-06 se congeló
+> (synthesis_date 2026-07-25). El árbol real ha divergido
+> significativamente — directorios como `src/audit/`, `src/coverage/`,
+> `src/ranking/`, `src/atomic/`, `src/sandbox/`, `src/redact/`, etc.
+> se añadieron después; `src/prompts/` nunca existió; muchos providers
+> se consolidaron en `src/llm/openai_compatible.rs` /
+> `openai_compat.rs` / `minimax.rs` / `deepseek.rs` / `mock.rs`
+> (actuales: `anthropic_compat.rs`, `openai_compatible.rs` también
+> viven en `src/llm/`; `kimi.rs` y `opencode.rs` no existen como
+> archivos pero sus nombres siguen apareciendo como secciones
+> en `config.toml`). **Esta sección se conserva como
+> referencia histórica del spec original; no refleja la
+> implementación actual.** El árbol vivo está en `src/` y el pin vivo
+> está en `Cargo.toml` (v0.12.14 al día de hoy; ver
+> [`docs/cli-cheatsheet.md`](cli-cheatsheet.md) §0.2 para la
+> tabla de env vars vigente).
 
 ```text
 moagan/
@@ -189,13 +228,27 @@ moagan/
 
 ### 0.3. Dependencias pin
 
+> **Estado (2026-08-28):** §0.3 describe el `Cargo.toml` pin tal
+> como estaba cuando T01-06 se congeló (synthesis_date 2026-07-25).
+> El pin vivo en `Cargo.toml` ha divergido significativamente —
+> la versión actual es **0.12.14** (no 0.4.0), la licencia es
+> **AGPL-3.0-or-later** (no MIT/Apache-2.0), y se han añadido/
+> quitado varias dependencias (rustls en lugar de native-tls, r2d2
+> + rusqlite en lugar de sqlx, etc.). **Esta sección se conserva
+> como referencia histórica del spec original; no refleja la
+> implementación actual.** El pin vivo está en `Cargo.toml` (ver
+> también `AGENTS.md` §"Differentiated allow-list" para la
+> política de crates admitidos).
+
 ```toml
 [package]
 name = "moagan"
-version = "0.4.0"
+version = "0.4.0"      # historical: T01-06 v0.4 spec time
+                       # current:  0.12.14 (see Cargo.toml)
 edition = "2024"
 rust-version = "1.97.1"
-license = "MIT OR Apache-2.0"
+license = "MIT OR Apache-2.0"  # historical: T01-06 v0.4 spec time
+                                # current:  AGPL-3.0-or-later (see Cargo.toml)
 
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }
@@ -270,6 +323,16 @@ insta = { version = "1.39", features = ["yaml"] }
 |---|---|---|---|
 | 1 | "Sketches de 400–800 tokens" sin tope duro para outputs de LLM | `max_tokens` uniforme por rol en `prompts/registry.rs`; todos los roles usan 1_000_000 como techo. | Evita truncamientos ambiguos con un techo uniforme para todos los roles. |
 | 2 | "Tagger ligero" sin parámetros | Tagger: `temperature=0`, `top_p=0.2`, `max_tokens=1_000_000`, JSON mode forzado. | Determinismo + techo uniforme para todos los roles. |
+
+> **Estado (2026-08-28) — rows 1 + 2:** el `1_000_000` uniforme fue
+> válido en v0.6 pero en v0.10+ el techo es per-`(provider, model)`,
+> auto-descubierto en runtime y persistido en `max_tokens_auto.toml`
+> (ver [`docs/max-tokens-auto.md`](max-tokens-auto.md)). El path
+> `prompts/registry.rs` tampoco existe como tal; la lógica vive
+> ahora en `src/llm/prompts/` (varios módulos) más los defaults por
+> rol en `src/phases/phase.rs`. La **decisión** (uniformidad por rol)
+> sigue vigente; la **implementación** (1M uniforme vía
+> `prompts/registry.rs`) es histórica.
 | 3 | "Embedding ligero" para clustering | **No se descargan modelos**. Clustering usa `hash_lsh` sobre texto tokenizado (SimHash 64-bit) + segunda pasada con LLM sólo si se piden `cluster_label` y `cluster_summary`. Embeddings locales (fastText) son demasiado pesados para MVP; se documenta como mejora. | Mantiene binario sin assets externos. |
 | 4 | Forma de "JSON mode forzado" en providers que no lo soportan | Proveedor implementa `supports_json_mode()`; si false, prompt indica `Responde únicamente con un JSON válido. Sin texto fuera del JSON.` y se valida con `jsonschema`. | Portabilidad. |
 | 5 | "Sin seeds" pero hace falta reproducibilidad | Sistema detecta duplicados por hash del input completo (prompt + parámetros_llm + fase + modelo). No garantiza misma salida, sí garantiza que no se duplican inputs. | Honra la propuesta. |
@@ -399,6 +462,19 @@ Razón: `jsonl.gz` es append-only (no requiere reescribir el archivo completo al
 ---
 
 ## 2. SQLite: schema exacto y orden de mutaciones
+
+> **Estado (2026-08-28):** §2 describe el schema SQLite con
+> v001 + v002; el schema vivo ha divergido significativamente.
+> La migración actual es **`v019_process_lease_last_heartbeat.sql`**
+> (19 archivos en `src/storage/migrations/` al día de hoy).
+> El spec sigue siendo **normativo en intención** (los
+> principios — `journal_mode = WAL`, `foreign_keys = ON`,
+> migraciones idempotentes, etc. — siguen vigentes) pero
+> el schema vivo y el orden de mutaciones han evolucionado.
+> Para el schema vivo, ver `src/storage/migrations/` y
+> `src/storage/sqlite.rs`. El wire del `cost_usd` column
+> (v015) y la normalización de tablas vacías (v016) son
+> ejemplos de cambios posteriores que el spec no anticipa.
 
 ### 2.1. Schema (literal, sin más tablas)
 
@@ -576,6 +652,17 @@ Si el paso 3 falla, el paso 4 no se ejecuta; el paso 5 sí, con `event='error'`.
 
 ## 3. Identificadores, hashing y cache
 
+> **Estado (2026-08-28):** §3 describe el hashing canónico y la
+> cache LLM con BLAKE3 como algoritmo por defecto (v0.10+). El
+> código real vive en `src/llm/wire.rs::build_cache_key` con el
+> enum `CacheHashAlgo::{Blake3, Sha256}`; la elección histórica
+> de SHA-256 en este spec fue reemplazada por BLAKE3 por
+> rendimiento (BLAKE3 es ~5× más rápido en hardware moderno y
+> produce el mismo tamaño de digest para nuestro uso). El
+> spec de la API y la forma de la cache key no han cambiado
+> (mismo separador `\x1f`, mismos campos); solo el hash
+> function.
+
 ### 3.1. `run_id`
 
 UUID v7. Generado por `ids::new_run_id()`:
@@ -591,7 +678,7 @@ pub fn new_run_id() -> Uuid {
 Para detectar duplicados y alimentar el cache:
 
 ```text
-hash_input = sha256(
+hash_input = blake3(
   role_id || \x1f ||            # "intake" | "sketch" | "judge" | ...
   phase_name || \x1f ||
   brief_hash || \x1f ||
@@ -604,35 +691,18 @@ hash_input = sha256(
 )
 ```
 
-Esto se computa en `llm/cache.rs::key_for(...)`. La implementación:
+Esto se computa en `llm/wire.rs::build_cache_key(...)` con el
+algoritmo por defecto `CacheHashAlgo::Blake3` (el enum
+`CacheHashAlgo` también soporta `Sha256` para backward
+compatibility, pero BLAKE3 es el default desde v0.10). La
+implementación:
 
 ```rust
-pub struct CallKey {
-    pub role: String,
-    pub phase: String,
-    pub brief_hash: String,
-    pub provider: String,
-    pub model: String,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub max_tokens: u32,
-    pub prompt: String,
-}
-
-impl CallKey {
-    pub fn hash(&self) -> String {
-        let mut h = Sha256::new();
-        for part in [
-            &self.role, &self.phase, &self.brief_hash,
-            &self.provider, &self.model,
-            &self.temperature.to_string(), &self.top_p.to_string(),
-            &self.max_tokens.to_string(),
-            &self.prompt,
-        ] {
-            h.update(part.as_bytes());
-            h.update(&[0x1f]);
-        }
-        hex::encode(h.finalize())
+pub fn build_cache_key(req: &Request, provider: &str, model: &str, algo: CacheHashAlgo) -> String {
+    // ... serializa los campos con \x1f como separador ...
+    match algo {
+        CacheHashAlgo::Blake3 => blake3_hex(&serialized),
+        CacheHashAlgo::Sha256 => sha256_hex(&serialized),
     }
 }
 ```
@@ -2531,10 +2601,10 @@ impl Default for Config {
                 hard_limit: 0.95,
             },
             retention: RetentionConfig {
-                keep_runs_days: 365,
-                keep_runs_count: 9000,
-                max_storage_gb: 50,
-                policy: "archive".into(),
+                keep_runs_days: 30,
+                keep_runs_count: 100,
+                max_storage_bytes: 50 * 1024 * 1024 * 1024,
+                policy: "delete".into(),
             },
             storage: StorageConfig {
                 jsonl_compression: "gz".into(),
@@ -2718,11 +2788,11 @@ Las tests usan `MockProvider` en lugar de HTTP real. `wiremock` está disponible
 ### 15.1. Registro
 
 ```rust
-pub struct ProviderRegistry {
+pub struct ProviderPool {
     by_name: HashMap<String, Arc<dyn Provider>>,
 }
 
-impl ProviderRegistry {
+impl ProviderPool {
     pub fn from_config(cfg: &Config) -> Result<Self> {
         let mut r = Self { by_name: HashMap::new() };
         for (name, spec) in &cfg.providers {
@@ -4009,7 +4079,7 @@ fn main() -> Result<()> {
 | Hash de input | `CallKey::hash` |
 | LLM cache | `llm::cache` |
 | Provider trait | `llm::provider::Provider` |
-| Multi-provider | `ProviderRegistry` |
+| Multi-provider | `ProviderPool` (formerly `ProviderRegistry`; renamed in v0.10) |
 | Plan limits | `PlanTracker` |
 | Hibernación | `phases::handle_pause` |
 | Switch mid-run | `moagan continue --switch-provider` |

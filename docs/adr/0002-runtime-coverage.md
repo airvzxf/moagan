@@ -21,8 +21,8 @@ events.
 
 What the telemetry does **not** carry is the source-level answer to
 "which lines of code did this run actually execute?" Today, an operator
-facing an unexpected `Error::Provider("http 500: boom")` (or any of
-the other variants in `src/error/mod.rs:90`) has to:
+facing an unexpected `Error::Provider { message: "http 500", http_status: 500 }` (or any of
+the other variants in `src/error/mod.rs:177`) has to:
 
 1. Re-derive the call site by reading the JSONL `phase / role / call_id`
    triple and locating the matching `tracing::error!(...)` in the code.
@@ -50,7 +50,7 @@ this:
   `tracing_subscriber::fmt::Layer` already supports
   `with_file(true)`, `with_line_number(true)`, and
   `with_current_span(true)`. Today the subscriber in
-  `src/main.rs:21-31` uses none of these, so a `tracing::error!` only
+  `src/main.rs:295` uses none of these, so a `tracing::error!` only
   carries the message and the target, not the call site.
 - **External eBPF / `bpftrace` uprobes**: a userspace tracer that
   attaches to a running process via uprobes. Powerful but
@@ -71,23 +71,43 @@ loop by post-processing the `profraw` files emitted by layer A.
 ### A.1 — Layer B: enriched `tracing` subscriber (always on, cost ~0)
 
 Change `init_tracing` in `src/main.rs:295` to enable file/line/column
-metadata on the JSON `fmt` layer:
+metadata on the JSON `fmt` layer, plus a per-event writer that
+routes `INFO`-and-below to stdout and `WARN`/`ERROR` to stderr
+(the v0.12.0 PR-04a / E-1 stream-routing flip):
 
 ```rust
-.with(fmt::layer()
-    .with_target(true)
-    .with_file(true)
-    .with_line_number(true)
-    .with_current_span(true)
-    .with_writer(moagan::telemetry::redact::ReportingLayer::new(std::io::stderr)))
+let writer = RoutingWriter { log_to_stderr };
+let redacted_writer = moagan::telemetry::redact::ReportingLayer::new(writer);
+
+let layer = match format {
+    LogFormat::Text => fmt::layer()
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(redacted_writer)
+        .boxed(),
+    LogFormat::Json => fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(redacted_writer)
+        .boxed(),
+};
 ```
 
 No new dependency, no new feature flag. Every `tracing::error!`,
 `tracing::warn!`, and `tracing::info!` event written to the JSONL
-streams now carries `file`, `line`, `column`, and the active span.
-The existing `serde_json` consumers (dashboard, sqlite mirror) already
-use `serde(default)` / `skip_serializing_if = "Option::is_none"` for
-unknown fields, so the format change is backwards compatible.
+streams now carries `file`, `line`, `column`, and (for the JSON
+branch) the active span list. The text branch omits
+`with_current_span` deliberately — terminal-friendly output is
+already span-aware via the `RUST_LOG` filter and doesn't need the
+extra metadata. The existing `serde_json` consumers (dashboard,
+sqlite mirror) already use `serde(default)` /
+`skip_serializing_if = "Option::is_none"` for unknown fields, so
+the format change is backwards compatible.
 
 ### A.2 — Layer A: SanCov runtime coverage (opt-in via `coverage` feature)
 
@@ -102,12 +122,13 @@ today's binary.
 
 When the feature is on, a new `moagan::coverage::CoverageRecorder`
 injects a `LLVM_PROFILE_FILE` env var pointing at
-`<run_dir>/telemetry/coverage/<run_id>-<tag>.profraw`, snapshots
-counters at the start of every `Telemetry::phase("start")` and on
-every `tracing::error!`, and writes a final snapshot in the binary's
-`Drop` impl. The recorder is a no-op when the binary is not
-instrumented (i.e. when the env var is not honoured by the runtime),
-mirroring `Telemetry::noop()`.
+`<run_dir>/telemetry/coverage/<run_id>.profraw`, snapshots
+counters on every `Telemetry::phase()` and
+`Telemetry::call()` (see `src/telemetry/mod.rs:557,610` and
+`src/coverage/mod.rs:281-441`), and rotates the active
+`profraw` so the snapshot list stays bounded. The recorder is a
+no-op when the binary is not instrumented (i.e. when the env var
+is not honoured by the runtime), mirroring `Telemetry::noop()`.
 
 ### A.3 — Correlation layer
 
@@ -186,14 +207,18 @@ the new `src/coverage/` module is a no-op stub when
   report reflects the *coverage* build, not the *release* build,
   even though the source is identical.
 - **`*.profraw` volume.** A long run emits one `profraw` per phase
-  start and one per `tracing::error!`. The plan mitigates by
-  routing the `coverage/` directory through the existing
-  `daily_rotation` in `src/telemetry/daily_rotation.rs` so old
-  runs get pruned alongside the rest of telemetry.
+  start and one per `tracing::error!`. PR #563 (commit `2d10fc9`)
+  added `CoverageRecorder::start_rotation` (`src/coverage/mod.rs:399-441`)
+  which spawns a background thread that rotates the active
+  `profraw` (the `profraw` file is renamed to a `<run_id>-<tag>-<seq>.profraw`
+  snapshot and a new active `profraw` is created). The
+  `daily_rotation` helper in `src/telemetry/daily_rotation.rs` is a
+  separate concern — it only emits a `stale_artifact` warning on
+  day-rollover for the regular `telemetry/daily.log` stream.
 - **The "line that caused the error" is still approximate.** The
   coverage report tells you which lines ran *before* the error,
   not the exact line that raised. The panic hook in
-  `src/main.rs:33-49` already gives the exact line for panics;
+  `src/main.rs:367` already gives the exact line for panics;
   for non-panic `Error` values, layer B's enriched tracing is the
   best we can do without per-error `#[track_caller]` propagation
   (left as a future improvement, not in scope).
