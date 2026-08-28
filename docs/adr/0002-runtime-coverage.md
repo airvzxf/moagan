@@ -71,23 +71,43 @@ loop by post-processing the `profraw` files emitted by layer A.
 ### A.1 — Layer B: enriched `tracing` subscriber (always on, cost ~0)
 
 Change `init_tracing` in `src/main.rs:295` to enable file/line/column
-metadata on the JSON `fmt` layer:
+metadata on the JSON `fmt` layer, plus a per-event writer that
+routes `INFO`-and-below to stdout and `WARN`/`ERROR` to stderr
+(the v0.12.0 PR-04a / E-1 stream-routing flip):
 
 ```rust
-.with(fmt::layer()
-    .with_target(true)
-    .with_file(true)
-    .with_line_number(true)
-    .with_current_span(true)
-    .with_writer(moagan::telemetry::redact::ReportingLayer::new(std::io::stderr)))
+let writer = RoutingWriter { log_to_stderr };
+let redacted_writer = moagan::telemetry::redact::ReportingLayer::new(writer);
+
+let layer = match format {
+    LogFormat::Text => fmt::layer()
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(redacted_writer)
+        .boxed(),
+    LogFormat::Json => fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(redacted_writer)
+        .boxed(),
+};
 ```
 
 No new dependency, no new feature flag. Every `tracing::error!`,
 `tracing::warn!`, and `tracing::info!` event written to the JSONL
-streams now carries `file`, `line`, `column`, and the active span.
-The existing `serde_json` consumers (dashboard, sqlite mirror) already
-use `serde(default)` / `skip_serializing_if = "Option::is_none"` for
-unknown fields, so the format change is backwards compatible.
+streams now carries `file`, `line`, `column`, and (for the JSON
+branch) the active span list. The text branch omits
+`with_current_span` deliberately — terminal-friendly output is
+already span-aware via the `RUST_LOG` filter and doesn't need the
+extra metadata. The existing `serde_json` consumers (dashboard,
+sqlite mirror) already use `serde(default)` /
+`skip_serializing_if = "Option::is_none"` for unknown fields, so
+the format change is backwards compatible.
 
 ### A.2 — Layer A: SanCov runtime coverage (opt-in via `coverage` feature)
 

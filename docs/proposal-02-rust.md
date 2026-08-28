@@ -26,6 +26,21 @@ Antes de aterrizar cada componente, fijo las decisiones que afectan a todo el si
 
 ### 0.2. Layout de directorios (código fuente)
 
+> **Estado (2026-08-28):** §0.2 y §0.3 describen el árbol de directorios y
+> el `Cargo.toml` pin tal como estaban cuando T01-06 se congeló
+> (synthesis_date 2026-07-25). El árbol real ha divergido
+> significativamente — directorios como `src/audit/`, `src/coverage/`,
+> `src/ranking/`, `src/atomic/`, `src/sandbox/`, `src/redact/`, etc.
+> se añadieron después; `src/prompts/` nunca existió; muchos providers
+> se consolidaron en `src/llm/openai_compatible.rs` /
+> `openai_compat.rs` / `minimax.rs` / `deepseek.rs` / `mock.rs` /
+> `kimi.rs` / `opencode.rs`. **Esta sección se conserva como
+> referencia histórica del spec original; no refleja la
+> implementación actual.** El árbol vivo está en `src/` y el pin vivo
+> está en `Cargo.toml` (v0.12.14 al día de hoy; ver
+> [`docs/cli-cheatsheet.md`](../cli-cheatsheet.md) §0.2 para la
+> tabla de env vars vigente).
+
 ```text
 moagan/
 ├── Cargo.toml

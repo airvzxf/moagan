@@ -82,8 +82,8 @@ when invoked with `cargo test -- --ignored` or `cargo test <name> -- --ignored`.
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs:465` | Mutates process-wide RLIMIT_NPROC (side-effects other tests) |
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs:510` | Mutates process-wide RLIMIT_AS (side-effects other tests) |
 | `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs:259` | Known-flaky under parallel execution (documented as such in `AGENTS.md`); exercised by `make e2e-network` |
-| `discover_opencode_writes_four_subdirs` | `tests/integration_discover_opencode.rs:32` | Requires `OPENCODE_API_KEY`; only runs locally / in `e2e-network` |
-| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:32` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
+| `discover_opencode_writes_four_subdirs` | `tests/integration_discover_opencode.rs:37` | Requires `OPENCODE_API_KEY`; only runs locally / in `e2e-network` |
+| `discover_deepseek_writes_four_subdirs` | `tests/integration_discover_deepseek.rs:37` | Requires `DEEPSEEK_API_KEY`; only runs locally / in `e2e-network` |
 | `discover_minimax_writes_four_subdirs` | `tests/integration_discover_minimax.rs:40` | Requires `MINIMAX_API_KEY`; only runs locally / in `e2e-network` |
 
 Total: **6 tests marked `#[ignore]`**.
@@ -108,7 +108,9 @@ them).
 | `python_validator` | `good_python_passes_when_python_present`, `broken_python_fails_when_python_present` | `python3` |
 | `sql_validator` | `sqlite_engine_passes_on_valid_select`, `sqlite_engine_fails_on_broken_select` | `sqlite3` |
 
-Pattern (from `src/validators/rust_validator.rs:407`):
+Pattern (from `src/validators/rust_validator.rs:558`, the first
+silent-skip site; the same shape repeats at :603 for `python3`/`tsc`
+style validators):
 
 ```rust
 if std::process::Command::new("cargo").arg("--version").output().is_err() {
@@ -139,7 +141,7 @@ but reports `Skipped` instead of `Pass`/`Fail`.
 | `src/validators/schema_validator.rs` | 75 | No schema to validate |
 | `src/validators/schema_validator.rs` | 146 | Per-artifact check skipped |
 | `src/validators/sql_validator.rs` | 100 | No SQL detected |
-| `src/validators/sql_validator.rs` | 113 | SQLite binary missing on PATH |
+| `src/validators/sql_validator.rs` | 113 | Source splits into zero SQL statements (per-statement split on `;`) |
 | `src/validators/sql_validator.rs` | 215 | Per-artifact check skipped |
 
 Total: **11 runtime `skipped` returns**. Each is a normal code path,
@@ -202,8 +204,8 @@ else
 fi
 ```
 
-- **Location:** `scripts/e2e_audit_proxy.sh:490–546` (the
-  `discover_opencode_go` block, conditional on `OPENCODE_API_KEY`).
+- **Location:** `scripts/e2e_audit_proxy.sh:580–662` (the
+  `discover_opencode` block, conditional on `OPENCODE_API_KEY`).
 - **Tests:** 8 `run_test` invocations
   (`proxy_e2e_discover_oc_run_id_present`,
   `proxy_e2e_discover_oc_tags_nonempty`,
@@ -236,7 +238,7 @@ else
 fi
 ```
 
-- **Location:** `scripts/e2e_audit_proxy.sh:573–629` (the
+- **Location:** `scripts/e2e_audit_proxy.sh:683–781` (the
   `discover_deepseek` block, conditional on `DEEPSEEK_API_KEY`).
 - **Tests:** 8 `run_test` invocations — parallel structure to 6d
   (`proxy_e2e_discover_ds_{run_id_present,tags_nonempty,facets_nonempty,extractions_subdirs,drafts_nonempty,telemetry_plan_reports_weekly,telemetry_plan_used_positive}`

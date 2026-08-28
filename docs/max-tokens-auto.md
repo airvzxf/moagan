@@ -66,6 +66,7 @@ max_tokens = 1024
 detected_at = "2026-08-11T11:13:02Z"
 verified_at = "2026-08-11T11:13:02Z"
 auto = true
+ceiling = 1073741824
 max_tokens = 4096
 ```
 
@@ -73,10 +74,10 @@ max_tokens = 4096
 |---|---|
 | `schema_version` | File format version. Numeric `u32` (`1` today). Bumped if the schema changes. |
 | `providers[provider][model].detected_at` | ISO-8601 timestamp of the initial successful probe. |
-| `providers[provider][model].verified_at` | ISO-8601 timestamp of the most recent successful verify probe. Empty string `""` until the entry has been re-verified at least once. |
+| `providers[provider][model].verified_at` | ISO-8601 timestamp of the most recent successful verify probe. On the first probe the algorithm initialises it to the same value as `detected_at` (via `Utc::now().to_rfc3339()` in `src/llm/probe_table.rs`), so a fresh entry is never an empty string. |
 | `providers[provider][model].auto` | Always `true` while the probe is responsible for the value. Operators can hand-edit to `false` to freeze a known good value without removing the entry. |
 | `providers[provider][model].attempts` | How many probe batches the algorithm ran for this entry. Diagnostic. |
-| `providers[provider][model].phase0_cap` | The initial exponential-phase cap the algorithm started from before bisecting. Diagnostic. |
+| `providers[provider][model].ceiling` | The per-provider hard ceiling the algorithm started the bisect from. Diagnostic. |
 | `providers[provider][model].max_tokens` | The discovered ceiling. Clamped to `[MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING]`. |
 
 `operator_caps[provider]` is an optional operator-pinned per-provider
@@ -89,8 +90,8 @@ operator cap when one is set, so an operator who has pinned a lower
 cap cannot accidentally regress to a value the auto-probe happens to
 discover on a permissive relay.
 
-Delete the file to force a fresh probe. Rename the file to `*.disabled`
-to keep the entries on disk while skipping the probe.
+Delete the file to force a fresh probe. There is no `*.disabled`
+rename — the runtime only consults the canonical filename.
 
 ## Tuning the floor
 
@@ -112,8 +113,9 @@ The upper bound is fixed at `MAX_AUTOPROBE_CEILING = 1u32 << MAX_PROBE_SHIFT
 - **"Probe timed out"** — the provider rejected every probe without
   returning a response, or the network is unreachable. The probe exits
   cleanly with the cached value (or `MIN_AUTOPROBE_FLOOR` if no cache).
-  Check `~/.local/share/moagan/max_tokens_auto.toml`; if the entry has
-  `verified_at = 0`, the cache file is stale and the probe never ran.
+  Check `~/.local/share/moagan/max_tokens_auto.toml`; if the entry's
+  `verified_at` is older than `detected_at` (or the entry is missing
+  entirely), the cache file is stale and the probe never re-ran.
 - **"Provider rejects everything"** — some providers return 4xx for any
   `max_tokens` larger than they support. The probe treats 4xx as a
   "ceiling" and bisects down. If the provider changes the limit between
@@ -126,7 +128,9 @@ The upper bound is fixed at `MAX_AUTOPROBE_CEILING = 1u32 << MAX_PROBE_SHIFT
   rewritten when `max_token_auto_save = true` (the default) and the
   current probe returns a different value. Set
   `MOAGAN_MAX_TOKEN_AUTO_SAVE=false` to freeze the cache, or set
-  `providers[provider][model].auto = false` to hand-pick a value.
+  `providers[provider][model].auto = false` on a specific entry
+  to hand-pick a value (the auto-probe will not touch entries with
+  `auto = false`).
 - **"Mock provider returns 1_000_000"** — by design. The mock provider
   skips the probe and uses `DEFAULT_MAX_TOKENS = 1_000_000` so
   per-phase `max_tokens` decisions are deterministic in tests.

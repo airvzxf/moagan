@@ -78,10 +78,15 @@ key. The YAML below shows the two layers for each job from
 | `e2e` | `T3 · make e2e (local mock pipeline)` |
 
 Note: the `T1 · build (populates cargo cache)` row is no longer in this
-table. The job was removed in PR #397; the consumers run their own
-incremental `cargo build` against the Swatinem/rust-cache `target/`
-namespace (the workspace's `target/` is shared across all jobs in
-the same workflow via the same cache key).
+table. The job was removed in PR #525 (commit `f6e33a6`, the
+`ci(workflows): restructure ci.yml + cache cleanup + bump timeouts`
+restructure on 2026-08-08). The PR #397 reference in older revisions
+of this section is a misattribution — #397 is the
+`ci(perf): fix e2e-network warm-cache build (270s → 80-120s)` perf
+fix, unrelated. The consumers now run their own incremental
+`cargo build` against the Swatinem/rust-cache `target/` namespace
+(the workspace's `target/` is shared across all jobs in the same
+workflow via the same cache key).
 
 The `context` strings in the `required_status_checks` JSON block are
 the right-hand column. They are case-sensitive and must match what
@@ -91,12 +96,10 @@ GitHub renders in the PR's "Checks" tab.
 post-merge on `main` (it's the real-LLM audit, not a PR gate). As of
 PR #555 the auto path runs on every push to `main` and carries two
 matrix jobs (fast + explore); the heavy `card80` job was extracted
-into `e2e-network-card80.yml` (manual dispatch) and the per-provider
-discovery jobs (`preflight-deepseek`, `test-discover-deepseek`,
-`discover-deepseek`, `preflight-opencode_go`,
-`test-discover-opencode-go`, `discover-opencode-go`,
-`test-discover-opencode-go-models`) were extracted to dedicated
-manual-only workflows:
+into `e2e-network-card80.yml` (manual dispatch). The per-provider
+discovery / ignored jobs were extracted from `e2e-network.yml` on
+2026-08-19 (per the `Jobs removed on 2026-08-19` block at the top
+of that file) to dedicated manual-only workflows:
 
 - `e2e-network-discover-deepseek.yml`
 - `e2e-network-discover-opencode.yml`

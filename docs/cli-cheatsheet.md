@@ -446,7 +446,7 @@ cli::dispatch → Cmd::Inspect → inspect::run_capabilities(&db, run_id, verbos
 ```
 
 The snapshot is captured at the start of each phase and persisted
-to the `calls` table (migration v014; see §15.11). On a run that
+to the `calls` table (migration v015; see §15.11). On a run that
 predates v0.7.1 the snapshot is absent and the command prints
 `no capability snapshot for this run`.
 
@@ -1041,7 +1041,7 @@ window_days  = 7
 
 ### 15.11 `moagan telemetry cost --run <run_id>`
 
-**👁 What it is** — Per-run USD aggregate for a finished run. Reads the `cost_usd` column added by SQLite migration v014 (§D.32.6 in `docs/proposal-03-add-ons.md`), groups by role and model, and prints a small table with the total. Lets an operator answer "how much did this run cost me" without joining the catalog and the calls table by hand. When the run predates v0.7.1 (no `cost_usd` column) or the `(provider, model)` pair has no `cost.*` flags in the catalog, the row prints `(no cost data)` instead of `0`.
+**👁 What it is** — Per-run USD aggregate for a finished run. Reads the `cost_usd` column added by SQLite migration v015 (§D.32.6 in `docs/proposal-03-add-ons.md`), groups by role and model, and prints a small table with the total. Lets an operator answer "how much did this run cost me" without joining the catalog and the calls table by hand. When the run predates v0.7.1 (no `cost_usd` column) or the `(provider, model)` pair has no `cost.*` flags in the catalog, the row prints `(no cost data)` instead of `0`.
 
 **🧩 Flag matrix**
 

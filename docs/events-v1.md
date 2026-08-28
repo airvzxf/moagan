@@ -151,17 +151,33 @@ moagan … 2>log.jsonl | jq -c 'select(.kind == "phase_error" or .kind == "warni
 
 ## Cross-reference: stderr
 
-stderr is the **logging** stream (`tracing-subscriber::fmt::layer().json()`
-when redirected, coloured text when a TTY). It carries the same
-information as the stdout events but with `file:line:column` source
-attribution, the `target: "moagan::..."` module path, and the span
-context (pipeline, phase, iteration, llm_call, probe).
+Since v0.12.0 the two streams are no longer split by event type:
+they are split by **level** via the `RoutingWriter` in
+`src/main.rs` (around `fn init_tracing`, line 295).
 
-Operators use stderr for **debugging** (where did the panic happen?)
-and stdout for **monitoring** (what happened across the run?). The
-two are intentionally disjoint streams: stderr is line-oriented
-logs, stdout is typed events. They are not redundant because
-each serves a different audience.
+- **Default** — `INFO`-and-below events go to **stdout**; `WARN`,
+  `ERROR`, and the panic hook go to **stderr**. The split is
+  implemented in the writer (per-event `make_writer_for` decision),
+  not in two `tracing_subscriber` layers, so it survives
+  `tokio::spawn` workers cleanly.
+- **`--log-to-stderr` / `MOAGAN_LOG_TO_STDERR=1`** — inverts the
+  default: everything goes to stderr, nothing to stdout. The flag
+  is **deprecated** as of v0.12.0 and is scheduled for removal in
+  v0.14.0; new scripts should use shell redirection
+  (`1> out.jsonl 2> errors.jsonl`) instead.
+
+In both modes the **content** of stderr is the same `tracing`
+event stream that goes to stdout: `file:line:column` source
+attribution, `target: "moagan::..."` module path, span context
+(pipeline, phase, iteration, llm_call, probe). The split is by
+stream, not by audience — operators pipe whichever stream carries
+the level they care about.
+
+Operators use stderr for **errors and warnings** (the panic hook,
+the `tracing::warn!` audit logs) and stdout for **everything else**
+(events + INFO logs). The two are intentionally disjoint streams;
+they are not redundant because each carries a different level
+slice of the same event stream.
 
 ## Compatibility
 
