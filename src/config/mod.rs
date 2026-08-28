@@ -1085,6 +1085,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             max_token_auto: Some(1024),
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         },
     );
@@ -1129,6 +1130,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             max_token_auto: Some(1024),
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         },
     );
@@ -1277,6 +1279,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             max_token_auto: Some(1024),
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         },
     );
@@ -1308,6 +1311,7 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             max_token_auto: None,
             max_token_auto_enabled: None,
             max_token_auto_save: true,
+            temperature_auto_enabled: None,
             plan: None,
         },
     );
@@ -1465,6 +1469,23 @@ pub struct ProviderConfig {
     /// re-probe. `false` keeps the table in-memory only.
     #[serde(default = "default_max_token_auto_save")]
     pub max_token_auto_save: bool,
+    /// Explicit opt-out for the `temperature` auto-probe (issue
+    /// #657 fix #3). The default (`None`) follows the
+    /// registry-wide behaviour (the probe fires for every
+    /// non-mock provider). Set `Some(false)` to opt a specific
+    /// provider out of the probe — useful for CI / smoke
+    /// scripts that pre-populate
+    /// `<MOAGAN_HOME>/temperatures_auto.toml` and want to skip
+    /// the 21-request probe fan-out. The probe remains on by
+    /// default for every other provider. Set `Some(true)` to
+    /// force-enable the probe on a per-provider basis (the
+    /// current default behaviour, but reserved for future
+    /// matrix-level suppression switches). Operators can also
+    /// use the global `MOAGAN_TEMPERATURE_AUTO` env var to
+    /// flip every provider at once — CLI > env > TOML
+    /// precedence, mirroring the max-tokens side.
+    #[serde(default)]
+    pub temperature_auto_enabled: Option<bool>,
     /// Optional token-plan declaration read by `moagan telemetry plan`.
     /// When set, the subcommand can compute a consumed-ratio against
     /// `limit_tokens` over a rolling `window_days` window derived from
@@ -1683,6 +1704,7 @@ impl Config {
             "max_token_auto",
             "max_token_auto_enabled",
             "max_token_auto_save",
+            "temperature_auto_enabled",
             "plan",
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
@@ -2337,12 +2359,24 @@ impl Config {
         // disable the probe fleet-wide with a single export.
         let auto_env = std::env::var("MOAGAN_MAX_TOKEN_AUTO").ok();
         let auto_save_env = std::env::var("MOAGAN_MAX_TOKEN_AUTO_SAVE").ok();
-        if auto_env.is_some() || auto_save_env.is_some() {
+        // Issue #657 fix #3: operator-facing kill-switch for the
+        // temperature auto-probe (mirror of `MOAGAN_MAX_TOKEN_AUTO`).
+        // The default behaviour keeps the probe on for every
+        // non-mock provider; an exported `false` (or any off-spelling
+        // — `0` / `no` / `off`) flips every provider to
+        // `temperature_auto_enabled = Some(false)` so the
+        // background probe fan-out is skipped. Truthy / unrecognised
+        // values are silently ignored so a typo does not silently
+        // disable the probe — same convention as
+        // `MOAGAN_<name>_OMIT_MAX_TOKENS` above.
+        let temp_auto_env = std::env::var("MOAGAN_TEMPERATURE_AUTO").ok();
+        if auto_env.is_some() || auto_save_env.is_some() || temp_auto_env.is_some() {
             tracing::trace!(
                 has_max_token_auto = auto_env.is_some(),
                 has_max_token_auto_save = auto_save_env.is_some(),
+                has_temperature_auto = temp_auto_env.is_some(),
                 provider_count = self.providers.len(),
-                "applying global max_token_auto knobs"
+                "applying global max_token_auto / temperature_auto knobs"
             );
         }
         for (name, spec) in self.providers.iter_mut() {
@@ -2369,6 +2403,21 @@ impl Config {
             }
             if let Some(v) = auto_save_env.as_deref() {
                 spec.max_token_auto_save = matches!(v.trim(), "true" | "1" | "yes" | "on" | "");
+            }
+            // Issue #657 fix #3: `MOAGAN_TEMPERATURE_AUTO=false`
+            // sets `temperature_auto_enabled = Some(false)` on every
+            // provider so the temperature probe is skipped entirely.
+            // Truthy / unrecognised values leave the field alone so
+            // the registry-side default ("probe runs") is preserved.
+            // The "off" set is intentionally the same as
+            // `MOAGAN_<name>_OMIT_MAX_TOKENS` so the operator
+            // mental model stays consistent across env vars.
+            if let Some(v) = temp_auto_env.as_deref() {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "false" | "0" | "no" | "off" => spec.temperature_auto_enabled = Some(false),
+                    "true" | "1" | "yes" | "on" => spec.temperature_auto_enabled = Some(true),
+                    _ => {}
+                }
             }
         }
         tracing::trace!(
@@ -3510,6 +3559,154 @@ mod tests {
         .expect("a provider table without the new keys must still parse");
         assert_eq!(spec.max_token_auto, None);
         assert!(spec.max_token_auto_save);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #657 fix #3 — `MOAGAN_TEMPERATURE_AUTO` + `temperature_auto_enabled`
+    // -----------------------------------------------------------------------
+
+    /// Issue #657 fix #3: `MOAGAN_TEMPERATURE_AUTO=false` flips
+    /// `temperature_auto_enabled` to `Some(false)` on every
+    /// provider (mirror of `MOAGAN_MAX_TOKEN_AUTO`). The runtime
+    /// uses this signal to skip the 21-request background
+    /// temperature probe fan-out (`src/llm/provider.rs`).
+    #[test]
+    fn env_temperature_auto_false_disables_probe() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_TEMPERATURE_AUTO", "false");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_TEMPERATURE_AUTO");
+        }
+        for (name, spec) in &cfg.providers {
+            assert_eq!(
+                spec.temperature_auto_enabled,
+                Some(false),
+                "provider {name} must carry temperature_auto_enabled = Some(false) under MOAGAN_TEMPERATURE_AUTO=false"
+            );
+        }
+    }
+
+    /// The other "off" spellings collapse to the same off-sentinel
+    /// (`Some(false)`), mirroring the `MOAGAN_<name>_OMIT_MAX_TOKENS`
+    /// convention.
+    #[test]
+    fn env_temperature_auto_parses_off_aliases() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for off in ["false", "0", "no", "off"] {
+            unsafe {
+                std::env::set_var("MOAGAN_TEMPERATURE_AUTO", off);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert_eq!(
+                cfg.providers["minimax"].temperature_auto_enabled,
+                Some(false),
+                "{off:?} should map to temperature_auto_enabled = Some(false)"
+            );
+        }
+        unsafe {
+            std::env::remove_var("MOAGAN_TEMPERATURE_AUTO");
+        }
+    }
+
+    /// Truthy spellings set `Some(true)`; the runtime currently
+    /// treats `Some(true)` and `None` identically (probe on), so
+    /// this is mostly a TOML-roundtrip guard, not a behaviour
+    /// switch. Pin the shape so a future refactor cannot silently
+    /// conflate the two.
+    #[test]
+    fn env_temperature_auto_parses_truthy_aliases() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for yes in ["true", "1", "yes", "on"] {
+            unsafe {
+                std::env::set_var("MOAGAN_TEMPERATURE_AUTO", yes);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert_eq!(
+                cfg.providers["minimax"].temperature_auto_enabled,
+                Some(true),
+                "{yes:?} should map to temperature_auto_enabled = Some(true)"
+            );
+        }
+        unsafe {
+            std::env::remove_var("MOAGAN_TEMPERATURE_AUTO");
+        }
+    }
+
+    /// Unset env: the field stays `None` (the registry default —
+    /// probe on). The pre-fix behaviour had no env var at all, so
+    /// this is the regression guard.
+    #[test]
+    fn env_temperature_auto_unset_leaves_field_none() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("MOAGAN_TEMPERATURE_AUTO");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        for (name, spec) in &cfg.providers {
+            assert_eq!(
+                spec.temperature_auto_enabled, None,
+                "provider {name} must keep temperature_auto_enabled = None when env is unset"
+            );
+        }
+    }
+
+    /// Unrecognised values leave the field alone so a typo does
+    /// not silently flip the probe off (same convention as
+    /// `MOAGAN_<name>_OMIT_MAX_TOKENS`).
+    #[test]
+    fn env_temperature_auto_unrecognised_is_ignored() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_TEMPERATURE_AUTO", "not-a-bool");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_TEMPERATURE_AUTO");
+        }
+        for (name, spec) in &cfg.providers {
+            assert_eq!(
+                spec.temperature_auto_enabled, None,
+                "unrecognised value must not flip the field; provider {name}"
+            );
+        }
+    }
+
+    /// TOML round-trip: an operator who writes
+    /// `temperature_auto_enabled = false` in `[providers.<name>]`
+    /// deserialises to `Some(false)` so the runtime sees the
+    /// opt-out signal directly (no env var needed).
+    #[test]
+    fn provider_config_temperature_auto_enabled_parses() {
+        let spec: ProviderConfig = toml::from_str(
+            r#"
+            endpoint = "https://example.invalid/v1/messages"
+            temperature_auto_enabled = false
+            "#,
+        )
+        .expect("a provider table with temperature_auto_enabled=false must parse");
+        assert_eq!(spec.temperature_auto_enabled, Some(false));
+    }
+
+    /// Default `None`: a TOML provider table that omits
+    /// `temperature_auto_enabled` deserialises with the field at
+    /// `None`, matching the v0.12.x registry default (probe on).
+    #[test]
+    fn provider_config_temperature_auto_enabled_defaults_to_none() {
+        let spec: ProviderConfig = toml::from_str(
+            r#"
+            endpoint = "https://example.invalid/v1/messages"
+            "#,
+        )
+        .expect("a provider table without temperature_auto_enabled must still parse");
+        assert_eq!(spec.temperature_auto_enabled, None);
     }
 
     /// v0.10 schema pin: an operator who writes `models = [{ id = ... }]`
