@@ -25,13 +25,20 @@ list is implicitly **not enforced**.
 | `T0 · fmt-check` | ✅ required | |
 | `T0 · guard-deps` | ✅ required | |
 | `T1 · clippy` | ✅ required | |
-| `T1 · build (populates cargo cache)` | ✅ required | |
 | `T2 · cargo test --lib --bins` | ✅ required | |
 | `T2 · cargo test --tests (integration)` | ✅ required | |
 | `T2 · cargo test --doc` | ✅ required | |
 | `T3 · make smoke` | ✅ required | |
 | `T3 · make e2e (local mock pipeline)` | ✅ required | |
 | `e2e-network` workflow (post-merge) | ❌ **not required** | Runs only on push to main; not a merge gate |
+
+Plus the ruleset-level `required_signatures` rule, which enforces
+GPG signing on every commit landing on `main` (the same invariant
+that `commit.gpgsign=true` enforces locally; the ruleset entry is
+the last-resort guard so a bypass at the local hook still gets
+caught at the ruleset gate). See
+[`docs/branch-protection.md`](branch-protection.md) for the full
+`gh api` block.
 
 To update these, edit the ruleset via `gh api` (see
 `docs/branch-protection.md` for the PUT block).
@@ -123,17 +130,17 @@ but reports `Skipped` instead of `Pass`/`Fail`.
 
 | File | Line | Reason |
 |---|---|---|
-| `src/validators/python_validator.rs` | 44 | Source doesn't look like Python |
-| `src/validators/python_validator.rs` | 76 | Per-artifact check skipped (Validator trait default) |
-| `src/validators/rust_validator.rs` | 68 | Source doesn't look like Rust |
-| `src/validators/rust_validator.rs` | 214 | Per-artifact check skipped (Validator trait default) |
-| `src/validators/typescript_validator.rs` | 44 | Source doesn't look like TypeScript |
-| `src/validators/typescript_validator.rs` | 74 | Per-artifact check skipped |
-| `src/validators/schema_validator.rs` | 68 | No schema to validate |
-| `src/validators/schema_validator.rs` | 133 | Per-artifact check skipped |
-| `src/validators/sql_validator.rs` | 90 | No SQL detected |
-| `src/validators/sql_validator.rs` | 102 | SQLite binary missing on PATH |
-| `src/validators/sql_validator.rs` | 182 | Per-artifact check skipped |
+| `src/validators/python_validator.rs` | 49 | Source doesn't look like Python |
+| `src/validators/python_validator.rs` | 85 | Per-artifact check skipped (Validator trait default) |
+| `src/validators/rust_validator.rs` | 73 | Source doesn't look like Rust |
+| `src/validators/rust_validator.rs` | 224 | Per-artifact check skipped (Validator trait default) |
+| `src/validators/typescript_validator.rs` | 51 | Source doesn't look like TypeScript |
+| `src/validators/typescript_validator.rs` | 85 | Per-artifact check skipped |
+| `src/validators/schema_validator.rs` | 75 | No schema to validate |
+| `src/validators/schema_validator.rs` | 146 | Per-artifact check skipped |
+| `src/validators/sql_validator.rs` | 100 | No SQL detected |
+| `src/validators/sql_validator.rs` | 113 | SQLite binary missing on PATH |
+| `src/validators/sql_validator.rs` | 215 | Per-artifact check skipped |
 
 Total: **11 runtime `skipped` returns**. Each is a normal code path,
 not a test exclusion.
@@ -207,11 +214,17 @@ fi
   `proxy_e2e_discover_oc_telemetry_plan_used_positive`,
   plus the `OC_RUN_ID` skip fallback that counts each missing subdir as
   one PASS).
-- **CI behaviour:** the key is currently NOT registered in any
-  workflow secret, so all 8 tests print a single `SKIP` line on
-  `make e2e-network` runs. Pair this block with `Layer 3`'s
-  `discover_opencode_go_writes_four_subdirs` `#[ignore]` integration
-  test which is also gated on the same secret.
+- **CI behaviour:** the `OPENCODE_API_KEY` secret IS registered on
+  the runner (alongside `DEEPSEEK_API_KEY`), but the auto-triggered
+  `e2e-network.yml` no longer consumes it (the discover-heavy path
+  moved to the manual-only `e2e-network-discover-opencode.yml` /
+  `e2e-network-discover-opencode-models.yml` workflows). On
+  `make e2e-network` runs, all 8 tests print a single `SKIP` line
+  because the section is gated on `MOAGAN_SMOKE_SECTION`; only the
+  manual discover workflows actually exercise the key. Pair this
+  block with `Layer 3`'s `discover_opencode_writes_four_subdirs`
+  `#[ignore]` integration test, which is also gated on the same
+  secret.
 
 ### 6e. `DEEPSEEK_API_KEY` → 8 discover_ds tests (PR #462)
 
@@ -228,11 +241,13 @@ fi
 - **Tests:** 8 `run_test` invocations — parallel structure to 6d
   (`proxy_e2e_discover_ds_{run_id_present,tags_nonempty,facets_nonempty,extractions_subdirs,drafts_nonempty,telemetry_plan_reports_weekly,telemetry_plan_used_positive}`
   plus the `DS_RUN_ID` skip fallback).
-- **CI behaviour:** the key is currently NOT registered in any
-  workflow secret, so all 8 tests print a single `SKIP` line on
-  `make e2e-network` runs. Pair with `Layer 3`'s
-  `discover_deepseek_writes_four_subdirs` `#[ignore]` integration
-  test.
+- **CI behaviour:** the `DEEPSEEK_API_KEY` secret IS registered on
+  the runner, but the auto-triggered `e2e-network.yml` no longer
+  consumes it (the discover path moved to the manual-only
+  `e2e-network-discover-deepseek.yml` workflow). On `make
+  e2e-network` runs, all 8 tests print a single `SKIP` line. Pair
+  with `Layer 3`'s `discover_deepseek_writes_four_subdirs`
+  `#[ignore]` integration test.
 
 ### 6f. `MINIMAX_API_KEY` re-check inside `scripts/gauntlet.sh` (1 test)
 
@@ -282,8 +297,8 @@ check from a clean state.
 | 6a | `MINIMAX_API_KEY` missing → 46 tests | 46 tests | ❌ no (key present in CI) |
 | 6b | `MOAGAN_SMOKE_LONG_DISCOVER=1` | 37 tests | ❌ no (env var unset) |
 | 6c | card80 partial-skips on timeout | 14 conditional | conditional |
-| 6d | `OPENCODE_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
-| 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key NOT yet registered) |
+| 6d | `OPENCODE_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
+| 6e | `DEEPSEEK_API_KEY` missing → 8 tests | 8 tests | ❌ no (key registered, not consumed in e2e-network) |
 | 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
 

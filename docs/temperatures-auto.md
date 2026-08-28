@@ -76,10 +76,10 @@ prohibitive or when the provider cannot be reached from the test runner:
 - **Smoke tests against a real provider.** Every CI run would otherwise
   pay 21 sequential probes per fresh model. `scripts/smoke.sh`,
   `scripts/smoke_multimodel.sh`, and `scripts/e2e_audit_proxy.sh` all
-  pin every cache entry with `auto = false` (or delete the cache
-  file) for exactly this reason — there is no env-var toggle for the
-  runtime probe, so the script-level disable is purely a hand-edit of
-  `temperatures_auto.toml`.
+  `rm -rf "$MOAGAN_HOME"` (and export `MOAGAN_MAX_TOKEN_AUTO=false`
+  to also skip the max-tokens probe) before each run, so neither
+  auto-probe can write or read a stale cache. `temperatures_auto.toml`
+  is then rebuilt from scratch on the first LLM call.
 - **Sandboxed / offline runs.** The probe needs at least one successful
   round-trip; if the network is locked down the probe exits cleanly
   with the cached value (or an empty set if there is no cache).
@@ -87,9 +87,10 @@ prohibitive or when the provider cannot be reached from the test runner:
   warm path it took during the previous run, freeze the probe so the
   cache file is not rewritten.
 
-Disable via the standard env var (`MOAGAN_TEMPERATURE_AUTO=0` or
-`=false`) or by hand-editing `temperatures_auto.toml` and marking every
-entry with `auto = false`.
+Disable by hand-editing `temperatures_auto.toml` and marking every
+entry with `auto = false`. There is no env-var toggle — the probe is
+wired into the runtime startup path and the only way to skip it is to
+either pin every entry by hand or delete the cache file.
 
 ## How the runtime uses the cached set
 
@@ -102,7 +103,7 @@ runs **before** the capability resolver:
 if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref())
     && let Some(clamped) =
         table.nearest_supported(&self.default_provider, &self.default_model, t)
-    && (clamped - t).abs() > f32::EPSILON
+    && (clamped - t).abs() > 1e-3_f32
 {
     tracing::warn!(
         provider = %self.default_provider,
@@ -238,9 +239,10 @@ manually first and let the next startup read the cached value.
   delete the file to force a fresh discovery.
 - **"Saved cache is being overwritten every run"** — the cache file
   is rewritten when the auto-probe is enabled (the default) and the
-  current probe returns a different set. Disable the auto-probe via
-  `MOAGAN_TEMPERATURE_AUTO=false`, or set
-  `providers[provider][model].auto = false` to hand-pick a set.
+  current probe returns a different set. There is no env-var
+  toggle; pin the entry by setting
+  `providers[provider][model].auto = false` (or simply delete the
+  cache file to force a fresh probe on the next startup).
 - **"Operator cap is being ignored"** — the runtime always intersects
   the auto-discovered set with the operator cap; the cap cannot
   *expand* the discovered set, only narrow it. To accept a value the

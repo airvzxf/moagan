@@ -70,18 +70,16 @@ Variables honoured by `src/config/mod.rs::apply_env_overrides` and `src/cli/flag
 | `MOAGAN_USER` | `default` | `rate` |
 | `MOAGAN_QUIET` | (unset) | silence `.env` notice |
 | `MOAGAN_FACET_CACHE_TTL_SECS` | `604800` (7d) | `discover --cache-facets` |
-| `MOAGAN_INSPECT_JSON` | `0` | inspect JSON output |
-| `MOAGAN_CONTINUE_FROM_PHASE` | (empty) | resume from phase |
-| `MOAGAN_FORCE_EVAL` | `0` | force eval pass |
-| `MOAGAN_BATCH_PROPOSALS` | (empty) | batch cardinality |
-| `MOAGAN_TELEMETRY_VACUUM` | `0` | `telemetry cleanup` analogue |
+| `MOAGAN_LOG_FORMAT` | (empty) | JSONL log format selector (see `src/cli/mod.rs:244`) |
+| `MOAGAN_DECISION_FORMAT` | (empty) | stdout event decision format (`off` silences) |
+| `MOAGAN_LOG_TO_STDERR` | (unset) | mirror JSONL logs to stderr |
 | `MOAGAN_PHASE_L_TEST_PANIC` | (unset) | debug: forced panic |
 | `MOAGAN_RATE_LIMIT_<provider>` | (empty) | per-provider token bucket |
 | `MOAGAN_RESEARCH_RATE_LIMIT_<host>` | (empty) | per-host token bucket |
 
-## 0.3 What's new in v0.6.0 (since the 2026-08-08 cheatsheet)
+## 0.3 What's new in v0.12.14 (since the 2026-08-08 cheatsheet)
 
-The cheatsheet was last touched in PR #319 (commit `1590877`). Since then the v0.6.0 release landed 14 PRs that change the CLI surface; this section is the audit summary and every claim below is verified against the current source. Per-flag details live in the matching sub-section further down.
+The cheatsheet has tracked the CLI surface through v0.6.0 → v0.12.14. Between those releases the v0.10 telemetry refactor renamed several env vars and the v0.12 line added the `MOAGAN_LOG_FORMAT` / `MOAGAN_DECISION_FORMAT` / `MOAGAN_LOG_TO_STDERR` globals listed in §0.2. Per-flag details live in the matching sub-section further down.
 
 ### New flags (added in v0.6.0)
 

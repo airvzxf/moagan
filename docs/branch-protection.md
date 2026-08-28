@@ -95,14 +95,20 @@ into `e2e-network-card80.yml` (manual dispatch) and the per-provider
 discovery jobs (`preflight-deepseek`, `test-discover-deepseek`,
 `discover-deepseek`, `preflight-opencode_go`,
 `test-discover-opencode-go`, `discover-opencode-go`,
-`test-discover-opencode-go-models`) were removed outright. The
-remaining two jobs surface under the following display names and
+`test-discover-opencode-go-models`) were extracted to dedicated
+manual-only workflows:
+
+- `e2e-network-discover-deepseek.yml`
+- `e2e-network-discover-opencode.yml`
+- `e2e-network-discover-opencode-models.yml`
+
+The remaining two jobs surface under the following display names and
 remain informational — none of them are required status checks:
 
 | Job ID (`jobs.<id>`) | Display name (`name:`) |
 |---|---|
-| `e2e-network` | `Tier 3 · e2e — fast` |
-| `e2e-network` | `Tier 3 · e2e — explore` |
+| `test-fast` | `Tier 3 · e2e — fast` |
+| `test-explore` | `Tier 3 · e2e — explore` |
 
 The manual-only `e2e-network-card80.yml` (single job `test-card80`,
 display name `Tier 3 · e2e — card80 (manual dispatch)`) and the

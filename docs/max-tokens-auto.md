@@ -42,7 +42,7 @@ Or in `~/.config/moagan/config.toml`:
 [providers.minimax]
 name = "minimax"
 model = "MiniMax-M3"
-max_token_auto = null   # disable entirely
+max_token_auto = 0   # disable entirely (Some(0) ≡ None)
 ```
 
 `Some(0)` is equivalent to `None` (both mean "off"). `Some(N>0)` enables
@@ -72,19 +72,22 @@ max_tokens = 4096
 | Field | Meaning |
 |---|---|
 | `schema_version` | File format version. Numeric `u32` (`1` today). Bumped if the schema changes. |
-| `providers[provider][model].provider` | The provider name (e.g. `minimax`, `opencode`). |
 | `providers[provider][model].detected_at` | ISO-8601 timestamp of the initial successful probe. |
-| `providers[provider][model].verified_at` | ISO-8601 timestamp of the most recent successful verify probe. Equal to `detected_at` until the entry has been re-verified at least once. |
+| `providers[provider][model].verified_at` | ISO-8601 timestamp of the most recent successful verify probe. Empty string `""` until the entry has been re-verified at least once. |
 | `providers[provider][model].auto` | Always `true` while the probe is responsible for the value. Operators can hand-edit to `false` to freeze a known good value without removing the entry. |
+| `providers[provider][model].attempts` | How many probe batches the algorithm ran for this entry. Diagnostic. |
+| `providers[provider][model].phase0_cap` | The initial exponential-phase cap the algorithm started from before bisecting. Diagnostic. |
 | `providers[provider][model].max_tokens` | The discovered ceiling. Clamped to `[MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING]`. |
 
 `operator_caps[provider]` is an optional operator-pinned per-provider
-cap (mirrors the temperatures sidecar; see
-[`temperatures-auto.md`](temperatures-auto.md) for the same shape and
-the `--persist-union` semantics). The runtime intersects the
-auto-discovered value with the operator cap when one is set, so an
-operator who has pinned a lower cap cannot accidentally regress to a
-value the auto-probe happens to discover on a permissive relay.
+cap. The cap is set with `moagan probe max_tokens --persist-min
+--provider PROVIDER` (the `--persist-min` flag is the `max_tokens`
+analogue of `--persist-union` for temperatures; see
+[`temperatures-auto.md`](temperatures-auto.md) for the temperatures
+sidecar). The runtime intersects the auto-discovered value with the
+operator cap when one is set, so an operator who has pinned a lower
+cap cannot accidentally regress to a value the auto-probe happens to
+discover on a permissive relay.
 
 Delete the file to force a fresh probe. Rename the file to `*.disabled`
 to keep the entries on disk while skipping the probe.
