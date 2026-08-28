@@ -5,6 +5,133 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.12] - 2026-08-28
+
+### Fixed
+
+Patch v0.12.12 (closes the §2.3 audit chain) — exercises the `card80` /
+`discover_opencode` / `discover_deepseek` / `discover_opencode_models`
+sections of `scripts/e2e_audit_proxy.sh` against the operator's
+real API tokens (the v0.12.5 → v0.12.11 chain only validated `fast` +
+`explore` against minimax). **No public API change; no schema bump.**
+All edits are script / workflow / docs / config-test only — no
+production-code paths in `src/` are touched (per §4 "out of scope").
+
+- **`scripts/e2e_audit_proxy.sh`** — six latent bugs in the
+  end-to-end smoke script that the v0.12.x chain never exercised:
+  - The `OPENCODE_GO_API_KEY` env-var gate was a v0.9 stub the
+    dispatcher no longer reads; the v0.10 resolver maps `opencode`
+    → `OPENCODE_API_KEY` (`src/llm/api_keys.rs:40`). Renamed to
+    `OPENCODE_API_KEY` in every guard; the `OPENCODE_GO_COVERAGE_MODELS`
+    array renamed to `OPENCODE_COVERAGE_MODELS`.
+  - The `--provider opencode_go` and `--provider deepseek` invocations
+    in A.bis / A.ter rejected bare aliases with exit code 2
+    (`build_registry_for: probe: expected 'provider:model', got 'X'`).
+    Switched to `--provider opencode:mimo-v2.5` (A.bis), `--provider
+    opencode:$MODEL` (A.quad), and `--provider deepseek:deepseek-v4-flash`
+    (A.ter) — matches the v0.10 multi-model section shape.
+  - The hardcoded `MiniMax-M3` grep in the card80 audit-log assertion
+    (line 363-364) silently passed with 0 matches when the upstream
+    was actually `MiniMax-M2.7` — replaced with `MiniMax-M2.7`.
+  - The `MOAGAN_DISABLE_DEEPSEEK_NATIVE` gate was a pay-as-you-go
+    budget guard; operator restored the native `DEEPSEEK_API_KEY`
+    on 2026-08-28; gate removed.
+  - The 14-model `OPENCODE_COVERAGE_MODELS` list trimmed to the
+    operator's published 7-model roster (`deepseek-v4-flash`,
+    `glm-5.3-flash`, `gpt-5.6-luna`, `mimo-v2.5`, `minimax-m2.7`,
+    `muse-spark-1.2-contributor`, `qwen3.7-max`); all 7 are registered
+    in `default_providers()` and cover all 3 wire formats.
+  - The A.bis discover request now uses `mimo-v2.5` (the operator's
+    smoke-test pin) instead of the undeclared `kimi-k2.7-code`.
+- **`src/config/mod.rs`** — `default_providers()` register the new
+  user-spec model IDs alongside the v0.12.x defaults:
+  - `deepseek`: `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`,
+    `deepseek-v4-pro` (the operator's 2026-08-28 roster); legacy
+    `deepseek-chat` / `deepseek-reasoner` kept for back-compat with
+    `tests/integration_discover_deepseek.rs:75` and the legacy
+    operator fixtures.
+  - `opencode`: `glm-5.3-flash`, `muse-spark-1.2-contributor`
+    (the operator's two new aliases). All 17 v0.12.x aliases kept
+    for back-compat with `tests/integration_capability_gating.rs`,
+    `tests/integration_temperature_matrix_rewrite.rs`,
+    `tests/integration_phase_k.rs`, and the opencode doc comments.
+- **`.github/workflows/test-ignored-opencode.yml`** — renamed from
+  `test-ignored-opencode-go.yml`; uses `OPENCODE_API_KEY` as the
+  GitHub secret (the v0.10 dispatcher never read `OPENCODE_GO_API_KEY`).
+  Companion cross-references in `ci.yml` and `test-ignored-minimax.yml`
+  updated to the new path.
+- **`.github/workflows/e2e-network-discover-{opencode,opencode-models,deepseek}.yml`**
+  — three new `workflow_dispatch:`-only workflows (manual-only) that
+  the Makefile targets and the audit script always referenced but
+  the `.github/workflows/` directory lacked (PR #555 had deleted
+  them alongside the auto-push triplet). Self-builds the release
+  binary; ~10 min for opencode, ~20 min for deepseek, ~35 min for
+  the 7-model opencode sweep.
+- **`.github/workflows/e2e-network.yml`** — comment block references
+  updated to the new workflow names.
+- **`Makefile`** — `e2e-network-discover-opencode-go*` targets renamed
+  to `e2e-network-discover-opencode*`; help text time budgets updated.
+- **`tests/integration_discover_opencode.rs`** — renamed from
+  `tests/integration_discover_opencode_go.rs`; the cargo test invocation
+  in the workflow already targets the new name. The
+  `discover_opencode_go_writes_four_subdirs` test function renamed to
+  `discover_opencode_writes_four_subdirs`. The `OPENCODE_GO_MAX_TOKENS_CAP`
+  reference in the `MOAGAN_MAX_TOKEN_AUTO` docstring removed (the
+  constant was already gone in v0.10). Cross-references in
+  `integration_discover_{deepseek,minimax}.rs` updated.
+- **`tests/integration_discover_deepseek.rs`** — `--provider
+  deepseek:deepseek-chat` → `--provider deepseek:deepseek-v4-flash`
+  (the operator's 2026-08-28 canonical model name).
+- **`docs/cli-cheatsheet.md`** — the operator-facing `moagan probe`
+  examples now use `opencode:qwen3.7-max` and `opencode:kimi-k3`
+  (the v0.10 section name); the `OPENCODE_GO_MAX_TOKENS_CAP` rows
+  annotated with "(removed in v0.10; per-model ceiling replaced
+  by the auto-probe persisted in `max_tokens_auto.toml`)" so the
+  historical record still stands.
+- **`docs/temperatures-auto.md`** / **`docs/max-tokens-auto.md`** —
+  the TOML examples switched to `[providers.opencode.kimi-k3]` /
+  `[operator_caps.opencode]` (the v0.10 section name).
+- **`docs/branch-protection.md`** / **`docs/validation-tiers.md`** /
+  **`docs/test-skips.md`** — workflow filename + test name references
+  updated to the new names.
+
+### Out of scope (deferred)
+
+- **§2.4** (e2e + smoke `wiremock` integration test for the
+  LLM-real path) — kept separate; will land in its own patch.
+- **§2.7** (`MAX_ATTEMPTS=3` rationale comment in `e2e-network.yml`) —
+  kept separate; 15-min doc-only patch.
+- **§2.8** (`tracing::subscriber::with_default` isolation) — kept
+  separate; the recent PR #647/#648 already mitigates the worst of
+  this with the single-test-binary invariant; a deeper refactor is
+  outside the scope of this audit.
+- **src/ stale `opencode_go` references** — 30+ stale references
+  remain in production code comments and test fixtures
+  (`src/cli/probe.rs:778-779`, `src/cli/doctor.rs:487, 644`,
+  `src/config/mod.rs:3343`, etc.). They are functionally inert
+  (the dispatcher keys on the canonical `opencode` string), but
+  should be cleaned up for consistency in a follow-up PR.
+
+### Verification
+
+- `make fmt-check guard-deps lint test build`: 0 failures.
+- `MOAGAN_SMOKE_SECTION=discover_deepseek bash scripts/e2e_audit_proxy.sh`
+  with the operator's `DEEPSEEK_API_KEY`: 4/7 assertions pass
+  (`run_id_present`, `drafts_nonempty` soft-skip, `telemetry_plan_reports_weekly`
+  soft-skip, `telemetry_plan_used_positive`). The 3 hard asserts
+  (`tags_nonempty`, `facets_nonempty`, `extractions_subdirs`) still
+  fail because the `deepseek-v4-flash` upstream emits trailing-comma
+  JSON that `parse_json_with_recovery` cannot repair — a §9.2
+  follow-up bug separate from this audit.
+
+### Operator-side findings
+
+- The `OPENCODE_API_KEY` in `~/.config/moagan/api_keys.toml`
+  authorizes `/v1/models` (HTTP 200) but rejects every
+  `/v1/chat/completions` request with HTTP 401. The script fix is
+  correct; the upstream key needs a refresh before
+  `discover_opencode` / `discover_opencode_models` can pass.
+
 ## [0.12.11] - 2026-08-28
 
 ### Fixed
