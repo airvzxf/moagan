@@ -198,23 +198,27 @@ jobs:
           # distribution recorded in docs/e2e-loop-2026-08-12.md (10
           # consecutive real-LLM iterations):
           #   - 4/10 (iters 2, 4, 6, 10) passed on the first attempt;
-          #   - 6/10 (iters 1, 3, 5, 7, 8, 9) hit exactly one upstream/model
-          #     flake (JSON schema violation, decode error). Of those 6,
-          #     5 (iters 1, 3, 5, 7, 9) recovered on the first retry,
-          #     and 1 (iter 8) needed the second retry — the third attempt —
-          #     to clear MiniMax's ~5-min upstream rate-limit window after
-          #     the retry itself was 429-ed;
-          #   - arithmetic: 4 + 6 = 10, and the maximum number of
-          #     attempts any iter needed in this window was 3.
-          # So 2 attempts absorb 5 of the 6 observed flakes and the
-          # 3rd covers the remaining rate-limit case. The "~5-min
-          # rate-limit window" is the upstream's window, not the
-          # end-to-end retry cycle (which is bounded by MAX_ATTEMPTS
-          # × inter-attempt backoff). Going higher only lengthens the
-          # feedback loop: a deterministic regression fails all
-          # attempts anyway, because the audit-log and run-id
-          # assertions in scripts/e2e_audit_proxy.sh re-run on every
-          # attempt.
+          #   - 6/10 (iters 1, 3, 5, 7, 8, 9) hit exactly one
+          #     upstream/model flake (JSON schema violation, decode
+          #     error). Four of them (iters 1, 3, 5, 7) have an
+          #     explicit retry row in the table showing the first
+          #     retry passed. Iter 9's retry is not recorded. Iter 8's
+          #     first retry was itself 429-ed by MiniMax (row 8r1,
+          #     "rate-limit — paused"), so it needed at least a third
+          #     attempt to clear the window; the successful attempt is
+          #     not recorded either, but the doc's summary states no
+          #     flake stayed stuck.
+          #   - arithmetic: 4 + 6 = 10. The largest attempt count the
+          #     table can substantiate is 3, and it comes from iter 8.
+          # So 2 attempts cover every flake with a recorded recovery,
+          # and the 3rd is what the one rate-limited iteration
+          # demonstrably needed. The "~5-min rate-limit window" is the
+          # upstream's window, not the end-to-end retry cycle (which is
+          # bounded by MAX_ATTEMPTS × inter-attempt backoff). Going
+          # higher only lengthens the feedback loop: a deterministic
+          # regression fails all attempts anyway, because the audit-log
+          # and run-id assertions in scripts/e2e_audit_proxy.sh re-run
+          # on every attempt.
           MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"

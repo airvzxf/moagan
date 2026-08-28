@@ -578,12 +578,21 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
         .env_remove("MOAGAN_QUIET")
         // Strip any inherited `MOAGAN_EVENT_FORMAT` /
         // `MOAGAN_LOG_FORMAT` so the `run_start` NDJSON event
-        // assertion is not silently masked by a parent-process
-        // override (`MOAGAN_EVENT_FORMAT=off` flips event
-        // emission off entirely — see
-        // `src/telemetry/stdout_events.rs:65-78`; a non-JSON
-        // `MOAGAN_LOG_FORMAT` would change the tracing layer
-        // shape so other NDJSON consumers drift).
+        // assertion cannot be masked by a parent-process override.
+        //
+        // `MOAGAN_LOG_FORMAT` is load-bearing: a non-JSON value
+        // changes the tracing layer shape and does break the
+        // assertions (verified by mutation).
+        //
+        // `MOAGAN_EVENT_FORMAT` is defence in depth only, NOT an
+        // active protection today: `src/main.rs:57-66` overwrites that
+        // variable unconditionally from `cli.event_format`, whose
+        // default arm maps to `Some("jsonl")`. An inherited
+        // `MOAGAN_EVENT_FORMAT=off` is therefore discarded, and only
+        // the `--event-format=off` flag actually silences emission
+        // (verified empirically). Keep the `env_remove` so this test
+        // stays correct if that precedence is ever fixed, but do not
+        // read it as the reason the assertion holds.
         .env_remove("MOAGAN_EVENT_FORMAT")
         .env_remove("MOAGAN_LOG_FORMAT")
         .output()
