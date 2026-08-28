@@ -1092,8 +1092,24 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // ----------------------------------------------------------------
     // deepseek (OpenAI-compatible direct)
     // ----------------------------------------------------------------
+    // v0.12.12 (§2.3): the operator's published roster
+    // (`docs/proposal-03-add-ons.md` §10-integrada-v0 DeepSeek roster;
+    // effective as of 2026-08-28) is `deepseek-v4-flash`,
+    // `deepseek-v4-flash-vision-exp`, `deepseek-v4-pro`. The v0.12.x
+    // defaults `deepseek-chat` / `deepseek-reasoner` are kept
+    // registered alongside them for backward compatibility (the
+    // `tests/integration_discover_deepseek.rs` --ignored suite, the
+    // docs/CLI cheatsheet, and the legacy CLI fixtures still
+    // reference them); the audit script and operator-facing docs
+    // treat `deepseek-v4-flash` as the canonical model.
     let deepseek_endpoint = Some("https://api.deepseek.com/v1/chat/completions".to_owned());
-    let deepseek_model_ids = ["deepseek-chat", "deepseek-reasoner"];
+    let deepseek_model_ids = [
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "deepseek-v4-pro",
+        "deepseek-chat",
+        "deepseek-reasoner",
+    ];
     let models = deepseek_model_ids
         .iter()
         .map(|model| ModelConfig {
@@ -1154,6 +1170,15 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
         },
         ModelConfig {
             id: "glm-5.2".to_owned(),
+            endpoint: Some(oc_chat.to_owned()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        // v0.12.12 (§2.3): glm-5.3-flash — added per the operator's
+        // 2026-08-28 published roster (`docs/proposal-03-add-ons.md`
+        // §10-integrada-v0 OpenCode All Models). Routes over the
+        // chat-completions endpoint alongside glm-5.1/glm-5.2.
+        ModelConfig {
+            id: "glm-5.3-flash".to_owned(),
             endpoint: Some(oc_chat.to_owned()),
             max_tokens: Some(DEFAULT_MAX_TOKENS),
         },
@@ -1227,6 +1252,17 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             // `omit_max_tokens = true` (applied to every model on
             // this URL via the per-model wire body) signals the
             // dispatcher to drop the field.
+            max_tokens: Some(DEFAULT_MAX_TOKENS),
+        },
+        // v0.12.12 (§2.3): muse-spark-1.2-contributor — added per
+        // the operator's 2026-08-28 published roster
+        // (`docs/proposal-03-add-ons.md` §10-integrada-v0 OpenCode
+        // All Models). Routes over the Responses endpoint alongside
+        // gpt-5.6-luna; the upstream reportedly tolerates the
+        // `max_tokens` field, so we keep the default ceiling here.
+        ModelConfig {
+            id: "muse-spark-1.2-contributor".to_owned(),
+            endpoint: Some(oc_responses.to_owned()),
             max_tokens: Some(DEFAULT_MAX_TOKENS),
         },
     ];

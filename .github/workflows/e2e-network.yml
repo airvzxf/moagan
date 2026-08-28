@@ -23,7 +23,7 @@ concurrency:
 
 # Minimum token permissions: read repo contents. The MINIMAX_API_KEY
 # secret is consumed via `secrets.*` and never written back to the
-# repo. OPENCODE_GO_API_KEY / DEEPSEEK_API_KEY are no longer consumed
+# repo. OPENCODE_API_KEY / DEEPSEEK_API_KEY are no longer consumed
 # here (moved to manual-only workflows in this restructure).
 permissions:
   contents: read
@@ -31,13 +31,13 @@ permissions:
 # Auto-trigger end-to-end suite: short + medium jobs only.
 # This workflow runs on every push to main and carries exactly the
 # MiniMax fast + explore rows. The long/heavy jobs (card80, the
-# 14-model opencode_go sweep) and the per-provider discovery / ignored
+# 7-model opencode sweep) and the per-provider discovery / ignored
 # tests were extracted into dedicated manual-only workflows on
 # 2026-08-19 to keep this workflow cheap on every push to main:
 #   - `e2e-network-card80.yml`                          — MiniMax card80
-#   - `e2e-network-discover-opencode-go-models.yml`     — 14-model sweep
+#   - `e2e-network-discover-opencode-models.yml`        — 7-model sweep
 #   - `test-ignored-deepseek.yml`                       — DeepSeek stub
-#   - `test-ignored-opencode-go.yml`                    — OpenCode Go stub
+#   - `test-ignored-opencode.yml`                       — OpenCode stub
 # All four are `workflow_dispatch:` only; trigger them manually from
 # the Actions tab when you need them.
 #
@@ -69,17 +69,17 @@ permissions:
 #     jobs. To restore: bring back the preflight + test-discover +
 #     discover-with-ignored triplet from PR #525 + #529 when the
 #     budget is back.
-#   - preflight-opencode_go, test-discover-opencode-go,
-#     discover-opencode-go: per-provider discovery is no longer part
+#   - preflight-opencode, test-discover-opencode,
+#     discover-opencode: per-provider discovery is no longer part
 #     of the auto path. Discovery is opt-in via the manual workflows
-#     listed above (card80 covers MiniMax discovery; the 14-model
-#     sweep covers opencode_go discovery). To restore automatic
+#     listed above (card80 covers MiniMax discovery; the 7-model
+#     sweep covers opencode discovery). To restore automatic
 #     discovery runs: re-add the four `discover-*` jobs and the
-#     opencode_go preflight here.
+#     opencode preflight here.
 #   - test-card80: moved to `e2e-network-card80.yml` (~25 min, manual).
-#   - test-discover-opencode-go-models: moved to
-#     `e2e-network-discover-opencode-go-models.yml` (~70 min, manual,
-#     14 opencode_go aliases).
+#   - test-discover-opencode-models: moved to
+#     `e2e-network-discover-opencode-models.yml` (~35 min, manual,
+#     7 opencode aliases per the 2026-08-28 operator roster).
 #
 # On `push` events the 3 active jobs above run in parallel after
 # `build-e2e-network` completes (wall-clock ≈ slowest row, ~8 min).

@@ -72,7 +72,7 @@ fn discover_deepseek_writes_four_subdirs() {
         .args([
             "discover",
             "--provider",
-            "deepseek:deepseek-chat",
+            "deepseek:deepseek-v4-flash",
             "--prompt",
             PROMPT,
             "--sketches-per-cell",
