@@ -197,17 +197,24 @@ jobs:
           # MAX_ATTEMPTS=3 (1 initial + 2 retries), derived from the run
           # distribution recorded in docs/e2e-loop-2026-08-12.md (10
           # consecutive real-LLM iterations):
-          #   - 3/10 passed on the first attempt;
-          #   - 7/10 hit exactly one upstream/model flake (JSON schema
-          #     violation, decode error) and every one of them passed on the
-          #     first retry — 0 needed a second retry;
-          #   - 1/10 (iter 8) hit a MiniMax 429 on its retry and needed the
-          #     extra attempt to clear the ~5-min rate-limit window.
-          # So 2 attempts covers the observed flake population and the 3rd is
-          # the margin for the rate-limit case. Going higher only lengthens the
-          # feedback loop: a deterministic regression fails all attempts
-          # anyway, because the audit-log and run-id assertions in
-          # scripts/e2e_audit_proxy.sh re-run on every attempt.
+          #   - 4/10 (iters 2, 4, 6, 10) passed on the first attempt;
+          #   - 6/10 (iters 1, 3, 5, 7, 8, 9) hit exactly one upstream/model
+          #     flake (JSON schema violation, decode error). Of those 6,
+          #     5 (iters 1, 3, 5, 7, 9) recovered on the first retry,
+          #     and 1 (iter 8) needed the second retry — the third attempt —
+          #     to clear MiniMax's ~5-min upstream rate-limit window after
+          #     the retry itself was 429-ed;
+          #   - arithmetic: 4 + 6 = 10, and the maximum number of
+          #     attempts any iter needed in this window was 3.
+          # So 2 attempts absorb 5 of the 6 observed flakes and the
+          # 3rd covers the remaining rate-limit case. The "~5-min
+          # rate-limit window" is the upstream's window, not the
+          # end-to-end retry cycle (which is bounded by MAX_ATTEMPTS
+          # × inter-attempt backoff). Going higher only lengthens the
+          # feedback loop: a deterministic regression fails all
+          # attempts anyway, because the audit-log and run-id
+          # assertions in scripts/e2e_audit_proxy.sh re-run on every
+          # attempt.
           MAX_ATTEMPTS=3
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             echo "================================================================"
@@ -215,13 +222,26 @@ jobs:
             echo "Started at $(date -u +%H:%M:%SZ)"
             echo "================================================================"
             START_TS=$(date +%s)
-            if make e2e-network-fast; then
-              END_TS=$(date +%s)
+            # Run `make` and capture its exit code BEFORE any
+            # other command. A subsequent $(date +%s) command
+            # substitution would set $? to 0 (date always
+            # succeeds) and clobber the real failure code, making
+            # the diagnostic line below print rc=0 even when
+            # `make` returned non-zero. We also avoid the
+            # `if CMD; then ... fi` pattern: in bash, an `if`
+            # compound with no `else` clause reports a zero exit
+            # status when the condition is false, so $? after
+            # `fi` is 0 regardless of CMD — verified locally with
+            # a fake_make that returns 42. The straight
+            # `CMD; RC=$?; if [ "$RC" -eq 0 ]` form is the only
+            # one that preserves make's real exit code here.
+            make e2e-network-fast
+            RC=$?
+            END_TS=$(date +%s)
+            if [ "$RC" -eq 0 ]; then
               echo "Attempt $attempt succeeded in $((END_TS - START_TS))s"
               exit 0
             fi
-            END_TS=$(date +%s)
-            RC=$?
             echo "Attempt $attempt failed with rc=$RC after $((END_TS - START_TS))s"
             if [ $attempt -lt $MAX_ATTEMPTS ]; then
               echo "Sleeping 60s before next attempt (backoff to let upstream recover)..."
@@ -275,13 +295,16 @@ jobs:
             echo "Started at $(date -u +%H:%M:%SZ)"
             echo "================================================================"
             START_TS=$(date +%s)
-            if make e2e-network-explore; then
-              END_TS=$(date +%s)
+            # `make` first, `RC=$?` immediately after, then END_TS:
+            # see the fast job above for why this exact order and why
+            # the `if CMD; then ... fi` form must not be used here.
+            make e2e-network-explore
+            RC=$?
+            END_TS=$(date +%s)
+            if [ "$RC" -eq 0 ]; then
               echo "Attempt $attempt succeeded in $((END_TS - START_TS))s"
               exit 0
             fi
-            END_TS=$(date +%s)
-            RC=$?
             echo "Attempt $attempt failed with rc=$RC after $((END_TS - START_TS))s"
             if [ $attempt -lt $MAX_ATTEMPTS ]; then
               echo "Sleeping 60s before next attempt (backoff to let upstream recover)..."
