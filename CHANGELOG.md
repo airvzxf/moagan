@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING — see ADR-0003)
+
+- **Config schema redesign (v0.13.0)** — `[providers.<name>]` (single-table
+  with `models = [{id, ...}]`) is deprecated in favour of
+  `[[providers.<name>]]` (array-of-tables with `models = ["<id>", ...]`).
+  Legacy TOML still loads with a `tracing::warn!` per section. Legacy
+  support will be removed in v0.15. See
+  [`docs/adr/0003-config-schema-array-of-tables.md`](docs/adr/0003-config-schema-array-of-tables.md)
+  for the design rationale and
+  [`docs/migrations/v0.12-to-v0.13-config.md`](docs/migrations/v0.12-to-v0.13-config.md)
+  for the operator migration guide.
+- **New `MOAGAN_<SECTION>_MAX_TOKENS` env override** — wins over the
+  auto-probe cache for the `(section, model)` pair. See the
+  `resolve_max_tokens` chain in
+  [`src/llm/max_tokens.rs`](src/llm/max_tokens.rs).
+- **Centralised `resolve_max_tokens()` helper** — replaces the 7
+  hand-rolled 3-layer `min` chains in `minimax.rs`, `deepseek.rs`,
+  `openai_compat.rs`, `anthropic_compat.rs`, and `openai_compatible.rs`.
+
 ## [0.12.18] - 2026-08-29
 
 ### Changed

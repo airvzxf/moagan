@@ -1,0 +1,11 @@
+# Fixture: v0.13 new array-of-tables form, no legacy sections.
+# Used by `integration_config_dual_mode::loads_new_only_config_clean` to
+# validate that the new schema parses without warnings and the bridge
+# collapses the single `[[providers.minimax]]` entry into a 2-model
+# `ProviderConfig`.
+
+[[providers.minimax]]
+endpoint = "https://api.minimax.io/anthropic/v1/messages"
+models = ["MiniMax-M3", "MiniMax-M2.5"]
+temperature = 0.6
+top_p = 0.95

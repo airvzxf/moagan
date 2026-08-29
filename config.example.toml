@@ -1,103 +1,150 @@
-# Example user-level config for `moagan` (v0.10 schema).
+# Example user-level config for `moagan` (v0.13 schema).
 #
 # This file is documentation. `moagan` does NOT read it; copies of it live at
 # `~/.config/moagan/config.toml` (the XDG-compliant home for moagan).
 # To activate any settings here, copy this file to the path above and edit.
 #
-# When `MoaganHome::resolve()` boots, it merges the on-disk TOML with the
-# `#[serde(default)]` `Default` impls in `src/config/mod.rs`. Every field has
-# a default, so you can omit any section and get the in-code default.
+# v0.13+ uses the `[[providers.<name>]]` array-of-tables shape. A v0.12
+# legacy `[providers.<name>]` single-table config STILL loads with a
+# `tracing::warn!` per legacy section (the dual-mode deserializer in
+# `src/config/dual_mode.rs` accepts both). Legacy support is scheduled
+# for removal in v0.15 — see:
+#
+#   docs/adr/0003-config-schema-array-of-tables.md
+#   docs/migrations/v0.12-to-v0.13-config.md
+#
+# A commented-out LEGACY block at the bottom shows the v0.12 syntax
+# side-by-side with the new shape; the `--> MIGRATE` arrow marks the
+# conversion point.
 
 [circuit_breaker]
 # Threshold for tripping the breaker per provider, inside `window_secs`.
-# Default is 5, which is too tight for long discovery fan-outs (50 errors
-# in 5 min is easy to hit on flaky upstreams). 200 is the recommended
-# value to tolerate upstream noise on the MiniMax-M3 wire (`anthropic`).
-# Override per-provider if needed.
+# Default is 5; 200 tolerates upstream noise on the MiniMax-M3 wire.
 threshold = 200
 
-# Sliding window for failure counting, in seconds.
-# Default is 60 s; 600 s gives the breaker a wider memory of recent errors.
+# Sliding window for failure counting, in seconds. Default 60 s;
+# 600 s gives the breaker a wider memory of recent errors.
 window_secs = 600
 
-# Time the breaker stays open before transitioning to HalfOpen. After
-# cooldown, the next call is a probe; success closes, failure re-opens.
-# Default is 30 s; 180 s is the recommended value when running multiple
-# discovery tests in succession.
+# Time the breaker stays open before transitioning to HalfOpen. Default
+# 30 s; 180 s when running multiple discovery tests in succession.
 cooldown_secs = 180
 
-# See `src/config/mod.rs` CircuitBreakerConfig for the full schema; this
-# file only documents the fields most operators want to override.
-
 # Per-role rate-limit override (catalog §D.19.6). Key is the
-# `Role::as_str()` value (snake_case: "tagger", "facet_deriver",
-# "extractor", etc.). Empty by default = only the per-provider bucket
-# applies. Use this when the upstream provider has a tighter quota for
-# one role (e.g. tagger fan-out of 1500+ calls after the post-matrix
-# stages).
+# `Role::as_str()` value (snake_case: "tagger", "facet_deriver", …).
+# Empty by default = only the per-provider bucket applies.
 #
 # [rate_limit_per_role]
 # tagger = { capacity = 30, refill_per_sec = 2 }
 
 # ---------------------------------------------------------------------------
-# v0.10 provider schema
+# v0.13 provider schema
 # ---------------------------------------------------------------------------
 #
-# Each `[providers.<section>]` section groups every model that shares the
-# same upstream relay. The wire format (`/v1/messages`,
-# `/v1/chat/completions`, `/v1/responses`) is detected from the
-# per-model URL by the dispatcher; the section name is the canonical
-# key for `api_keys.toml` and the `<NAME>_API_KEY` env-var fallback.
+# Each `[[providers.<name>]]` entry binds one upstream endpoint to a set
+# of model ids. A single-endpoint provider (minimax, deepseek, mock) is
+# one entry; opencode fronts three wire formats and is three entries
+# under the same section roof. The wire format (`/v1/messages`,
+# `/v1/chat/completions`, `/v1/responses`) is read from the URL path by
+# the dispatcher; the section name is the canonical key for
+# `api_keys.toml` and the `<NAME>_API_KEY` env-var fallback.
 #
-# DO NOT put real API keys here — use `~/.config/moagan/api_keys.toml`
-# or the `MOAGAN_DEFAULT_PROVIDER` env var.
+# Section-level knobs (`temperature`, `top_p`, `omit_max_tokens`,
+# `max_token_auto*`, `temperature_auto_enabled`, `plan`) can appear on
+# any entry. The bridge (`Config::compute_legacy_providers`) merges
+# them with `SectionKnobs::merge_first_wins` when collapsing into the
+# canonical `ProviderConfig` shape, so the operator can spread knobs
+# across entries or keep them on the first one — both forms parse
+# identically.
+#
+# DO NOT put real API keys here — use `~/.config/moagan/api_keys.toml`.
 
 # [defaults]
 # provider = "opencode:kimi-k3"
 
-# [providers.minimax]
+# [[providers.minimax]]
 # endpoint = "https://api.minimax.io/anthropic/v1/messages"
 # models = [
-#   { id = "MiniMax-M3",            max_tokens = 1000000 },
-#   { id = "MiniMax-M2.7",          max_tokens = 1000000 },
-#   { id = "MiniMax-M2.7-highspeed", max_tokens = 1000000 },
-#   { id = "MiniMax-M2.5",          max_tokens = 1000000 },
+#   "MiniMax-M3",
+#   "MiniMax-M2.7",
+#   "MiniMax-M2.7-highspeed",
+#   "MiniMax-M2.5",
 # ]
 # temperature = 0.6
 # top_p = 0.95
+# max_token_auto = 1024      # auto-probe floor; runtime discovers above this
 
-# [providers.opencode]
-# models = [
-#   { id = "kimi-k3",       endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "kimi-k2.6",     endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "glm-5.1",       endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "glm-5.2",       endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "deepseek-v4-pro",   endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "deepseek-v4-flash", endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "mimo-v2.5",     endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "mimo-v2.5-pro", endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "hy3",          endpoint = "https://opencode.ai/zen/go/v1/chat/completions", max_tokens = 1000000 },
-#   { id = "minimax-m3",    endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
-#   { id = "minimax-m2.7",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
-#   { id = "minimax-m2.5",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
-#   { id = "qwen3.8-max",   endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
-#   { id = "qwen3.7-max",   endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
-#   { id = "qwen3.7-plus",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
-#   { id = "qwen3.6-plus",  endpoint = "https://opencode.ai/zen/go/v1/messages",        max_tokens = 1000000 },
-#   { id = "gpt-5.6-luna",  endpoint = "https://opencode.ai/zen/go/v1/responses",       max_tokens = 1000000 },
-# ]
-# temperature = 1.0
-# top_p = 0.95
-
-# [providers.deepseek]
+# [[providers.deepseek]]
 # endpoint = "https://api.deepseek.com/v1/chat/completions"
 # models = [
-#   { id = "deepseek-chat",    max_tokens = 1000000 },
-#   { id = "deepseek-reasoner", max_tokens = 1000000 },
+#   "deepseek-v4-flash",
+#   "deepseek-v4-flash-vision-exp",
+#   "deepseek-v4-pro",
+#   "deepseek-chat",
+#   "deepseek-reasoner",
 # ]
 # temperature = 0.6
 # top_p = 0.95
 
-# [providers.mock]
+# [[providers.opencode]]
+# endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
+# models = ["kimi-k3", "kimi-k2.6", "glm-5.1", "glm-5.2", "glm-5.3-flash",
+#           "deepseek-v4-pro", "deepseek-v4-flash", "mimo-v2.5", "mimo-v2.5-pro", "hy3"]
+# temperature = 1.0
+# top_p = 0.95
+#
+# [[providers.opencode]]
+# endpoint = "https://opencode.ai/zen/go/v1/messages"
+# models = ["minimax-m3", "minimax-m2.7", "minimax-m2.5",
+#           "qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"]
+#
+# [[providers.opencode]]
+# endpoint = "https://opencode.ai/zen/go/v1/responses"
+# models = ["gpt-5.6-luna", "muse-spark-1.2-contributor"]
+# omit_max_tokens = true   # gpt-5.6-luna rejects the *presence* of `max_tokens`
+
+# [[providers.mock]]
 # endpoint = "mock://local"
-# mock_dir = "/path/to/canned/responses"
+# models = ["mock-model"]
+
+# ---------------------------------------------------------------------------
+# v0.12 LEGACY schema (DEPRECATED, supported until v0.15)
+# ---------------------------------------------------------------------------
+# The dual-mode deserializer accepts this single-table form and emits a
+# `tracing::warn!` per legacy section. Conversion is mechanical — see
+# the `--> MIGRATE` notes below. This form will be REMOVED in v0.15.
+#
+# [providers.minimax]                                        --> MIGRATE
+# endpoint = "https://api.minimax.io/anthropic/v1/messages"
+# temperature = 0.6
+# top_p = 0.95
+# models = [
+#   { id = "MiniMax-M3" },               # --> replace with "MiniMax-M3",
+#   { id = "MiniMax-M2.7" },             # --> "MiniMax-M2.7",
+#   { id = "MiniMax-M2.7-highspeed" },   # --> "MiniMax-M2.7-highspeed",
+#   { id = "MiniMax-M2.5" },             # --> "MiniMax-M2.5",
+# ]
+#
+# Per-model `max_tokens = N` is gone in v0.13; set
+# `MOAGAN_MINIMAX_MAX_TOKENS=N` instead — see §4 of the migration guide.
+#
+# [providers.opencode]                                       --> MIGRATE
+# models = [
+#   { id = "kimi-k3", endpoint = "https://opencode.ai/zen/go/v1/chat/completions" },
+#   ...
+# ]
+#
+# becomes:
+#
+# [[providers.opencode]]                                     --> MIGRATE
+# endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
+# models = ["kimi-k3", ...]
+#
+# [[providers.opencode]]                                     --> MIGRATE
+# endpoint = "https://opencode.ai/zen/go/v1/messages"
+# models = [...]
+#
+# [[providers.opencode]]                                     --> MIGRATE
+# endpoint = "https://opencode.ai/zen/go/v1/responses"
+# models = [...]
+# omit_max_tokens = true

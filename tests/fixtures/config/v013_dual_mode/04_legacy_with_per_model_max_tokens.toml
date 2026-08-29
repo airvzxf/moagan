@@ -1,0 +1,16 @@
+# Fixture: legacy single-table form with per-model `max_tokens` cap.
+# The dual-mode bridge MUST preserve the per-model ceiling via the
+# `legacy_model_max_tokens` side-channel so the operator-side cap
+# chain keeps working until the operator migrates to v0.13.
+#
+# Companion to `tests/integration_audit_e2e.rs::run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap`:
+# the `131072` ceiling survives the bridge and the audit proxy must
+# clamp the wire body to that value (rather than the v0.12 default of
+# `1_000_000`).
+
+[providers.minimax]
+endpoint = "https://api.minimax.io/anthropic/v1/messages"
+
+models = [
+  { id = "MiniMax-M2.7", max_tokens = 131072 },
+]

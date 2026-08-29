@@ -1,0 +1,15 @@
+# Fixture: v0.12 legacy single-table form, no new sections.
+# Used by `integration_config_dual_mode::loads_legacy_only_config_and_warns`
+# to validate that the dual-mode deserializer accepts the legacy shape
+# and emits a single `tracing::warn!` per legacy section.
+
+[providers.minimax]
+endpoint = "https://api.minimax.io/anthropic/v1/messages"
+temperature = 0.6
+top_p = 0.95
+max_token_auto = 1024
+
+models = [
+  { id = "MiniMax-M3",   max_tokens = 1000000 },
+  { id = "MiniMax-M2.5", max_tokens = 1000000 },
+]
