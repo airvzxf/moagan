@@ -226,3 +226,31 @@ $ head -1 .git/hooks/pre-commit
 | GitHub Copilot instructions | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
 | Branch protection (ruleset apply) | [`docs/branch-protection.md`](branch-protection.md) |
 | Architectural authority | [`docs/proposal-02-rust.md`](proposal-02-rust.md) |
+
+## Artifact naming convention for `moagan` workflows
+
+Every workflow that invokes `moagan` (or `cargo test` on a `moagan` binary)
+as the primary step of the job captures stdout and stderr into `.log.gz`
+files and uploads them as separate artifacts. The exception is
+`.github/workflows/release.yml` (smoke check via `--version` / `--help`
+only; no log capture needed).
+
+| Artifact | Format | Content | Retention |
+|---|---|---|---|
+| `moagan-<job>-stdout` | `.log.gz` (gzip, level 9) | Step's stdout (TRACE/DEBUG/INFO/WARN) plus any `cargo` output redirected there | 7 d |
+| `moagan-<job>-stderr` | `.log.gz` (gzip, level 9) | Step's stderr (ERROR + any `eprintln!`) plus `cargo`'s default stderr output | 7 d |
+
+Decompress with `gunzip` (or `zcat` / `zless`). The hint printed on
+failure (`::error::Moagan run failed in '<job>'. Full stdout is in the
+'moagan-<job>-stdout' artifact...`) is grep-friendly: search the runner
+log for `Moagan run failed` to find the artifact names for any job.
+
+Pre-existing artifacts that capture orthogonal data stay unchanged:
+
+- `moagan-jsonl-<job>` (CI jobs): the structured telemetry JSONL files
+  from `MOAGAN_HOME/.runs/` and `target/test-runs/`; 7 d.
+- `moagan-e2e-<name>-logs` (network jobs): the full `.runs/` directory
+  with `tags/`, `facets/`, `extractions/`, `drafts/`, `final/`,
+  `rankings/`, etc.; 1 d.
+- `moagan-test-ignored-<provider>-logs` (test-ignored jobs): the
+  per-provider `target/test-runs/<provider>/` directory; 1 d.
