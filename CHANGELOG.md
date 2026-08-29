@@ -7,7 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-29
+
 ### Changed
+
+- **Close out the v0.10 `opencode_go` → `opencode` rename** —
+  every remaining `opencode_go` / `OPENCODE_GO` /
+  `OpenCodeGo…` / `opencode-go` identifier in `src/` is renamed
+  to its canonical v0.10 form (`opencode` / `OPENCODE` /
+  `OpenCode…` / `opencode:`). No schema or wire-format change;
+  the upstream URL `https://opencode.ai/zen/go/v1/...` is
+  untouched everywhere it appears. Surface area:
+
+  - `src/llm/capabilities.rs` — `for_opencode_go()` →
+    `for_opencode()`; `for_opencode_go_responses()` →
+    `for_opencode_responses()`; `capabilities_for_opencode_go_responses_prefers_responses_wire`
+    test renamed to
+    `capabilities_for_opencode_responses_prefers_responses_wire`.
+  - `src/llm/probe.rs` — `RE_OPENCODE_GO` static regex →
+    `RE_OPENCODE`; the local `opencode_go` closure var →
+    `opencode`; the `parse_cap_opencode_go_is_not_less_or_equal`
+    test → `parse_cap_opencode_is_not_less_or_equal`.
+  - `src/llm/openai_compat.rs` —
+    `send_streaming_clamps_max_tokens_to_opencode_go_hard_cap`
+    test → `send_streaming_clamps_max_tokens_to_opencode_hard_cap`;
+    `ProviderCapabilities::for_opencode_go_responses()` call site
+    → `for_opencode_responses()`.
+  - `src/llm/openai_compatible.rs` — test fixture string
+    `"opencode_go"` → `"opencode"` (provider-section name in the
+    capability-matrix probe).
+  - `src/llm/anthropic_compat.rs` — `OpenCodeGoMessagesResponseBody`
+    → `OpenCodeMessagesResponseBody`;
+    `OpenCodeGoMessagesContent` → `OpenCodeMessagesContent`;
+    `OpenCodeGoMessagesUsage` → `OpenCodeMessagesUsage`.
+  - `src/llm/{wire,wire_format,provider,deepseek}.rs` — comment
+    references rewritten; no behavioural change.
+  - `src/cli/doctor.rs` — `ProviderCapabilities::for_opencode_go()`
+    and `for_opencode_go_responses()` call sites →
+    `for_opencode()` / `for_opencode_responses()`.
+  - `src/cli/probe.rs` — `--provider opencode-go:kimi-k3`
+    doc-comment examples (max_tokens + temperature probes) →
+    `--provider opencode:kimi-k3` (the canonical provider id is
+    the section name `opencode`).
+  - `tests/integration_discover_{deepseek,minimax}.rs` and
+    `tests/integration_q3_dotenv.rs` — comment references
+    rewritten.
+  - `docs/test-skips.md` — Layer 6d skip block code sample
+    rewritten.
+
+  Historical `OPENCODE_GO_MAX_TOKENS_CAP` /
+  `OpenCodeGoDispatch` / `OpenCodeGoProvider` / `BLOCKED_MODELS`
+  breadcrumbs are preserved in the modified doc comments so the
+  v0.9 / v0.10 lineage stays auditable; each breadcrumb
+  references the v0.13.x rename explicitly.
+
+- **Strip every remaining `opencode_go` / `OpenCodeGo…` /
+  `OpenCode Go` / `opencode-go` reference from comments and
+  docstrings** (follow-up to the close-out above). The rename
+  left a layer of historical breadcrumbs in every `src/llm/*.rs`,
+  `src/cli/doctor.rs`, the discover integration tests, and one
+  workflow / doc file. Every current-behavior description that
+  read "OpenCode Go" now reads "OpenCode"; every breadcrumb that
+  referenced an obsolete identifier (e.g. `OpenCodeGoDispatch::url`,
+  the legacy `BLOCKED_MODELS` gate, the v0.9 16 384-token cap,
+  the v0.10 `opencode_go` → `opencode` section rename) is
+  rephrased to preserve the historical context without naming
+  the symbol that no longer exists. Files touched:
+
+  - `src/llm/{anthropic_compat,openai_compat,openai_compatible,
+    capabilities,probe,provider,json_strategy,embed/remote,
+    response_format_opt_out,param_rejections,deepseek,
+    temperature_probe,probe_table}.rs`
+  - `src/cli/doctor.rs`
+  - `tests/integration_discover_{deepseek,minimax,opencode}.rs`
+  - `tests/integration_{probe_uses_min_output_tokens_for_thinking,
+    probe_temperature,param_rejection_self_heal,q3_dotenv}.rs`
+  - `docs/temperatures-auto.md`, `docs/test-skips.md`
+  - `.github/workflows/test-ignored-opencode.yml`
+
+  The upstream URL `https://opencode.ai/zen/go/v1/...` is
+  untouched everywhere it appears; the cleanup is textual-only
+  and no test semantics change.
 
 - ci(workflows): capture stdout/stderr into separate 7 d `.log.gz` artifacts (`moagan-<job>-{stdout,stderr}`) with a generic failure hint naming the artifact pattern; existing `-logs` and `-jsonl-*` artifacts are unchanged.
 

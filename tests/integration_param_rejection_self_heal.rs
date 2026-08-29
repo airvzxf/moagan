@@ -6,7 +6,7 @@
 //!    today (`temperature`, `top_p`).
 //! 2. [`detect_rejection`] catches every signature observed in the
 //!    spike: Anthropic `unknown_parameter`, OpenAI Responses
-//!    `unsupported_parameter`, OpenCode Go kimi-k3
+//!    `unsupported_parameter`, OpenCode kimi-k3
 //!    `invalid <param>:`, DeepSeek `Invalid <param> value, the
 //!    valid range ...` and `Failed to deserialize: <param>:
 //!    invalid value`, MiniMax Anthropic-direct `invalid params,

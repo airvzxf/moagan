@@ -376,7 +376,7 @@ pub fn body_carries_max_tokens_rejection(body: &str) -> bool {
 ///   OpenCode Responses providers via the shared `classify_status`
 ///   helper in `super::http`).
 /// - `"openai-compat: HTTP 400 after 1 attempts: {body}"` (the
-///   OpenCode Go chat-completions wire in `openai_compatible.rs`,
+///   OpenCode chat-completions wire in `openai_compatible.rs`,
 ///   where the path is `/v1/chat/completions`).
 ///
 /// Both shapes share the same `: {body}` suffix; we strip everything
@@ -443,7 +443,7 @@ fn is_max_tokens_rejection_error(err: &Error) -> bool {
 ///
 /// Three patterns are recognised:
 ///
-/// 1. **Anthropic-compat** (MiniMax direct, OpenCode Go Anthropic
+/// 1. **Anthropic-compat** (MiniMax direct, OpenCode Anthropic
 ///    routing, qwen3.x): the body carries
 ///    `"model[<name>] does not support max tokens > N"`. `N` is the
 ///    boundary value the upstream accepts; we return `N` verbatim.
@@ -452,14 +452,14 @@ fn is_max_tokens_rejection_error(err: &Error) -> bool {
 ///    `"max_tokens is too large: M. This model supports at most N
 ///    completion tokens, whereas you provided M"`. `N` is the cap;
 ///    `M` is the rejected value (we ignore it).
-/// 3. **OpenCode Go relay**: the body wraps the upstream's error in
+/// 3. **OpenCode relay**: the body wraps the upstream's error in
 ///    `Error from provider (Console Go): Upstream request failed:
 ///    [invalid_parameter] 参数校验失败: \n/max_tokens: 4294967295 is
 ///    not less or equal to 131072\n`. The cap `N` follows the
 ///    literal `is not less or equal to ` substring. Used by the
-///    OpenCode Go relay for any model whose upstream rejects with
+///    OpenCode relay for any model whose upstream rejects with
 ///    the JSON-schema-validation style `is not less or equal to`
-///    phrasing (qwen3.x via OpenCode Go, DeepSeek direct, ...).
+///    phrasing (qwen3.x via OpenCode, DeepSeek direct, ...).
 ///
 /// The body is JSON-decoded first so JSON escapes (`\u003e` for
 /// `>`, `\u003c` for `<`) in the upstream's `error.message` field
@@ -483,7 +483,7 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
 
     static RE_ANTHROPIC: OnceLock<regex::Regex> = OnceLock::new();
     static RE_OPENAI: OnceLock<regex::Regex> = OnceLock::new();
-    static RE_OPENCODE_GO: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_OPENCODE: OnceLock<regex::Regex> = OnceLock::new();
 
     // Anthropic-compat: `model[<name>] does not support max tokens > N`.
     // The model name can be hyphenated (qwen3.8-max) or contain dots
@@ -502,14 +502,14 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
             .expect("parse_cap_from_error_body: openai regex compiles")
     });
 
-    // OpenCode Go relay: the upstream JSON-schema validation message
+    // OpenCode relay: the upstream JSON-schema validation message
     // uses `is not less or equal to N` (note the missing `than` —
     // it's a translation of the Chinese 参数校验失败). Match that
     // variant verbatim so qwen3.x, longcat, and any other model
-    // routed through OpenCode Go short-circuit in 3 round-trips.
-    let opencode_go = RE_OPENCODE_GO.get_or_init(|| {
+    // routed through OpenCode short-circuit in 3 round-trips.
+    let opencode = RE_OPENCODE.get_or_init(|| {
         regex::Regex::new(r"is not less or equal to (\d+)")
-            .expect("parse_cap_from_error_body: opencode_go regex compiles")
+            .expect("parse_cap_from_error_body: opencode regex compiles")
     });
 
     // The Anthropic upstream (MiniMax) emits `max tokens \u003e N`
@@ -537,7 +537,7 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
             .captures(t)
             .and_then(|c| c.get(1))
             .or_else(|| openai.captures(t).and_then(|c| c.get(1)))
-            .or_else(|| opencode_go.captures(t).and_then(|c| c.get(1)))
+            .or_else(|| opencode.captures(t).and_then(|c| c.get(1)))
             .and_then(|m| m.as_str().parse::<u64>().ok())
     })?;
 
@@ -587,7 +587,7 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
 /// The exponential phase stops at the smallest `2^k > ceiling`
 /// rather than burning a probe round-trip on a value the upstream
 /// will reject with HTTP 400 (DeepSeek-direct caps at 393_216;
-/// MiniMax-M3 caps at 524_288; OpenCode Go's per-model caps pin
+/// MiniMax-M3 caps at 524_288; OpenCode's per-model caps pin
 /// the OpenAI-compat and Anthropic-compat and Responses paths at
 /// 16_384). Without this short-circuit the probe would otherwise
 /// walk all 30 sequential `2^k` values and every value above the
@@ -648,7 +648,7 @@ where
     // Phase 1: exponential search 2^1..2^MAX_PROBE_SHIFT, with an
     // early break when `n > ceiling` (the smallest `2^k` past the
     // per-provider bound — DeepSeek at k=19 = 524_288, MiniMax at
-    // k=20 = 1_048_576, OpenCode Go at k=15 = 32_768). M2: each
+    // k=20 = 1_048_576, OpenCode at k=15 = 32_768). M2: each
     // probe that comes back as `Indeterminate` (transient 5xx /
     // network blip) is retried once at the same `n` before we
     // commit the outcome. A single timeout mid-Phase-1 would
@@ -1934,7 +1934,7 @@ max_tokens = 524288\n\
         assert_eq!(parse_cap_from_error_body(body), Some(524_288));
     }
 
-    /// OpenCode Go relay wraps the upstream JSON-schema validation
+    /// OpenCode relay wraps the upstream JSON-schema validation
     /// error in `Error from provider (Console Go): Upstream request
     /// failed: [invalid_parameter] 参数校验失败: \n/max_tokens:
     /// 4294967295 is not less or equal to 131072\n`. The cap
@@ -1942,7 +1942,7 @@ max_tokens = 524288\n\
     /// (note: no `than`; it's a translation of the Chinese
     /// `参数校验失败`).
     #[test]
-    fn parse_cap_opencode_go_is_not_less_or_equal() {
+    fn parse_cap_opencode_is_not_less_or_equal() {
         let body = r#"{"error":{"type":"invalid_request_error","message":"Error from provider (Console Go): Upstream request failed: [invalid_parameter] 参数校验失败: \n/max_tokens: 4294967295 is not less or equal to 131072\n"}}"#;
         assert_eq!(parse_cap_from_error_body(body), Some(131_072));
     }

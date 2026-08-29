@@ -126,7 +126,7 @@ impl ProviderCapabilities {
         }
     }
 
-    /// Generic OpenAI-compat provider (DeepSeek, OpenCode Go's
+    /// Generic OpenAI-compat provider (DeepSeek, OpenCode's
     /// `/v1/chat/completions`).
     pub fn for_openai_compat() -> Self {
         Self::default()
@@ -140,14 +140,14 @@ impl ProviderCapabilities {
         Self::default()
     }
 
-    /// OpenCode Go dispatcher. The dispatch happens at the URL
+    /// OpenCode dispatcher. The dispatch happens at the URL
     /// layer; the capability vector here is the chat-completions
     /// default — the inner provider already does the routing.
-    pub fn for_opencode_go() -> Self {
+    pub fn for_opencode() -> Self {
         Self::default()
     }
 
-    /// OpenCode Go routed through the Anthropic-compatible
+    /// OpenCode routed through the Anthropic-compatible
     /// `/v1/messages` endpoint.
     pub fn for_anthropic_compat() -> Self {
         Self {
@@ -162,9 +162,9 @@ impl ProviderCapabilities {
         }
     }
 
-    /// OpenCode Go routed through the OpenAI Responses API
+    /// OpenCode routed through the OpenAI Responses API
     /// (`/v1/responses`).
-    pub fn for_opencode_go_responses() -> Self {
+    pub fn for_opencode_responses() -> Self {
         Self {
             supports_system_field: false,
             supports_response_format: true,
@@ -254,13 +254,13 @@ mod tests {
         assert_eq!(cap.wire_format_id(), "anthropic");
     }
 
-    /// `opencode_go_responses` is the OpenAI Responses API slot.
+    /// `opencode_responses` is the OpenAI Responses API slot.
     /// The flag flips to `responses` and the OpenAI baseline
     /// flags drop; `supports_response_format` survives because
     /// the Responses API still honours it.
     #[test]
-    fn capabilities_for_opencode_go_responses_prefers_responses_wire() {
-        let cap = ProviderCapabilities::for_opencode_go_responses();
+    fn capabilities_for_opencode_responses_prefers_responses_wire() {
+        let cap = ProviderCapabilities::for_opencode_responses();
         assert!(cap.prefers_responses_wire);
         assert!(!cap.prefers_anthropic_wire);
         assert!(!cap.prefers_openai_wire);

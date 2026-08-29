@@ -154,7 +154,7 @@ pub trait Provider: Send + Sync {
     /// [`super::probe::MAX_AUTOPROBE_CEILING`] (≈ 1.07G) which is
     /// correct for providers without a documented ceiling (mock,
     /// third-party relays with permissive limits). Providers that
-    /// clamp inside `send` (`minimax`, `deepseek`, `opencode_go`
+    /// clamp inside `send` (`minimax`, `deepseek`, `opencode`
     /// and its routed variants) override this so the probe does
     /// not have to discover what the clamp already pins.
     fn max_tokens_probe_ceiling(&self) -> u32 {
@@ -1108,7 +1108,7 @@ impl Provider for BreakeredProvider {
     /// Delegate to the inner provider so the wrapper is transparent
     /// and the probe observes the inner provider's per-kind ceiling
     /// (e.g. `DEEPSEEK_MAX_TOKENS_CAP` on the direct DeepSeek
-    /// provider, `u32::MAX` on OpenCode Go
+    /// provider, `u32::MAX` on OpenCode
     /// chat-completions, `MINIMAX_MAX_TOKENS_CAP` on minimax).
     /// Without this delegation the wrapper would inherit the trait
     /// default (`MAX_AUTOPROBE_CEILING` ≈ 1.07G) and the probe
@@ -1795,7 +1795,7 @@ fn spawn_pending_probes(
         // phase short-circuits at the first `2^k` past the
         // upstream's hard cap. DeepSeek-direct caps at 393_216
         // (DEEPSEEK_MAX_TOKENS_CAP), MiniMax at 524_288
-        // (MINIMAX_MAX_TOKENS_CAP), OpenCode Go at 16_384
+        // (MINIMAX_MAX_TOKENS_CAP), OpenCode at 16_384
         // (u32::MAX); providers without a
         // documented ceiling inherit the trait default
         // (≈ 1.07G). Without this query the algorithm would burn
@@ -2407,12 +2407,13 @@ mod tests {
         );
     }
 
-    /// v0.10 pin: the legacy `BLOCKED_MODELS` gate
-    /// (`opencode_go.rs::BLOCKED_MODELS`) is gone — the operator
-    /// controls which models route through OpenCode by choosing
-    /// what to put in their `config.toml`. The dispatcher no
-    /// longer refuses any alias. Verify the registry accepts the
-    /// formerly-blocked `minimax-m3` model id without complaint.
+    /// v0.10 pin: the legacy `BLOCKED_MODELS` gate is gone (it lived
+    /// in the v0.9 dispatcher; the dispatcher was removed in
+    /// v0.10). The operator controls which models route through
+    /// OpenCode by choosing what to put in their `config.toml`. The
+    /// dispatcher no longer refuses any alias. Verify the registry
+    /// accepts the formerly-blocked `minimax-m3` model id without
+    /// complaint.
     #[tokio::test]
     async fn registry_from_config_accepts_minimax_m3_no_blocked_gate() {
         let _env = env_lock();

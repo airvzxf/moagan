@@ -87,7 +87,7 @@ pub enum ProbeCmd {
 #[derive(Debug, Clone, clap::Args)]
 pub struct ProbeMaxTokensCmd {
     /// Provider:model pairs to probe, e.g.
-    /// `--provider minimax:MiniMax-M3 opencode-go:kimi-k3`.
+    /// `--provider minimax:MiniMax-M3 opencode:kimi-k3`.
     /// Repeat the flag once per pair; the value is the literal
     /// `provider:model` string.
     #[arg(
@@ -122,7 +122,7 @@ pub struct ProbeMaxTokensCmd {
 #[derive(Debug, Clone, clap::Args)]
 pub struct ProbeTemperatureCmd {
     /// Provider:model pairs to probe, e.g.
-    /// `--provider minimax:MiniMax-M3 opencode-go:kimi-k3`.
+    /// `--provider minimax:MiniMax-M3 opencode:kimi-k3`.
     /// Repeat the flag once per pair; the value is the literal
     /// `provider:model` string.
     #[arg(

@@ -3,7 +3,7 @@
 LLM upstreams do not advertise the exact temperature range they accept in a
 machine-readable way. Anthropic-compat endpoints pin `temperature ∈ [0.0, 1.0]`,
 OpenAI-compat endpoints typically allow `(0.0, 2.0]`, and a few relays
-(DeepSeek-direct, certain OpenCode Go routes) cap the value at `1.0` and
+(DeepSeek-direct, certain OpenCode routes) cap the value at `1.0` and
 return HTTP 400 + `temperature must be between 0 and 1` otherwise. Hard-coding
 a global cap is the same brittleness the [`max_tokens` auto-probe](max-tokens-auto.md)
 removes — a relay can tighten the cap without warning and the next run breaks.

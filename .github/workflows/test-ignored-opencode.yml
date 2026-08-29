@@ -24,14 +24,13 @@ name: test-ignored-opencode
 # on a healthy local run, ~90 min on a slow upstream).
 #
 # v0.12.12 (§2.3): renamed from `test-ignored-opencode-go.yml`,
-# `OPENCODE_GO_API_KEY` → `OPENCODE_API_KEY` (the v0.10 dispatcher
-# already maps `opencode` → `OPENCODE_API_KEY`; the legacy
-# `OPENCODE_GO_API_KEY` was a v0.9 stub that no code path actually
-# read). Restored from the PR #525 shape on 2026-08-19 (PR #555 had
-# previously collapsed this file to a 1-job `disabled-stub` banner);
-# the auto `push: branches: [main]` trigger is deliberately NOT added
-# because the OpenCode budget is non-trivial and we want each merge to
-# main to be cheap even when the budget is back.
+# `OPENCODE_API_KEY` is the canonical env var (the dispatcher maps
+# the `opencode` section to it). Restored from the PR #525 shape
+# on 2026-08-19 (PR #555 had previously collapsed this file to a
+# 1-job `disabled-stub` banner); the auto `push: branches: [main]`
+# trigger is deliberately NOT added because the OpenCode budget is
+# non-trivial and we want each merge to main to be cheap even when
+# the budget is back.
 
 on:
   workflow_dispatch:

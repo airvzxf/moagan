@@ -393,7 +393,7 @@ fn capabilities_for_section(section: &str) -> crate::llm::capabilities::Provider
     use crate::llm::capabilities::ProviderCapabilities;
     match section {
         "minimax" => ProviderCapabilities::for_minimax(),
-        "opencode" => ProviderCapabilities::for_opencode_go(),
+        "opencode" => ProviderCapabilities::for_opencode(),
         "deepseek" => ProviderCapabilities::for_deepseek(),
         "mock" => ProviderCapabilities::for_mock(),
         _ => ProviderCapabilities::default(),
@@ -659,9 +659,9 @@ mod tests {
         let check = check_api_key(&three_kind_config());
         assert_eq!(check.status, Status::Fail);
         // v0.10: the section name IS the canonical provider-family
-        // key (no `kind` indirection). The legacy `opencode_go`
-        // alias was collapsed into the canonical `opencode` section
-        // in Phase 8, so the missing-key detail names `opencode`.
+        // key (no `kind` indirection). The legacy alias was
+        // collapsed into the canonical `opencode` section in
+        // Phase 8, so the missing-key detail names `opencode`.
         assert!(
             check.detail.contains("opencode"),
             "Fail detail must name the missing kind; got: {}",
@@ -747,10 +747,10 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
     /// columns when the catalog cache is missing. The
     /// `for_minimax` constructor flips the wire preference to
     /// Anthropic and downgrades `supports_response_format`. The
-    /// `for_opencode_go` (the renamed v0.10 opencode kind)
+    /// `for_opencode` (the canonical v0.10 opencode kind)
     /// constructor defaults to the OpenAI-compat chat-completions
-    /// wire — the inner provider has already routed the model
-    /// to the right wire format by URL. The test pins both so a
+    /// wire — the inner provider has already routed the model to
+    /// the right wire format by URL. The test pins both so a
     /// future refactor cannot silently break the matrix.
     #[test]
     fn capabilities_for_kind_picks_correct_static_matrix() {
@@ -761,12 +761,12 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         let r = super::capabilities_for_kind("opencode");
         // v0.10: the `opencode` kind defaults to the
         // chat-completions wire (the inner provider dispatches
-        // by URL). The legacy `for_opencode_go_responses`
+        // by URL). The legacy `for_opencode_responses`
         // constructor still exists for back-compat callers that
         // key on the wire id explicitly.
         assert!(r.prefers_openai_wire);
         assert_eq!(r.wire_format_id(), "openai_compatible");
-        let resp = ProviderCapabilities::for_opencode_go_responses();
+        let resp = ProviderCapabilities::for_opencode_responses();
         assert!(resp.prefers_responses_wire);
         // v0.10 (Phase 2 wire-format rename): the OpenAI Responses
         // wire reports its serde id as `"openai"`. The legacy

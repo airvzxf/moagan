@@ -12,7 +12,7 @@
 //!
 //! Provider APIs disagree on which wire fields they accept:
 //! Anthropic-compat endpoints reject `top_p`, OpenAI-compat typically
-//! accepts it, the OpenCode Go `kimi-k3` route rejects `temperature`
+//! accepts it, the OpenCode `kimi-k3` route rejects `temperature`
 //! outright, and DeepSeek-direct rejects both `temperature` and
 //! `top_p` outside their declared ranges. Hardcoding a global map is
 //! the same brittleness the `max_tokens` / temperature auto-probes
@@ -21,7 +21,7 @@
 //!
 //! The auto-detect is intentionally conservative: 5-7 patterns cover
 //! every rejection signature observed in the spike (Anthropic,
-//! OpenAI-compat, OpenCode Go, DeepSeek, MiniMax Anthropic-direct).
+//! OpenAI-compat, OpenCode, DeepSeek, MiniMax Anthropic-direct).
 //! Up to ~40% of upstream rejections are silent (HTTP 200 with the
 //! parameter dropped) and the auto-detect does NOT catch those —
 //! callers can opt into a `WARN`-level diagnostic for silent
@@ -372,7 +372,7 @@ impl ParamRejectionsTable {
 /// can seed every rejected name into the table at once.
 ///
 /// The seven patterns cover every rejection observed in the spike
-/// (Anthropic, OpenAI-compat, OpenCode Go, DeepSeek, MiniMax
+/// (Anthropic, OpenAI-compat, OpenCode, DeepSeek, MiniMax
 /// Anthropic-direct). All 7 patterns are regex-driven; `regex` is
 /// already a regular dependency so no new crates are pulled in.
 ///
@@ -385,7 +385,7 @@ impl ParamRejectionsTable {
 ///    (MiniMax Anthropic-direct)
 /// 4. `error.param` structured field (deterministic — the
 ///    upstream's API actually hands us the offending field name)
-/// 5. `invalid <param>: ...` (OpenCode Go kimi-k3)
+/// 5. `invalid <param>: ...` (OpenCode kimi-k3)
 /// 6. `Invalid <param> value, the valid range ...` (DeepSeek)
 /// 7. `<param>: invalid value` (DeepSeek deserialization)
 /// 8. Legacy freeform: `<param> is too large: N`
@@ -472,7 +472,7 @@ fn run_message_patterns(msg: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
     // Pattern: plural-form "Unknown parameters: '<a>', '<b>', '<c>'"
-    // (Anthropic-compat relay + several OpenCode Go routes emit
+    // (Anthropic-compat relay + several OpenCode routes emit
     // this shape). Must run before the singular #1+#2 extractor so
     // the three quoted names are captured in one pass.
     for cap in captures_iter(msg, r"'([A-Za-z_][A-Za-z0-9_]*)'") {
@@ -521,7 +521,7 @@ fn run_message_patterns(msg: &str) -> Vec<String> {
         push_unique(&mut out, cap);
     }
 
-    // Pattern #5: OpenCode Go kimi-k3 "invalid temperature: only 1".
+    // Pattern #5: OpenCode kimi-k3 "invalid temperature: only 1".
     // Anchored on `invalid <param>:` so the noun after "invalid"
     // is the parameter name (not a generic word like "value").
     if let Some(cap) = capture(msg, r"(?i)invalid ([A-Za-z_][A-Za-z0-9_]*):\s+[a-zA-Z]") {

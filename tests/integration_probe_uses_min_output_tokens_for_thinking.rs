@@ -4,7 +4,7 @@
 //!
 //! ## Why this test exists
 //!
-//! The MiniMax M-series and OpenCode Go / MiMo fleet spend the
+//! The MiniMax M-series and OpenCode / MiMo fleet spend the
 //! first ~115 tokens of an output budget on a thinking pass
 //! and only emit text afterwards. With
 //! `max_tokens = 16` (the historical probe floor) the model

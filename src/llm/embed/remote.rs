@@ -17,7 +17,7 @@
 //!   body `{"input": [...], "model": ...}`,
 //!   response `{"data": [{"embedding": [...]}, ...]}`. Matches the
 //!   public OpenAI spec and any OpenAI-compatible relay that follows
-//!   the same shape (OpenCode Go's chat path, etc.).
+//!   the same shape (OpenCode's chat path, etc.).
 //! - [`RemoteEmbedderProvider::Cohere`] — `POST {endpoint}/v1/embed`,
 //!   body `{"texts": [...], "model": ...}`,
 //!   response `{"embeddings": [[...], [...]]}`.

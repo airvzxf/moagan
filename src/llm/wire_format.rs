@@ -34,9 +34,10 @@ pub struct WireResponse {
 /// concrete impls live here:
 ///
 /// - [`AnthropicWire`] — `/v1/messages` shape, `system` separate
-///   from `messages` (used by `minimax` and `opencode_go_anthropic`).
+///   from `messages` (used by `minimax` and the OpenCode route
+///   via the Anthropic-compat wire).
 /// - [`OpenAiWire`] — `/v1/chat/completions` shape, used by all
-///   OpenAI-compat providers (DeepSeek, `opencode_go` chat path).
+///   OpenAI-compat providers (DeepSeek, `opencode` chat path).
 /// - [`CustomWire`] — caller-supplied handler for backends that
 ///   follow none of the stock shapes.
 ///
@@ -118,7 +119,7 @@ impl WireFormat for AnthropicWire {
 /// OpenAI-compatible wire format. `/v1/chat/completions` body
 /// shape, with the role-based JSON mode flag and the
 /// per-model opt-out list honoured on the way out. Used by all
-/// OpenAI-compat providers (DeepSeek, the `opencode_go` chat
+/// OpenAI-compat providers (DeepSeek, the `opencode` chat
 /// path, and any future OpenAI-compat subscription).
 pub struct OpenAiWire;
 
@@ -176,8 +177,8 @@ impl WireFormat for OpenAiWire {
 /// string) instead of `messages`, the system prompt rides on
 /// `instructions`, and the response body is
 /// `{"output": [{"content": [{"type": "output_text",
-/// "text": "..."}]}]}`. Currently used by the `opencode_go_responses`
-/// provider for `gpt-5.6-luna`.
+/// "text": "..."}]}]}`. Currently used by the OpenCode route via
+/// the Responses API wire for `gpt-5.6-luna`.
 pub struct ResponsesWire;
 
 #[async_trait]

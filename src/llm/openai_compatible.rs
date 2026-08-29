@@ -1,7 +1,7 @@
 //! Generic OpenAI Chat Completions provider.
 //!
 //! Used by any backend whose API is OpenAI-compatible: DeepSeek
-//! (`https://api.deepseek.com/v1`), OpenCode Go
+//! (`https://api.deepseek.com/v1`), OpenCode
 //! (`https://opencode.ai/zen/go/v1`), and any future provider that
 //! speaks the same wire format. The provider name (`fn name()`) is
 //! configurable so the same code can serve multiple backends.
@@ -18,11 +18,10 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
-// The legacy `OpenCodeGoDispatch` sub-trait (formerly in
-// `super::opencode_go`) was the dispatcher's handle for routing by
-// URL. The v0.10 dispatcher picks the concrete provider from the
-// wire format, not from a boxed trait object — the URL builder is now
-// a public method on each provider.
+// The v0.9 dispatcher exposed a sub-trait for routing by URL. The
+// v0.10 dispatcher picks the concrete provider from the wire format,
+// not from a boxed trait object — the URL builder is now a public
+// method on each provider.
 use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
@@ -51,7 +50,7 @@ pub struct OpenAICompatibleProvider {
     /// layer on top of `provider_max_tokens`. `None` means no
     /// kind-level cap (DeepSeek-direct uses this; DeepSeek accepts
     /// up to 8192 per its docs and the per-provider TOML knob is
-    /// enough). `Some(16_384)` is wired by the OpenCode Go
+    /// enough). `Some(16_384)` is wired by the OpenCode
     /// dispatcher so the upstream never returns HTTP 400 for
     /// kimi-k*, qwen3.x, gpt-5.6-luna, etc. — see
     /// `u32::MAX`.
@@ -400,7 +399,7 @@ struct ResponseFormat {
 }
 
 /// Roles that produce structured JSON output. The OpenAI-compat
-/// providers (DeepSeek, OpenCode Go) get `response_format` set to
+/// providers (DeepSeek, OpenCode) get `response_format` set to
 /// `json_object` for these roles so the JSON parser in `parse_model_json`
 /// stops hitting the trailing-token / missing-brace pathologies
 /// reported by the Q8 multi-model benchmark. Markdown-only roles
@@ -493,7 +492,7 @@ impl Provider for OpenAICompatibleProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         // Dispatcher lookup by `kind`: direct DeepSeek config
         // gets the deepseek variant; everything else (the
-        // OpenCode Go chat-completions path) stays on the
+        // OpenCode chat-completions path) stays on the
         // generic baseline.
         if self.name == "deepseek" {
             ProviderCapabilities::for_deepseek()
@@ -553,7 +552,7 @@ impl Provider for OpenAICompatibleProvider {
     /// Cap the exponential probe at the `kind_hard_cap` so the
     /// algorithm does not burn 30 sequential HTTP round-trips
     /// probing values the upstream will never accept. DeepSeek-direct
-    /// (`DEEPSEEK_MAX_TOKENS_CAP = 393_216`) and OpenCode Go's
+    /// (`DEEPSEEK_MAX_TOKENS_CAP = 393_216`) and OpenCode's
     /// chat-completions path (`u32::MAX = 16_384`)
     /// both reach this method via `new_with_kind_cap`, so the probe
     /// observes the upstream's real bound without first tripping
@@ -569,11 +568,9 @@ impl Provider for OpenAICompatibleProvider {
 }
 
 impl OpenAICompatibleProvider {
-    /// Public URL the provider POSTs to. The legacy
-    /// `OpenCodeGoDispatch::url` accessor lived on the v0.9
-    /// dispatcher; v0.10 keeps the URL builder as a plain method
-    /// so external callers / tests can still inspect the routed
-    /// URL.
+    /// Public URL the provider POSTs to. v0.10 keeps the URL builder
+    /// as a plain method so external callers / tests can still
+    /// inspect the routed URL.
     pub fn url(&self) -> String {
         self.chat_url()
     }
@@ -604,7 +601,7 @@ impl OpenAICompatibleProvider {
             let body = if safety_clamp {
                 // Apply three-layer max_tokens cap. Highest priority
                 // (smallest wins) to lowest:
-                //   1. `kind_hard_cap` — set by the OpenCode Go
+                //   1. `kind_hard_cap` — set by the OpenCode
                 //      dispatcher to `u32::MAX =
                 //      16_384`. DeepSeek-direct leaves `None` (the
                 //      direct upstream's 8192 limit is covered by
@@ -881,7 +878,7 @@ mod tests {
 
     #[test]
     fn openai_compat_request_omits_response_format_for_opted_out_models() {
-        // glm-5.1 routes through OpenCode Go's
+        // glm-5.1 routes through OpenCode's
         // /v1/chat/completions endpoint, which is built on this
         // OpenAICompatibleProvider. Same code path as DeepSeek — the
         // opt-out must trigger purely from the model name.
@@ -922,12 +919,12 @@ mod tests {
 
     #[test]
     fn opencode_request_omits_response_format_for_opted_out_models() {
-        // Pin the OpenCode Go contract: even when role_requires_json
+        // Pin the OpenCode contract: even when role_requires_json
         // is true (Route), the chat-completions body for an opted-out
         // model must NOT carry the `response_format` field so the
         // upstream doesn't return prose-prefixed content.
         let p = provider_with_model(
-            "opencode_go",
+            "opencode",
             "https://opencode.ai/zen/go/v1",
             "kimi-k2.7-code",
         );
@@ -936,7 +933,7 @@ mod tests {
         assert_eq!(value["model"], serde_json::json!("kimi-k2.7-code"));
         assert!(
             value.get("response_format").is_none(),
-            "OpenCode Go request for opted-out model must omit response_format, got: {value}"
+            "OpenCode request for opted-out model must omit response_format, got: {value}"
         );
         // Sanity: the role_requires_json path was actually exercised
         // — without the opt-out check the field WOULD be present.
@@ -1008,7 +1005,7 @@ mod tests {
 
     #[test]
     fn opencode_request_keeps_response_format_for_non_opted_out_models() {
-        // The flip side of the previous test: an OpenCode Go model
+        // The flip side of the previous test: an OpenCode model
         // NOT on the opt-out list (mimo-v2.5, deepseek-v4-flash, hy3)
         // still gets response_format = json_object for JSON roles.
         for model in ["mimo-v2.5", "deepseek-v4-flash", "hy3"] {
@@ -1107,7 +1104,7 @@ mod tests {
     }
 
     /// PR-fix (opencode hard cap): when the dispatcher wires an
-    /// `OpenAICompatibleProvider` for an OpenCode Go model
+    /// `OpenAICompatibleProvider` for an OpenCode model
     /// (`new_with_kind_cap(_, _, Some(u32::MAX))`)
     /// the wire body must clamp `request.max_tokens` to 16_384 even
     /// if `ProviderConfig::max_tokens` is unset. Without the clamp
@@ -1185,14 +1182,14 @@ mod tests {
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
-            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`
-            // global ceiling is gone. The kind cap wired here is
-            // `u32::MAX` (the opencode chat-completions path has
-            // no kind-level ceiling — the auto-probe discovers
-            // the real boundary per `(provider, model)` and
-            // caches it in `max_tokens_auto.toml`). With nothing
-            // in the clamp chain, the wire body carries the
-            // requested value unchanged.
+            // v0.10: the v0.9 16_384-token global ceiling on the
+            // chat-completions wire is gone. The kind cap wired
+            // here is `u32::MAX` (the opencode chat-completions
+            // path has no kind-level ceiling — the auto-probe
+            // discovers the real boundary per `(provider, model)`
+            // and caches it in `max_tokens_auto.toml`). With
+            // nothing in the clamp chain, the wire body carries
+            // the requested value unchanged.
             assert_eq!(
                 body["max_tokens"],
                 serde_json::json!(1_000_000),

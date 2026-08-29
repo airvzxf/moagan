@@ -1,6 +1,6 @@
 //! Per-model opt-out for `response_format: json_object`.
 //!
-//! Some models in the OpenCode Go and OpenAI-compat roster ignore
+//! Some models in the OpenCode and OpenAI-compat roster ignore
 //! `response_format` (prose-prefixed or empty content); providers
 //! that route to those models must omit the field from the request
 //! body so the heuristic parser has a chance to recover the JSON.
