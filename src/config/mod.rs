@@ -1504,6 +1504,15 @@ pub struct ProviderConfig {
 /// default), and an optional `max_tokens` ceiling. The runtime
 /// dispatcher iterates the list and constructs one `Provider` per
 /// entry, picking the wire format from the URL path.
+///
+/// `omit_max_tokens` is a per-model knob (rather than section-level)
+/// because the v0.13 wire-format requirement is per-model: a section
+/// can mix Anthropic-compat models that REQUIRE `max_tokens` (e.g.
+/// `kimi-k3`, `glm-5.1`, `minimax-m3`) with Responses models that
+/// MUST NOT carry it (e.g. `gpt-5.6-luna`, `muse-spark-1.2-contributor`).
+/// The bridge populates this field from each `[[providers.X]]`
+/// entry's `SectionKnobs::omit_max_tokens` so a single entry can
+/// opt its whole group out while sibling entries stay opted in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -1525,6 +1534,16 @@ pub struct ModelConfig {
     /// lower value (and will persist it to
     /// `<MOAGAN_HOME>/max_tokens_auto.toml`).
     pub max_tokens: Option<u32>,
+
+    /// Per-model opt-out for the `max_tokens` wire field. The
+    /// dispatcher computes the effective value as
+    /// `self.omit_max_tokens || spec.omit_max_tokens` so the
+    /// section-level knob stays a fallback for entries that don't
+    /// set it explicitly. Default `false`: the runtime sends
+    /// `max_tokens` unless both this field and the section-level
+    /// knob are `true`.
+    #[serde(default)]
+    pub omit_max_tokens: bool,
 }
 
 /// One entry in the v0.13 `[[providers.<name>]]` array-of-tables
@@ -1613,7 +1632,7 @@ pub struct ProviderEntry {
 /// `ProviderEntry` itself). `endpoint` is per-entry in v0.13 (each
 /// `[[providers.X]]` carries its own URL); `models` is the flat
 /// `Vec<String>` of model ids sharing that entry's endpoint.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SectionKnobs {
     /// Default sampling temperature. Mirrors `ProviderConfig::temperature`.
@@ -1652,19 +1671,58 @@ pub struct SectionKnobs {
     pub plan: Option<PlanConfig>,
 }
 
+impl Default for SectionKnobs {
+    fn default() -> Self {
+        // Match serde's `default_*` helpers so a `SectionKnobs::default()`
+        // call site (used both by `compute_legacy_providers` and by
+        // the `..SectionKnobs::default()` shorthand in
+        // `default_providers()`) agrees with the on-disk defaults
+        // a fresh TOML produces. The pre-v0.13 derived `Default`
+        // returned `max_token_auto_save = false`, which silently
+        // disabled persistence on every section whose builder used
+        // `SectionKnobs::default()` for an entry that did not
+        // mention the knob. See the B-1 reproducer in the v0.13.0
+        // bug report.
+        Self {
+            temperature: None,
+            top_p: None,
+            omit_max_tokens: false,
+            max_token_auto: None,
+            max_token_auto_enabled: None,
+            max_token_auto_save: default_max_token_auto_save(),
+            temperature_auto_enabled: None,
+            plan: None,
+        }
+    }
+}
+
 impl SectionKnobs {
-    /// First-non-default wins merge. Slots that are `None` on `self`
-    /// are filled from `other`; populated slots keep their values.
-    /// The `bool` fields (`omit_max_tokens`, `max_token_auto_save`)
-    /// are not `Option<_>`, so they keep `self`'s value verbatim —
-    /// the first entry that mentions a knob wins on the booleans,
-    /// even when its value is `false` (the literal default).
+    /// First-non-default wins merge for the `Option<_>` knobs.
+    /// Slots that are `None` on `self` are filled from `other`;
+    /// populated slots keep their values.
     ///
-    /// "First-non-default" was chosen over "first byte" so an entry
-    /// with no knob mention does not block a later entry from
-    /// populating the field. The only ambiguity is on the booleans,
-    /// and there we accept the simple first-wins behaviour because
-    /// the operator can always reorder entries to override.
+    /// **Bool knobs are intentionally NOT merged here.** The two
+    /// `bool` fields (`omit_max_tokens`, `max_token_auto_save`)
+    /// carry section-level semantics in v0.13:
+    ///
+    /// - `omit_max_tokens` is now a per-model field on `ModelConfig`
+    ///   (the wire-format requirement is per-model: a section can
+    ///   mix Anthropic-compat models that REQUIRE the field with
+    ///   Responses models that MUST NOT carry it). The
+    ///   section-level knob is a fallback only. Merging it here
+    ///   would let one Responses entry silently promote the flag to
+    ///   the whole section, dropping `max_tokens` from the wire
+    ///   body of every sibling model. See the B-1 reproducer in
+    ///   the v0.13.0 bug report.
+    ///
+    /// - `max_token_auto_save` defaults to `true` (the serde
+    ///   default). An earlier implementation tried to merge it as
+    ///   "any entry that says `false` flips the section to `false`"
+    ///   but the condition was a no-op and the field was
+    ///   permanently stuck at `false`, so `<MOAGAN_HOME>/max_tokens_auto.toml`
+    ///   was never written. `compute_legacy_providers` now seeds
+    ///   the field with `true` and flips it to `false` only when
+    ///   an entry explicitly says so — outside `merge_first_wins`.
     pub fn merge_first_wins(&mut self, other: &SectionKnobs) {
         if self.temperature.is_none() {
             self.temperature = other.temperature;
@@ -1672,22 +1730,11 @@ impl SectionKnobs {
         if self.top_p.is_none() {
             self.top_p = other.top_p;
         }
-        // Booleans: first-wins. The first entry that mentions the
-        // knob (even with `= false`) is the source of truth.
-        if !self.omit_max_tokens && other.omit_max_tokens {
-            self.omit_max_tokens = true;
-        }
         if self.max_token_auto.is_none() {
             self.max_token_auto = other.max_token_auto;
         }
         if self.max_token_auto_enabled.is_none() {
             self.max_token_auto_enabled = other.max_token_auto_enabled;
-        }
-        if other.max_token_auto_save && !self.max_token_auto_save {
-            // The default is `true` (persist) — only override when
-            // `other` explicitly says `false`. This matches the
-            // `ProviderConfig::max_token_auto_save` default.
-            self.max_token_auto_save = false;
         }
         if self.temperature_auto_enabled.is_none() {
             self.temperature_auto_enabled = other.temperature_auto_enabled;
@@ -1818,11 +1865,32 @@ impl Config {
     pub fn compute_legacy_providers(&mut self) -> Result<()> {
         let mut out: BTreeMap<String, ProviderConfig> = BTreeMap::new();
         for (name, entries) in self.providers.iter() {
-            let mut knobs = SectionKnobs::default();
+            // Seed the merge with `max_token_auto_save = true` so the
+            // bridge preserves serde's default (which is also the
+            // Rust default of `bool` but the explicit init makes the
+            // intent obvious to a future reader). Operators who opt
+            // a single entry out (`max_token_auto_save = false`)
+            // propagate the off-signal through `merge_first_wins`;
+            // entries that leave it at the default keep the
+            // section-wide `true`.
+            let mut knobs = SectionKnobs {
+                max_token_auto_save: true,
+                ..Default::default()
+            };
             let mut models: Vec<ModelConfig> = Vec::new();
             let mut first_endpoint: Option<String> = None;
             for entry in entries {
                 knobs.merge_first_wins(&entry.knobs);
+                // `max_token_auto_save` is intentionally NOT merged
+                // by `SectionKnobs::merge_first_wins` (see the
+                // method's docstring). The seed is `true`; any entry
+                // that explicitly says `false` flips the section
+                // value to `false` so the operator's per-entry opt-
+                // out propagates without overwriting the serde
+                // default.
+                if !entry.knobs.max_token_auto_save {
+                    knobs.max_token_auto_save = false;
+                }
                 if first_endpoint.is_none() {
                     first_endpoint = Some(entry.endpoint.clone());
                 }
@@ -1840,10 +1908,22 @@ impl Config {
                     // empty (max_tokens is resolved via
                     // `resolve_max_tokens` once PR #4 lands).
                     let max_tokens = entry.legacy_model_max_tokens.get(model_id).copied();
+                    // `omit_max_tokens` is per-model in v0.13 (the
+                    // wire-format requirement is per-model: a single
+                    // section can mix Anthropic-compat models that
+                    // REQUIRE the field with Responses models that
+                    // MUST NOT carry it). Each entry's
+                    // `SectionKnobs::omit_max_tokens` propagates to
+                    // every model that entry owns. The section-level
+                    // `ProviderConfig::omit_max_tokens` becomes a
+                    // fallback the dispatcher `OR`s with the
+                    // per-model field (see `provider.rs:1426`).
+                    let omit_max_tokens = entry.knobs.omit_max_tokens;
                     models.push(ModelConfig {
                         id: model_id.clone(),
                         endpoint: Some(entry.endpoint.clone()),
                         max_tokens,
+                        omit_max_tokens,
                     });
                 }
             }
@@ -1855,7 +1935,10 @@ impl Config {
                     endpoint,
                     temperature: knobs.temperature,
                     top_p: knobs.top_p,
-                    omit_max_tokens: knobs.omit_max_tokens,
+                    // Section-level `omit_max_tokens` is initialised
+                    // to `false` (the Rust default); the per-model
+                    // field above is the authoritative source.
+                    omit_max_tokens: false,
                     max_token_auto: knobs.max_token_auto,
                     max_token_auto_enabled: knobs.max_token_auto_enabled,
                     max_token_auto_save: knobs.max_token_auto_save,
@@ -2185,29 +2268,32 @@ impl Config {
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_ENDPOINT")
             && !v.trim().is_empty()
         {
-            // v0.13 update: after `compute_legacy_providers` the
             // v0.13 update: scope the rewrite to the canonical
             // `minimax` section (the env var is documented as
             // targeting the direct MiniMax upstream). After the
             // bridge, the section-level `endpoint` is `None` for
             // non-mock sections, but each per-model `endpoint`
-            // carries the entry's URL — so we look at the first
-            // minimax model whose endpoint contains `/messages`
-            // and rewrite that one. The `mock` section keeps its
-            // `mock://` endpoint (no `/messages`), and the
+            // carries the entry's URL — so we rewrite EVERY minimax
+            // model whose endpoint contains `/messages`. The v0.12
+            // semantics rewrote `ProviderConfig::endpoint` once at
+            // the section level, so all four minimax models
+            // inherited the proxy URL; the v0.13 bridge moved the
+            // URL onto each per-model entry, and `iter_mut().find()`
+            // would only flip the first one. The mock section keeps
+            // its `mock://` endpoint (no `/messages`), and the
             // `opencode` section's `minimax-m3/m2.7/m2.5` aliases
             // are NOT touched (matching the canonical v0.10 split
             // documented in plan §6.5).
             let mut rewritten = 0usize;
-            if let Some(spec) = self.providers_legacy.get_mut("minimax")
-                && let Some(first) = spec.models.iter_mut().find(|m| {
+            if let Some(spec) = self.providers_legacy.get_mut("minimax") {
+                for model in spec.models.iter_mut().filter(|m| {
                     m.endpoint
                         .as_deref()
                         .is_some_and(|e| e.contains("/messages"))
-                })
-            {
-                first.endpoint = Some(v.clone());
-                rewritten += 1;
+                }) {
+                    model.endpoint = Some(v.clone());
+                    rewritten += 1;
+                }
             }
             tracing::trace!(
                 var = "MOAGAN_MINIMAX_ENDPOINT",
@@ -2218,25 +2304,23 @@ impl Config {
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_MODEL")
             && !v.trim().is_empty()
         {
-            // v0.13 update: the bridge keeps `models[0].id`
-            // populated, so the legacy rewrite path keeps working.
-            // The section-level `endpoint` is `None` after the
-            // bridge for non-mock sections, so the existing
-            // v0.13: scope the rewrite to the canonical `minimax`
-            // section (the only one the env var is meant to retarget)
-            // AND to the model whose per-model endpoint carries the
-            // canonical MiniMax URL pattern. `opencode`'s
-            // `minimax-m3/m2.7/m2.5` aliases live on the
-            // `/v1/messages` endpoint but are NOT touched by the
-            // override — that is the canonical
-            // v0.10 split (see plan §6.5).
+            // v0.13 update: scope the rewrite to the canonical
+            // `minimax` section AND to `models[0]` by position
+            // (NOT by endpoint substring — that would couple the
+            // model-id rewrite to the endpoint rewrite above, so
+            // setting both env vars would land the model-id on the
+            // wrong entry once the endpoint rewrite stripped the
+            // `/messages` substring). v0.12 rewrote the
+            // section-level `endpoint` once, so all four minimax
+            // models inherited the proxy URL; v0.13 keeps the
+            // same shape on each per-model entry. The mock section
+            // keeps its `mock://` endpoint (no `/messages`), and
+            // `opencode`'s `minimax-m3/m2.7/m2.5` aliases live on
+            // the `/v1/messages` endpoint but are NOT touched —
+            // see plan §6.5.
             let mut rewritten = 0usize;
             if let Some(spec) = self.providers_legacy.get_mut("minimax")
-                && let Some(first) = spec.models.iter_mut().find(|m| {
-                    m.endpoint
-                        .as_deref()
-                        .is_some_and(|e| e.contains("/messages"))
-                })
+                && let Some(first) = spec.models.first_mut()
             {
                 first.id = v.clone();
                 rewritten += 1;
@@ -3589,6 +3673,7 @@ mod tests {
                 id: "mock-model".to_owned(),
                 endpoint: Some("mock://local".to_owned()),
                 max_tokens: None,
+                omit_max_tokens: false,
             }],
             "mock provider must not be touched by MOAGAN_MINIMAX_MODEL"
         );
@@ -5088,18 +5173,21 @@ mod tests {
         );
     }
 
-    /// `ProviderConfig::omit_max_tokens` survives a TOML round-trip so
+    /// `ModelConfig::omit_max_tokens` survives a TOML round-trip so
     /// operators can pin their choice in `~/.config/moagan/config.toml`
-    /// via `[providers.<name>]\nomit_max_tokens = true`. v0.10
-    /// update: `gpt-5.6-luna` is a model on the canonical `opencode`
-    /// section (the per-model alias sections were collapsed); the
-    /// round-trip flips the flag on the opencode section and the
-    /// assertion checks the model survives under the canonical name.
+    /// via `[[providers.<name>]]\nomit_max_tokens = true` (per-model in
+    /// v0.13). v0.10 update: `gpt-5.6-luna` is a model on the
+    /// canonical `opencode` section (the per-model alias sections were
+    /// collapsed); the round-trip flips the flag on the per-model
+    /// entry and the assertion checks the model survives under the
+    /// canonical name with the flag still set.
     #[test]
     fn provider_config_omit_max_tokens_toml_round_trip() {
         let mut cfg = Config::default();
-        if let Some(spec) = cfg.providers_legacy.get_mut("opencode") {
-            spec.omit_max_tokens = true;
+        if let Some(spec) = cfg.providers_legacy.get_mut("opencode")
+            && let Some(model) = spec.models.iter_mut().find(|m| m.id == "gpt-5.6-luna")
+        {
+            model.omit_max_tokens = true;
         }
         let raw = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
@@ -5107,15 +5195,296 @@ mod tests {
             .providers_legacy
             .get("opencode")
             .expect("opencode section must survive TOML round-trip");
+        // v0.13: section-level `omit_max_tokens` is a fallback
+        // (initialised to `false` by the bridge); the per-model
+        // field is the authoritative source.
+        let luna = oc
+            .models
+            .iter()
+            .find(|m| m.id == "gpt-5.6-luna")
+            .expect("gpt-5.6-luna must survive round-trip");
         assert!(
-            oc.omit_max_tokens,
-            "TOML round-trip must preserve omit_max_tokens"
+            luna.omit_max_tokens,
+            "per-model omit_max_tokens must survive the TOML round-trip"
         );
         // Pin the v0.10 canonical schema: gpt-5.6-luna is a model on
         // the opencode section, NOT a top-level section.
         assert!(
             oc.models.iter().any(|m| m.id == "gpt-5.6-luna"),
             "opencode section must carry gpt-5.6-luna on models[]"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // v0.13.0 B-1 regression guards: the dual-mode bridge
+    // (`Config::compute_legacy_providers`) and the dispatcher
+    // (`src/llm/provider.rs:1426`) must agree on
+    // `omit_max_tokens` and `max_token_auto_save` semantics. The
+    // B-1 reproducer pinned both regressions — these tests lock
+    // the corrected behaviour so a future refactor cannot silently
+    // regress.
+    // ----------------------------------------------------------------
+
+    /// B-1 regression: `SectionKnobs::merge_first_wins` previously
+    /// promoted `omit_max_tokens = true` from any entry to the
+    /// whole section via an any-true-wins rule. The default opencode
+    /// config mixes `chat=false`, `anthropic=false`, and
+    /// `responses=true` (for `gpt-5.6-luna`), so the whole opencode
+    /// section ended up with `omit_max_tokens = true`, silently
+    /// dropping `max_tokens` from the wire body of every
+    /// Anthropic-compat model. v0.13.0 fixes this by making
+    /// `omit_max_tokens` a per-model field; the section-level knob
+    /// is now initialised to `false` by the bridge. Verify the
+    /// default config no longer flips the section-wide flag.
+    #[test]
+    fn merge_first_wins_opencode_omit_max_tokens_does_not_bleed_across_entries() {
+        let cfg = Config::default();
+        let oc = cfg
+            .providers_legacy
+            .get("opencode")
+            .expect("opencode section missing from default providers");
+        assert!(
+            !oc.omit_max_tokens,
+            "section-level omit_max_tokens must default to false (B-1 regression)"
+        );
+    }
+
+    /// B-1 regression: `max_token_auto_save` is `bool::default() = false`
+    /// in Rust but `default_max_token_auto_save() = true` per serde.
+    /// The pre-fix bridge merged `max_token_auto_save` via
+    /// `SectionKnobs::merge_first_wins`, whose bool branch was a
+    /// no-op (`if other = true AND self = false: self = false`),
+    /// so the field was permanently stuck at `false`. v0.13.0
+    /// seeds the bridge with `max_token_auto_save = true` and
+    /// never merges the bool; verify the default config now keeps
+    /// the serde default for every section.
+    #[test]
+    fn merge_first_wins_max_token_auto_save_defaults_to_true() {
+        let cfg = Config::default();
+        for (name, spec) in &cfg.providers_legacy {
+            assert!(
+                spec.max_token_auto_save,
+                "section {name} must keep max_token_auto_save = true by default (B-1 regression)"
+            );
+        }
+        // Spot-check: the two sections the B-1 reproducer named
+        // explicitly (opencode + minimax) must both be `true`.
+        let oc = cfg.providers_legacy.get("opencode").unwrap();
+        let mm = cfg.providers_legacy.get("minimax").unwrap();
+        assert!(
+            oc.max_token_auto_save,
+            "opencode.max_token_auto_save = true"
+        );
+        assert!(mm.max_token_auto_save, "minimax.max_token_auto_save = true");
+    }
+
+    /// B-1 follow-up: `omit_max_tokens` is per-model in v0.13.
+    /// Verify that the default opencode config flags ONLY the
+    /// Responses models (`gpt-5.6-luna`, `muse-spark-1.2-contributor`)
+    /// and leaves every other opencode model (`kimi-k3`,
+    /// `glm-5.1`, `minimax-m3`, etc.) carrying `max_tokens`. The
+    /// exact list of "must be true" models comes from the
+    /// fixtures the v0.13.0 ADR pinned as the canonical wire-format
+    /// roster for opencode.
+    #[test]
+    fn compute_legacy_providers_per_model_omit_max_tokens() {
+        let cfg = Config::default();
+        let oc = cfg
+            .providers_legacy
+            .get("opencode")
+            .expect("opencode section missing from default providers");
+        // Models on `/v1/responses` MUST NOT carry `max_tokens`.
+        for must_be_true in ["gpt-5.6-luna", "muse-spark-1.2-contributor"] {
+            let model = oc
+                .models
+                .iter()
+                .find(|m| m.id == must_be_true)
+                .unwrap_or_else(|| panic!("opencode must contain {must_be_true}"));
+            assert!(
+                model.omit_max_tokens,
+                "opencode.{must_be_true}.omit_max_tokens must be true (Responses wire format)"
+            );
+        }
+        // Models on `/v1/chat/completions` and `/v1/messages` MUST
+        // carry `max_tokens`. Sample representatives from each
+        // wire-format group; the dispatcher will pick `chat` or
+        // `anthropic` based on the per-model endpoint URL.
+        for must_be_false in ["kimi-k3", "glm-5.1", "minimax-m3"] {
+            let model = oc
+                .models
+                .iter()
+                .find(|m| m.id == must_be_false)
+                .unwrap_or_else(|| panic!("opencode must contain {must_be_false}"));
+            assert!(
+                !model.omit_max_tokens,
+                "opencode.{must_be_false}.omit_max_tokens must be false (anthropic-compat wire format)"
+            );
+        }
+    }
+
+    /// H-1 + H-2 + H-3 regression: `MOAGAN_MINIMAX_ENDPOINT`
+    /// previously used `iter_mut().find(...)`, so only the FIRST
+    /// minimax model inherited the proxy URL. v0.12 semantics
+    /// rewrote the section-level `endpoint`, so all four minimax
+    /// models inherited the override; v0.13 collapsed the URL onto
+    /// every per-model entry, and the rewrite must follow. Verify
+    /// every minimax model whose endpoint contains `/messages` is
+    /// updated, not just the first.
+    #[test]
+    fn moagan_minimax_endpoint_rewrites_all_matching_models() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_MINIMAX_ENDPOINT").ok();
+        // Pre-condition: the default minimax section exposes at
+        // least 4 models whose endpoint contains `/messages`. The
+        // assertion is a guard against a future fixture change
+        // that would silently shrink the section and make the
+        // test vacuous.
+        let pre = Config::default();
+        let pre_total = pre
+            .providers_legacy
+            .get("minimax")
+            .expect("minimax section missing from default providers")
+            .models
+            .len();
+        let pre_matching = pre
+            .providers_legacy
+            .get("minimax")
+            .unwrap()
+            .models
+            .iter()
+            .filter(|m| {
+                m.endpoint
+                    .as_deref()
+                    .is_some_and(|e| e.contains("/messages"))
+            })
+            .count();
+        assert!(
+            pre_matching >= 4,
+            "default minimax section must expose at least 4 /messages models; got {pre_matching}/{pre_total}"
+        );
+        unsafe {
+            std::env::set_var("MOAGAN_MINIMAX_ENDPOINT", "http://proxy.local/x");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_MINIMAX_ENDPOINT");
+        }
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_MINIMAX_ENDPOINT", v);
+            }
+        }
+        let mm = cfg
+            .providers_legacy
+            .get("minimax")
+            .expect("minimax section missing from default providers");
+        let rewritten = mm
+            .models
+            .iter()
+            .filter(|m| m.endpoint.as_deref() == Some("http://proxy.local/x"))
+            .count();
+        assert_eq!(
+            rewritten, pre_matching,
+            "every /messages model must inherit MOAGAN_MINIMAX_ENDPOINT (got {rewritten}/{pre_matching})"
+        );
+        // The mock section (no `/messages`) stays untouched.
+        let mock = cfg.providers_legacy.get("mock").expect("mock section");
+        for model in &mock.models {
+            assert!(
+                model.endpoint.as_deref() != Some("http://proxy.local/x"),
+                "mock section must NOT inherit MOAGAN_MINIMAX_ENDPOINT (no /messages)"
+            );
+        }
+    }
+
+    /// H-2 + H-3 regression: `MOAGAN_MINIMAX_MODEL` previously used
+    /// `iter_mut().find(...)` on the same endpoint substring
+    /// predicate as `MOAGAN_MINIMAX_ENDPOINT`. When both env vars
+    /// were set, the endpoint rewrite happened first and the model
+    /// id then landed on `models[1]` instead of `models[0]`. v0.13
+    /// scopes the rewrite to `models[0]` by position so the order
+    /// coupling goes away.
+    #[test]
+    fn moagan_minimax_model_rewrites_models_zero_only() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_MINIMAX_MODEL").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_MINIMAX_MODEL", "REPLACED");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_MINIMAX_MODEL");
+        }
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_MINIMAX_MODEL", v);
+            }
+        }
+        let mm = cfg
+            .providers_legacy
+            .get("minimax")
+            .expect("minimax section missing from default providers");
+        assert!(
+            mm.models[0].id == "REPLACED",
+            "MOAGAN_MINIMAX_MODEL must rewrite models[0]; got {}",
+            mm.models[0].id
+        );
+        for (i, model) in mm.models.iter().enumerate().skip(1) {
+            assert!(
+                model.id != "REPLACED",
+                "MOAGAN_MINIMAX_MODEL must NOT rewrite models[{i}] ({})",
+                model.id
+            );
+        }
+    }
+
+    /// H-3 regression: order coupling between
+    /// `MOAGAN_MINIMAX_ENDPOINT` and `MOAGAN_MINIMAX_MODEL`. When
+    /// both env vars are set, the model-id rewrite must still
+    /// land on `models[0]` regardless of whether the endpoint
+    /// rewrite changed the URL string the previous
+    /// substring-based predicate matched on. The fix scopes the
+    /// model-id rewrite to position (`models[0]`), so the two
+    /// rewrites become commutative.
+    #[test]
+    fn moagan_minimax_endpoint_then_model_lands_on_models_zero() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior_endpoint = std::env::var("MOAGAN_MINIMAX_ENDPOINT").ok();
+        let prior_model = std::env::var("MOAGAN_MINIMAX_MODEL").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_MINIMAX_ENDPOINT", "http://proxy.local/x");
+            std::env::set_var("MOAGAN_MINIMAX_MODEL", "REPLACED");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_MINIMAX_ENDPOINT");
+            std::env::remove_var("MOAGAN_MINIMAX_MODEL");
+        }
+        if let Some(v) = prior_endpoint {
+            unsafe {
+                std::env::set_var("MOAGAN_MINIMAX_ENDPOINT", v);
+            }
+        }
+        if let Some(v) = prior_model {
+            unsafe {
+                std::env::set_var("MOAGAN_MINIMAX_MODEL", v);
+            }
+        }
+        let mm = cfg
+            .providers_legacy
+            .get("minimax")
+            .expect("minimax section missing from default providers");
+        assert_eq!(
+            mm.models[0].id, "REPLACED",
+            "MOAGAN_MINIMAX_MODEL must rewrite models[0] regardless of MOAGAN_MINIMAX_ENDPOINT"
+        );
+        assert_eq!(
+            mm.models[0].endpoint.as_deref(),
+            Some("http://proxy.local/x"),
+            "MOAGAN_MINIMAX_ENDPOINT must rewrite models[0].endpoint"
         );
     }
 

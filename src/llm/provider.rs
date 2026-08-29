@@ -1364,6 +1364,7 @@ pub fn registry_from_config_with_home_and_sink(
                     id: section_name.clone(),
                     endpoint: spec.endpoint.clone(),
                     max_tokens: None,
+                    omit_max_tokens: false,
                 }]
             } else {
                 spec.models.clone()
@@ -1405,6 +1406,7 @@ pub fn registry_from_config_with_home_and_sink(
                 id: section_name.clone(),
                 endpoint: spec.endpoint.clone(),
                 max_tokens: None,
+                omit_max_tokens: false,
             }]
         } else {
             spec.models.clone()
@@ -1423,6 +1425,16 @@ pub fn registry_from_config_with_home_and_sink(
                     ))
                 })?;
             let wire_format = wire_format_from_url(&endpoint)?;
+            // `omit_max_tokens` is the OR of the per-model field and
+            // the section-level fallback. The per-model field carries
+            // the v0.13 contract: a section can mix Anthropic-compat
+            // models that REQUIRE `max_tokens` (e.g. `kimi-k3`,
+            // `glm-5.1`, `minimax-m3`) with Responses models that
+            // MUST NOT carry it (e.g. `gpt-5.6-luna`,
+            // `muse-spark-1.2-contributor`); the section-level knob
+            // stays as a fallback for entries that don't set the
+            // per-model field explicitly. See `compute_legacy_providers`
+            // for the bridge logic.
             let resolved = ResolvedModelConfig {
                 section: section_name.clone(),
                 id: model_cfg.id.clone(),
@@ -1431,7 +1443,7 @@ pub fn registry_from_config_with_home_and_sink(
                 temperature: spec.temperature,
                 top_p: spec.top_p,
                 wire_format,
-                omit_max_tokens: spec.omit_max_tokens,
+                omit_max_tokens: model_cfg.omit_max_tokens || spec.omit_max_tokens,
             };
 
             let provider: Arc<dyn Provider> = if section_name == "deepseek" {
@@ -2171,11 +2183,13 @@ mod tests {
                         max_tokens: None,
                         id: "mock-a".into(),
                         endpoint: None,
+                        omit_max_tokens: false,
                     },
                     crate::config::ModelConfig {
                         max_tokens: None,
                         id: "mock-b".into(),
                         endpoint: None,
+                        omit_max_tokens: false,
                     },
                 ],
                 temperature: None,
@@ -2428,6 +2442,7 @@ mod tests {
                     max_tokens: None,
                     id: "minimax-m3".into(),
                     endpoint: None,
+                    omit_max_tokens: false,
                 }],
                 endpoint: Some("https://api.minimax.io/anthropic/v1/messages".to_owned()),
                 temperature: Some(0.6),
@@ -2509,6 +2524,7 @@ mod tests {
                     max_tokens: None,
                     id: "minimax-test".into(),
                     endpoint: None,
+                    omit_max_tokens: false,
                 }],
                 endpoint: Some("https://probe-test.invalid/anthropic/v1/messages".to_owned()),
                 temperature: None,
@@ -2672,6 +2688,7 @@ mod tests {
                     max_tokens: None,
                     id: "minimax-test".into(),
                     endpoint: None,
+                    omit_max_tokens: false,
                 }],
                 endpoint: Some(format!("{}/v1/messages", server.uri())),
                 temperature: None,
@@ -2813,6 +2830,7 @@ mod tests {
                     max_tokens: None,
                     id: "minimax-test".into(),
                     endpoint: None,
+                    omit_max_tokens: false,
                 }],
                 endpoint: Some("https://probe-test.invalid/anthropic/v1/messages".to_owned()),
                 temperature: None,
@@ -3298,6 +3316,7 @@ mod tests {
                 id: "qwen3.7-max".into(), // Anthropic-compat path
                 endpoint: None,
                 max_tokens: None,
+                omit_max_tokens: false,
             }],
             endpoint: None,
             temperature: None,
@@ -3723,6 +3742,7 @@ mod tests {
                     max_tokens: None,
                     id: "mock-model".into(),
                     endpoint: None,
+                    omit_max_tokens: false,
                 }],
                 temperature: None,
                 top_p: None,
@@ -3760,6 +3780,7 @@ mod tests {
                     max_tokens: None,
                     id: "probe-fixture".into(),
                     endpoint: None,
+                    omit_max_tokens: false,
                 }],
                 temperature: None,
                 top_p: None,
@@ -3915,11 +3936,13 @@ mod tests {
                         max_tokens: None,
                         id: "probe-quiet".into(),
                         endpoint: None,
+                        omit_max_tokens: false,
                     },
                     crate::config::ModelConfig {
                         max_tokens: None,
                         id: "probe-loud".into(),
                         endpoint: None,
+                        omit_max_tokens: false,
                     },
                 ],
                 temperature: None,
@@ -4091,5 +4114,228 @@ mod tests {
              (other tests in this file remove the var on exit)"
         );
         drop(_guard);
+    }
+
+    // ----------------------------------------------------------------
+    // v0.13.0 B-1 dispatcher regression guards: `effective_max_tokens`
+    // must agree with the dispatcher-built
+    // `ResolvedModelConfig::omit_max_tokens` contract for both
+    // Anthropic-compat and Responses wire formats. The pre-fix
+    // dispatcher computed `omit_max_tokens` from the section-level
+    // `ProviderConfig::omit_max_tokens` only, so a default opencode
+    // config (chat=false, anthropic=false, responses=true for
+    // `gpt-5.6-luna`) ended up with `omit_max_tokens=true` for the
+    // whole section. The Anthropic-compat models in that section
+    // (`kimi-k3`, `glm-5.1`, `minimax-m3`) MUST carry `max_tokens`
+    // because their upstream rejects 400-style requests without
+    // the field. v0.13.0 fixes the bridge so `omit_max_tokens` is
+    // a per-model field; these tests pin the dispatcher's
+    // per-model resolution.
+    // ----------------------------------------------------------------
+
+    /// B-1 dispatcher regression: an opencode chat-completions
+    /// model (`kimi-k3`) MUST carry `max_tokens` because the
+    /// Anthropic-compat wire format requires the field. The
+    /// pre-fix dispatcher flagged the WHOLE opencode section as
+    /// `omit_max_tokens=true` (because the Responses models had
+    /// `omit_max_tokens=true` and `merge_first_wins` was
+    /// any-true-wins), so every opencode model shipped without
+    /// `max_tokens` and Anthropic-compat upstreams rejected with
+    /// HTTP 400. v0.13.0 makes `omit_max_tokens` per-model;
+    /// `kimi-k3` keeps `omit_max_tokens=false` at the inner
+    /// provider level. Verify the inner provider's
+    /// `omit_max_tokens` is `false` by going through the wire
+    /// body via a wiremock server (the wire builder checks the
+    /// flag to decide whether to include the field).
+    #[tokio::test]
+    async fn dispatcher_opencode_chat_models_carry_max_tokens() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _guard = env_lock();
+        // Default config registers `minimax`, `deepseek`, AND
+        // `opencode` sections; all three need a dummy API key
+        // to build the inner provider.
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-dispatcher-test");
+            std::env::set_var("DEEPSEEK_API_KEY", "dummy-for-dispatcher-test");
+            std::env::set_var("OPENCODE_API_KEY", "dummy-for-dispatcher-test");
+        }
+
+        // Build a wiremock that mimics the opencode chat endpoint
+        // (the default `kimi-k3` URL is
+        // `https://opencode.ai/zen/go/v1/chat/completions`). We
+        // can't route the real upstream through wiremock, so we
+        // construct a synthetic config that points the opencode
+        // section at the wiremock. The dispatcher must propagate
+        // the per-model `omit_max_tokens=false` flag through.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut cfg = crate::config::Config::default();
+        // Replace the opencode section's per-model endpoint to
+        // route through wiremock. We keep the canonical model
+        // roster and the per-model `omit_max_tokens` flag the
+        // default bridge produced.
+        let server_uri = server.uri();
+        let oc = cfg
+            .providers_legacy
+            .get_mut("opencode")
+            .expect("opencode section");
+        for model in &mut oc.models {
+            if model.id == "kimi-k3" {
+                model.endpoint = Some(format!("{server_uri}/v1/chat/completions"));
+            }
+        }
+        let registry = registry_from_config_with_home(
+            &cfg.providers_legacy,
+            &CircuitBreakerConfig::default(),
+            None,
+        )
+        .expect("registry builds");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
+        }
+
+        let key = crate::llm::provider::ProviderRegistry::registry_key("opencode", "kimi-k3");
+        let wrapped = registry
+            .wrapped
+            .get(&key)
+            .unwrap_or_else(|| panic!("opencode::kimi-k3 must be registered"))
+            .clone();
+        let req = Request {
+            model: "kimi-k3".into(),
+            role: Role::Propose,
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: Some(16_384),
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        let (_status, _response) = wrapped
+            .send(&req)
+            .await
+            .expect("kimi-k3 send must succeed against wiremock");
+        let received = server
+            .received_requests()
+            .await
+            .expect("wiremock received at least one request");
+        let body: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("mock server received a JSON body");
+        assert!(
+            body.get("max_tokens").is_some(),
+            "opencode::kimi-k3 wire body must carry max_tokens (Anthropic-compat wire format); got: {body}"
+        );
+    }
+
+    /// B-1 dispatcher regression: an opencode Responses model
+    /// (`gpt-5.6-luna`) MUST NOT carry `max_tokens` because the
+    /// Responses wire format rejects the presence of the field.
+    /// The pre-fix dispatcher correctly flagged this model
+    /// (because the section-wide flag was `true`), but the flag
+    /// was promoted by a buggy merge — it accidentally applied to
+    /// every sibling. v0.13.0 keeps the flag per-model; verify
+    /// the wire body for `gpt-5.6-luna` does NOT carry
+    /// `max_tokens`.
+    #[tokio::test]
+    async fn dispatcher_opencode_responses_models_omit_max_tokens() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-dispatcher-test");
+            std::env::set_var("DEEPSEEK_API_KEY", "dummy-for-dispatcher-test");
+            std::env::set_var("OPENCODE_API_KEY", "dummy-for-dispatcher-test");
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "output": [{
+                    "content": [{"type": "output_text", "text": "ok"}]
+                }],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut cfg = crate::config::Config::default();
+        let server_uri = server.uri();
+        let oc = cfg
+            .providers_legacy
+            .get_mut("opencode")
+            .expect("opencode section");
+        for model in &mut oc.models {
+            if model.id == "gpt-5.6-luna" {
+                model.endpoint = Some(format!("{server_uri}/v1/responses"));
+            }
+        }
+        let registry = registry_from_config_with_home(
+            &cfg.providers_legacy,
+            &CircuitBreakerConfig::default(),
+            None,
+        )
+        .expect("registry builds");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::remove_var("OPENCODE_API_KEY");
+        }
+
+        let key = crate::llm::provider::ProviderRegistry::registry_key("opencode", "gpt-5.6-luna");
+        let wrapped = registry
+            .wrapped
+            .get(&key)
+            .unwrap_or_else(|| panic!("opencode::gpt-5.6-luna must be registered"))
+            .clone();
+        let req = Request {
+            model: "gpt-5.6-luna".into(),
+            role: Role::Propose,
+            system: "sys".into(),
+            user: "user".into(),
+            max_tokens: Some(16_384),
+            temperature: None,
+            top_p: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        let (_status, _response) = wrapped
+            .send(&req)
+            .await
+            .expect("gpt-5.6-luna send must succeed against wiremock");
+        let received = server
+            .received_requests()
+            .await
+            .expect("wiremock received at least one request");
+        let body: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("mock server received a JSON body");
+        assert!(
+            body.get("max_tokens").is_none(),
+            "opencode::gpt-5.6-luna wire body must NOT carry max_tokens (Responses wire format); got: {body}"
+        );
     }
 }

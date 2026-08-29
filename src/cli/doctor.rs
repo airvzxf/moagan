@@ -447,11 +447,13 @@ mod tests {
                         id: "MiniMax-M3".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     },
                     crate::config::ModelConfig {
                         id: "MiniMax-M2.7".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     },
                 ],
                 ..ProviderConfig::default()
@@ -464,6 +466,7 @@ mod tests {
                     id: "mock-model".into(),
                     endpoint: None,
                     max_tokens: None,
+                    omit_max_tokens: false,
                 }],
                 ..ProviderConfig::default()
             },

@@ -65,6 +65,7 @@ impl DeepSeekProvider {
                 id: "deepseek-v4-flash".to_owned(),
                 endpoint: spec.endpoint.clone(),
                 max_tokens: None,
+                omit_max_tokens: false,
             });
         let name = "deepseek".to_owned();
         tracing::info!(

@@ -457,6 +457,7 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
                 id: "mock-model".to_owned(),
                 endpoint: None,
                 max_tokens: None,
+                omit_max_tokens: false,
             }],
             endpoint: Some("mock://local".to_owned()),
             temperature: None,

@@ -226,11 +226,29 @@ fn parse_new_array(
             .map_err(|e| de::Error::custom(format!("providers.{section}[{i}]: {e}")))?;
         // Empty endpoint is a hard error per the v0.13 spec: the
         // array-of-tables form does not inherit a section-level
-        // default, so each entry must carry its own URL.
-        if entry.endpoint.is_empty() {
+        // default, so each entry must carry its own URL. Whitespace
+        // is rejected too — `ProviderConfig::endpoint` is later
+        // matched by URL prefix to pick the wire format, so a URL
+        // of `"   "` would silently route to nothing.
+        if entry.endpoint.trim().is_empty() {
             return Err(de::Error::custom(format!(
                 "providers.{section}[{i}]: `endpoint` is required in v0.13"
             )));
+        }
+        // Warn-and-drop for empty `models = []` (legacy form would
+        // produce one entry with no models — kept for operator-side
+        // "section exists but disabled" semantics). The entry stays
+        // in the `Vec` so the section header survives a partial
+        // removal in the operator's TOML; the runtime sees an empty
+        // `models[]` and falls back to the section default.
+        if entry.models.is_empty() {
+            tracing::warn!(
+                section = %section,
+                index = i,
+                "config: `[[providers.{section}]]` entry has empty `models = []`; \
+                 the section will be treated as inactive. Add at least one model id \
+                 (e.g. `models = [\"<id>\"]`) to register the entry."
+            );
         }
         entries.push(entry);
     }
@@ -255,7 +273,23 @@ fn parse_legacy_table(
     // helpers so the field naming can drift between the two without
     // touching this function.
     let section_endpoint = match tbl.get("endpoint") {
-        Some(toml::Value::String(s)) => Some(s.clone()),
+        Some(toml::Value::String(s)) => {
+            // Whitespace-only endpoints are silently coerced to
+            // `None` later (the bridge treats them as "no endpoint
+            // set"). Surface them here as a hard error so the
+            // operator learns about the typo at load time, not as
+            // a `provider has no endpoint` failure at first LLM
+            // call. Aligns with `parse_new_array`, which rejects
+            // empty / whitespace endpoints as well (H-5 fix).
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(de::Error::custom(format!(
+                    "providers.{section}.endpoint must be a non-empty URL, \
+                     got whitespace-only or empty string"
+                )));
+            }
+            Some(s.clone())
+        }
         None => None,
         Some(other) => {
             return Err(de::Error::custom(format!(
@@ -613,6 +647,62 @@ models = ["a", "b"]
             msg.contains("`endpoint` is required"),
             "error must mention the missing endpoint; got: {msg}"
         );
+    }
+
+    /// H-5 regression: `parse_legacy_table` previously returned
+    /// `ProviderEntry { endpoint: "", ... }` when both the section
+    /// and per-model endpoints were missing. `parse_new_array`
+    /// already rejected the empty case (see
+    /// `new_array_with_empty_endpoint_is_rejected` above); the
+    /// legacy form must do the same so the operator sees the typo
+    /// at load time instead of a `provider has no endpoint`
+    /// failure at the first LLM call.
+    #[test]
+    fn legacy_with_empty_endpoint_is_rejected() {
+        let toml_str = r#"
+[providers.broken]
+endpoint = ""
+
+[[providers.broken.models]]
+id = "orphan"
+"#;
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        let tbl = raw.as_table().unwrap();
+        let provs = tbl.get("providers").and_then(|v| v.as_table()).unwrap();
+        let broken_tbl = provs
+            .get("broken")
+            .and_then(|v| v.as_table())
+            .expect("table");
+        let result = parse_legacy_table("broken", broken_tbl.clone());
+        assert!(result.is_err(), "empty endpoint must error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("non-empty URL"),
+            "error must mention the empty endpoint; got: {msg}"
+        );
+    }
+
+    /// Whitespace-only endpoint must be rejected too — the URL is
+    /// matched by prefix to pick the wire format, so `"   "` would
+    /// silently route to nothing at first LLM call.
+    #[test]
+    fn legacy_with_whitespace_endpoint_is_rejected() {
+        let toml_str = r#"
+[providers.broken]
+endpoint = "   "
+
+[[providers.broken.models]]
+id = "orphan"
+"#;
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        let tbl = raw.as_table().unwrap();
+        let provs = tbl.get("providers").and_then(|v| v.as_table()).unwrap();
+        let broken_tbl = provs
+            .get("broken")
+            .and_then(|v| v.as_table())
+            .expect("table");
+        let result = parse_legacy_table("broken", broken_tbl.clone());
+        assert!(result.is_err(), "whitespace endpoint must error");
     }
 
     #[test]

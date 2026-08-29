@@ -1215,6 +1215,7 @@ mod tests {
                 // off the operator's network; the provider is
                 // built, not sent to.
                 endpoint: Some("http://127.0.0.1:0/v1/messages".into()),
+                omit_max_tokens: false,
             }],
             endpoint: None,
             temperature: None,

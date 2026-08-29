@@ -75,6 +75,7 @@ impl MinimaxProvider {
                 id: "MiniMax-M3".to_owned(),
                 endpoint: spec.endpoint.clone(),
                 max_tokens: None,
+                omit_max_tokens: false,
             });
         tracing::info!(
             model = %first.id,
@@ -700,6 +701,7 @@ mod tests {
                     id: model.into(),
                     endpoint: None,
                     max_tokens: None,
+                    omit_max_tokens: false,
                 }],
                 endpoint: None,
                 temperature: None,
@@ -886,6 +888,7 @@ mod tests {
                     // to the mock base instead of the real MiniMax URL.
                     endpoint: Some(server.uri()),
                     max_tokens: Some(8192),
+                    omit_max_tokens: false,
                 }],
                 endpoint: None,
                 temperature: None,
@@ -1214,6 +1217,7 @@ mod tests {
                     id: "MiniMax-M3".into(),
                     endpoint: None,
                     max_tokens: Some(8192),
+                    omit_max_tokens: false,
                 }],
                 temperature: None,
                 top_p: None,

@@ -117,18 +117,28 @@ pub fn resolve_max_tokens(
     // 2. Cached auto-probe. Filter entries below the floor so a
     //    manually-edited sidecar (or a corrupted write from a
     //    concurrent run) cannot leak a degenerate value into the
-    //    wire body.
+    //    wire body. The cached value is also clamped against
+    //    `kind_hard_cap` so the cache is an upper bound, not a
+    //    standalone source — v0.12's hand-rolled chains applied
+    //    `operator_cap.min(table_cap).min(kind_cap)` and the
+    //    helper must match that arithmetic for the audit-log hash
+    //    contract to hold. Without this clamp, a `kind_cap = Some(1024)`
+    //    would be silently overridden by a stale cache entry of
+    //    `999_999` that survives across runs (the probe fan-out
+    //    is skipped once the table is populated).
     if let Some(t) = table
         && let Some(entry) = t.get(section, model)
         && entry.max_tokens >= MIN_AUTOPROBE_FLOOR
     {
+        let cached = entry.max_tokens.min(kind_hard_cap.unwrap_or(u32::MAX));
         tracing::trace!(
             section,
             model,
-            cached = entry.max_tokens,
-            "resolve_max_tokens: cache wins"
+            cached,
+            kind_hard_cap = ?kind_hard_cap,
+            "resolve_max_tokens: cache wins (clamped by kind_hard_cap)"
         );
-        return entry.max_tokens;
+        return cached;
     }
     // 3. Operator TOML override (the per-model `max_token_auto`
     //    knob) and the kind-level cap (MiniMax upstream rejects
@@ -559,5 +569,42 @@ mod tests {
             "simple wrapper must delegate to the full helper"
         );
         assert_eq!(via_simple, 4096);
+    }
+
+    // ---- v0.13.0 B-1 H-4 regression: cache is not the ceiling ---
+
+    /// H-4 regression: the cache rung previously returned
+    /// `entry.max_tokens` directly without applying
+    /// `kind_hard_cap`. v0.12 hand-rolled chains used
+    /// `operator_cap.min(table_cap).min(kind_cap)`, so the helper
+    /// must apply `kind_hard_cap` at the cache rung too. Without
+    /// this clamp, a stale cached value (the probe fan-out is
+    /// skipped once the table is populated) would silently
+    /// override the kind cap and the upstream would reject with
+    /// HTTP 400 for any model whose real ceiling is below the
+    /// cache.
+    #[test]
+    fn resolve_max_tokens_cache_clamped_by_kind_hard_cap() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = EnvGuard::new("MOAGAN_MINIMAX_MAX_TOKENS");
+        guard.set("");
+        // Cache entry above the kind cap — exactly the corruption
+        // scenario: a previous run persisted a stale
+        // `entry.max_tokens = 999_999`, but the MiniMax upstream
+        // caps at `kind_hard_cap = Some(1000)`.
+        let table = table_with_entry("minimax", "MiniMax-M3", 999_999);
+        let got = resolve_max_tokens("minimax", "MiniMax-M3", Some(&table), None, Some(1000));
+        assert_eq!(
+            got, 1000,
+            "cache value above kind_hard_cap must be clamped to kind_hard_cap"
+        );
+        // Sanity: without the kind cap the helper returns the
+        // cache value (the pre-fix contract — confirm the test
+        // would have failed before H-4 by removing the cap).
+        let got_no_cap = resolve_max_tokens("minimax", "MiniMax-M3", Some(&table), None, None);
+        assert_eq!(
+            got_no_cap, 999_999,
+            "without kind_hard_cap the helper must return the cached value verbatim"
+        );
     }
 }
