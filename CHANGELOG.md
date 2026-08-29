@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-08-29
+## [0.12.18] - 2026-08-29
 
 ### Changed
 
@@ -59,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OpenCodeGoDispatch` / `OpenCodeGoProvider` / `BLOCKED_MODELS`
   breadcrumbs are preserved in the modified doc comments so the
   v0.9 / v0.10 lineage stays auditable; each breadcrumb
-  references the v0.13.x rename explicitly.
+  references the v0.12.18 close-out explicitly.
 
 - **Strip every remaining `opencode_go` / `OpenCodeGo…` /
   `OpenCode Go` / `opencode-go` reference from comments and
