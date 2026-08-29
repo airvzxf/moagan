@@ -397,53 +397,53 @@ impl Provider for MinimaxProvider {
 
     async fn send(&self, req: &Request) -> Result<(u16, Response)> {
         let mut req = req.clone();
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        // Three-layer cap (highest priority first, smallest wins):
-        //   1. MINIMAX_MAX_TOKENS_CAP — documented upstream ceiling;
-        //      the upstream returns HTTP 400 above it.
-        //   2. ProviderConfig::max_tokens — operator override.
-        //   3. MaxTokensTable::resolve_cached — auto-probed
-        //      per-(provider, model) value, primary source of truth.
+        // v0.13.0 B-1 PR #3: the env -> cached -> operator_cap ->
+        // kind_hard_cap -> DEFAULT_MAX_TOKENS chain lives in
+        // `crate::llm::max_tokens::resolve_max_tokens`. We pass the
+        // kind-level hard cap (`MINIMAX_MAX_TOKENS_CAP = 524_288`)
+        // and the operator TOML override as the two `Option<u32>`
+        // arguments so the helper returns the right ceiling for
+        // every combination of env-var, cached probe, and TOML
+        // override. The audit-log hash contract (`effective_max_tokens`
+        // == wire-body value) holds because both methods call the
+        // helper with the same arguments.
         //
         // `req.max_tokens = None` (set by the auto-healing
         // `param_rejections` path) is preserved through the chain:
         // the wire body omits the field so the upstream accepts the
         // request without the cap.
-        let cap = operator_cap.min(table_cap).min(MINIMAX_MAX_TOKENS_CAP);
+        let resolved = crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            Some(MINIMAX_MAX_TOKENS_CAP),
+        );
         if let Some(n) = req.max_tokens {
-            req.max_tokens = Some(n.min(cap));
+            req.max_tokens = Some(n.min(resolved));
         }
         self.send_http(req).await
     }
 
     fn effective_max_tokens(&self, req: &Request) -> u32 {
         // Mirror of the clamp chain in `send()` so the audit-log hash
-        // is byte-for-byte identical to the wire body. Reordering or
-        // dropping a layer here would let a request leave the
-        // process with `max_tokens = 1_000_000` while the audit
-        // records the sha256 of `max_tokens = 524_288`, and the
-        // proxy verify step would flag every call as a body
-        // mismatch.
+        // is byte-for-byte identical to the wire body. Both methods
+        // route through `resolve_max_tokens` with identical
+        // arguments; a future refactor that drifts either side of
+        // the call will surface as a test failure in
+        // `crate::llm::max_tokens::tests::send_and_effective_max_tokens_agree_on_minimax`.
         //
-        // `None` on `req.max_tokens` is treated as `u32::MAX` so the
-        // audit hash stays deterministic when the auto-heal path
-        // drops the field from the wire body.
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        req.max_tokens
-            .unwrap_or(u32::MAX)
-            .min(operator_cap)
-            .min(table_cap)
-            .min(MINIMAX_MAX_TOKENS_CAP)
+        // `None` on `req.max_tokens` is treated as `u32::MAX` so
+        // the audit hash stays deterministic when the auto-heal
+        // path drops the field from the wire body.
+        let resolved = crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            Some(MINIMAX_MAX_TOKENS_CAP),
+        );
+        req.max_tokens.unwrap_or(u32::MAX).min(resolved)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap — operator

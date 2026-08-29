@@ -17,6 +17,7 @@ pub mod governor;
 pub mod http;
 pub mod json_extractor;
 pub mod json_strategy;
+pub mod max_tokens;
 pub mod minimax;
 pub mod mock;
 pub mod modal_gate;

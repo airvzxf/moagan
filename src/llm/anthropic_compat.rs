@@ -276,24 +276,25 @@ impl Provider for AnthropicCompatProvider {
         // `send_with_safety_clamp(_, true)` so the audit-log hash is
         // byte-for-byte identical to the wire body. Same ordering as
         // `send`:
-        //   1. `u32::MAX` (16_384 for the
-        //      2026-08-04 model roster).
-        //   2. `provider_max_tokens` (operator TOML override).
-        //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
+        // v0.13.0 B-1 PR #3: route through
+        // `crate::llm::max_tokens::resolve_max_tokens` so the
+        // env -> cached -> operator_cap -> DEFAULT_MAX_TOKENS
+        // chain is centralised. Both this method and
+        // `send_with_safety_clamp(_, true)` call the helper with
+        // the same arguments; the precedence order is encoded in
+        // the helper itself.
         //
         // `None` on `req.max_tokens` is treated as `u32::MAX` so the
         // audit hash stays deterministic when the auto-heal path
         // drops the field from the wire body.
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        req.max_tokens
-            .unwrap_or(u32::MAX)
-            .min(operator_cap)
-            .min(table_cap)
+        let resolved = crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            None,
+        );
+        req.max_tokens.unwrap_or(u32::MAX).min(resolved)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
@@ -338,23 +339,23 @@ impl AnthropicCompatProvider {
         // self.max_retries (3) for transient 5xx storms.
         let max_retries = if safety_clamp { self.max_retries } else { 0 };
         if safety_clamp {
-            // Three-layer cap. Highest priority (smallest wins) to lowest:
-            //   1. u32::MAX — documented hard ceiling
-            //      for the 2026-08-04 model roster.
-            //   2. provider_max_tokens — operator TOML override.
-            //   3. MaxTokensTable::resolve_cached — auto-probed value.
+            // v0.13.0 B-1 PR #3: route through
+            // `crate::llm::max_tokens::resolve_max_tokens` so the
+            // env -> cached -> operator_cap -> DEFAULT_MAX_TOKENS
+            // chain is centralised. The Anthropic-compat path has
+            // no kind-level hard cap, so `kind_hard_cap` is `None`.
             //
             // `req.max_tokens = None` (set by the auto-healing
             // `param_rejections` path) is preserved through the
             // chain: the wire body omits the field so the upstream
             // accepts the request without the cap.
-            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-            let table_cap = self
-                .max_tokens_table
-                .as_ref()
-                .and_then(|t| t.resolve_cached(self.name(), self.model()))
-                .unwrap_or(u32::MAX);
-            let cap = operator_cap.min(table_cap);
+            let cap = crate::llm::max_tokens::resolve_max_tokens(
+                self.name(),
+                self.model(),
+                self.max_tokens_table.as_deref(),
+                self.provider_max_tokens,
+                None,
+            );
             if let Some(n) = req.max_tokens {
                 req.max_tokens = Some(n.min(cap));
             }
