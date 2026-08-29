@@ -594,12 +594,11 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         None,
     )?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    // PR-B1: `--max-parallelism` is validated up-front (D.15.5:
-    // hard cap u32::MAX simultaneous LLM calls after PR #543 lifted
-    // the cap from 64 to honour the operator's choice). The helper
-    // in `flags_batch.rs` is the same one the cheatsheet
-    // (`docs/cli-cheatsheet.md` §1 row 5) promises, so we surface
-    // its exact error message.
+    // PR-B1: `--max-parallelism` is validated up-front (PR #543
+    // lifted the cap from 64 to u32::MAX simultaneous LLM calls to
+    // honour the operator's choice). We surface
+    // `flags_batch::validate_max_parallelism`'s exact error message
+    // so the operator sees a consistent rejection across commands.
     if let Some(n) = opts.max_parallelism {
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }

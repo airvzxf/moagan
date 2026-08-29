@@ -410,9 +410,8 @@ pub async fn run_full_pipeline(
     // so the registry can wire the per-provider `RateLimiter` from
     // the resolved value. Validation has to come first (a typo like
     // `--max-parallelism 4096` would silently raise the local bucket
-    // AND overwhelm the upstream rate-limit). The D.15.5 helper in
-    // `flags_batch.rs` is the same one the cheatsheet
-    // (`docs/cli-cheatsheet.md` §1 row 5) promises.
+    // AND overwhelm the upstream rate-limit); see the PR #543 helper
+    // in `flags_batch.rs`.
     if let Some(n) = max_parallelism {
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }
