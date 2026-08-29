@@ -392,6 +392,19 @@ pub fn now_rfc3339() -> String {
 mod tests {
     use super::*;
 
+    /// Serialises the three `MOAGAN_DECISION_FORMAT`-mutating tests
+    /// below. Without this lock, the parallel test runner lets sibling
+    /// tests observe env state owned by a test mid-flight — for
+    /// example, the `unknown_env_defaults_to_summary` test can fail
+    /// when another test overwrites the env var to `"all"` between
+    /// this test's `set_var("verbose-not-real")` and the read inside
+    /// `resolve_decision_format`. Pinning the lock to the entire
+    /// set-var → read → restore critical section eliminates the race.
+    /// Same pattern as `src/phases/deliver.rs:621` and the sibling
+    /// `src/llm/provider.rs:2123` `env_lock()` helper; see
+    /// `docs/test-skips.md` §3 for the historical flake (PR #246).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn schema_version_constant_is_stable() {
         // Pin the schema version so operators can grep for it.
@@ -534,6 +547,12 @@ mod tests {
     /// value). Symmetric with `MOAGAN_EVENT_FORMAT` precedence.
     #[test]
     fn resolve_decision_format_env_var_wins_over_explicit() {
+        // Serialise against sibling env-var tests; see `ENV_LOCK`
+        // doc comment above.
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         // Save and restore to keep the test hermetic.
         let prev = std::env::var("MOAGAN_DECISION_FORMAT").ok();
         unsafe {
@@ -557,6 +576,10 @@ mod tests {
     /// the explicit `Summary` flag.
     #[test]
     fn resolve_decision_format_env_var_all_wins_over_summary() {
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         let prev = std::env::var("MOAGAN_DECISION_FORMAT").ok();
         unsafe {
             std::env::set_var("MOAGAN_DECISION_FORMAT", "all");
@@ -579,6 +602,10 @@ mod tests {
     /// default for typos / unfamiliar names).
     #[test]
     fn resolve_decision_format_unknown_env_defaults_to_summary() {
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         let prev = std::env::var("MOAGAN_DECISION_FORMAT").ok();
         unsafe {
             std::env::set_var("MOAGAN_DECISION_FORMAT", "verbose-not-real");
