@@ -23,9 +23,7 @@
 //! the 600 s default test timeout and the per-sketch MiniMax cost stays
 //! modest (see `docs/pending-items-2026-08-13.md §9.3` for the
 //! MiniMax cost rationale — cheaper than the 2×2 matrix used by
-//! the deepseek/opencode siblings — the `opencode` section
-//! name was the v0.10 alias for the historical `opencode_go`
-//! section, finalized in v0.13.x).
+//! the deepseek/opencode siblings).
 
 use std::fs;
 use std::path::PathBuf;
@@ -166,15 +164,13 @@ fn discover_minimax_writes_four_subdirs() {
     }
 
     // V4 §6.10 promises `drafts/<sketch_id>.md` sidecars, one per
-    // surviving sketch, but in practice DeepSeek and OpenCode Go
+    // surviving sketch, but in practice DeepSeek and OpenCode
     // sometimes return sketch bodies with thesis lengths that pass
     // the matrix gate yet produce drafts whose sidecar write races
     // the LLM timeout under sustained load. Same soft-check
     // relaxation applies to MiniMax: a zero count is a soft signal —
     // log it for the test report but do not fail CI. See commit
-    // `071cf0d` for the opencode/deepseek precedent
-    // (the `opencode_go` section name was the historical alias
-    // for `opencode`; finalized in v0.13.x) and
+    // `071cf0d` for the opencode/deepseek precedent and
     // `docs/pending-items-2026-08-13.md §9.2` for context.
     let drafts_count = fs::read_dir(run_dir.join("drafts"))
         .map(|d| d.count())

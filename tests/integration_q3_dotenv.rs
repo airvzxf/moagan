@@ -57,9 +57,7 @@ fn doctor_loads_api_key_from_dotenv() {
     // (minimax / deepseek / opencode). Pre-PR-B2 only
     // MINIMAX_API_KEY was checked; to keep this test passing we
     // supply the other two via direct env (the dotenv test only
-    // exercises MINIMAX). The `opencode` section was the v0.10
-    // alias for the historical `opencode_go` section, finalized
-    // in v0.13.x.
+    // exercises MINIMAX).
     fs::write(
         tmp.path().join(".env"),
         "MINIMAX_API_KEY=from-dotenv\n\

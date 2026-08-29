@@ -126,7 +126,7 @@ impl ProviderCapabilities {
         }
     }
 
-    /// Generic OpenAI-compat provider (DeepSeek, OpenCode Go's
+    /// Generic OpenAI-compat provider (DeepSeek, OpenCode's
     /// `/v1/chat/completions`).
     pub fn for_openai_compat() -> Self {
         Self::default()
@@ -143,7 +143,6 @@ impl ProviderCapabilities {
     /// OpenCode dispatcher. The dispatch happens at the URL
     /// layer; the capability vector here is the chat-completions
     /// default — the inner provider already does the routing.
-    /// Renamed in v0.13.x from `for_opencode_go`.
     pub fn for_opencode() -> Self {
         Self::default()
     }
@@ -165,7 +164,6 @@ impl ProviderCapabilities {
 
     /// OpenCode routed through the OpenAI Responses API
     /// (`/v1/responses`).
-    /// Renamed in v0.13.x from `for_opencode_go_responses`.
     pub fn for_opencode_responses() -> Self {
         Self {
             supports_system_field: false,
@@ -260,7 +258,6 @@ mod tests {
     /// The flag flips to `responses` and the OpenAI baseline
     /// flags drop; `supports_response_format` survives because
     /// the Responses API still honours it.
-    /// Renamed in v0.13.x from `capabilities_for_opencode_go_responses_prefers_responses_wire`.
     #[test]
     fn capabilities_for_opencode_responses_prefers_responses_wire() {
         let cap = ProviderCapabilities::for_opencode_responses();

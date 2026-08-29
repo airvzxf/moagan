@@ -75,7 +75,7 @@ fn wrap_transport(provider: Arc<MinimaxProvider>) -> Arc<dyn TemperatureProbeTra
 /// Anthropic-compat envelope shape; the 400 body is the
 /// `{"error": {"message": "temperature must be between 0 and 2"}}`
 /// shape real upstreams emit (Anthropic-compat relays that cap
-/// at `1.0`, OpenCode Go routes that cap at `1.0`, etc.).
+/// at `1.0`, OpenCode routes that cap at `1.0`, etc.).
 async fn mount_temperature_ceiling(server: &MockServer, ceiling: f32) {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -184,7 +184,7 @@ async fn mount_truncate_all(server: &MockServer) {
 /// `[0.0, 0.1, ..., 1.0]` (11 values, step 0.1). This is the
 /// production-shaped test: it pins the boundary contract that a
 /// relay capping the temperature at `1.0` (Anthropic-compat
-/// endpoints, OpenCode Go routes for `gpt-5.6-luna`) surfaces,
+/// endpoints, OpenCode routes for `gpt-5.6-luna`) surfaces,
 /// so the runtime never tries `T=1.1` against such a relay after
 /// the auto-probe runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

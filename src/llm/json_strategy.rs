@@ -1,6 +1,6 @@
 //! Per-model JSON recovery strategy.
 //!
-//! Different models in the OpenCode Go roster (and the chat-completions
+//! Different models in the OpenCode roster (and the chat-completions
 //! fall-back to OpenAI-compat providers) emit parseable JSON through
 //! different recovery paths. This module encodes the per-model default
 //! as a typed enum so the parse chain
@@ -130,10 +130,10 @@ pub const STRATEGY_BY_MODEL: &[(&str, JsonRecoveryStrategy)] = &[
     ("kimi-k2.7-code", JsonRecoveryStrategy::Lenient),
     ("kimi-k3", JsonRecoveryStrategy::Lenient),
     ("kimi-k2.6", JsonRecoveryStrategy::Lenient),
-    // glm — OpenCode Go chat-completions; Lenient.
+    // glm — OpenCode chat-completions; Lenient.
     ("glm-5.1", JsonRecoveryStrategy::Lenient),
     ("glm-5.2", JsonRecoveryStrategy::Lenient),
-    // hy3 — OpenCode Go; Lenient.
+    // hy3 — OpenCode; Lenient.
     ("hy3", JsonRecoveryStrategy::Lenient),
     // mimo — chat-completions; Lenient.
     ("mimo-v2.5", JsonRecoveryStrategy::Lenient),

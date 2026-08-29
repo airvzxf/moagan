@@ -1,11 +1,6 @@
 //! `anthropic_compat` provider — Anthropic-compatible wire format
 //! served at `/v1/messages`.
 //!
-//! v0.10: the v0.9 `opencode_go` dispatcher is gone. The historical
-//! `opencode_go` → `OpenCodeDispatch` breadcrumb (rewritten in v0.13.x
-//! as part of the close-out) is preserved here so the v0.9 → v0.13.x
-//! lineage stays auditable — note that no `OpenCodeDispatch` symbol
-//! exists in the tree today; only the breadcrumb text was renamed.
 //! The provider is generic over its section name — the dispatcher routes any
 //! section whose endpoint URL ends with `/v1/messages` to this
 //! provider. That covers direct MiniMax
@@ -458,12 +453,9 @@ impl AnthropicCompatProvider {
 }
 
 impl AnthropicCompatProvider {
-    /// Public URL the provider POSTs to. The legacy
-    /// `OpenCodeGoDispatch::url` accessor lived on the v0.9
-    /// dispatcher (no longer in the tree since v0.10; this comment
-    /// preserves the v0.9 → v0.13.x lineage breadcrumb). v0.10
-    /// keeps the URL builder as a plain method so external callers
-    /// / tests can still inspect the routed URL.
+    /// Public URL the provider POSTs to. v0.10 keeps the URL builder
+    /// as a plain method so external callers / tests can still
+    /// inspect the routed URL.
     pub fn url(&self) -> String {
         self.messages_url()
     }
@@ -477,8 +469,6 @@ impl AnthropicCompatProvider {
 /// `super::http` ignores `thinking` blocks; here we collect both and
 /// prepend the `text` block(s) first, then append the `thinking`
 /// block(s) as a fallback so the JSON parser has something to chew on.
-/// (`OpenCodeGoMessagesResponseBody` → `OpenCodeMessagesResponseBody`,
-/// renamed in v0.13.x.)
 #[derive(Debug, Deserialize)]
 struct OpenCodeMessagesResponseBody {
     content: Vec<OpenCodeMessagesContent>,
@@ -488,7 +478,7 @@ struct OpenCodeMessagesResponseBody {
 
 #[derive(Debug, Deserialize)]
 struct OpenCodeMessagesContent {
-    /// Block type from the response. Some OpenCode Go models
+    /// Block type from the response. Some OpenCode models
     /// (qwen3.7-max confirmed on 2026-08-04) omit the `type` field
     /// on the leading `thinking` block — only subsequent blocks
     /// carry `type: "text"`. Treat as optional and infer from the
@@ -496,7 +486,7 @@ struct OpenCodeMessagesContent {
     #[serde(rename = "type", default)]
     kind: Option<String>,
     text: Option<String>,
-    /// Some OpenCode Go models put the response payload inside a
+    /// Some OpenCode models put the response payload inside a
     /// `thinking` block. Captured here so we can fall back to it when
     /// no `text` block is present.
     thinking: Option<String>,
@@ -515,7 +505,7 @@ impl OpenCodeMessagesResponseBody {
         let mut text = String::new();
         let mut thinking = String::new();
         for c in self.content {
-            // Some OpenCode Go models omit `type` on the leading
+            // Some OpenCode models omit `type` on the leading
             // thinking block. Infer the kind from the body's actual
             // fields so we don't drop the response.
             let kind = c.kind.as_deref().or_else(|| {
@@ -902,16 +892,14 @@ mod tests {
         });
     }
 
-    /// v0.10 (post Phase 8): the legacy `OPENCODE_MAX_TOKENS_CAP`
-    /// global clamp is gone. With no probe result and no operator
-    /// override, the wire body carries the request's raw
-    /// `max_tokens` unchanged. The auto-probe discovers the real
+    /// v0.10 (post Phase 8): the legacy 16_384-token global clamp
+    /// for the chat-completions wire is gone. With no probe result
+    /// and no operator override, the wire body carries the request's
+    /// raw `max_tokens` unchanged. The auto-probe discovers the real
     /// upstream boundary per `(provider, model)` and caches it
     /// in `max_tokens_auto.toml`; this regression guard pins
-    /// that the Anthropic-compat path no longer applies a 16_384
+    /// that the Anthropic-compat path no longer applies that
     /// ceiling to OpenCode calls.
-    /// (`OPENCODE_GO_MAX_TOKENS_CAP` → `OPENCODE_MAX_TOKENS_CAP`,
-    /// renamed in v0.13.x.)
     #[test]
     fn send_does_not_clamp_max_tokens_when_no_probe_or_override() {
         use wiremock::matchers::{method, path};
@@ -982,9 +970,9 @@ mod tests {
                 body["max_tokens"],
                 serde_json::json!(1_000_000),
                 "Anthropic-compat path must NOT clamp 1_000_000 → 16_384 anymore; \
-                 the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP` global cap is gone \
-                 (`OPENCODE_GO_MAX_TOKENS_CAP` → `OPENCODE_MAX_TOKENS_CAP`, \
-                 renamed in v0.13.x as part of the broader rename). Got body: {body}"
+                 the v0.9 16_384-token global cap is gone (it lived \
+                 on the chat-completions path, which was removed \
+                 in v0.10). Got body: {body}"
             );
         });
     }

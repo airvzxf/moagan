@@ -28,15 +28,10 @@ use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
 use super::wire_format::role_requires_json;
-// The legacy `OpenCodeGoDispatch` sub-trait lived in
-// `super::opencode_go` on the v0.9 dispatcher (no longer in the tree
-// since v0.10; the v0.13.x close-out rewrote the breadcrumb arrow
-// to `OpenCodeDispatch`, but no such symbol exists in the tree today
-// — only the breadcrumb text was renamed). It was the dispatcher's
-// handle for routing by URL. The v0.10 dispatcher picks the
-// concrete provider from the wire format, not from a boxed trait
-// object — the URL builder is now a public method on each provider
-// (e.g. `OpenAICompatProvider::url`).
+// The v0.9 dispatcher exposed a sub-trait for routing by URL. The
+// v0.10 dispatcher picks the concrete provider from the wire format,
+// not from a boxed trait object — the URL builder is now a public
+// method on each provider (e.g. `OpenAICompatProvider::url`).
 use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
@@ -860,10 +855,7 @@ impl OpenAICompatProvider {
 }
 
 impl OpenAICompatProvider {
-    /// Compute the URL the provider POSTs to. The legacy
-    /// `OpenCodeGoDispatch::url` accessor lived on the v0.9
-    /// dispatcher (no longer in the tree since v0.10; this comment
-    /// preserves the v0.9 → v0.13.x lineage breadcrumb). Kept as a
+    /// Compute the URL the provider POSTs to. Kept as a
     /// public method so external callers / tests can still inspect
     /// the routed URL.
     pub fn url(&self) -> String {
@@ -1442,18 +1434,16 @@ data: [DONE]\n\n",
         });
     }
 
-    /// v0.10 (post Phase 8): the legacy `OPENCODE_MAX_TOKENS_CAP`
-    /// global clamp is gone. The OpenCode relay on the chat-
-    /// completions path no longer has a per-kind ceiling baked
+    /// v0.10 (post Phase 8): the legacy 16_384-token global clamp on
+    /// the chat-completions wire is gone. The OpenCode relay on the
+    /// chat-completions path no longer has a per-kind ceiling baked
     /// into the wire layer — the auto-probe discovers the real
     /// upstream boundary per `(provider, model)` and caches it in
     /// `max_tokens_auto.toml`. With no probe result and no
     /// operator override, the wire body carries the request's
     /// raw `max_tokens` unchanged. This regression guard pins
-    /// that the clamp chain no longer applies a 16_384 ceiling
+    /// that the clamp chain no longer applies that ceiling
     /// to OpenCode chat-completions calls.
-    /// (`OPENCODE_GO_MAX_TOKENS_CAP` → `OPENCODE_MAX_TOKENS_CAP`,
-    /// renamed in v0.13.x.)
     #[test]
     fn send_does_not_clamp_max_tokens_when_no_probe_or_override() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1480,9 +1470,8 @@ data: [DONE]\n\n",
                     endpoint: Some(format!("{}/v1", server.uri())),
                     // None on purpose — exercise the "no TOML
                     // override, no table" path. v0.10 removed the
-                    // global `OPENCODE_MAX_TOKENS_CAP` (formerly
-                    // `OPENCODE_GO_MAX_TOKENS_CAP`; renamed in
-                    // v0.13.x); with nothing in the chain the wire
+                    // global 16_384-token cap on the chat-completions
+                    // wire; with nothing in the chain the wire
                     // body carries the REQUESTED value unchanged.
                     temperature: None,
                     top_p: None,
@@ -1519,12 +1508,11 @@ data: [DONE]\n\n",
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
-            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` global
-            // ceiling is gone (`OPENCODE_GO_MAX_TOKENS_CAP` →
-            // `OPENCODE_MAX_TOKENS_CAP`, renamed in v0.13.x as part of the
-            // broader rename). With no operator override and no table entry,
-            // the wire body carries the requested value verbatim — the only
-            // layers left in the clamp chain are `u32::MAX` (operator cap,
+            // v0.10: the v0.9 16_384-token global ceiling on the
+            // chat-completions wire is gone. With no operator
+            // override and no table entry, the wire body carries
+            // the requested value verbatim — the only layers left
+            // in the clamp chain are `u32::MAX` (operator cap,
             // default) and `u32::MAX` (table, missing).
             assert_eq!(
                 body.get("max_tokens").and_then(|v| v.as_u64()),
@@ -1537,11 +1525,9 @@ data: [DONE]\n\n",
     /// Regression guard for the streaming Responses path
     /// (`send_streaming`): with no operator cap and no table entry,
     /// the SSE wire body must carry the REQUESTED `max_tokens`
-    /// unchanged — the v0.10 schema removed the global
-    /// `OPENCODE_MAX_TOKENS_CAP` so there is no implicit
-    /// ceiling. The v0.9 name "opencode_go_hard_cap" (now
-    /// `opencode_hard_cap` after the v0.13.x rename) is kept only
-    /// as a documentation breadcrumb.
+    /// unchanged — the v0.10 schema removed the global 16_384-token
+    /// cap on the chat-completions wire, so there is no implicit
+    /// ceiling.
     #[test]
     fn send_streaming_clamps_max_tokens_to_opencode_hard_cap() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1603,13 +1589,12 @@ data: [DONE]\n\n",
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
-            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384` global
-            // ceiling is gone (`OPENCODE_GO_MAX_TOKENS_CAP` →
-            // `OPENCODE_MAX_TOKENS_CAP`, renamed in v0.13.x as part of the
-            // broader rename). With no operator override and no table entry,
-            // the SSE wire body carries the requested value verbatim — same
-            // contract as the non-streaming path so a `stream: true` flip
-            // cannot introduce a regression.
+            // v0.10: the v0.9 16_384-token global ceiling on the
+            // chat-completions wire is gone. With no operator
+            // override and no table entry, the SSE wire body carries
+            // the requested value verbatim — same contract as the
+            // non-streaming path so a `stream: true` flip cannot
+            // introduce a regression.
             assert_eq!(
                 body.get("max_tokens").and_then(|v| v.as_u64()),
                 Some(1_000_000),

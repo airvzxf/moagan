@@ -659,11 +659,9 @@ mod tests {
         let check = check_api_key(&three_kind_config());
         assert_eq!(check.status, Status::Fail);
         // v0.10: the section name IS the canonical provider-family
-        // key (no `kind` indirection). The legacy `opencode_go`
-        // alias was collapsed into the canonical `opencode` section
-        // in Phase 8 (the rename to `opencode` is the v0.13.x
-        // close-out of that cleanup), so the missing-key detail
-        // names `opencode`.
+        // key (no `kind` indirection). The legacy alias was
+        // collapsed into the canonical `opencode` section in
+        // Phase 8, so the missing-key detail names `opencode`.
         assert!(
             check.detail.contains("opencode"),
             "Fail detail must name the missing kind; got: {}",
@@ -749,12 +747,11 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
     /// columns when the catalog cache is missing. The
     /// `for_minimax` constructor flips the wire preference to
     /// Anthropic and downgrades `supports_response_format`. The
-    /// `for_opencode` (formerly `for_opencode_go`, renamed in
-    /// v0.13.x; the canonical v0.10 opencode kind) constructor
-    /// defaults to the OpenAI-compat chat-completions wire — the
-    /// inner provider has already routed the model to the right
-    /// wire format by URL. The test pins both so a future
-    /// refactor cannot silently break the matrix.
+    /// `for_opencode` (the canonical v0.10 opencode kind)
+    /// constructor defaults to the OpenAI-compat chat-completions
+    /// wire — the inner provider has already routed the model to
+    /// the right wire format by URL. The test pins both so a
+    /// future refactor cannot silently break the matrix.
     #[test]
     fn capabilities_for_kind_picks_correct_static_matrix() {
         use crate::llm::capabilities::ProviderCapabilities;
@@ -765,9 +762,8 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         // v0.10: the `opencode` kind defaults to the
         // chat-completions wire (the inner provider dispatches
         // by URL). The legacy `for_opencode_responses`
-        // constructor (formerly `for_opencode_go_responses`,
-        // renamed in v0.13.x) still exists for back-compat
-        // callers that key on the wire id explicitly.
+        // constructor still exists for back-compat callers that
+        // key on the wire id explicitly.
         assert!(r.prefers_openai_wire);
         assert_eq!(r.wire_format_id(), "openai_compatible");
         let resp = ProviderCapabilities::for_opencode_responses();

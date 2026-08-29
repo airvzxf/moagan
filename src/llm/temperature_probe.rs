@@ -12,7 +12,7 @@
 //! Provider APIs disagree on the exact temperature range they
 //! accept. Anthropic-compat endpoints pin `temperature ∈ [0.0, 1.0]`,
 //! OpenAI-compat endpoints typically allow `(0.0, 2.0]`, and a few
-//! relays (DeepSeek-direct, certain OpenCode Go routes) cap the
+//! relays (DeepSeek-direct, certain OpenCode routes) cap the
 //! value at `1.0` with HTTP 400 + `temperature must be between 0
 //! and 1` otherwise. Hardcoding a global cap from the operator's
 //! mental map of these limits is the same brittleness the
@@ -110,14 +110,14 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Minimum number of output tokens the probe request asks for.
 /// Some providers reject requests with `max_tokens = 0` (or
-/// clamp it to `1`); others (the MiniMax M-series, OpenCode Go /
+/// clamp it to `1`); others (the MiniMax M-series, OpenCode /
 /// MiMo, etc.) spend the budget on a thinking pass and never
 /// emit text when the cap is below the model's thinking
 /// footprint, returning HTTP 200 with `content: null`. 1024 is
 /// large enough to cover the thinking footprint of every model
 /// the runtime currently targets while staying well below every
 /// probe's per-request cap (MiniMax-M2.5 caps at 196_608,
-/// MiMo-v2.5 caps at 131_072, OpenCode Go proxies inherit the
+/// MiMo-v2.5 caps at 131_072, OpenCode proxies inherit the
 /// upstream cap). The value matches [`crate::llm::probe::MIN_AUTOPROBE_FLOOR`]
 /// so the two auto-probes share a single minimum-viable budget.
 const PROBE_MIN_OUTPUT_TOKENS: u32 = 1024;
@@ -554,7 +554,7 @@ fn build_probe_event<'a>(
 /// `between`, `value`, `not allowed`, `>`, `<`, `>=`, `<=`. The
 /// conjunction matches the upstream error wording observed across
 /// the providers the runtime currently targets (Anthropic-compat,
-/// OpenAI-compat, OpenAI Responses, DeepSeek-direct, OpenCode Go
+/// OpenAI-compat, OpenAI Responses, DeepSeek-direct, OpenCode
 /// relays) without inflating the false-positive rate for benign
 /// bodies.
 ///
@@ -1621,7 +1621,7 @@ mod tests {
     #[test]
     fn classify_probe_response_4xx_with_signature_is_rejected() {
         // The canonical upstream rejection shape (Anthropic-
-        // compat relays that cap at 1.0, OpenCode Go routes for
+        // compat relays that cap at 1.0, OpenCode routes for
         // `gpt-5.6-luna`). The classifier pins this as
         // Rejected because the body carries the rejection
         // signature.

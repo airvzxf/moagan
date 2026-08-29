@@ -188,7 +188,7 @@ impl MaxTokensTable {
     /// phase. `detect_max_tokens` short-circuits at the first
     /// `2^k > ceiling` so the algorithm does not probe values the
     /// upstream will reject (e.g. DeepSeek at 393_216, MiniMax at
-    /// 524_288, OpenCode Go at 16_384). Production callers query
+    /// 524_288, OpenCode at 16_384). Production callers query
     /// `Provider::max_tokens_probe_ceiling()` and pass the value
     /// here; tests typically pass [`MAX_AUTOPROBE_CEILING`] to
     /// exercise the unbounded algorithm.

@@ -217,8 +217,6 @@ Total: 14 of the 37 card80 tests have a partial-skip path.
 ```bash
 if [[ -n "${OPENCODE_API_KEY:-}" ]]; then
   # 8 run_test calls inside the opencode discover block
-  # (the `opencode` section was the v0.10 alias for the
-  # historical `opencode_go` section, finalized in v0.13.x)
 else
   echo "SKIP: opencode discovery e2e tests (OPENCODE_API_KEY not present)"
 fi

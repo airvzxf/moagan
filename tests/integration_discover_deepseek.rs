@@ -1,8 +1,6 @@
 //! End-to-end discovery validation against the native `deepseek`
 //! provider (PR #462; companion to the opencode close-out in
-//! `tests/integration_discover_opencode.rs`; the canonical
-//! `opencode` section name was the v0.10 alias for the
-//! historical `opencode_go` section, finalized in v0.13.x).
+//! `tests/integration_discover_opencode.rs`).
 //!
 //! `#[ignore]`d by default; only runs locally / via
 //! `.github/workflows/test-ignored-deepseek.yml` (post-PR #555, manual
@@ -161,7 +159,7 @@ fn discover_deepseek_writes_four_subdirs() {
     }
 
     // V4 §6.10 promises `drafts/<sketch_id>.md` sidecars, one per
-    // surviving sketch, but in practice DeepSeek and OpenCode Go
+    // surviving sketch, but in practice DeepSeek and OpenCode
     // sometimes return sketch bodies with thesis lengths that pass
     // the matrix gate yet produce drafts whose sidecar write races
     // the LLM timeout under sustained load. A zero count is a soft
