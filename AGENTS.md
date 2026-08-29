@@ -153,8 +153,20 @@ Concretely:
    log, fix, commit, push, re-dispatch, repeat. Do NOT tag until the
    release branch is fully green.
 9. Only when the release branch is green: merge the release PR.
-10. Only after the release PR is merged: tag. `release.yml` runs
-    automatically.
+10. Only after the release PR is merged: tag the **merge commit on
+    the trunk**, NOT the branch tip you tagged before opening the PR.
+    The squash-merge rewrites the SHA, so the branch-tip tag points
+    at a commit that exists on no branch. Re-tag in two steps:
+    `git tag -d v0.12.XX && git push origin :refs/tags/v0.12.XX`,
+    then `git tag -s v0.12.XX <merge-commit-sha>` and
+    `git push origin v0.12.XX`. Verify with
+    `git rev-parse v0.12.XX^{commit}` — it MUST match
+    `git rev-parse main`. `release.yml` runs on the tag push; an
+    orphan tag publishes a release whose SHA no longer matches the
+    next merge on main, and the audit log stops being reproducible.
+    **Tagging the branch tip and then squashing the PR is the same
+    class of bug as tagging before CI is green — both break the
+    invariant that the release commit is reachable from main.**
 
 ### When the change does not touch CI
 
