@@ -81,6 +81,19 @@ mod tests {
         }
     }
 
+    /// Capture tracing events emitted by `event` into an in-memory
+    /// buffer, then return the formatted output as a String. Uses
+    /// `tracing::subscriber::with_default` (thread-local dispatcher
+    /// override). Survives today only because the two callers
+    /// (`redacts_anthropic_key_in_event_message`,
+    /// `redacts_email_in_event_field`) emit at `tracing::info!`,
+    /// which is louder than the process-global `LevelFilter::ERROR`
+    /// installed by `src/sandbox/process.rs:2535`'s `try_init()`. If
+    /// a future test wants to assert on `tracing::debug!` /
+    /// `tracing::trace!`, move it to a dedicated
+    /// `tests/integration_*_tracing.rs` binary (single `#[test]`,
+    /// own process). The mechanical guard
+    /// `scripts/check-no-trace-debug-in-mod-tests.sh` enforces this.
     fn capture(event: impl FnOnce()) -> String {
         let buffer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(

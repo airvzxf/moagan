@@ -2528,8 +2528,12 @@ mod tests {
     /// `tracing::subscriber::with_default` (thread-local) cannot
     /// reliably override this — see the §2.2 flake (commit `1e3bb18`)
     /// and `tests/integration_parse_json_recovery.rs` for the
-    /// worked example. Any new tracing-dependent unit test in this
-    /// binary must live in its own integration test binary.
+    /// worked example. **Mechanical guard**: any new
+    /// `tracing::debug!` / `tracing::trace!` call inside an inline
+    /// `#[cfg(test)] mod tests { … }` block in `src/` fails
+    /// `scripts/check-no-trace-debug-in-mod-tests.sh` in CI. Any new
+    /// tracing-dependent unit test in this binary must live in its
+    /// own integration test binary.
     #[tokio::test]
     async fn moa_sandbox_run_cmd_with_off_logs_denial() {
         let _ = tracing_subscriber::fmt::try_init();

@@ -5,6 +5,24 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.17] - 2026-08-28
+
+### Fixed
+
+- **Test-only: CI guard against §2.2-style flakes via `tracing::debug!`
+  in inline `mod tests`** ([#668](https://github.com/airvzxf/moagan/issues/668)).
+  Mechanical check that flags any `tracing::debug!` / `tracing::trace!`
+  macro inside a `#[cfg(test)] mod tests { … }` block in `src/`. The
+  same `tracing_subscriber::fmt::try_init()` side-effect that PR #647
+  worked around for the `--lib` binary would silently poison any
+  future DEBUG/TRACE assertion added in a test module — this guard
+  surfaces the mistake before it ships. New script
+  `scripts/check-no-trace-debug-in-mod-tests.sh`; wired into
+  `make guard-deps` (T0, < 2 s pre-commit + CI) so the check fires on
+  every push. Three at-risk sites annotated in-code with a short
+  docstring explaining the §2.2 mechanism and the migration path; no
+  `src/` production-code API change; no schema bump.
+
 ## [0.12.16] - 2026-08-28
 
 ### Changed
