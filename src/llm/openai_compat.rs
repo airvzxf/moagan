@@ -428,29 +428,24 @@ impl Provider for OpenAICompatProvider {
         // Mirror of the clamp chain in
         // `send_with_safety_clamp(_, true)` (and `send_streaming`,
         // which applies the same chain) so the audit-log hash is
-        // byte-for-byte identical to the wire body. Same ordering
-        // as `send`:
-        //   1. `u32::MAX` (16_384 for the
-        //      2026-08-04 model roster).
-        //   2. `provider_max_tokens` (operator TOML override).
-        //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
-        // `omit_max_tokens` does NOT affect this value — it only
-        // drops the field from the wire body; when the field is
-        // present the value is the same clamped `u32`.
+        // byte-for-byte identical to the wire body. Both methods
+        // route through
+        // `crate::llm::max_tokens::resolve_max_tokens` with the
+        // same arguments. `omit_max_tokens` does NOT affect this
+        // value — it only drops the field from the wire body; when
+        // the field is present the value is the same clamped `u32`.
         //
         // `None` on `req.max_tokens` is treated as `u32::MAX` so
         // the audit hash stays deterministic when the auto-heal
         // path drops the field from the wire body.
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        req.max_tokens
-            .unwrap_or(u32::MAX)
-            .min(operator_cap)
-            .min(table_cap)
+        let resolved = crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            None,
+        );
+        req.max_tokens.unwrap_or(u32::MAX).min(resolved)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
@@ -610,23 +605,25 @@ impl OpenAICompatProvider {
         let max_retries = if safety_clamp { self.max_retries } else { 0 };
         let mut req = req.clone();
         if safety_clamp {
-            // Three-layer cap. Highest priority (smallest wins) to lowest:
-            //   1. u32::MAX — documented hard ceiling
-            //      for the 2026-08-04 roster (kimi-k* / gpt-5.6-luna).
-            //   2. provider_max_tokens — operator TOML override.
-            //   3. MaxTokensTable::resolve_cached — auto-probed value.
+            // v0.13.0 B-1 PR #3: route through
+            // `crate::llm::max_tokens::resolve_max_tokens` so the
+            // env -> cached -> operator_cap -> DEFAULT_MAX_TOKENS
+            // chain is centralised. The OpenAI-compat path has no
+            // kind-level hard cap (the 16_384-token opencode
+            // chat-completions ceiling was lifted in v0.10), so
+            // `kind_hard_cap` is `None`.
             //
             // `max_tokens = None` (set by the auto-healing
             // `param_rejections` path) is preserved through the
             // chain: the wire body omits the field so the
             // upstream accepts the request without the cap.
-            let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-            let table_cap = self
-                .max_tokens_table
-                .as_ref()
-                .and_then(|t| t.resolve_cached(self.name(), self.model()))
-                .unwrap_or(u32::MAX);
-            let cap = operator_cap.min(table_cap);
+            let cap = crate::llm::max_tokens::resolve_max_tokens(
+                self.name(),
+                self.model(),
+                self.max_tokens_table.as_deref(),
+                self.provider_max_tokens,
+                None,
+            );
             if let Some(n) = req.max_tokens {
                 req.max_tokens = Some(n.min(cap));
             }
@@ -768,18 +765,19 @@ impl OpenAICompatProvider {
     /// response, and returns a single aggregated `Response` with
     /// the joined text and the terminal usage block.
     async fn send_streaming(&self, req: &Request, url: &str) -> Result<(u16, Response)> {
-        // Apply three-layer max_tokens cap (same as the non-streaming
-        // path and as `OpenAiCompatProvider` / `MinimaxProvider`).
-        // Clamping here as well so the SSE wire body carries the same
-        // value the upstream would see on the non-streaming path.
+        // v0.13.0 B-1 PR #3: route through
+        // `crate::llm::max_tokens::resolve_max_tokens` so the SSE
+        // wire body carries the same value the non-streaming path
+        // would have sent (the env -> cached -> operator_cap ->
+        // DEFAULT_MAX_TOKENS chain is centralised in the helper).
         let mut req = req.clone();
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        let cap = operator_cap.min(table_cap);
+        let cap = crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            None,
+        );
         // `None` (auto-heal path) stays `None`; `Some(n)` is
         // clamped to `cap`. The wire body decides whether `None`
         // serialises as field-absent (via `skip_serializing_if`).
@@ -1171,6 +1169,7 @@ data: [DONE]\n\n";
                         id: "minimax-m3".into(),
                         endpoint: None,
                         max_tokens: Some(8192),
+                        omit_max_tokens: false,
                     }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
@@ -1238,6 +1237,7 @@ data: [DONE]\n\n",
                         id: "minimax-m3".into(),
                         endpoint: None,
                         max_tokens: Some(8192),
+                        omit_max_tokens: false,
                     }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
@@ -1319,6 +1319,7 @@ data: [DONE]\n\n",
                         id: "minimax-m3".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
@@ -1816,6 +1817,7 @@ data: [DONE]\n\n",
                         id: "gpt-5.6-luna".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,
@@ -1902,6 +1904,7 @@ data: [DONE]\n\n",
                         id: "gpt-5.6-luna".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     }],
                     endpoint: Some(format!("{}/v1", server.uri())),
                     temperature: None,

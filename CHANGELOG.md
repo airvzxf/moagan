@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-29
+
+### Changed (BREAKING — see ADR-0003)
+
+- **Config schema redesign (v0.13.0)** — `[providers.<name>]` (single-table
+  with `models = [{id, ...}]`) is deprecated in favour of
+  `[[providers.<name>]]` (array-of-tables with `models = ["<id>", ...]`).
+  Legacy TOML still loads with a `tracing::warn!` per section. Legacy
+  support will be removed in v0.15. See
+  [`docs/adr/0003-config-schema-array-of-tables.md`](docs/adr/0003-config-schema-array-of-tables.md)
+  for the design rationale and
+  [`docs/migrations/v0.12-to-v0.13-config.md`](docs/migrations/v0.12-to-v0.13-config.md)
+  for the operator migration guide.
+- **New `MOAGAN_<SECTION>_MAX_TOKENS` env override** — wins over the
+  auto-probe cache for the `(section, model)` pair. See the
+  `resolve_max_tokens` chain in
+  [`src/llm/max_tokens.rs`](src/llm/max_tokens.rs).
+- **Centralised `resolve_max_tokens()` helper** — replaces the 7
+  hand-rolled 3-layer `min` chains in `minimax.rs`, `deepseek.rs`,
+  `openai_compat.rs`, `anthropic_compat.rs`, and `openai_compatible.rs`.
+- **`omit_max_tokens` is now per-model** — the v0.13 schema allows
+  per-entry knobs (e.g. `gpt-5.6-luna`'s responses endpoint opts in
+  while sibling chat / anthropic endpoints opt out). The bridge
+  populates `ModelConfig::omit_max_tokens` from each
+  `[[providers.<name>]]` entry's `SectionKnobs`; the section-level
+  field is the fallback.
+- **`MOAGAN_MINIMAX_ENDPOINT` rewrites all matching minimax models**
+  (v0.12 only rewrote the section-level endpoint, which collapsed
+  to a single model after the bridge). `MOAGAN_MINIMAX_MODEL` keeps
+  the v0.12 "rewrite the first model" semantics; both env vars are
+  scoped to the canonical `minimax` section.
+
+### Fixed
+
+- **`max_token_auto_save` bridge bug** — v0.13 introduced a bool-merge
+  defect that silently flipped the section default from `true` to
+  `false`, suppressing `<MOAGAN_HOME>/max_tokens_auto.toml` writes.
+  Fixed by initialising the merge state to `true` so serde's
+  `default_max_token_auto_save()` is preserved across the bridge.
+- **`omit_max_tokens` opencode bleed** — the same bool-merge defect
+  promoted `gpt-5.6-luna`'s `omit_max_tokens = true` to the entire
+  `opencode` section, silently dropping `max_tokens` from chat
+  (`kimi-k3`, `glm-5.1`, …) and anthropic-compat (`minimax-m3`,
+  `qwen3.7-max`, …) wire bodies that require the field. Fixed by
+  moving the field to a per-model slot on `ModelConfig`.
+- **`resolve_max_tokens` cache upper bound** — the auto-probe cache
+  rung now respects the kind-level hard cap (e.g.
+  `MINIMAX_MAX_TOKENS_CAP = 524_288`), restoring the v0.12
+  `operator_cap.min(table_cap).min(kind_cap)` semantics.
+
 ## [0.12.18] - 2026-08-29
 
 ### Changed

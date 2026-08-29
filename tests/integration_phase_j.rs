@@ -450,13 +450,14 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
     // (`default_model` = first `models[].id`) and the `mock_dir`
     // wires through to the canned-response fixtures.
     let mut cfg = Config::default();
-    cfg.providers.insert(
+    cfg.providers_legacy.insert(
         "mock".to_owned(),
         moagan::config::ProviderConfig {
             models: vec![moagan::config::ModelConfig {
                 id: "mock-model".to_owned(),
                 endpoint: None,
                 max_tokens: None,
+                omit_max_tokens: false,
             }],
             endpoint: Some("mock://local".to_owned()),
             temperature: None,

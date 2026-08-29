@@ -507,30 +507,25 @@ impl Provider for OpenAICompatibleProvider {
 
     fn effective_max_tokens(&self, req: &Request) -> u32 {
         // Mirror of the clamp chain in
-        // `send_with_safety_clamp(_, true)` so the audit-log hash is
-        // byte-for-byte identical to the wire body. Same ordering as
-        // `send`:
-        //   1. `kind_hard_cap` (dispatcher-set, e.g.
-        //      `u32::MAX = 16_384` for OpenCode
-        //      Go routes; `None` for DeepSeek-direct).
-        //   2. `provider_max_tokens` (operator TOML override).
-        //   3. `MaxTokensTable::resolve_cached` (auto-probed value).
+        // `send_with_safety_clamp(_, true)` so the audit-log hash
+        // is byte-for-byte identical to the wire body. Both paths
+        // route through
+        // `crate::llm::max_tokens::resolve_max_tokens` with the
+        // same arguments; the precedence order (env → cache →
+        // operator_cap → kind_hard_cap → DEFAULT_MAX_TOKENS) is
+        // encoded in the helper.
         //
         // `None` on `req.max_tokens` is treated as `u32::MAX` so the
         // audit hash stays deterministic even when the auto-heal
         // path drops the field from the wire body.
-        let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-        let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
-        let table_cap = self
-            .max_tokens_table
-            .as_ref()
-            .and_then(|t| t.resolve_cached(self.name(), self.model()))
-            .unwrap_or(u32::MAX);
-        req.max_tokens
-            .unwrap_or(u32::MAX)
-            .min(operator_cap)
-            .min(kind_cap)
-            .min(table_cap)
+        let resolved = crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            self.kind_hard_cap,
+        );
+        req.max_tokens.unwrap_or(u32::MAX).min(resolved)
     }
 
     /// Bypass variant for the auto-probe. Skips every cap
@@ -599,30 +594,26 @@ impl OpenAICompatibleProvider {
             attempt += 1;
             let body = self.build_chat_request(req);
             let body = if safety_clamp {
-                // Apply three-layer max_tokens cap. Highest priority
-                // (smallest wins) to lowest:
-                //   1. `kind_hard_cap` — set by the OpenCode
-                //      dispatcher to `u32::MAX =
-                //      16_384`. DeepSeek-direct leaves `None` (the
-                //      direct upstream's 8192 limit is covered by
-                //      the operator override).
-                //   2. `provider_max_tokens` — operator TOML override.
-                //   3. `MaxTokensTable::resolve_cached` — auto-probed
-                //      per-(provider, model) value; primary source of
-                //      truth when present.
+                // v0.13.0 B-1 PR #3: the env -> cached -> operator_cap
+                // -> kind_hard_cap -> DEFAULT_MAX_TOKENS chain lives
+                // in `crate::llm::max_tokens::resolve_max_tokens`.
+                // The kind-level hard cap (e.g. `DEEPSEEK_MAX_TOKENS_CAP
+                // = 393_216` for the DeepSeek-direct wrapper, or
+                // `u32::MAX` for the opencode Go route) flows through
+                // the helper as the `kind_hard_cap` argument; the
+                // operator TOML override is `provider_max_tokens`.
                 //
                 // `max_tokens = None` (set by the auto-healing
                 // `param_rejections` path) is preserved through the
                 // chain: the wire body omits the field so the
                 // upstream accepts the request without the cap.
-                let operator_cap = self.provider_max_tokens.unwrap_or(u32::MAX);
-                let kind_cap = self.kind_hard_cap.unwrap_or(u32::MAX);
-                let table_cap = self
-                    .max_tokens_table
-                    .as_ref()
-                    .and_then(|t| t.resolve_cached(self.name(), self.model()))
-                    .unwrap_or(u32::MAX);
-                let cap = operator_cap.min(kind_cap).min(table_cap);
+                let cap = crate::llm::max_tokens::resolve_max_tokens(
+                    self.name(),
+                    self.model(),
+                    self.max_tokens_table.as_deref(),
+                    self.provider_max_tokens,
+                    self.kind_hard_cap,
+                );
                 match body.max_tokens {
                     Some(n) if n > cap => ChatRequest {
                         max_tokens: Some(cap),
@@ -768,6 +759,7 @@ mod tests {
                     id: "deepseek-v4-flash".into(),
                     endpoint: None,
                     max_tokens: Some(8192),
+                    omit_max_tokens: false,
                 }],
                 temperature: None,
                 top_p: None,
@@ -827,6 +819,7 @@ mod tests {
                     id: model.into(),
                     endpoint: None,
                     max_tokens: None,
+                    omit_max_tokens: false,
                 }],
                 endpoint: Some(endpoint.into()),
                 temperature: None,
@@ -1142,6 +1135,7 @@ mod tests {
                         id: "kimi-k3".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     }],
                     endpoint: Some(server.uri()),
                     // None on purpose: only the kind-level cap
@@ -1477,6 +1471,7 @@ mod tests {
                     id: "deepseek-v4-flash".into(),
                     endpoint: None,
                     max_tokens: None,
+                    omit_max_tokens: false,
                 }],
                 endpoint: Some(server.uri()),
                 temperature: None,

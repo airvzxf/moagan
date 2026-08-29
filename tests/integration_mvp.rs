@@ -1535,6 +1535,7 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
             // when it reads `first.endpoint`.
             endpoint: Some(format!("{}/anthropic/v1", server.uri())),
             max_tokens: None,
+            omit_max_tokens: false,
         }],
         endpoint: None,
         temperature: None,

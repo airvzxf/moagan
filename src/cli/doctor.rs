@@ -56,7 +56,7 @@ fn check_api_key(cfg: &Config) -> Check {
     use crate::llm::api_keys::lookup_key;
     let mut missing: Vec<String> = Vec::new();
     let mut seen_sections: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for name in cfg.providers.keys() {
+    for name in cfg.providers_legacy.keys() {
         // v0.10 (post-Phase 8 cleanup): the section name IS the
         // canonical provider-family key for `api_keys.toml` and the
         // `<NAME>_API_KEY` env-var fallback. The deprecated `kind`
@@ -163,10 +163,10 @@ fn check_sqlite() -> Check {
 
 fn check_provider_config(cfg: &Config) -> Check {
     trace!(
-        providers = cfg.providers.len(),
+        providers = cfg.providers_legacy.len(),
         "check_provider_config: enter"
     );
-    if cfg.providers.is_empty() {
+    if cfg.providers_legacy.is_empty() {
         return Check {
             name: "providers".to_string(),
             status: Status::Warn,
@@ -176,7 +176,7 @@ fn check_provider_config(cfg: &Config) -> Check {
     Check {
         name: "providers".to_string(),
         status: Status::Ok,
-        detail: format!("{} provider(s) configured", cfg.providers.len()),
+        detail: format!("{} provider(s) configured", cfg.providers_legacy.len()),
     }
 }
 
@@ -192,7 +192,7 @@ fn check_provider_config(cfg: &Config) -> Check {
 fn models_per_provider(cfg: &Config) -> Vec<(String, Vec<String>)> {
     use std::collections::BTreeMap;
     let mut by_section: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (section, spec) in &cfg.providers {
+    for (section, spec) in &cfg.providers_legacy {
         for m in &spec.models {
             by_section
                 .entry(section.clone())
@@ -315,7 +315,7 @@ fn run_capabilities() -> Result<i32> {
     // output is stable across runs. v0.10: each row carries the
     // section name plus every model id registered under it; the
     // catalog lookup still uses the section + model pair.
-    for (name, spec) in &cfg.providers {
+    for (name, spec) in &cfg.providers_legacy {
         let caps = capabilities_for_section(name);
         for model in &spec.models {
             let entry = catalog
@@ -433,8 +433,13 @@ mod tests {
     /// doctor output.
     #[test]
     fn models_per_provider_groups_by_section_and_dedupes() {
-        let mut providers = std::collections::BTreeMap::new();
-        providers.insert(
+        // Build a Config with ONLY the providers the test inspects.
+        // `Config::default()` ships with minimax / deepseek /
+        // opencode / mock; the test wants to pin the alphabetical
+        // ordering and dedup contract for a two-section config.
+        let mut cfg = Config::default();
+        cfg.providers_legacy.clear();
+        cfg.providers_legacy.insert(
             "minimax".into(),
             ProviderConfig {
                 models: vec![
@@ -442,31 +447,30 @@ mod tests {
                         id: "MiniMax-M3".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     },
                     crate::config::ModelConfig {
                         id: "MiniMax-M2.7".into(),
                         endpoint: None,
                         max_tokens: None,
+                        omit_max_tokens: false,
                     },
                 ],
                 ..ProviderConfig::default()
             },
         );
-        providers.insert(
+        cfg.providers_legacy.insert(
             "mock".into(),
             ProviderConfig {
                 models: vec![crate::config::ModelConfig {
                     id: "mock-model".into(),
                     endpoint: None,
                     max_tokens: None,
+                    omit_max_tokens: false,
                 }],
                 ..ProviderConfig::default()
             },
         );
-        let cfg = Config {
-            providers,
-            ..Config::default()
-        };
 
         let entries = models_per_provider(&cfg);
         // Alphabetical by section: minimax before mock.
@@ -550,32 +554,29 @@ mod tests {
     /// `check_api_key` tests so the helper sees the full set of
     /// kinds it must iterate over.
     fn three_kind_config() -> Config {
-        let mut providers = std::collections::BTreeMap::new();
-        providers.insert(
+        let mut cfg = Config::default();
+        cfg.providers_legacy.insert(
             "minimax".into(),
             ProviderConfig {
                 models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
-        providers.insert(
+        cfg.providers_legacy.insert(
             "deepseek".into(),
             ProviderConfig {
                 models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
-        providers.insert(
+        cfg.providers_legacy.insert(
             "opencode".into(),
             ProviderConfig {
                 models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
-        Config {
-            providers,
-            ..Config::default()
-        }
+        cfg
     }
 
     #[test]
@@ -686,17 +687,19 @@ mod tests {
             std::env::remove_var("MOAGAN_HOME");
         }
         // A mock-only config requires no keys; the check must
-        // report OK regardless of the env-var state.
-        let cfg = Config {
-            providers: std::collections::BTreeMap::from([(
-                "mock".to_owned(),
-                ProviderConfig {
-                    models: Vec::new(),
-                    ..ProviderConfig::default()
-                },
-            )]),
-            ..Config::default()
-        };
+        // report OK regardless of the env-var state. Wipe the
+        // default registry (minimax / deepseek / opencode / mock)
+        // and register ONLY `mock` so the check has nothing to
+        // validate beyond the mock section.
+        let mut cfg = Config::default();
+        cfg.providers_legacy.clear();
+        cfg.providers_legacy.insert(
+            "mock".to_owned(),
+            ProviderConfig {
+                models: Vec::new(),
+                ..ProviderConfig::default()
+            },
+        );
         let check = check_api_key(&cfg);
         assert_eq!(check.status, Status::Ok);
     }
@@ -791,7 +794,6 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
     /// has one minimax provider.
     #[test]
     fn doctor_capabilities_prints_table_for_known_model() {
-        use std::collections::BTreeMap;
         let _lock = TEST_DOCTOR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _api_lock = crate::TEST_API_KEYS_LOCK
             .lock()
@@ -810,18 +812,15 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
         unsafe {
             std::env::set_var("MOAGAN_HOME", tmp.path());
         }
-        let mut providers = BTreeMap::new();
-        providers.insert(
+        let mut cfg = Config::default();
+        cfg.providers_legacy.insert(
             "minimax".into(),
             crate::config::ProviderConfig {
                 models: Vec::new(),
                 ..crate::config::ProviderConfig::default()
             },
         );
-        let _cfg = Config {
-            providers,
-            ..Config::default()
-        };
+        let _cfg = cfg;
         // The capability table prints a per-section static matrix
         // for every provider; the test pins the per-section lookup
         // (the actual stdout print is exercised by the
