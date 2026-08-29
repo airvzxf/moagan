@@ -25,12 +25,79 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Tag-reachability guard: enforces the AGENTS.md "tag the trunk
+  # merge commit, NOT the branch tip" rule mechanically. If the tag's
+  # commit is not an ancestor of origin/main, the workflow fails
+  # before any binary is built. Defense in depth — the procedural
+  # rule still lives in AGENTS.md; this job is the structural check.
+  verify-tag-reachability:
+    name: 'Verify · tag is reachable from main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout at ref
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve tag commit + fetch main
+        id: resolve
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          TAG_COMMIT="$(git rev-parse "${TAG}^{commit}")"
+          MAIN_COMMIT="$(git rev-parse origin/main)"
+          echo "tag=${TAG} tag_commit=${TAG_COMMIT} main_head=${MAIN_COMMIT}"
+          {
+            echo "TAG=${TAG}"
+            echo "TAG_COMMIT=${TAG_COMMIT}"
+            echo "MAIN_COMMIT=${MAIN_COMMIT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fail if tag^{commit} is not an ancestor of main
+        env:
+          TAG: ${{ steps.resolve.outputs.TAG }}
+          TAG_COMMIT: ${{ steps.resolve.outputs.TAG_COMMIT }}
+          MAIN_COMMIT: ${{ steps.resolve.outputs.MAIN_COMMIT }}
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+            echo "✓ ${TAG} (${TAG_COMMIT}) is reachable from origin/main (${MAIN_COMMIT})"
+            exit 0
+          fi
+          {
+            echo "ERROR: tag ${TAG} points at ${TAG_COMMIT}, which is NOT an"
+            echo "ancestor of origin/main (${MAIN_COMMIT})."
+            echo ""
+            echo "This means the tag was created on a branch tip or a local"
+            echo "commit that was later squashed away when the release PR"
+            echo "was merged into main. The release would publish a binary"
+            echo "whose SHA does not correspond to any commit reachable from"
+            echo "main, breaking the audit log."
+            echo ""
+            echo "Fix (delete the orphan tag, re-tag the merge commit on main):"
+            echo "  git tag -d ${TAG}"
+            echo "  git push origin :refs/tags/${TAG}"
+            echo "  git checkout main && git reset --hard origin/main"
+            echo "  git tag -s ${TAG} \$(git rev-parse origin/main)"
+            echo "  git push origin ${TAG}"
+            echo ""
+            echo "See AGENTS.md 'tag the trunk merge commit, NOT the branch tip'."
+          } >&2
+          exit 1
+
   build-release:
     name: 'Build · release binary'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+    needs: verify-tag-reachability
     steps:
       - name: Checkout at ref
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
