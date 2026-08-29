@@ -483,7 +483,7 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
 
     static RE_ANTHROPIC: OnceLock<regex::Regex> = OnceLock::new();
     static RE_OPENAI: OnceLock<regex::Regex> = OnceLock::new();
-    static RE_OPENCODE_GO: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_OPENCODE: OnceLock<regex::Regex> = OnceLock::new();
 
     // Anthropic-compat: `model[<name>] does not support max tokens > N`.
     // The model name can be hyphenated (qwen3.8-max) or contain dots
@@ -502,14 +502,15 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
             .expect("parse_cap_from_error_body: openai regex compiles")
     });
 
-    // OpenCode Go relay: the upstream JSON-schema validation message
+    // OpenCode relay: the upstream JSON-schema validation message
     // uses `is not less or equal to N` (note the missing `than` —
     // it's a translation of the Chinese 参数校验失败). Match that
     // variant verbatim so qwen3.x, longcat, and any other model
-    // routed through OpenCode Go short-circuit in 3 round-trips.
-    let opencode_go = RE_OPENCODE_GO.get_or_init(|| {
+    // routed through OpenCode short-circuit in 3 round-trips.
+    // Renamed in v0.13.x from `RE_OPENCODE_GO` / `opencode_go` local.
+    let opencode = RE_OPENCODE.get_or_init(|| {
         regex::Regex::new(r"is not less or equal to (\d+)")
-            .expect("parse_cap_from_error_body: opencode_go regex compiles")
+            .expect("parse_cap_from_error_body: opencode regex compiles")
     });
 
     // The Anthropic upstream (MiniMax) emits `max tokens \u003e N`
@@ -537,7 +538,7 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
             .captures(t)
             .and_then(|c| c.get(1))
             .or_else(|| openai.captures(t).and_then(|c| c.get(1)))
-            .or_else(|| opencode_go.captures(t).and_then(|c| c.get(1)))
+            .or_else(|| opencode.captures(t).and_then(|c| c.get(1)))
             .and_then(|m| m.as_str().parse::<u64>().ok())
     })?;
 
@@ -1942,7 +1943,7 @@ max_tokens = 524288\n\
     /// (note: no `than`; it's a translation of the Chinese
     /// `参数校验失败`).
     #[test]
-    fn parse_cap_opencode_go_is_not_less_or_equal() {
+    fn parse_cap_opencode_is_not_less_or_equal() {
         let body = r#"{"error":{"type":"invalid_request_error","message":"Error from provider (Console Go): Upstream request failed: [invalid_parameter] 参数校验失败: \n/max_tokens: 4294967295 is not less or equal to 131072\n"}}"#;
         assert_eq!(parse_cap_from_error_body(body), Some(131_072));
     }

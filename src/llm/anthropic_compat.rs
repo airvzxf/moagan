@@ -1,8 +1,12 @@
 //! `anthropic_compat` provider — Anthropic-compatible wire format
 //! served at `/v1/messages`.
 //!
-//! v0.10: the v0.9 `opencode_go` dispatcher is gone. The provider
-//! is generic over its section name — the dispatcher routes any
+//! v0.10: the v0.9 `opencode_go` dispatcher is gone. The historical
+//! `opencode_go` → `OpenCodeDispatch` breadcrumb (rewritten in v0.13.x
+//! as part of the close-out) is preserved here so the v0.9 → v0.13.x
+//! lineage stays auditable — note that no `OpenCodeDispatch` symbol
+//! exists in the tree today; only the breadcrumb text was renamed.
+//! The provider is generic over its section name — the dispatcher routes any
 //! section whose endpoint URL ends with `/v1/messages` to this
 //! provider. That covers direct MiniMax
 //! (`https://api.minimax.io/anthropic/v1/messages`) and the OpenCode
@@ -403,7 +407,7 @@ impl AnthropicCompatProvider {
                     let retry_after = retry_after(&resp);
                     if status.is_success() {
                         let decode_started = std::time::Instant::now();
-                        let parsed: OpenCodeGoMessagesResponseBody =
+                        let parsed: OpenCodeMessagesResponseBody =
                             resp.json().await.map_err(|e| Error::Provider {
                                 message: format!("decode response: {e}"),
                                 http_status: None,
@@ -456,31 +460,34 @@ impl AnthropicCompatProvider {
 impl AnthropicCompatProvider {
     /// Public URL the provider POSTs to. The legacy
     /// `OpenCodeGoDispatch::url` accessor lived on the v0.9
-    /// dispatcher; v0.10 keeps the URL builder as a plain method
-    /// so external callers / tests can still inspect the routed
-    /// URL.
+    /// dispatcher (no longer in the tree since v0.10; this comment
+    /// preserves the v0.9 → v0.13.x lineage breadcrumb). v0.10
+    /// keeps the URL builder as a plain method so external callers
+    /// / tests can still inspect the routed URL.
     pub fn url(&self) -> String {
         self.messages_url()
     }
 }
 
-/// OpenCode Go Anthropic-compat response body. Extends the canonical
-/// shape with a `thinking` block fallback: some OpenCode Go models
+/// OpenCode Anthropic-compat response body. Extends the canonical
+/// shape with a `thinking` block fallback: some OpenCode models
 /// (qwen3.x, plus future additions) return the response content inside
 /// a `thinking` block instead of a `text` block when the prompt
 /// produces a planning pass. The shared `MessagesResponseBody` in
 /// `super::http` ignores `thinking` blocks; here we collect both and
 /// prepend the `text` block(s) first, then append the `thinking`
 /// block(s) as a fallback so the JSON parser has something to chew on.
+/// (`OpenCodeGoMessagesResponseBody` → `OpenCodeMessagesResponseBody`,
+/// renamed in v0.13.x.)
 #[derive(Debug, Deserialize)]
-struct OpenCodeGoMessagesResponseBody {
-    content: Vec<OpenCodeGoMessagesContent>,
+struct OpenCodeMessagesResponseBody {
+    content: Vec<OpenCodeMessagesContent>,
     stop_reason: Option<String>,
-    usage: Option<OpenCodeGoMessagesUsage>,
+    usage: Option<OpenCodeMessagesUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenCodeGoMessagesContent {
+struct OpenCodeMessagesContent {
     /// Block type from the response. Some OpenCode Go models
     /// (qwen3.7-max confirmed on 2026-08-04) omit the `type` field
     /// on the leading `thinking` block — only subsequent blocks
@@ -496,14 +503,14 @@ struct OpenCodeGoMessagesContent {
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct OpenCodeGoMessagesUsage {
+struct OpenCodeMessagesUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
 }
 
-impl OpenCodeGoMessagesResponseBody {
+impl OpenCodeMessagesResponseBody {
     fn into_response(self) -> Response {
         let mut text = String::new();
         let mut thinking = String::new();
@@ -561,14 +568,14 @@ mod tests {
 
     #[test]
     fn thinking_only_response_is_recovered() {
-        let body = OpenCodeGoMessagesResponseBody {
-            content: vec![OpenCodeGoMessagesContent {
+        let body = OpenCodeMessagesResponseBody {
+            content: vec![OpenCodeMessagesContent {
                 kind: Some("thinking".into()),
                 text: None,
                 thinking: Some(r#"{"mode":"fast"}"#.into()),
             }],
             stop_reason: Some("end_turn".into()),
-            usage: Some(OpenCodeGoMessagesUsage {
+            usage: Some(OpenCodeMessagesUsage {
                 input_tokens: Some(100),
                 output_tokens: Some(50),
                 ..Default::default()
@@ -583,14 +590,14 @@ mod tests {
 
     #[test]
     fn text_response_takes_precedence() {
-        let body = OpenCodeGoMessagesResponseBody {
+        let body = OpenCodeMessagesResponseBody {
             content: vec![
-                OpenCodeGoMessagesContent {
+                OpenCodeMessagesContent {
                     kind: Some("text".into()),
                     text: Some("plain".into()),
                     thinking: None,
                 },
-                OpenCodeGoMessagesContent {
+                OpenCodeMessagesContent {
                     kind: Some("thinking".into()),
                     text: None,
                     thinking: Some("should be ignored".into()),
@@ -605,7 +612,7 @@ mod tests {
 
     #[test]
     fn empty_response_yields_empty_text() {
-        let body = OpenCodeGoMessagesResponseBody {
+        let body = OpenCodeMessagesResponseBody {
             content: vec![],
             stop_reason: None,
             usage: None,
@@ -621,7 +628,7 @@ mod tests {
         // for qwen3.7-max: the first content block has no `type` field
         // (just `signature` + `thinking`), the second has `type: "text"`.
         let body = r#"{"content":[{"signature":"","thinking":"Thinking Process..."},{"text":"{\"mode\":\"fast\",\"reason\":\"x\",\"sketches\":0,\"proposals\":3,\"judges\":3}","type":"text"}],"stop_reason":"end_turn","usage":{"input_tokens":165,"output_tokens":1760}}"#;
-        let parsed: OpenCodeGoMessagesResponseBody = serde_json::from_str(body).unwrap();
+        let parsed: OpenCodeMessagesResponseBody = serde_json::from_str(body).unwrap();
         let resp = parsed.into_response();
         assert_eq!(resp.usage.input_tokens, 165);
         assert!(
@@ -895,14 +902,16 @@ mod tests {
         });
     }
 
-    /// v0.10 (post Phase 8): the legacy `OPENCODE_GO_MAX_TOKENS_CAP`
+    /// v0.10 (post Phase 8): the legacy `OPENCODE_MAX_TOKENS_CAP`
     /// global clamp is gone. With no probe result and no operator
     /// override, the wire body carries the request's raw
     /// `max_tokens` unchanged. The auto-probe discovers the real
     /// upstream boundary per `(provider, model)` and caches it
     /// in `max_tokens_auto.toml`; this regression guard pins
     /// that the Anthropic-compat path no longer applies a 16_384
-    /// ceiling to OpenCode Go calls.
+    /// ceiling to OpenCode calls.
+    /// (`OPENCODE_GO_MAX_TOKENS_CAP` → `OPENCODE_MAX_TOKENS_CAP`,
+    /// renamed in v0.13.x.)
     #[test]
     fn send_does_not_clamp_max_tokens_when_no_probe_or_override() {
         use wiremock::matchers::{method, path};
@@ -973,7 +982,9 @@ mod tests {
                 body["max_tokens"],
                 serde_json::json!(1_000_000),
                 "Anthropic-compat path must NOT clamp 1_000_000 → 16_384 anymore; \
-                 the OPENCODE_GO_MAX_TOKENS_CAP global cap is gone. Got body: {body}"
+                 the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP` global cap is gone \
+                 (`OPENCODE_GO_MAX_TOKENS_CAP` → `OPENCODE_MAX_TOKENS_CAP`, \
+                 renamed in v0.13.x as part of the broader rename). Got body: {body}"
             );
         });
     }

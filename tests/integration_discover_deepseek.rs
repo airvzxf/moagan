@@ -1,6 +1,8 @@
 //! End-to-end discovery validation against the native `deepseek`
-//! provider (PR #462; companion to the opencode_go close-out in
-//! `tests/integration_discover_opencode.rs`).
+//! provider (PR #462; companion to the opencode close-out in
+//! `tests/integration_discover_opencode.rs`; the canonical
+//! `opencode` section name was the v0.10 alias for the
+//! historical `opencode_go` section, finalized in v0.13.x).
 //!
 //! `#[ignore]`d by default; only runs locally / via
 //! `.github/workflows/test-ignored-deepseek.yml` (post-PR #555, manual

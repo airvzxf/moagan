@@ -7,7 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-29
+
 ### Changed
+
+- **Close out the v0.10 `opencode_go` → `opencode` rename** —
+  every remaining `opencode_go` / `OPENCODE_GO` /
+  `OpenCodeGo…` / `opencode-go` identifier in `src/` is renamed
+  to its canonical v0.10 form (`opencode` / `OPENCODE` /
+  `OpenCode…` / `opencode:`). No schema or wire-format change;
+  the upstream URL `https://opencode.ai/zen/go/v1/...` is
+  untouched everywhere it appears. Surface area:
+
+  - `src/llm/capabilities.rs` — `for_opencode_go()` →
+    `for_opencode()`; `for_opencode_go_responses()` →
+    `for_opencode_responses()`; `capabilities_for_opencode_go_responses_prefers_responses_wire`
+    test renamed to
+    `capabilities_for_opencode_responses_prefers_responses_wire`.
+  - `src/llm/probe.rs` — `RE_OPENCODE_GO` static regex →
+    `RE_OPENCODE`; the local `opencode_go` closure var →
+    `opencode`; the `parse_cap_opencode_go_is_not_less_or_equal`
+    test → `parse_cap_opencode_is_not_less_or_equal`.
+  - `src/llm/openai_compat.rs` —
+    `send_streaming_clamps_max_tokens_to_opencode_go_hard_cap`
+    test → `send_streaming_clamps_max_tokens_to_opencode_hard_cap`;
+    `ProviderCapabilities::for_opencode_go_responses()` call site
+    → `for_opencode_responses()`.
+  - `src/llm/openai_compatible.rs` — test fixture string
+    `"opencode_go"` → `"opencode"` (provider-section name in the
+    capability-matrix probe).
+  - `src/llm/anthropic_compat.rs` — `OpenCodeGoMessagesResponseBody`
+    → `OpenCodeMessagesResponseBody`;
+    `OpenCodeGoMessagesContent` → `OpenCodeMessagesContent`;
+    `OpenCodeGoMessagesUsage` → `OpenCodeMessagesUsage`.
+  - `src/llm/{wire,wire_format,provider,deepseek}.rs` — comment
+    references rewritten; no behavioural change.
+  - `src/cli/doctor.rs` — `ProviderCapabilities::for_opencode_go()`
+    and `for_opencode_go_responses()` call sites →
+    `for_opencode()` / `for_opencode_responses()`.
+  - `src/cli/probe.rs` — `--provider opencode-go:kimi-k3`
+    doc-comment examples (max_tokens + temperature probes) →
+    `--provider opencode:kimi-k3` (the canonical provider id is
+    the section name `opencode`).
+  - `tests/integration_discover_{deepseek,minimax}.rs` and
+    `tests/integration_q3_dotenv.rs` — comment references
+    rewritten.
+  - `docs/test-skips.md` — Layer 6d skip block code sample
+    rewritten.
+
+  Historical `OPENCODE_GO_MAX_TOKENS_CAP` /
+  `OpenCodeGoDispatch` / `OpenCodeGoProvider` / `BLOCKED_MODELS`
+  breadcrumbs are preserved in the modified doc comments so the
+  v0.9 / v0.10 lineage stays auditable; each breadcrumb
+  references the v0.13.x rename explicitly.
 
 - ci(workflows): capture stdout/stderr into separate 7 d `.log.gz` artifacts (`moagan-<job>-{stdout,stderr}`) with a generic failure hint naming the artifact pattern; existing `-logs` and `-jsonl-*` artifacts are unchanged.
 

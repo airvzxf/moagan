@@ -224,7 +224,9 @@ impl Provider for DeepSeekProvider {
         // construction time via [`Self::new`] so the per-provider
         // hard cap is honoured at every layer (audit-log hash
         // included). Mirrors the `u32::MAX`
-        // wiring on the opencode_go chat-completions path.
+        // wiring on the opencode chat-completions path
+        // (formerly the `opencode_go` chat-completions path; the
+        // `opencode_go` section was renamed to `opencode` in v0.13.x).
         self.0.effective_max_tokens(req)
     }
 

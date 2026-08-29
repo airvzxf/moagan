@@ -18,11 +18,14 @@ use crate::error::{Error, Result};
 use crate::secret::SecretString;
 
 use super::capabilities::ProviderCapabilities;
-// The legacy `OpenCodeGoDispatch` sub-trait (formerly in
-// `super::opencode_go`) was the dispatcher's handle for routing by
-// URL. The v0.10 dispatcher picks the concrete provider from the
-// wire format, not from a boxed trait object — the URL builder is now
-// a public method on each provider.
+// The legacy `OpenCodeGoDispatch` sub-trait lived in
+// `super::opencode_go` on the v0.9 dispatcher (no longer in the tree
+// since v0.10; the v0.13.x close-out rewrote the breadcrumb arrow
+// to `OpenCodeDispatch`, but no such symbol exists in the tree today
+// — only the breadcrumb text was renamed). It was the dispatcher's
+// handle for routing by URL. The v0.10 dispatcher picks the
+// concrete provider from the wire format, not from a boxed trait
+// object — the URL builder is now a public method on each provider.
 use super::probe::MIN_AUTOPROBE_FLOOR;
 use super::probe_table::MaxTokensTable;
 use super::provider::Provider;
@@ -571,9 +574,10 @@ impl Provider for OpenAICompatibleProvider {
 impl OpenAICompatibleProvider {
     /// Public URL the provider POSTs to. The legacy
     /// `OpenCodeGoDispatch::url` accessor lived on the v0.9
-    /// dispatcher; v0.10 keeps the URL builder as a plain method
-    /// so external callers / tests can still inspect the routed
-    /// URL.
+    /// dispatcher (no longer in the tree since v0.10; this comment
+    /// preserves the v0.9 → v0.13.x lineage breadcrumb). v0.10
+    /// keeps the URL builder as a plain method so external callers
+    /// / tests can still inspect the routed URL.
     pub fn url(&self) -> String {
         self.chat_url()
     }
@@ -922,12 +926,12 @@ mod tests {
 
     #[test]
     fn opencode_request_omits_response_format_for_opted_out_models() {
-        // Pin the OpenCode Go contract: even when role_requires_json
+        // Pin the OpenCode contract: even when role_requires_json
         // is true (Route), the chat-completions body for an opted-out
         // model must NOT carry the `response_format` field so the
         // upstream doesn't return prose-prefixed content.
         let p = provider_with_model(
-            "opencode_go",
+            "opencode",
             "https://opencode.ai/zen/go/v1",
             "kimi-k2.7-code",
         );
@@ -936,7 +940,7 @@ mod tests {
         assert_eq!(value["model"], serde_json::json!("kimi-k2.7-code"));
         assert!(
             value.get("response_format").is_none(),
-            "OpenCode Go request for opted-out model must omit response_format, got: {value}"
+            "OpenCode request for opted-out model must omit response_format, got: {value}"
         );
         // Sanity: the role_requires_json path was actually exercised
         // — without the opt-out check the field WOULD be present.
@@ -1185,7 +1189,8 @@ mod tests {
             assert_eq!(received.len(), 1);
             let body: serde_json::Value = serde_json::from_slice(&received[0].body)
                 .expect("mock server received a JSON body");
-            // v0.10: the v0.9 `OPENCODE_GO_MAX_TOKENS_CAP = 16_384`
+            // v0.10: the v0.9 `OPENCODE_MAX_TOKENS_CAP = 16_384` (formerly
+            // `OPENCODE_GO_MAX_TOKENS_CAP`; renamed in v0.13.x)
             // global ceiling is gone. The kind cap wired here is
             // `u32::MAX` (the opencode chat-completions path has
             // no kind-level ceiling — the auto-probe discovers

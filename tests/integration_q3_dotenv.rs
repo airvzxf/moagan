@@ -54,10 +54,12 @@ fn version_succeeds_with_dotenv_in_current_directory() {
 fn doctor_loads_api_key_from_dotenv() {
     let tmp = tempfile::tempdir().unwrap();
     // PR-B2: the doctor now checks every keyed provider kind
-    // (minimax / deepseek / opencode_go). Pre-PR-B2 only
+    // (minimax / deepseek / opencode). Pre-PR-B2 only
     // MINIMAX_API_KEY was checked; to keep this test passing we
     // supply the other two via direct env (the dotenv test only
-    // exercises MINIMAX).
+    // exercises MINIMAX). The `opencode` section was the v0.10
+    // alias for the historical `opencode_go` section, finalized
+    // in v0.13.x.
     fs::write(
         tmp.path().join(".env"),
         "MINIMAX_API_KEY=from-dotenv\n\
