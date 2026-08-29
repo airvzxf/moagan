@@ -7,37 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Strip every remaining `opencode_go` / `OpenCodeGo…` /
-  `OpenCode Go` / `opencode-go` reference from comments and
-  docstrings** (follow-up to the v0.13.0 identifier rename). The
-  close-out commit left a layer of historical breadcrumbs in
-  every `src/llm/*.rs`, `src/cli/doctor.rs`, the discover
-  integration tests, and one workflow / doc file. Every
-  current-behavior description that read "OpenCode Go" now reads
-  "OpenCode"; every breadcrumb that referenced an obsolete
-  identifier (e.g. `OpenCodeGoDispatch::url`, the legacy
-  `BLOCKED_MODELS` gate, the v0.9 16_384-token cap, the v0.10
-  `opencode_go` → `opencode` section rename) is rephrased to
-  preserve the historical context without naming the symbol that
-  no longer exists. Files touched:
-
-  - `src/llm/{anthropic_compat,openai_compat,openai_compatible,
-    capabilities,probe,provider,json_strategy,embed/remote,
-    response_format_opt_out,param_rejections,deepseek,
-    temperature_probe,probe_table}.rs`
-  - `src/cli/doctor.rs`
-  - `tests/integration_discover_{deepseek,minimax,opencode}.rs`
-  - `tests/integration_{probe_uses_min_output_tokens_for_thinking,
-    probe_temperature,param_rejection_self_heal,q3_dotenv}.rs`
-  - `docs/temperatures-auto.md`, `docs/test-skips.md`
-  - `.github/workflows/test-ignored-opencode.yml`
-
-  The upstream URL `https://opencode.ai/zen/go/v1/...` is
-  untouched everywhere it appears; the rename is textual-only and
-  no test semantics change.
-
 ## [0.13.0] - 2026-08-29
 
 ### Changed
@@ -91,6 +60,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breadcrumbs are preserved in the modified doc comments so the
   v0.9 / v0.10 lineage stays auditable; each breadcrumb
   references the v0.13.x rename explicitly.
+
+- **Strip every remaining `opencode_go` / `OpenCodeGo…` /
+  `OpenCode Go` / `opencode-go` reference from comments and
+  docstrings** (follow-up to the close-out above). The rename
+  left a layer of historical breadcrumbs in every `src/llm/*.rs`,
+  `src/cli/doctor.rs`, the discover integration tests, and one
+  workflow / doc file. Every current-behavior description that
+  read "OpenCode Go" now reads "OpenCode"; every breadcrumb that
+  referenced an obsolete identifier (e.g. `OpenCodeGoDispatch::url`,
+  the legacy `BLOCKED_MODELS` gate, the v0.9 16 384-token cap,
+  the v0.10 `opencode_go` → `opencode` section rename) is
+  rephrased to preserve the historical context without naming
+  the symbol that no longer exists. Files touched:
+
+  - `src/llm/{anthropic_compat,openai_compat,openai_compatible,
+    capabilities,probe,provider,json_strategy,embed/remote,
+    response_format_opt_out,param_rejections,deepseek,
+    temperature_probe,probe_table}.rs`
+  - `src/cli/doctor.rs`
+  - `tests/integration_discover_{deepseek,minimax,opencode}.rs`
+  - `tests/integration_{probe_uses_min_output_tokens_for_thinking,
+    probe_temperature,param_rejection_self_heal,q3_dotenv}.rs`
+  - `docs/temperatures-auto.md`, `docs/test-skips.md`
+  - `.github/workflows/test-ignored-opencode.yml`
+
+  The upstream URL `https://opencode.ai/zen/go/v1/...` is
+  untouched everywhere it appears; the cleanup is textual-only
+  and no test semantics change.
 
 - ci(workflows): capture stdout/stderr into separate 7 d `.log.gz` artifacts (`moagan-<job>-{stdout,stderr}`) with a generic failure hint naming the artifact pattern; existing `-logs` and `-jsonl-*` artifacts are unchanged.
 
