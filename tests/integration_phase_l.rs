@@ -57,6 +57,20 @@ fn panic_message_through_main_binary_is_redacted() {
     assert!(!stderr.contains(secret), "{stderr}");
 }
 
+/// Redaction must apply to `tracing::info!` event messages.
+///
+/// The pattern is the same as `src/telemetry/redact.rs:84`'s
+/// `capture` helper: `tracing::subscriber::with_default` is
+/// thread-local and does NOT override the process-global
+/// `LevelFilter::current()` atomic. This test survives because it
+/// asserts on `tracing::info!` only — the `LevelFilter::ERROR` set
+/// by `src/sandbox/process.rs:2535`'s `try_init()` (which does NOT
+/// compile into this `test-tests` binary but does compile into
+/// `cargo test --all-targets`) still passes `INFO+` events. If
+/// this assertion ever tightens to `tracing::debug!` /
+/// `tracing::trace!`, move the test to a dedicated
+/// `tests/integration_*_tracing.rs` binary (single `#[test]`, own
+/// process) — see `scripts/check-no-trace-debug-in-mod-tests.sh`.
 #[test]
 fn tracing_event_with_secret_message_is_redacted() {
     let secret = "sk-ant-abcdefghijklmnopqrst";

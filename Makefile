@@ -87,6 +87,7 @@ doc:
 guard-deps:
 	bash scripts/check-no-anthropic-sdk.sh
 	bash scripts/check-no-forbidden-crates.sh
+	bash scripts/check-no-trace-debug-in-mod-tests.sh
 
 smoke:
 	@echo ">>> Running 5 smoke suites (fast, <2 s total)…"
