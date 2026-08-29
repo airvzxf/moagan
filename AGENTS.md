@@ -168,6 +168,80 @@ Concretely:
     class of bug as tagging before CI is green — both break the
     invariant that the release commit is reachable from main.**
 
+    **Normative procedure — execute these in order, do not skip a
+    step.** The `release.yml` workflow has a `verify-tag-reachability`
+    job that mechanically enforces invariant ④ on the CI side
+    (defense in depth — this procedural list is still load-bearing).
+
+    ① **Fetch and align local `main` to remote.** Covers the local
+       drift that the squash merge creates.
+
+       ```bash
+       git fetch origin main
+       git checkout main
+       git reset --hard origin/main
+       ```
+
+    ② **Confirm the release bump is at HEAD and `Cargo.toml` matches
+       the planned tag.**
+
+       ```bash
+       git log --oneline -1   # expect: <sha> chore(release): v0.12.XX — ...
+       grep '^version' Cargo.toml   # expect: version = "0.12.XX"
+       ```
+
+    ③ **Tag with `-s` (GPG-signed), pointing at the merge SHA.**
+
+       ```bash
+       git tag -s v0.12.XX "$(git rev-parse HEAD)"
+       git push origin v0.12.XX
+       ```
+
+       **Never** tag a local-only commit before it reaches `main`,
+       and **never** tag a branch tip that will be squashed.
+
+    ④ **Verify the tag's commit equals `origin/main`'s HEAD.** This
+       is the invariant the workflow guard checks.
+
+       ```bash
+       [ "$(git rev-parse v0.12.XX^{commit})" \
+           = "$(git rev-parse origin/main)" ] \
+           || { echo "ORPHAN TAG — abort, re-tag after step ①"; exit 1; }
+       ```
+
+    ⑤ **Verify the tag object SHA on the remote matches the local
+       one** (catches a partial push / network race).
+
+       ```bash
+       [ "$(git rev-parse v0.12.XX)" \
+           = "$(git ls-remote origin refs/tags/v0.12.XX | awk '{print $1}')" ] \
+           || { echo "TAG PUSH MISMATCH — abort"; exit 1; }
+       ```
+
+    ⑥ **Watch the `release.yml` run.** The
+       `Verify · tag is reachable from main` job passes if ④ holds;
+       `Build · release binary` cold-builds (~5 min);
+       `Publish · GitHub Release` uploads the binary + sha256 +
+       sha512 + CycloneDX SBOM and creates the release page.
+
+    **If you discover you orphaned a tag** (e.g. you tagged before
+    the squash, or ④ fails):
+
+    ```bash
+    git tag -d v0.12.XX                          # delete local
+    git push origin :refs/tags/v0.12.XX          # delete remote
+    git fetch origin main                        # re-sync to trunk
+    git checkout main && git reset --hard origin/main
+    git tag -s v0.12.XX "$(git rev-parse origin/main)"
+    git push origin v0.12.XX
+    ```
+
+    The orphan release page stays published even after the remote
+    tag is deleted — GitHub Releases are independent of git refs.
+    Mark it as pre-release or delete the release page manually after
+    re-publishing at the correct SHA so consumers do not pull the
+    orphan binary by accident.
+
 ### When the change does not touch CI
 
 Steps 2–4 and 6 collapse into the normal required checks on the PR.
