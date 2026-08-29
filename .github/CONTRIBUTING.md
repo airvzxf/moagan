@@ -31,20 +31,19 @@ the canonical sources and explains the basics.
 
 This is a single-crate Rust binary. The flat layout is intentional —
 no workspace, no `crates/` directory. Source under `src/`, tests under
-`tests/`, scripts under `scripts/`. Full architectural authority:
+`tests/`, scripts under `scripts/`. The source code is the canonical
+spec; the following reference documents are kept current alongside it:
 
 | Document | Purpose |
 |---|---|
-| `docs/proposal-01-concept.md` | Product vision (V4). |
-| `docs/proposal-02-rust.md` | Rust implementation spec (T01-06 — normative). |
-| `docs/proposal-03-add-ons.md` | Add-on catalog (opt-in overlays). |
 | `docs/validation-tiers.md` | The T0–T3 + commit-msg model. |
 | `docs/branch-protection.md` | The ruleset `protect-main` and how to update it. |
+| `docs/adr/` | Architecture decision records — the *why* behind major decisions. |
 | `AGENTS.md` | Repo-level rules. Conflicts with the global `AGENTS.md` are resolved by the most specific. |
 
-When you touch anything that changes behaviour, the relevant proposal
-gets a sentence in the PR body that links to the section you are
-moving.
+When you touch anything that changes behaviour, link the relevant
+source file (and section) in the PR body so reviewers can locate the
+change quickly.
 
 ## Validation tiers — what the local loop looks like
 

@@ -9,9 +9,9 @@
 > policy gap were retired in the 2026-08-28 docs prune; their
 > resolution lives here).
 > **Relates to**:
-> [`docs/proposal-02-rust.md` T01-06 §0.5](../proposal-02-rust.md),
-> [`docs/proposal-03-add-ons.md` §D.7, §D.14.23, §D.18.2](../proposal-03-add-ons.md),
-> [`AGENTS.md` §"No-go list"](../../AGENTS.md).
+> [`AGENTS.md` §"No-go list"](../../AGENTS.md),
+> [`AGENTS.md` §"Differentiated allow-list"](../../AGENTS.md),
+> [`scripts/check-no-forbidden-crates.sh`](../../scripts/check-no-forbidden-crates.sh).
 
 ## Context
 
@@ -23,15 +23,18 @@ the prior `docs/pending-items-2026-08-13.md` had flagged this gap
 as Tier B #19 (the doc itself was retired in the 2026-08-28 docs
 prune; the resolution lives in this ADR).
 
-`docs/proposal-03-add-ons.md` (the additive patch catalogue) **does**
-list each of the three crates with a target version, a target use case,
-and a normative reference:
+The three crates were each documented with a target version, a
+target use case, and a normative reference in the (now-retired) patch
+catalogue. The current authoritative sources for each verdict are
+listed below in the *Decision* section (`Cargo.toml` for the
+configurations, `scripts/check-no-forbidden-crates.sh` for the
+enforcement). Summary:
 
-| Crate        | Pinned version   | Target use                                            | Catalogue ref                                 |
+| Crate        | Pinned version   | Target use                                            | Current source                                |
 |--------------|------------------|-------------------------------------------------------|-----------------------------------------------|
-| `petgraph`   | `0.6` + `serde`  | DAG of phases (optional, only `deep` mode)            | §D.2 (T18-06 §0; T16-09 §7.2; T07-10 §1217) |
-| `comfy-table`| `7.1`            | Pretty-printed CLI tables (`inspect`, `telemetry …`) | §D.14.23 (T12-09 §6.2; T20-06 §6.3)          |
-| `proptest`   | `1.4`            | Property-based testing for hashes and serialization   | §D.18.2 (T00-05 D20)                          |
+| `petgraph`   | `0.6` + `serde`  | DAG of phases (optional, only `deep` mode)            | `Cargo.toml` `[dependencies]` (optional)       |
+| `comfy-table`| `7.1`            | Pretty-printed CLI tables (`inspect`, `telemetry …`) | nowhere (forbidden; deferred to v0.9+)       |
+| `proptest`   | `1.4`            | Property-based testing for hashes and serialization   | `Cargo.toml` `[dev-dependencies]`             |
 
 The catalogue ships three different access patterns:
 
@@ -71,8 +74,8 @@ guard-rails. Each verdict is enforceable by a CI guard in
 - **Activation**: only when `--features dag` is passed AND
   `--mode deep` is selected at runtime.
 - **Default build** (`cargo build` with no features) does **not**
-  pull `petgraph`; the linear `phases/` vector from T01-06 stays the
-  default path (§D.2 in `proposal-03-add-ons.md`).
+  pull `petgraph`; the linear `phases/` vector in `src/phases/`
+  stays the default path.
 - **Rationale**: T01-06 §0.5 row 18 already sketches the
   `DagNode` trait that wraps `petgraph`. Default-off keeps the
   release binary footprint unchanged and the no-go rule
@@ -211,18 +214,19 @@ A blanket prohibition would have foreclosed legitimate uses:
   means we'd rather add a proptest dev-dep in a follow-up."*
   Leaving the prohibition in place makes the workaround permanent.
 
-## Appendix B — Cross-references back to the catalogue
+## Appendix B — Cross-references back to current sources
 
-- `petgraph`: `proposal-03-add-ons.md §D.2` (T18-06 §0,
-  T16-09 §7.2, T07-10 §1217). The §D.2 crates table specifies
-  *"petgraph se usa como opcional; por defecto T01-06 mantiene su
-  phases/ vector (DAG solo en deep)"*.
-- `comfy-table`: `proposal-03-add-ons.md §D.14.23`
-  (T12-09 §6.2; T20-06 §6.3).
-- `proptest`: `proposal-03-add-ons.md §D.18.2` (T00-05 D20).
-  Pre-existing rationale note in `proposal-02-rust.md:1664-1666`:
-  *"proptest no se añade como dep — los invariantes de la
-  perturbación (clip, monotonicidad de sigma, fracciones suman 1.0)
-  están cubiertos por tests unitarios con seeds fijos."* — this ADR
-  retires that note in favour of the property-based harness for the
-  same invariants.
+- `petgraph`: declared in `Cargo.toml` `[dependencies]` with
+  `optional = true` and gated by the `dag` Cargo feature. The
+  linear `phases/` vector in `src/phases/` is the default build
+  path; `petgraph` only activates with `--features dag --mode deep`.
+- `comfy-table`: not present anywhere in `Cargo.toml`. The blanket
+  no-go list in [`AGENTS.md`](../../AGENTS.md) and the CI guard in
+  `scripts/check-no-forbidden-crates.sh` are the enforcement. The
+  deferral window has slipped from the original "v0.9" target; a
+  future ADR should formalise the current decision window.
+- `proptest`: declared in `Cargo.toml` `[dev-dependencies]` only.
+  The historical rationale note that argued against `proptest`
+  (covered today by hand-seeded unit tests in
+  `src/ranking/stability.rs`) is retired by this ADR in favour of
+  property-based harnesses for the same invariants.

@@ -5,7 +5,7 @@
 > **Deciders**: `airvzxf/moagan` operator
 > **Supersedes**: nothing
 > **Relates to**:
-> [`docs/proposal-02-rust.md` T01-06 §10 (telemetry)](../proposal-02-rust.md),
+> [`src/telemetry/mod.rs`](../../src/telemetry/mod.rs) (telemetry pipeline),
 > [`AGENTS.md` §"No-go list"](../../AGENTS.md),
 > [`docs/adr/0001-no-go-list-policy.md`](0001-no-go-list-policy.md).
 

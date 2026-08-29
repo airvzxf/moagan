@@ -1305,10 +1305,9 @@ mod tests {
 
     /// PR-B1 (B1.2): `run_rerun` with the default `same_config =
     /// true` must apply the supplied `--matrix-override` JSON as a
-    /// deep merge on top of the cloned manifest, mirroring the
-    /// documented behaviour in `docs/cli-cheatsheet.md` §4 row 2
-    /// ("keeps the original `execution_policy` + applies the
-    /// override patches").
+    /// deep merge on top of the cloned manifest — keeping the
+    /// original `execution_policy` and applying the override patches
+    /// on top.
     #[test]
     fn rerun_same_config_true_applies_matrix_override() {
         // Deep-merge primitive semantics — the same call path the
