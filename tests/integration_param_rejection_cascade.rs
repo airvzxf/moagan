@@ -102,7 +102,7 @@ fn build_provider(uri: String) -> Arc<MinimaxProvider> {
     )
 }
 
-/// Adjust `cfg` so `cfg.providers["minimax"]` matches the test's
+/// Adjust `cfg` so `cfg.providers_legacy["minimax"]` matches the test's
 /// expectations. Each test starts from `Config::default()` and
 /// narrows the section; the default section already has
 /// `top_p = Some(0.95)` (line ~1066 of `src/config/mod.rs`), which
@@ -113,7 +113,7 @@ fn cfg_with_minimax_provider_section(
     section_override: Option<ProviderConfig>,
 ) -> Config {
     if let Some(override_) = section_override {
-        cfg.providers.insert(PROVIDER.into(), override_);
+        cfg.providers_legacy.insert(PROVIDER.into(), override_);
     }
     cfg
 }

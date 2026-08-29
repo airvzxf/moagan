@@ -141,7 +141,7 @@ fn build_context(
     registry.insert("recording".into(), provider_dyn);
 
     let mut cfg = Config::default();
-    cfg.providers.insert(
+    cfg.providers_legacy.insert(
         "recording".to_owned(),
         ProviderConfig {
             endpoint: None,

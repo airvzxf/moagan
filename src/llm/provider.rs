@@ -4002,7 +4002,7 @@ mod tests {
         );
 
         let mut cfg = crate::config::Config {
-            providers: probe_cfg_nonmock(Some(4096), None),
+            providers_legacy: probe_cfg_nonmock(Some(4096), None),
             ..crate::config::Config::default()
         };
         // SAFETY: this test owns the MOAGAN_MAX_TOKEN_AUTO env var;
@@ -4016,7 +4016,7 @@ mod tests {
             std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
         }
         let reg = registry_from_config_with_home(
-            &cfg.providers,
+            &cfg.providers_legacy,
             &CircuitBreakerConfig::default(),
             Some(&home),
         )

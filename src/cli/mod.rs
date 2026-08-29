@@ -1415,7 +1415,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     "bare SECTION provider without MODEL id"
                 );
                 let cfg_early = Config::load().unwrap_or_default();
-                if let Some(spec) = cfg_early.providers.get(provider)
+                if let Some(spec) = cfg_early.providers_legacy.get(provider)
                     && spec.models.len() > 1
                 {
                     return Err(Error::InvalidArgs(format!(

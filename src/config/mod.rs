@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
 
+pub mod dual_mode;
 pub mod profile;
 pub use profile::Profile;
 
@@ -36,7 +36,28 @@ pub struct Config {
     /// Token budget for the run. `None` means unlimited.
     pub token_budget: Option<u64>,
     /// Named providers the user can select with `--provider`.
-    pub providers: BTreeMap<String, ProviderConfig>,
+    ///
+    /// v0.13.0 schema: each value is `Vec<ProviderEntry>`. The
+    /// array-of-tables form lets a single section bind multiple
+    /// endpoints to distinct model subsets (think `opencode` with
+    /// `/v1/chat/completions`, `/v1/messages`, and `/v1/responses`
+    /// all under the same `[providers.opencode]` roof). The
+    /// `dual_mode::deserialize_providers_map` helper accepts both the
+    /// v0.13 array form and the v0.12 legacy single-table form
+    /// (`[providers.<name>]` with `models = [{id = "...", ...}, ...]`),
+    /// emitting a `tracing::warn!` per legacy section.
+    #[serde(deserialize_with = "dual_mode::deserialize_providers_map")]
+    pub providers: BTreeMap<String, Vec<ProviderEntry>>,
+    /// Bridge view: `providers` collapsed into the canonical
+    /// `BTreeMap<String, ProviderConfig>` shape that every existing
+    /// consumer (`llm::provider::registry_from_config_with_home`,
+    /// `cli::doctor`, `cli::run`, `cli::telemetry`, etc.) already
+    /// reads. `compute_legacy_providers` populates this from
+    /// `providers` after load, and `apply_env_overrides` mutates it
+    /// in place. Not serialised (`#[serde(skip)]`) — it is derived
+    /// state, and the canonical persisted form is `providers`.
+    #[serde(skip)]
+    pub providers_legacy: BTreeMap<String, ProviderConfig>,
     /// Default provider name (`SECTION[:MODEL]`) when the operator
     /// omits `--provider`. Empty string = "no default"; the CLI
     /// falls back to `MOAGAN_DEFAULT_PROVIDER` then to a clear
@@ -989,7 +1010,7 @@ impl RankingWeights {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
+        let mut cfg = Self {
             home: None,
             max_parallelism: 4,
             sketch_timeout_secs: 120,
@@ -997,6 +1018,7 @@ impl Default for Config {
             total_timeout_secs: 0,
             token_budget: None,
             providers: default_providers(),
+            providers_legacy: BTreeMap::new(),
             default_provider: String::new(),
             export_format: "tar.gz".to_owned(),
             export_compression: 6,
@@ -1036,11 +1058,32 @@ impl Default for Config {
             export: ExportConfig::default(),
             selection_plan: default_selection_plan(),
             embedder: EmbedderConfig::default(),
+        };
+        // Bridge the new-shape `providers` map into the canonical
+        // `ProviderConfig` view every existing consumer reads.
+        // `compute_legacy_providers` is idempotent and cheap
+        // (O(sections × entries)) — running it here means downstream
+        // code can read `cfg.providers_legacy` without first calling
+        // `Config::load()`.
+        //
+        // The defaults are duplicate-free by construction, so the
+        // fallible bridge cannot fail here. If it somehow does
+        // (default regression, future refactor), we surface the
+        // error in the log and leave `providers_legacy` empty
+        // rather than panicking from inside `Default::default()`.
+        if let Err(e) = cfg.compute_legacy_providers() {
+            tracing::error!(
+                error = %e,
+                "Config::default: bridge to providers_legacy failed (default \
+                 providers are duplicate-free; this is a programming bug, please \
+                 open an issue with the trace below)"
+            );
         }
+        cfg
     }
 }
 
-fn default_providers() -> BTreeMap<String, ProviderConfig> {
+fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
     let mut m = BTreeMap::new();
 
     // ----------------------------------------------------------------
@@ -1049,45 +1092,41 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // One section per canonical provider family. The section name
     // (`minimax`) is the `api_keys.toml` key and the
     // `MINIMAX_API_KEY` env-var suffix — no more `kind` tag.
-    // Every model the MiniMax upstream exposes lives under
-    // `models[]`. The wire format (`/v1/messages`) is detected
-    // from the URL by the dispatcher; the config only carries
-    // the full URL.
-    let minimax_endpoint = Some("https://api.minimax.io/anthropic/v1/messages".to_owned());
-    let minimax_models = [
-        "MiniMax-M3",
-        "MiniMax-M2.7",
-        "MiniMax-M2.7-highspeed",
-        "MiniMax-M2.5",
-    ];
-    let models = minimax_models
-        .iter()
-        .map(|model| ModelConfig {
-            id: (*model).to_owned(),
-            endpoint: None,
-            // Start from `DEFAULT_MAX_TOKENS` (1,000,000) and let
-            // the startup auto-probe discover the real ceiling per
-            // `(provider, model)`. The wire body in
-            // `MinimaxProvider::send` clamps to
-            // `MINIMAX_MAX_TOKENS_CAP`; `max_token_auto` below
-            // enables the probe.
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        })
-        .collect();
+    // Every model the MiniMax upstream exposes lives under the
+    // single `[[providers.minimax]]` array entry. The wire format
+    // (`/v1/messages`) is detected from the URL by the dispatcher;
+    // the config only carries the full URL.
+    //
+    // The `max_tokens` ceiling is now resolved centrally via
+    // `crate::llm::max_tokens::resolve_max_tokens` (PR #4); the
+    // bridge leaves `models[i].max_tokens = None` so the helper is
+    // the single source of truth at runtime.
     m.insert(
         "minimax".to_owned(),
-        ProviderConfig {
-            models,
-            endpoint: minimax_endpoint,
-            temperature: Some(0.6),
-            top_p: Some(0.95),
-            omit_max_tokens: false,
-            max_token_auto: Some(1024),
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        },
+        vec![ProviderEntry {
+            endpoint: "https://api.minimax.io/anthropic/v1/messages".to_owned(),
+            models: vec![
+                "MiniMax-M3".to_owned(),
+                "MiniMax-M2.7".to_owned(),
+                "MiniMax-M2.7-highspeed".to_owned(),
+                "MiniMax-M2.5".to_owned(),
+            ],
+            legacy_model_max_tokens: BTreeMap::new(),
+            knobs: SectionKnobs {
+                temperature: Some(0.6),
+                top_p: Some(0.95),
+                omit_max_tokens: false,
+                // Floor for the auto-probe (1024 = `MIN_AUTOPROBE_FLOOR`).
+                // The wire body in `MinimaxProvider::send` clamps to
+                // `MINIMAX_MAX_TOKENS_CAP`; the runtime helper
+                // discovers the real ceiling above this floor.
+                max_token_auto: Some(1024),
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            },
+        }],
     );
 
     // ----------------------------------------------------------------
@@ -1103,45 +1142,39 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // docs/CLI cheatsheet, and the legacy CLI fixtures still
     // reference them); the audit script and operator-facing docs
     // treat `deepseek-v4-flash` as the canonical model.
-    let deepseek_endpoint = Some("https://api.deepseek.com/v1/chat/completions".to_owned());
-    let deepseek_model_ids = [
-        "deepseek-v4-flash",
-        "deepseek-v4-flash-vision-exp",
-        "deepseek-v4-pro",
-        "deepseek-chat",
-        "deepseek-reasoner",
-    ];
-    let models = deepseek_model_ids
-        .iter()
-        .map(|model| ModelConfig {
-            id: (*model).to_owned(),
-            endpoint: None,
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        })
-        .collect();
     m.insert(
         "deepseek".to_owned(),
-        ProviderConfig {
-            models,
-            endpoint: deepseek_endpoint,
-            temperature: Some(0.6),
-            top_p: Some(0.95),
-            omit_max_tokens: false,
-            max_token_auto: Some(1024),
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        },
+        vec![ProviderEntry {
+            endpoint: "https://api.deepseek.com/v1/chat/completions".to_owned(),
+            models: vec![
+                "deepseek-v4-flash".to_owned(),
+                "deepseek-v4-flash-vision-exp".to_owned(),
+                "deepseek-v4-pro".to_owned(),
+                "deepseek-chat".to_owned(),
+                "deepseek-reasoner".to_owned(),
+            ],
+            legacy_model_max_tokens: BTreeMap::new(),
+            knobs: SectionKnobs {
+                temperature: Some(0.6),
+                top_p: Some(0.95),
+                omit_max_tokens: false,
+                max_token_auto: Some(1024),
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            },
+        }],
     );
 
     // ----------------------------------------------------------------
-    // opencode (one section, multiple models, mixed wire formats)
+    // opencode (one section, three entries — chat / anthropic / responses)
     // ----------------------------------------------------------------
-    // The v0.10 schema exposes every OpenCode model under the
-    // single `opencode` section. Each model carries its own
-    // endpoint URL (the dispatcher picks the wire format from the
-    // path):
+    // v0.13 schema: `opencode` becomes an array of three entries, one
+    // per upstream endpoint. Each entry binds its endpoint to the
+    // models routed over that endpoint. The wire format comes from
+    // the entry's URL path; the section name (`opencode`) drives
+    // API-key lookup.
     //
     // * `/v1/chat/completions` (OpenAI-compatible) — 10 models
     // * `/v1/messages` (Anthropic-compatible) — 7 models
@@ -1150,138 +1183,94 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // Per-model aliases (the v0.9 single-model section shape) are
     // gone: callers reach every model via
     // `--provider opencode:MODEL`.
-    let oc_chat = "https://opencode.ai/zen/go/v1/chat/completions";
-    let oc_anthropic = "https://opencode.ai/zen/go/v1/messages";
-    let oc_responses = "https://opencode.ai/zen/go/v1/responses";
-    let oc_models = vec![
-        // `/v1/chat/completions` (OpenAI-compatible).
-        ModelConfig {
-            id: "kimi-k3".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "kimi-k2.6".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "glm-5.1".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "glm-5.2".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        // v0.12.12 (§2.3): glm-5.3-flash — added per the operator's
-        // 2026-08-28 published roster (`docs/proposal-03-add-ons.md`
-        // §10-integrada-v0 OpenCode All Models). Routes over the
-        // chat-completions endpoint alongside glm-5.1/glm-5.2.
-        ModelConfig {
-            id: "glm-5.3-flash".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "deepseek-v4-pro".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "deepseek-v4-flash".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "mimo-v2.5".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "mimo-v2.5-pro".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "hy3".to_owned(),
-            endpoint: Some(oc_chat.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        // `/v1/messages` (Anthropic-compatible).
-        ModelConfig {
-            id: "minimax-m3".to_owned(),
-            endpoint: Some(oc_anthropic.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "minimax-m2.7".to_owned(),
-            endpoint: Some(oc_anthropic.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "minimax-m2.5".to_owned(),
-            endpoint: Some(oc_anthropic.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "qwen3.8-max".to_owned(),
-            endpoint: Some(oc_anthropic.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "qwen3.7-max".to_owned(),
-            endpoint: Some(oc_anthropic.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "qwen3.7-plus".to_owned(),
-            endpoint: Some(oc_anthropic.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        ModelConfig {
-            id: "qwen3.6-plus".to_owned(),
-            endpoint: Some(oc_anthropic.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        // `/v1/responses` (OpenAI Responses).
-        ModelConfig {
-            id: "gpt-5.6-luna".to_owned(),
-            endpoint: Some(oc_responses.to_owned()),
-            // gpt-5.6-luna rejects the *presence* of `max_tokens`,
-            // not just an oversized value — the section flag
-            // `omit_max_tokens = true` (applied to every model on
-            // this URL via the per-model wire body) signals the
-            // dispatcher to drop the field.
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-        // v0.12.12 (§2.3): muse-spark-1.2-contributor — added per
-        // the operator's 2026-08-28 published roster
-        // (`docs/proposal-03-add-ons.md` §10-integrada-v0 OpenCode
-        // All Models). Routes over the Responses endpoint alongside
-        // gpt-5.6-luna; the upstream reportedly tolerates the
-        // `max_tokens` field, so we keep the default ceiling here.
-        ModelConfig {
-            id: "muse-spark-1.2-contributor".to_owned(),
-            endpoint: Some(oc_responses.to_owned()),
-            max_tokens: Some(DEFAULT_MAX_TOKENS),
-        },
-    ];
+    let oc_chat = "https://opencode.ai/zen/go/v1/chat/completions".to_owned();
+    let oc_anthropic = "https://opencode.ai/zen/go/v1/messages".to_owned();
+    let oc_responses = "https://opencode.ai/zen/go/v1/responses".to_owned();
+    // The section-level knobs attach to the FIRST entry
+    // (chat-completions) so the operator sees them at the top of the
+    // OpenCode block in the rendered TOML. The bridge's
+    // first-non-default wins merge then promotes them to the
+    // `ProviderConfig` section-level.
+    let oc_knobs = SectionKnobs {
+        temperature: Some(1.0),
+        top_p: Some(0.95),
+        omit_max_tokens: false,
+        max_token_auto: Some(1024),
+        max_token_auto_enabled: None,
+        max_token_auto_save: true,
+        temperature_auto_enabled: None,
+        plan: None,
+    };
     m.insert(
         "opencode".to_owned(),
-        ProviderConfig {
-            models: oc_models,
-            endpoint: None,
-            temperature: Some(1.0),
-            top_p: Some(0.95),
-            omit_max_tokens: false,
-            max_token_auto: Some(1024),
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        },
+        vec![
+            // `/v1/chat/completions` (OpenAI-compatible).
+            ProviderEntry {
+                endpoint: oc_chat,
+                models: vec![
+                    "kimi-k3".to_owned(),
+                    "kimi-k2.6".to_owned(),
+                    "glm-5.1".to_owned(),
+                    "glm-5.2".to_owned(),
+                    // v0.12.12 (§2.3): glm-5.3-flash — added per the
+                    // operator's 2026-08-28 published roster
+                    // (`docs/proposal-03-add-ons.md` §10-integrada-v0
+                    // OpenCode All Models).
+                    "glm-5.3-flash".to_owned(),
+                    "deepseek-v4-pro".to_owned(),
+                    "deepseek-v4-flash".to_owned(),
+                    "mimo-v2.5".to_owned(),
+                    "mimo-v2.5-pro".to_owned(),
+                    "hy3".to_owned(),
+                ],
+                legacy_model_max_tokens: BTreeMap::new(),
+                knobs: oc_knobs,
+            },
+            // `/v1/messages` (Anthropic-compatible).
+            ProviderEntry {
+                endpoint: oc_anthropic,
+                models: vec![
+                    "minimax-m3".to_owned(),
+                    "minimax-m2.7".to_owned(),
+                    "minimax-m2.5".to_owned(),
+                    "qwen3.8-max".to_owned(),
+                    "qwen3.7-max".to_owned(),
+                    "qwen3.7-plus".to_owned(),
+                    "qwen3.6-plus".to_owned(),
+                ],
+                legacy_model_max_tokens: BTreeMap::new(),
+                knobs: SectionKnobs::default(),
+            },
+            // `/v1/responses` (OpenAI Responses).
+            ProviderEntry {
+                endpoint: oc_responses,
+                models: vec![
+                    // gpt-5.6-luna rejects the *presence* of
+                    // `max_tokens`, not just an oversized value —
+                    // the section flag `omit_max_tokens = true` is
+                    // attached to this entry so the dispatcher drops
+                    // the field for every model routed here.
+                    "gpt-5.6-luna".to_owned(),
+                    // v0.12.12 (§2.3): muse-spark-1.2-contributor —
+                    // added per the operator's 2026-08-28 published
+                    // roster (`docs/proposal-03-add-ons.md`
+                    // §10-integrada-v0 OpenCode All Models).
+                    "muse-spark-1.2-contributor".to_owned(),
+                ],
+                legacy_model_max_tokens: BTreeMap::new(),
+                // Knobs that diverge from the chat entry:
+                // `omit_max_tokens = true` so the wire body drops
+                // the field entirely (gpt-5.6-luna rejects its
+                // presence). `top_p` is unset here; the bridge's
+                // first-non-default wins keeps the chat entry's
+                // `top_p = Some(0.95)` since this entry did not set
+                // it.
+                knobs: SectionKnobs {
+                    omit_max_tokens: true,
+                    ..SectionKnobs::default()
+                },
+            },
+        ],
     );
 
     // ----------------------------------------------------------------
@@ -1295,25 +1284,31 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
     // so the binary accepts `--provider mock:mock-model` from the
     // default config without needing a per-call MOAGAN_CONFIG
     // workaround.
+    //
+    // Mock corner: the bridge propagates the entry's endpoint to
+    // `ProviderConfig::endpoint` so `is_mock` in
+    // `src/llm/provider.rs:1351-1356` keeps working — that check
+    // queries `spec.endpoint.starts_with("mock://")`, and after the
+    // conversion every non-mock section has `endpoint = None` (the
+    // entry now carries the URL).
     m.insert(
         "mock".to_owned(),
-        ProviderConfig {
-            models: vec![ModelConfig {
-                id: "mock-model".to_owned(),
-                endpoint: None,
-                max_tokens: None,
-            }],
-            endpoint: Some("mock://local".to_owned()),
-            temperature: None,
-            top_p: None,
-            omit_max_tokens: false,
-            // The mock provider has no upstream to probe.
-            max_token_auto: None,
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        },
+        vec![ProviderEntry {
+            endpoint: "mock://local".to_owned(),
+            models: vec!["mock-model".to_owned()],
+            legacy_model_max_tokens: BTreeMap::new(),
+            knobs: SectionKnobs {
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                // The mock provider has no upstream to probe.
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            },
+        }],
     );
     m
 }
@@ -1532,6 +1527,177 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
 }
 
+/// One entry in the v0.13 `[[providers.<name>]]` array-of-tables
+/// schema.
+///
+/// Each entry binds one `endpoint` URL to a set of model ids. The
+/// section-level knobs (`temperature`, `top_p`, `omit_max_tokens`,
+/// `max_token_auto*`, `temperature_auto_enabled`, `plan`) can appear
+/// on ANY entry; the bridge (`Config::compute_legacy_providers`)
+/// merges them with first-non-default-wins when collapsing the
+/// array-of-tables into the canonical `ProviderConfig` shape.
+///
+/// The v0.13 ADR captures the *why* of this shape: a provider that
+/// routes to multiple upstreams (think `opencode` with `/v1/chat/
+/// completions` + `/v1/messages` + `/v1/responses` on the same host
+/// family) is now an array of `(endpoint, models)` pairs instead of
+/// a flat `models[]` list with per-model `endpoint` overrides.
+///
+/// `deny_unknown_fields` is intentionally absent: combining it with
+/// `#[serde(flatten)] knobs` is a known serde foot-gun (the flatten
+/// attribute does not propagate `deny_unknown_fields` to the
+/// flattened sub-struct). The post-load
+/// `Config::warn_unknown_provider_keys` walks the raw TOML and emits
+/// a warning for keys the typed schema does not recognise, which is
+/// the right place to surface typos regardless of array vs table
+/// form.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderEntry {
+    /// Required: the full URL the runtime will dispatch to,
+    /// including the wire-format path (`/messages`,
+    /// `/chat/completions`, `/responses`). In the v0.13 schema the
+    /// endpoint is mandatory per entry — unlike v0.12, the
+    /// array-of-tables form does not inherit a section-level default.
+    pub endpoint: String,
+    /// Required, non-empty: model ids that share this endpoint. Each
+    /// id must be unique across the section; duplicate ids across
+    /// entries of the same section are rejected by
+    /// `Config::compute_legacy_providers` with `Error::InvalidArgs`.
+    ///
+    /// The deserializer accepts both the new `Vec<String>` form and
+    /// the legacy `Vec<ModelConfig>` (inline-table) form, the latter
+    /// with a `tracing::warn!` per call (per-section deprecation is
+    /// emitted by `dual_mode::deserialize_providers_map`). The legacy
+    /// per-model `endpoint` is dropped silently: each
+    /// `[[providers.X]]` entry now carries its own URL, and the
+    /// bridge groups legacy models by effective endpoint so the v0.13
+    /// array-of-tables shape matches the operator's intent.
+    ///
+    /// Legacy per-model `max_tokens` IS preserved, but routed
+    /// through the side-channel field below rather than this list —
+    /// the v0.13 schema does not carry per-model `max_tokens`, and
+    /// operators upgrading from v0.12 expect the operator-side cap to
+    /// keep working until PR #4's `resolve_max_tokens` lands. The
+    /// bridge populates `ModelConfig::max_tokens` from this map;
+    /// once `resolve_max_tokens` is wired through, the map becomes
+    /// irrelevant and we can drop the side-channel.
+    #[serde(deserialize_with = "dual_mode::deserialize_model_list")]
+    pub models: Vec<String>,
+    /// Legacy-only side-channel: per-model `max_tokens` extracted
+    /// from `[[providers.X.models]] max_tokens = N` entries. The new
+    /// schema never populates this (the v0.13 array-of-tables form
+    /// has no per-model `max_tokens` knob). `#[serde(skip)]` keeps
+    /// it out of the persisted shape; the bridge reads it to populate
+    /// `ModelConfig::max_tokens` so a v0.12 TOML continues to clamp
+    /// the wire body until PR #4 lands the central resolver.
+    #[serde(skip)]
+    pub legacy_model_max_tokens: BTreeMap<String, u32>,
+    /// Section-level knobs the operator can attach to any entry.
+    /// The bridge merges them with first-non-default-wins so the
+    /// operator can spread the knobs across entries (e.g. put
+    /// `temperature = 0.6` on the first entry and leave the rest
+    /// knob-less). `flatten` keeps the TOML flat (no nested
+    /// `[knobs]` block).
+    #[serde(flatten)]
+    pub knobs: SectionKnobs,
+}
+
+/// Section-level knobs the v0.13 `[[providers.X]]` schema accepts on
+/// any entry. Merged first-non-default-wins by
+/// [`SectionKnobs::merge_first_wins`] when collapsing the
+/// array-of-tables into the canonical `ProviderConfig` shape.
+///
+/// The set of fields mirrors `ProviderConfig`'s section-level
+/// knobs minus `endpoint` and `models` (those live on the
+/// `ProviderEntry` itself). `endpoint` is per-entry in v0.13 (each
+/// `[[providers.X]]` carries its own URL); `models` is the flat
+/// `Vec<String>` of model ids sharing that entry's endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SectionKnobs {
+    /// Default sampling temperature. Mirrors `ProviderConfig::temperature`.
+    pub temperature: Option<f32>,
+    /// Default nucleus sampling `top_p`. Mirrors `ProviderConfig::top_p`.
+    pub top_p: Option<f32>,
+    /// Whether to drop the `max_tokens` field from the wire body
+    /// entirely. Required for upstreams whose wire format rejects
+    /// the *presence* of the field (OpenAI Responses for some
+    /// `gpt-5.6-luna`-class models). Mirrors `ProviderConfig::omit_max_tokens`.
+    #[serde(default)]
+    pub omit_max_tokens: bool,
+    /// When `Some(n > 0)`, run the startup auto-probe with `n` as
+    /// the floor. `Some(0)` is the operator kill-switch (the
+    /// registry treats it exactly like `None`).
+    /// Mirrors `ProviderConfig::max_token_auto`.
+    #[serde(default)]
+    pub max_token_auto: Option<u32>,
+    /// Explicit per-provider opt-out / opt-in for the auto-probe.
+    /// Mirrors `ProviderConfig::max_token_auto_enabled`.
+    #[serde(default)]
+    pub max_token_auto_enabled: Option<bool>,
+    /// Persist the auto-probe result to
+    /// `<MOAGAN_HOME>/max_tokens_auto.toml`. Default `true`.
+    /// Mirrors `ProviderConfig::max_token_auto_save`.
+    #[serde(default = "default_max_token_auto_save")]
+    pub max_token_auto_save: bool,
+    /// Explicit per-provider opt-out / opt-in for the temperature
+    /// auto-probe (issue #657 fix #3). Mirrors
+    /// `ProviderConfig::temperature_auto_enabled`.
+    #[serde(default)]
+    pub temperature_auto_enabled: Option<bool>,
+    /// Token-plan declaration read by `moagan telemetry plan`.
+    /// Mirrors `ProviderConfig::plan`.
+    #[serde(default)]
+    pub plan: Option<PlanConfig>,
+}
+
+impl SectionKnobs {
+    /// First-non-default wins merge. Slots that are `None` on `self`
+    /// are filled from `other`; populated slots keep their values.
+    /// The `bool` fields (`omit_max_tokens`, `max_token_auto_save`)
+    /// are not `Option<_>`, so they keep `self`'s value verbatim —
+    /// the first entry that mentions a knob wins on the booleans,
+    /// even when its value is `false` (the literal default).
+    ///
+    /// "First-non-default" was chosen over "first byte" so an entry
+    /// with no knob mention does not block a later entry from
+    /// populating the field. The only ambiguity is on the booleans,
+    /// and there we accept the simple first-wins behaviour because
+    /// the operator can always reorder entries to override.
+    pub fn merge_first_wins(&mut self, other: &SectionKnobs) {
+        if self.temperature.is_none() {
+            self.temperature = other.temperature;
+        }
+        if self.top_p.is_none() {
+            self.top_p = other.top_p;
+        }
+        // Booleans: first-wins. The first entry that mentions the
+        // knob (even with `= false`) is the source of truth.
+        if !self.omit_max_tokens && other.omit_max_tokens {
+            self.omit_max_tokens = true;
+        }
+        if self.max_token_auto.is_none() {
+            self.max_token_auto = other.max_token_auto;
+        }
+        if self.max_token_auto_enabled.is_none() {
+            self.max_token_auto_enabled = other.max_token_auto_enabled;
+        }
+        if other.max_token_auto_save && !self.max_token_auto_save {
+            // The default is `true` (persist) — only override when
+            // `other` explicitly says `false`. This matches the
+            // `ProviderConfig::max_token_auto_save` default.
+            self.max_token_auto_save = false;
+        }
+        if self.temperature_auto_enabled.is_none() {
+            self.temperature_auto_enabled = other.temperature_auto_enabled;
+        }
+        if self.plan.is_none() {
+            self.plan = other.plan.clone();
+        }
+    }
+}
+
 /// Resolved spec for one `(section, model)` pair.
 ///
 /// Built by the dispatcher at construction time (Phase 3) from the
@@ -1614,6 +1780,94 @@ impl ProviderConfig {
 }
 
 impl Config {
+    /// Collapse the new-shape `providers: BTreeMap<String, Vec<ProviderEntry>>`
+    /// into the canonical `providers_legacy: BTreeMap<String, ProviderConfig>`
+    /// every existing consumer (`llm::provider::registry_from_config_with_home`,
+    /// `cli::doctor`, `cli::run`, `cli::telemetry`, etc.) reads.
+    ///
+    /// The conversion is:
+    ///
+    /// 1. Walk each section's entries. The first entry seeds the
+    ///    section-level knobs (`temperature`, `top_p`, etc.) via
+    ///    [`SectionKnobs::merge_first_wins`]; later entries fill in
+    ///    slots the first entry left at the default.
+    /// 2. Each entry's `models` becomes one [`ModelConfig`] per id,
+    ///    carrying the entry's endpoint on the per-model `endpoint`
+    ///    field so the dispatcher can pick the wire format from the
+    ///    URL. `max_tokens` is set to `None` — the runtime resolves
+    ///    it centrally via
+    ///    `crate::llm::max_tokens::resolve_max_tokens` (PR #4).
+    /// 3. Duplicate model ids across entries of the same section
+    ///    error out with `Error::InvalidArgs` so an operator typo
+    ///    surfaces immediately instead of silently shadowing the
+    ///    first registration.
+    /// 4. The section-level `ProviderConfig::endpoint` becomes
+    ///    `None` for every section, EXCEPT `mock` — the `mock`
+    ///    section's first-entry endpoint propagates to
+    ///    `ProviderConfig::endpoint` so `is_mock` in
+    ///    `src/llm/provider.rs:1351-1356` keeps working. That check
+    ///    queries `spec.endpoint.starts_with("mock://")`; without
+    ///    this corner the mock provider would silently fail to be
+    ///    recognised as mock after the bridge runs.
+    ///
+    /// Returns [`crate::Error::InvalidArgs`] on duplicate model ids
+    /// within a section. The default providers are duplicate-free
+    /// by construction; the only way to hit the error is via user
+    /// TOML — `Config::load` propagates the error so a typo cannot
+    /// reach the runtime.
+    pub fn compute_legacy_providers(&mut self) -> Result<()> {
+        let mut out: BTreeMap<String, ProviderConfig> = BTreeMap::new();
+        for (name, entries) in self.providers.iter() {
+            let mut knobs = SectionKnobs::default();
+            let mut models: Vec<ModelConfig> = Vec::new();
+            let mut first_endpoint: Option<String> = None;
+            for entry in entries {
+                knobs.merge_first_wins(&entry.knobs);
+                if first_endpoint.is_none() {
+                    first_endpoint = Some(entry.endpoint.clone());
+                }
+                for model_id in &entry.models {
+                    if models.iter().any(|m| &m.id == model_id) {
+                        return Err(crate::Error::InvalidArgs(format!(
+                            "provider '{name}' has duplicate model '{model_id}' across \
+                             `[[providers.{name}]]` entries; each model id must appear \
+                             in exactly one entry of the section"
+                        )));
+                    }
+                    // Legacy entries carry per-model `max_tokens`
+                    // through the `legacy_model_max_tokens`
+                    // side-channel; new-schema entries leave it
+                    // empty (max_tokens is resolved via
+                    // `resolve_max_tokens` once PR #4 lands).
+                    let max_tokens = entry.legacy_model_max_tokens.get(model_id).copied();
+                    models.push(ModelConfig {
+                        id: model_id.clone(),
+                        endpoint: Some(entry.endpoint.clone()),
+                        max_tokens,
+                    });
+                }
+            }
+            let endpoint = if name == "mock" { first_endpoint } else { None };
+            out.insert(
+                name.clone(),
+                ProviderConfig {
+                    models,
+                    endpoint,
+                    temperature: knobs.temperature,
+                    top_p: knobs.top_p,
+                    omit_max_tokens: knobs.omit_max_tokens,
+                    max_token_auto: knobs.max_token_auto,
+                    max_token_auto_enabled: knobs.max_token_auto_enabled,
+                    max_token_auto_save: knobs.max_token_auto_save,
+                    temperature_auto_enabled: knobs.temperature_auto_enabled,
+                    plan: knobs.plan,
+                },
+            );
+        }
+        self.providers_legacy = out;
+        Ok(())
+    }
+
     /// Build the default configuration without touching the filesystem.
     pub fn defaults() -> Self {
         tracing::trace!("Config::defaults: building from Self::default()");
@@ -1681,18 +1935,36 @@ impl Config {
             final_provider_count = cfg.providers.len(),
             "config::load: provider defaults merged"
         );
+        // Bridge: collapse the new-shape `providers` map into
+        // `providers_legacy` (the canonical `BTreeMap<String,
+        // ProviderConfig>` every existing consumer reads). Runs
+        // BEFORE env overrides — env overrides now mutate
+        // `providers_legacy` directly via `apply_env_overrides`, so
+        // a single bridge call before the env pass keeps both views
+        // consistent. The duplicate-id error (operator typo in
+        // user TOML) propagates to the caller so the typo surfaces
+        // at load time, not silently shadowed at runtime.
+        cfg.compute_legacy_providers()?;
         cfg.apply_env_overrides();
         tracing::info!("config::load: ok");
         Ok(cfg)
     }
 
-    /// Inspect the raw TOML for any `[providers.<name>]` table that
-    /// only contains keys that `ProviderConfig` does NOT recognise
-    /// (e.g. `api_key = "..."`). The most common offender is an
-    /// operator putting the key into `moagan.toml` instead of
-    /// `api_keys.toml`; without this warning the field is silently
-    /// dropped by serde and the operator wonders why the key is
-    /// missing. The warning fires once per offending table.
+    /// Inspect the raw TOML for any `[providers.<name>]` table (or
+    /// `[[providers.<name>]]` array-of-tables) that only contains keys
+    /// the v0.13 schema does NOT recognise (e.g. `api_key = "..."`).
+    /// The most common offender is an operator putting the key into
+    /// `moagan.toml` instead of `api_keys.toml`; without this warning
+    /// the field is silently dropped by serde and the operator wonders
+    /// why the key is missing. The warning fires once per offending
+    /// section / entry.
+    ///
+    /// v0.13 update: the helper now accepts both the legacy
+    /// `[providers.X]` (single table) form AND the new
+    /// `[[providers.X]]` (array-of-tables) form. Each entry in the
+    /// array form is checked independently. `config` is added to
+    /// `KNOWN` so the `[providers.X.config]` sibling block (see plan
+    /// §3.5) does not trip the warning.
     fn warn_unknown_provider_keys(path: &std::path::Path, raw: &str) {
         tracing::trace!(path = %path.display(), "warn_unknown_provider_keys: enter");
         const KNOWN: &[&str] = &[
@@ -1706,6 +1978,16 @@ impl Config {
             "max_token_auto_save",
             "temperature_auto_enabled",
             "plan",
+            "config",
+            // Legacy v0.12 per-model keys under `[[providers.X.models]]`:
+            // ignored because the new shape doesn't carry per-model
+            // fields, but we don't want to warn for an operator who is
+            // still on the legacy schema and has a typo-free
+            // `max_tokens = ...` entry.
+            "kind",
+            "model",
+            "hard_incompatibilities",
+            "max_tokens",
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
             Ok(v) => v,
@@ -1722,23 +2004,63 @@ impl Config {
         };
         let mut warned = 0usize;
         for (name, value) in table {
-            let Some(sub) = value.as_table() else {
-                continue;
-            };
-            let has_known = sub.keys().any(|k| KNOWN.contains(&k.as_str()));
-            if has_known {
-                continue;
+            match value {
+                // Legacy single-table form: a single TOML table whose
+                // top-level keys we check against `KNOWN`.
+                toml::Value::Table(sub) => {
+                    if sub.keys().any(|k| KNOWN.contains(&k.as_str())) {
+                        continue;
+                    }
+                    let unknown: Vec<&str> = sub.keys().map(String::as_str).collect();
+                    tracing::warn!(
+                        path = %path.display(),
+                        provider = %name,
+                        unknown_keys = ?unknown,
+                        "config: [providers.{name}] only contains unknown keys {:?}; \
+                         these are ignored (api_key belongs in api_keys.toml, not moagan.toml)",
+                        unknown,
+                    );
+                    warned += 1;
+                }
+                // v0.13 array-of-tables form: each entry is its own
+                // table. A single entry with NO known keys is the
+                // canonical "all-unknown" signal (e.g. an operator
+                // wrote only `api_key`); otherwise we skip — the
+                // typed deserializer already drops the unknown keys.
+                toml::Value::Array(entries) => {
+                    for entry in entries {
+                        let Some(sub) = entry.as_table() else {
+                            continue;
+                        };
+                        if sub.keys().any(|k| KNOWN.contains(&k.as_str())) {
+                            continue;
+                        }
+                        if sub.is_empty() {
+                            // Empty `[[providers.X]]` entries are
+                            // surfaced by the dual-mode deserializer
+                            // (it requires at least `endpoint`); no
+                            // need to double-warn here.
+                            continue;
+                        }
+                        let unknown: Vec<&str> = sub.keys().map(String::as_str).collect();
+                        tracing::warn!(
+                            path = %path.display(),
+                            provider = %name,
+                            unknown_keys = ?unknown,
+                            "config: [providers.{name}] entry only contains unknown keys {:?}; \
+                             these are ignored (api_key belongs in api_keys.toml, not moagan.toml)",
+                            unknown,
+                        );
+                        warned += 1;
+                    }
+                }
+                _ => {
+                    // Anything else (e.g. a bare string) is a shape
+                    // error; the main loader will surface it via
+                    // the dual-mode deserializer.
+                    continue;
+                }
             }
-            let unknown: Vec<&str> = sub.keys().map(String::as_str).collect();
-            tracing::warn!(
-                path = %path.display(),
-                provider = %name,
-                unknown_keys = ?unknown,
-                "config: [providers.{name}] only contains unknown keys {:?}; \
-                 these are ignored (api_key belongs in api_keys.toml, not moagan.toml)",
-                unknown,
-            );
-            warned += 1;
         }
         tracing::trace!(warned_count = warned, "warn_unknown_provider_keys: done");
     }
@@ -1863,16 +2185,29 @@ impl Config {
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_ENDPOINT")
             && !v.trim().is_empty()
         {
+            // v0.13 update: after `compute_legacy_providers` the
+            // v0.13 update: scope the rewrite to the canonical
+            // `minimax` section (the env var is documented as
+            // targeting the direct MiniMax upstream). After the
+            // bridge, the section-level `endpoint` is `None` for
+            // non-mock sections, but each per-model `endpoint`
+            // carries the entry's URL — so we look at the first
+            // minimax model whose endpoint contains `/messages`
+            // and rewrite that one. The `mock` section keeps its
+            // `mock://` endpoint (no `/messages`), and the
+            // `opencode` section's `minimax-m3/m2.7/m2.5` aliases
+            // are NOT touched (matching the canonical v0.10 split
+            // documented in plan §6.5).
             let mut rewritten = 0usize;
-            for spec in self.providers.values_mut() {
-                if spec
-                    .endpoint
-                    .as_deref()
-                    .is_some_and(|e| e.contains("/messages"))
-                {
-                    spec.endpoint = Some(v.clone());
-                    rewritten += 1;
-                }
+            if let Some(spec) = self.providers_legacy.get_mut("minimax")
+                && let Some(first) = spec.models.iter_mut().find(|m| {
+                    m.endpoint
+                        .as_deref()
+                        .is_some_and(|e| e.contains("/messages"))
+                })
+            {
+                first.endpoint = Some(v.clone());
+                rewritten += 1;
             }
             tracing::trace!(
                 var = "MOAGAN_MINIMAX_ENDPOINT",
@@ -1883,23 +2218,28 @@ impl Config {
         if let Ok(v) = std::env::var("MOAGAN_MINIMAX_MODEL")
             && !v.trim().is_empty()
         {
-            // v0.10: `model` lives on `models[].id`. Replace the
-            // id on the first model of any section whose endpoint
-            // matches the canonical MiniMax URL pattern (the
-            // `/v1/messages` path). This mirrors the legacy
-            // `MOAGAN_MINIMAX_MODEL` contract for callers that
-            // still rely on the env var.
+            // v0.13 update: the bridge keeps `models[0].id`
+            // populated, so the legacy rewrite path keeps working.
+            // The section-level `endpoint` is `None` after the
+            // bridge for non-mock sections, so the existing
+            // v0.13: scope the rewrite to the canonical `minimax`
+            // section (the only one the env var is meant to retarget)
+            // AND to the model whose per-model endpoint carries the
+            // canonical MiniMax URL pattern. `opencode`'s
+            // `minimax-m3/m2.7/m2.5` aliases live on the
+            // `/v1/messages` endpoint but are NOT touched by the
+            // override — that is the canonical
+            // v0.10 split (see plan §6.5).
             let mut rewritten = 0usize;
-            for spec in self.providers.values_mut() {
-                if spec
-                    .endpoint
-                    .as_deref()
-                    .is_some_and(|e| e.contains("/messages"))
-                    && let Some(first) = spec.models.first_mut()
-                {
-                    first.id = v.clone();
-                    rewritten += 1;
-                }
+            if let Some(spec) = self.providers_legacy.get_mut("minimax")
+                && let Some(first) = spec.models.iter_mut().find(|m| {
+                    m.endpoint
+                        .as_deref()
+                        .is_some_and(|e| e.contains("/messages"))
+                })
+            {
+                first.id = v.clone();
+                rewritten += 1;
             }
             tracing::trace!(
                 var = "MOAGAN_MINIMAX_MODEL",
@@ -2375,11 +2715,11 @@ impl Config {
                 has_max_token_auto = auto_env.is_some(),
                 has_max_token_auto_save = auto_save_env.is_some(),
                 has_temperature_auto = temp_auto_env.is_some(),
-                provider_count = self.providers.len(),
+                provider_count = self.providers_legacy.len(),
                 "applying global max_token_auto / temperature_auto knobs"
             );
         }
-        for (name, spec) in self.providers.iter_mut() {
+        for (name, spec) in self.providers_legacy.iter_mut() {
             let env_key = format!(
                 "MOAGAN_{}_OMIT_MAX_TOKENS",
                 name.to_uppercase().replace(['.', '-'], "_")
@@ -2421,7 +2761,7 @@ impl Config {
             }
         }
         tracing::trace!(
-            provider_count = self.providers.len(),
+            provider_count = self.providers_legacy.len(),
             rl_provider_entries = self.rate_limit_per_provider.len(),
             rl_role_entries = self.rate_limit_per_role.len(),
             throttle_entries = self.throttle_per_role.len(),
@@ -2611,9 +2951,14 @@ fn parse_network_policy_env(s: &str) -> Option<NetworkPolicy> {
 impl Config {
     /// Resolve the configured provider by name. Returns
     /// `Error::InvalidArgs` if the provider is unknown.
+    ///
+    /// Reads from `providers_legacy` (the bridge view populated by
+    /// [`Config::compute_legacy_providers`]). Public callers never see
+    /// `Vec<ProviderEntry>` — they always work with the canonical
+    /// `&ProviderConfig` shape.
     pub fn provider(&self, name: &str) -> Result<&ProviderConfig> {
         tracing::trace!(name, "Config::provider: enter");
-        let res = self.providers.get(name).ok_or_else(|| {
+        let res = self.providers_legacy.get(name).ok_or_else(|| {
             tracing::warn!(name, "Config::provider: unknown provider");
             crate::Error::InvalidArgs(format!("unknown provider: {name}"))
         });
@@ -2959,10 +3304,10 @@ mod tests {
         assert!(cfg.redact_in_telemetry);
         // v0.10 canonical sections (per-model aliases collapsed into
         // the canonical provider family).
-        assert!(cfg.providers.contains_key("minimax"));
-        assert!(cfg.providers.contains_key("opencode"));
-        assert!(cfg.providers.contains_key("deepseek"));
-        assert!(cfg.providers.contains_key("mock"));
+        assert!(cfg.providers_legacy.contains_key("minimax"));
+        assert!(cfg.providers_legacy.contains_key("opencode"));
+        assert!(cfg.providers_legacy.contains_key("deepseek"));
+        assert!(cfg.providers_legacy.contains_key("mock"));
     }
 
     #[test]
@@ -3093,7 +3438,7 @@ mod tests {
         let back: Config = toml::from_str(&raw).unwrap();
         assert_eq!(back.max_parallelism, cfg.max_parallelism);
         assert_eq!(back.default_provider, cfg.default_provider);
-        assert_eq!(back.providers.len(), cfg.providers.len());
+        assert_eq!(back.providers_legacy.len(), cfg.providers_legacy.len());
     }
 
     #[test]
@@ -3120,21 +3465,27 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
 
-        // Default config has the hardcoded production endpoint.
+        // v0.13: the section-level `endpoint` is `None` (the bridge
+        // copies the entry endpoint onto every model). The baseline
+        // is therefore checked on a model, not the section.
         let mut cfg = Config::default();
         let baseline = cfg
-            .providers
+            .providers_legacy
             .get("minimax")
+            .unwrap()
+            .models
+            .first()
             .unwrap()
             .endpoint
             .clone()
-            .expect("default minimax section must carry endpoint");
+            .expect("default minimax section must carry per-model endpoint");
         assert_eq!(baseline, "https://api.minimax.io/anthropic/v1/messages");
 
-        // With the env var set, apply_env_overrides rewrites the
-        // minimax section (the only one whose endpoint matches the
-        // MiniMax /v1/messages URL pattern) but leaves other
-        // providers (e.g. "mock", "opencode") alone.
+        // With the env var set, apply_env_overrides rewrites every
+        // per-model endpoint matching the `/messages` pattern. After
+        // the rewrite the `mock` section keeps its `mock://` URL
+        // because the dispatcher mock check (`spec.endpoint.starts_with("mock://")`)
+        // is in `is_mock` and that field stays untouched.
         unsafe {
             std::env::set_var("MOAGAN_MINIMAX_ENDPOINT", "http://localhost:8086/x");
         }
@@ -3143,11 +3494,11 @@ mod tests {
             std::env::remove_var("MOAGAN_MINIMAX_ENDPOINT");
         }
         assert_eq!(
-            cfg.providers.get("minimax").unwrap().endpoint,
+            cfg.providers_legacy.get("minimax").unwrap().models[0].endpoint,
             Some("http://localhost:8086/x".to_owned())
         );
         assert_eq!(
-            cfg.providers.get("mock").unwrap().endpoint,
+            cfg.providers_legacy.get("mock").unwrap().endpoint,
             Some("mock://local".to_owned()),
             "non-minimax providers must not be touched by MOAGAN_MINIMAX_ENDPOINT"
         );
@@ -3175,7 +3526,7 @@ mod tests {
         // first model id on `models[0].id` (the v0.10 canonical
         // field).
         assert_eq!(
-            cfg.providers.get("minimax").unwrap().models[0].id,
+            cfg.providers_legacy.get("minimax").unwrap().models[0].id,
             "MiniMax-M3"
         );
 
@@ -3202,11 +3553,11 @@ mod tests {
         // models on the `opencode` section now and must NOT be
         // touched by the MOAGAN_MINIMAX_MODEL env override.
         assert_eq!(
-            cfg.providers.get("minimax").unwrap().models[0].id,
+            cfg.providers_legacy.get("minimax").unwrap().models[0].id,
             "MiniMax-M2.5",
             "minimax section should pick up MOAGAN_MINIMAX_MODEL"
         );
-        let oc_spec = cfg.providers.get("opencode").unwrap();
+        let oc_spec = cfg.providers_legacy.get("opencode").unwrap();
         for model_id in ["minimax-m3", "minimax-m2.7", "minimax-m2.5"] {
             let entry = oc_spec
                 .models
@@ -3223,11 +3574,20 @@ mod tests {
         // `default_providers()` so the dispatcher accepts
         // `--provider mock:mock-model` without a per-test
         // `MOAGAN_CONFIG` workaround.
+        // v0.13: the bridge copies the entry endpoint onto every
+        // model. `mock://local` is therefore propagated to the
+        // `mock-model` model config so the dispatcher's `is_mock`
+        // check (`spec.endpoint.starts_with("mock://")`) keeps
+        // working. The MOAGAN_MINIMAX_MODEL env override is scoped
+        // to the `minimax` section and must NOT touch the mock
+        // model — the assertion verifies the mock section survives
+        // untouched (the endpoint stays `mock://local`, not
+        // `MiniMax-M2.5`).
         assert_eq!(
-            cfg.providers.get("mock").unwrap().models,
+            cfg.providers_legacy.get("mock").unwrap().models,
             vec![ModelConfig {
                 id: "mock-model".to_owned(),
-                endpoint: None,
+                endpoint: Some("mock://local".to_owned()),
                 max_tokens: None,
             }],
             "mock provider must not be touched by MOAGAN_MINIMAX_MODEL"
@@ -3257,7 +3617,7 @@ mod tests {
         // Blank value: the first model id stays at the canonical
         // v0.10 default.
         assert_eq!(
-            cfg.providers.get("minimax").unwrap().models[0].id,
+            cfg.providers_legacy.get("minimax").unwrap().models[0].id,
             "MiniMax-M3"
         );
     }
@@ -3268,12 +3628,19 @@ mod tests {
     fn default_providers_lists_deepseek() {
         let cfg = Config::default();
         let spec = cfg
-            .providers
+            .providers_legacy
             .get("deepseek")
             .expect("deepseek missing from default providers");
-        assert_eq!(
-            spec.endpoint.as_deref(),
-            Some("https://api.deepseek.com/v1/chat/completions")
+        // v0.13: the section-level `endpoint` is `None` (each
+        // `[[providers.X]]` entry carries its own URL after the
+        // bridge). The URL lives on every model in the section.
+        assert!(
+            spec.models
+                .iter()
+                .any(|m| m.endpoint.as_deref()
+                    == Some("https://api.deepseek.com/v1/chat/completions")),
+            "deepseek section must list `https://api.deepseek.com/v1/chat/completions` \
+             on at least one model"
         );
         assert!(
             spec.models.iter().any(|m| m.id == "deepseek-chat"),
@@ -3291,7 +3658,7 @@ mod tests {
     fn default_providers_lists_opencode_aliases() {
         let cfg = Config::default();
         let spec = cfg
-            .providers
+            .providers_legacy
             .get("opencode")
             .expect("opencode section missing from default providers");
         // One representative model per wire-format group; the URL
@@ -3330,7 +3697,7 @@ mod tests {
         ];
         for (section, expected_id) in samples {
             let spec = cfg
-                .providers
+                .providers_legacy
                 .get(section)
                 .unwrap_or_else(|| panic!("section {section} missing from default providers"));
             assert!(
@@ -3361,7 +3728,7 @@ mod tests {
             "MiniMax-M2.5",
         ];
         let minimax_spec = cfg
-            .providers
+            .providers_legacy
             .get("minimax")
             .expect("minimax section missing from default providers");
         for model_id in canonical_direct {
@@ -3372,7 +3739,7 @@ mod tests {
         }
         let canonical_opencode = ["minimax-m3", "minimax-m2.7", "minimax-m2.5"];
         let opencode_spec = cfg
-            .providers
+            .providers_legacy
             .get("opencode")
             .expect("opencode section missing from default providers");
         for model_id in canonical_opencode {
@@ -3392,7 +3759,7 @@ mod tests {
     fn default_opencode_providers_enable_max_tokens_auto_probe() {
         let cfg = Config::default();
         let oc_spec = cfg
-            .providers
+            .providers_legacy
             .get("opencode")
             .expect("opencode section missing from default providers");
         // Section-level probe floor must be > 0 so the
@@ -3404,14 +3771,16 @@ mod tests {
              (max_token_auto = Some(n), n > 0); with the probe off and \
              max_tokens = 1M the upstream rejects with HTTP 400"
         );
-        // Every opencode model starts at DEFAULT_MAX_TOKENS so
-        // the probe has a generous floor to work from.
+        // v0.13: the bridge sets `models[i].max_tokens = None` so
+        // `crate::llm::max_tokens::resolve_max_tokens` is the single
+        // source of truth at runtime. The probe (`max_token_auto`)
+        // narrows the value the helper returns; the helper itself
+        // chains env > cache > kind_cap > DEFAULT_MAX_TOKENS.
         for model in &oc_spec.models {
             assert_eq!(
-                model.max_tokens,
-                Some(DEFAULT_MAX_TOKENS),
-                "opencode model {} must start at DEFAULT_MAX_TOKENS; \
-                 the probe narrows it to the real ceiling",
+                model.max_tokens, None,
+                "opencode model {} must start with `max_tokens = None`; \
+                 `resolve_max_tokens` resolves it at runtime",
                 model.id
             );
         }
@@ -3429,14 +3798,18 @@ mod tests {
     fn default_minimax_provider_enables_max_tokens_auto_probe() {
         let cfg = Config::default();
         let spec = cfg
-            .providers
+            .providers_legacy
             .get("minimax")
             .expect("minimax section missing from default providers");
+        // v0.13: the bridge sets `models[i].max_tokens = None` so
+        // `crate::llm::max_tokens::resolve_max_tokens` is the single
+        // source of truth at runtime. The probe (`max_token_auto`)
+        // narrows the value the helper returns; the helper itself
+        // chains env > cache > kind_cap > DEFAULT_MAX_TOKENS.
         assert_eq!(
-            spec.models[0].max_tokens,
-            Some(DEFAULT_MAX_TOKENS),
-            "minimax section first model must start at DEFAULT_MAX_TOKENS; \
-             the probe narrows it to the real ceiling"
+            spec.models[0].max_tokens, None,
+            "minimax section first model must start with `max_tokens = None`; \
+             `resolve_max_tokens` resolves it at runtime"
         );
         let floor = spec.max_token_auto.unwrap_or(0);
         assert!(
@@ -3462,7 +3835,7 @@ mod tests {
         // Pre-condition: the real providers ship with the probe on,
         // so the assertion below cannot pass vacuously.
         assert!(
-            cfg.providers
+            cfg.providers_legacy
                 .values()
                 .any(|s| s.max_token_auto.is_some_and(|n| n > 0)),
             "default config must enable the probe somewhere"
@@ -3471,7 +3844,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
         }
-        for (name, spec) in &cfg.providers {
+        for (name, spec) in &cfg.providers_legacy {
             assert_eq!(
                 spec.max_token_auto,
                 Some(0),
@@ -3492,7 +3865,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.apply_env_overrides();
             assert_eq!(
-                cfg.providers["minimax"].max_token_auto,
+                cfg.providers_legacy["minimax"].max_token_auto,
                 Some(0),
                 "{off:?} should map to the off sentinel"
             );
@@ -3502,14 +3875,14 @@ mod tests {
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
-        assert_eq!(cfg.providers["minimax"].max_token_auto, Some(8192));
+        assert_eq!(cfg.providers_legacy["minimax"].max_token_auto, Some(8192));
         // Garbage parses to `None`, which is also "off".
         unsafe {
             std::env::set_var("MOAGAN_MAX_TOKEN_AUTO", "not-a-number");
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
-        assert_eq!(cfg.providers["minimax"].max_token_auto, None);
+        assert_eq!(cfg.providers_legacy["minimax"].max_token_auto, None);
         unsafe {
             std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
         }
@@ -3526,7 +3899,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         assert!(
-            cfg.providers.values().all(|s| !s.max_token_auto_save),
+            cfg.providers_legacy
+                .values()
+                .all(|s| !s.max_token_auto_save),
             "`false` must disable persistence everywhere"
         );
         unsafe {
@@ -3535,7 +3910,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         assert!(
-            cfg.providers.values().all(|s| s.max_token_auto_save),
+            cfg.providers_legacy.values().all(|s| s.max_token_auto_save),
             "`yes` must enable persistence everywhere"
         );
         unsafe {
@@ -3581,7 +3956,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MOAGAN_TEMPERATURE_AUTO");
         }
-        for (name, spec) in &cfg.providers {
+        for (name, spec) in &cfg.providers_legacy {
             assert_eq!(
                 spec.temperature_auto_enabled,
                 Some(false),
@@ -3603,7 +3978,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.apply_env_overrides();
             assert_eq!(
-                cfg.providers["minimax"].temperature_auto_enabled,
+                cfg.providers_legacy["minimax"].temperature_auto_enabled,
                 Some(false),
                 "{off:?} should map to temperature_auto_enabled = Some(false)"
             );
@@ -3628,7 +4003,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.apply_env_overrides();
             assert_eq!(
-                cfg.providers["minimax"].temperature_auto_enabled,
+                cfg.providers_legacy["minimax"].temperature_auto_enabled,
                 Some(true),
                 "{yes:?} should map to temperature_auto_enabled = Some(true)"
             );
@@ -3649,7 +4024,7 @@ mod tests {
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
-        for (name, spec) in &cfg.providers {
+        for (name, spec) in &cfg.providers_legacy {
             assert_eq!(
                 spec.temperature_auto_enabled, None,
                 "provider {name} must keep temperature_auto_enabled = None when env is unset"
@@ -3671,7 +4046,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MOAGAN_TEMPERATURE_AUTO");
         }
-        for (name, spec) in &cfg.providers {
+        for (name, spec) in &cfg.providers_legacy {
             assert_eq!(
                 spec.temperature_auto_enabled, None,
                 "unrecognised value must not flip the field; provider {name}"
@@ -4631,7 +5006,7 @@ mod tests {
             }
         }
         let oc = cfg
-            .providers
+            .providers_legacy
             .get("opencode")
             .expect("opencode must be in default providers");
         assert!(
@@ -4640,7 +5015,7 @@ mod tests {
         );
         // Untouched section must remain `false`.
         let minimax = cfg
-            .providers
+            .providers_legacy
             .get("minimax")
             .expect("minimax must be in default providers");
         assert!(
@@ -4658,7 +5033,7 @@ mod tests {
         let prior = std::env::var("MOAGAN_OPENCODE_OMIT_MAX_TOKENS").ok();
         let mut cfg = Config::default();
         // Pretend the TOML flipped the bit on.
-        if let Some(spec) = cfg.providers.get_mut("opencode") {
+        if let Some(spec) = cfg.providers_legacy.get_mut("opencode") {
             spec.omit_max_tokens = true;
         }
         unsafe {
@@ -4674,7 +5049,7 @@ mod tests {
             }
         }
         let oc = cfg
-            .providers
+            .providers_legacy
             .get("opencode")
             .expect("opencode must be in default providers");
         assert!(
@@ -4703,7 +5078,7 @@ mod tests {
             }
         }
         let oc = cfg
-            .providers
+            .providers_legacy
             .get("opencode")
             .expect("opencode must be in default providers");
         assert!(
@@ -4723,13 +5098,13 @@ mod tests {
     #[test]
     fn provider_config_omit_max_tokens_toml_round_trip() {
         let mut cfg = Config::default();
-        if let Some(spec) = cfg.providers.get_mut("opencode") {
+        if let Some(spec) = cfg.providers_legacy.get_mut("opencode") {
             spec.omit_max_tokens = true;
         }
         let raw = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
         let oc = back
-            .providers
+            .providers_legacy
             .get("opencode")
             .expect("opencode section must survive TOML round-trip");
         assert!(
@@ -4809,12 +5184,12 @@ model = "mock-user-xdg"
 
         let cfg = Config::load().expect("Config::load succeeds");
         assert!(
-            cfg.providers.contains_key("cwd_marker"),
+            cfg.providers_legacy.contains_key("cwd_marker"),
             "cwd moagan.toml must be loaded; providers: {:?}",
-            cfg.providers.keys().collect::<Vec<_>>()
+            cfg.providers_legacy.keys().collect::<Vec<_>>()
         );
         assert!(
-            !cfg.providers.contains_key("user_xdg_marker"),
+            !cfg.providers_legacy.contains_key("user_xdg_marker"),
             "user XDG config.toml must be IGNORED when cwd file is present (strict precedence)"
         );
     }
@@ -4860,12 +5235,12 @@ model = "mock-env-var"
 
         let cfg = Config::load().expect("Config::load succeeds");
         assert!(
-            cfg.providers.contains_key("env_var_marker"),
+            cfg.providers_legacy.contains_key("env_var_marker"),
             "MOAGAN_CONFIG must win over cwd file; providers: {:?}",
-            cfg.providers.keys().collect::<Vec<_>>()
+            cfg.providers_legacy.keys().collect::<Vec<_>>()
         );
         assert!(
-            !cfg.providers.contains_key("cwd_marker"),
+            !cfg.providers_legacy.contains_key("cwd_marker"),
             "cwd file must be IGNORED when MOAGAN_CONFIG is set"
         );
     }
@@ -4904,7 +5279,7 @@ model = "mock-user-xdg-only"
 
         let cfg = Config::load().expect("Config::load succeeds");
         assert!(
-            cfg.providers.contains_key("user_xdg_only_marker"),
+            cfg.providers_legacy.contains_key("user_xdg_only_marker"),
             "user XDG config.toml must be loaded when no cwd file exists"
         );
     }
@@ -4956,11 +5331,11 @@ model = "mock-hidden-dotfile"
 
         let cfg = Config::load().expect("Config::load succeeds");
         assert!(
-            cfg.providers.contains_key("hidden_dotfile_marker"),
+            cfg.providers_legacy.contains_key("hidden_dotfile_marker"),
             "./.moagan.toml must be honoured as an alt cwd file name"
         );
         assert!(
-            !cfg.providers.contains_key("user_xdg_dotfile_test"),
+            !cfg.providers_legacy.contains_key("user_xdg_dotfile_test"),
             "user XDG must be IGNORED when the hidden cwd file exists"
         );
     }
@@ -5003,14 +5378,14 @@ temperature = 0.42
 
         let cfg = Config::load().expect("Config::load succeeds");
         assert_eq!(
-            cfg.providers.get("minimax").unwrap().temperature,
+            cfg.providers_legacy.get("minimax").unwrap().temperature,
             Some(0.42),
             "operator's temperature override must reach the config"
         );
         // Defaults still present.
-        assert!(cfg.providers.contains_key("minimax"));
-        assert!(cfg.providers.contains_key("mock"));
-        assert!(cfg.providers.contains_key("deepseek"));
+        assert!(cfg.providers_legacy.contains_key("minimax"));
+        assert!(cfg.providers_legacy.contains_key("mock"));
+        assert!(cfg.providers_legacy.contains_key("deepseek"));
     }
 
     #[test]
@@ -5053,7 +5428,7 @@ api_key = "this-belongs-in-api_keys.toml"
         // (its default behaviour for unknown keys); the rest of the
         // default provider entry is kept.
         assert!(
-            cfg.providers.contains_key("minimax"),
+            cfg.providers_legacy.contains_key("minimax"),
             "minimax entry must survive even though the user only wrote unknown keys"
         );
     }
@@ -5107,3 +5482,6 @@ replicas_per_temperature = 2
         assert_eq!(default.replicas_per_temperature, 2);
     }
 }
+
+#[cfg(test)]
+mod dual_mode_integration;
