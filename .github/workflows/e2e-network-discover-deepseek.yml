@@ -62,12 +62,24 @@ jobs:
           fi
           echo "OK: DEEPSEEK_API_KEY is set ($(echo -n "$DEEPSEEK_API_KEY" | wc -c) chars)"
 
+      - name: prepare logs directory
+        run: mkdir -p logs
+
       - name: T3 · e2e-network (discover deepseek, real LLM)
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BIN: ${{ github.workspace }}/target/release/moagan
           MOAGAN_SMOKE_SECTION: discover_deepseek
-        run: make e2e-network-discover-deepseek
+        run: |
+          bash -c '
+          make e2e-network-discover-deepseek
+          ' > logs/${{ github.job }}-stdout.log 2> logs/${{ github.job }}-stderr.log
+
+      - name: gzip captured logs
+        if: always()
+        run: |
+          gzip -9 -f logs/${{ github.job }}-stdout.log logs/${{ github.job }}-stderr.log || true
+          ls -la logs/ || true
 
       - name: upload discover-deepseek artifacts
         if: always()
@@ -78,3 +90,26 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
           include-hidden-files: true
+
+      - name: upload moagan stdout artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-${{ github.job }}-stdout
+          path: logs/${{ github.job }}-stdout.log.gz
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: upload moagan stderr artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-${{ github.job }}-stderr
+          path: logs/${{ github.job }}-stderr.log.gz
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: print artifact hint on failure
+        if: failure()
+        run: |
+          echo "::error::Moagan run failed in '${{ github.job }}'. Full stdout is in the 'moagan-${{ github.job }}-stdout' artifact and full stderr is in 'moagan-${{ github.job }}-stderr' (retention: 7 days)."

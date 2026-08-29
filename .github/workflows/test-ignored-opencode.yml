@@ -75,10 +75,14 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
+      - name: prepare logs directory
+        run: mkdir -p logs
+
       - name: cargo test integration_discover_opencode -- --ignored (gated on OPENCODE_API_KEY)
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
+          bash -c '
           echo "============================================================"
           echo "DIAGNOSTIC HEADER"
           echo "  GitHub Actions run: $GITHUB_RUN_ID / attempt $GITHUB_RUN_ATTEMPT"
@@ -104,6 +108,13 @@ jobs:
           echo "cargo test finished at $(date -u +%H:%M:%SZ) (wall-clock $((END_TS - START_TS))s, rc=$CARGO_RC)"
           echo "============================================================"
           exit $CARGO_RC
+          ' > logs/${{ github.job }}-stdout.log 2> logs/${{ github.job }}-stderr.log
+
+      - name: gzip captured logs
+        if: always()
+        run: |
+          gzip -9 -f logs/${{ github.job }}-stdout.log logs/${{ github.job }}-stderr.log || true
+          ls -la logs/ || true
 
       - name: upload test-ignored artifacts
         if: always()
@@ -113,3 +124,26 @@ jobs:
           path: target/test-runs/opencode/
           retention-days: 1
           if-no-files-found: warn
+
+      - name: upload moagan stdout artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-${{ github.job }}-stdout
+          path: logs/${{ github.job }}-stdout.log.gz
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: upload moagan stderr artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moagan-${{ github.job }}-stderr
+          path: logs/${{ github.job }}-stderr.log.gz
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: print artifact hint on failure
+        if: failure()
+        run: |
+          echo "::error::Moagan run failed in '${{ github.job }}'. Full stdout is in the 'moagan-${{ github.job }}-stdout' artifact and full stderr is in 'moagan-${{ github.job }}-stderr' (retention: 7 days)."
