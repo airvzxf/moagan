@@ -49,7 +49,7 @@ body:
     attributes:
       label: Documentation impact
       description: "Which doc needs to change? (README, docs/proposal-*.md, AGENTS.md, …)"
-      placeholder: "Probably docs/proposal-02-rust.md §5.3."
+      placeholder: "Probably the relevant src/ file and section."
     validations:
       required: false
 

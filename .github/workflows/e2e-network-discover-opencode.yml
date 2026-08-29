@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
 
 # Manual-only discover validation against the opencode provider
-# (model `mimo-v2.5`, the operator's smoke-test pin per
-# `docs/proposal-03-add-ons.md`). Extracted from `e2e-network.yml`
-# on 2026-08-19 to keep the auto workflow cheap on every push to
+# (model `mimo-v2.5`, the operator's smoke-test pin). Extracted from
+# `e2e-network.yml` on 2026-08-19 to keep the auto workflow cheap on
+# every push to
 # main. Trigger from the Actions tab → this workflow → "Run workflow".
 #
 # Self-builds the release binary locally instead of depending on the

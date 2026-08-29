@@ -33,12 +33,7 @@
 
 ## Architectural authority
 
-1. `docs/proposal-01-concept.md` (product vision; spec id V4).
-2. `docs/proposal-02-rust.md` (Rust implementation spec, normative; spec id T01-06).
-3. `docs/proposal-03-add-ons.md` (additive patch catalog, opt-in; spec id 10-integrada-v0, base T01-06).
-
-When conflicts arise, T01-06 wins. Catalog patches are opt-in and documented inline in
-`docs/proposal-03-add-ons.md` (each section is an opt-in overlay).
+The source code (`src/`) is the canonical spec. When documentation and code conflict, **code wins**. ADRs in `docs/adr/` capture the *why* behind decisions; they are historical, not normative.
 
 ## Validation tiers
 

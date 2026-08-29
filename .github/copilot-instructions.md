@@ -78,5 +78,5 @@ inflating the existing ones.
 
 Prefer the conservative answer. The `verify` step matters more than
 the speed of the answer. If a question requires architectural
-authority, refer to `docs/proposal-02-rust.md` (T01-06, normative)
-and `docs/proposal-03-add-ons.md` (opt-in catalog).
+authority, refer to the source code (`src/`) first; ADRs in `docs/adr/`
+capture the rationale behind major decisions.
