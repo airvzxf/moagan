@@ -98,6 +98,40 @@ pub static TEST_MINIMAX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 #[cfg(test)]
 pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialises every test that mutates `MOAGAN_EVENT_FORMAT` (the
+/// env var honoured by clap's `env = "MOAGAN_EVENT_FORMAT"`
+/// binding at `src/cli/mod.rs:255` and by `resolve_event_format`
+/// at `src/telemetry/stdout_events.rs:67`). Currently consumed by:
+///
+/// - `src/cli/mod.rs::tests::event_format_default_is_auto`
+///   (line 2652) — removes the env var.
+/// - `src/cli/mod.rs::tests::event_format_env_off_reaches_parser`
+///   (line 2679) — sets the env var to `"off"` and reads via clap.
+///
+/// Without this lock, parallel `cargo test` runs let sibling
+/// tests observe env state owned by a test mid-flight — the same
+/// flake pattern closed in PR #246 for `MOAGAN_LOG_FORMAT` (see
+/// `docs/test-skips.md §3 Layer 2 closing notes`) and re-applied in
+/// PR #677 for `MOAGAN_DECISION_FORMAT` at
+/// `src/telemetry/stdout_events.rs:406`. Note that
+/// `src/telemetry/stdout_events.rs:406` is a *module-local* lock
+/// (different env var) — it does not protect
+/// `MOAGAN_EVENT_FORMAT`; a test that touches both env vars must
+/// acquire both locks.
+///
+/// The lock only needs to cover the `Cli::try_parse_from` parse
+/// window because clap reads `env = MOAGAN_EVENT_FORMAT` at parse
+/// time, not at every subsequent read; this distinguishes it
+/// from PR #677's lock, which must cover a longer window because
+/// `resolve_decision_format` is consulted at every decision emit.
+///
+/// Gated with `#[cfg(test)]` matching the `TEST_MOAGAN_HOME_LOCK`
+/// precedent — only unit tests in `src/cli/mod.rs` need it today;
+/// integration tests use `cmd.env(...)` on a child process and do
+/// not race with this lock.
+#[cfg(test)]
+pub static TEST_EVENT_FORMAT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;

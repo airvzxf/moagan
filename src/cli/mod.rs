@@ -2361,6 +2361,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_EVENT_FORMAT_LOCK;
     use crate::TEST_MOAGAN_HOME_LOCK;
 
     /// Allocate a fresh `(TempDir, path)` pair.
@@ -2588,9 +2589,11 @@ mod tests {
     /// (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
     #[test]
     fn log_to_stderr_env_accepts_shell_idiomatic_one() {
-        // SAFETY: tests in this module serialize on
-        // `TEST_MOAGAN_HOME_LOCK` (the upper scope); env mutations
-        // are scoped to this test body and undone in the cleanup.
+        // SAFETY: tests in this module serialise on one of
+        // `TEST_MOAGAN_HOME_LOCK` (for `MOAGAN_HOME` /
+        // `MOAGAN_LOG_TO_STDERR` mutations) or `TEST_EVENT_FORMAT_LOCK`
+        // (for `MOAGAN_EVENT_FORMAT` mutations). Env mutations are
+        // scoped to each test body and undone in its cleanup.
         let _guard = TEST_MOAGAN_HOME_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2650,7 +2653,13 @@ mod tests {
     /// `MOAGAN_EVENT_FORMAT=off`).
     #[test]
     fn event_format_default_is_auto() {
-        let _guard = TEST_MOAGAN_HOME_LOCK
+        // Save-and-restore pattern (same as PR #677 at
+        // `src/telemetry/stdout_events.rs:557-567`): if the test
+        // panics between `remove_var` and the end, the inherited
+        // value is still restored. Lock guards against concurrent
+        // access; the save/restore guards against panic leakage.
+        let prev = std::env::var("MOAGAN_EVENT_FORMAT").ok();
+        let _guard = TEST_EVENT_FORMAT_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
@@ -2662,6 +2671,13 @@ mod tests {
             EventFormatArg::Auto,
             "default for --event-format must be Auto (issue #657 fix #2)"
         );
+        drop(_guard);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_EVENT_FORMAT", v),
+                None => std::env::remove_var("MOAGAN_EVENT_FORMAT"),
+            }
+        }
     }
 
     /// Issue #657 fix #2: an inherited `MOAGAN_EVENT_FORMAT=off`
@@ -2677,7 +2693,10 @@ mod tests {
     /// `MOAGAN_EVENT_FORMAT` inherited-off case).
     #[test]
     fn event_format_env_off_reaches_parser() {
-        let _guard = TEST_MOAGAN_HOME_LOCK
+        // Same save/restore pattern as
+        // `event_format_default_is_auto` above.
+        let prev = std::env::var("MOAGAN_EVENT_FORMAT").ok();
+        let _guard = TEST_EVENT_FORMAT_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
@@ -2689,8 +2708,12 @@ mod tests {
             EventFormatArg::Off,
             "MOAGAN_EVENT_FORMAT=off must reach the parser as Off (issue #657 fix #2)"
         );
+        drop(_guard);
         unsafe {
-            std::env::remove_var("MOAGAN_EVENT_FORMAT");
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_EVENT_FORMAT", v),
+                None => std::env::remove_var("MOAGAN_EVENT_FORMAT"),
+            }
         }
     }
 
