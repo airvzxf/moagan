@@ -631,6 +631,12 @@ impl DiscoveryCoordinator {
             let auto_clusters: Vec<String> = matrix.iter_cells().map(|c| c.label.clone()).collect();
             if ctx.config.discovery.persona_enabled
                 && !auto_candidates.is_empty()
+                // Persona picker auto-invoke gate: only fires when
+                // the matrix has at least 5 sketches total. With
+                // `sketches_per_cell = 1` and ≤4 cells, the picker
+                // is skipped (this is the documented behaviour for
+                // tiny / debug runs that opt into the v0.13.2
+                // floor of 1; it is not a regression).
                 && sketches_per_cell * matrix.cells().max(1) > 4
             {
                 match persona_angle::pick_persona(&ctx, auto_candidates).await {
@@ -2021,11 +2027,12 @@ mod tests {
     /// F2 (Track G.2): `sketches_per_cell` is set to `1` so the
     /// matrix cardinality equals the cell count (8 cells × 1 = 8
     /// sketches) — matching the v0.5 pre-F1 contract these
-    /// regression tests pinned. The new F2 default
+    /// regression tests pinned. The F2 default
     /// (`sketches_per_cell = 10`) would fan out 80 sketches and
-    /// require a 80-entry mock buffer; pinning `1` keeps the
-    /// existing test fixtures bit-identical to the pre-F1
-    /// behaviour.
+    /// require a 80-entry mock buffer; pinning `1` is a fast
+    /// mock-buffer fixture, not a workaround for a floor (the
+    /// operator-facing floor was lowered to 1 in v0.13.2, so
+    /// the test value happens to equal the floor).
     fn build_run_ctx(home: MoaganHome, scripted: Arc<ScriptedProvider>) -> Arc<RunContext> {
         let mut registry = crate::llm::ProviderRegistry::default();
         registry.insert("mock".into(), scripted);
@@ -2114,6 +2121,9 @@ mod tests {
         // per cell. `build_run_ctx` pins `sketches_per_cell = 1`
         // so the matrix cardinality stays at 8 (F2 default of 10
         // would fan out 80 and break the 8-entry mock buffer).
+        // Note: with the v0.13.2 floor of 1, `1` is the same as
+        // the floor — this is a fast mock-buffer fixture, not a
+        // bypass of the floor.
         // The coordinator's actual fan-out is the matrix's
         // cardinality (= 8 cells × 1 = 8 sketches), not the
         // mode-derived soft target (7), so the assertion uses the
@@ -2376,7 +2386,9 @@ mod tests {
             // F2 (Track G.2): pin `sketches_per_cell = 1` so the
             // matrix cardinality stays at 8 cells × 1 = 8 — the
             // F2 default of 10 would inflate the mock buffer
-            // requirement from 8 to 80 entries.
+            // requirement from 8 to 80 entries. Note: with the
+            // v0.13.2 floor of 1, this is a fast mock-buffer
+            // fixture, not a workaround for a floor.
             let mut registry = crate::llm::ProviderRegistry::default();
             registry.insert("mock".into(), scripted_for_ctx);
             let mut cfg = crate::config::Config::default();
@@ -2541,7 +2553,9 @@ mod tests {
                     // pre-F2 8-skeleton the test asserts. The F2
                     // default of 10 would inflate the mock buffer
                     // by 10× and break the `expected_calls`
-                    // assertion below.
+                    // assertion below. Note: with the v0.13.2
+                    // floor of 1, this is a fast mock-buffer
+                    // fixture, not a workaround for a floor.
                     sketches_per_cell: 1,
                 },
                 ..crate::config::Config::default()

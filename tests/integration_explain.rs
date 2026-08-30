@@ -5,7 +5,7 @@
 //!
 //! 1. Print the explain table for the resolved config WITHOUT
 //!    launching the discovery pipeline.
-//! 2. Reject `--sketches-per-cell < 10` exactly the same way the
+//! 2. Reject `--sketches-per-cell < 1` exactly the same way the
 //!    real run does (so the operator gets the same error message).
 //! 3. Reject a malformed `--matrix-spec` exactly the same way the
 //!    real run does (so the explain path never silently papers
@@ -124,19 +124,20 @@ fn explain_invalid_spec_returns_invalid_args_error() {
     );
 }
 
-/// F3: `moagan discover --explain --sketches-per-cell 5` errors
+/// F3: `moagan discover --explain --sketches-per-cell 0` errors
 /// with the F2 floor message, exactly as the real run would.
 /// The dispatcher enforces this for the pipeline; the explain
 /// helper re-checks it so the contract is the same on both
-/// surfaces.
+/// surfaces. v0.13.2 lowered the floor from 10 to 1, so the
+/// only rejected value is `0`.
 #[test]
 fn explain_below_minimum_sketches_per_cell_rejects() {
     let mut opts = opts_minimal();
-    opts.sketches_per_cell = 5;
+    opts.sketches_per_cell = 0;
     let cfg = Config::default();
     let err = build_and_format(&opts, &cfg).unwrap_err();
     assert!(
-        err.to_string().contains("below the minimum of 10"),
+        err.to_string().contains("below the minimum of 1"),
         "explain path must enforce the F2 floor; got {err}"
     );
 }

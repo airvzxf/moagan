@@ -156,19 +156,19 @@ run_test "cli_audit_help_mentions_verify" \
 # SECTION 2 — Sketches-per-cell validation (10 tests)
 # ---------------------------------------------------------------------
 
-run_test "sketches_per_cell_5_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 5 2>&1 | grep -q 'below the minimum of 10'"
+run_test "sketches_per_cell_5_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_0_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 1'"
 
-run_test "sketches_per_cell_1_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 1 2>&1 | grep -q 'below the minimum of 10'"
+run_test "sketches_per_cell_1_floor_ok" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
-run_test "sketches_per_cell_9_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 9 2>&1 | grep -q 'below the minimum of 10'"
+run_test "sketches_per_cell_9_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
-run_test "sketches_per_cell_10_floor_ok" \
+run_test "sketches_per_cell_default_ok" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_25_accepted" \
@@ -820,11 +820,11 @@ run_test "summary_exec_present" \
 run_test "discovery_pipeline_intake_first" \
   "grep -q 'Pipeline::new' ${ROOT}/src/cli/discover.rs | head -1 && grep -q 'push(IntakePhase)' ${ROOT}/src/cli/discover.rs"
 
-run_test "discovery_sketches_per_cell_floor_10" \
-  "grep -q 'sketches-per-cell {sketches_per_cell} below the minimum of 10' ${ROOT}/src/cli/mod.rs"
+run_test "discovery_sketches_per_cell_floor_1" \
+  "grep -q 'sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/mod.rs"
 
 run_test "discovery_floor_in_discover_rs" \
-  "grep -q 'below the minimum of 10' ${ROOT}/src/cli/discover.rs"
+  "grep -q 'below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/discover.rs"
 
 run_test "discovery_calls_build_registry" \
   "grep -q 'build_registry_for' ${ROOT}/src/cli/discover.rs"

@@ -67,8 +67,11 @@ pub const DEFAULT_SKETCHES_PER_CELL: usize = 10;
 /// F2 minimum allowed `sketches_per_cell`. Used by the CLI
 /// dispatcher's `--sketches-per-cell` validator AND the
 /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env-var parser so both
-/// surfaces reject the same floor.
-pub const MIN_SKETCHES_PER_CELL: usize = 10;
+/// surfaces reject the same floor. F2.x (v0.13.2) lowered the
+/// operator-facing floor to 1 to support debug / integration
+/// runs; default is unchanged at 10 to preserve the v0.5
+/// cardinality contract for nominal discovery runs.
+pub const MIN_SKETCHES_PER_CELL: usize = 1;
 
 /// Resolve the operator's input into an [`ExplorationMatrix`].
 ///
@@ -270,10 +273,10 @@ pub struct DiscoverOptions {
     pub mock_dir: Option<PathBuf>,
     /// F2 (Track G.2): sketches per matrix cell. The matrix
     /// fan-out is `cells() × sketches_per_cell ×
-    /// profile_total`. Default 10; floor 10 (replaces the
-    /// v0.5 `cardinality = 80` contract). The CLI's
-    /// `--sketches-per-cell` flag is the canonical
-    /// operator-facing knob; the
+    /// profile_total`. Default 10; floor 1 (replaces the
+    /// v0.5 `cardinality = 80` contract; floor lowered from
+    /// 10 in v0.13.2). The CLI's `--sketches-per-cell` flag
+    /// is the canonical operator-facing knob; the
     /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var and the
     /// `[discovery_matrix].sketches_per_cell` TOML key are
     /// merge-order fall-backs.
@@ -906,10 +909,11 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
 /// out of an argument list, falling back to the provided
 /// default when the flag is absent. Used by `discover_cmd` to
 /// validate the input before spawning the run. The F2 floor is
-/// `MIN_SKETCHES_PER_CELL = 10` (replaces the v0.5
-/// `cardinality >= 80` guard). The legacy `--cardinality` flag
-/// is rejected outright so a stale script does not silently
-/// fall back to the integer-division shortfall the F1
+/// `MIN_SKETCHES_PER_CELL = 1` (replaces the v0.5
+/// `cardinality >= 80` guard; lowered from 10 in v0.13.2).
+/// The legacy `--cardinality` flag is rejected outright so a
+/// stale script does not silently fall back to the
+/// integer-division shortfall the F1
 /// `derive_sketches_per_cell` helper relied on.
 #[allow(dead_code)]
 pub(crate) fn parse_sketches_per_cell(args: &[String], default: usize) -> Result<usize> {
@@ -942,7 +946,7 @@ pub(crate) fn parse_sketches_per_cell(args: &[String], default: usize) -> Result
         if arg == "--cardinality" || arg.starts_with("--cardinality=") {
             return Err(Error::InvalidArgs(
                 "--cardinality was renamed to --sketches-per-cell in F2; \
-                 pass --sketches-per-cell <N> instead (floor 10)"
+                 pass --sketches-per-cell <N> instead (floor 1)"
                     .to_owned(),
             ));
         }
@@ -1021,6 +1025,12 @@ fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
         .filter(|n| *n > 0);
     if let (Some(card), Some(cells)) = (legacy_cardinality, legacy_cells) {
         // Ceil-divide so 80 sketches on 8 cells → 10 per cell.
+        // Note: with floor=1 (v0.13.2), the `.max(MIN_SKETCHES_PER_CELL)`
+        // is effectively a no-op for any positive `card / cells` ratio
+        // — it only matters for malformed legacy sidecars whose
+        // cardinality is below `cells` (e.g. `card=4, cells=8 → 1 per
+        // cell`); the ceil-divide value is the new authoritative
+        // answer in that case.
         return card.div_ceil(cells).max(MIN_SKETCHES_PER_CELL);
     }
     RESUME_DEFAULT_SKETCHES_PER_CELL
@@ -1374,7 +1384,8 @@ mod tests {
     #[test]
     fn parse_sketches_per_cell_default_when_flag_missing() {
         // Default falls back when no flag was supplied. The F2
-        // floor (10) is the canonical operator- default and matches
+        // default is 10; the floor is `MIN_SKETCHES_PER_CELL = 1`
+        // (lowered from 10 in v0.13.2). The default here matches
         // the `default_value_t = 10` clap annotation on
         // `--sketches-per-cell`.
         let v = parse_sketches_per_cell(&[], 10).unwrap();
@@ -1396,22 +1407,22 @@ mod tests {
 
     #[test]
     fn parse_sketches_per_cell_rejects_below_minimum() {
-        let e = parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "5".to_string()], 10)
+        let e = parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "0".to_string()], 10)
             .unwrap_err();
         assert!(
-            e.to_string().contains("below the minimum of 10"),
+            e.to_string()
+                .contains(&format!("below the minimum of {MIN_SKETCHES_PER_CELL}")),
             "error must mention the F2 floor; got {e:?}"
         );
     }
 
     #[test]
-    fn parse_sketches_per_cell_accepts_floor() {
-        // 10 is the F2 floor; values at the floor must round-trip
-        // unchanged (the > check rejects only values strictly
-        // below 10).
-        let v = parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "10".to_string()], 10)
+    fn parse_sketches_per_cell_accepts_new_floor() {
+        // 1 is the v0.13.2 operator-facing floor; values at or
+        // above the floor round-trip unchanged.
+        let v = parse_sketches_per_cell(&["--sketches-per-cell".to_string(), "1".to_string()], 10)
             .unwrap();
-        assert_eq!(v, 10);
+        assert_eq!(v, 1);
     }
 
     #[test]
@@ -1617,6 +1628,8 @@ mod tests {
         let run_dir = home.run_dir(run_id);
         run_dir.ensure().expect("ensure run_dir");
         // 4 dims × 2 facets = 8 cells; cardinality = 80 → 10 per cell.
+        // (The 10 comes from ceil-div `80 / 8`, not from the v0.13.2
+        // floor of 1 — this assertion would also hold at floor=10.)
         let matrix_json = serde_json::json!({
             "cells": 8,
             "cardinality": 80,

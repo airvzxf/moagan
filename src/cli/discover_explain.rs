@@ -196,6 +196,10 @@ fn resolve_cells(opts: &DiscoverOptions) -> Result<(usize, ValueSource)> {
 /// 2. TOML `[discovery_matrix].sketches_per_cell` → `Toml`.
 /// 3. Built-in default 10 → `Default`.
 ///
+/// The operator-facing floor is 1 (lowered from 10 in v0.13.2);
+/// only the default remains 10. The floor is enforced at the
+/// CLI layer and re-checked below in `build_and_format`.
+///
 /// The `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var is applied
 /// inside `Config::apply_env_overrides` (before this helper sees
 /// the config) so a `Toml` source here actually means "the env
@@ -429,9 +433,10 @@ fn format_results(input: &ExplainInput) -> String {
 pub fn build_and_format(opts: &DiscoverOptions, _cfg: &Config) -> Result<String> {
     debug!("discover_explain::build_and_format: enter");
     // Validation: the F2 floor is enforced at the CLI layer
-    // (the dispatcher rejects `sketches_per_cell < 10`), but we
-    // re-check here so the explain path matches the real run's
-    // contract. This way, `moagan discover --sketches-per-cell 5
+    // (the dispatcher rejects `sketches_per_cell <
+    // MIN_SKETCHES_PER_CELL` — 1 as of v0.13.2), but we re-check
+    // here so the explain path matches the real run's contract.
+    // This way, `moagan discover --sketches-per-cell 0
     // --explain` errors out exactly the same way a non-explain
     // invocation would.
     if opts.sketches_per_cell < MIN_SKETCHES_PER_CELL {
@@ -746,11 +751,11 @@ Surviving sketches = ≤ 1920";
     #[test]
     fn build_and_format_rejects_sketches_below_floor() {
         let mut o = opts();
-        o.sketches_per_cell = 5;
+        o.sketches_per_cell = 0;
         let cfg = Config::default();
         let err = build_and_format(&o, &cfg).unwrap_err();
         assert!(
-            err.to_string().contains("below the minimum of 10"),
+            err.to_string().contains("below the minimum of 1"),
             "error must mention the floor; got {err}"
         );
     }

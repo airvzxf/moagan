@@ -10,6 +10,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing::{debug, error, info, trace, warn};
 
+use crate::cli::discover::MIN_SKETCHES_PER_CELL;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
@@ -802,10 +803,14 @@ pub enum Cmd {
         /// F2 (Track G.2): sketches per matrix cell. The matrix
         /// fan-out is `cells() × sketches_per_cell ×
         /// profile_total`. Default `10` (replaces the v0.5
-        /// `cardinality = 80` floor); must be `>= 10`. A 4-dim
-        /// × 2-facet matrix with the default fan-out produces
-        /// 80 sketches; raise `sketches_per_cell` to expand the
-        /// per-cell fan-out without adding cells. Overridden by
+        /// `cardinality = 80` floor); must be `>= 1` (the F2
+        /// operator-facing floor, lowered from `10` in v0.13.2).
+        /// A 4-dim × 2-facet matrix with the default fan-out
+        /// produces 80 sketches; raise `sketches_per_cell` to
+        /// expand the per-cell fan-out without adding cells.
+        /// Lower bound 1 is intended for integration tests and
+        /// debugging; nominal discovery runs should use the
+        /// default 10. Overridden by
         /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` (env) and
         /// `[discovery_matrix].sketches_per_cell` (TOML); the
         /// CLI flag wins on conflict.
@@ -1944,13 +1949,14 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             temperature_profiles,
             explain,
         } => {
-            if sketches_per_cell < 10 {
+            if sketches_per_cell < MIN_SKETCHES_PER_CELL {
                 warn!(
                     sketches_per_cell = sketches_per_cell,
-                    "sketches-per-cell below F2 floor"
+                    min = MIN_SKETCHES_PER_CELL,
+                    "sketches-per-cell below floor"
                 );
                 return Err(Error::InvalidArgs(format!(
-                    "sketches-per-cell {sketches_per_cell} below the minimum of 10"
+                    "sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}"
                 )));
             }
             // F1: `--facets-per-dimension` only makes sense when the
