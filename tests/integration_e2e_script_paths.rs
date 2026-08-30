@@ -205,34 +205,10 @@ fn latest_run_dir(root: &Path) -> Option<PathBuf> {
     entries.into_iter().next().map(|(_, path)| path)
 }
 
-/// Write a minimal `moagan.toml` overriding the default `minimax`
-/// section with a single model capped at 131072. The point of
-/// `[[providers.minimax.models]]` here (rather than relying on the
-/// default which carries `max_tokens = 1_000_000`) is to pin the
-/// operator-side fix for bug #4. Endpoint is set to the canonical
-/// MiniMax Anthropic URL so `MOAGAN_MINIMAX_ENDPOINT` env rewrite
-/// has a `/messages`-bearing anchor to match.
-fn write_minimax_cap_config(path: &Path) {
-    let body = r#"# Minimal override for integration_e2e_script_paths::run_through_audit_proxy_*
-# (tests/integration_e2e_script_paths.rs).
-#
-# Pins bug #4: the operator-side max_tokens cap must clamp the
-# wire body so MiniMax-M2.7 does not return HTTP 400. A
-# regression that drops this TOML (or that ignores
-# `ModelConfig::max_tokens` in `MinimaxProvider::send`) makes
-# every request exceed 131072 on the wire and the mock returns
-# 400; the test below asserts on the largest observed
-# `max_tokens`, so the regression fails explicitly.
-
-[providers.minimax]
-endpoint = "https://api.minimax.io/anthropic/v1/messages"
-
-[[providers.minimax.models]]
-id = "MiniMax-M2.7"
-max_tokens = 131072
-"#;
-    std::fs::write(path, body).expect("write moagan.toml override");
-}
+// v0.13.1 removed the legacy heredoc; the 131072 cap for MiniMax-M2.7 is
+// now pinned via `MOAGAN_MINIMAX_MAX_TOKENS=131072` (see
+// `docs/max-tokens-auto.md`). The default `minimax` section's endpoint is
+// overridden per-test via `MOAGAN_MINIMAX_ENDPOINT`.
 
 // ---------------------------------------------------------------------------
 // Test #1 — Bug #2: bare `--provider minimax` (no `:MODEL`) is rejected
@@ -431,9 +407,11 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
     let runs_dir = tmp.path().join("runs");
     std::fs::create_dir_all(&runs_dir).expect("mkdir runs");
 
-    // Pin bug #4: write the operator-side override.
-    let config_path = tmp.path().join("moagan.toml");
-    write_minimax_cap_config(&config_path);
+    // Pin bug #4: the operator-side max_tokens cap (131072) is now
+    // applied via the `MOAGAN_MINIMAX_MAX_TOKENS` env var below
+    // The default config carries the canonical `/v1/messages`
+    // endpoint, which is overridden per-test via
+    // `MOAGAN_MINIMAX_ENDPOINT`.
 
     // The `temperature` startup auto-probe is disabled via the
     // `MOAGAN_TEMPERATURE_AUTO=false` env var below (issue
@@ -468,7 +446,6 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
         .env_remove("MINIMAX_API_KEY")
         .env_remove("MOAGAN_QUIET")
         .env("MOAGAN_HOME", &runs_dir)
-        .env("MOAGAN_CONFIG", &config_path)
         .env("MOAGAN_MAX_TOKEN_AUTO", "false")
         .env("MOAGAN_MAX_TOKEN_AUTO_SAVE", "false")
         .kill_on_drop(true)
@@ -507,14 +484,18 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
         .arg(&runs_dir)
         .current_dir(tmp.path())
         .env("MOAGAN_HOME", &runs_dir)
-        .env("MOAGAN_CONFIG", &config_path)
         .env(
             "MOAGAN_MINIMAX_ENDPOINT",
             format!("http://127.0.0.1:{port}/anthropic/v1/messages"),
         )
+        // Pin bug #4: the operator-side max_tokens cap is now
+        // applied via env var (v0.13.1 removed the legacy
+        // `[providers.minimax.models]` heredoc). See
+        // `docs/max-tokens-auto.md` §"Tuning the floor".
+        .env("MOAGAN_MINIMAX_MAX_TOKENS", "131072")
         .env("MINIMAX_API_KEY", "test-key")
         // Disable the `max_tokens` and `temperature` startup
-        // auto-probes. The override TOML sets
+        // auto-probes. The MOAGAN_MINIMAX_MAX_TOKENS env var sets
         // `max_tokens = 131072` directly, so the max-tokens
         // probe is redundant — the operator-side cap is the
         // source of truth. The temperature probe is the

@@ -93,7 +93,7 @@ spellings: `false` / `0` / `no` / `off`, mirroring
 `MOAGAN_<name>_OMIT_MAX_TOKENS`). The same env var is consulted in
 `src/config/mod.rs::apply_env_overrides` for every provider entry.
 For per-provider opt-out, set
-`[providers.<name>] temperature_auto_enabled = false` in
+`[[providers.<name>]] temperature_auto_enabled = false` in
 `config.toml` (parity with `max_token_auto_enabled`). The
 hand-edit / delete-the-cache-file path is still supported as a last
 resort but is no longer the only path.
@@ -278,7 +278,7 @@ manually first and let the next startup read the cached value.
   is rewritten when the auto-probe is enabled (the default) and the
   current probe returns a different set. Disable the background
   probe with `MOAGAN_TEMPERATURE_AUTO=false` (or set
-  `[providers.<name>] temperature_auto_enabled = false`) to keep the
+  `[[providers.<name>]] temperature_auto_enabled = false`) to keep the
   cached entry untouched across runs. The hand-edit
   (`providers[provider][model].auto = false`) and delete-the-cache-file
   paths remain as fallbacks.

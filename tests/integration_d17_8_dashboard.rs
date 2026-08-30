@@ -35,7 +35,7 @@ fn mock_run_writes_dashboard_html() {
 
     // v0.10 dispatcher requires the `--provider SECTION` shorthand
     // to resolve to a configured model id; `Config::default()` ships
-    // `[providers.mock]` with an empty `models[]` list. Drop a
+    // `[[providers.mock]]` with an empty `models[]` list. Drop a
     // one-line config onto disk that registers `mock-model` under
     // the `mock` section so the dispatcher finds it. The
     // `MOAGAN_CONFIG` env var overrides the user-level config
@@ -44,10 +44,9 @@ fn mock_run_writes_dashboard_html() {
     let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
     std::fs::write(
         &mock_cfg_path,
-        "[providers.mock]\n\
+        "[[providers.mock]]\n\
          endpoint = \"mock://local\"\n\
-         mock_dir = \"tests/fixtures/mock_provider\"\n\
-         models = [{ id = \"mock-model\" }]\n",
+         models = [\"mock-model\"]\n",
     )
     .expect("write mock config");
 

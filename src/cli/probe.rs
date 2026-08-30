@@ -198,7 +198,7 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         let spec = cfg.providers_legacy.get(provider).cloned().ok_or_else(|| {
             Error::InvalidArgs(format!(
                 "probe: provider '{provider}' is not in the loaded config; \
-                 register it under [providers.{provider}] in config.toml first"
+                 register it under [[providers.{provider}]] (array-of-tables) in config.toml first"
             ))
         })?;
         // v0.10: the model id is required and the spec is the
@@ -383,7 +383,7 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
         let spec = cfg.providers_legacy.get(provider).cloned().ok_or_else(|| {
             Error::InvalidArgs(format!(
                 "probe: provider '{provider}' is not in the loaded config; \
-                 register it under [providers.{provider}] in config.toml first"
+                 register it under [[providers.{provider}]] (array-of-tables) in config.toml first"
             ))
         })?;
         // v0.10: the model id is required and the spec is the

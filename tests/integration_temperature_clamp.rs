@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moagan::config::{Config, ProviderConfig};
+use moagan::config::{Config, ProviderEntry, SectionKnobs};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
@@ -141,21 +141,19 @@ fn build_context(
     registry.insert("recording".into(), provider_dyn);
 
     let mut cfg = Config::default();
-    cfg.providers_legacy.insert(
+    cfg.providers.insert(
         "recording".to_owned(),
-        ProviderConfig {
-            endpoint: None,
+        vec![ProviderEntry {
+            endpoint: "recording://local".to_owned(),
             models: Vec::new(),
-            temperature: None,
-            top_p: None,
-            omit_max_tokens: false,
-            max_token_auto: None,
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        },
+            knobs: SectionKnobs {
+                max_token_auto_save: true,
+                ..SectionKnobs::default()
+            },
+        }],
     );
+    cfg.compute_legacy_providers()
+        .expect("recording section must collapse without error");
     let ctx = RunContext::new_with_config(
         run_id,
         home,

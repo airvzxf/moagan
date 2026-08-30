@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-08-30
+
+### Removed (BREAKING — early removal of v0.13.0 deprecation)
+
+- **Legacy `[providers.<name>]` single-table config schema** — the
+  dual-mode deserializer (`src/config/dual_mode.rs`,
+  `src/config/dual_mode_integration.rs`) introduced in v0.13.0 is
+  removed entirely. The `[[providers.<name>]]` array-of-tables
+  shape (the v0.13.0 canonical form) is the only accepted schema.
+  v0.13.0 documented the removal at v0.15; v0.13.1 pulls the
+  cutover forward because the repo is private and has no external
+  users on the legacy shape. A v0.12-era `config.toml` now fails
+  to parse with a `tracing::error!` that points at this migration
+  recipe. See
+  [`docs/adr/0003-config-schema-array-of-tables.md`](docs/adr/0003-config-schema-array-of-tables.md)
+  (historical) and the new
+  [`docs/adr/0004-accelerate-legacy-config-removal.md`](docs/adr/0004-accelerate-legacy-config-removal.md).
+- **`ProviderEntry::legacy_model_max_tokens` side-channel field**
+  (formerly at `src/config/mod.rs:1614` in v0.13.0; the field no
+  longer exists in v0.13.1) — removed. Per-model `max_tokens = N`
+  was carried via this field; v0.13.1 drops the bridge that
+  needed it. Operators who relied on the per-model cap must
+  migrate to `MOAGAN_<SECTION>_MAX_TOKENS=N` env var.
+- **`scripts/check-no-legacy-config-schema.sh`** — removed (the
+  CI guard became a tautology once the legacy shape was removed
+  from the source). Dropped from `make guard-deps` and
+  `scripts/gauntlet.sh`.
+- **`docs/migrations/v0.12-to-v0.13-config.md`** — the migration
+  guide is closed (the migration window is over). The §4
+  `MOAGAN_<SECTION>_MAX_TOKENS` content is preserved in
+  [`docs/max-tokens-auto.md`](docs/max-tokens-auto.md) §"Tuning
+  the floor".
+- **`tests/integration_config_dual_mode.rs`** + the 7 fixtures
+  under `tests/fixtures/config/v013_dual_mode/` — removed.
+  Coverage that exercised the bridge no longer applies.
+
+### Changed
+
+- **`src/config/mod.rs`** — `pub mod dual_mode;`, both
+  `#[serde(deserialize_with = "dual_mode::*")]` attributes, and
+  the `legacy_model_max_tokens` field on `ProviderEntry` are gone.
+  The `compute_legacy_providers()` collapse function is retained
+  because `src/cli/*.rs`, `src/llm/provider.rs`, and
+  `src/phases/phase.rs` continue to read the canonical
+  `cfg.providers_legacy` view (~80 call sites). Only the legacy
+  TOML *input* path is removed.
+
+### Internal
+
+- Duplicate-id detection moves inline into `Config::load` (it
+  was inside the bridge body at L1898–1903).
+- `Config::load` now emits a friendly `tracing::error!` when a
+  v0.12-shape TOML fails to parse.
+- `e2e_audit_proxy.sh` heredoc at L237–255 migrated to
+  `MOAGAN_MINIMAX_MAX_TOKENS=131072` env var (the
+  per-test TOML write is gone).
+
+### Documentation
+
+- **`docs/adr/0003-config-schema-array-of-tables.md`** — kept
+  verbatim as historical record of the v0.13.0 decision.
+- **`docs/adr/0004-accelerate-legacy-config-removal.md`** — new
+  ADR documenting the v0.13.1 acceleration.
+- **`config.example.toml`** — LEGACY block (L110–149) deleted;
+  header (L1–18) and bridge comment (L54–58) rewritten to
+  v0.13-only.
+- **`docs/max-tokens-auto.md`** — §"When to disable it" TOML
+  example (L41–48) rewritten to v0.13 array-of-tables;
+  §"Tuning the floor" now hosts the env-var recipe previously
+  in the migration guide §4.
+- **`docs/temperatures-auto.md:96,281`** — `[providers.<name>]`
+  → `[[providers.<name>]]` syntax.
+
 ## [0.13.0] - 2026-08-29
 
 ### Changed (BREAKING — see ADR-0003)
