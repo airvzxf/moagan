@@ -3,12 +3,13 @@
 //! keep working during the F1 transition window.
 //!
 //! F2 is the feature that renames `--cardinality` to
-//! `--sketches-per-cell` and lowers the floor. Until F2 lands,
-//! the legacy flag pair still drives an 8-cell matrix (the
-//! `4 × 2` placeholder layout) so existing CI runs and operator
-//! scripts that pass `--cardinality 80 --dimensions 4
-//! --facets-per-dimension 2` keep producing the same artefacts
-//! they produced pre-F1.
+//! `--sketches-per-cell` and lowers the floor. v0.13.2 lowered
+//! the floor from 10 to 1 (so debug / integration runs can fan
+//! out cheaply). Until F2 lands, the legacy flag pair still
+//! drives an 8-cell matrix (the `4 × 2` placeholder layout) so
+//! existing CI runs and operator scripts that pass
+//! `--cardinality 80 --dimensions 4 --facets-per-dimension 2`
+//! keep producing the same artefacts they produced pre-F1.
 //!
 //! The test below pins three behaviours:
 //!

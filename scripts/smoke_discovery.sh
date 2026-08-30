@@ -122,19 +122,19 @@ run_test "cli_no_mode_discovery_in_run" \
 # 2. Sketches-per-cell validation (10 tests)
 # ---------------------------------------------------------------------
 
-run_test "sketches_per_cell_below_floor_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 5 2>&1 | grep -q 'below the minimum of 10'"
+run_test "sketches_per_cell_five_accepted" \
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_zero_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 10'"
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 1'"
 
-run_test "sketches_per_cell_one_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 1 2>&1 | grep -q 'below the minimum of 10'"
+run_test "sketches_per_cell_one_floor_ok" \
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
-run_test "sketches_per_cell_nine_rejected" \
-  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 9 2>&1 | grep -q 'below the minimum of 10'"
+run_test "sketches_per_cell_nine_accepted" \
+  "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
-run_test "sketches_per_cell_10_floor_ok" \
+run_test "sketches_per_cell_default_ok" \
   "MOAGAN_HOME=$(mkhome) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
 
 run_test "sketches_per_cell_25_accepted" \

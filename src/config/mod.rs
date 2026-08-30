@@ -459,7 +459,7 @@ pub struct DiscoveryMatrixConfig {
     /// `--llm-derive` flag wins on conflict.
     #[serde(default)]
     pub llm_derive_first: bool,
-    /// F2 (Track G.2): sketches-per-cell floor for the matrix
+    /// F2 (Track G.2): sketches-per-cell knob for the matrix
     /// fan-out. The matrix's total cardinality is
     /// `cells() × sketches_per_cell`; the CLI's
     /// `--sketches-per-cell` flag (default `10`) and the
@@ -470,6 +470,9 @@ pub struct DiscoveryMatrixConfig {
     /// the per-cell fan-out from the cells count so a 4-dim
     /// × 2-facet matrix produces 80 sketches only when the
     /// operator explicitly sets `sketches_per_cell = 20`.
+    /// The operator-facing floor was lowered from `10` to `1`
+    /// in v0.13.2 to support debug / integration runs;
+    /// `MIN_SKETCHES_PER_CELL` is the single source of truth.
     /// The previous `MOAGAN_DISCOVERY_CARDINALITY` env var is
     /// removed; operators with that export must rename it.
     #[serde(default = "default_sketches_per_cell")]
@@ -487,10 +490,12 @@ fn default_sketches_per_cell() -> usize {
 
 /// F2 minimum allowed value for `sketches_per_cell`. The CLI's
 /// `--sketches-per-cell` flag and the `MOAGAN_DISCOVERY_SKETCHES_PER_CELL`
-/// env var reject anything below this floor. Matches the v0.5
-/// spec lower band (V4 §6.4 said "40–500" sketches; F2 splits
-/// that into "10 per cell minimum" + "operator picks cells count").
-pub(crate) const MIN_SKETCHES_PER_CELL: usize = 10;
+/// env var reject anything below this floor. F2.x (v0.13.2)
+/// lowered the operator-facing floor to `1` (from `10`) so
+/// debug / integration tests can fan out cheaply; default is
+/// unchanged at `10` to preserve the v0.5 cardinality contract
+/// for nominal discovery runs.
+pub(crate) const MIN_SKETCHES_PER_CELL: usize = 1;
 
 impl Default for DiscoveryMatrixConfig {
     fn default() -> Self {
@@ -2597,16 +2602,30 @@ impl Config {
         // over both (see `cli::discover::run`). Garbage / blank
         // exports leave the existing value alone so a stale env
         // var does not silently flip the floor.
-        if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL")
-            && let Ok(n) = v.trim().parse::<usize>()
-            && n >= MIN_SKETCHES_PER_CELL
-        {
-            tracing::trace!(
-                var = "MOAGAN_DISCOVERY_SKETCHES_PER_CELL",
-                value = n,
-                "applied env override"
-            );
-            self.discovery_matrix.sketches_per_cell = n;
+        if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL") {
+            if let Ok(n) = v.trim().parse::<usize>() {
+                if n >= MIN_SKETCHES_PER_CELL {
+                    tracing::trace!(
+                        var = "MOAGAN_DISCOVERY_SKETCHES_PER_CELL",
+                        value = n,
+                        "applied env override"
+                    );
+                    self.discovery_matrix.sketches_per_cell = n;
+                } else {
+                    tracing::warn!(
+                        sketches_per_cell = n,
+                        min = MIN_SKETCHES_PER_CELL,
+                        "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is below the floor; \
+                         ignoring the override",
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    value = %v,
+                    "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is not a valid integer; \
+                     ignoring the override",
+                );
+            }
         }
         if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS") {
             let normalised = v.trim().to_ascii_lowercase();

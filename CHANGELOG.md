@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-08-30
+
+### Changed
+
+- **Discovery `--sketches-per-cell` floor lowered**: `MIN_SKETCHES_PER_CELL`
+  drops from `10` to `1`. The default and TOML default stay at `10`. Affected
+  surfaces: CLI dispatcher (`src/cli/mod.rs`), `parse_sketches_per_cell`
+  (`src/cli/discover.rs`), the `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var
+  override (`src/config/mod.rs`), the resume helper
+  (`src/cli/discover.rs:resume_sketches_per_cell`), and the
+  `discover_explain` re-check (`src/cli/discover_explain.rs`). The
+  `--cardinality` legacy rename error message is updated to reflect the new
+  floor.
+
+  Operators who opt into `--sketches-per-cell 1` should be aware that the
+  saturation tracker's `min_sketches = 40` (`StopPolicy::default`) will trip
+  `MinSketchesReached` early for small matrices; this is by design and
+  matches the documented contract for debug / integration runs. Nominal
+  discovery runs that omit the flag continue to fan out `(cells × 10 ×
+  profile_total)` sketches.
+
+### Fixed
+
+- The CLI dispatcher now uses `MIN_SKETCHES_PER_CELL` instead of a
+  hard-coded `10`, so the operator-facing floor is a single source of truth.
+  Previously the dispatcher hard-coded `10` while the env-var parser used the
+  constant — the two could drift silently.
+- `Config::apply_env_overrides` now emits a `tracing::warn!` when
+  `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` is below the floor or not a valid
+  integer, instead of silently dropping the override.
+
 ## [0.13.1] - 2026-08-30
 
 ### Removed (BREAKING — early removal of v0.13.0 deprecation)

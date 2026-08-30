@@ -23,7 +23,10 @@
 //! `MOAGAN_DISCOVERY_SKETCHES_PER_CELL`, or TOML
 //! `[discovery_matrix].sketches_per_cell`), no longer derived
 //! from the v0.5 `cardinality / cells` integer division. Default
-//! 10 replaces the v0.5 cardinality floor of 80.
+//! 10 replaces the v0.5 cardinality floor of 80. The
+//! operator-facing floor was lowered to 1 in v0.13.2; the
+//! constructor's `.max(1)` clamp remains as defence-in-depth
+//! against an internal caller passing `0`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -293,9 +296,12 @@ pub struct ExplorationMatrix {
     pub dimensions: Vec<Dimension>,
     /// Number of sketches to generate per cell. Default 10
     /// (4 dims × 2 facets × 10 = 80 sketches, the user's chosen
-    /// floor). F1 surfaces this as `sketches_per_cell` so the
+    /// default). F1 surfaces this as `sketches_per_cell` so the
     /// matrix fan-out is decoupled from a hardcoded `cardinality`
-    /// target; F2 renames the CLI flag accordingly.
+    /// target; F2 renames the CLI flag accordingly. The
+    /// operator-facing floor is `MIN_SKETCHES_PER_CELL = 1`
+    /// (lowered from 10 in v0.13.2); this field stores whatever
+    /// value the operator passed (or 10 by default).
     pub sketches_per_cell: usize,
     /// Per-provider sampling-temperature profiles keyed by the
     /// provider's MODEL name (e.g. `"MiniMax-M3"`, `"deepseek-v4-flash"`,
@@ -325,6 +331,11 @@ impl ExplorationMatrix {
     /// [`ExplorationMatrix::from_derived`], or
     /// [`ExplorationMatrix::load_or_derive`].
     pub fn new(dimensions: Vec<Dimension>, sketches_per_cell: usize) -> Self {
+        // Defence-in-depth: clamp `0` to `1` so an internal caller
+        // passing `0` cannot silently produce an empty matrix.
+        // The operator-facing floor in v0.13.2 is `1`
+        // (`MIN_SKETCHES_PER_CELL`), so this only fires when an
+        // internal site mis-sets the value to `0`.
         let sketches_per_cell = sketches_per_cell.max(1);
         tracing::debug!(
             dimensions = dimensions.len(),
