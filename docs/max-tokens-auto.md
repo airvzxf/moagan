@@ -39,24 +39,24 @@ export MOAGAN_MAX_TOKEN_AUTO_SAVE=false   # do not overwrite the cache
 Or in `~/.config/moagan/config.toml`:
 
 ```toml
-[providers.minimax]
+[[providers.minimax]]
+endpoint = "https://api.minimax.io/anthropic/v1/messages"
 max_token_auto = 0         # disable entirely (Some(0) ≡ None)
 max_token_auto_enabled = false  # also disables; supersedes the floor value above
-
-[[providers.minimax.models]]
-id = "MiniMax-M3"
-max_tokens = 1000000
+models = ["MiniMax-M3"]
 ```
+
+Per-model `max_tokens` is now via `MOAGAN_MINIMAX_MAX_TOKENS=1000000`
+(see "Tuning the floor (env-var override)" below).
 
 `Some(0)` is equivalent to `None` (both mean "off"). `Some(N>0)` enables
 the probe with a floor of `N` tokens. The `max_token_auto_enabled:
-Option<bool>` knob (declared at `src/config/mod.rs:1462`) is a hard
-kill switch: when set to `Some(false)` it suppresses the probe
-table entirely regardless of the `max_token_auto` floor. Operators
-who want the probe disabled even if the floor is nonzero should
-use `max_token_auto_enabled = false`; operators who want the probe
-to run with a different floor just set `max_token_auto = N` (with
-`max_token_auto_enabled` left as `None`, which means "use the
+Option<bool>` knob is a hard kill switch: when set to `Some(false)` it
+suppresses the probe table entirely regardless of the `max_token_auto`
+floor. Operators who want the probe disabled even if the floor is
+nonzero should use `max_token_auto_enabled = false`; operators who want
+the probe to run with a different floor just set `max_token_auto = N`
+(with `max_token_auto_enabled` left as `None`, which means "use the
 floor's nonzero-ness as the gate").
 
 ## How to read `max_tokens_auto.toml`
@@ -100,11 +100,14 @@ sidecar). **As of v0.12.14 the `operator_caps` map is write-only**:
 `set_operator_cap` writes to the file (`src/llm/probe_table.rs:419-448`)
 but the runtime dispatch path (`src/llm/minimax.rs:400-444` and
 analogous per-provider paths) reads the per-provider
-`ProviderConfig::max_tokens` directly, not the `operator_caps` map.
-The cap survives across runs as a paper trail (so an operator can
-see what was pinned) but does not currently clamp the runtime
-dispatch. Pinning via `ProviderConfig::max_tokens` in
-`~/.config/moagan/config.toml` is the active mechanism.
+`ModelConfig::max_tokens` (per-model) populated from the
+`[[providers.<name>]]` entry's per-model slot, or falls through to
+`MOAGAN_<SECTION>_MAX_TOKENS` env var, or to the auto-probe cache,
+in that priority order. The cap survives across runs as a paper trail
+(so an operator can see what was pinned) but does not currently
+clamp the runtime dispatch. Pinning via
+`MOAGAN_<SECTION>_MAX_TOKENS` or per-model `ModelConfig::max_tokens`
+is the active mechanism.
 
 Delete the file to force a fresh probe. There is no `*.disabled`
 rename — the runtime only consults the canonical filename.
@@ -123,6 +126,55 @@ rename — the runtime only consults the canonical filename.
 The upper bound is fixed at `MAX_AUTOPROBE_CEILING = 1u32 << MAX_PROBE_SHIFT
 = 2^30` (about 1 billion tokens). The probe's exponential phase stops at
 `2^30` and the bisect phase never exceeds it.
+
+## Tuning the floor (env-var override)
+
+**New in v0.13, preserved across the v0.13.0 bridge and the
+v0.13.1 bridge-removal acceleration.** This is the operator-facing
+per-`(section, model)` `max_tokens` knob that was previously
+embedded in the legacy TOML (per-model `max_tokens = N`). The
+full chain, in priority order:
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. Env var   MOAGAN_<SECTION>_MAX_TOKENS (highest priority) │
+  │    e.g. MOAGAN_MINIMAX_MAX_TOKENS=131072                    │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 2. Cache     <MOAGAN_HOME>/max_tokens_auto.toml             │
+  │    populated by the auto-probe at startup                   │
+  │    filtered by >= MIN_AUTOPROBE_FLOOR (1024)                │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 3. Kind cap  MINIMAX_MAX_TOKENS_CAP, DEEPSEEK_MAX_TOKENS_CAP│
+  │    hardcoded per-provider safety net                        │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 4. Default   DEFAULT_MAX_TOKENS = 1_000_000 (lowest)        │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+Implementation:
+[`src/llm/max_tokens.rs`](../../src/llm/max_tokens.rs) — see the
+`resolve_max_tokens` function.
+
+### Concrete operator recipes
+
+Pin a specific `(section, model)` ceiling without editing the
+TOML:
+
+```bash
+export MOAGAN_MINIMAX_MAX_TOKENS=131072     # MiniMax-M3, etc.
+export MOAGAN_OPENCODE_MAX_TOKENS=32768     # every opencode model
+export MOAGAN_DEEPSEEK_MAX_TOKENS=8192      # DeepSeek Chat / Reasoner
+```
+
+Section-name normalisation: the helper uppercases the section name
+and folds `.` / `-` to `_`, so `opencode-go` resolves to
+`MOAGAN_OPENCODE_GO_MAX_TOKENS` and `mini-max` (hypothetical) to
+`MOAGAN_MINI_MAX_MAX_TOKENS`.
+
+Out-of-range values (e.g. `MOAGAN_MINIMAX_MAX_TOKENS=10`, below
+`MIN_AUTOPROBE_FLOOR`) emit a `tracing::warn!` and fall through to
+the next rung. Unparseable values (e.g. `=abc`) emit a warning and
+fall through. Empty / whitespace values are silently ignored.
 
 ## Troubleshooting
 

@@ -30,16 +30,15 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
     // custom `MOAGAN_CONFIG` below only adds the `mock_dir` so the
     // canned fixtures load from `tests/fixtures/mock_provider`;
     // the default `Config::default()` already registers
-    // `[providers.mock] models = [{ id = "mock-model" }]` in
+    // `[[providers.mock]] models = ["mock-model"]` in
     // `default_providers()`.
     let mock_cfg_dir = tempfile::TempDir::new().expect("mock cfg tmpdir");
     let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
     std::fs::write(
         &mock_cfg_path,
-        "[providers.mock]\n\
+        "[[providers.mock]]\n\
          endpoint = \"mock://local\"\n\
-         mock_dir = \"tests/fixtures/mock_provider\"\n\
-         models = [{ id = \"mock-model\" }]\n",
+         models = [\"mock-model\"]\n",
     )
     .expect("write mock config");
 
@@ -281,10 +280,9 @@ fn mock_run_prompt_dash_reads_from_stdin() {
     let mock_cfg_path = mock_cfg_dir.path().join("moagan-test-mock.toml");
     std::fs::write(
         &mock_cfg_path,
-        "[providers.mock]\n\
+        "[[providers.mock]]\n\
          endpoint = \"mock://local\"\n\
-         mock_dir = \"tests/fixtures/mock_provider\"\n\
-         models = [{ id = \"mock-model\" }]\n",
+         models = [\"mock-model\"]\n",
     )
     .expect("write mock config");
 

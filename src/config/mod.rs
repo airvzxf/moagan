@@ -15,7 +15,6 @@ use crate::Result;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
 
-pub mod dual_mode;
 pub mod profile;
 pub use profile::Profile;
 
@@ -41,12 +40,10 @@ pub struct Config {
     /// array-of-tables form lets a single section bind multiple
     /// endpoints to distinct model subsets (think `opencode` with
     /// `/v1/chat/completions`, `/v1/messages`, and `/v1/responses`
-    /// all under the same `[providers.opencode]` roof). The
-    /// `dual_mode::deserialize_providers_map` helper accepts both the
-    /// v0.13 array form and the v0.12 legacy single-table form
-    /// (`[providers.<name>]` with `models = [{id = "...", ...}, ...]`),
-    /// emitting a `tracing::warn!` per legacy section.
-    #[serde(deserialize_with = "dual_mode::deserialize_providers_map")]
+    /// all under the same `[providers.opencode]` roof). The v0.13
+    /// array-of-tables form (`[[providers.<name>]]` with `endpoint`
+    /// and `models = [...]`) is the only accepted schema; the
+    /// v0.12 single-table form was removed in v0.13.1.
     pub providers: BTreeMap<String, Vec<ProviderEntry>>,
     /// Bridge view: `providers` collapsed into the canonical
     /// `BTreeMap<String, ProviderConfig>` shape that every existing
@@ -1059,7 +1056,7 @@ impl Default for Config {
             selection_plan: default_selection_plan(),
             embedder: EmbedderConfig::default(),
         };
-        // Bridge the new-shape `providers` map into the canonical
+        // Collapse the new-shape `providers` map into the canonical
         // `ProviderConfig` view every existing consumer reads.
         // `compute_legacy_providers` is idempotent and cheap
         // (O(sections × entries)) — running it here means downstream
@@ -1067,14 +1064,14 @@ impl Default for Config {
         // `Config::load()`.
         //
         // The defaults are duplicate-free by construction, so the
-        // fallible bridge cannot fail here. If it somehow does
+        // fallible collapse cannot fail here. If it somehow does
         // (default regression, future refactor), we surface the
         // error in the log and leave `providers_legacy` empty
         // rather than panicking from inside `Default::default()`.
         if let Err(e) = cfg.compute_legacy_providers() {
             tracing::error!(
                 error = %e,
-                "Config::default: bridge to providers_legacy failed (default \
+                "Config::default: collapse into providers_legacy failed (default \
                  providers are duplicate-free; this is a programming bug, please \
                  open an issue with the trace below)"
             );
@@ -1099,7 +1096,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
     //
     // The `max_tokens` ceiling is now resolved centrally via
     // `crate::llm::max_tokens::resolve_max_tokens` (PR #4); the
-    // bridge leaves `models[i].max_tokens = None` so the helper is
+    // collapse leaves `models[i].max_tokens = None` so the helper is
     // the single source of truth at runtime.
     m.insert(
         "minimax".to_owned(),
@@ -1111,7 +1108,6 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 "MiniMax-M2.7-highspeed".to_owned(),
                 "MiniMax-M2.5".to_owned(),
             ],
-            legacy_model_max_tokens: BTreeMap::new(),
             knobs: SectionKnobs {
                 temperature: Some(0.6),
                 top_p: Some(0.95),
@@ -1153,7 +1149,6 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 "deepseek-chat".to_owned(),
                 "deepseek-reasoner".to_owned(),
             ],
-            legacy_model_max_tokens: BTreeMap::new(),
             knobs: SectionKnobs {
                 temperature: Some(0.6),
                 top_p: Some(0.95),
@@ -1188,7 +1183,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
     let oc_responses = "https://opencode.ai/zen/go/v1/responses".to_owned();
     // The section-level knobs attach to the FIRST entry
     // (chat-completions) so the operator sees them at the top of the
-    // OpenCode block in the rendered TOML. The bridge's
+    // OpenCode block in the rendered TOML. The collapse's
     // first-non-default wins merge then promotes them to the
     // `ProviderConfig` section-level.
     let oc_knobs = SectionKnobs {
@@ -1223,7 +1218,6 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                     "mimo-v2.5-pro".to_owned(),
                     "hy3".to_owned(),
                 ],
-                legacy_model_max_tokens: BTreeMap::new(),
                 knobs: oc_knobs,
             },
             // `/v1/messages` (Anthropic-compatible).
@@ -1238,7 +1232,6 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                     "qwen3.7-plus".to_owned(),
                     "qwen3.6-plus".to_owned(),
                 ],
-                legacy_model_max_tokens: BTreeMap::new(),
                 knobs: SectionKnobs::default(),
             },
             // `/v1/responses` (OpenAI Responses).
@@ -1257,11 +1250,10 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                     // §10-integrada-v0 OpenCode All Models).
                     "muse-spark-1.2-contributor".to_owned(),
                 ],
-                legacy_model_max_tokens: BTreeMap::new(),
                 // Knobs that diverge from the chat entry:
                 // `omit_max_tokens = true` so the wire body drops
                 // the field entirely (gpt-5.6-luna rejects its
-                // presence). `top_p` is unset here; the bridge's
+                // presence). `top_p` is unset here; the collapse's
                 // first-non-default wins keeps the chat entry's
                 // `top_p = Some(0.95)` since this entry did not set
                 // it.
@@ -1285,7 +1277,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
     // default config without needing a per-call MOAGAN_CONFIG
     // workaround.
     //
-    // Mock corner: the bridge propagates the entry's endpoint to
+    // Mock corner: the collapse propagates the entry's endpoint to
     // `ProviderConfig::endpoint` so `is_mock` in
     // `src/llm/provider.rs:1351-1356` keeps working — that check
     // queries `spec.endpoint.starts_with("mock://")`, and after the
@@ -1296,7 +1288,6 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
         vec![ProviderEntry {
             endpoint: "mock://local".to_owned(),
             models: vec!["mock-model".to_owned()],
-            legacy_model_max_tokens: BTreeMap::new(),
             knobs: SectionKnobs {
                 temperature: None,
                 top_p: None,
@@ -1510,7 +1501,7 @@ pub struct ProviderConfig {
 /// can mix Anthropic-compat models that REQUIRE `max_tokens` (e.g.
 /// `kimi-k3`, `glm-5.1`, `minimax-m3`) with Responses models that
 /// MUST NOT carry it (e.g. `gpt-5.6-luna`, `muse-spark-1.2-contributor`).
-/// The bridge populates this field from each `[[providers.X]]`
+/// The collapse populates this field from each `[[providers.X]]`
 /// entry's `SectionKnobs::omit_max_tokens` so a single entry can
 /// opt its whole group out while sibling entries stay opted in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1584,36 +1575,14 @@ pub struct ProviderEntry {
     /// entries of the same section are rejected by
     /// `Config::compute_legacy_providers` with `Error::InvalidArgs`.
     ///
-    /// The deserializer accepts both the new `Vec<String>` form and
-    /// the legacy `Vec<ModelConfig>` (inline-table) form, the latter
-    /// with a `tracing::warn!` per call (per-section deprecation is
-    /// emitted by `dual_mode::deserialize_providers_map`). The legacy
-    /// per-model `endpoint` is dropped silently: each
-    /// `[[providers.X]]` entry now carries its own URL, and the
-    /// bridge groups legacy models by effective endpoint so the v0.13
-    /// array-of-tables shape matches the operator's intent.
-    ///
-    /// Legacy per-model `max_tokens` IS preserved, but routed
-    /// through the side-channel field below rather than this list —
-    /// the v0.13 schema does not carry per-model `max_tokens`, and
-    /// operators upgrading from v0.12 expect the operator-side cap to
-    /// keep working until PR #4's `resolve_max_tokens` lands. The
-    /// bridge populates `ModelConfig::max_tokens` from this map;
-    /// once `resolve_max_tokens` is wired through, the map becomes
-    /// irrelevant and we can drop the side-channel.
-    #[serde(deserialize_with = "dual_mode::deserialize_model_list")]
+    /// The v0.13.1 schema is `Vec<String>` only. The legacy
+    /// `Vec<ModelConfig>` (inline-table) form was removed in v0.13.1
+    /// along with the bridge that accepted it; per-model
+    /// `max_tokens` is now resolved centrally via
+    /// `crate::llm::max_tokens::resolve_max_tokens`.
     pub models: Vec<String>,
-    /// Legacy-only side-channel: per-model `max_tokens` extracted
-    /// from `[[providers.X.models]] max_tokens = N` entries. The new
-    /// schema never populates this (the v0.13 array-of-tables form
-    /// has no per-model `max_tokens` knob). `#[serde(skip)]` keeps
-    /// it out of the persisted shape; the bridge reads it to populate
-    /// `ModelConfig::max_tokens` so a v0.12 TOML continues to clamp
-    /// the wire body until PR #4 lands the central resolver.
-    #[serde(skip)]
-    pub legacy_model_max_tokens: BTreeMap<String, u32>,
     /// Section-level knobs the operator can attach to any entry.
-    /// The bridge merges them with first-non-default-wins so the
+    /// The collapse merges them with first-non-default-wins so the
     /// operator can spread the knobs across entries (e.g. put
     /// `temperature = 0.6` on the first entry and leave the rest
     /// knob-less). `flatten` keeps the TOML flat (no nested
@@ -1844,29 +1813,25 @@ impl Config {
     ///    URL. `max_tokens` is set to `None` — the runtime resolves
     ///    it centrally via
     ///    `crate::llm::max_tokens::resolve_max_tokens` (PR #4).
-    /// 3. Duplicate model ids across entries of the same section
-    ///    error out with `Error::InvalidArgs` so an operator typo
-    ///    surfaces immediately instead of silently shadowing the
-    ///    first registration.
-    /// 4. The section-level `ProviderConfig::endpoint` becomes
+    /// 3. The section-level `ProviderConfig::endpoint` becomes
     ///    `None` for every section, EXCEPT `mock` — the `mock`
     ///    section's first-entry endpoint propagates to
     ///    `ProviderConfig::endpoint` so `is_mock` in
     ///    `src/llm/provider.rs:1351-1356` keeps working. That check
     ///    queries `spec.endpoint.starts_with("mock://")`; without
     ///    this corner the mock provider would silently fail to be
-    ///    recognised as mock after the bridge runs.
+    ///    recognised as mock after the collapse runs.
     ///
-    /// Returns [`crate::Error::InvalidArgs`] on duplicate model ids
-    /// within a section. The default providers are duplicate-free
-    /// by construction; the only way to hit the error is via user
-    /// TOML — `Config::load` propagates the error so a typo cannot
-    /// reach the runtime.
+    /// Note: duplicate-id detection (model ids appearing in more
+    /// than one `[[providers.<name>]]` entry of the same section)
+    /// moved to `Config::load` in v0.13.1 — the check happens
+    /// before the collapse so the error path can point at the
+    /// exact entry that introduced the conflict.
     pub fn compute_legacy_providers(&mut self) -> Result<()> {
         let mut out: BTreeMap<String, ProviderConfig> = BTreeMap::new();
         for (name, entries) in self.providers.iter() {
             // Seed the merge with `max_token_auto_save = true` so the
-            // bridge preserves serde's default (which is also the
+            // collapse preserves serde's default (which is also the
             // Rust default of `bool` but the explicit init makes the
             // intent obvious to a future reader). Operators who opt
             // a single entry out (`max_token_auto_save = false`)
@@ -1895,19 +1860,11 @@ impl Config {
                     first_endpoint = Some(entry.endpoint.clone());
                 }
                 for model_id in &entry.models {
-                    if models.iter().any(|m| &m.id == model_id) {
-                        return Err(crate::Error::InvalidArgs(format!(
-                            "provider '{name}' has duplicate model '{model_id}' across \
-                             `[[providers.{name}]]` entries; each model id must appear \
-                             in exactly one entry of the section"
-                        )));
-                    }
-                    // Legacy entries carry per-model `max_tokens`
-                    // through the `legacy_model_max_tokens`
-                    // side-channel; new-schema entries leave it
-                    // empty (max_tokens is resolved via
-                    // `resolve_max_tokens` once PR #4 lands).
-                    let max_tokens = entry.legacy_model_max_tokens.get(model_id).copied();
+                    // Per-model `max_tokens` is resolved by `resolve_max_tokens`
+                    // at dispatch time (priority: per-model slot →
+                    // `MOAGAN_<SECTION>_MAX_TOKENS` env var → auto-probe
+                    // cache → default floor). No legacy side-channel.
+                    let max_tokens = None;
                     // `omit_max_tokens` is per-model in v0.13 (the
                     // wire-format requirement is per-model: a single
                     // section can mix Anthropic-compat models that
@@ -1990,11 +1947,33 @@ impl Config {
                     p.display()
                 );
                 toml::from_str(&raw).map_err(|e| {
-                    tracing::error!(
-                        path = %p.display(),
-                        error = %e,
-                        "config: TOML parse failed"
-                    );
+                    let msg = e.to_string();
+                    // Heuristic for the v0.12 single-table form
+                    // (`[providers.<name>] endpoint = "..." models = [...]`).
+                    // The new array-of-tables shape expects an array at
+                    // each `providers.<name>` slot, so a TOML map at
+                    // that position produces this `invalid type: map,
+                    // expected ... sequence/array`-style error. Surface
+                    // a friendly hint rather than the raw serde message.
+                    let looks_legacy = (msg.contains("expected")
+                        && (msg.contains("sequence") || msg.contains("array")))
+                        && msg.contains("invalid type")
+                        && msg.contains("map");
+                    if looks_legacy {
+                        tracing::error!(
+                            path = %p.display(),
+                            error = %e,
+                            "config: detected legacy `[providers.<name>]` single-table form \
+                             (removed in v0.13.1). Migrate to `[[providers.<name>]]` \
+                             array-of-tables. See docs/adr/0004-accelerate-legacy-config-removal.md"
+                        );
+                    } else {
+                        tracing::error!(
+                            path = %p.display(),
+                            error = %e,
+                            "config: TOML parse failed"
+                        );
+                    }
                     crate::Error::InvalidArgs(format!("config parse error at {p:?}: {e}"))
                 })?
             }
@@ -2018,12 +1997,35 @@ impl Config {
             final_provider_count = cfg.providers.len(),
             "config::load: provider defaults merged"
         );
-        // Bridge: collapse the new-shape `providers` map into
+        // Detect duplicate model ids across `[[providers.X]]`
+        // entries of the same section. Lives here (rather than in
+        // `compute_legacy_providers`) because the deserialiser does
+        // not know section-membership semantics; the deserialised
+        // `Vec<ProviderEntry>` happily keeps duplicates and the
+        // collapse step would only catch them via the section-level
+        // scan below. Failing fast at load time surfaces operator
+        // typos immediately instead of silently shadowing the first
+        // registration at dispatch.
+        for (name, entries) in &cfg.providers {
+            let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for entry in entries {
+                for model_id in &entry.models {
+                    if !seen.insert(model_id.as_str()) {
+                        return Err(crate::Error::InvalidArgs(format!(
+                            "provider '{name}' has duplicate model '{model_id}' across \
+                             `[[providers.{name}]]` entries; each model id must appear \
+                             in exactly one entry of the section"
+                        )));
+                    }
+                }
+            }
+        }
+        // Collapse the new-shape `providers` map into
         // `providers_legacy` (the canonical `BTreeMap<String,
         // ProviderConfig>` every existing consumer reads). Runs
         // BEFORE env overrides — env overrides now mutate
         // `providers_legacy` directly via `apply_env_overrides`, so
-        // a single bridge call before the env pass keeps both views
+        // a single collapse call before the env pass keeps both views
         // consistent. The duplicate-id error (operator typo in
         // user TOML) propagates to the caller so the typo surfaces
         // at load time, not silently shadowed at runtime.
@@ -2042,12 +2044,11 @@ impl Config {
     /// why the key is missing. The warning fires once per offending
     /// section / entry.
     ///
-    /// v0.13 update: the helper now accepts both the legacy
-    /// `[providers.X]` (single table) form AND the new
-    /// `[[providers.X]]` (array-of-tables) form. Each entry in the
-    /// array form is checked independently. `config` is added to
-    /// `KNOWN` so the `[providers.X.config]` sibling block (see plan
-    /// §3.5) does not trip the warning.
+    /// v0.13 schema: the helper inspects the `[[providers.X]]`
+    /// (array-of-tables) form. Each entry in the array form is
+    /// checked independently. `config` is added to `KNOWN` so the
+    /// `[providers.X.config]` sibling block (see plan §3.5) does
+    /// not trip the warning.
     fn warn_unknown_provider_keys(path: &std::path::Path, raw: &str) {
         tracing::trace!(path = %path.display(), "warn_unknown_provider_keys: enter");
         const KNOWN: &[&str] = &[
@@ -2062,15 +2063,6 @@ impl Config {
             "temperature_auto_enabled",
             "plan",
             "config",
-            // Legacy v0.12 per-model keys under `[[providers.X.models]]`:
-            // ignored because the new shape doesn't carry per-model
-            // fields, but we don't want to warn for an operator who is
-            // still on the legacy schema and has a typo-free
-            // `max_tokens = ...` entry.
-            "kind",
-            "model",
-            "hard_incompatibilities",
-            "max_tokens",
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
             Ok(v) => v,
@@ -2088,23 +2080,6 @@ impl Config {
         let mut warned = 0usize;
         for (name, value) in table {
             match value {
-                // Legacy single-table form: a single TOML table whose
-                // top-level keys we check against `KNOWN`.
-                toml::Value::Table(sub) => {
-                    if sub.keys().any(|k| KNOWN.contains(&k.as_str())) {
-                        continue;
-                    }
-                    let unknown: Vec<&str> = sub.keys().map(String::as_str).collect();
-                    tracing::warn!(
-                        path = %path.display(),
-                        provider = %name,
-                        unknown_keys = ?unknown,
-                        "config: [providers.{name}] only contains unknown keys {:?}; \
-                         these are ignored (api_key belongs in api_keys.toml, not moagan.toml)",
-                        unknown,
-                    );
-                    warned += 1;
-                }
                 // v0.13 array-of-tables form: each entry is its own
                 // table. A single entry with NO known keys is the
                 // canonical "all-unknown" signal (e.g. an operator
@@ -2119,10 +2094,10 @@ impl Config {
                             continue;
                         }
                         if sub.is_empty() {
-                            // Empty `[[providers.X]]` entries are
-                            // surfaced by the dual-mode deserializer
-                            // (it requires at least `endpoint`); no
-                            // need to double-warn here.
+                            // Empty `[[providers.X]]` entries fail
+                            // at deserialisation (the entry must
+                            // have at least `endpoint`); no need
+                            // to double-warn here.
                             continue;
                         }
                         let unknown: Vec<&str> = sub.keys().map(String::as_str).collect();
@@ -2140,7 +2115,7 @@ impl Config {
                 _ => {
                     // Anything else (e.g. a bare string) is a shape
                     // error; the main loader will surface it via
-                    // the dual-mode deserializer.
+                    // the array-of-tables deserialiser.
                     continue;
                 }
             }
@@ -2271,13 +2246,13 @@ impl Config {
             // v0.13 update: scope the rewrite to the canonical
             // `minimax` section (the env var is documented as
             // targeting the direct MiniMax upstream). After the
-            // bridge, the section-level `endpoint` is `None` for
+            // collapse, the section-level `endpoint` is `None` for
             // non-mock sections, but each per-model `endpoint`
             // carries the entry's URL — so we rewrite EVERY minimax
             // model whose endpoint contains `/messages`. The v0.12
             // semantics rewrote `ProviderConfig::endpoint` once at
             // the section level, so all four minimax models
-            // inherited the proxy URL; the v0.13 bridge moved the
+            // inherited the proxy URL; the v0.13 collapse moved the
             // URL onto each per-model entry, and `iter_mut().find()`
             // would only flip the first one. The mock section keeps
             // its `mock://` endpoint (no `/messages`), and the
@@ -3549,7 +3524,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
 
-        // v0.13: the section-level `endpoint` is `None` (the bridge
+        // v0.13: the section-level `endpoint` is `None` (the collapse
         // copies the entry endpoint onto every model). The baseline
         // is therefore checked on a model, not the section.
         let mut cfg = Config::default();
@@ -3654,11 +3629,11 @@ mod tests {
             );
         }
         // The mock provider must not be touched. v0.10 ships
-        // `[providers.mock] models = [{ id = "mock-model" }]` from
+        // `[[providers.mock]] models = ["mock-model"]` from
         // `default_providers()` so the dispatcher accepts
         // `--provider mock:mock-model` without a per-test
         // `MOAGAN_CONFIG` workaround.
-        // v0.13: the bridge copies the entry endpoint onto every
+        // v0.13: the collapse copies the entry endpoint onto every
         // model. `mock://local` is therefore propagated to the
         // `mock-model` model config so the dispatcher's `is_mock`
         // check (`spec.endpoint.starts_with("mock://")`) keeps
@@ -3856,7 +3831,7 @@ mod tests {
              (max_token_auto = Some(n), n > 0); with the probe off and \
              max_tokens = 1M the upstream rejects with HTTP 400"
         );
-        // v0.13: the bridge sets `models[i].max_tokens = None` so
+        // v0.13: the collapse sets `models[i].max_tokens = None` so
         // `crate::llm::max_tokens::resolve_max_tokens` is the single
         // source of truth at runtime. The probe (`max_token_auto`)
         // narrows the value the helper returns; the helper itself
@@ -3886,7 +3861,7 @@ mod tests {
             .providers_legacy
             .get("minimax")
             .expect("minimax section missing from default providers");
-        // v0.13: the bridge sets `models[i].max_tokens = None` so
+        // v0.13: the collapse sets `models[i].max_tokens = None` so
         // `crate::llm::max_tokens::resolve_max_tokens` is the single
         // source of truth at runtime. The probe (`max_token_auto`)
         // narrows the value the helper returns; the helper itself
@@ -4140,7 +4115,7 @@ mod tests {
     }
 
     /// TOML round-trip: an operator who writes
-    /// `temperature_auto_enabled = false` in `[providers.<name>]`
+    /// `temperature_auto_enabled = false` in `[[providers.<name>]]`
     /// deserialises to `Some(false)` so the runtime sees the
     /// opt-out signal directly (no env var needed).
     #[test]
@@ -5196,7 +5171,7 @@ mod tests {
             .get("opencode")
             .expect("opencode section must survive TOML round-trip");
         // v0.13: section-level `omit_max_tokens` is a fallback
-        // (initialised to `false` by the bridge); the per-model
+        // (initialised to `false` by the collapse); the per-model
         // field is the authoritative source.
         let luna = oc
             .models
@@ -5216,7 +5191,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // v0.13.0 B-1 regression guards: the dual-mode bridge
+    // v0.13.0 B-1 regression guards: the collapse
     // (`Config::compute_legacy_providers`) and the dispatcher
     // (`src/llm/provider.rs:1426`) must agree on
     // `omit_max_tokens` and `max_token_auto_save` semantics. The
@@ -5234,7 +5209,7 @@ mod tests {
     /// dropping `max_tokens` from the wire body of every
     /// Anthropic-compat model. v0.13.0 fixes this by making
     /// `omit_max_tokens` a per-model field; the section-level knob
-    /// is now initialised to `false` by the bridge. Verify the
+    /// is now initialised to `false` by the collapse. Verify the
     /// default config no longer flips the section-wide flag.
     #[test]
     fn merge_first_wins_opencode_omit_max_tokens_does_not_bleed_across_entries() {
@@ -5255,7 +5230,7 @@ mod tests {
     /// `SectionKnobs::merge_first_wins`, whose bool branch was a
     /// no-op (`if other = true AND self = false: self = false`),
     /// so the field was permanently stuck at `false`. v0.13.0
-    /// seeds the bridge with `max_token_auto_save = true` and
+    /// seeds the collapse with `max_token_auto_save = true` and
     /// never merges the bool; verify the default config now keeps
     /// the serde default for every section.
     #[test]
@@ -5506,10 +5481,9 @@ mod tests {
     fn write_marker_toml(dir: &std::path::Path, marker: &str) -> std::path::PathBuf {
         let body = format!(
             r#"
-[providers.{marker}]
-kind = "mock"
+[[providers.{marker}]]
 endpoint = "mock://{marker}"
-model = "mock-{marker}"
+models = ["mock-{marker}"]
 "#
         );
         let p = dir.join("moagan.toml");
@@ -5537,10 +5511,9 @@ model = "mock-{marker}"
         let xdg_dir = home_dir.path().join(".config").join("moagan");
         std::fs::create_dir_all(&xdg_dir).unwrap();
         let xdg_body = r#"
-[providers.user_xdg_marker]
-kind = "mock"
+[[providers.user_xdg_marker]]
 endpoint = "mock://user-xdg"
-model = "mock-user-xdg"
+models = ["mock-user-xdg"]
 "#;
         std::fs::write(xdg_dir.join("config.toml"), xdg_body).unwrap();
         unsafe {
@@ -5591,10 +5564,9 @@ model = "mock-user-xdg"
         std::fs::write(
             &env_path,
             r#"
-[providers.env_var_marker]
-kind = "mock"
+[[providers.env_var_marker]]
 endpoint = "mock://env-var"
-model = "mock-env-var"
+models = ["mock-env-var"]
 "#,
         )
         .unwrap();
@@ -5633,10 +5605,9 @@ model = "mock-env-var"
         std::fs::write(
             xdg_dir.join("config.toml"),
             r#"
-[providers.user_xdg_only_marker]
-kind = "mock"
+[[providers.user_xdg_only_marker]]
 endpoint = "mock://user-xdg-only"
-model = "mock-user-xdg-only"
+models = ["mock-user-xdg-only"]
 "#,
         )
         .unwrap();
@@ -5675,10 +5646,9 @@ model = "mock-user-xdg-only"
         std::fs::write(
             xdg_dir.join("config.toml"),
             r#"
-[providers.user_xdg_dotfile_test]
-kind = "mock"
+[[providers.user_xdg_dotfile_test]]
 endpoint = "mock://user-xdg"
-model = "mock-user-xdg"
+models = ["mock-user-xdg"]
 "#,
         )
         .unwrap();
@@ -5690,10 +5660,9 @@ model = "mock-user-xdg"
         std::fs::write(
             cwd_dir.path().join(".moagan.toml"),
             r#"
-[providers.hidden_dotfile_marker]
-kind = "mock"
+[[providers.hidden_dotfile_marker]]
 endpoint = "mock://hidden-dotfile"
-model = "mock-hidden-dotfile"
+models = ["mock-hidden-dotfile"]
 "#,
         )
         .unwrap();
@@ -5734,7 +5703,7 @@ model = "mock-hidden-dotfile"
         std::fs::write(
             xdg_dir.join("config.toml"),
             r#"
-[providers.minimax]
+[[providers.minimax]]
 temperature = 0.42
 "#,
         )
@@ -5760,8 +5729,8 @@ temperature = 0.42
     #[test]
     fn warn_unknown_provider_keys_does_not_panic() {
         // The helper walks the raw TOML and emits warnings for
-        // `[providers.X]` tables whose only keys are unknown to
-        // `ProviderConfig` (e.g. `api_key = "..."`). The test pins
+        // `[[providers.X]]` entries whose only keys are unknown to
+        // `ProviderEntry` (e.g. `api_key = "..."`). The test pins
         // the behaviour: it must not panic and must produce the
         // expected `tracing::warn!` line (we don't assert on the
         // log capture here — that's covered by the existing
@@ -5786,7 +5755,7 @@ temperature = 0.42
         std::fs::write(
             cwd_dir.path().join("moagan.toml"),
             r#"
-[providers.minimax]
+[[providers.minimax]]
 api_key = "this-belongs-in-api_keys.toml"
 "#,
         )
@@ -5851,6 +5820,3 @@ replicas_per_temperature = 2
         assert_eq!(default.replicas_per_temperature, 2);
     }
 }
-
-#[cfg(test)]
-mod dual_mode_integration;

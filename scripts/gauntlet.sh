@@ -114,12 +114,10 @@ echo "${BOLD}Testing${RESET}"
 run_gate "cargo test --all-targets" bash -c "cargo test --all-targets"
 echo
 
-# 5. check scripts (no-go list + forbidden crates + Anthropic SDK +
-# legacy-config-schema guard)
+# 5. check scripts (no-go list + forbidden crates + Anthropic SDK)
 echo "${BOLD}Compliance${RESET}"
 run_gate "scripts/check-no-anthropic-sdk.sh" bash -c "./scripts/check-no-anthropic-sdk.sh"
 run_gate "scripts/check-no-forbidden-crates.sh" bash -c "./scripts/check-no-forbidden-crates.sh"
-run_gate "scripts/check-no-legacy-config-schema.sh" bash -c "./scripts/check-no-legacy-config-schema.sh"
 echo
 
 # 6. Smoke gates

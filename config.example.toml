@@ -1,21 +1,15 @@
-# Example user-level config for `moagan` (v0.13 schema).
+# Example user-level config for `moagan` (v0.13+ schema).
 #
 # This file is documentation. `moagan` does NOT read it; copies of it live at
 # `~/.config/moagan/config.toml` (the XDG-compliant home for moagan).
 # To activate any settings here, copy this file to the path above and edit.
 #
-# v0.13+ uses the `[[providers.<name>]]` array-of-tables shape. A v0.12
-# legacy `[providers.<name>]` single-table config STILL loads with a
-# `tracing::warn!` per legacy section (the dual-mode deserializer in
-# `src/config/dual_mode.rs` accepts both). Legacy support is scheduled
-# for removal in v0.15 — see:
+# v0.13+ uses the `[[providers.<name>]]` array-of-tables shape. The
+# v0.12 legacy `[providers.<name>]` single-table form was removed
+# in v0.13.1 — see:
 #
 #   docs/adr/0003-config-schema-array-of-tables.md
-#   docs/migrations/v0.12-to-v0.13-config.md
-#
-# A commented-out LEGACY block at the bottom shows the v0.12 syntax
-# side-by-side with the new shape; the `--> MIGRATE` arrow marks the
-# conversion point.
+#   docs/adr/0004-accelerate-legacy-config-removal.md
 
 [circuit_breaker]
 # Threshold for tripping the breaker per provider, inside `window_secs`.
@@ -51,11 +45,8 @@ cooldown_secs = 180
 #
 # Section-level knobs (`temperature`, `top_p`, `omit_max_tokens`,
 # `max_token_auto*`, `temperature_auto_enabled`, `plan`) can appear on
-# any entry. The bridge (`Config::compute_legacy_providers`) merges
-# them with `SectionKnobs::merge_first_wins` when collapsing into the
-# canonical `ProviderConfig` shape, so the operator can spread knobs
-# across entries or keep them on the first one — both forms parse
-# identically.
+# any entry; when multiple entries exist, knobs on the first entry
+# win for unset slots on later entries.
 #
 # DO NOT put real API keys here — use `~/.config/moagan/api_keys.toml`.
 
@@ -106,45 +97,4 @@ cooldown_secs = 180
 # [[providers.mock]]
 # endpoint = "mock://local"
 # models = ["mock-model"]
-
-# ---------------------------------------------------------------------------
-# v0.12 LEGACY schema (DEPRECATED, supported until v0.15)
-# ---------------------------------------------------------------------------
-# The dual-mode deserializer accepts this single-table form and emits a
-# `tracing::warn!` per legacy section. Conversion is mechanical — see
-# the `--> MIGRATE` notes below. This form will be REMOVED in v0.15.
-#
-# [providers.minimax]                                        --> MIGRATE
-# endpoint = "https://api.minimax.io/anthropic/v1/messages"
-# temperature = 0.6
-# top_p = 0.95
-# models = [
-#   { id = "MiniMax-M3" },               # --> replace with "MiniMax-M3",
-#   { id = "MiniMax-M2.7" },             # --> "MiniMax-M2.7",
-#   { id = "MiniMax-M2.7-highspeed" },   # --> "MiniMax-M2.7-highspeed",
-#   { id = "MiniMax-M2.5" },             # --> "MiniMax-M2.5",
-# ]
-#
-# Per-model `max_tokens = N` is gone in v0.13; set
-# `MOAGAN_MINIMAX_MAX_TOKENS=N` instead — see §4 of the migration guide.
-#
-# [providers.opencode]                                       --> MIGRATE
-# models = [
-#   { id = "kimi-k3", endpoint = "https://opencode.ai/zen/go/v1/chat/completions" },
-#   ...
-# ]
-#
-# becomes:
-#
-# [[providers.opencode]]                                     --> MIGRATE
-# endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
-# models = ["kimi-k3", ...]
-#
-# [[providers.opencode]]                                     --> MIGRATE
-# endpoint = "https://opencode.ai/zen/go/v1/messages"
-# models = [...]
-#
-# [[providers.opencode]]                                     --> MIGRATE
-# endpoint = "https://opencode.ai/zen/go/v1/responses"
-# models = [...]
 # omit_max_tokens = true

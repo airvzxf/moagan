@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 
-use moagan::config::{Config, ProviderConfig};
+use moagan::config::{Config, ProviderConfig, ProviderEntry, SectionKnobs};
 use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
@@ -102,7 +102,7 @@ fn build_provider(uri: String) -> Arc<MinimaxProvider> {
     )
 }
 
-/// Adjust `cfg` so `cfg.providers_legacy["minimax"]` matches the test's
+/// Adjust `cfg` so the `minimax` section matches the test's
 /// expectations. Each test starts from `Config::default()` and
 /// narrows the section; the default section already has
 /// `top_p = Some(0.95)` (line ~1066 of `src/config/mod.rs`), which
@@ -113,7 +113,34 @@ fn cfg_with_minimax_provider_section(
     section_override: Option<ProviderConfig>,
 ) -> Config {
     if let Some(override_) = section_override {
-        cfg.providers_legacy.insert(PROVIDER.into(), override_);
+        // The new-shape `providers` map is the source of truth; mutate
+        // it, then re-collapse into `providers_legacy` so downstream
+        // consumers see the override.
+        cfg.providers.insert(
+            PROVIDER.into(),
+            vec![ProviderEntry {
+                endpoint: override_
+                    .endpoint
+                    .clone()
+                    .unwrap_or_else(|| "https://api.minimax.io/anthropic/v1/messages".to_owned()),
+                models: override_.models.iter().map(|m| m.id.clone()).collect(),
+                knobs: SectionKnobs::default(),
+            }],
+        );
+        cfg.compute_legacy_providers()
+            .expect("minimax section must collapse without error");
+        // Re-apply per-field overrides after the collapse so
+        // tests can pin temperature / top_p to specific values.
+        if let Some(slot) = cfg.providers_legacy.get_mut(PROVIDER) {
+            slot.temperature = override_.temperature;
+            slot.top_p = override_.top_p;
+            slot.omit_max_tokens = override_.omit_max_tokens;
+            slot.max_token_auto = override_.max_token_auto;
+            slot.max_token_auto_enabled = override_.max_token_auto_enabled;
+            slot.max_token_auto_save = override_.max_token_auto_save;
+            slot.temperature_auto_enabled = override_.temperature_auto_enabled;
+            slot.plan = override_.plan;
+        }
     }
     cfg
 }
