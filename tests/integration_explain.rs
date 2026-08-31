@@ -125,7 +125,7 @@ fn explain_invalid_spec_returns_invalid_args_error() {
 }
 
 /// F3: `moagan discover --explain --sketches-per-cell 0` errors
-/// with the F2 floor message, exactly as the real run would.
+/// with the floor message (now "below the minimum of 1"), exactly as the real run would.
 /// The dispatcher enforces this for the pipeline; the explain
 /// helper re-checks it so the contract is the same on both
 /// surfaces. v0.13.2 lowered the floor from 10 to 1, so the
@@ -138,7 +138,7 @@ fn explain_below_minimum_sketches_per_cell_rejects() {
     let err = build_and_format(&opts, &cfg).unwrap_err();
     assert!(
         err.to_string().contains("below the minimum of 1"),
-        "explain path must enforce the F2 floor; got {err}"
+        "explain path must enforce the operator-facing floor; got {err}"
     );
 }
 

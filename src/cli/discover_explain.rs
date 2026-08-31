@@ -432,7 +432,7 @@ fn format_results(input: &ExplainInput) -> String {
 /// captured by tests) — this helper only formats.
 pub fn build_and_format(opts: &DiscoverOptions, _cfg: &Config) -> Result<String> {
     debug!("discover_explain::build_and_format: enter");
-    // Validation: the F2 floor is enforced at the CLI layer
+    // Validation: the operator-facing floor is enforced at the CLI layer
     // (the dispatcher rejects `sketches_per_cell <
     // MIN_SKETCHES_PER_CELL` — 1 as of v0.13.2), but we re-check
     // here so the explain path matches the real run's contract.
@@ -441,8 +441,8 @@ pub fn build_and_format(opts: &DiscoverOptions, _cfg: &Config) -> Result<String>
     // invocation would.
     if opts.sketches_per_cell < MIN_SKETCHES_PER_CELL {
         return Err(Error::InvalidArgs(format!(
-            "sketches-per-cell {} below the minimum of {}",
-            opts.sketches_per_cell, MIN_SKETCHES_PER_CELL
+            "sketches-per-cell {value} below the minimum of {MIN_SKETCHES_PER_CELL}",
+            value = opts.sketches_per_cell,
         )));
     }
     let input = build_explain_input(opts, _cfg)?;

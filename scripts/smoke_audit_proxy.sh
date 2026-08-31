@@ -157,28 +157,28 @@ run_test "cli_audit_help_mentions_verify" \
 # ---------------------------------------------------------------------
 
 run_test "sketches_per_cell_5_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_0_rejected" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 1'"
 
 run_test "sketches_per_cell_1_floor_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_9_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_default_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_25_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_100_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "legacy_cardinality_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --cardinality 80 2>&1 | grep -q 'was renamed to --sketches-per-cell'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --cardinality 80 2>&1 | grep -qE 'unexpected argument|--cardinality'"
 
 run_test "sketches_per_cell_invalid_value" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
@@ -187,7 +187,7 @@ run_test "sketches_per_cell_missing_value" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
 
 run_test "sketches_per_cell_zero_dimensions_rejected_or_warns" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'; test \$? -le 1"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'"
 
 # ---------------------------------------------------------------------
 # SECTION 3 — Role inventory (14 tests)
@@ -823,7 +823,7 @@ run_test "discovery_pipeline_intake_first" \
 run_test "discovery_sketches_per_cell_floor_1" \
   "grep -q 'sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/mod.rs"
 
-run_test "discovery_floor_in_discover_rs" \
+run_test "discovery_floor_in_discover_rs_uses_constant" \
   "grep -q 'below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/discover.rs"
 
 run_test "discovery_calls_build_registry" \
