@@ -2603,28 +2603,27 @@ impl Config {
         // exports leave the existing value alone so a stale env
         // var does not silently flip the floor.
         if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL") {
-            if let Ok(n) = v.trim().parse::<usize>() {
-                if n >= MIN_SKETCHES_PER_CELL {
+            // Trace-level because `Config::load()` is invoked twice per
+            // `Cmd::Discover` (once for the startup-reconcile gate,
+            // once for the pipeline); warning twice dilutes the signal.
+            match v.trim().parse::<usize>() {
+                Ok(n) if n >= MIN_SKETCHES_PER_CELL => {
                     tracing::trace!(
                         var = "MOAGAN_DISCOVERY_SKETCHES_PER_CELL",
                         value = n,
-                        "applied env override"
+                        "applied env override",
                     );
                     self.discovery_matrix.sketches_per_cell = n;
-                } else {
-                    tracing::warn!(
-                        sketches_per_cell = n,
-                        min = MIN_SKETCHES_PER_CELL,
-                        "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is below the floor; \
-                         ignoring the override",
-                    );
                 }
-            } else {
-                tracing::warn!(
+                Ok(n) => tracing::trace!(
+                    sketches_per_cell = n,
+                    min = MIN_SKETCHES_PER_CELL,
+                    "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is below the floor; ignoring the override",
+                ),
+                Err(_) => tracing::trace!(
                     value = %v,
-                    "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is not a valid integer; \
-                     ignoring the override",
-                );
+                    "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is not a valid integer; ignoring the override",
+                ),
             }
         }
         if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS") {
@@ -4301,6 +4300,55 @@ mod tests {
             cfg.startup_reconcile,
             "garbage env must not flip the default"
         );
+    }
+
+    /// F2: the operator-facing floor permits the new minimum value
+    /// through the environment override while preserving the default of 10
+    /// for every other caller.
+    #[test]
+    fn env_var_discovery_sketches_per_cell_one_overrides_default() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "1");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+        }
+        assert_eq!(cfg.discovery_matrix.sketches_per_cell, 1);
+    }
+
+    /// F2: values below the operator-facing floor are ignored and the
+    /// built-in default remains unchanged.
+    #[test]
+    fn env_var_discovery_sketches_per_cell_zero_does_not_override() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "0");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+        }
+        assert_eq!(cfg.discovery_matrix.sketches_per_cell, 10);
+    }
+
+    /// F2: malformed environment values are ignored and the built-in
+    /// default remains unchanged.
+    #[test]
+    fn env_var_discovery_sketches_per_cell_garbage_does_not_override() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "not-a-number");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+        }
+        assert_eq!(cfg.discovery_matrix.sketches_per_cell, 10);
     }
 
     /// Catalog §D.11.9: the default value of `sandbox_allow_network`

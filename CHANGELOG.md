@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-08-31
+
+### Changed
+
+- **F2 docs drift**: doc-comments in `tests/integration_discover.rs:37,131`,
+  `tests/integration_explain.rs:128,141`, `src/cli/discover.rs:1415`, and
+  `src/cli/discover_explain.rs:435` that still referred to the
+  pre-v0.13.2 `10` as "the F2 floor" are rewritten to call 10 "the F2
+  default" and the floor (`MIN_SKETCHES_PER_CELL`) is consistently named
+  "the operator-facing floor".
+- **Resume legacy sidecar (`cardinality < cells`)**: documented in
+  `CHANGELOG` and pinned by a new unit test. Before v0.13.2 such a sidecar
+  resolved to the legacy floor (10); after v0.13.2 it resolves to
+  `ceil(card / cells) ≥ 1` (e.g. `card=4, cells=8 → 1`). The behaviour is
+  more honest and matches the new contract; the doc-comment at
+  `src/cli/discover.rs:1025-1034` is now backed by
+  `resume_sketches_per_cell_legacy_card_below_cells_resolves_to_ceil_div`.
+- **`discover_explain` error string harmonised**: the
+  `build_and_format` re-check now uses named placeholders
+  (`{value}` / `{MIN_SKETCHES_PER_CELL}`) consistent with the dispatcher
+  (`src/cli/mod.rs`) and `parse_sketches_per_cell` (`src/cli/discover.rs`).
+  Same message format from all three call-sites.
+- **Module header `src/cli/discover.rs`** notes that v0.13.2 lowered the
+  operator-facing per-cell floor to 1 (default stays 10).
+
+### Fixed
+
+- **Smoke scripts `--sketches-per-cell` accepted tests**: the suffix
+  `; test $? -le 1` after the `grep -qE` produced a tautology
+  (`grep` exit 0 and 1 both pass through `test 0 -le 1` and
+  `test 1 -le 1`). Removed the suffix across
+  `scripts/smoke_discovery.sh` (6 lines) and
+  `scripts/smoke_audit_proxy.sh` (7 lines) so `run_test` now correctly
+  gates on the grep match. The pre-existing `--cardinality` smoke tests
+  (which grepped a substring clap can no longer produce since the F2
+  rename) now grep clap's actual `unexpected argument` rejection.
+- **`MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env-var warn/trace**: the warn
+  previously fired twice per `Cmd::Discover` (because `Config::load()`
+  is invoked twice — once for the startup-reconcile gate and once for
+  the pipeline). Demoted to `tracing::trace!` to avoid duplicate
+  warnings on the operator's screen; the gate still drops the override
+  silently. The `Ok(n)` round-trip is now pinned by
+  `env_var_discovery_sketches_per_cell_one_overrides_default` (and two
+  negative twins for `0` and `garbage`).
+- **`--cardinality` rename error message** no longer hard-codes
+  `(floor 1)` — interpolates `MIN_SKETCHES_PER_CELL` for parity with
+  the rest of the file.
+
 ## [0.13.2] - 2026-08-30
 
 ### Changed

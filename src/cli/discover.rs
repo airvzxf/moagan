@@ -24,6 +24,8 @@
 //!
 //! Cardinality minimum is 80 sketches; the spec says 40–500 (V4 §6.4)
 //! and the user's Plan B preferred the upper half of the lower band.
+//! v0.13.2 lowered the operator-facing per-cell floor to 1 (default stays
+//! at 10); the 40–500 spec band is unchanged.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -944,11 +946,10 @@ pub(crate) fn parse_sketches_per_cell(args: &[String], default: usize) -> Result
             break;
         }
         if arg == "--cardinality" || arg.starts_with("--cardinality=") {
-            return Err(Error::InvalidArgs(
+            return Err(Error::InvalidArgs(format!(
                 "--cardinality was renamed to --sketches-per-cell in F2; \
-                 pass --sketches-per-cell <N> instead (floor 1)"
-                    .to_owned(),
-            ));
+                 pass --sketches-per-cell <N> instead (floor {MIN_SKETCHES_PER_CELL})"
+            )));
         }
         i += 1;
     }
@@ -1412,7 +1413,7 @@ mod tests {
         assert!(
             e.to_string()
                 .contains(&format!("below the minimum of {MIN_SKETCHES_PER_CELL}")),
-            "error must mention the F2 floor; got {e:?}"
+            "error must mention the operator-facing floor; got {e:?}"
         );
     }
 
@@ -1647,6 +1648,56 @@ mod tests {
         .unwrap();
         let v = resume_sketches_per_cell(&home, run_id);
         assert_eq!(v, 10);
+    }
+
+    /// F2 backward-read: when the legacy cardinality is below the
+    /// number of cells, ceil division resolves to the new floor of 1
+    /// rather than the old fixed floor of 10.
+    #[test]
+    fn resume_sketches_per_cell_legacy_card_below_cells_resolves_to_ceil_div() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run_dir");
+        let matrix_json = serde_json::json!({
+            "cardinality": 4,
+            "dimensions": [
+                {"id": "a", "facets": [{"id": "x"}, {"id": "y"}]},
+                {"id": "b", "facets": [{"id": "x"}, {"id": "y"}]},
+                {"id": "c", "facets": [{"id": "x"}, {"id": "y"}]},
+                {"id": "d", "facets": [{"id": "x"}, {"id": "y"}]},
+            ],
+        });
+        std::fs::write(
+            run_dir.root().join("exploration_matrix.json"),
+            serde_json::to_vec(&matrix_json).unwrap(),
+        )
+        .unwrap();
+        let v = resume_sketches_per_cell(&home, run_id);
+        assert_eq!(v, 1);
+    }
+
+    /// F2 forward-read: the new minimum value round-trips through a
+    /// persisted `sketches_per_cell` field unchanged.
+    #[test]
+    fn resume_sketches_per_cell_reads_f2_field_at_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = MoaganHome::at(dir.path().to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().expect("ensure run_dir");
+        let matrix_json = serde_json::json!({
+            "cells": 2,
+            "sketches_per_cell": 1,
+        });
+        std::fs::write(
+            run_dir.root().join("exploration_matrix.json"),
+            serde_json::to_vec(&matrix_json).unwrap(),
+        )
+        .unwrap();
+        let v = resume_sketches_per_cell(&home, run_id);
+        assert_eq!(v, 1);
     }
 
     /// F2 backward-read: ceil division. 81 sketches on 8 cells

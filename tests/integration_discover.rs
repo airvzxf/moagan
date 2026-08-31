@@ -34,7 +34,7 @@
 //! 1. The mock discover path emits **at least one**
 //!    `kind = "discovery_iteration"` event when the iteration
 //!    loop runs end-to-end. With `--matrix-spec auth=oauth,api-key`
-//!    × `--sketches-per-cell 10` (the F2 floor) ×
+//!    × `--sketches-per-cell 10` (the F2 default; floor is 1 since v0.13.2) ×
 //!    `--temperature-profile …replicas=1` the fan-out is
 //!    `1 dim × 2 facets × 10 sketches × 1 temp × 1 replica = 20`
 //!    iterations, so the expectation is `>= 1` (we do not pin a
@@ -128,7 +128,7 @@ const ITER_REQUIRED_FIELDS: &[&str] = &[
 ///
 /// `--matrix-spec auth=oauth,api-key` declares exactly one
 /// dimension with two facets (2 cells) and `--sketches-per-cell 10`
-/// makes the per-cell fan-out = 10 (the F2 floor). With
+/// makes the per-cell fan-out = 10 (the F2 default; floor is 1 since v0.13.2). With
 /// `temperatures=[0.5] × replicas=1` the total sketch attempts =
 /// `1 × 2 × 10 × 1 × 1 = 20` iterations, so the lower-bound
 /// assertion in the test (`>= 1`) is comfortably above the
