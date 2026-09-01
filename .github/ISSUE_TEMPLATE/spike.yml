@@ -1,0 +1,43 @@
+name: Spike
+description: Timeboxed investigation (max 2 weeks). Must end with a deliverable (new issue or ADR in docs/adr/).
+title: "[SPIKE] <Title>"
+labels: ["spike"]
+assignees: ["airvzxf"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A spike is **timeboxed research**, not implementation. Close it by
+        either opening a follow-up issue for the work, or by landing an
+        ADR in `docs/adr/` that records the decision.
+
+  - type: input
+    id: due
+    attributes:
+      label: Timebox end date
+      description: Must be at most 2 weeks out. If you need more, open follow-up spikes instead.
+      placeholder: "YYYY-MM-DD (within 2 weeks)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question this spike is trying to answer
+      placeholder: |
+        Can we replace the in-process SQLite pool with a remote one
+        without breaking the redaction contract?
+    validations:
+      required: true
+
+  - type: textarea
+    id: deliverable
+    attributes:
+      label: Expected deliverable
+      description: New issue, ADR in docs/adr/, or a doc PR. Be specific.
+      placeholder: |
+        - One ADR in `docs/adr/` summarising findings, OR
+        - One follow-up issue per concrete change to be made.
+    validations:
+      required: true

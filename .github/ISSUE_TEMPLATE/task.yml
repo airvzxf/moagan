@@ -1,0 +1,59 @@
+name: Task
+description: General work issue. For bugs use the bug template; for new features use the feature template; for timeboxed investigations use the spike template.
+title: "[<Label>] <Title>"
+labels: ["task", "area:unknown"]
+assignees: ["airvzxf"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tasks are normal, scoped pieces of work. Keep the title short and
+        prefix it with a category label (e.g. `[chore]`, `[docs]`,
+        `[refactor]`) so they sort well in the board.
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Suggested priority
+      options:
+        - P0 (Critical)
+        - P1 (High)
+        - P2 (Medium)
+        - P3 (Low)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: size
+    attributes:
+      label: Estimated size
+      options:
+        - XS (<1h)
+        - S (½ day)
+        - M (1–2 days)
+        - L (week)
+        - XL (epic — needs sub-issues)
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this work exists. Link the upstream issue / doc if any.
+      placeholder: |
+        The current behaviour is X; we want Y because Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      description: A checklist the PR can be measured against.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
