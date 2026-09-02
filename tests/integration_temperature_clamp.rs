@@ -152,7 +152,7 @@ fn build_context(
             },
         }],
     );
-    cfg.compute_legacy_providers()
+    cfg.collapse_providers()
         .expect("recording section must collapse without error");
     let ctx = RunContext::new_with_config(
         run_id,

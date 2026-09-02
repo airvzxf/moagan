@@ -102,7 +102,7 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
     // the pipeline tried to use it (or never, on a completed run).
     if let Some(provider) = opts.switch_provider.as_deref() {
         let cfg = crate::config::Config::load().unwrap_or_default();
-        if !cfg.providers_legacy.contains_key(provider) {
+        if !cfg.providers_by_section.contains_key(provider) {
             warn!(
                 provider = provider,
                 "continue: --switch-provider not in configured providers"
@@ -110,7 +110,7 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
             return Err(Error::InvalidArgs(format!(
                 "--switch-provider '{}' is not in the configured providers; available: {}",
                 provider,
-                cfg.providers_legacy
+                cfg.providers_by_section
                     .keys()
                     .cloned()
                     .collect::<Vec<_>>()

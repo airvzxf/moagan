@@ -195,12 +195,16 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
 
     let mut results: Vec<ProbeResult> = Vec::with_capacity(pairs.len());
     for (provider, model) in &pairs {
-        let spec = cfg.providers_legacy.get(provider).cloned().ok_or_else(|| {
-            Error::InvalidArgs(format!(
-                "probe: provider '{provider}' is not in the loaded config; \
+        let spec = cfg
+            .providers_by_section
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidArgs(format!(
+                    "probe: provider '{provider}' is not in the loaded config; \
                  register it under [[providers.{provider}]] (array-of-tables) in config.toml first"
-            ))
-        })?;
+                ))
+            })?;
         // v0.10: the model id is required and the spec is the
         // template we copy from. Reject mismatched model ids so
         // the operator cannot probe a model that isn't actually
@@ -328,7 +332,7 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
 /// 4. `--dry-run` → print the plan and exit 0 without touching
 ///    the wire or the file.
 /// 5. For every `(provider, model)`:
-///    - Resolve the spec from `cfg.providers_legacy`; error out if
+///    - Resolve the spec from `cfg.providers_by_section`; error out if
 ///      missing.
 ///    - Override `spec.model` with the operator-supplied model.
 ///    - `mock` provider → skip with
@@ -380,12 +384,16 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
 
     let mut results: Vec<TemperatureProbeResult> = Vec::with_capacity(pairs.len());
     for (provider, model) in &pairs {
-        let spec = cfg.providers_legacy.get(provider).cloned().ok_or_else(|| {
-            Error::InvalidArgs(format!(
-                "probe: provider '{provider}' is not in the loaded config; \
+        let spec = cfg
+            .providers_by_section
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidArgs(format!(
+                    "probe: provider '{provider}' is not in the loaded config; \
                  register it under [[providers.{provider}]] (array-of-tables) in config.toml first"
-            ))
-        })?;
+                ))
+            })?;
         // v0.10: the model id is required and the spec is the
         // template we copy from. Reject mismatched model ids.
         if !spec.models.iter().any(|m| m.id == *model) {

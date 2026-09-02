@@ -1433,7 +1433,7 @@ pub fn registry_from_config_with_home_and_sink(
             // MUST NOT carry it (e.g. `gpt-5.6-luna`,
             // `muse-spark-1.2-contributor`); the section-level knob
             // stays as a fallback for entries that don't set the
-            // per-model field explicitly. See `compute_legacy_providers`
+            // per-model field explicitly. See `collapse_providers`
             // for the bridge logic.
             let resolved = ResolvedModelConfig {
                 section: section_name.clone(),
@@ -4025,7 +4025,7 @@ mod tests {
         );
 
         let mut cfg = crate::config::Config {
-            providers_legacy: probe_cfg_nonmock(Some(4096), None),
+            providers_by_section: probe_cfg_nonmock(Some(4096), None),
             ..crate::config::Config::default()
         };
         // SAFETY: this test owns the MOAGAN_MAX_TOKEN_AUTO env var;
@@ -4039,7 +4039,7 @@ mod tests {
             std::env::remove_var("MOAGAN_MAX_TOKEN_AUTO");
         }
         let reg = registry_from_config_with_home(
-            &cfg.providers_legacy,
+            &cfg.providers_by_section,
             &CircuitBreakerConfig::default(),
             Some(&home),
         )
@@ -4190,7 +4190,7 @@ mod tests {
         // default bridge produced.
         let server_uri = server.uri();
         let oc = cfg
-            .providers_legacy
+            .providers_by_section
             .get_mut("opencode")
             .expect("opencode section");
         for model in &mut oc.models {
@@ -4199,7 +4199,7 @@ mod tests {
             }
         }
         let registry = registry_from_config_with_home(
-            &cfg.providers_legacy,
+            &cfg.providers_by_section,
             &CircuitBreakerConfig::default(),
             None,
         )
@@ -4283,7 +4283,7 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         let server_uri = server.uri();
         let oc = cfg
-            .providers_legacy
+            .providers_by_section
             .get_mut("opencode")
             .expect("opencode section");
         for model in &mut oc.models {
@@ -4292,7 +4292,7 @@ mod tests {
             }
         }
         let registry = registry_from_config_with_home(
-            &cfg.providers_legacy,
+            &cfg.providers_by_section,
             &CircuitBreakerConfig::default(),
             None,
         )

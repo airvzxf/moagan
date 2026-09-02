@@ -461,7 +461,7 @@ async fn rerun_pipeline_helper_populates_full_sidecars() -> Result<()> {
             },
         }],
     );
-    cfg.compute_legacy_providers()
+    cfg.collapse_providers()
         .expect("default mock section must collapse without error");
     // `run_full_pipeline` uses `tokio::select!` (the shutdown-signal
     // branch), so it needs a tokio runtime. `pollster::block_on` is

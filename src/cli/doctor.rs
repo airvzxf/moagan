@@ -56,7 +56,7 @@ fn check_api_key(cfg: &Config) -> Check {
     use crate::llm::api_keys::lookup_key;
     let mut missing: Vec<String> = Vec::new();
     let mut seen_sections: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for name in cfg.providers_legacy.keys() {
+    for name in cfg.providers_by_section.keys() {
         // v0.10 (post-Phase 8 cleanup): the section name IS the
         // canonical provider-family key for `api_keys.toml` and the
         // `<NAME>_API_KEY` env-var fallback. The deprecated `kind`
@@ -163,10 +163,10 @@ fn check_sqlite() -> Check {
 
 fn check_provider_config(cfg: &Config) -> Check {
     trace!(
-        providers = cfg.providers_legacy.len(),
+        providers = cfg.providers_by_section.len(),
         "check_provider_config: enter"
     );
-    if cfg.providers_legacy.is_empty() {
+    if cfg.providers_by_section.is_empty() {
         return Check {
             name: "providers".to_string(),
             status: Status::Warn,
@@ -176,7 +176,7 @@ fn check_provider_config(cfg: &Config) -> Check {
     Check {
         name: "providers".to_string(),
         status: Status::Ok,
-        detail: format!("{} provider(s) configured", cfg.providers_legacy.len()),
+        detail: format!("{} provider(s) configured", cfg.providers_by_section.len()),
     }
 }
 
@@ -192,7 +192,7 @@ fn check_provider_config(cfg: &Config) -> Check {
 fn models_per_provider(cfg: &Config) -> Vec<(String, Vec<String>)> {
     use std::collections::BTreeMap;
     let mut by_section: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (section, spec) in &cfg.providers_legacy {
+    for (section, spec) in &cfg.providers_by_section {
         for m in &spec.models {
             by_section
                 .entry(section.clone())
@@ -315,7 +315,7 @@ fn run_capabilities() -> Result<i32> {
     // output is stable across runs. v0.10: each row carries the
     // section name plus every model id registered under it; the
     // catalog lookup still uses the section + model pair.
-    for (name, spec) in &cfg.providers_legacy {
+    for (name, spec) in &cfg.providers_by_section {
         let caps = capabilities_for_section(name);
         for model in &spec.models {
             let entry = catalog
@@ -438,8 +438,8 @@ mod tests {
         // opencode / mock; the test wants to pin the alphabetical
         // ordering and dedup contract for a two-section config.
         let mut cfg = Config::default();
-        cfg.providers_legacy.clear();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.clear();
+        cfg.providers_by_section.insert(
             "minimax".into(),
             ProviderConfig {
                 models: vec![
@@ -459,7 +459,7 @@ mod tests {
                 ..ProviderConfig::default()
             },
         );
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "mock".into(),
             ProviderConfig {
                 models: vec![crate::config::ModelConfig {
@@ -555,21 +555,21 @@ mod tests {
     /// kinds it must iterate over.
     fn three_kind_config() -> Config {
         let mut cfg = Config::default();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "minimax".into(),
             ProviderConfig {
                 models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "deepseek".into(),
             ProviderConfig {
                 models: Vec::new(),
                 ..ProviderConfig::default()
             },
         );
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "opencode".into(),
             ProviderConfig {
                 models: Vec::new(),
@@ -692,8 +692,8 @@ mod tests {
         // and register ONLY `mock` so the check has nothing to
         // validate beyond the mock section.
         let mut cfg = Config::default();
-        cfg.providers_legacy.clear();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.clear();
+        cfg.providers_by_section.insert(
             "mock".to_owned(),
             ProviderConfig {
                 models: Vec::new(),
@@ -813,7 +813,7 @@ deepseek = "env:DOCTOR_TEST_DEEPSEEK_KEY_B2"
             std::env::set_var("MOAGAN_HOME", tmp.path());
         }
         let mut cfg = Config::default();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "minimax".into(),
             crate::config::ProviderConfig {
                 models: Vec::new(),

@@ -114,7 +114,7 @@ fn cfg_with_minimax_provider_section(
 ) -> Config {
     if let Some(override_) = section_override {
         // The new-shape `providers` map is the source of truth; mutate
-        // it, then re-collapse into `providers_legacy` so downstream
+        // it, then re-collapse into `providers_by_section` so downstream
         // consumers see the override.
         cfg.providers.insert(
             PROVIDER.into(),
@@ -127,11 +127,11 @@ fn cfg_with_minimax_provider_section(
                 knobs: SectionKnobs::default(),
             }],
         );
-        cfg.compute_legacy_providers()
+        cfg.collapse_providers()
             .expect("minimax section must collapse without error");
         // Re-apply per-field overrides after the collapse so
         // tests can pin temperature / top_p to specific values.
-        if let Some(slot) = cfg.providers_legacy.get_mut(PROVIDER) {
+        if let Some(slot) = cfg.providers_by_section.get_mut(PROVIDER) {
             slot.temperature = override_.temperature;
             slot.top_p = override_.top_p;
             slot.omit_max_tokens = override_.omit_max_tokens;

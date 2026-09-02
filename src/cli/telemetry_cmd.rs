@@ -831,7 +831,7 @@ mod provider {
             entry.1 += r.input_tokens;
             entry.2 += r.output_tokens;
         }
-        for (name, provider_cfg) in &cfg.providers_legacy {
+        for (name, provider_cfg) in &cfg.providers_by_section {
             // v0.10: each row in `models[]` is a distinct
             // `(provider, model)` pair the upstream sees; the
             // SQLite join keys on the same pair. The section-level
@@ -856,7 +856,7 @@ mod provider {
 
     fn plan_summary(name: &str, cfg: &Config, db: &Db) -> Result<()> {
         let provider: &ProviderConfig = cfg
-            .providers_legacy
+            .providers_by_section
             .get(name)
             .ok_or_else(|| Error::InvalidArgs(format!("unknown provider plan '{name}'")))?;
         println!("Provider: {}", name);
@@ -1316,11 +1316,11 @@ mod config {
         debug!("telemetry config::run: enter");
         let cfg = Config::load()?;
         println!("=== providers ===");
-        let mut names: Vec<&String> = cfg.providers_legacy.keys().collect();
+        let mut names: Vec<&String> = cfg.providers_by_section.keys().collect();
         names.sort();
         for name in names {
             let spec = cfg
-                .providers_legacy
+                .providers_by_section
                 .get(name)
                 .expect("provider present in same map we just iterated");
             // v0.10: model id is sourced from the section's first
@@ -1434,7 +1434,7 @@ mod plan {
         let cfg = Config::load().ok();
         let mut plan_for_filter: Option<&PlanConfig> = None;
         if let (Some(cfg), Some(name)) = (cfg.as_ref(), provider_filter)
-            && let Some(spec) = cfg.providers_legacy.get(name)
+            && let Some(spec) = cfg.providers_by_section.get(name)
         {
             plan_for_filter = spec.plan.as_ref();
             if let Some(p) = spec.plan.as_ref()
@@ -1483,7 +1483,7 @@ mod plan {
         let plan_lookup = |provider: &str, model: &str| -> Option<PlanConfig> {
             cfg.as_ref()
                 .and_then(|c| {
-                    c.providers_legacy
+                    c.providers_by_section
                         .values()
                         .find(|spec| {
                             // v0.10: the lookup uses the section name
@@ -1505,7 +1505,7 @@ mod plan {
                             // it may be either the section name or the
                             // model id when the section only registers
                             // one model. Look up by either.
-                            c.providers_legacy.values().find(|spec| {
+                            c.providers_by_section.values().find(|spec| {
                                 let section_first_model = spec
                                     .models
                                     .first()

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-01
+
+### Changed
+
+- **BREAKING (public field name)**: Renamed `Config::providers_legacy`
+  to `Config::providers_by_section` (closes #686). The field is `pub`
+  and `#[serde(skip)]`, so this is a source-level rename only — TOML
+  parse is unaffected, but external crate consumers reading the field
+  directly must update the name. The new name reflects the field's
+  role: it is the canonical per-section view (`BTreeMap<String,
+  ProviderConfig>`) populated by the dual-mode deserialiser and
+  consumed by every CLI subcommand, the LLM registry, and every phase.
+- **BREAKING (public method name)**: Renamed
+  `Config::compute_legacy_providers()` to `Config::collapse_providers()`
+  (closes #686). Same semantics; the new name describes the operation
+  (collapsing the array-of-tables `providers` map into the per-section
+  view) instead of the historical context (the v0.12 legacy single-
+  table input that the bridge used to accept).
+
+### Refactored
+
+- Unified `MIN_SKETCHES_PER_CELL` constant (closes #701): removed the
+  duplicate definition in `src/config/mod.rs`; the canonical source
+  is now `src/cli/discover.rs` and the config module re-exports it.
+  No behavioural change. Cherry-picked from
+  `refactor/unify-min-sketches-689-9` (commit `4ec2dc8`).
+
 ## [0.13.3] - 2026-08-31
 
 ### Changed
