@@ -19,7 +19,8 @@
 #   pacman -S lefthook           # or: cargo install lefthook
 #   lefthook install             # writes .git/hooks/{pre-commit,pre-push,commit-msg}
 #
-# Reference: docs/validation-tiers.md
+# Reference: AGENTS.md §"Validation tiers" (rationale, escape hatches,
+# setup). The dev-loop ASCII diagram is in the Makefile header.
 #
 # -----------------------------------------------------------------------------
 # Network-safety invariant (do not break)

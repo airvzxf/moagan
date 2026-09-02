@@ -61,7 +61,7 @@ context.
 
 ## Validation
 
-The four-tier model lives in `docs/validation-tiers.md`. When
+The four-tier model lives in `AGENTS.md` §"Validation tiers". When
 suggesting a change, identify the tier it affects:
 
 - T0 <2 s — `make fmt-check`, `make guard-deps`
