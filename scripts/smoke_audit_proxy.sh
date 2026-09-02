@@ -1160,12 +1160,12 @@ rm -rf "$WORK_Q"
 
 WORK_T=$(mkhome)
 run_test "discover_run_creates_summary_md" \
-  "MOAGAN_HOME=$WORK_T $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/summary.md 2>/dev/null | head -1 | grep -q summary.md; test \$? -le 1"
+  "MOAGAN_HOME=$WORK_T $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/summary.md 2>/dev/null | head -1 | grep -q summary.md"
 rm -rf "$WORK_T"
 
 WORK_U=$(mkhome)
 run_test "discover_run_creates_summary_json" \
-  "MOAGAN_HOME=$WORK_U $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/summary.json 2>/dev/null | head -1 | grep -q summary.json; test \$? -le 1"
+  "MOAGAN_HOME=$WORK_U $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/summary.json 2>/dev/null | head -1 | grep -q summary.json"
 rm -rf "$WORK_U"
 
 # ---------------------------------------------------------------------
