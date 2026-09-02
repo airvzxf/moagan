@@ -776,7 +776,7 @@ impl RunContext {
         // `[providers.minimax] temperature = 0.42` actually gets 0.42.
         let (provider_temperature, provider_top_p) = self
             .config
-            .providers_legacy
+            .providers_by_section
             .get(&self.default_provider)
             .map(|s| (s.temperature, s.top_p))
             .unwrap_or((None, None));
@@ -892,7 +892,7 @@ impl RunContext {
     ) -> Result<Response> {
         let (_provider_temperature, provider_top_p) = self
             .config
-            .providers_legacy
+            .providers_by_section
             .get(&self.default_provider)
             .map(|s| (s.temperature, s.top_p))
             .unwrap_or((None, None));
@@ -966,7 +966,7 @@ impl RunContext {
     ) -> Result<Response> {
         let (_provider_temperature, provider_top_p) = self
             .config
-            .providers_legacy
+            .providers_by_section
             .get(&self.default_provider)
             .map(|s| (s.temperature, s.top_p))
             .unwrap_or((None, None));
@@ -1024,7 +1024,7 @@ impl RunContext {
         // `call_with_retry` so the cache-miss path is consistent.
         let (provider_temperature, provider_top_p) = self
             .config
-            .providers_legacy
+            .providers_by_section
             .get(&self.default_provider)
             .map(|s| (s.temperature, s.top_p))
             .unwrap_or((None, None));
@@ -1914,7 +1914,7 @@ impl RunContext {
         // expects on the non-prefill path.
         let provider_top_p = self
             .config
-            .providers_legacy
+            .providers_by_section
             .get(&self.default_provider)
             .and_then(|s| s.top_p);
         req.top_p = resolve_top_p(role, provider_top_p);
@@ -2071,7 +2071,7 @@ impl RunContext {
             let user = "Continue.".to_string();
             let provider_top_p = self
                 .config
-                .providers_legacy
+                .providers_by_section
                 .get(&self.default_provider)
                 .and_then(|s| s.top_p);
             let req = Request {
@@ -3738,7 +3738,7 @@ mod tests {
         // Build a Config with the active provider carrying
         // temperature=0.42 and top_p=0.5.
         let mut cfg = Config::default();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "recording".to_owned(),
             ProviderConfig {
                 endpoint: None,
@@ -3814,7 +3814,7 @@ mod tests {
 
         // Provider has NO temperature/top_p set (None).
         let mut cfg = Config::default();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "recording".to_owned(),
             ProviderConfig {
                 endpoint: None,
@@ -3900,7 +3900,7 @@ mod tests {
         // `call_with_retry_at_temp` does NOT consult the provider
         // config — only the `temperature` parameter.
         let mut cfg = Config::default();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "recording".to_owned(),
             ProviderConfig {
                 endpoint: None,
@@ -4172,7 +4172,7 @@ mod tests {
         // `Request.temperature`, so the gate sees the test's
         // chosen value verbatim.
         let mut cfg = Config::default();
-        cfg.providers_legacy.insert(
+        cfg.providers_by_section.insert(
             "recording".to_owned(),
             ProviderConfig {
                 endpoint: None,
