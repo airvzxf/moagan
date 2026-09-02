@@ -13,6 +13,107 @@
 //! one-time persistence) lock for write. The `parking_lot` flavour
 //! is already on the dependency list, so the lock is non-poisoning
 //! and contention-free under realistic workloads.
+//!
+//! # Why an auto-probe
+//!
+//! LLM providers do not advertise their real `max_tokens` ceiling
+//! in a machine-readable way. The OAuth/backend surface lists one
+//! number, the chat-completion surface accepts another, and the
+//! streaming-vs-non-streaming paths often disagree. Hard-coding a
+//! `MAX_TOKENS_CAP` per provider is a losing bet: the moment a
+//! vendor rolls a new model the constant is wrong.
+//!
+//! `moagan` (v0.10+) probes each `(provider, model)` pair at first
+//! startup to discover the actual ceiling. The discovered value is
+//! cached at `<MOAGAN_HOME>/max_tokens_auto.toml` and verified
+//! with a single lightweight probe on every subsequent startup.
+//! The probe is opt-in but enabled by default (`Some(1024)`), so
+//! out-of-the-box behaviour is "discover on first run, then reuse"
+//! with a safety floor of 1024 tokens.
+//!
+//! # When to disable it
+//!
+//! Disable the auto-probe when the cost of a sequential HTTP sweep
+//! is prohibitive or when the provider cannot be reached from the
+//! test runner:
+//!
+//! - **Smoke tests against a real provider.** Every CI run would
+//!   otherwise pay ~30 sequential probes per fresh model. The
+//!   smoke / e2e scripts export `MOAGAN_MAX_TOKEN_AUTO=false` for
+//!   exactly this reason.
+//! - **Sandboxed / offline runs.** The probe needs at least one
+//!   successful round-trip; if the network is locked down the
+//!   probe exits cleanly with the cached value (or the default
+//!   floor if there is no cache).
+//! - **Reproducible benchmarks.** Freeze the probe via
+//!   `MOAGAN_MAX_TOKEN_AUTO_SAVE=false` so the cache file is not
+//!   rewritten.
+//!
+//! Disable with:
+//!
+//! ```bash
+//! export MOAGAN_MAX_TOKEN_AUTO=false        # or =0
+//! export MOAGAN_MAX_TOKEN_AUTO_SAVE=false   # do not overwrite the cache
+//! ```
+//!
+//! Or in `~/.config/moagan/config.toml`:
+//!
+//! ```toml
+//! [[providers.minimax]]
+//! endpoint = "https://api.minimax.io/anthropic/v1/messages"
+//! max_token_auto = 0         # disable entirely (Some(0) ≡ None)
+//! max_token_auto_enabled = false  # also disables; supersedes the floor value above
+//! models = ["MiniMax-M3"]
+//! ```
+//!
+//! `Some(0)` is equivalent to `None` (both mean "off"). `Some(N>0)`
+//! enables the probe with a floor of `N` tokens. The
+//! `max_token_auto_enabled: Option<bool>` knob is a hard kill
+//! switch: when set to `Some(false)` it suppresses the probe table
+//! entirely regardless of the `max_token_auto` floor. Operators
+//! who want the probe disabled even if the floor is nonzero should
+//! use `max_token_auto_enabled = false`; operators who want the
+//! probe to run with a different floor just set
+//! `max_token_auto = N` (with `max_token_auto_enabled` left as
+//! `None`, which means "use the floor's nonzero-ness as the gate").
+//!
+//! # Sidecar schema (`<MOAGAN_HOME>/max_tokens_auto.toml`)
+//!
+//! ```toml
+//! schema_version = 1
+//!
+//! [providers.minimax."MiniMax-M3"]
+//! detected_at = "2026-08-11T11:12:34Z"
+//! verified_at = "2026-08-12T10:00:00Z"
+//! auto = true
+//! max_tokens = 1024
+//! ```
+//!
+//! | Field | Meaning |
+//! |---|---|
+//! | `schema_version` | File format version. Numeric `u32` (`1` today). Bumped if the schema changes. |
+//! | `providers[provider][model].detected_at` | ISO-8601 timestamp of the initial successful probe. |
+//! | `providers[provider][model].verified_at` | ISO-8601 timestamp of the most recent successful verify probe. On the first probe the algorithm initialises it to the same value as `detected_at`, so a fresh entry is never an empty string. |
+//! | `providers[provider][model].auto` | Always `true` while the probe is responsible for the value. A `false` value is **just a marker** indicating the entry has been hand-curated; it does NOT freeze the value (see [`MaxTokensTable::set_operator_cap`] and the troubleshooting matrix). |
+//! | `providers[provider][model].attempts` | How many probe batches the algorithm ran for this entry. Diagnostic. |
+//! | `providers[provider][model].ceiling` | The per-provider hard ceiling the algorithm started the bisect from. Diagnostic. |
+//! | `providers[provider][model].max_tokens` | The discovered ceiling. Clamped to `[MIN_AUTOPROBE_FLOOR, MAX_AUTOPROBE_CEILING]`. |
+//!
+//! `operator_caps[provider]` is the optional operator-pinned
+//! per-provider cap (the `max_tokens` analogue of the
+//! `temperatures_auto.toml` `operator_caps` map). **As of v0.12.14
+//! the `operator_caps` map is write-only**: [`MaxTokensTable::set_operator_cap`]
+//! persists the value to disk for an audit trail, but the runtime
+//! dispatch path reads the per-provider
+//! `ModelConfig::max_tokens` (per-model), or falls through to
+//! `MOAGAN_<SECTION>_MAX_TOKENS`, or to the auto-probe cache, in
+//! that priority order — see [`crate::llm::max_tokens`] for the
+//! full chain. Pinning via env vars or per-model
+//! `ModelConfig::max_tokens` is the active mechanism.
+//!
+//! Delete the file to force a fresh probe. There is no
+//! `*.disabled` rename — the runtime only consults the canonical
+//! filename.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -416,6 +517,17 @@ impl MaxTokensTable {
     /// same on-disk sidecar so a human diff after a probe-run stays
     /// meaningful. `auto` is hard-coded to `false` because an
     /// operator-pinned cap is, by construction, not auto-detected.
+    ///
+    /// **Write-only as of v0.12.14.** This method persists the
+    /// cap to disk for an audit trail (so an operator can see what
+    /// was pinned), but the runtime dispatch path does NOT
+    /// currently read this field — the per-provider
+    /// `ModelConfig::max_tokens` (per-model), the
+    /// `MOAGAN_<SECTION>_MAX_TOKENS` env var, and the auto-probe
+    /// cache take precedence in that order. To clamp the runtime,
+    /// use env vars or per-model `ModelConfig::max_tokens`. The
+    /// cap survives across runs as a paper trail, not as an
+    /// active clamp.
     pub fn set_operator_cap(&self, provider: &str, min: u32) -> Result<()> {
         tracing::info!(provider, min, "MaxTokensTable::set_operator_cap");
         let now = Utc::now().to_rfc3339();

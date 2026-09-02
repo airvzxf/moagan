@@ -32,7 +32,10 @@ release type) removes:
 - `tests/integration_config_dual_mode.rs` + 7 fixtures
 - `scripts/check-no-legacy-config-schema.sh`
 - `docs/migrations/v0.12-to-v0.13-config.md` (with §4 content
-  preserved in `docs/max-tokens-auto.md`)
+  preserved in `src/llm/max_tokens.rs::resolve_max_tokens`
+  module-level docs — the historical `docs/max-tokens-auto.md`
+  was migrated to `src/llm/probe_table.rs` module-level docs in
+  v0.13.5, closes #694/#695/#696)
 - The `legacy_model_max_tokens` side-channel field on
   `ProviderEntry`
 - The two `#[serde(deserialize_with = "dual_mode::*")]` attributes

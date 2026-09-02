@@ -207,7 +207,8 @@ fn latest_run_dir(root: &Path) -> Option<PathBuf> {
 
 // v0.13.1 removed the legacy heredoc; the 131072 cap for MiniMax-M2.7 is
 // now pinned via `MOAGAN_MINIMAX_MAX_TOKENS=131072` (see
-// `docs/max-tokens-auto.md`). The default `minimax` section's endpoint is
+// `src/llm/max_tokens.rs::resolve_max_tokens` for the env-var
+// resolution chain). The default `minimax` section's endpoint is
 // overridden per-test via `MOAGAN_MINIMAX_ENDPOINT`.
 
 // ---------------------------------------------------------------------------
@@ -491,7 +492,7 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
         // Pin bug #4: the operator-side max_tokens cap is now
         // applied via env var (v0.13.1 removed the legacy
         // `[providers.minimax.models]` heredoc). See
-        // `docs/max-tokens-auto.md` §"Tuning the floor".
+        // `src/llm/max_tokens.rs::resolve_max_tokens` §"Tuning the floor".
         .env("MOAGAN_MINIMAX_MAX_TOKENS", "131072")
         .env("MINIMAX_API_KEY", "test-key")
         // Disable the `max_tokens` and `temperature` startup

@@ -50,8 +50,9 @@ persisted at `~/.local/share/moagan/max_tokens_auto.toml` and
 verified on every subsequent run. Disable with
 `MOAGAN_MAX_TOKEN_AUTO=0` or set `max_token_auto = None` in
 `~/.config/moagan/config.toml`. See
-[`docs/max-tokens-auto.md`](docs/max-tokens-auto.md) for the full
-algorithm and tuning knobs.
+[`src/llm/probe_table.rs`](src/llm/probe_table.rs) (table + sidecar
+schema) and [`src/llm/max_tokens.rs`](src/llm/max_tokens.rs)
+(env-var resolution chain) for the full algorithm and tuning knobs.
 
 ### Auto-detected `temperatures`
 
