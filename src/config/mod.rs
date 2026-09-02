@@ -488,14 +488,13 @@ fn default_sketches_per_cell() -> usize {
     10
 }
 
-/// F2 minimum allowed value for `sketches_per_cell`. The CLI's
-/// `--sketches-per-cell` flag and the `MOAGAN_DISCOVERY_SKETCHES_PER_CELL`
-/// env var reject anything below this floor. F2.x (v0.13.2)
-/// lowered the operator-facing floor to `1` (from `10`) so
-/// debug / integration tests can fan out cheaply; default is
-/// unchanged at `10` to preserve the v0.5 cardinality contract
-/// for nominal discovery runs.
-pub(crate) const MIN_SKETCHES_PER_CELL: usize = 1;
+/// F2 minimum allowed value for `sketches_per_cell`. Canonical
+/// definition lives at [`crate::cli::discover::MIN_SKETCHES_PER_CELL`];
+/// re-exported here so internal config-validator call sites keep
+/// their current import path. See the upstream definition for
+/// the F2.x (v0.13.2) floor-lowering rationale and the
+/// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env-var note.
+pub(crate) use crate::cli::discover::MIN_SKETCHES_PER_CELL;
 
 impl Default for DiscoveryMatrixConfig {
     fn default() -> Self {
