@@ -2368,6 +2368,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
 mod tests {
     use super::*;
     use crate::TEST_EVENT_FORMAT_LOCK;
+    use crate::TEST_LOG_TO_STDERR_LOCK;
     use crate::TEST_MOAGAN_HOME_LOCK;
 
     /// Allocate a fresh `(TempDir, path)` pair.
@@ -2385,7 +2386,7 @@ mod tests {
         (tmp, path)
     }
 
-    fn lock_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
+    fn lock_home_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_MOAGAN_HOME_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2395,7 +2396,7 @@ mod tests {
         guard
     }
 
-    fn unlock_env(guard: std::sync::MutexGuard<'static, ()>) {
+    fn unlock_home_env(guard: std::sync::MutexGuard<'static, ()>) {
         unsafe {
             std::env::remove_var("MOAGAN_HOME");
         }
@@ -2423,7 +2424,7 @@ mod tests {
     #[test]
     fn cli_run_invokes_startup_reconcile_when_enabled() {
         let (_keep, tmp) = unique_tmp("reconcile-enabled");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
         let cfg = Config::default();
@@ -2438,7 +2439,7 @@ mod tests {
         assert_eq!(report.orphans_removed, 0);
         assert_eq!(report.zombies_recovered, 0);
 
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -2450,7 +2451,7 @@ mod tests {
     #[test]
     fn cli_run_skips_startup_reconcile_when_disabled() {
         let (_keep, tmp) = unique_tmp("reconcile-disabled");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
         let cfg = Config {
@@ -2465,7 +2466,7 @@ mod tests {
             "startup_reconcile=false must short-circuit to Ok(None); got {report:?}"
         );
 
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -2478,7 +2479,7 @@ mod tests {
     #[test]
     fn cli_run_reconcile_sweeps_zombies_and_orphans() {
         let (_keep, tmp) = unique_tmp("reconcile-sweep");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
         // Open the DB once so the migration runner applies
@@ -2531,7 +2532,7 @@ mod tests {
             "zombie must be flipped to `interrupted`"
         );
 
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -2595,12 +2596,23 @@ mod tests {
     /// (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
     #[test]
     fn log_to_stderr_env_accepts_shell_idiomatic_one() {
+        // Save-and-restore pattern (same as PR #677 at
+        // `src/telemetry/stdout_events.rs:557-567` and PR #678 at
+        // `src/cli/mod.rs::tests::event_format_default_is_auto`):
+        // if the test panics between `set_var` and the restore
+        // block, the inherited `MOAGAN_LOG_TO_STDERR` value (if
+        // any) is still restored. The lock guards against
+        // concurrent access; the save/restore guards against panic
+        // leakage.
+        //
         // SAFETY: tests in this module serialise on one of
-        // `TEST_MOAGAN_HOME_LOCK` (for `MOAGAN_HOME` /
-        // `MOAGAN_LOG_TO_STDERR` mutations) or `TEST_EVENT_FORMAT_LOCK`
+        // `TEST_MOAGAN_HOME_LOCK` (for `MOAGAN_HOME` mutations),
+        // `TEST_LOG_TO_STDERR_LOCK` (for `MOAGAN_LOG_TO_STDERR`
+        // mutations, PR #679 item 1), or `TEST_EVENT_FORMAT_LOCK`
         // (for `MOAGAN_EVENT_FORMAT` mutations). Env mutations are
         // scoped to each test body and undone in its cleanup.
-        let _guard = TEST_MOAGAN_HOME_LOCK
+        let prev = std::env::var("MOAGAN_LOG_TO_STDERR").ok();
+        let _guard = TEST_LOG_TO_STDERR_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
@@ -2612,8 +2624,12 @@ mod tests {
             cli.log_to_stderr,
             "MOAGAN_LOG_TO_STDERR=1 must round-trip as `true`"
         );
+        drop(_guard);
         unsafe {
-            std::env::remove_var("MOAGAN_LOG_TO_STDERR");
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_LOG_TO_STDERR", v),
+                None => std::env::remove_var("MOAGAN_LOG_TO_STDERR"),
+            }
         }
     }
 
@@ -2623,7 +2639,12 @@ mod tests {
     /// silently regress the BoolishValueParser on the off side.
     #[test]
     fn log_to_stderr_env_accepts_false() {
-        let _guard = TEST_MOAGAN_HOME_LOCK
+        // Save-and-restore pattern (same as the sibling
+        // `log_to_stderr_env_accepts_shell_idiomatic_one` above;
+        // PR #677 / PR #678 precedent). Guards against panic
+        // leakage of the inherited `MOAGAN_LOG_TO_STDERR` value.
+        let prev = std::env::var("MOAGAN_LOG_TO_STDERR").ok();
+        let _guard = TEST_LOG_TO_STDERR_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
@@ -2635,8 +2656,12 @@ mod tests {
             !cli.log_to_stderr,
             "MOAGAN_LOG_TO_STDERR=false must round-trip as `false`"
         );
+        drop(_guard);
         unsafe {
-            std::env::remove_var("MOAGAN_LOG_TO_STDERR");
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_LOG_TO_STDERR", v),
+                None => std::env::remove_var("MOAGAN_LOG_TO_STDERR"),
+            }
         }
     }
 

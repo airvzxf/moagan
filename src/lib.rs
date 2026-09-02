@@ -132,6 +132,39 @@ pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub static TEST_EVENT_FORMAT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialises every test that mutates `MOAGAN_LOG_TO_STDERR`
+/// (the env var honoured by clap's `env = "MOAGAN_LOG_TO_STDERR"`
+/// binding at `src/cli/mod.rs:299` and by the legacy
+/// `log_to_stderr_value` resolver at `src/main.rs:223`). Currently
+/// consumed by:
+///
+/// - `src/cli/mod.rs::tests::log_to_stderr_env_accepts_shell_idiomatic_one`
+///   (line 2589) — sets the env var to `"1"` and reads via clap.
+/// - `src/cli/mod.rs::tests::log_to_stderr_env_accepts_false`
+///   (line 2619) — sets the env var to `"false"` and reads via
+///   clap.
+///
+/// Split off `TEST_MOAGAN_HOME_LOCK` by PR #679 (issue #679 item 1)
+/// because the env-var scope is different: `MOAGAN_HOME` and
+/// `MOAGAN_LOG_TO_STDERR` are independent clap bindings (different
+/// flags, different parse paths), so serialising one does not
+/// imply serialising the other. Sharing a single lock for both
+/// forced every `MOAGAN_LOG_TO_STDERR` test to wait for every
+/// `MOAGAN_HOME`-mutating test, which is over-serialisation.
+///
+/// Lock window matches `TEST_EVENT_FORMAT_LOCK`: only the
+/// `Cli::try_parse_from` parse matters because clap reads
+/// `env = MOAGAN_LOG_TO_STDERR` at parse time, not at every
+/// subsequent read.
+///
+/// Gated with `#[cfg(test)]` matching the `TEST_MOAGAN_HOME_LOCK`
+/// and `TEST_EVENT_FORMAT_LOCK` precedent — only unit tests in
+/// `src/cli/mod.rs` need it today; integration tests use
+/// `cmd.env(...)` on a child process and do not race with this
+/// lock.
+#[cfg(test)]
+pub static TEST_LOG_TO_STDERR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;

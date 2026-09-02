@@ -517,7 +517,7 @@ mod tests {
     /// and end up sharing each other's home dir, which
     /// surfaces as a spurious
     /// `Provider("sqlite: duplicate column name: …")` panic.
-    fn lock_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
+    fn lock_home_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_MOAGAN_HOME_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -527,7 +527,7 @@ mod tests {
         guard
     }
 
-    fn unlock_env(guard: std::sync::MutexGuard<'static, ()>) {
+    fn unlock_home_env(guard: std::sync::MutexGuard<'static, ()>) {
         unsafe {
             std::env::remove_var("MOAGAN_HOME");
         }
@@ -554,14 +554,14 @@ mod tests {
     #[test]
     fn dry_run_with_cleanup_orphans_no_fs_changes() {
         let (_keep, tmp) = unique_tmp("empty-cleanup");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let rc = run(args_with(&["cleanup", "dry", "yes"])).expect("dry-run must not error");
         assert_eq!(rc, 0);
         assert!(
             !tmp.join(".runs/foo").exists(),
             "dry-run must not create spurious files"
         );
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -576,11 +576,11 @@ mod tests {
         let target = run_dir.join("p_001.json.tmp.deadbeef01234567");
         std::fs::write(&target, b"orphan").unwrap();
 
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let rc = run(args_with(&["cleanup", "dry"])).expect("dry-run must not error");
         assert_eq!(rc, 0);
         assert!(target.exists(), "dry-run must not delete the file");
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -595,11 +595,11 @@ mod tests {
         let target = run_dir.join("p_001.json.tmp.deadbeef01234567");
         std::fs::write(&target, b"orphan").unwrap();
 
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let rc = run(args_with(&["cleanup", "yes"])).expect("with-yes must not error");
         assert_eq!(rc, 0);
         assert!(!target.exists(), "with-yes must delete the file");
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -615,7 +615,7 @@ mod tests {
         let target = run_dir.join("p_001.json.tmp.deadbeef01234567");
         std::fs::write(&target, b"orphan").unwrap();
 
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let err =
             run(args_with(&["cleanup"])).expect_err("missing --yes must surface as NeedsInput");
         assert!(
@@ -624,7 +624,7 @@ mod tests {
         );
         assert_eq!(err.exit_code() as i32, 10);
         assert!(target.exists(), "no-yes must not delete the file");
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 

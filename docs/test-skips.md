@@ -346,6 +346,123 @@ let the dev skip the validation entirely):
 These do NOT affect CI — only local development. CI re-runs the full
 check from a clean state.
 
+## Layer 8 — Process-wide env-locks (`TEST_*_LOCK` statics)
+
+Tests that mutate process-wide state — `std::env::set_var`,
+`std::env::set_current_dir`, etc. — must serialise against any
+sibling test that reads the same state, or the parallel `cargo
+test` run surfaces as a flake. Each lock here is a `pub static
+Mutex<()>` declared at the top of `src/lib.rs` (under `#[cfg(test)]`
+or, in the case of `TEST_API_KEYS_LOCK`, deliberately not gated so
+integration tests in `tests/` can also acquire it). The lock costs
+~8 bytes per process and is only ever touched by the test harness.
+
+These are NOT skips — every test below still runs. They are
+serialisation gates so the asserts inside each test see a stable
+view of the env-var they touch.
+
+### Inventory
+
+| Lock | Env vars / state protected | Defined at | Acquired by (representative) |
+|---|---|---|---|
+| `TEST_MOAGAN_HOME_LOCK` | `MOAGAN_HOME` | `src/lib.rs:57` | `src/cli/{mod,repair,rate,doctor}.rs` tests, `src/cli/probe.rs`, `src/reconcile/mod.rs`, `src/config/{mod,profile}.rs`, `src/fs_layout.rs`, `src/phases/synthesize.rs`, `src/preferences/{cache,integration}.rs` (~50 tests) |
+| `TEST_API_KEYS_LOCK` | `MINIMAX_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY` | `src/lib.rs:70` | `src/llm/{api_keys,provider}.rs` tests, `src/cli/{doctor,probe}.rs` tests (~14 tests) |
+| `TEST_PATH_LOCK` | `PATH` | `src/lib.rs:81` | `src/research/pdf.rs` tests (K.4 sub-1 PDF-parser block) |
+| `TEST_MINIMAX_ENV_LOCK` | `MOAGAN_MINIMAX_MODEL`, `MOAGAN_MINIMAX_ENDPOINT` | `src/lib.rs:92` | `src/config/mod.rs` tests (PR-B2 config-precedence block) |
+| `TEST_CWD_LOCK` | `std::env::set_current_dir` (cwd) | `src/lib.rs:99` | `src/config/mod.rs` tests (6 sites) |
+| `TEST_EVENT_FORMAT_LOCK` | `MOAGAN_EVENT_FORMAT` (clap `env = "..."` binding at `src/cli/mod.rs:255`) | `src/lib.rs:133` | `src/cli/mod.rs::tests::event_format_default_is_auto`, `src/cli/mod.rs::tests::event_format_env_off_reaches_parser` (PR #678) |
+| `TEST_LOG_TO_STDERR_LOCK` | `MOAGAN_LOG_TO_STDERR` (clap `env = "..."` binding at `src/cli/mod.rs:299`) | `src/lib.rs:166` | `src/cli/mod.rs::tests::log_to_stderr_env_accepts_shell_idiomatic_one`, `src/cli/mod.rs::tests::log_to_stderr_env_accepts_false` (PR #679) |
+
+Plus one **module-local** lock that lives outside `src/lib.rs`
+because its scope is bounded to a single module:
+
+| Lock | Env vars / state protected | Defined at | Acquired by |
+|---|---|---|---|
+| `STDOUT_EVENTS_TEST_LOCK` (module-local `Mutex<()>` at `src/telemetry/stdout_events.rs:406`) | `MOAGAN_DECISION_FORMAT` | `src/telemetry/stdout_events.rs:406` | `src/telemetry/stdout_events.rs::tests::env_var_extends_opt_out` and adjacent (PR #677). Note: this lock is module-local, not crate-wide; a test that touches both `MOAGAN_DECISION_FORMAT` and any of the crate-wide locks must acquire both. |
+
+### Established pattern (PR #246 → #677 → #678 → #679)
+
+1. **One lock per env-var group**, declared once in `src/lib.rs`
+   under `#[cfg(test)]`. The `TEST_API_KEYS_LOCK` precedent
+   shows the gate can be dropped if integration tests in
+   `tests/` also need to acquire it (the integration-test
+   compilation unit doesn't see `cfg(test)` of the lib).
+2. **Lock window matches the read window** — for `MOAGAN_HOME`
+   and the LLM keys, the window is "from `set_var` through the
+   dispatcher call that consumes the var"; for
+   `MOAGAN_EVENT_FORMAT` / `MOAGAN_LOG_TO_STDERR` it is just
+   "the `Cli::try_parse_from` parse window" because clap reads
+   the env binding at parse time only.
+3. **Save-and-restore the previous value** before mutating (PR
+   #677 precedent at `src/telemetry/stdout_events.rs:557-567`,
+   generalised by PR #678 and PR #679). The pattern is:
+
+   ```rust
+   let prev = std::env::var("MOAGAN_FOO").ok();
+   let _guard = TEST_FOO_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+   unsafe { std::env::set_var("MOAGAN_FOO", "bar"); }
+   // ... test body ...
+   drop(_guard);
+   unsafe {
+       match prev {
+           Some(v) => std::env::set_var("MOAGAN_FOO", v),
+           None => std::env::remove_var("MOAGAN_FOO"),
+       }
+   }
+   ```
+
+   The explicit `drop(_guard)` happens **before** the restore so
+   a panic inside the test body still releases the lock; the
+   save/restore pair guarantees the inherited value lands back
+   on the env if the test panics between `set_var` and the
+   restore block.
+4. **Helper wrappers in test modules** (`fn lock_home_env(tmp:
+   &Path)` in `src/cli/{mod,repair}.rs` and
+   `src/reconcile/mod.rs`) bind the lock + env mutation into a
+   single function so callers don't have to repeat the
+   acquire / mutate / release dance. The helper name should
+   name the env var (PR #679 item 3: `lock_home_env` not
+   `lock_env`).
+5. **Local alias over the crate-wide static** for tests that
+   acquire the same lock from many call sites (see
+   `src/cli/probe.rs:753` and `src/llm/provider.rs:2125` for
+   the `TEST_API_KEYS_LOCK` alias pattern).
+
+### Anti-pattern (do NOT do)
+
+- **Do NOT use a lock for one env var to serialise mutations of
+  a different env var.** That is the bug PR #678 closed for
+  `MOAGAN_EVENT_FORMAT` (was riding on `TEST_MOAGAN_HOME_LOCK`)
+  and the bug PR #679 closed for `MOAGAN_LOG_TO_STDERR` (was
+  riding on `TEST_MOAGAN_HOME_LOCK`). The two vars are
+  independent clap bindings — sharing a lock over-serialises
+  and forces unrelated tests to wait on each other.
+- **Do NOT skip the save/restore** "because the test always
+  sets the var". A panic between `set_var` and the explicit
+  cleanup leaks the mutated var to the next parallel test,
+  re-creating the very flake the lock was added to prevent.
+- **Do NOT add a new lock without a doc comment** matching the
+  shape of the existing ones (`src/lib.rs:46-133`). The
+  comment must list the env vars the lock guards, the call
+  sites that acquire it, and the historical PR that closed
+  the flake the lock exists to prevent.
+
+### How to add a new lock
+
+1. **First**: confirm the flake is real by stress-running the
+   affected test with `cargo test --lib --no-fail-fast
+   --test-threads=8 <name>` × 20. If a flake reproduces, the
+   lock is justified; if it doesn't, the test has a different
+   bug and the lock will only mask it.
+2. **Declare** the static at `src/lib.rs` next to the existing
+   `TEST_*_LOCK` siblings, with a full doc comment
+   (env-var scope, call sites, historical PR).
+3. **Acquire** in the affected test with the save/restore
+   pattern above.
+4. **Update Layer 8** here — add a row to the inventory table
+   so the next maintainer doesn't have to grep the codebase
+   to discover the lock.
+
 ## Summary table
 
 | Layer | Mechanism | Count | Auto-skipped on CI? |
@@ -363,6 +480,7 @@ check from a clean state.
 | 6f | `MINIMAX_API_KEY` in `gauntlet.sh:143` | 1 test | ❌ no (key present in CI) |
 | 6g | `MOAGAN_SMOKE_SECTION=discover_opencode_models` + `OPENCODE_API_KEY` (manual) | 35 tests (5 × 7 models) | ❌ no (env var + key never set in CI) |
 | 7 | lefthook escape hatches | n/a (escape hatches) | ❌ no |
+| 8 | Process-wide env-locks (`TEST_*_LOCK` statics) | 7 crate-wide locks + 1 module-local | n/a (serialisation, not skip) |
 
 **Total tests actively skipped on CI:** 0.
 **Total tests in conditional skip code paths:** 63
@@ -399,7 +517,11 @@ is never set in the workflow)).
    and add a row to the Layer 2 table above.
 
 2. **If the test mutates global state:** use `#[ignore]` in source.
-   Add a clear `#[ignore = "reason"]` message.
+   Add a clear `#[ignore = "reason"]` message. **For env-var or
+   cwd mutations that must run in parallel** (i.e. cannot be
+   `#[ignore]`d), follow the Layer 8 lock pattern instead — add a
+   `TEST_*_LOCK` static to `src/lib.rs`, acquire it with
+   save/restore, and update the Layer 8 inventory table.
 
 3. **If the test depends on an external binary that's not always
    available:** use the silent-skip pattern (return early if binary
