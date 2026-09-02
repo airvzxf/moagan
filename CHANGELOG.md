@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-09-02
+
+### Changed
+
+- Docs migration: `validation-tiers.md`, `max-tokens-auto.md`,
+  `temperatures-auto.md` → doc comments in code (closes #694, #695,
+  #696). No runtime / API change.
+
 ## [0.13.6] - 2026-09-02
 
 ### Changed
