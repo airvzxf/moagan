@@ -2628,16 +2628,39 @@ impl Config {
         }
         if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS") {
             let normalised = v.trim().to_ascii_lowercase();
+            // v0.13.4 fix: the trace used to fire after the match
+            // regardless of whether the value matched the accepted
+            // vocabulary, which made the "applied env override"
+            // log line lie about bad exports. Restrict the trace
+            // to the accept-arms and surface rejected values with
+            // a `warn!` so a stale `export MOAGAN_DISCOVERY_AUTO_PICKERS=foo`
+            // does not silently fall back to the TOML default. The
+            // `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` block above
+            // already follows the same shape (trace on apply,
+            // event with reason on rejection); mirror it.
             match normalised.as_str() {
-                "true" | "1" | "yes" | "on" => self.discovery.auto_pickers = true,
-                "false" | "0" | "no" | "off" => self.discovery.auto_pickers = false,
-                _ => {}
+                "true" | "1" | "yes" | "on" => {
+                    tracing::trace!(
+                        var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
+                        value = true,
+                        "applied env override"
+                    );
+                    self.discovery.auto_pickers = true;
+                }
+                "false" | "0" | "no" | "off" => {
+                    tracing::trace!(
+                        var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
+                        value = false,
+                        "applied env override"
+                    );
+                    self.discovery.auto_pickers = false;
+                }
+                _ => tracing::warn!(
+                    var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
+                    value = %v,
+                    "MOAGAN_DISCOVERY_AUTO_PICKERS is not a recognised boolean (accepted: true|false|1|0|yes|no|on|off); ignoring the override"
+                ),
             }
-            tracing::trace!(
-                var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
-                value = self.discovery.auto_pickers,
-                "applied env override"
-            );
         }
         // Track E (catalog §D.19.6): per-provider rate-limit knobs.
         // `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>`
@@ -5213,6 +5236,92 @@ mod tests {
             "garbage env must not flip the default false, got {}",
             oc.omit_max_tokens
         );
+    }
+
+    /// v0.13.4 regression pin (PR #698 item 5): the parser used to
+    /// fire `tracing::trace!("applied env override")` regardless
+    /// of whether the `MOAGAN_DISCOVERY_AUTO_PICKERS` value
+    /// matched the accepted vocabulary. After the fix the trace
+    /// only fires when the override is actually applied, and a
+    /// rejected value (anything outside the boolean vocabulary)
+    /// leaves the typed field unchanged. This test pins:
+    ///  - accepted values (`true`, `false`, mixed case, whitespace
+    ///    surrounding) flip the typed field
+    ///  - rejected values (`maybe`, empty after trim, gibberish)
+    ///    leave the typed field at `Config::default()` (`true`) and
+    ///    do not flip it to `false` (the previous bug-prone shape
+    ///    where any non-true input fell through `_ => {}` and the
+    ///    trace still claimed "applied")
+    #[test]
+    fn apply_env_overrides_discovery_auto_pickers_rejects_garbage() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS").ok();
+
+        // Rejected: gibberish. Field stays at the Config::default of
+        // `true`. The previous bug emitted the "applied" trace even
+        // for this value, so the post-mortem log lied.
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "maybe");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
+        }
+        assert!(
+            cfg.discovery.auto_pickers,
+            "garbage env value must not flip auto_pickers away from the default"
+        );
+
+        // Rejected: empty after trim. Same contract.
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "   ");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
+        }
+        assert!(
+            cfg.discovery.auto_pickers,
+            "whitespace-only env value must not flip auto_pickers away from the default"
+        );
+
+        // Accepted: explicit `false` flips the flag.
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "false");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
+        }
+        assert!(
+            !cfg.discovery.auto_pickers,
+            "explicit 'false' must flip auto_pickers"
+        );
+
+        // Accepted: mixed-case `YES` flips the flag (vocabulary is
+        // lowercased before matching).
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "YES");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
+        }
+        assert!(
+            cfg.discovery.auto_pickers,
+            "uppercase 'YES' must flip auto_pickers"
+        );
+
+        // Restore prior shell state.
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", v);
+            }
+        }
     }
 
     /// `ModelConfig::omit_max_tokens` survives a TOML round-trip so
