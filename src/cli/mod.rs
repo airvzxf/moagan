@@ -10,7 +10,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::cli::discover::MIN_SKETCHES_PER_CELL;
+use crate::cli::discover::{DEFAULT_SKETCHES_PER_CELL, MIN_SKETCHES_PER_CELL};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
@@ -2271,7 +2271,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     prompt: prompt.clone(),
                     home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),
-                    sketches_per_cell: 10,
+                    sketches_per_cell: DEFAULT_SKETCHES_PER_CELL,
                     max_parallelism,
                     dimensions: Some(8),
                     facets_per_dimension: Some(1),
