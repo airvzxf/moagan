@@ -44,11 +44,14 @@ release type) removes:
 ## What stays
 
 The new-shape types (`ProviderEntry`, `SectionKnobs`) and the
-runtime projection (`Config::providers_legacy` + `compute_legacy_providers`)
+runtime projection (`Config::providers_by_section` + `collapse_providers`)
 stay — they are the canonical v0.13 view, not legacy artefacts.
-Renaming `providers_legacy` → `providers` is a follow-up for v0.14
-(~200 LOC refactor across 11 production files), not part of this
-acceleration.
+Renaming `providers_legacy` → `providers_by_section` (and the
+collapse helper `compute_legacy_providers` → `collapse_providers`)
+is a follow-up for v0.14 (~200 LOC refactor across 11 production
+files), not part of this acceleration. The names were finalised
+in operator decision 2026-09-01 (commit history on
+`refactor/rename-providers-legacy-686`).
 
 ## Consequences
 

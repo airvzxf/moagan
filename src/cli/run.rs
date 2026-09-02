@@ -878,12 +878,12 @@ pub(crate) fn build_registry_for_with_active(
             other => other,
         })?;
     let spec = cfg
-        .providers_legacy
+        .providers_by_section
         .get(&section)
         .ok_or_else(|| {
             Error::InvalidArgs(format!(
                 "provider '{section}' is not in config (known sections: [{}])",
-                cfg.providers_legacy
+                cfg.providers_by_section
                     .keys()
                     .cloned()
                     .collect::<Vec<_>>()
