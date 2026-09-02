@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-09-02
+
+### Changed
+
+- F2 cleanup: fix smoke scripts (`smoke_phase_p.sh`, `smoke_preflight.sh`,
+  `smoke_audit_proxy.sh`), remove unused dev-deps (`serde_yaml`, `indicatif`).
+
 ## [0.14.0] - 2026-09-01
 
 ### Changed
