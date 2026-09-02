@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-09-02
+
+### Fixed
+
+- Bash tautology in smoke/e2e scripts (#702).
+- Dead-write `post_opts.sketches_per_cell` (#699).
+- Test lock pattern: `TEST_LOG_TO_STDERR_LOCK`, `lock_home_env` rename (#679).
+- Runtime fixes `sketches_per_cell`: `parse_sketches_per_cell` removal,
+  `MinSketchesReached` regression test, resume fallback tracing,
+  `MOAGAN_DISCOVERY_AUTO_PICKERS` parser (#698).
+- UX + smoke guard: `Env` source in `--explain`, `Preflight::sketches_per_cell`
+  constant, coord+saturation doc drift (#700).
+
 ## [0.13.5] - 2026-09-02
 
 ### Changed
