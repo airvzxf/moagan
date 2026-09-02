@@ -44,15 +44,10 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 
-# Resolve the domain source path. K split `src/domain/mod.rs` into
-# `src/domain/mod.rs`; pre-K branches still carry the flat file.
-# The smoke has domain-type shape checks that need to run on both,
-# so we point at whichever path exists on disk.
-if [[ -f "${ROOT}/src/domain/mod.rs" ]]; then
-    DOMAIN_SRC="${ROOT}/src/domain/mod.rs"
-else
-    DOMAIN_SRC="${ROOT}/src/domain/mod.rs"
-fi
+# Resolve the domain source path. The domain types live in
+# `src/domain/mod.rs` since sub-fase K; the older flat `src/domain.rs`
+# was removed in 16eb259. The smoke only needs the current path.
+DOMAIN_SRC="${ROOT}/src/domain/mod.rs"
 export DOMAIN_SRC
 
 # ---------------------------------------------------------------------
