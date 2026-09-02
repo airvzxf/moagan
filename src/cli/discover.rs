@@ -263,7 +263,7 @@ fn build_post_matrix_pipeline(opts: &DiscoverOptions) -> Pipeline {
 }
 
 /// Options for `moagan discover`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DiscoverOptions {
     /// Provider name (must be in config).
     pub provider: String,
@@ -1228,7 +1228,6 @@ pub async fn run_resume(
         prompt: String::new(),
         home: Some(home_arc.root().to_path_buf()),
         mock_dir: None,
-        sketches_per_cell: RESUME_DEFAULT_SKETCHES_PER_CELL,
         max_parallelism: None,
         dimensions: None,
         facets_per_dimension: None,
@@ -1240,6 +1239,7 @@ pub async fn run_resume(
         cache_facets: false,
         temperature_profiles: Vec::new(),
         explain: false,
+        ..Default::default()
     };
     let post_pipeline = build_post_matrix_pipeline(&post_opts);
 
