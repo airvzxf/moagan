@@ -937,9 +937,30 @@ const RESUME_DEFAULT_CLUSTER_THRESHOLD: f32 = 0.7;
 fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
     let path = home.run_dir(run_id).root().join("exploration_matrix.json");
     let Ok(raw) = std::fs::read_to_string(&path) else {
+        // F2 fallback: sidecar missing. The resume is best-effort
+        // (the matrix will be rebuilt around the operator's CLI
+        // value at the next phase boundary), so we surface a single
+        // info-level event with the path so a post-mortem can tell
+        // "no matrix sidecar" apart from "matrix sidecar malformed"
+        // without having to re-run the resume.
+        tracing::info!(
+            run_id = %run_id,
+            sidecar = %path.display(),
+            fallback = RESUME_DEFAULT_SKETCHES_PER_CELL,
+            reason = "missing",
+            "resume_sketches_per_cell: sidecar missing; using default"
+        );
         return RESUME_DEFAULT_SKETCHES_PER_CELL;
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        // F2 fallback: sidecar present but malformed JSON.
+        tracing::info!(
+            run_id = %run_id,
+            sidecar = %path.display(),
+            fallback = RESUME_DEFAULT_SKETCHES_PER_CELL,
+            reason = "malformed_json",
+            "resume_sketches_per_cell: sidecar malformed; using default"
+        );
         return RESUME_DEFAULT_SKETCHES_PER_CELL;
     };
     // F2 first choice: explicit `sketches_per_cell` written by
@@ -980,6 +1001,19 @@ fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
         // answer in that case.
         return card.div_ceil(cells).max(MIN_SKETCHES_PER_CELL);
     }
+    // F2 fallback: sidecar present and well-formed JSON, but no
+    // `sketches_per_cell` field AND no recoverable legacy
+    // `cardinality + dimensions`. The matrix shape is unknowable
+    // so we fall back to the default. Distinct reason string so
+    // post-mortems can tell "sidecar shape unrecognised" apart
+    // from "sidecar missing" and "sidecar malformed".
+    tracing::info!(
+        run_id = %run_id,
+        sidecar = %path.display(),
+        fallback = RESUME_DEFAULT_SKETCHES_PER_CELL,
+        reason = "no_recoverable_field",
+        "resume_sketches_per_cell: sidecar lacks both sketches_per_cell and legacy cardinality; using default"
+    );
     RESUME_DEFAULT_SKETCHES_PER_CELL
 }
 
