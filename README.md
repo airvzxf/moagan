@@ -66,8 +66,8 @@ rewrites out-of-range requests to the nearest valid value via
 operator-driven counterpart is
 `moagan probe temperature --provider PROVIDER:MODEL [--persist-union]
 [--batch-size N] [--dry-run]`. See
-[`docs/temperatures-auto.md`](docs/temperatures-auto.md) for the
-algorithm, the sidecar format, and the `--persist-union` operator
+[`src/llm/temperature_probe.rs`](src/llm/temperature_probe.rs) for
+the algorithm, the sidecar format, and the `--persist-union` operator
 cap.
 
 ## Architecture

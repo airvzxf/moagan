@@ -35,6 +35,82 @@
 //! `BreakeredProvider` wrapping) and the cross-run cache, so a
 //! probe that comes back `Rejected` does not count against the
 //! runtime's breaker window nor poison the steady-state cache.
+//!
+//! ## The algorithm
+//!
+//! The probe tests 21 candidate temperatures per `(provider, model)`,
+//! spanning `0.0` (deterministic decoding) through `2.0` (the
+//! OpenAI-compat baseline) in `0.1` increments — the canonical
+//! constant lives at [`TEMPERATURE_PROBE_VALUES`]. Each candidate
+//! is tried in isolation with a tiny deterministic payload
+//! (`"Reply with the single character: 1"`, `max_tokens = 1024`,
+//! 15 s per-probe HTTP timeout) and classified by HTTP status plus
+//! body fingerprint into three outcomes:
+//!
+//! | Outcome | Meaning |
+//! |---|---|
+//! | `Accepted` | HTTP 2xx/3xx with a non-empty body that does not carry the rejection signature, OR HTTP 2xx/3xx with an empty body AND the truncation signal (`stop_reason = "max_tokens"` with `output_tokens > 0`). The second case is the wire shape MiniMax returns when the model thinks too hard and exhausts its output budget mid-emit: the upstream unambiguously accepted the request, the model simply had no budget to emit trailing tokens. |
+//! | `Rejected` | HTTP 2xx/3xx with a non-empty body that carries the rejection signature, or HTTP 4xx (`400`, `422`) with the rejection signature in the body — the upstream rejects the value as out-of-range. |
+//! | `Indeterminate` | Timeout, 5xx, transport error, 4xx without the rejection signature, or 2xx/3xx with an empty body WITHOUT the truncation signal. The empty-body-without-truncation shape is genuinely ambiguous (silent parameter drop, decoder-absorbed error, 200 envelope with no content); the algorithm's `retry_once_on_indeterminate` path fires a second probe and the second outcome is treated as terminal for the batch boundary. |
+//!
+//! The algorithm fans the candidates out in groups of
+//! [`TEMPERATURE_PROBE_BATCH_SIZE`] (3) so 21 candidates become
+//! exactly 7 batches, which keeps the upstream from seeing a single
+//! 21-shot burst. `0` is a legal override that fans every candidate
+//! out in parallel; the CLI flag `--batch-size 0` is the escape
+//! hatch for operators on a private relay that can absorb the burst.
+//!
+//! ## When it runs
+//!
+//! There are two complementary entry points:
+//!
+//! - **Runtime auto-probe** — `ProviderRegistry` schedules one
+//!   background probe per fresh `(provider, model)` the first
+//!   time the registry sees it. The probe writes through to
+//!   `<MOAGAN_HOME>/temperatures_auto.toml` so the next startup
+//!   picks the cached set up without re-running.
+//! - **Operator-driven probe** — `moagan probe temperature
+//!   --provider PROVIDER:MODEL [--persist-union] [--batch-size N]
+//!   [--dry-run]`. The CLI reuses the same
+//!   `detect_supported_temperatures` algorithm and writes through
+//!   the same sidecar.
+//!
+//! Both paths use the same on-disk sidecar, so an operator-pinned
+//! entry from the CLI is visible to the runtime auto-probe on the
+//! next startup and vice versa.
+//!
+//! ## When to disable it
+//!
+//! Disable the auto-probe when the cost of a 21-shot HTTP sweep is
+//! prohibitive or when the provider cannot be reached from the
+//! test runner:
+//!
+//! - **Smoke tests against a real provider.** Every CI run would
+//!   otherwise pay 21 sequential probes per fresh model. The
+//!   smoke / e2e scripts create a fresh `MOAGAN_HOME` per run via
+//!   the `mkhome()` mktemp helper (e.g. `WORK_PROXY_1=$(mkhome)`
+//!   in `scripts/e2e_audit_proxy.sh`) and export
+//!   `MOAGAN_MAX_TOKEN_AUTO=false` to also skip the max-tokens
+//!   probe, so neither auto-probe can write or read a stale
+//!   cache. `temperatures_auto.toml` is then rebuilt from scratch
+//!   on the first LLM call.
+//! - **Sandboxed / offline runs.** The probe needs at least one
+//!   successful round-trip; if the network is locked down the
+//!   probe exits cleanly with the cached value (or an empty set
+//!   if there is no cache).
+//! - **Reproducible benchmarks.** When the first call must take
+//!   the same warm path it took during the previous run, freeze
+//!   the probe so the cache file is not rewritten.
+//!
+//! Disable with `MOAGAN_TEMPERATURE_AUTO=false` (env var, accepted
+//! spellings: `false` / `0` / `no` / `off`, mirroring
+//! `MOAGAN_<name>_OMIT_MAX_TOKENS`). The same env var is consulted
+//! in `crate::config::apply_env_overrides` for every provider
+//! entry. For per-provider opt-out, set
+//! `[[providers.<name>]] temperature_auto_enabled = false` in
+//! `config.toml` (parity with `max_token_auto_enabled`). The
+//! hand-edit / delete-the-cache-file path is still supported as a
+//! last resort but is no longer the only path.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,6 +173,19 @@ pub const TEMPERATURE_PROBE_VALUES: &[f32] = &[
 /// value matches the v0.7.1 `max_tokens` tightening-batch size so
 /// the two auto-probes share the same fan-out semantics; a future
 /// refactor can tune one without touching the other.
+///
+/// # Tuning the batch size
+///
+/// The runtime auto-probe always uses this default; the
+/// `moagan probe temperature --batch-size N` CLI flag is the only
+/// knob that overrides it at probe time.
+///
+/// | Value | Effect |
+/// |---|---|
+/// | `1` | Sequential probe; slowest but safest for shared upstreams. |
+/// | `3` (default) | 7 batches of 3 candidates in parallel; matches the runtime. |
+/// | `7` | 3 batches of 7 candidates in parallel; faster but harder on the upstream. |
+/// | `21` / `0` | Every candidate in parallel; one batch, one round-trip. Use only on a private relay. |
 pub const TEMPERATURE_PROBE_BATCH_SIZE: usize = 3;
 
 /// HTTP timeout for a single probe. Mirrors the `max_tokens`
@@ -1249,6 +1338,24 @@ impl TemperatureTable {
 
     /// Effective per-provider operator cap. `None` when no cap
     /// has been recorded for `provider`.
+    ///
+    /// **Invariant — runtime always intersects the auto-discovered
+    /// set with the operator cap.** The cap is the **union** of
+    /// every temperature the operator has allowed under the same
+    /// provider, so a fresh run on a new model inherits the
+    /// temperatures the operator already vetted for a sibling
+    /// model on the same provider. On a `(provider, model)`
+    /// lookup the runtime intersects the auto-discovered set
+    /// with the operator's cap, so an operator who has
+    /// explicitly whitelisted `T = 0.0..1.0` cannot accidentally
+    /// regress to a `T = 1.5` acceptance that the auto-probe
+    /// happens to discover on a permissive relay.
+    ///
+    /// The `--persist-union` semantics are deliberate: union
+    /// (not intersection) preserves the principle of "do not
+    /// restrict what a model already demonstrated it accepts".
+    /// Intersection would silently shrink the cap the moment one
+    /// model rejects a value another model accepts.
     pub fn operator_cap(&self, provider: &str) -> Option<OperatorCap> {
         self.inner.read().operator_caps.get(provider).cloned()
     }
