@@ -807,4 +807,63 @@ mod tests {
         let decision = t.update(&batch, &clusters);
         assert_eq!(decision, StopDecision::Continue);
     }
+
+    /// v0.13.2 floor (PR #688) regression pin: when the operator
+    /// runs a small matrix with `--sketches-per-cell 1`, the
+    /// saturation tracker's `min_sketches = 40` floor can be
+    /// reached exactly when the matrix exhausts itself. The
+    /// tracker must surface this as `MinSketchesReached` (a clean
+    /// "we hit the floor with no work left" early exit), NOT
+    /// `Continue`. A future refactor that loses the early-exit
+    /// branch would silently let the matrix loop finish on its
+    /// outer "exhausted matrix" check, hiding the contract.
+    ///
+    /// Setup mirrors the v0.13.2 default policy at the smallest
+    /// matrix size that reaches the floor exactly: 40 cells × 1
+    /// sketch per cell × 1 default profile slot = 40 total
+    /// sketches, with `target = 40`. The loop completes the 40
+    /// sketches (the matrix loop drives `update` with the
+    /// sketch it just recorded, then a final empty batch on the
+    /// natural end-of-matrix signal), so the tracker's `update`
+    /// sees `completed = 40` and `batch = []`.
+    #[test]
+    fn min_sketches_reached_pins_spc_1_small_matrix_contract() {
+        // The v0.13.2 floor of 1 (PR #688) lets operators pick
+        // `sketches_per_cell = 1`. The smallest matrix that
+        // reaches `DEFAULT_MIN_SKETCHES = 40` exactly is
+        // 40 cells × 1 sketch per cell × 1 default profile
+        // slot, giving `target = 40` and `min_sketches = 40`.
+        let mut t = SaturationTracker::with_policy(40, StopPolicy::default());
+        // Drive the loop: every iteration records one completion
+        // and asks the tracker for a decision. The final
+        // iteration is the "matrix is exhausted" signal — the
+        // loop passes an empty batch to `update`.
+        for i in 0..40 {
+            t.record_completions(1);
+            let sketch = sketch(
+                &format!("sk_{i:02}"),
+                &format!("thesis {i} alpha beta gamma"),
+                "minimalist",
+            );
+            let decision = t.update(&[sketch], &[]);
+            assert_eq!(
+                decision,
+                StopDecision::Continue,
+                "matrix loop must continue while there is still work at iteration {i}"
+            );
+        }
+        assert_eq!(t.completed, 40);
+        // Final probe: batch is empty, completed (40) >= min_sketches
+        // (40) → MinSketchesReached. This is the v0.13.2 contract:
+        // the floor is reachable from spc=1, and the tracker
+        // surfaces it as a clean stop reason.
+        let decision = t.update(&[], &[]);
+        assert_eq!(
+            decision,
+            StopDecision::Stop {
+                reason: StopReason::MinSketchesReached
+            },
+            "spc=1 small matrix must trip MinSketchesReached once the matrix exhausts at the floor"
+        );
+    }
 }
