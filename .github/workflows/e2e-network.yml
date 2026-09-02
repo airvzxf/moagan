@@ -86,7 +86,7 @@ permissions:
 # On `workflow_dispatch` the run is identical — the heavy sections
 # live in their own manual workflows.
 #
-# Reference: docs/validation-tiers.md (Tier 3, main-only).
+# Reference: AGENTS.md §"Validation tiers" (Tier 3, main-only).
 #
 # Uses the same .github/actions/rust-setup composite as ci.yml:
 # Swatinem/rust-cache@v2 (cache-on-failure: true) shares the target/

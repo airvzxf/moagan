@@ -1,6 +1,32 @@
 # Moagan validation gauntlet.
 # Usage: make validate
 #
+# Validation tiers (full rationale: AGENTS.md §"Validation tiers"):
+#
+#   T0  sub-second    fmt-check + guard-deps                → pre-commit (parallel)
+#   T1  seconds       lint + build                          → pre-commit (parallel)
+#   T2  minutes       test-ci (cargo test --all-targets)    → pre-push
+#   T3  CI only       smoke + e2e; e2e-network on main only → .github/workflows/
+#   msg <1 s          conventional commit subject check     → commit-msg
+#
+# Dev loop (compact):
+#
+#   $ edit src/...                                  (T0 + T1 in ~30-90 s, parallel)
+#   $ git commit -m "feat(llm): add streaming parser"
+#      └─► commit-msg     ─ check format ─── pass
+#      └─► pre-commit     ─ T0: fmt-check + guard-deps ── parallel
+#                          T1: lint + build ──────────── parallel
+#   $ git push                                       (T2: cargo test in 1-5 min)
+#      └─► pre-push       ─ T2: cargo test ─── sequential
+#
+#   GitHub Actions — ci.yml (8 required, ~6 min cold / ~3 min warm):
+#      round 1: fmt-check  │  guard-deps  │  clippy
+#      round 2: test-lib  │  test-tests  │  test-doc  │  smoke  │  e2e
+#
+#   GitHub Actions — e2e-network.yml (post-merge, main only, ~15 min cold):
+#      preflight-minimax  →  build-e2e-network
+#      →  fast (~2 min)  +  explore (~8 min)  in parallel
+#
 # Smoke vs E2E:
 #   smoke_*  Pure-static checks that grep the source, read static
 #            SQLite, or run grep/jq over already-produced artefact

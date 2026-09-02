@@ -50,8 +50,9 @@ persisted at `~/.local/share/moagan/max_tokens_auto.toml` and
 verified on every subsequent run. Disable with
 `MOAGAN_MAX_TOKEN_AUTO=0` or set `max_token_auto = None` in
 `~/.config/moagan/config.toml`. See
-[`docs/max-tokens-auto.md`](docs/max-tokens-auto.md) for the full
-algorithm and tuning knobs.
+[`src/llm/probe_table.rs`](src/llm/probe_table.rs) (table + sidecar
+schema) and [`src/llm/max_tokens.rs`](src/llm/max_tokens.rs)
+(env-var resolution chain) for the full algorithm and tuning knobs.
 
 ### Auto-detected `temperatures`
 
@@ -65,8 +66,8 @@ rewrites out-of-range requests to the nearest valid value via
 operator-driven counterpart is
 `moagan probe temperature --provider PROVIDER:MODEL [--persist-union]
 [--batch-size N] [--dry-run]`. See
-[`docs/temperatures-auto.md`](docs/temperatures-auto.md) for the
-algorithm, the sidecar format, and the `--persist-union` operator
+[`src/llm/temperature_probe.rs`](src/llm/temperature_probe.rs) for
+the algorithm, the sidecar format, and the `--persist-union` operator
 cap.
 
 ## Architecture

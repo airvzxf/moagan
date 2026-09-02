@@ -36,7 +36,7 @@ spec; the following reference documents are kept current alongside it:
 
 | Document | Purpose |
 |---|---|
-| `docs/validation-tiers.md` | The T0–T3 + commit-msg model. |
+| `AGENTS.md` §"Validation tiers" | The T0–T3 + commit-msg model. |
 | `docs/branch-protection.md` | The ruleset `protect-main` and how to update it. |
 | `docs/adr/` | Architecture decision records — the *why* behind major decisions. |
 | `AGENTS.md` | Repo-level rules. Conflicts with the global `AGENTS.md` are resolved by the most specific. |

@@ -20,7 +20,7 @@ concurrency:
 permissions:
   contents: read
 
-# Tiered validation as documented in docs/validation-tiers.md, but split into
+# Tiered validation as documented in AGENTS.md §"Validation tiers", but split into
 # 7 round-2 jobs to maximise wall-clock parallelism. The dependency graph:
 #
 #   fmt-check              ─┐

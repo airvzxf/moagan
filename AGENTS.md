@@ -37,8 +37,9 @@ The source code (`src/`) is the canonical spec. When documentation and code conf
 
 ## Validation tiers
 
-The validation split across the dev loop is documented in
-[`docs/validation-tiers.md`](docs/validation-tiers.md). Short version:
+The dev loop splits validation into four tiers so the common cases
+(fmt, clippy, build) are sub-30s while the slow integration suite
+(~minutes) only blocks push and CI. The compact table:
 
 | Tier | Cost | Where | What |
 |---|---|---|---|
@@ -46,6 +47,12 @@ The validation split across the dev loop is documented in
 | T1 | 30–90 s | pre-commit | `make lint` + `make build` |
 | T2 | 1–5 min | pre-push | `make test-ci` (cargo test, skips known-flaky `audit_e2e`) |
 | T3 | 5–30 min | CI | `make smoke` + `make e2e`; `make e2e-network` on `main` only |
+
+Plus one fast orthogonal check on the commit message itself:
+
+| Hook | Cost | Where | What |
+|---|---|---|---|
+| commit-msg | <1 s | `commit-msg` hook | `scripts/check-commit-msg.sh` enforces Conventional Commits subject format (`feat:`, `fix:`, `chore(deps):`, …) |
 
 Hooks are managed by [`lefthook`](https://github.com/evilmartians/lefthook);
 config lives in [`lefthook.yml`](lefthook.yml). Setup once per clone:
@@ -58,6 +65,66 @@ lefthook install
 The local aggregator `scripts/gauntlet.sh` runs everything end-to-end and is
 the reference for the full gauntlet order. Branch protection rules and the
 required-status-checks list are in [`docs/branch-protection.md`](docs/branch-protection.md).
+
+### Why this split
+
+The user's complaint was the right one: "I don't want to wait 5
+minutes for every commit when the project grows." That is solved by
+**time-shifting** the slow checks from commit to push, not by
+removing them.
+
+- **Commit is frequent** (10–50 / day). Only T0+T1 (<30 s) belongs here.
+- **Push is rare** (1–10 / day). T2 is fine on push; the dev is
+  about to context-switch anyway while CI runs.
+- **CI is the audit**, not the bottleneck. It re-runs everything in a
+  clean environment so a corrupted local cache can never mask a real
+  regression.
+- **Parallelism inside CI** is the second layer of speedup. The 8
+  required jobs run concurrently in two rounds; total wall-clock is
+  ~6 min cold vs. ~5–8 min sequentially.
+
+### Escape hatches
+
+Use sparingly and document in the commit body when you do:
+
+```bash
+# Skip all lefthook hooks for one command
+LEFTPHOOK=0 git commit -m "wip: experiment"
+
+# Skip pre-commit + commit-msg only (still runs pre-push on next git push)
+git commit --no-verify
+
+# Skip pre-push (still runs CI; CI catches the same checks)
+git push --no-verify
+```
+
+`--no-verify` does **not** skip CI. Branch protection will still
+block the merge if any required check is red. So `git push
+--no-verify` is safe-ish: you push faster, the CI catches it, you
+fix it.
+
+### Setup on a fresh clone
+
+```bash
+# One-time per machine
+pacman -S lefthook           # or: cargo install lefthook
+lefthook --version           # ≥ 1.6 required
+
+# One-time per repo clone
+lefthook install             # writes .git/hooks/{pre-commit,pre-push,commit-msg}
+git config --local commit.gpgsign true    # if not already global
+```
+
+Verify the hooks are wired:
+
+```bash
+$ ls -1 .git/hooks/{pre-commit,pre-push,commit-msg}
+.git/hooks/commit-msg
+.git/hooks/pre-commit
+.git/hooks/pre-push
+$ head -1 .git/hooks/pre-commit
+#!/usr/bin/env lefthook
+```
 
 ## Smoke gates
 

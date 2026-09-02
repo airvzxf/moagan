@@ -21,7 +21,6 @@
 /docs/ARCHITECTURE.md         @airvzxf
 /docs/proposal-*.md           @airvzxf
 /docs/branch-protection.md    @airvzxf
-/docs/validation-tiers.md     @airvzxf
 
 # Build / dependency manifests — touching these is a forced upgrade.
 /Cargo.toml                   @airvzxf

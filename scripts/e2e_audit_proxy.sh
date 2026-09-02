@@ -237,7 +237,7 @@ stop_proxy() {
 # v0.13.1 removed the legacy `[providers.<name>]` heredoc; the
 # 131072 cap for MiniMax-M2.7 is now pinned per-proxy via
 # `MOAGAN_MINIMAX_MAX_TOKENS=131072` in each `run_test` body
-# (see docs/max-tokens-auto.md). Without this override the
+# (see src/llm/max_tokens.rs::resolve_max_tokens). Without this override the
 # runtime falls back to `MINIMAX_MAX_TOKENS_CAP = 524288` when
 # the startup auto-probe can't reach models.dev, and the
 # upstream rejects with HTTP 400 "does not support max tokens
