@@ -193,21 +193,29 @@ fn resolve_cells(opts: &DiscoverOptions) -> Result<(usize, ValueSource)> {
 ///
 /// Precedence (CLI wins on conflict):
 /// 1. CLI flag (`opts.sketches_per_cell`, default 10) → `Flag`.
-/// 2. TOML `[discovery_matrix].sketches_per_cell` → `Toml`.
-/// 3. Built-in default 10 → `Default`.
+/// 2. `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var (set + parses
+///    to a value at or above the floor) → `Env`. The env var is
+///    applied inside `Config::apply_env_overrides` before this
+///    helper sees the config, so the resulting
+///    `cfg.discovery_matrix.sketches_per_cell` is the env var's
+///    value; we re-read the env var directly here to decide
+///    whether to attribute the result to `Env` vs `Toml`.
+/// 3. TOML `[discovery_matrix].sketches_per_cell` → `Toml`.
+/// 4. Built-in default 10 → `Default`.
 ///
 /// The operator-facing floor is 1 (lowered from 10 in v0.13.2);
 /// only the default remains 10. The floor is enforced at the
 /// CLI layer and re-checked below in `build_and_format`.
 ///
-/// The `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var is applied
-/// inside `Config::apply_env_overrides` (before this helper sees
-/// the config) so a `Toml` source here actually means "the env
-/// var was unset and TOML has the value"; we deliberately do NOT
-/// distinguish Env from Toml in this helper — both fall under
-/// `Toml` per the plan's "Default / Flag / Env / Toml" taxonomy
-/// (the operator's TOML block is what they edited, the env var
-/// is a transient override).
+/// v0.13.4 (PR #700 item 6): split the previous "Env + Toml both
+/// reported as Toml" shape into two distinct sources. The plan's
+/// "Default / Flag / Env / Toml" taxonomy now maps 1:1 onto the
+/// resolution chain, so the `Type` column on
+/// `moagan discover --explain` reflects the operator's mental
+/// model. The detection mirrors
+/// `Config::apply_env_overrides` (a parse-fail / below-floor env
+/// var is treated as if it were unset, so it falls through to
+/// `Toml`).
 fn resolve_sketches_per_cell(opts: &DiscoverOptions, cfg: &Config) -> (usize, ValueSource) {
     // The CLI flag is the highest-precedence source. We detect
     // "user passed --sketches-per-cell" by comparing the parsed
@@ -220,6 +228,20 @@ fn resolve_sketches_per_cell(opts: &DiscoverOptions, cfg: &Config) -> (usize, Va
     // the clap default to disambiguate.
     if opts.sketches_per_cell != DEFAULT_SKETCHES_PER_CELL {
         return (opts.sketches_per_cell, ValueSource::Flag);
+    }
+    // Env-var source: re-read the env var directly so we can tell
+    // "the operator exported the env var and it landed" apart
+    // from "the operator set a TOML value". `apply_env_overrides`
+    // already followed the same parse-floor-accept-or-reject
+    // rules; mirror them so the explain matches what the live
+    // config loader did. A parse-fail or below-floor env var is
+    // treated as unset (the config loader leaves the typed
+    // field at the TOML value in that case).
+    if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL")
+        && let Ok(n) = v.trim().parse::<usize>()
+        && n >= MIN_SKETCHES_PER_CELL
+    {
+        return (n, ValueSource::Env);
     }
     let toml_value = cfg.discovery_matrix.sketches_per_cell;
     if toml_value != DEFAULT_SKETCHES_PER_CELL {
@@ -454,6 +476,13 @@ mod tests {
     use super::*;
     use crate::cli::discover::TemperatureProfileSpec;
 
+    /// Tests that touch `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` serialise
+    /// through this mutex so parallel `cargo test` workers do not
+    /// race on the env var. Mirror of
+    /// `config::tests::TEST_ENV_LOCK`; lives next to the helpers that
+    /// read the env var rather than the config loader.
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn opts() -> DiscoverOptions {
         DiscoverOptions {
             provider: "mock".to_string(),
@@ -574,13 +603,94 @@ mod tests {
 
     #[test]
     fn build_input_sketches_per_cell_via_toml_is_toml() {
+        // Take the env-var lock so a parallel worker cannot
+        // mutate `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` between
+        // our setup and the `build_explain_input` call below.
+        // Without the lock, this assertion is racy on a
+        // shared CI runner.
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL").ok();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+        }
         let mut o = opts();
         o.sketches_per_cell = DEFAULT_SKETCHES_PER_CELL;
         let mut cfg = Config::default();
         cfg.discovery_matrix.sketches_per_cell = 40;
         let input = build_explain_input(&o, &cfg).unwrap();
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", v);
+            }
+        }
         assert_eq!(input.sketches_per_cell, 40);
         assert_eq!(input.source_sketches_per_cell, ValueSource::Toml);
+    }
+
+    /// v0.13.4 (PR #700 item 6): the env var
+    /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` produces an `Env`
+    /// source on the explain output. The previous shape
+    /// collapsed env + TOML into a single `Toml` source, which
+    /// lied about an operator override. Pin the new shape with
+    /// the env var set to a non-default value (the explain path
+    /// must read it directly to disambiguate Env from Toml).
+    #[test]
+    fn build_input_sketches_per_cell_via_env_is_env() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "30");
+        }
+        let o = opts();
+        // TOML value differs from the env var to confirm Env wins
+        // over Toml in the precedence chain.
+        let mut cfg = Config::default();
+        cfg.discovery_matrix.sketches_per_cell = 40;
+        let input = build_explain_input(&o, &cfg).unwrap();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+        }
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", v);
+            }
+        }
+        assert_eq!(input.sketches_per_cell, 30);
+        assert_eq!(input.source_sketches_per_cell, ValueSource::Env);
+    }
+
+    /// Companion to the env-source test: an env var that parses
+    /// below the v0.13.2 floor (1) is treated as unset, the same
+    /// way `Config::apply_env_overrides` ignores it. The explain
+    /// must fall back to TOML (or default) rather than surfacing
+    /// the rejected env value. Locks the precedence chain so a
+    /// future refactor that forgets the floor check trips the
+    /// test.
+    #[test]
+    fn build_input_sketches_per_cell_env_below_floor_falls_through_to_toml() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL").ok();
+        unsafe {
+            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "0");
+        }
+        let o = opts();
+        let mut cfg = Config::default();
+        cfg.discovery_matrix.sketches_per_cell = 40;
+        let input = build_explain_input(&o, &cfg).unwrap();
+        unsafe {
+            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+        }
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", v);
+            }
+        }
+        assert_eq!(
+            input.source_sketches_per_cell,
+            ValueSource::Toml,
+            "below-floor env values must fall through to TOML (same as apply_env_overrides)"
+        );
+        assert_eq!(input.sketches_per_cell, 40);
     }
 
     #[test]
