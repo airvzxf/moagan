@@ -2385,7 +2385,7 @@ mod tests {
         (tmp, path)
     }
 
-    fn lock_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
+    fn lock_home_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_MOAGAN_HOME_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2395,7 +2395,7 @@ mod tests {
         guard
     }
 
-    fn unlock_env(guard: std::sync::MutexGuard<'static, ()>) {
+    fn unlock_home_env(guard: std::sync::MutexGuard<'static, ()>) {
         unsafe {
             std::env::remove_var("MOAGAN_HOME");
         }
@@ -2423,7 +2423,7 @@ mod tests {
     #[test]
     fn cli_run_invokes_startup_reconcile_when_enabled() {
         let (_keep, tmp) = unique_tmp("reconcile-enabled");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
         let cfg = Config::default();
@@ -2438,7 +2438,7 @@ mod tests {
         assert_eq!(report.orphans_removed, 0);
         assert_eq!(report.zombies_recovered, 0);
 
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -2450,7 +2450,7 @@ mod tests {
     #[test]
     fn cli_run_skips_startup_reconcile_when_disabled() {
         let (_keep, tmp) = unique_tmp("reconcile-disabled");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
         let cfg = Config {
@@ -2465,7 +2465,7 @@ mod tests {
             "startup_reconcile=false must short-circuit to Ok(None); got {report:?}"
         );
 
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
@@ -2478,7 +2478,7 @@ mod tests {
     #[test]
     fn cli_run_reconcile_sweeps_zombies_and_orphans() {
         let (_keep, tmp) = unique_tmp("reconcile-sweep");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
 
         // Open the DB once so the migration runner applies
@@ -2531,7 +2531,7 @@ mod tests {
             "zombie must be flipped to `interrupted`"
         );
 
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 

@@ -423,7 +423,7 @@ mod tests {
         (tmp, path)
     }
 
-    fn lock_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
+    fn lock_home_env(tmp: &std::path::Path) -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_MOAGAN_HOME_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -433,7 +433,7 @@ mod tests {
         guard
     }
 
-    fn unlock_env(guard: std::sync::MutexGuard<'static, ()>) {
+    fn unlock_home_env(guard: std::sync::MutexGuard<'static, ()>) {
         unsafe {
             std::env::remove_var("MOAGAN_HOME");
         }
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn reconcile_startup_cleans_orphans_and_zombies() {
         let (_keep, tmp) = unique_tmp("reconcile-startup");
-        let guard = lock_env(&tmp);
+        let guard = lock_home_env(&tmp);
         let home = MoaganHome::at(tmp.clone());
         let db = Db::open(&home.meta_db_path()).expect("open db");
 
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(zombie_row.status, "interrupted");
 
         drop(db);
-        unlock_env(guard);
+        unlock_home_env(guard);
         // `_keep` (TempDir) drops at end of test → dir cleaned up.
     }
 
