@@ -405,6 +405,18 @@ impl DiscoveryCoordinator {
     ///    `~60 sketches at 50% saturation` contract. The tracker's
     ///    target is `matrix.cardinality()` (cells ×
     ///    sketches_per_cell × profile_total) — the F2 contract.
+    ///
+    ///    v0.13.2 (PR #688) lowered the operator-facing per-cell
+    ///    floor from 10 to 1, so `sketches_per_cell = 1` is now
+    ///    a valid choice. With the default profile
+    ///    (`[1.0] × 1`) the matrix cardinality becomes `cells × 1`,
+    ///    which can fall below the tracker's `min_sketches = 40`
+    ///    floor. When that happens, the loop trips
+    ///    `MinSketchesReached` cleanly at the natural end-of-matrix
+    ///    boundary instead of returning to the outer matrix-exhausted
+    ///    check. The v0.13.4 test
+    ///    `min_sketches_reached_pins_spc_1_small_matrix_contract`
+    ///    in `src/discovery/saturation.rs` pins this shape.
     /// 5. Iterate over every `(cell, sketch_index)` pair. Each
     ///    iteration:
     ///    - Acquires a parallelism permit (`ctx.parallelism`) so the
