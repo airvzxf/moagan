@@ -73,11 +73,6 @@ run_test "preflight_two_run_ids_printed" "
   echo '--- searching for run ids ---'
   grep -E 'preflight (discover|fast) run_id' /tmp/preflight-out.txt | head -3
   echo '---'
-  echo \"\$output\" > /tmp/preflight-out.txt
-  echo \"preflight output len: \${#output}\"
-  echo '--- searching for run ids ---'
-  grep -E 'preflight (discover|fast) run_id' /tmp/preflight-out.txt | head -3
-  echo '---'
   echo \"\$output\" | grep -cE 'preflight discover run_id: ' | grep -qE '^([1-9][0-9]*)$' || { echo 'no discover run_id line'; exit 1; }
   echo \"\$output\" | grep -cE 'preflight fast run_id: '     | grep -qE '^([1-9][0-9]*)$' || { echo 'no fast run_id line'; exit 1; }
 "
@@ -93,7 +88,6 @@ run_test "preflight_mock_creates_discover_sketches" "
   HOME_DIR=\$(mktemp -d /tmp/moagan-preflight.XXXXXX)
   export MOAGAN_HOME=\$HOME_DIR
   export MOAGAN_QUIET=1
-  export 
   $BIN preflight \
     --provider mock:mock-model \
     --prompt 'demo prompt' \
@@ -127,7 +121,6 @@ run_test "preflight_non_interactive_no_prompts" "
   HOME_DIR=\$(mktemp -d /tmp/moagan-preflight.XXXXXX)
   export MOAGAN_HOME=\$HOME_DIR
   export MOAGAN_QUIET=1
-  export 
   echo n | $BIN preflight \
     --provider mock:mock-model \
     --prompt 'demo prompt' \
@@ -151,7 +144,6 @@ run_test "preflight_invalid_provider_fails_fast" "
   HOME_DIR=\$(mktemp -d /tmp/moagan-preflight.XXXXXX)
   export MOAGAN_HOME=\$HOME_DIR
   export MOAGAN_QUIET=1
-  export 
   # mixed-up provider = no valid provider in config; the binary
   # fails on lookup, not on the LLM call. This is a sanity check
   # that the preflight does not silently succeed with a typo.
