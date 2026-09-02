@@ -202,6 +202,13 @@ impl SaturationTracker {
     ///    safety net to avoid unbounded outlier growth).
     /// 5. `MinSketchesReached` — loop reached `min_sketches`
     ///    and the input batch is empty (a clean early exit).
+    ///    v0.13.2 (PR #688) lowered the operator-facing per-cell
+    ///    floor from 10 to 1, so a matrix with `--sketches-per-cell
+    ///    1` and `cells = 40` hits this branch at the natural
+    ///    end-of-matrix boundary. The behaviour is intentional and
+    ///    pinned by
+    ///    `min_sketches_reached_pins_spc_1_small_matrix_contract`
+    ///    in this module's tests.
     /// 6. `Continue` — none of the above.
     pub fn update(&mut self, batch: &[Sketch], clusters: &[Cluster]) -> StopDecision {
         self.cluster_count = clusters.len();
