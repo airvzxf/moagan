@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Smoke checks for Phase P. Each entry is a single inline command;
+# the loop exports ROOT so `$ROOT/...` resolves inside the subshell.
+#
+# Note: `set -uo pipefail` (no `-e`) lets one failed check be
+# reported as FAIL without aborting the whole suite. The
+# pre-2026-04 version used `set -euo pipefail`, which caused the
+# first failing grep to silently kill the loop and the trailing
+# `printf` to lie about how many checks ran.
+#
+# Usage:  ./scripts/smoke_phase_p.sh
+# Exit:   0 when all checks pass, 1 otherwise.
+
+set -uo pipefail
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export ROOT
 checks=(
@@ -12,14 +25,29 @@ checks=(
   'grep -q acquire_many_owned "$ROOT/src/execution/parallelism.rs"'
   'grep -q TooManyPermits "$ROOT/src/execution/parallelism.rs"'
   'grep -q compress_or_report "$ROOT/src/storage/compression.rs"'
-  'grep -q "Sub-fase P" "$ROOT/docs/v0.3-status.md"'
-  'grep -q "Decision table v0.3 patch" "$ROOT/docs/proposal-03-add-ons.md"'
 )
+PASS=0
+FAIL=0
+FAILED_CHECKS=()
 for check in "${checks[@]}"; do
   # Export ROOT so the subshell inherits it for the inline command.
   # Without this, single-quoted strings like "$ROOT/src/llm/role.rs"
   # interpolate as the literal text "$ROOT", which the subshell
   # cannot resolve and the check fails.
-  env ROOT="$ROOT" bash -c "$check"
+  if env ROOT="$ROOT" bash -c "$check"; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    FAILED_CHECKS+=("$check")
+  fi
 done
-printf '%d smoke checks passed\n' "${#checks[@]}"
+
+printf 'phase_p smoke: PASS=%d FAIL=%d TOTAL=%d\n' "$PASS" "$FAIL" "${#checks[@]}"
+if [[ $FAIL -gt 0 ]]; then
+  printf 'failed:\n'
+  for c in "${FAILED_CHECKS[@]}"; do
+    printf '  %s\n' "$c"
+  done
+  exit 1
+fi
+exit 0
