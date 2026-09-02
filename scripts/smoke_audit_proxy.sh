@@ -824,7 +824,18 @@ run_test "discovery_sketches_per_cell_floor_1" \
   "grep -q 'sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/mod.rs"
 
 run_test "discovery_floor_in_discover_rs_uses_constant" \
-  "grep -q 'below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/discover.rs"
+  "grep -q 'MIN_SKETCHES_PER_CELL' ${ROOT}/src/cli/discover.rs"
+
+# v0.13.4 (PR #700 item 10): the `discovery_explain` path runs
+# the same floor check as `Cmd::Discover` (see
+# `discover_explain::build_and_format` in
+# `src/cli/discover_explain.rs`). Extend the constant-usage
+# guard to also scan `discover_explain.rs` so a future refactor
+# that drifts to a literal `1` (the v0.13.2 floor) trips the
+# smoke before it lands. The error string is harmonised with
+# `cli::mod` so the same regex matches both surfaces.
+run_test "discovery_floor_in_discover_explain_rs_uses_constant" \
+  "grep -q 'below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/discover_explain.rs"
 
 run_test "discovery_calls_build_registry" \
   "grep -q 'build_registry_for' ${ROOT}/src/cli/discover.rs"
