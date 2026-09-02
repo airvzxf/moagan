@@ -20,9 +20,10 @@
 //!
 //! Compliance: `proposal-01-concept.md` §5.8 ("JSON Schema. Parser
 //! YAML/TOML. Validación de manifests."). YAML and TOML are
-//! deferred — `serde_yaml` and `toml` are already in the
-//! dependency tree but the user picked JSON Schema only for the
-//! sub-fase C scope.
+//! deferred — `toml` is already in the dependency tree but
+//! `serde_yaml` is intentionally absent (the crate is
+//! upstream-deprecated as of 0.9.34-deprecated). The user picked
+//! JSON Schema only for the sub-fase C scope.
 
 use crate::error::Result;
 use crate::sandbox::Sandbox;
