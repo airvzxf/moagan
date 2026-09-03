@@ -369,11 +369,39 @@ impl RunContext {
             .breaker_for(&self.default_provider, role)
     }
 
+    /// Tanda 04e D-1: same as [`Self::breaker_for`] but with an
+    /// explicit section override. The multi-provider dispatch
+    /// helpers key the breaker by `(section, role)` so a
+    /// saturating `MiniMax-M3` call does not sidelined the
+    /// `mimo-v2.5` calls (and vice versa). The CLI boundary
+    /// pre-creates the per-`(provider, role)` breakers via
+    /// `with_breakers_per_role` for the default provider; the
+    /// first call for a new section creates a default-config
+    /// breaker the same way the default lookup does, so the
+    /// `BreakerRegistry::breaker_for` lazy-init semantics carry
+    /// over verbatim.
+    pub fn breaker_for_at(
+        &self,
+        section: &str,
+        role: Role,
+    ) -> crate::llm::circuit_breaker::CircuitBreaker {
+        self.breaker_per_role.breaker_for(section, role)
+    }
+
     /// v0.9.6: lookup (or lazily create) the throttle governor
     /// for `(default_provider, role)`. The same `Arc` is returned
     /// across all callers so the AIMD state is consistent.
     pub fn governor_for(&self, role: Role) -> Arc<ThrottleGovernor> {
         self.throttle.governor_for(&self.default_provider, role)
+    }
+
+    /// Tanda 04e D-1: same as [`Self::governor_for`] but with
+    /// an explicit section override. Each `(section, role)` gets
+    /// its own AIMD state so the per-provider rate-limit cap
+    /// (`[rate_limit_per_provider]`) is honoured independently
+    /// across the multi-provider fan-out.
+    pub fn governor_for_at(&self, section: &str, role: Role) -> Arc<ThrottleGovernor> {
+        self.throttle.governor_for(section, role)
     }
 
     /// v0.9.6: shared AIMD-throttle / per-(provider, role)-breaker
@@ -431,6 +459,50 @@ impl RunContext {
                     // `pre_call`; counting it again here would just
                     // feed the same code path the user already saw
                     // saturate the breaker in v0.9.7.
+                }
+                _ => {}
+            },
+        }
+        result
+    }
+
+    /// Tanda 04e D-1: same as [`Self::dispatch_with_governors`]
+    /// but with an explicit section override so the breaker +
+    /// AIMD-throttle state is keyed by `(section, role)` rather
+    /// than `(default_provider, role)`. Mirrors the default
+    /// variant's cascade-avoidance and AIMD-backoff semantics
+    /// exactly; the only difference is which section feeds the
+    /// breaker / governor registries.
+    async fn dispatch_with_governors_for<F, T>(
+        &self,
+        section: &str,
+        role: Role,
+        inner: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        let was_open = self.breaker_for_at(section, role).is_open();
+        if was_open {
+            return Err(Error::PlanExhausted {
+                message: format!(
+                    "circuit open: provider '{section}' role '{}' sidelined",
+                    role.as_str()
+                ),
+                http_status: None,
+            });
+        }
+        let governor = self.governor_for_at(section, role);
+        let _throttle_sleep = governor.pre_call().await;
+        let result = inner.await;
+        match &result {
+            Ok(_) => governor.on_success(),
+            Err(e) => match (e.provider_cause(), was_open) {
+                (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
+                    governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
+                }
+                (Some(ProviderCause::PlanExhausted { .. }), _) => {
+                    // Self-inflicted: do nothing on the breaker path.
                 }
                 _ => {}
             },
@@ -734,6 +806,32 @@ impl RunContext {
             .expect("default provider must be registered")
     }
 
+    /// Tanda 04e D-1: resolve a provider by explicit
+    /// `(section, model_id)` pair. The lookup skips the round-
+    /// robin pool (a multi-provider dispatch must always hit the
+    /// specific `(section, model)` it was called with) and falls
+    /// back to the bare section name for the legacy mock
+    /// registration path so hand-rolled test fixtures keep
+    /// working. Panics with the joined key in the message when
+    /// the pair is missing — the CLI boundary guarantees every
+    /// `(section, model)` referenced by a
+    /// `--temperature-profile` is registered via
+    /// `build_registry_for_with_active` before the coordinator
+    /// starts the loop, so a missing entry here is a programming
+    /// error in the dispatch wiring (not an operator misconfig).
+    pub fn provider_for(&self, section: &str, model_id: &str) -> Arc<dyn crate::llm::Provider> {
+        let joined = crate::llm::ProviderRegistry::registry_key(section, model_id);
+        if let Some(p) = self.providers.get(&joined) {
+            return p;
+        }
+        self.providers.get(section).unwrap_or_else(|| {
+            panic!(
+                "provider for (section={section}, model={model_id}) (joined key {joined:?}) \
+                 must be registered in the multi-provider registry"
+            )
+        })
+    }
+
     /// Send a `Request` through the active provider and surface the
     /// response. Every call is mirrored into the call-level telemetry
     /// (JSONL + SQLite when the index is enabled) with a fresh
@@ -994,6 +1092,158 @@ impl RunContext {
         // v0.9.6: AIMD-throttle + breaker. See `dispatch_with_governors`.
         self.dispatch_with_governors(role, async {
             self.dispatch_to_provider(req, None, started_unix, retry_count)
+                .await
+        })
+        .await
+    }
+
+    /// Tanda 04e D-1: like [`Self::call_with_retry_at_temp`]
+    /// but pinned to a specific `(section, model_id)` pair. The
+    /// discovery coordinator's multi-provider fan-out routes
+    /// every `(cell, temperature, replica)` iteration through
+    /// this helper so each provider contributes to the matrix
+    /// independently. The cache key is computed against the
+    /// explicit pair (via `Cache::cache_key`) so two providers
+    /// answering the same prompt cache distinctly — same
+    /// contract `call_with_retry_at_temp` honours for the
+    /// default pair.
+    ///
+    /// The lookup `self.providers.get_model(section, model_id)`
+    /// is delegated to [`Self::provider_for`] which panics with
+    /// the joined key in the message when the pair is missing
+    /// from the registry. The CLI boundary guarantees every pair
+    /// referenced by a `--temperature-profile` flag is
+    /// registered via `build_registry_for_with_active` before
+    /// the coordinator starts the loop, so a missing pair here
+    /// is a programming error in the dispatch wiring — not an
+    /// operator misconfig — and a panic with the joined key is
+    /// the right diagnostic.
+    pub async fn call_with_retry_at_temp_for(
+        &self,
+        section: &str,
+        model_id: &str,
+        role: Role,
+        system: String,
+        user: String,
+        retry_count: u32,
+        temperature: f32,
+    ) -> Result<Response> {
+        let (_provider_temperature, provider_top_p) = self
+            .config
+            .providers_by_section
+            .get(section)
+            .map(|s| (s.temperature, s.top_p))
+            .unwrap_or((None, None));
+        let system = render_system_prompt_with_prefix(&role, model_id, &system);
+        let req = Request {
+            role,
+            model: model_id.to_owned(),
+            system,
+            user,
+            max_tokens: Some(max_tokens_for_role(role)),
+            temperature: Some(temperature),
+            top_p: resolve_top_p(role, provider_top_p),
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        let cache_key = Cache::cache_key(&req, section, model_id);
+        let started_unix = crate::time::now_unix_secs();
+        let prompt_id = format!("{}@{}", role.as_str(), cache_key);
+        if let Some(entry) = self.prompt_cache.lock().lookup_by_id(&prompt_id) {
+            return self.record_cache_hit_at(
+                entry,
+                role,
+                &cache_key,
+                section,
+                model_id,
+                started_unix,
+                retry_count,
+            );
+        }
+        if let Some(entry) = self.cache.lookup(&cache_key)? {
+            self.prompt_cache
+                .lock()
+                .register(&prompt_id, cache_key.clone());
+            return self.record_cache_hit_at(
+                entry,
+                role,
+                &cache_key,
+                section,
+                model_id,
+                started_unix,
+                retry_count,
+            );
+        }
+        if let Some(rl) = self.rate_limit_per_role.get(&role) {
+            let _wait = rl.acquire().await?;
+        }
+        self.dispatch_with_governors_for(section, role, async {
+            self.dispatch_to_provider_for(
+                section,
+                model_id,
+                req,
+                Some(cache_key.clone()),
+                started_unix,
+                retry_count,
+            )
+            .await
+        })
+        .await
+        .inspect(|_response| {
+            self.prompt_cache.lock().register(&prompt_id, cache_key);
+        })
+    }
+
+    /// Tanda 04e D-1: provider-uncached sibling of
+    /// [`Self::call_with_retry_at_temp_for`] used by the
+    /// discovery coordinator's retry path. Mirrors
+    /// [`Self::call_uncached_at_temp`] but pins the dispatch to
+    /// the supplied `(section, model_id)` pair. The cache key is
+    /// still computed (so the audit hash matches the cached
+    /// path's shape) but no cache lookup runs — the retry
+    /// budget must not be poisoned by a previously cached broken
+    /// response.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) async fn call_uncached_at_temp_for(
+        &self,
+        section: &str,
+        model_id: &str,
+        role: Role,
+        system: String,
+        user: String,
+        started_unix: i64,
+        retry_count: u32,
+        temperature: f32,
+    ) -> Result<Response> {
+        let (_provider_temperature, provider_top_p) = self
+            .config
+            .providers_by_section
+            .get(section)
+            .map(|s| (s.temperature, s.top_p))
+            .unwrap_or((None, None));
+        let system = render_system_prompt_with_prefix(&role, model_id, &system);
+        let req = Request {
+            role,
+            model: model_id.to_owned(),
+            system,
+            user,
+            max_tokens: Some(max_tokens_for_role(role)),
+            temperature: Some(temperature),
+            top_p: resolve_top_p(role, provider_top_p),
+            response_schema: None,
+            stream: false,
+            extra_messages: vec![],
+            attachments: vec![],
+            tool_choice: None,
+        };
+        if let Some(rl) = self.rate_limit_per_role.get(&role) {
+            let _wait = rl.acquire().await?;
+        }
+        self.dispatch_with_governors_for(section, role, async {
+            self.dispatch_to_provider_for(section, model_id, req, None, started_unix, retry_count)
                 .await
         })
         .await
@@ -1595,6 +1845,370 @@ impl RunContext {
         .await
     }
 
+    /// Tanda 04e D-1: sibling of [`Self::dispatch_to_provider`]
+    /// that dispatches against a specific `(section, model_id)`
+    /// pair instead of the run context's default. Mirrors the
+    /// default variant's gate order verbatim — modality gate →
+    /// temperature clamp → capability resolver → param-rejection
+    /// omit → silent-acceptance audit → cache store / telemetry
+    /// write / cost record / stdout `Event::LlmCall` mirror —
+    /// so the only behavioural difference is which provider is
+    /// `provider.send`'d. The cache key mixes `(section, model)`
+    /// via the existing `Cache::cache_key` contract so two
+    /// providers answering the same prompt cache distinctly.
+    ///
+    /// The function is a near-clone of `dispatch_to_provider`
+    /// rather than a parameterised refactor because the default
+    /// path is exercised by ~5 call sites and pinning the
+    /// behaviour to the existing self-`default_*` references
+    /// would force every call site to thread `(section, model)`
+    /// arguments through, including paths that do not need
+    /// them. The sibling keeps the production hot path
+    /// unchanged and concentrates the override wiring in one
+    /// auditable spot.
+    async fn dispatch_to_provider_for(
+        &self,
+        section: &str,
+        model_id: &str,
+        mut req: Request,
+        cache_key: Option<String>,
+        started_unix: i64,
+        retry_count: u32,
+    ) -> Result<Response> {
+        use tracing::Instrument;
+        let provider = self.provider_for(section, model_id);
+        let effective_max = provider.effective_max_tokens(&req);
+        if let Some(catalog) = self.models_dev_catalog.as_ref()
+            && let Some(entry) = crate::llm::models_dev::lookup(catalog, section, model_id)
+        {
+            let gate = crate::llm::modal_gate::ModalityGate::from_entry(&entry);
+            if let Err(e) = gate.apply(&mut req) {
+                let ended_unix = crate::time::now_unix_secs();
+                let phase_name = req.role.as_str();
+                let _ = self.telemetry.call(
+                    &uuid::Uuid::now_v7().to_string(),
+                    phase_name,
+                    phase_name,
+                    section,
+                    model_id,
+                    cache_key.as_deref().unwrap_or(""),
+                    None,
+                    false,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    started_unix,
+                    ended_unix,
+                    Some(&e.to_string()),
+                    retry_count,
+                );
+                return Err(e);
+            }
+        }
+        if let (Some(t), Some(table)) = (req.temperature, self.temperature_table.as_ref())
+            && let Some(clamped) = table.nearest_supported(section, model_id, t)
+        {
+            if (clamped - t).abs() > 1e-3_f32 {
+                tracing::warn!(
+                    provider = %section,
+                    model = %model_id,
+                    role = %req.role.as_str(),
+                    requested = %t,
+                    clamped_to = %clamped,
+                    "temperature outside supported set; clamped at dispatch (safety net)"
+                );
+            } else {
+                tracing::debug!(
+                    provider = %section,
+                    model = %model_id,
+                    role = %req.role.as_str(),
+                    requested = %t,
+                    dispatched = %clamped,
+                    "temperature in supported set; dispatched as requested"
+                );
+            }
+            req.temperature = Some(clamped);
+        }
+        let gated = match self.capability_resolver.as_ref() {
+            Some(resolver) => resolver.gate_request(section, model_id, &req),
+            None => req.clone(),
+        };
+        let gated_audit = gated.max_tokens.unwrap_or(u32::MAX);
+        let hash_input = if gated_audit != effective_max {
+            let mut clamped = gated;
+            clamped.max_tokens = Some(effective_max);
+            clamped
+        } else {
+            gated
+        };
+        let mut hash_input = hash_input;
+        if let Some(table) = self.param_rejections.as_ref() {
+            let mut omitted: Vec<&str> = Vec::new();
+            for param in PARAM_NAMES {
+                if table.should_omit(section, model_id, param) {
+                    crate::llm::wire::omit_param(&mut hash_input, param);
+                    omitted.push(param);
+                }
+            }
+            if !omitted.is_empty() {
+                tracing::debug!(
+                    provider = %section,
+                    model = %model_id,
+                    role = %req.role.as_str(),
+                    omitted = ?omitted,
+                    "omitted known-rejected params before dispatch"
+                );
+            }
+        }
+        let request_body_sha256 = (section == "minimax")
+            .then(|| crate::llm::http::request_body_sha256(&hash_input))
+            .transpose()?;
+        if let Ok(value) = serde_json::to_value(&hash_input) {
+            audit_unknown_fields(&value);
+        }
+        let call_id = uuid::Uuid::now_v7().to_string();
+        let provider_started = std::time::Instant::now();
+        let call_span = tracing::info_span!(
+            "llm_call",
+            call_id = %call_id,
+            provider = %section,
+            model = %model_id,
+            role = %req.role.as_str(),
+            stage = tracing::field::Empty,
+        );
+        async {
+            tracing::debug!(
+                call_id = %call_id,
+                phase = req.role.as_str(),
+                stage = "provider.send.started",
+                retry_count,
+                "LLM call stage"
+            );
+            let mut result = provider.send(&hash_input).await;
+            let max_rejection_retries = PARAM_NAMES.len();
+            let mut rejection_attempts = 0;
+            while rejection_attempts < max_rejection_retries {
+                let status = match result.as_ref().err().and_then(|e| e.http_status()) {
+                    Some(s) if (400..500).contains(&s) => s,
+                    _ => break,
+                };
+                let err = result.as_ref().expect_err("status set implies Err");
+                let body = parse_provider_error_body(err, status);
+                let detected = detect_all_rejections(status, body.as_ref());
+                if detected.is_empty() {
+                    break;
+                }
+                for detected_param in &detected {
+                    tracing::info!(
+                        provider = %section,
+                        model = %model_id,
+                        role = %req.role.as_str(),
+                        detected_param = %detected_param,
+                        "auto-detected param rejection; retrying without it"
+                    );
+                    if let Some(table) = self.param_rejections.as_ref()
+                        && let Err(rec_err) = table.record(section, model_id, detected_param)
+                    {
+                        tracing::warn!(
+                            error = %rec_err,
+                            "failed to persist param rejection; in-memory entry still kept"
+                        );
+                    }
+                    crate::llm::wire::omit_param(&mut hash_input, detected_param);
+                }
+                if let Ok(value) = serde_json::to_value(&hash_input) {
+                    audit_unknown_fields(&value);
+                }
+                tracing::debug!(
+                    call_id = %call_id,
+                    phase = req.role.as_str(),
+                    stage = "provider.send.retry",
+                    detected_params = ?detected,
+                    "LLM call stage"
+                );
+                rejection_attempts += 1;
+                result = provider.send(&hash_input).await;
+                if result.is_ok() {
+                    break;
+                }
+            }
+            tracing::debug!(
+                call_id = %call_id,
+                phase = req.role.as_str(),
+                stage = "provider.send.completed",
+                elapsed_ms = provider_started.elapsed().as_millis(),
+                success = result.is_ok(),
+                retry_count,
+                "LLM call stage"
+            );
+            let ended_unix = crate::time::now_unix_secs();
+            let phase_name = req.role.as_str();
+            let ctx = || WarningContext {
+                phase: Some(phase_name.to_owned()),
+                role: Some(phase_name.to_owned()),
+                call_id: Some(call_id.clone()),
+                attempt: Some(retry_count),
+            };
+            match &result {
+                Ok((status, response)) => {
+                    if let Some(ref key) = cache_key {
+                        let cache_started = std::time::Instant::now();
+                        tracing::debug!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "cache.store.started",
+                            "LLM call stage"
+                        );
+                        match self.cache.store(key, section, model_id, response) {
+                            Ok(()) => tracing::debug!(
+                                call_id = %call_id,
+                                phase = phase_name,
+                                stage = "cache.store.completed",
+                                elapsed_ms = cache_started.elapsed().as_millis(),
+                                "LLM call stage"
+                            ),
+                            Err(e) => tracing::warn!(
+                                call_id = %call_id,
+                                phase = phase_name,
+                                stage = "cache.store.error",
+                                error = %e,
+                                "LLM call stage"
+                            ),
+                        }
+                    }
+                    if let Err(e) = self.telemetry.call(
+                        &call_id,
+                        phase_name,
+                        phase_name,
+                        section,
+                        model_id,
+                        cache_key.as_deref().unwrap_or(""),
+                        request_body_sha256.as_deref(),
+                        false,
+                        Some(*status),
+                        response.usage.input_tokens,
+                        response.usage.output_tokens,
+                        0,
+                        response.usage.cache_creation,
+                        started_unix,
+                        ended_unix,
+                        None,
+                        retry_count,
+                    ) {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "telemetry.call.error",
+                            error = %e,
+                            "LLM call stage"
+                        );
+                    } else {
+                        tracing::debug!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "telemetry.call.completed",
+                            "LLM call stage"
+                        );
+                        if crate::telemetry::stdout_events::resolve_event_format(
+                            crate::telemetry::stdout_events::EventFormat::Jsonl,
+                        ) {
+                            crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                crate::telemetry::stdout_events::Event::LlmCall {
+                                    schema: crate::telemetry::stdout_events::SCHEMA_VERSION,
+                                    ts: crate::telemetry::stdout_events::now_rfc3339(),
+                                    call_id: &call_id,
+                                    phase: phase_name,
+                                    role: phase_name,
+                                    provider: section,
+                                    model: model_id,
+                                    elapsed_ms: provider_started.elapsed().as_millis() as u64,
+                                    ok: true,
+                                    input_tokens: response.usage.input_tokens as u32,
+                                    output_tokens: response.usage.output_tokens as u32,
+                                    retry_count,
+                                },
+                            );
+                        }
+                        if let Some(db) = self.telemetry.db() {
+                            let cost_usd = crate::llm::cost::cost_estimate(
+                                self.models_dev_catalog.as_deref(),
+                                section,
+                                model_id,
+                                &response.usage,
+                            );
+                            if let Err(e) = db.record_call_cost(&call_id, cost_usd) {
+                                tracing::warn!(
+                                    call_id = %call_id,
+                                    phase = phase_name,
+                                    stage = "cost.record.error",
+                                    error = %e,
+                                    "LLM call stage"
+                                );
+                            }
+                        }
+                    }
+                    if response.truncated {
+                        let _ = self.telemetry.warn(
+                            "model.response_truncated",
+                            "warn",
+                            "model response ended at max_tokens",
+                            serde_json::json!({
+                                "text_bytes": response.text.len(),
+                                "finish_reason": response.finish_reason,
+                            }),
+                            ctx(),
+                        );
+                    }
+                    if response.text.is_empty() {
+                        let _ = self.telemetry.warn(
+                            "model.response_empty",
+                            "warn",
+                            "model returned an empty text block",
+                            serde_json::json!({
+                                "finish_reason": response.finish_reason,
+                            }),
+                            ctx(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if let Err(telemetry_error) = self.telemetry.call(
+                        &call_id,
+                        phase_name,
+                        phase_name,
+                        section,
+                        model_id,
+                        cache_key.as_deref().unwrap_or(""),
+                        request_body_sha256.as_deref(),
+                        false,
+                        e.http_status(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        started_unix,
+                        ended_unix,
+                        Some(&e.to_string()),
+                        retry_count,
+                    ) {
+                        tracing::warn!(
+                            call_id = %call_id,
+                            phase = phase_name,
+                            stage = "telemetry.call.error",
+                            error = %telemetry_error,
+                            "LLM call stage"
+                        );
+                    }
+                }
+            }
+            result.map(|(_, r)| r)
+        }
+        .instrument(call_span)
+        .await
+    }
+
     /// Record a cache hit and surface the cached response. The cached
     /// `usage` is used to populate `cache_read`/`cache_creation` in
     /// the call record so the run's cache-hit rate is observable.
@@ -1606,6 +2220,35 @@ impl RunContext {
         started_unix: i64,
         retry_count: u32,
     ) -> Result<Response> {
+        self.record_cache_hit_at(
+            entry,
+            role,
+            cache_key,
+            &self.default_provider.clone(),
+            &self.default_model.clone(),
+            started_unix,
+            retry_count,
+        )
+    }
+
+    /// Tanda 04e D-1: same as [`Self::record_cache_hit`] but
+    /// with an explicit `(section, model)` pair. Mirrors the
+    /// default variant's telemetry row verbatim so the audit
+    /// log keeps the per-provider identifier on every cache-hit
+    /// row — operators reading the JSONL see the same
+    /// `(section, model)` string the multi-provider dispatch
+    /// used, not a silently-downgraded
+    /// `(default_provider, default_model)` fallback.
+    fn record_cache_hit_at(
+        &self,
+        entry: crate::llm::cache::CacheEntry,
+        role: Role,
+        cache_key: &str,
+        section: &str,
+        model_id: &str,
+        started_unix: i64,
+        retry_count: u32,
+    ) -> Result<Response> {
         let response = entry.response;
         let ended_unix = crate::time::now_unix_secs();
         let call_id = uuid::Uuid::now_v7().to_string();
@@ -1614,8 +2257,8 @@ impl RunContext {
             &call_id,
             phase_name,
             phase_name,
-            self.default_provider.as_str(),
-            self.default_model.as_str(),
+            section,
+            model_id,
             cache_key,
             None,
             true,

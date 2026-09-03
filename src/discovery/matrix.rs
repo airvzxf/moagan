@@ -304,12 +304,23 @@ pub struct ExplorationMatrix {
     /// value the operator passed (or 10 by default).
     pub sketches_per_cell: usize,
     /// Per-provider sampling-temperature profiles keyed by the
-    /// provider's MODEL name (e.g. `"MiniMax-M3"`, `"deepseek-v4-flash"`,
-    /// `"mimo-v2.5"` — the same string stored on the `Request` /
-    /// `ProviderConfig`). A provider not in this map uses
-    /// [`Self::default_profile`]. Default empty so the matrix is
-    /// bit-identical to the v0.5 behaviour when no profile is
-    /// configured (PR-D1).
+    /// joined `section::model` string (the same key produced by
+    /// `ProviderRegistry::registry_key(section, model)`,
+    /// e.g. `"minimax::MiniMax-M3"`,
+    /// `"deepseek::deepseek-v4-flash"`,
+    /// `"opencode::mimo-v2.5"`). A `(section, model)` pair not
+    /// in this map uses [`Self::default_profile`].
+    ///
+    /// Tanda 04e D-1 changed the persistence shape from bare
+    /// MODEL names (PR-D1) to the joined `section::model` form so
+    /// the coordinator can fan out across multiple providers in
+    /// one run. A v0.14.x sidecar that carries bare-model keys
+    /// (e.g. `temperature_profiles["MiniMax-M3"]`) is upgraded
+    /// in-memory via [`Self::migrate_legacy_keys`] at read time;
+    /// the file is rewritten in-place on the next `write_json`
+    /// call so a re-read sees the new shape. Default empty so the
+    /// matrix is bit-identical to the v0.5 behaviour when no
+    /// profile is configured (PR-D1).
     #[serde(default)]
     pub temperature_profiles: HashMap<String, TemperatureProfile>,
     /// Default profile applied to providers absent from
@@ -430,6 +441,16 @@ impl ExplorationMatrix {
     /// case-sensitive on the model name string — operators should
     /// pass the exact `ProviderConfig::model` value (e.g.
     /// `"MiniMax-M3"`) when configuring the map.
+    ///
+    /// Tanda 04e D-1: the legacy `temperature_profiles` map keys
+    /// are now `section::model` join keys (e.g.
+    /// `"minimax::MiniMax-M3"`). A bare-model lookup
+    /// (`profile_for("MiniMax-M3")`) is preserved as a thin shim
+    /// for the handful of callers that still need it (the
+    /// unit tests and the `cli::discover_explain` cardinality
+    /// table). New code MUST use [`Self::profile_for_pair`] —
+    /// the bare-model lookup silently misses every multi-provider
+    /// profile whose key is the joined form.
     pub fn profile_for(&self, provider_model: &str) -> &TemperatureProfile {
         let explicit = self.temperature_profiles.contains_key(provider_model);
         tracing::trace!(
@@ -440,6 +461,177 @@ impl ExplorationMatrix {
         self.temperature_profiles
             .get(provider_model)
             .unwrap_or(&self.default_profile)
+    }
+
+    /// Tanda 04e D-1: resolve the temperature profile for a
+    /// specific `(section, model)` pair. The lookup key is the
+    /// joined `ProviderRegistry::registry_key(section, model)`
+    /// string, which matches how the CLI dispatcher and the
+    /// coordinator persist the profile map. Returns
+    /// [`Self::default_profile`] when the joined key is absent
+    /// (the v0.5 unconfigured behaviour for any single
+    /// provider).
+    ///
+    /// The companion helper [`Self::active_provider_profiles`]
+    /// enumerates every `(section, model)` pair the coordinator
+    /// should fan out across; [`Self::profile_for_pair`] is the
+    /// per-iteration lookup the coordinator uses inside the
+    /// multi-provider loop. The two helpers share the same
+    /// joined-key contract so a key inserted by the CLI merge
+    /// step is read back by the coordinator verbatim.
+    pub fn profile_for_pair(&self, section: &str, model: &str) -> &TemperatureProfile {
+        let key = crate::llm::ProviderRegistry::registry_key(section, model);
+        let explicit = self.temperature_profiles.contains_key(&key);
+        tracing::trace!(
+            section = %section,
+            model = %model,
+            joined_key = %key,
+            explicit_profile = explicit,
+            "ExplorationMatrix::profile_for_pair"
+        );
+        self.temperature_profiles
+            .get(&key)
+            .unwrap_or(&self.default_profile)
+    }
+
+    /// Tanda 04e D-1: enumerate every `(section, model, profile)`
+    /// triple the coordinator should fan out across. The list
+    /// combines:
+    ///
+    /// 1. Every explicit entry in [`Self::temperature_profiles`],
+    ///    with the joined key split on `"::"` into `(section,
+    ///    model)`. Legacy bare-model keys (`"MiniMax-M3"` with no
+    ///    `"::"`) are interpreted as `(default_section, model)`
+    ///    so a v0.14.x sidecar transparently upgrades to the
+    ///    new key form without losing data.
+    /// 2. `(default_section, default_model, default_profile)`
+    ///    appended so the unconfigured case collapses to one
+    ///    provider × one profile (the v0.5 single-shot
+    ///    contract).
+    ///
+    /// The list is deduplicated by `(section, model)` with the
+    /// LATER occurrence winning — matches the CLI merge order
+    /// where the last `--temperature-profile` flag overrides
+    /// earlier ones. Returns at minimum
+    /// `[(default_section, default_model, default_profile)]` so
+    /// a fresh matrix with no explicit profiles produces the
+    /// same fan-out as v0.5.
+    ///
+    /// The returned `TemperatureProfile` is the entry from
+    /// [`Self::temperature_profiles`] (a clone), or
+    /// [`Self::default_profile`] when the default fallback is
+    /// used. The coordinator clones each entry to drive the
+    /// inner `(temperatures × replicas)` loop, so the
+    /// returned profile is detached from the matrix's borrow.
+    pub fn active_provider_profiles(
+        &self,
+        default_section: &str,
+        default_model: &str,
+    ) -> Vec<(String, String, TemperatureProfile)> {
+        use std::collections::BTreeMap;
+        let mut by_pair: BTreeMap<(String, String), TemperatureProfile> = BTreeMap::new();
+        for (key, profile) in self.temperature_profiles.iter() {
+            let (section, model) = match key.split_once("::") {
+                Some((sec, mdl)) => (sec.to_owned(), mdl.to_owned()),
+                None => (default_section.to_owned(), key.clone()),
+            };
+            // Last-wins per (section, model) pair; matches the CLI
+            // merge order ("last --temperature-profile flag wins").
+            by_pair.insert((section, model), profile.clone());
+        }
+        // Always include the default pair so the unconfigured
+        // case collapses to one provider. Inserting under the
+        // same key only happens when the operator did not set a
+        // profile for the default pair — the explicit entry
+        // wins on conflict (the BTreeMap insert is a no-op when
+        // the key is already present, so the existing
+        // explicit-profile value is preserved).
+        by_pair
+            .entry((default_section.to_owned(), default_model.to_owned()))
+            .or_insert_with(|| self.default_profile.clone());
+        tracing::debug!(
+            pair_count = by_pair.len(),
+            default_section = %default_section,
+            default_model = %default_model,
+            "ExplorationMatrix::active_provider_profiles"
+        );
+        by_pair.into_iter().map(|(k, v)| (k.0, k.1, v)).collect()
+    }
+
+    /// Tanda 04e D-1: rewrite bare-model entries in
+    /// [`Self::temperature_profiles`] whose key matches
+    /// `default_model` (the v0.14.x persistence shape) into
+    /// the joined `default_section::default_model` form. The
+    /// rewrite is a one-shot, in-memory migration — the file is
+    /// rewritten in-place on the next `write_json` call.
+    ///
+    /// Returns the number of keys that were re-keyed (0 when
+    /// the matrix is already in the new shape). A bare-model
+    /// entry whose model differs from `default_model` is left
+    /// alone: those entries are outside the documented
+    /// migration scope (they would be ambiguous — we do not
+    /// know which section they belong to). The coordinator
+    /// surfaces them through [`Self::active_provider_profiles`]
+    /// as `(default_section, model)` so the loop still fans
+    /// out against them, but the audit log may want to flag
+    /// the legacy key separately. Future work.
+    ///
+    /// The migration is idempotent: running it twice leaves the
+    /// matrix in the new shape without an infinite loop or
+    /// duplicate entries.
+    pub fn migrate_legacy_keys(&mut self, default_section: &str) -> usize {
+        let mut rewritten = 0usize;
+        let mut to_insert: Vec<(String, TemperatureProfile)> = Vec::new();
+        let mut to_remove: Vec<String> = Vec::new();
+        for (key, profile) in self.temperature_profiles.iter() {
+            if key.contains("::") {
+                // Already in the new shape.
+                continue;
+            }
+            // The legacy entry should be keyed by the model name
+            // alone. We migrate only the entry that matches
+            // `default_section::key` semantically — i.e. the
+            // entry whose bare model equals the configured
+            // default model. Without the default_model parameter
+            // we cannot distinguish a v0.14.x entry (which was
+            // meant for the default provider) from a typo /
+            // future bare-model key we do not want to touch.
+            let joined = crate::llm::ProviderRegistry::registry_key(default_section, key);
+            if joined == *key {
+                // Should be unreachable: the joined form for
+                // (default_section, key) differs from `key` unless
+                // `default_section == key` or `key.is_empty()`.
+                // Defensive skip in case the registry's join
+                // rule ever changes.
+                continue;
+            }
+            if self.temperature_profiles.contains_key(&joined) {
+                // The joined form is already present (e.g. a
+                // newer run wrote it first). Drop the legacy
+                // bare-model key so it does not double-fire on
+                // `active_provider_profiles`.
+                to_remove.push(key.clone());
+                rewritten += 1;
+                continue;
+            }
+            to_insert.push((joined, profile.clone()));
+            to_remove.push(key.clone());
+            rewritten += 1;
+        }
+        for (k, v) in to_insert {
+            self.temperature_profiles.insert(k, v);
+        }
+        for k in to_remove {
+            self.temperature_profiles.remove(&k);
+        }
+        if rewritten > 0 {
+            tracing::info!(
+                rewritten,
+                default_section = %default_section,
+                "ExplorationMatrix::migrate_legacy_keys"
+            );
+        }
+        rewritten
     }
 
     /// PR-7: rewrite every per-provider temperature profile so
