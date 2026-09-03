@@ -951,6 +951,47 @@ pub(crate) fn build_registry_for_with_active(
     }
     let mut spec_map = std::collections::BTreeMap::new();
     spec_map.insert(section.clone(), spec);
+    // Tanda 04e (D-1) cross-section fix: when `active_pairs` lists
+    // pairs from sections OTHER than `--provider`'s section (the
+    // typical multi-provider fan-out shape:
+    // `--provider minimax:MiniMax-M3 --temperature-profile
+    // 'provider=opencode:mimo-v2.5;...'`), `spec_map` must include
+    // every distinct section referenced by `active_pairs` so
+    // `registry_from_config_with_sink_active` actually builds the
+    // non-default section's providers. Without this, the inner
+    // builder only iterates the `--provider` section and the registry
+    // is missing the second section entirely; the coordinator's
+    // `has_provider_for` filter then drops the second pair with a
+    // `warn!`, and the operator sees only the default provider's
+    // sketches. Reproduces against any two distinct configured
+    // sections (the existing mock-short-circuit test missed it
+    // because both pairs live in the `mock` section, which is
+    // handled by the earlier mock short-circuit and never reaches
+    // this branch).
+    if let Some(pairs) = active_pairs {
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(pairs.len());
+        seen.insert(section.clone());
+        for (sec, _model) in pairs.iter() {
+            if !seen.insert(sec.clone()) {
+                continue;
+            }
+            match cfg.providers_by_section.get(sec) {
+                Some(extra_spec) => {
+                    spec_map.insert(sec.clone(), extra_spec.clone());
+                }
+                None => {
+                    tracing::warn!(
+                        section = %sec,
+                        known_sections = ?cfg.providers_by_section.keys().collect::<Vec<_>>(),
+                        "build_registry_for_with_active: active_pair references a section \
+                         that is not in the loaded config; the pair will be filtered out \
+                         by the coordinator's has_provider_for guard"
+                    );
+                }
+            }
+        }
+    }
     let reg = crate::llm::provider::registry_from_config_with_sink_active(
         &spec_map,
         &cfg.circuit_breaker,
@@ -1754,5 +1795,123 @@ mod tests {
             "absent budget_state must read back as unlimited"
         );
         assert_eq!(used, 0, "fresh run must have no usage");
+    }
+
+    /// Tanda 04e (D-1) cross-section regression: when `--provider`
+    /// is one section (e.g. `mock`) and `--temperature-profile`
+    /// references a DIFFERENT section (e.g. `other`), the registry
+    /// must host BOTH sections. The pre-fix `build_registry_for_with_active`
+    /// only added the `--provider` section's spec to `spec_map`, so
+    /// `registry_from_config_with_sink_active` only built the
+    /// `--provider` providers; the coordinator's `has_provider_for`
+    /// filter then dropped the second pair, and the operator saw
+    /// only the default provider's sketches. Pin both keys are
+    /// present after the build.
+    #[test]
+    fn build_registry_for_with_active_hosts_cross_section_pairs() {
+        use crate::config::{Config, ModelConfig, ProviderConfig};
+        use crate::llm::provider::ProviderRegistry;
+
+        fn mock_section(id: &str, endpoint: &str) -> ProviderConfig {
+            ProviderConfig {
+                models: vec![ModelConfig {
+                    id: id.to_owned(),
+                    endpoint: Some(endpoint.to_owned()),
+                    max_tokens: None,
+                    omit_max_tokens: false,
+                }],
+                endpoint: Some(endpoint.to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            }
+        }
+
+        let mut cfg = Config::default();
+        cfg.providers_by_section.insert(
+            "mock".to_owned(),
+            mock_section("mock-model", "mock://default"),
+        );
+        cfg.providers_by_section.insert(
+            "other".to_owned(),
+            mock_section("other-model", "mock://other"),
+        );
+
+        let active_pairs: &[(String, String)] = &[
+            ("mock".to_owned(), "mock-model".to_owned()),
+            ("other".to_owned(), "other-model".to_owned()),
+        ];
+        let reg =
+            build_registry_for_with_active(&cfg, "mock:mock-model", None, None, Some(active_pairs))
+                .expect("registry builds");
+
+        let default_key = ProviderRegistry::registry_key("mock", "mock-model");
+        let other_key = ProviderRegistry::registry_key("other", "other-model");
+        assert!(
+            reg.get(&default_key).is_some(),
+            "default pair {default_key:?} must be present"
+        );
+        assert!(
+            reg.get(&other_key).is_some(),
+            "cross-section pair {other_key:?} must be present after the D-1 fix; \
+             pre-fix code only built the --provider section"
+        );
+    }
+
+    /// Cross-section defence-in-depth: when `active_pairs` references
+    /// a section that is not in the loaded config, the registry
+    /// builder logs a `warn!` instead of silently dropping the pair,
+    /// and the coordinator's `has_provider_for` filter handles the
+    /// absent pair at dispatch time. Pin both halves.
+    #[test]
+    fn build_registry_for_with_active_warns_on_unknown_section() {
+        use crate::config::{Config, ModelConfig, ProviderConfig};
+
+        let mut cfg = Config::default();
+        cfg.providers_by_section.insert(
+            "mock".to_owned(),
+            ProviderConfig {
+                models: vec![ModelConfig {
+                    id: "mock-model".to_owned(),
+                    endpoint: Some("mock://default".to_owned()),
+                    max_tokens: None,
+                    omit_max_tokens: false,
+                }],
+                endpoint: Some("mock://default".to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            },
+        );
+        let active_pairs: &[(String, String)] = &[
+            ("mock".to_owned(), "mock-model".to_owned()),
+            ("missing_section".to_owned(), "missing-model".to_owned()),
+        ];
+        // The function must NOT return Err — it logs a warn and
+        // proceeds with the known sections only. The coordinator's
+        // `has_provider_for` filter then handles the unknown pair.
+        let reg =
+            build_registry_for_with_active(&cfg, "mock:mock-model", None, None, Some(active_pairs))
+                .expect("registry builds with unknown section in active_pairs");
+        let joined = ProviderRegistry::registry_key("mock", "mock-model");
+        assert!(
+            reg.get(&joined).is_some(),
+            "known section's joined key {joined:?} must be present"
+        );
+        let unknown_joined = ProviderRegistry::registry_key("missing_section", "missing-model");
+        assert!(
+            reg.get(&unknown_joined).is_none(),
+            "unknown section's joined key {unknown_joined:?} must not be in the registry"
+        );
     }
 }
