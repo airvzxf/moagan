@@ -299,7 +299,7 @@ impl Phase for DiscoverMatrixPhase {
             None => SketchLoopState::new("discover_matrix".to_owned()),
         };
 
-        // Build the future list (cell, temperature, replica, sketch_id).
+        // Build the future list (provider, cell, temperature, replica, sketch_id).
         //
         // PR-D1: when the matrix carries a per-provider
         // `temperature_profiles` map (or a non-default
@@ -309,133 +309,196 @@ impl Phase for DiscoverMatrixPhase {
         // default profile (`[1.0] × 1`) this is exactly one task per
         // `(cell, sketch_index)` pair — the v0.5 fan-out.
         //
-        // The lookup key is `ctx.default_model` (the model the
-        // active `RunContext` is bound to). When the operator sets
-        // `--provider mimo-v2.5 --temperature-profile 'provider=mimo-v2.5;...'`,
-        // the matrix's `temperature_profiles["mimo-v2.5"]` profile
-        // is matched and the loop fans out per the spec.
-        let profile = self.matrix.profile_for(&ctx.default_model).clone();
-        let profile_temperatures: Vec<f32> = profile.temperatures.clone();
-        let profile_replicas: usize = profile.replicas_per_temperature.max(1);
+        // Tanda 04e D-1: the legacy `profile_for(&ctx.default_model)`
+        // lookup is replaced by `active_provider_profiles` so the
+        // loop fans out across every configured `(section, model)`
+        // pair. Each pair's `(temperatures × replicas)` axis drives
+        // the inner loops; the dispatch site threads the pair
+        // through `call_*_at_temp_for` so the cache key mixes
+        // `(section, model)`. `migrate_legacy_keys` runs first so
+        // a v0.14.x sidecar (bare-model keys) upgrades to the new
+        // joined form before the loop fans out.
+        let mut matrix = self.matrix.clone();
+        let rewritten = matrix.migrate_legacy_keys(&ctx.default_provider, &ctx.default_model);
+        if rewritten > 0 {
+            tracing::info!(
+                rewritten,
+                default_section = %ctx.default_provider,
+                default_model = %ctx.default_model,
+                "discover_matrix: legacy temperature-profile keys migrated to section::model form"
+            );
+        }
+        let active_provider_profiles: Vec<(
+            String,
+            String,
+            crate::discovery::matrix::TemperatureProfile,
+        )> = matrix
+            .active_provider_profiles(&ctx.default_provider, &ctx.default_model)
+            .into_iter()
+            // F2 (B1/B2): mirror the coordinator's pre-flight
+            // filter. `RunContext::provider_for` panics on an
+            // unregistered pair, so a legacy `temperature_profiles`
+            // key naming a section this run never built is dropped
+            // (with an audit line) instead of aborting the phase.
+            .filter(|(section, model, _)| {
+                let ok = ctx.has_provider_for(section, model);
+                if !ok {
+                    tracing::warn!(
+                        section = %section,
+                        model = %model,
+                        default_section = %ctx.default_provider,
+                        default_model = %ctx.default_model,
+                        "discover_matrix: temperature profile names a (section, model) pair \
+                         that is not in the provider registry; skipping it in the fan-out"
+                    );
+                }
+                ok
+            })
+            .collect();
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let brief_arc = Arc::new(brief_text);
         let system_arc = Arc::clone(&system);
-        // Pre-compute the full (cell, temperature, replica,
-        // sketch_index) iterator as a `Vec` so the closure
-        // ownership is trivial (no nested-`flat_map` returning
-        // references to locals). The capacity is `cells.len() *
-        // profile_temperatures.len() * profile_replicas * per_cell`
-        // — the same number the loop would spawn otherwise; no
-        // memory bloat. With the default profile (`[1.0] × 1`)
-        // and `per_cell = sketches_per_cell`, this is exactly the
-        // v0.5 `(cells × sketches_per_cell)` fan-out.
-        let mut work_items: Vec<(MatrixCell, f32)> = Vec::with_capacity(
-            cells.len() * profile_temperatures.len() * profile_replicas * per_cell,
-        );
-        for cell in cells.iter() {
-            for &temperature in profile_temperatures.iter() {
-                for _replica in 0..profile_replicas {
-                    for _ in 0..per_cell {
-                        work_items.push((cell.clone(), temperature));
+        // Pre-compute the full (provider, cell, temperature,
+        // replica, sketch_index) iterator as a `Vec` so the
+        // closure ownership is trivial (no nested-`flat_map`
+        // returning references to locals). The capacity matches
+        // the total fan-out: `cells.len() * per_cell *
+        // Σ(profile.total())`.
+        let total_capacity: usize = active_provider_profiles
+            .iter()
+            .map(|(_, _, p)| cells.len() * per_cell * p.total())
+            .sum();
+        let mut work_items: Vec<(String, String, MatrixCell, f32)> =
+            Vec::with_capacity(total_capacity);
+        for (section, model, profile) in active_provider_profiles.iter() {
+            for cell in cells.iter() {
+                for &temperature in profile.temperatures.iter() {
+                    for _replica in 0..profile.replicas_per_temperature.max(1) {
+                        for _ in 0..per_cell {
+                            work_items.push((
+                                section.clone(),
+                                model.clone(),
+                                cell.clone(),
+                                temperature,
+                            ));
+                        }
                     }
                 }
             }
         }
-        let futures = work_items.into_iter().map(|(cell, temperature)| {
-            let brief = Arc::clone(&brief_arc);
-            let system = Arc::clone(&system_arc);
-            let counter = Arc::clone(&counter);
-            let ctx = ctx.clone();
-            async move {
-                let _permit = ctx.parallelism.acquire().await?;
-                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let id = format!("sk_{:04}", n);
-                let user = DiscoverMatrixPhase::user_payload(brief.as_str(), &cell, n);
-                // D.34.1 / PR-05: drive the sketch extraction
-                // through the bounded retry helper in
-                // `src/discovery/sketch_retry.rs`
-                // (`retry_sketch_extraction`). The helper
-                // applies exponential backoff independent of
-                // the per-mode retry budget, so the
-                // matrix's worst-case 3 retries survive even
-                // when the run mode is `fast` (which would
-                // otherwise cap retries at 1 attempt). Each
-                // attempt threads its index through the new
-                // `calls.retry_count` column so the post-
-                // execution review can correlate the JSONL /
-                // SQLite call record with the warnings stream
-                // without scraping stderr. With `max_retries=3`
-                // and 2 broken responses followed by a valid
-                // one, the helper consumes exactly 3 mock calls
-                // (retry_count 0, 1, 2) — matching the spec's
-                // `retry_count` 0, 1, 2 contract.
-                //
-                // PR-D1: every iteration is stamped with the
-                // explicit `temperature` from the active
-                // profile; the cache key in
-                // `src/llm/cache/mod.rs:117` includes the
-                // resolved temperature so different
-                // `temperature` values cache distinctly
-                // (the audit confirmed this; pinned here so
-                // the wire path stays consistent).
-                let retry_counter = Arc::new(AtomicU32::new(0));
-                // PR-D2 follow-up: 1 retry (down from 3) for the same reason
-                // as `src/discovery/coordinator.rs`.
-                let mut sketch: Sketch = retry_sketch_extraction(1, || {
-                    let ctx = ctx.clone();
-                    let user = user.clone();
-                    let system = system.as_str().to_owned();
-                    let counter = Arc::clone(&retry_counter);
-                    let schema_hint = system_prompt(Role::Sketch).to_owned();
-                    async move {
-                        let attempt = counter.fetch_add(1, Ordering::SeqCst);
-                        let result: Result<Sketch> = async {
-                            // First attempt (`attempt == 0`)
-                            // goes through the cache-aware
-                            // path so re-running the same
-                            // prompt reuses a prior response.
-                            // Retries bypass the cache so a
-                            // previously cached broken
-                            // response does not poison the
-                            // retry budget (the original
-                            // `call_with_retry_parse` follows
-                            // the same rule; pin it here so
-                            // the matrix does too).
-                            let started_unix = crate::time::now_unix_secs();
-                            let raw = if attempt == 0 {
-                                ctx.call_with_retry_at_temp(
+        let futures = work_items
+            .into_iter()
+            .map(|(section, model, cell, temperature)| {
+                let brief = Arc::clone(&brief_arc);
+                let system = Arc::clone(&system_arc);
+                let counter = Arc::clone(&counter);
+                let ctx = ctx.clone();
+                async move {
+                    let _permit = ctx.parallelism.acquire().await?;
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let id = format!("sk_{:04}", n);
+                    let user = DiscoverMatrixPhase::user_payload(brief.as_str(), &cell, n);
+                    // D.34.1 / PR-05: drive the sketch extraction
+                    // through the bounded retry helper in
+                    // `src/discovery/sketch_retry.rs`
+                    // (`retry_sketch_extraction`). The helper
+                    // applies exponential backoff independent of
+                    // the per-mode retry budget, so the
+                    // matrix's worst-case 3 retries survive even
+                    // when the run mode is `fast` (which would
+                    // otherwise cap retries at 1 attempt). Each
+                    // attempt threads its index through the new
+                    // `calls.retry_count` column so the post-
+                    // execution review can correlate the JSONL /
+                    // SQLite call record with the warnings stream
+                    // without scraping stderr. With `max_retries=3`
+                    // and 2 broken responses followed by a valid
+                    // one, the helper consumes exactly 3 mock calls
+                    // (retry_count 0, 1, 2) — matching the spec's
+                    // `retry_count` 0, 1, 2 contract.
+                    //
+                    // PR-D1: every iteration is stamped with the
+                    // explicit `temperature` from the active
+                    // profile; the cache key in
+                    // `src/llm/cache/mod.rs:117` includes the
+                    // resolved temperature so different
+                    // `temperature` values cache distinctly
+                    // (the audit confirmed this; pinned here so
+                    // the wire path stays consistent).
+                    //
+                    // Tanda 04e D-1: the iteration is also stamped
+                    // with the `(section, model)` pair; the cache
+                    // key mixes it via `Cache::cache_key` so two
+                    // providers answering the same prompt cache
+                    // distinctly.
+                    let retry_counter = Arc::new(AtomicU32::new(0));
+                    // PR-D2 follow-up: 1 retry (down from 3) for the same reason
+                    // as `src/discovery/coordinator.rs`.
+                    let mut sketch: Sketch = retry_sketch_extraction(1, || {
+                        let ctx = ctx.clone();
+                        let user = user.clone();
+                        let system = system.as_str().to_owned();
+                        let counter = Arc::clone(&retry_counter);
+                        let section = section.clone();
+                        let model = model.clone();
+                        let schema_hint = system_prompt(Role::Sketch).to_owned();
+                        async move {
+                            let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                            let result: Result<Sketch> = async {
+                                // First attempt (`attempt == 0`)
+                                // goes through the cache-aware
+                                // path so re-running the same
+                                // prompt reuses a prior response.
+                                // Retries bypass the cache so a
+                                // previously cached broken
+                                // response does not poison the
+                                // retry budget (the original
+                                // `call_with_retry_parse` follows
+                                // the same rule; pin it here so
+                                // the matrix does too).
+                                let started_unix = crate::time::now_unix_secs();
+                                let raw = if attempt == 0 {
+                                    ctx.call_with_retry_at_temp_for(
+                                        &section,
+                                        &model,
+                                        Role::Sketch,
+                                        system,
+                                        user,
+                                        attempt,
+                                        temperature,
+                                    )
+                                    .await?
+                                } else {
+                                    ctx.call_uncached_at_temp_for(
+                                        &section,
+                                        &model,
+                                        Role::Sketch,
+                                        system,
+                                        user,
+                                        started_unix,
+                                        attempt,
+                                        temperature,
+                                    )
+                                    .await?
+                                };
+                                ctx.parse_model_json::<Sketch>(
                                     Role::Sketch,
-                                    system,
-                                    user,
-                                    attempt,
-                                    temperature,
+                                    &raw.text,
+                                    &schema_hint,
                                 )
-                                .await?
-                            } else {
-                                ctx.call_uncached_at_temp(
-                                    Role::Sketch,
-                                    system,
-                                    user,
-                                    started_unix,
-                                    attempt,
-                                    temperature,
-                                )
-                                .await?
-                            };
-                            ctx.parse_model_json::<Sketch>(Role::Sketch, &raw.text, &schema_hint)
+                            }
+                            .await;
+                            result
                         }
-                        .await;
-                        result
+                    })
+                    .await?;
+                    if sketch.id.is_empty() {
+                        sketch.id = id.clone();
                     }
-                })
-                .await?;
-                if sketch.id.is_empty() {
-                    sketch.id = id.clone();
+                    sketch.angle = format!("{}:{}", cell.dimension_id, cell.facet_id);
+                    Ok::<Sketch, crate::error::Error>(sketch)
                 }
-                sketch.angle = format!("{}:{}", cell.dimension_id, cell.facet_id);
-                Ok::<Sketch, crate::error::Error>(sketch)
-            }
-        });
+            });
 
         let results = join_all(futures).await;
         let total_attempts = results.len();

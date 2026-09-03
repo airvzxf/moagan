@@ -547,6 +547,26 @@ impl DiscoveryCoordinator {
         let mut matrix = matrix;
         matrix.temperature_profiles = temperature_profiles;
         matrix.default_profile = default_profile;
+        // Tanda 04e D-1: rewrite bare-model entries whose key
+        // does not contain `"::"` into the joined
+        // `default_provider::model` form. Handles a v0.14.x
+        // sidecar (or persisted `[discovery_matrix].temperature_profiles`
+        // block from `config.toml`) that still uses the legacy
+        // bare-model keys. The migration is idempotent and
+        // returns the number of rewritten keys (logged so an
+        // operator reading the JSONL sees when the upgrade
+        // fires). The file is rewritten in-place on the next
+        // `write_json` call below, so a re-read sees the new
+        // shape automatically.
+        let rewritten = matrix.migrate_legacy_keys(&ctx.default_provider, &ctx.default_model);
+        if rewritten > 0 {
+            tracing::info!(
+                rewritten,
+                default_section = %ctx.default_provider,
+                default_model = %ctx.default_model,
+                "discovery: legacy temperature-profile keys migrated to section::model form"
+            );
+        }
         // PR-7: rewrite every per-provider temperature profile
         // against the auto-discovered supported set. The runtime
         // gate in `RunContext::dispatch_to_provider` is the safety
@@ -559,10 +579,22 @@ impl DiscoveryCoordinator {
         if let Some(table) = ctx.temperature_table.as_ref() {
             let mut supported_sets: std::collections::HashMap<String, Vec<f32>> =
                 std::collections::HashMap::new();
-            for model in matrix.temperature_profiles.keys() {
-                let set = table.supported_for(&ctx.default_provider, model);
+            // Tanda 04e D-1: keys are now the joined
+            // `section::model` form. Split on `"::"` to feed the
+            // temperature table's `(section, model)` lookup so a
+            // profile attached to `opencode::mimo-v2.5` consults
+            // the right upstream's supported set rather than the
+            // default provider's. A bare-model key (defensive:
+            // `migrate_legacy_keys` ran above) is split into
+            // `(default_provider, key)`.
+            for joined in matrix.temperature_profiles.keys() {
+                let (sec, mdl) = match joined.split_once("::") {
+                    Some((s, m)) => (s, m),
+                    None => (ctx.default_provider.as_str(), joined.as_str()),
+                };
+                let set = table.supported_for(sec, mdl);
                 if !set.is_empty() {
-                    supported_sets.insert(model.clone(), set);
+                    supported_sets.insert(joined.clone(), set);
                 }
             }
             let events = matrix.rewrite_temperatures_to_supported(&supported_sets);
@@ -734,28 +766,66 @@ impl DiscoveryCoordinator {
         // `target.max(matrix.cardinality()) == matrix.cardinality()`
         // — the saturation tracker anchors to the matrix fan-out
         // the operator picked.
+        //
+        // F2 (B6): the tracker is constructed ONCE, after `total`
+        // is known, and the resume baseline is replayed into that
+        // instance. The pre-fix code constructed a first tracker
+        // here, replayed `state.completed_sketches.len()` into it,
+        // and then overwrote the whole binding a few lines below
+        // with a second `SaturationTracker::with_policy(...)` —
+        // silently discarding the baseline, so a resumed run
+        // reported `tracker.coverage() == 0` and re-ran the full
+        // fan-out before the stop policy could fire.
         let policy = StopPolicy::default();
-        let mut tracker = SaturationTracker::with_policy(target.max(matrix.cardinality()), policy);
-
-        // Replay the already-completed count into the tracker so a
-        // resume picks up the right `completed` baseline.
-        tracker.record_completions(state.completed_sketches.len());
 
         let per_cell = matrix.sketches_per_cell.max(1);
         let cells: Vec<MatrixCell> = matrix.iter_cells().collect();
-        // PR-D1: per-provider temperature profile expansion. The
-        // coordinator (the actual `moagan discover` driver) honours
-        // the matrix's `temperature_profiles` map the same way the
-        // flat `DiscoverMatrixPhase` does, so an operator who sets
-        // `--temperature-profile 'provider=<model>;temperatures=...;replicas=...'`
-        // observes the fan-out regardless of which code path the run
-        // takes. The default profile is `[1.0] × 1`, so the
-        // unconfigured case collapses to the v0.5 `(cells ×
-        // per_cell)` total.
-        let profile = matrix.profile_for(&ctx.default_model).clone();
-        let profile_temperatures: Vec<f32> = profile.temperatures.clone();
-        let profile_replicas: usize = profile.replicas_per_temperature.max(1);
-        let total = cells.len() * profile_temperatures.len() * profile_replicas * per_cell;
+        // Tanda 04e D-1: enumerate the `(section, model, profile)`
+        // triples the loop fans out across. The list always
+        // includes the default pair (so the unconfigured case
+        // collapses to one provider × one profile = the v0.5
+        // single-shot contract). The pair-keyed form is the
+        // source of truth from this commit forward; the legacy
+        // bare-model `profile_for(&ctx.default_model)` lookup is
+        // replaced by `profile_for_pair(section, model)` inside
+        // the inner loop.
+        let active_provider_profiles: Vec<(
+            String,
+            String,
+            crate::discovery::matrix::TemperatureProfile,
+        )> = matrix
+            .active_provider_profiles(&ctx.default_provider, &ctx.default_model)
+            .into_iter()
+            // F2 (B1/B2): drop any pair the registry cannot serve
+            // before the loop dispatches. `RunContext::provider_for`
+            // panics on a missing pair by design (the CLI boundary
+            // is supposed to guarantee registration), so an
+            // unregistered pair reached through a legacy
+            // `temperature_profiles` key would abort the run
+            // mid-fan-out. Skipping with a `warn!` keeps the
+            // configured pairs running and leaves the operator an
+            // audit line naming the pair that was dropped.
+            .filter(|(section, model, _)| {
+                let ok = ctx.has_provider_for(section, model);
+                if !ok {
+                    tracing::warn!(
+                        section = %section,
+                        model = %model,
+                        default_section = %ctx.default_provider,
+                        default_model = %ctx.default_model,
+                        "discovery: temperature profile names a (section, model) pair that is \
+                         not in the provider registry; skipping it in the fan-out"
+                    );
+                }
+                ok
+            })
+            .collect();
+        let total = cells.len()
+            * per_cell
+            * active_provider_profiles
+                .iter()
+                .map(|(_, _, p)| p.total())
+                .sum::<usize>();
         // PR-D1: re-anchor the saturation tracker's target to the
         // real total so the saturation / outlier checks fire
         // against the operator's full profile expansion. With the
@@ -777,19 +847,47 @@ impl DiscoveryCoordinator {
         // cut the loop short at iteration #420 — the operator's
         // intent was the full 1680.
         let expanded_policy = policy;
-        tracker = SaturationTracker::with_policy(total.max(target), expanded_policy);
+        let tracker = init_saturation_tracker(
+            total,
+            target,
+            expanded_policy,
+            state.completed_sketches.len(),
+        );
+
+        // F2 (B7): the tracker is sized against `total`, the
+        // PRE-collapse call count — the loop really does fire one
+        // LLM call per declared temperature, even when
+        // `rewrite_temperatures_to_supported` snapped two of them
+        // onto the same upstream-supported value. `effective_total`
+        // is the post-collapse count: how many DISTINCT
+        // `(temperature, replica)` points the fan-out explores.
+        // `dropped_total = total - effective_total` is the number
+        // of calls that are duplicates of another point, i.e. the
+        // summed form of `RewriteEvent::dropped_count`. Surfacing
+        // both here means an operator reading the init line can
+        // tell "the tracker targets 1680 calls" from "but only
+        // 560 of them explore a distinct temperature".
+        let effective_total = cells.len()
+            * per_cell
+            * active_provider_profiles
+                .iter()
+                .map(|(_, _, p)| p.unique_total())
+                .sum::<usize>();
+        let dropped_total = total.saturating_sub(effective_total);
 
         let resume_from = state.completed_sketches.len();
         tracing::info!(
             total = total,
+            effective_total = effective_total,
+            dropped_total = dropped_total,
             cells = cells.len(),
             per_cell = per_cell,
-            profile_temps = profile_temperatures.len(),
-            profile_replicas = profile_replicas,
+            active_providers = active_provider_profiles.len(),
             sketches_per_cell,
             target = target,
             matrix_cardinality = matrix.cardinality(),
             tracker_target = tracker.target,
+            tracker_completed = tracker.completed,
             tracker_hard_cap = tracker.policy.hard_cap,
             tracker_max_sketches = tracker.policy.max_sketches,
             tracker_min_sketches = tracker.policy.min_sketches,
@@ -830,361 +928,409 @@ impl DiscoveryCoordinator {
 
         let mut join_set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
         let mut n: usize = 0;
-        'outer: for cell in cells.iter() {
-            for &temperature in profile_temperatures.iter() {
-                for replica in 0..profile_replicas {
-                    for sketch_index in 0..per_cell {
-                        if cancel.is_cancelled() {
-                            tracing::warn!(n = n, total = total, "discovery: cancelled mid-loop");
-                            break 'outer;
-                        }
-                        // Stop condition: target reached OR the tracker has declared Stop.
-                        {
-                            let s = shared_state.lock().expect("state poisoned");
-                            let completed = s.completed_sketches.len();
-                            let failed = s.failed_attempts as usize;
-                            drop(s);
-                            if completed + failed >= total {
-                                tracing::info!(
+        // Tanda 04e D-1: outer loop iterates over every active
+        // `(section, model, profile)` triple the operator
+        // configured (or the single default pair in the
+        // unconfigured case). The profile's `(temperatures,
+        // replicas)` axis drives the inner loops so each pair
+        // contributes its full expansion to the matrix fan-out.
+        // The dispatch site threads the pair through
+        // `call_with_retry_at_temp_for` /
+        // `call_uncached_at_temp_for` so the cache key mixes
+        // `(section, model)` and the per-`(provider, role)`
+        // breaker + governor keying matches the provider the
+        // call is firing against.
+        'outer: for (section, model, profile) in active_provider_profiles.iter() {
+            let section = section.clone();
+            let model = model.clone();
+            let profile_temperatures: Vec<f32> = profile.temperatures.clone();
+            let profile_replicas: usize = profile.replicas_per_temperature.max(1);
+            for cell in cells.iter() {
+                for &temperature in profile_temperatures.iter() {
+                    for replica in 0..profile_replicas {
+                        for sketch_index in 0..per_cell {
+                            if cancel.is_cancelled() {
+                                tracing::warn!(
                                     n = n,
                                     total = total,
-                                    "discovery: loop target reached; break 'outer"
+                                    "discovery: cancelled mid-loop"
                                 );
                                 break 'outer;
                             }
-                            if shared_stop_reason
-                                .lock()
-                                .expect("stop_reason poisoned")
-                                .is_some()
+                            // Stop condition: target reached OR the tracker has declared Stop.
                             {
-                                break 'outer;
+                                let s = shared_state.lock().expect("state poisoned");
+                                let completed = s.completed_sketches.len();
+                                let failed = s.failed_attempts as usize;
+                                drop(s);
+                                if completed + failed >= total {
+                                    tracing::info!(
+                                        n = n,
+                                        total = total,
+                                        "discovery: loop target reached; break 'outer"
+                                    );
+                                    break 'outer;
+                                }
+                                if shared_stop_reason
+                                    .lock()
+                                    .expect("stop_reason poisoned")
+                                    .is_some()
+                                {
+                                    break 'outer;
+                                }
                             }
-                        }
 
-                        let id = format!(
-                            "sk_{:04}",
-                            id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        );
-                        let user = build_user_payload(&brief_text, cell, sketch_index);
+                            let id = format!(
+                                "sk_{:04}",
+                                id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            );
+                            let user = build_user_payload(&brief_text, cell, sketch_index);
 
-                        let cell_for_angle = cell.clone();
-                        let system_for_attempt = system.clone();
-                        let user_for_attempt = user.clone();
-                        let id_for_attempt = id.clone();
-                        let ctx_for_attempt = ctx.clone();
-                        let n_for_attempt = n;
-                        let state_for_task = Arc::clone(&shared_state);
-                        let tracker_for_task = Arc::clone(&shared_tracker);
-                        let stop_reason_for_task = Arc::clone(&shared_stop_reason);
-                        let sketches_dir_for_task = sketches_dir.clone();
-                        let run_dir_for_task = run_dir.clone();
-                        let cancel_for_task = cancel.clone();
+                            let cell_for_angle = cell.clone();
+                            let system_for_attempt = system.clone();
+                            let user_for_attempt = user.clone();
+                            let id_for_attempt = id.clone();
+                            let ctx_for_attempt = ctx.clone();
+                            let section_for_attempt = section.clone();
+                            let model_for_attempt = model.clone();
+                            let n_for_attempt = n;
+                            let state_for_task = Arc::clone(&shared_state);
+                            let tracker_for_task = Arc::clone(&shared_tracker);
+                            let stop_reason_for_task = Arc::clone(&shared_stop_reason);
+                            let sketches_dir_for_task = sketches_dir.clone();
+                            let run_dir_for_task = run_dir.clone();
+                            let cancel_for_task = cancel.clone();
 
-                        if n < 5 || n.is_multiple_of(100) {
-                            // PR-7 (operator-visibility): the field is renamed
-                            // from `temperature` to `temperature_profile` so the
-                            // operator can tell at a glance that the value
-                            // shown here is the post-rewrite matrix profile
-                            // temperature, not necessarily the value the
-                            // runtime ends up sending. The actual sent value
-                            // is logged separately at dispatch time by
-                            // `RunContext::dispatch_to_provider` (look for
-                            // `requested` / `clamped_to` /
-                            // `temperature in supported set; no clamp`).
-                            tracing::trace!(
+                            if n < 5 || n.is_multiple_of(100) {
+                                // PR-7 (operator-visibility): the field is renamed
+                                // from `temperature` to `temperature_profile` so the
+                                // operator can tell at a glance that the value
+                                // shown here is the post-rewrite matrix profile
+                                // temperature, not necessarily the value the
+                                // runtime ends up sending. The actual sent value
+                                // is logged separately at dispatch time by
+                                // `RunContext::dispatch_to_provider` (look for
+                                // `requested` / `clamped_to` /
+                                // `temperature in supported set; no clamp`).
+                                tracing::trace!(
+                                    n = n,
+                                    total = total,
+                                    section = %section,
+                                    model = %model,
+                                    cell_dim = %cell.dimension_id,
+                                    cell_facet = %cell.facet_id,
+                                    temperature_profile = %temperature,
+                                    replica = replica,
+                                    sketch_index = sketch_index,
+                                    "discovery: iteration start"
+                                );
+                            }
+
+                            // PR-D2 follow-up: 2 retries (up from 1, down from the
+                            // original 3) because run8 on 2026-08-19 had a 4.2 % sketch
+                            // rejection rate vs 1.6 % on run7. Verified bucket: 45 of
+                            // 57 rejections were JSON parse failures (trailing comma,
+                            // schema mismatch) caused by the temperature 1.0+ pathology
+                            // on MiniMax-M3. Two retries (3 attempts) recover the
+                            // majority of those failures without re-introducing the
+                            // 30-day cardinalidad 880 projection that motivated the
+                            // drop from 3 to 1 in the first place — the dominant
+                            // retry cost is the 15–18 s LLM round-trip, and 2 retries
+                            // add at most 36 s per failing iteration, which is bounded
+                            // by the rest of the test runtime.
+                            //
+                            // PR-2: the entire iteration runs inside the spawned task. The
+                            // task acquires a parallelism permit (semaphore.acquire) BEFORE
+                            // the LLM call so the in-flight count is bounded; the permit is
+                            // released when the permit guard drops at the end of the task.
+                            // Wrap the future with the per-iteration span so the
+                            // events emitted inside the task (LLM call, telemetry
+                            // writes, sketch retry loop) all carry the same
+                            // (n, total, cell, temperature, replica, sketch_index)
+                            // context the operator can grep end-to-end.
+                            //
+                            // Tanda 04e D-1: the LLM call threads the per-iteration
+                            // `(section, model)` pair through
+                            // `call_with_retry_at_temp_for` /
+                            // `call_uncached_at_temp_for`. The cache key mixes the
+                            // pair (via `Cache::cache_key`) so two providers
+                            // answering the same prompt cache distinctly.
+                            let iteration_span = tracing::trace_span!(
+                                "iteration",
                                 n = n,
                                 total = total,
+                                section = %section,
+                                model = %model,
                                 cell_dim = %cell.dimension_id,
                                 cell_facet = %cell.facet_id,
                                 temperature_profile = %temperature,
                                 replica = replica,
                                 sketch_index = sketch_index,
-                                "discovery: iteration start"
                             );
-                        }
+                            join_set.spawn(
+                                async move {
+                                    // Cancellation honor: bail before burning API budget.
+                                    if cancel_for_task.is_cancelled() {
+                                        return;
+                                    }
+                                    let _permit = match ctx_for_attempt.parallelism.acquire().await {
+                                        Ok(p) => p,
+                                        Err(_) => return,
+                                    };
 
-                        // PR-D2 follow-up: 2 retries (up from 1, down from the
-                        // original 3) because run8 on 2026-08-19 had a 4.2 % sketch
-                        // rejection rate vs 1.6 % on run7. Verified bucket: 45 of
-                        // 57 rejections were JSON parse failures (trailing comma,
-                        // schema mismatch) caused by the temperature 1.0+ pathology
-                        // on MiniMax-M3. Two retries (3 attempts) recover the
-                        // majority of those failures without re-introducing the
-                        // 30-day cardinalidad 880 projection that motivated the
-                        // drop from 3 to 1 in the first place — the dominant
-                        // retry cost is the 15–18 s LLM round-trip, and 2 retries
-                        // add at most 36 s per failing iteration, which is bounded
-                        // by the rest of the test runtime.
-                        //
-                        // PR-2: the entire iteration runs inside the spawned task. The
-                        // task acquires a parallelism permit (semaphore.acquire) BEFORE
-                        // the LLM call so the in-flight count is bounded; the permit is
-                        // released when the permit guard drops at the end of the task.
-                        // Wrap the future with the per-iteration span so the
-                        // events emitted inside the task (LLM call, telemetry
-                        // writes, sketch retry loop) all carry the same
-                        // (n, total, cell, temperature, replica, sketch_index)
-                        // context the operator can grep end-to-end.
-                        let iteration_span = tracing::trace_span!(
-                            "iteration",
-                            n = n,
-                            total = total,
-                            cell_dim = %cell.dimension_id,
-                            cell_facet = %cell.facet_id,
-                            temperature_profile = %temperature,
-                            replica = replica,
-                            sketch_index = sketch_index,
-                        );
-                        join_set.spawn(
-                            async move {
-                                // Cancellation honor: bail before burning API budget.
-                                if cancel_for_task.is_cancelled() {
-                                    return;
-                                }
-                                let _permit = match ctx_for_attempt.parallelism.acquire().await {
-                                    Ok(p) => p,
-                                    Err(_) => return,
-                                };
-
-                                let sketch_result = retry_sketch_extraction(10, || {
-                                    let ctx = ctx_for_attempt.clone();
-                                    let user = user_for_attempt.clone();
-                                    let system = system_for_attempt.to_string();
-                                    let id = id_for_attempt.clone();
-                                    let cell = cell_for_angle.clone();
-                                    let attempt = n_for_attempt;
-                                    async move {
-                                        let started_unix = crate::time::now_unix_secs();
-                                        let raw = if attempt == 0 {
-                                            ctx.call_with_retry_at_temp(
+                                    let sketch_result = retry_sketch_extraction(10, || {
+                                        let ctx = ctx_for_attempt.clone();
+                                        let user = user_for_attempt.clone();
+                                        let system = system_for_attempt.to_string();
+                                        let id = id_for_attempt.clone();
+                                        let cell = cell_for_angle.clone();
+                                        let attempt = n_for_attempt;
+                                        let section = section_for_attempt.clone();
+                                        let model = model_for_attempt.clone();
+                                        async move {
+                                            let started_unix = crate::time::now_unix_secs();
+                                            let raw = if attempt == 0 {
+                                                ctx.call_with_retry_at_temp_for(
+                                                    &section,
+                                                    &model,
+                                                    crate::llm::Role::Sketch,
+                                                    system,
+                                                    user,
+                                                    0,
+                                                    temperature,
+                                                )
+                                                .await?
+                                            } else {
+                                                ctx.call_uncached_at_temp_for(
+                                                    &section,
+                                                    &model,
+                                                    crate::llm::Role::Sketch,
+                                                    system,
+                                                    user,
+                                                    started_unix,
+                                                    attempt as u32,
+                                                    temperature,
+                                                )
+                                                .await?
+                                            };
+                                            let schema_hint = crate::llm::prompts::system_prompt(
                                                 crate::llm::Role::Sketch,
-                                                system,
-                                                user,
-                                                0,
-                                                temperature,
                                             )
-                                            .await?
-                                        } else {
-                                            ctx.call_uncached_at_temp(
+                                            .to_owned();
+                                            let mut sketch: Sketch = ctx.parse_model_json(
                                                 crate::llm::Role::Sketch,
-                                                system,
-                                                user,
-                                                started_unix,
-                                                attempt as u32,
-                                                temperature,
-                                            )
-                                            .await?
-                                        };
-                                        let schema_hint = crate::llm::prompts::system_prompt(
-                                            crate::llm::Role::Sketch,
-                                        )
-                                        .to_owned();
-                                        let mut sketch: Sketch = ctx.parse_model_json(
-                                            crate::llm::Role::Sketch,
-                                            &raw.text,
-                                            &schema_hint,
-                                        )?;
-                                        if sketch.id.is_empty() {
-                                            sketch.id = id;
+                                                &raw.text,
+                                                &schema_hint,
+                                            )?;
+                                            if sketch.id.is_empty() {
+                                                sketch.id = id;
+                                            }
+                                            sketch.angle =
+                                                format!("{}:{}", cell.dimension_id, cell.facet_id);
+                                            Ok::<Sketch, Error>(sketch)
                                         }
-                                        sketch.angle =
-                                            format!("{}:{}", cell.dimension_id, cell.facet_id);
-                                        Ok::<Sketch, Error>(sketch)
-                                    }
-                                })
-                                .await;
+                                    })
+                                    .await;
 
-                            match sketch_result {
-                                Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
-                                    // Stdout DiscoveryIteration mirror
-                                    // (`kind = "discovery_iteration"`):
-                                    // emitted alongside the
-                                    // `iteration_span` so
-                                    // `moagan discover … 2>log.jsonl
-                                    // | jq 'select(.kind ==
-                                    // "discovery_iteration")'`
-                                    // surfaces one line per accepted
-                                    // sketch — outcome `"accepted"`
-                                    // when the thesis clears the
-                                    // 30-char gate.
-                                    if crate::telemetry::stdout_events::resolve_event_format(
-                                        crate::telemetry::stdout_events::EventFormat::Jsonl,
-                                    ) {
-                                        use crate::telemetry::stdout_events::{
-                                            now_rfc3339, Event, SCHEMA_VERSION,
-                                        };
-                                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
-                                            Event::DiscoveryIteration {
-                                                schema: SCHEMA_VERSION,
-                                                ts: now_rfc3339(),
-                                                n: n_for_attempt,
-                                                total,
-                                                cell_dim: cell_for_angle
-                                                    .dimension_id
-                                                    .as_str(),
-                                                cell_facet: cell_for_angle
-                                                    .facet_id
-                                                    .as_str(),
-                                                temperature,
-                                                replica,
-                                                sketch_index,
-                                                outcome: "accepted",
-                                            },
-                                        );
-                                    }
-                                    let path = sketches_dir_for_task
-                                        .join(format!("{}.json", sketch.id));
-                                    let _ = write_json(&path, &sketch);
-                                    let decision = {
-                                        let mut s = state_for_task.lock().expect("state poisoned");
-                                        s.record_completion(sketch.id.clone());
-                                        let _ = s.save(&run_dir_for_task);
-                                        drop(s);
-                                        let mut t = tracker_for_task.lock().expect("tracker poisoned");
-                                        t.record_completions(1);
-                                        let t_completed = t.completed;
-                                        let t_target = t.target;
-                                        let decision = t.update(std::slice::from_ref(&sketch), &[]);
-                                        let coverage = t.coverage();
-                                        tracing::debug!(
-                                            sketch_id = %sketch.id,
-                                            n = n_for_attempt,
-                                            total = total,
-                                            angle = %sketch.angle,
-                                            cell_dim = %cell_for_angle.dimension_id,
-                                            cell_facet = %cell_for_angle.facet_id,
-                                            temperature_profile = %temperature,
-                                            replica = replica,
-                                            sketch_index = sketch_index,
-                                            thesis_len = sketch.thesis.len(),
-                                            completed = t_completed,
-                                            "discovery: sketch accepted"
-                                        );
-                                        if let StopDecision::Stop { reason } = &decision {
-                                            tracing::warn!(
-                                                n = n_for_attempt,
-                                                total = total,
-                                                completed = t_completed,
-                                                target = t_target,
-                                                reason = ?reason,
-                                                "discovery: tracker returned Stop"
-                                            );
-                                            if matches!(reason, StopReason::Saturated) {
-                                                TelemetryEvent::DiscoverySaturated {
-                                                    run_id: run_id.to_string(),
-                                                    coverage,
-                                                    at_unix: crate::time::now_unix_secs(),
+                                    match sketch_result {
+                                        Ok(sketch) if sketch.thesis.trim().len() >= 30 => {
+                                            // Stdout DiscoveryIteration mirror
+                                            // (`kind = "discovery_iteration"`):
+                                            // emitted alongside the
+                                            // `iteration_span` so
+                                            // `moagan discover … 2>log.jsonl
+                                            // | jq 'select(.kind ==
+                                            // "discovery_iteration")'`
+                                            // surfaces one line per accepted
+                                            // sketch — outcome `"accepted"`
+                                            // when the thesis clears the
+                                            // 30-char gate.
+                                            if crate::telemetry::stdout_events::resolve_event_format(
+                                                crate::telemetry::stdout_events::EventFormat::Jsonl,
+                                            ) {
+                                                use crate::telemetry::stdout_events::{
+                                                    now_rfc3339, Event, SCHEMA_VERSION,
+                                                };
+                                                crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                                    Event::DiscoveryIteration {
+                                                        schema: SCHEMA_VERSION,
+                                                        ts: now_rfc3339(),
+                                                        n: n_for_attempt,
+                                                        total,
+                                                        section: section_for_attempt.as_str(),
+                                                        model: model_for_attempt.as_str(),
+                                                        cell_dim: cell_for_angle
+                                                            .dimension_id
+                                                            .as_str(),
+                                                        cell_facet: cell_for_angle
+                                                            .facet_id
+                                                            .as_str(),
+                                                        temperature,
+                                                        replica,
+                                                        sketch_index,
+                                                        outcome: "accepted",
+                                                    },
+                                                );
+                                            }
+                                            let path = sketches_dir_for_task
+                                                .join(format!("{}.json", sketch.id));
+                                            let _ = write_json(&path, &sketch);
+                                            let decision = {
+                                                let mut s = state_for_task.lock().expect("state poisoned");
+                                                s.record_completion(sketch.id.clone());
+                                                let _ = s.save(&run_dir_for_task);
+                                                drop(s);
+                                                let mut t = tracker_for_task.lock().expect("tracker poisoned");
+                                                t.record_completions(1);
+                                                let t_completed = t.completed;
+                                                let t_target = t.target;
+                                                let decision = t.update(std::slice::from_ref(&sketch), &[]);
+                                                let coverage = t.coverage();
+                                                tracing::debug!(
+                                                    sketch_id = %sketch.id,
+                                                    n = n_for_attempt,
+                                                    total = total,
+                                                    angle = %sketch.angle,
+                                                    cell_dim = %cell_for_angle.dimension_id,
+                                                    cell_facet = %cell_for_angle.facet_id,
+                                                    temperature_profile = %temperature,
+                                                    replica = replica,
+                                                    sketch_index = sketch_index,
+                                                    thesis_len = sketch.thesis.len(),
+                                                    completed = t_completed,
+                                                    "discovery: sketch accepted"
+                                                );
+                                                if let StopDecision::Stop { reason } = &decision {
+                                                    tracing::warn!(
+                                                        n = n_for_attempt,
+                                                        total = total,
+                                                        completed = t_completed,
+                                                        target = t_target,
+                                                        reason = ?reason,
+                                                        "discovery: tracker returned Stop"
+                                                    );
+                                                    if matches!(reason, StopReason::Saturated) {
+                                                        TelemetryEvent::DiscoverySaturated {
+                                                            run_id: run_id.to_string(),
+                                                            coverage,
+                                                            at_unix: crate::time::now_unix_secs(),
+                                                        }
+                                                        .emit();
+                                                    }
                                                 }
-                                                .emit();
+                                                decision
+                                            };
+                                            if let StopDecision::Stop { reason } = decision {
+                                                *stop_reason_for_task
+                                                    .lock()
+                                                    .expect("stop_reason poisoned") = Some(reason);
                                             }
                                         }
-                                        decision
-                                    };
-                                    if let StopDecision::Stop { reason } = decision {
-                                        *stop_reason_for_task
-                                            .lock()
-                                            .expect("stop_reason poisoned") = Some(reason);
+                                        Ok(sketch) => {
+                                            tracing::warn!(
+                                                sketch_id = %id,
+                                                n = n_for_attempt,
+                                                thesis_len = sketch.thesis.trim().len(),
+                                                "discovery: sketch rejected (thesis too short)"
+                                            );
+                                            // Stdout DiscoveryIteration mirror
+                                            // (`kind = "discovery_iteration"`):
+                                            // the sketch parsed cleanly but
+                                            // the thesis failed the 30-char
+                                            // gate — outcome `"rejected"` so
+                                            // operators can distinguish "LLM
+                                            // schema ok, content too thin"
+                                            // from a hard extraction error.
+                                            if crate::telemetry::stdout_events::resolve_event_format(
+                                                crate::telemetry::stdout_events::EventFormat::Jsonl,
+                                            ) {
+                                                use crate::telemetry::stdout_events::{
+                                                    now_rfc3339, Event, SCHEMA_VERSION,
+                                                };
+                                                crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                                    Event::DiscoveryIteration {
+                                                        schema: SCHEMA_VERSION,
+                                                        ts: now_rfc3339(),
+                                                        n: n_for_attempt,
+                                                        total,
+                                                        section: section_for_attempt.as_str(),
+                                                        model: model_for_attempt.as_str(),
+                                                        cell_dim: cell_for_angle
+                                                            .dimension_id
+                                                            .as_str(),
+                                                        cell_facet: cell_for_angle
+                                                            .facet_id
+                                                            .as_str(),
+                                                        temperature,
+                                                        replica,
+                                                        sketch_index,
+                                                        outcome: "rejected",
+                                                    },
+                                                );
+                                            }
+                                            let mut s = state_for_task.lock().expect("state poisoned");
+                                            s.record_failure();
+                                            let _ = s.save(&run_dir_for_task);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                sketch_id = %id,
+                                                n = n_for_attempt,
+                                                error = %e,
+                                                "discovery: sketch extraction failed after retries; recording failure"
+                                            );
+                                            // Stdout DiscoveryIteration mirror
+                                            // (`kind = "discovery_iteration"`):
+                                            // the LLM never produced a
+                                            // parseable sketch even with the
+                                            // retry budget — outcome
+                                            // `"error"` so dashboards can
+                                            // count hard failures separately
+                                            // from soft rejections.
+                                            if crate::telemetry::stdout_events::resolve_event_format(
+                                                crate::telemetry::stdout_events::EventFormat::Jsonl,
+                                            ) {
+                                                use crate::telemetry::stdout_events::{
+                                                    now_rfc3339, Event, SCHEMA_VERSION,
+                                                };
+                                                crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
+                                                    Event::DiscoveryIteration {
+                                                        schema: SCHEMA_VERSION,
+                                                        ts: now_rfc3339(),
+                                                        n: n_for_attempt,
+                                                        total,
+                                                        section: section_for_attempt.as_str(),
+                                                        model: model_for_attempt.as_str(),
+                                                        cell_dim: cell_for_angle
+                                                            .dimension_id
+                                                            .as_str(),
+                                                        cell_facet: cell_for_angle
+                                                            .facet_id
+                                                            .as_str(),
+                                                        temperature,
+                                                        replica,
+                                                        sketch_index,
+                                                        outcome: "error",
+                                                    },
+                                                );
+                                            }
+                                            let mut s = state_for_task.lock().expect("state poisoned");
+                                            s.record_failure();
+                                            let _ = s.save(&run_dir_for_task);
+                                        }
                                     }
+                                    // Pipe the future through the iteration span
+                                    // so every event emitted inside (LLM call,
+                                    // retry loop, telemetry mirror) carries the
+                                    // same (n, total, cell, temperature, replica,
+                                    // sketch_index) context the operator can
+                                    // grep end-to-end.
                                 }
-                                Ok(sketch) => {
-                                    tracing::warn!(
-                                        sketch_id = %id,
-                                        n = n_for_attempt,
-                                        thesis_len = sketch.thesis.trim().len(),
-                                        "discovery: sketch rejected (thesis too short)"
-                                    );
-                                    // Stdout DiscoveryIteration mirror
-                                    // (`kind = "discovery_iteration"`):
-                                    // the sketch parsed cleanly but
-                                    // the thesis failed the 30-char
-                                    // gate — outcome `"rejected"` so
-                                    // operators can distinguish "LLM
-                                    // schema ok, content too thin"
-                                    // from a hard extraction error.
-                                    if crate::telemetry::stdout_events::resolve_event_format(
-                                        crate::telemetry::stdout_events::EventFormat::Jsonl,
-                                    ) {
-                                        use crate::telemetry::stdout_events::{
-                                            now_rfc3339, Event, SCHEMA_VERSION,
-                                        };
-                                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
-                                            Event::DiscoveryIteration {
-                                                schema: SCHEMA_VERSION,
-                                                ts: now_rfc3339(),
-                                                n: n_for_attempt,
-                                                total,
-                                                cell_dim: cell_for_angle
-                                                    .dimension_id
-                                                    .as_str(),
-                                                cell_facet: cell_for_angle
-                                                    .facet_id
-                                                    .as_str(),
-                                                temperature,
-                                                replica,
-                                                sketch_index,
-                                                outcome: "rejected",
-                                            },
-                                        );
-                                    }
-                                    let mut s = state_for_task.lock().expect("state poisoned");
-                                    s.record_failure();
-                                    let _ = s.save(&run_dir_for_task);
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        sketch_id = %id,
-                                        n = n_for_attempt,
-                                        error = %e,
-                                        "discovery: sketch extraction failed after retries; recording failure"
-                                    );
-                                    // Stdout DiscoveryIteration mirror
-                                    // (`kind = "discovery_iteration"`):
-                                    // the LLM never produced a
-                                    // parseable sketch even with the
-                                    // retry budget — outcome
-                                    // `"error"` so dashboards can
-                                    // count hard failures separately
-                                    // from soft rejections.
-                                    if crate::telemetry::stdout_events::resolve_event_format(
-                                        crate::telemetry::stdout_events::EventFormat::Jsonl,
-                                    ) {
-                                        use crate::telemetry::stdout_events::{
-                                            now_rfc3339, Event, SCHEMA_VERSION,
-                                        };
-                                        crate::telemetry::stdout_events::STDOUT_EVENTS.emit(
-                                            Event::DiscoveryIteration {
-                                                schema: SCHEMA_VERSION,
-                                                ts: now_rfc3339(),
-                                                n: n_for_attempt,
-                                                total,
-                                                cell_dim: cell_for_angle
-                                                    .dimension_id
-                                                    .as_str(),
-                                                cell_facet: cell_for_angle
-                                                    .facet_id
-                                                    .as_str(),
-                                                temperature,
-                                                replica,
-                                                sketch_index,
-                                                outcome: "error",
-                                            },
-                                        );
-                                    }
-                                    let mut s = state_for_task.lock().expect("state poisoned");
-                                    s.record_failure();
-                                    let _ = s.save(&run_dir_for_task);
-                                }
-                            }
-                            // Pipe the future through the iteration span
-                            // so every event emitted inside (LLM call,
-                            // retry loop, telemetry mirror) carries the
-                            // same (n, total, cell, temperature, replica,
-                            // sketch_index) context the operator can
-                            // grep end-to-end.
-                        }.instrument(iteration_span));
+                                .instrument(iteration_span));
 
-                        n += 1;
-                        tokio::task::yield_now().await;
+                            n += 1;
+                            tokio::task::yield_now().await;
+                        }
                     }
                 }
             }
@@ -1358,6 +1504,43 @@ fn build_coordinator_matrix(
     //    phase) reads the freshly-written sidecar.
     tracing::debug!("build_coordinator_matrix: falling through to empty matrix (LLM-derive)");
     Ok(ExplorationMatrix::new(Vec::new(), sketches_per_cell))
+}
+
+/// F2 (B6): build the sketch loop's [`SaturationTracker`] in one
+/// place, sized against the loop's real fan-out and pre-loaded
+/// with the resume baseline.
+///
+/// The tracker is constructed EXACTLY once per run. The pre-fix
+/// code built a first tracker from `matrix.cardinality()`,
+/// replayed `state.completed_sketches.len()` into it, and then
+/// rebound the same variable to a second
+/// `SaturationTracker::with_policy(...)` once `total` was known —
+/// silently discarding the baseline. A resumed run therefore saw
+/// `tracker.completed == 0` and `tracker.coverage() == 0.0`, so
+/// the stop policy behaved as if nothing had been explored.
+///
+/// Keeping the construction + the replay in one function is what
+/// makes the invariant testable: a future re-introduction of a
+/// second construction has to go through here, and the unit test
+/// `resume_baseline_survives_tracker_initialisation` pins that
+/// `completed == resume_baseline` on the returned tracker.
+fn init_saturation_tracker(
+    total: usize,
+    target: usize,
+    policy: StopPolicy,
+    resume_baseline: usize,
+) -> SaturationTracker {
+    let mut tracker = SaturationTracker::with_policy(total.max(target), policy);
+    tracker.record_completions(resume_baseline);
+    tracing::debug!(
+        total,
+        target,
+        tracker_target = tracker.target,
+        resume_baseline,
+        completed = tracker.completed,
+        "init_saturation_tracker"
+    );
+    tracker
 }
 
 /// Build the user payload the LLM sees for one `(cell, sketch_index)`
@@ -2443,37 +2626,41 @@ mod tests {
         );
     }
 
-    /// PR-D1: when the operator sets a per-provider temperature
-    /// profile, the coordinator fans out the matrix across the
-    /// `(cell, temperature, replica)` Cartesian product. The
-    /// test asserts:
+    /// Tanda 04e D-1: when the operator sets per-`(section, model)`
+    /// temperature profiles, the coordinator fans out the matrix
+    /// across the Cartesian product `(cells × per_cell ×
+    /// Σ(profile.total()))`. The test asserts:
     ///
-    /// * The total number of LLM calls equals `cells × per_cell ×
-    ///   Σ(providers: |temperatures| × replicas)`.
-    /// * The recorded temperatures match the expected per-provider
-    ///   profile (the `mock-model` profile has 2 temperatures × 2
-    ///   replicas; the `other-model` profile has 1 temperature ×
-    ///   1 replica — but it never fires because the active
-    ///   provider's model is `mock-model`).
-    /// * The mock provider's model name (`"mock-model"`) is used
-    ///   as the lookup key; a typo in the profile map key would
-    ///   fall back to `default_profile` and the test would fail.
+    /// * The total number of LLM calls equals
+    ///   `cells × per_cell × (Σ profile.total())` summed across
+    ///   every configured `(section, model)` pair.
+    /// * The recorded temperatures match the union of the
+    ///   per-pair profiles (the `(mock, mock-model)` profile has
+    ///   2 temperatures × 2 replicas; the `(mock, other-model)`
+    ///   profile has 1 temperature × 1 replica).
+    /// * The pair-keyed form is the lookup key; a typo in the
+    ///   joined key would fall back to `default_profile` and
+    ///   the test would fail.
     #[test]
     fn phase_continue_iterates_per_provider_and_per_replica() {
         let rt = single_thread_runtime();
-        // Build the profile map the coordinator will read.
-        // The active provider's model name (`mock-model`) keys
-        // into this map.
+        // Build the profile map the coordinator will read. The
+        // joined keys (`mock::mock-model`, `mock::other-model`)
+        // are the canonical v0.14.3+ form produced by the CLI
+        // merge step in `cli::discover::run`. The coordinator's
+        // `migrate_legacy_keys` would re-key bare-model entries
+        // to this form, but we set the keys directly so the
+        // assertion pin matches the production wire shape.
         let mut profiles = std::collections::HashMap::new();
         profiles.insert(
-            "mock-model".to_owned(),
+            "mock::mock-model".to_owned(),
             crate::discovery::matrix::TemperatureProfile {
                 temperatures: vec![0.0, 0.5],
                 replicas_per_temperature: 2,
             },
         );
         profiles.insert(
-            "other-model".to_owned(),
+            "mock::other-model".to_owned(),
             crate::discovery::matrix::TemperatureProfile {
                 temperatures: vec![0.7],
                 replicas_per_temperature: 1,
@@ -2483,20 +2670,14 @@ mod tests {
             temperatures: vec![0.99],
             replicas_per_temperature: 1,
         };
-        // The coordinator uses `default_for_with_profiles(target)`
-        // internally (target = `Cardinality::for_mode_default(Standard).soft = 7`).
-        // For target=7 the default matrix has 4 dims × 2 facets
-        // = 8 cells × max(7/8, 1) per_cell = 1 sketch per cell.
-        // Cardinality = 8. With the active provider's profile
-        // (`[0.0, 0.5] × 2 = 4`) the total fan-out is 8 × 4 = 32.
+        // Tanda 04e D-1: `active_provider_profiles` returns every
+        // `(section, model, profile)` triple plus the default
+        // pair (which falls back to `default_profile` when no
+        // explicit entry exists). For this test the explicit
+        // profiles cover the default pair (mock, mock-model) so
+        // the default fallback never fires — total fan-out is
+        // `cells × per_cell × (4 + 1) = 8 × 1 × 5 = 40`.
         let target = Cardinality::for_mode_default(Mode::Standard).soft;
-        // F1 (Track G.2): the legacy `default_for_with_profiles`
-        // constructor is gone. The test reconstructs the same
-        // 4×2 matrix shape via `ExplorationMatrix::new` plus the
-        // explicit profiles. The test config populates
-        // `discovery_matrix.matrix_spec` with the equivalent
-        // spec so the coordinator picks it up the same way the
-        // pre-F1 path did.
         let matrix = crate::discovery::matrix::ExplorationMatrix::new(
             legacy_4x2_dimensions(),
             (target / 8).max(1),
@@ -2504,8 +2685,10 @@ mod tests {
         let mut matrix = matrix;
         matrix.temperature_profiles = profiles.clone();
         matrix.default_profile = default_profile;
-        let expected_calls =
-            matrix.cells() * matrix.sketches_per_cell * matrix.profile_for("mock-model").total();
+        let active = matrix.active_provider_profiles("mock", "mock-model");
+        let expected_calls = matrix.cells()
+            * matrix.sketches_per_cell
+            * active.iter().map(|(_, _, p)| p.total()).sum::<usize>();
         let scripted = TemperatureRecordingProvider::new(
             (0..expected_calls)
                 .map(|i| sketch_payload(&format!("sk_{i:04}")))
@@ -2543,10 +2726,10 @@ mod tests {
             // Build the effective Config with the explicit profile
             // map; the coordinator reads it via
             // `ctx.config.discovery_matrix.temperature_profiles`.
-            // F1 (Track G.2): the config also carries the legacy
-            // 4×2 `matrix_spec` so the coordinator's matrix
-            // builder picks up the same shape the pre-F1 test
-            // derived from `default_for_with_profiles`.
+            // The config also carries the legacy 4×2 `matrix_spec`
+            // so the coordinator's matrix builder picks up the
+            // same shape the pre-D-1 test derived from
+            // `default_for_with_profiles`.
             let cfg = crate::config::Config {
                 discovery_matrix: crate::config::DiscoveryMatrixConfig {
                     temperature_profiles: matrix.temperature_profiles.clone(),
@@ -2560,14 +2743,11 @@ mod tests {
                     dimensions: None,
                     facets_per_dimension: None,
                     llm_derive_first: false,
-                    // F2 (Track G.2): pin `sketches_per_cell = 1`
-                    // so the matrix cardinality matches the
-                    // pre-F2 8-skeleton the test asserts. The F2
-                    // default of 10 would inflate the mock buffer
-                    // by 10× and break the `expected_calls`
-                    // assertion below. Note: with the v0.13.2
-                    // floor of 1, this is a fast mock-buffer
-                    // fixture, not a workaround for a floor.
+                    // Pin `sketches_per_cell = 1` so the matrix
+                    // cardinality matches the 8-skeleton the test
+                    // asserts. The v0.13.x default of 10 would
+                    // inflate the mock buffer by 10× and break the
+                    // `expected_calls` assertion below.
                     sketches_per_cell: 1,
                 },
                 ..crate::config::Config::default()
@@ -2590,7 +2770,7 @@ mod tests {
         let calls = scripted.calls.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             calls, expected_calls,
-            "explicit profile must drive a fan-out of cells × per_cell × (temperatures × replicas); \
+            "explicit profiles must drive a fan-out of cells × per_cell × Σ(profile.total()); \
              expected {expected_calls}, got {calls}"
         );
         let recorded = scripted.temperatures.lock().clone();
@@ -2600,17 +2780,19 @@ mod tests {
             "every call must record its temperature; expected {expected_calls} entries, got {}",
             recorded.len()
         );
-        // The active provider's model is `mock-model`, so the
-        // recorded temperatures must come from the `mock-model`
-        // profile (`[0.0, 0.5] × 2`). No call may carry the
-        // `other-model` profile's `0.7` or the default profile's
-        // `0.99` — a typo in the lookup key would silently fall
-        // back to the default and trip this assertion.
+        // Every recorded temperature must come from one of the
+        // configured profiles (`[0.0, 0.5]` for `mock::mock-model`
+        // and `[0.7]` for `mock::other-model`). No call may carry
+        // the default profile's `0.99` — a typo in the joined
+        // key would silently fall back to the default and trip
+        // this assertion.
         for (i, &t) in recorded.iter().enumerate() {
+            let in_mock_profile = (t - 0.0).abs() < f32::EPSILON || (t - 0.5).abs() < f32::EPSILON;
+            let in_other_profile = (t - 0.7).abs() < f32::EPSILON;
             assert!(
-                (t - 0.0).abs() < f32::EPSILON || (t - 0.5).abs() < f32::EPSILON,
-                "call #{i} carried unexpected temperature {t}; the active provider's \
-                 profile must be `[0.0, 0.5] × 2`"
+                in_mock_profile || in_other_profile,
+                "call #{i} carried unexpected temperature {t}; every temperature must come \
+                 from one of the configured profiles"
             );
         }
     }
@@ -2676,6 +2858,67 @@ mod tests {
     /// pre-F1 tests.
     fn legacy_4x2_cardinality(target: usize) -> usize {
         legacy_4x2_dimensions().len() * 2 * ((target / (legacy_4x2_dimensions().len() * 2)).max(1))
+    }
+
+    // -----------------------------------------------------------
+    // F2 (B6/T5) — the resume baseline survives tracker init.
+    //
+    // The pre-fix loop constructed the tracker twice: the first
+    // instance got the replayed `state.completed_sketches.len()`,
+    // the second (built once `total` was known) silently replaced
+    // it and started from zero. A resumed run therefore reported
+    // `coverage() == 0` no matter how much of the fan-out was
+    // already on disk. `init_saturation_tracker` is now the single
+    // construction site and these tests pin that contract.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn resume_baseline_survives_tracker_initialisation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path();
+
+        // Persist a mid-run state with 5 completed sketches, then
+        // read it back the way `run_with_ctx_and_target` does.
+        let mut persisted = SketchLoopState::new("deployment-model:serverless".to_owned());
+        for i in 0..5 {
+            persisted.record_completion(format!("sk_{i:04}"));
+        }
+        persisted.save(run_dir).expect("save state");
+        let state = SketchLoopState::load(run_dir)
+            .expect("load state")
+            .expect("state file exists");
+        assert_eq!(state.completed_sketches.len(), 5);
+
+        let tracker =
+            init_saturation_tracker(80, 8, StopPolicy::default(), state.completed_sketches.len());
+
+        assert_eq!(
+            tracker.completed, 5,
+            "the persisted completion count must reach the tracker that the loop uses"
+        );
+        assert_eq!(
+            tracker.target, 80,
+            "the tracker is anchored to the loop's real fan-out (total.max(target))"
+        );
+        assert!(
+            tracker.coverage() > 0.0,
+            "a resumed run must not report zero coverage; got {}",
+            tracker.coverage()
+        );
+        assert!(
+            (tracker.coverage() - 0.0625).abs() < 1e-6,
+            "coverage must be 5/80; got {}",
+            tracker.coverage()
+        );
+    }
+
+    #[test]
+    fn fresh_run_tracker_starts_at_zero_completions() {
+        let state = SketchLoopState::new("deployment-model:serverless".to_owned());
+        let tracker =
+            init_saturation_tracker(80, 8, StopPolicy::default(), state.completed_sketches.len());
+        assert_eq!(tracker.completed, 0);
+        assert_eq!(tracker.coverage(), 0.0);
     }
 
     /// Build the 4-dim × 2-facet legacy matrix dimensions. Mirrors
@@ -2754,12 +2997,16 @@ mod tests {
     // never fires end-to-end and the integration assertion can only
     // verify the emitter compiles + serialises. This unit test
     // pins the wire schema directly: a hand-rolled
-    // `Event::DiscoveryIteration` with all 9 fields populated must
+    // `Event::DiscoveryIteration` with all 11 fields populated must
     // round-trip through `serde_json::to_string` with the
     // `kind = "discovery_iteration"` discriminator and the field
     // names documented in `docs/events-v1.md`. A future enum
     // rename or schema break trips the assertion instead of
     // silently changing the wire format.
+    //
+    // F2 (B4) added `section` + `model` so a dashboard consuming
+    // the NDJSON stream can attribute each sketch to the provider
+    // pair that produced it.
     // -----------------------------------------------------------
     #[test]
     fn discovery_iteration_event_serializes_with_kind_discriminator() {
@@ -2769,6 +3016,8 @@ mod tests {
             ts: "2026-08-26T10:37:54.667Z".to_owned(),
             n: 7,
             total: 80,
+            section: "minimax",
+            model: "MiniMax-M3",
             cell_dim: "storage",
             cell_facet: "sql",
             temperature: 0.5,
@@ -2786,6 +3035,16 @@ mod tests {
             v["kind"],
             serde_json::Value::String("discovery_iteration".into()),
             "DiscoveryIteration event must serialise with kind=\"discovery_iteration\"; got {v}"
+        );
+        assert_eq!(
+            v["section"],
+            serde_json::Value::String("minimax".into()),
+            "F2 (B4): the event must attribute the sketch to its provider section"
+        );
+        assert_eq!(
+            v["model"],
+            serde_json::Value::String("MiniMax-M3".into()),
+            "F2 (B4): the event must attribute the sketch to its provider model"
         );
         assert_eq!(
             v["schema"],

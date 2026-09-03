@@ -399,12 +399,13 @@ impl Default for ExportConfig {
     }
 }
 
-/// PR-D1: persistent per-provider temperature-profile overrides
-/// for the discovery matrix. Lives under `[discovery_matrix]` in
-/// `~/.config/moagan/config.toml` so an operator can pre-configure
-/// a run's fan-out without passing `--temperature-profile` flags
-/// every time. CLI flags win on conflict — see
-/// `cli::discover::run` for the merge order.
+/// PR-D1 + Tanda 04e D-1: persistent per-provider
+/// temperature-profile overrides for the discovery matrix.
+/// Lives under `[discovery_matrix]` in
+/// `~/.config/moagan/config.toml` so an operator can
+/// pre-configure a run's fan-out without passing
+/// `--temperature-profile` flags every time. CLI flags win on
+/// conflict — see `cli::discover::run` for the merge order.
 ///
 /// Re-exported alongside `DiscoveryWiringConfig` (which is a
 /// separate `[discovery]` block dedicated to the persona/angle
@@ -415,12 +416,29 @@ impl Default for ExportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiscoveryMatrixConfig {
-    /// Per-provider sampling-temperature profiles keyed by the
-    /// provider's MODEL name (the same string stored on
-    /// `ProviderConfig::model`, e.g. `"MiniMax-M3"`,
-    /// `"deepseek-v4-flash"`, `"mimo-v2.5"`). Empty by default so
-    /// unconfigured installations match v0.5's single-shot
-    /// behaviour.
+    /// Tanda 04e D-1: per-`(section, model)` sampling-temperature
+    /// profiles keyed by the joined `section::model` string (the
+    /// same key produced by `ProviderRegistry::registry_key`,
+    /// e.g. `"minimax::MiniMax-M3"`,
+    /// `"deepseek::deepseek-v4-flash"`,
+    /// `"opencode::mimo-v2.5"`). A `(section, model)` pair not in
+    /// this map uses `default_profile`.
+    ///
+    /// Backward compat: a v0.14.x sidecar that still carries
+    /// bare-model keys (e.g. `temperature_profiles["MiniMax-M3"]`)
+    /// is upgraded in-memory via
+    /// `ExplorationMatrix::migrate_legacy_keys` at read time —
+    /// only the entry whose model equals the run's `--provider`
+    /// model is re-keyed, since every other bare key belongs to
+    /// an unknown section. The file is rewritten in-place on the
+    /// next `write_json` call
+    /// so a re-read sees the new shape. CLI specs use the new
+    /// `provider=<section>:<model>` form (Tanda 04e D-1) or the
+    /// legacy `provider=<model>` form (PR-D1, implicit section
+    /// from `--provider`).
+    ///
+    /// Empty by default so unconfigured installations match
+    /// v0.5's single-shot behaviour.
     pub temperature_profiles:
         std::collections::HashMap<String, crate::discovery::matrix::TemperatureProfile>,
     /// Optional default profile applied to providers absent from

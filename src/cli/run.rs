@@ -892,21 +892,47 @@ pub(crate) fn build_registry_for_with_active(
         })?
         .clone();
     // Mock short-circuit: load canned responses from disk and
-    // register them under the requested `(section, model_id)` key.
-    // The legacy `mock` section has no upstream. When the
-    // operator passed `--provider mock` (single-model alias) the
-    // resolved model id is `mock-model`; we register under both
-    // the joined `mock::mock-model` key and the bare `mock` key
-    // so the legacy `RunContext::provider()` lookup (which uses
-    // the section name for backward compatibility) finds the
-    // provider.
+    // register them under every `(section, model_id)` pair the
+    // caller listed. The legacy `mock` section has no upstream.
+    // When the operator passed `--provider mock` (single-model
+    // alias) the resolved model id is `mock-model`; we register
+    // under both the joined `mock::mock-model` key and the bare
+    // `mock` key so the legacy `RunContext::provider()` lookup
+    // (which uses the section name for backward compatibility)
+    // finds the provider.
+    //
+    // Tanda 04e D-1: when `active_pairs` carries multiple
+    // `(section, model_id)` entries (the multi-provider fan-out
+    // case), we register a fresh `MockProvider` instance under
+    // every joined key so each pair's LLM call is dispatched
+    // against the same canned fixture pool. The `MockProvider`
+    // is shared via `Arc` so all pairs answer the same prompts
+    // out of the same response pool (the per-call cycle cursor
+    // advances in lock-step across every pair, which is fine
+    // for tests where the response shape does not depend on the
+    // pair). Real upstreams would resolve each pair to its own
+    // HTTP client; the mock short-circuit honours the same
+    // `active_pairs` contract so a multi-provider integration
+    // test exercises the full registry wiring end-to-end.
     if section == "mock"
         && let Some(dir) = mock_dir
     {
-        let mock = crate::llm::MockProvider::from_dir(dir)?;
+        let mock: Arc<dyn crate::llm::provider::Provider> =
+            Arc::new(crate::llm::MockProvider::from_dir(dir)?);
         let mut reg = ProviderRegistry::default();
-        let joined = ProviderRegistry::registry_key(&section, &model_id);
-        reg.insert(joined, Arc::new(mock));
+        // Tanda 04e D-1: register the active pair list
+        // (every `(section, model_id)` the dispatcher will hit)
+        // when supplied, falling back to the legacy single-pair
+        // resolution when `active_pairs` is empty.
+        let pairs: Vec<(String, String)> = if let Some(pairs) = active_pairs {
+            pairs.to_vec()
+        } else {
+            vec![(section.clone(), model_id.clone())]
+        };
+        for (sec, mdl) in &pairs {
+            let joined = ProviderRegistry::registry_key(sec, mdl);
+            reg.insert(joined, Arc::clone(&mock));
+        }
         return Ok(reg);
     }
     // Minimax API-key short-circuit: the `--api-key` flag

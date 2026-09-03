@@ -100,7 +100,7 @@ versioned independently of `moagan`'s own version. **Additive changes**
 | `phase_end`    | On successful `Phase::execute` completion.     | `phase`, `seq`, `elapsed_ms`, `status: "ok"` |
 | `phase_error`  | When a `Phase::execute` returns `Err`.          | `phase`, `seq`, `error`, `exit_code: 0` (placeholder) |
 | `llm_call`     | On successful `provider.send` (non-probe).     | `call_id`, `phase`, `role`, `provider`, `model`, `elapsed_ms`, `ok`, `input_tokens`, `output_tokens`, `retry_count` |
-| `discovery_iteration` | Per sketch loop iteration in discovery. | `n`, `total`, `cell_dim`, `cell_facet`, `temperature`, `replica`, `sketch_index`, `outcome` |
+| `discovery_iteration` | Per sketch loop iteration in discovery. | `n`, `total`, `section`, `model`, `cell_dim`, `cell_facet`, `temperature`, `replica`, `sketch_index`, `outcome` |
 | `probe`        | Per auto-probe call (temperature / max_tokens). | `probe_kind`, `candidate`, `iteration`, `provider`, `model`, `outcome: "accepted"\|"rejected"\|"indeterminate"` |
 | `warning`      | When `Telemetry::warn` is called.               | `code`, `level`, `phase?`, `details` |
 | `decision`     | At curated decision points throughout the pipeline (see `--decision-format` below). Verbosity controlled by `--decision-format`. | `decision_kind`, `payload` |

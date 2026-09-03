@@ -432,6 +432,102 @@ mod tests {
         assert_ne!(k1, k2);
     }
 
+    /// The v0.14.x cache-key recipe, spelled out literally so a
+    /// refactor of [`Cache::cache_key`] cannot quietly change the
+    /// field list, their order, or their labels. `PROMPT_SET`
+    /// stands in for the `prompt_set_hash()` slot.
+    fn v0_14_x_cache_key(prompt_set: &str) -> String {
+        canonical_hash(&[
+            "role",
+            "sketch",
+            "provider",
+            "minimax",
+            "model",
+            "MiniMax-M3",
+            "system",
+            "system prompt",
+            "user",
+            "user prompt",
+            "max_tokens",
+            "4096",
+            "temperature",
+            "0.5",
+            "top_p",
+            "",
+            "prompt_set_hash",
+            prompt_set,
+        ])
+    }
+
+    /// F2 (B8/T4): pin the cache key byte-for-byte against the
+    /// v0.14.x single-provider shape.
+    ///
+    /// Tanda 04e D-1 made the discovery loop pass an explicit
+    /// `(section, model)` pair into `Cache::cache_key`. For the
+    /// default pair that call MUST produce the exact key v0.14.x
+    /// produced for the same prompt + temperature, otherwise every
+    /// cross-run cache entry written before the upgrade turns into
+    /// a miss and the operator silently re-pays for the whole
+    /// discovery fan-out.
+    ///
+    /// The pin asserts two independent things:
+    ///
+    /// 1. `cache_key` still hashes the v0.14.x parts, in order,
+    ///    with `provider` as the BARE SECTION name (`"minimax"`) —
+    ///    never the joined registry key (`"minimax::MiniMax-M3"`).
+    /// 2. The hashing primitive underneath (BLAKE3 over the
+    ///    `0x1f`-separated canonical join) still produces the
+    ///    stored reference digest.
+    ///
+    /// `prompt_set_hash()` is read at runtime rather than
+    /// hardcoded: it is a digest over the compiled-in prompt
+    /// texts, so freezing it would turn every prompt edit into a
+    /// spurious failure. The stored digest below therefore uses a
+    /// fixed stand-in for that one slot.
+    #[test]
+    fn cache_key_is_byte_identical_to_single_provider_shape() {
+        let mut r = req("system prompt", "user prompt");
+        r.role = Role::Sketch;
+        r.temperature = Some(0.5);
+        r.max_tokens = Some(4096);
+
+        assert_eq!(
+            Cache::cache_key(&r, "minimax", "MiniMax-M3"),
+            v0_14_x_cache_key(&prompt_set_hash()),
+            "cache_key must keep the v0.14.x field list, order, and labels"
+        );
+
+        // The joined registry key must NOT be accepted as the
+        // `provider` half: callers split the pair first.
+        assert_ne!(
+            Cache::cache_key(&r, "minimax::MiniMax-M3", "MiniMax-M3"),
+            v0_14_x_cache_key(&prompt_set_hash()),
+            "passing the joined registry key as `provider` must produce a different key"
+        );
+
+        // Stored reference digest for the recipe with a fixed
+        // prompt-set slot. Catches a change of hash function or of
+        // the canonical-join separator scheme.
+        assert_eq!(
+            v0_14_x_cache_key(&"0".repeat(64)),
+            "f62bbbb633072ce2c62f23cb5de1d7658441a6c1d38504c59eca554de10a8a68",
+            "canonical_hash primitive changed (hash function or separator scheme)"
+        );
+    }
+
+    /// F2 (B8): the pair is mixed into the key, so two providers
+    /// answering the same prompt cache distinctly instead of
+    /// serving each other's responses.
+    #[test]
+    fn cache_key_differs_by_provider_pair() {
+        let r = req("s", "u");
+        let a = Cache::cache_key(&r, "minimax", "MiniMax-M3");
+        let b = Cache::cache_key(&r, "minimax", "MiniMax-M2");
+        let c = Cache::cache_key(&r, "opencode", "MiniMax-M3");
+        assert_ne!(a, b, "same section, different model must not collide");
+        assert_ne!(a, c, "same model, different section must not collide");
+    }
+
     #[test]
     fn store_and_lookup_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();

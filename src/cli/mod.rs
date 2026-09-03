@@ -883,20 +883,29 @@ pub enum Cmd {
         /// `MOAGAN_FACET_CACHE_TTL_SECS` (default 7 days).
         #[arg(long, default_value_t = false)]
         cache_facets: bool,
-        /// PR-D1: per-provider sampling-temperature profile. May
-        /// be passed multiple times; each occurrence applies one
-        /// profile to the named provider model. The spec grammar is
-        /// `provider=<model>;temperatures=<csv>;replicas=<n>`:
+        /// PR-D1 + Tanda 04e D-1: per-provider sampling-temperature
+        /// profile. May be passed multiple times; each occurrence
+        /// applies one profile to a `(section, model)` pair. The
+        /// spec grammar is
+        /// `provider=<ref>;temperatures=<csv>;replicas=<n>` where
+        /// `<ref>` accepts two forms:
         ///
-        /// * `provider=<model>` — provider MODEL name (the same
-        ///   string stored on `ProviderConfig::model`, e.g.
-        ///   `MiniMax-M3`, `mimo-v2.5`).
+        /// * `provider=<model>` — legacy form (PR-D1). The section
+        ///   is implicit and defaults to the `--provider` section
+        ///   at merge time. Matrix lookup key: `<section>::<model>`.
+        /// * `provider=<section>:<model>` — Tanda 04e D-1 form.
+        ///   The section is explicit; the parser splits on the
+        ///   first `:` via `parse_provider_model`. Matrix lookup
+        ///   key: `<section>::<model>`.
+        ///
+        /// Other segments:
+        ///
         /// * `temperatures=<csv>` — comma-separated floats in
         ///   `0.0..=2.0`. At least one value required.
         /// * `replicas=<n>` — integer `>= 1`.
         ///
-        /// Multiple specs for the same provider are allowed; the
-        /// LAST one wins (documented in `cli::discover`).
+        /// Multiple specs for the same `(section, model)` pair are
+        /// allowed; the LAST one wins (documented in `cli::discover`).
         /// Providers without a spec fall back to the matrix's
         /// `default_profile` (`[1.0] × 1`), which reproduces the
         /// v0.5 single-shot contract byte-for-byte. Default empty.
@@ -2283,6 +2292,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     cache_facets: false,
                     temperature_profiles: vec![discover::TemperatureProfileSpec {
                         provider: "MiniMax-M3".to_owned(),
+                        section: None,
                         temperatures: vec![1.0],
                         replicas_per_temperature: 1,
                     }],

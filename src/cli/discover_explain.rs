@@ -698,6 +698,7 @@ mod tests {
         let mut o = opts();
         o.temperature_profiles = vec![TemperatureProfileSpec {
             provider: "minimax-m3".to_string(),
+            section: None,
             temperatures: vec![0.5, 0.7, 1.0, 1.3],
             replicas_per_temperature: 2,
         }];

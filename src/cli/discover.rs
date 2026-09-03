@@ -334,28 +334,49 @@ pub struct DiscoverOptions {
     pub explain: bool,
 }
 
-/// Parsed CLI form of a per-provider temperature profile (PR-D1).
+/// Parsed CLI form of a per-provider temperature profile (PR-D1,
+/// Tanda 04e D-1).
 ///
 /// The clap `Vec<String>` for `--temperature-profile` is parsed
 /// into this typed form once at the dispatcher boundary so the
 /// downstream matrix / coordinator code consumes validated,
 /// type-safe values. The spec grammar is
-/// `provider=<model>;temperatures=<csv>;replicas=<n>`:
+/// `provider=<ref>;temperatures=<csv>;replicas=<n>` where `<ref>`
+/// accepts two forms:
 ///
-/// * `provider=<model>` — REQUIRED. Provider MODEL name (e.g.
-///   `MiniMax-M3`, `mimo-v2.5`). Must be non-empty.
+/// * `provider=<model>` — legacy form (PR-D1). The section is
+///   implicit and defaults to the `--provider` section at merge
+///   time. The lookup key on the matrix becomes
+///   `<section>::<model>`.
+/// * `provider=<section>:<model>` — Tanda 04e D-1 form. The
+///   section is explicit; the parser splits on the first `:`
+///   via `parse_provider_model`. The lookup key on the matrix
+///   becomes `<section>::<model>` directly.
+///
+/// Other segments:
+///
 /// * `temperatures=<csv>` — REQUIRED. Comma-separated floats in
 ///   `0.0..=2.0`. At least one value required.
 /// * `replicas=<n>` — REQUIRED. Integer `>= 1`.
 ///
-/// Multiple `--temperature-profile` flags for the same provider
-/// are allowed; the LAST spec wins (documented behaviour so the
-/// audit can pin the merge order).
+/// Multiple `--temperature-profile` flags for the same `(section,
+/// model)` pair are allowed; the LAST spec wins (documented
+/// behaviour so the audit can pin the merge order).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemperatureProfileSpec {
-    /// Provider MODEL name (the lookup key the matrix uses; case
-    /// sensitive).
+    /// Provider MODEL name (the matrix's lookup key when no
+    /// explicit section is supplied). For the legacy form this
+    /// is the bare model string (e.g. `MiniMax-M3`,
+    /// `mimo-v2.5`); for the new `<section>:<model>` form this
+    /// is the model half (e.g. `MiniMax-M3` with section
+    /// `minimax`). Case-sensitive.
     pub provider: String,
+    /// Explicit provider SECTION name when the operator used the
+    /// `provider=<section>:<model>` form. `None` means the
+    /// legacy form was used and the section is implicit (the
+    /// `cli::discover::run` merge step substitutes the active
+    /// `--provider` section before persisting the profile).
+    pub section: Option<String>,
     /// Sampling temperatures the loop iterates per `(cell,
     /// replica)` pair. Always non-empty (the parser enforces it).
     pub temperatures: Vec<f32>,
@@ -372,6 +393,7 @@ impl TemperatureProfileSpec {
     pub fn parse(s: &str) -> crate::error::Result<Self> {
         debug!(spec = s, "TemperatureProfileSpec::parse: enter");
         let mut provider: Option<String> = None;
+        let mut section: Option<String> = None;
         let mut temperatures: Option<Vec<f32>> = None;
         let mut replicas: Option<usize> = None;
         for kv in s.split(';') {
@@ -386,7 +408,7 @@ impl TemperatureProfileSpec {
                 crate::error::Error::InvalidArgs(format!(
                     "expected `key=value` in temperature-profile spec segment {kv:?} \
                      (full spec: {s:?}); grammar is \
-                     `provider=<name>;temperatures=<csv>;replicas=<n>`"
+                     `provider=<name|section:model>;temperatures=<csv>;replicas=<n>`"
                 ))
             })?;
             let key = k.trim();
@@ -398,7 +420,26 @@ impl TemperatureProfileSpec {
                             "provider name is empty in temperature-profile spec {s:?}"
                         )));
                     }
-                    provider = Some(value.to_owned());
+                    // Tanda 04e D-1: the value can be either a bare
+                    // model (`MiniMax-M3`, `mimo-v2.5`) — the legacy
+                    // form — or `<section>:<model>`. The split is
+                    // delegated to `parse_provider_model` so the
+                    // canonical "section name + single colon + no
+                    // extra colons" contract is honoured (matches
+                    // `moagan probe <section>:<model>`). On success
+                    // we record the explicit section; on failure the
+                    // value is treated as a bare model name (the
+                    // legacy form).
+                    match crate::cli::probe::parse_provider_model(value) {
+                        Ok((sec, mdl)) => {
+                            section = Some(sec);
+                            provider = Some(mdl);
+                        }
+                        Err(_) => {
+                            section = None;
+                            provider = Some(value.to_owned());
+                        }
+                    }
                 }
                 "temperatures" => {
                     let parsed = value
@@ -456,6 +497,7 @@ impl TemperatureProfileSpec {
                     "missing `provider=<name>` in temperature-profile spec {s:?}"
                 ))
             })?,
+            section,
             temperatures: temperatures.ok_or_else(|| {
                 crate::error::Error::InvalidArgs(format!(
                     "missing `temperatures=<csv>` in temperature-profile spec {s:?}"
@@ -469,11 +511,27 @@ impl TemperatureProfileSpec {
         };
         trace!(
             provider = %out.provider,
+            section = ?out.section,
             temperatures = out.temperatures.len(),
             replicas = out.replicas_per_temperature,
             "TemperatureProfileSpec::parse: ok"
         );
         Ok(out)
+    }
+
+    /// Resolve the `(section, model)` pair the profile should be
+    /// keyed under on the matrix. When the spec carries an explicit
+    /// `section` (the `provider=<section>:<model>` form), the value
+    /// is returned verbatim. Otherwise the supplied
+    /// `default_section` is substituted (the legacy form's section
+    /// is implicit — it matches the active `--provider` section).
+    pub fn into_pair(&self, default_section: &str) -> (String, String) {
+        (
+            self.section
+                .clone()
+                .unwrap_or_else(|| default_section.to_owned()),
+            self.provider.clone(),
+        )
     }
 
     /// Convert into the matrix's `TemperatureProfile` (the form
@@ -486,6 +544,59 @@ impl TemperatureProfileSpec {
             replicas_per_temperature: self.replicas_per_temperature,
         }
     }
+}
+
+/// F2 (B2): resolve every `(section, model)` pair the discovery
+/// run may dispatch against, so the provider registry hosts all
+/// of them before the coordinator's fan-out starts.
+///
+/// The list is the default `--provider SECTION:MODEL` pair plus
+/// one entry per key in the MERGED
+/// `[discovery_matrix].temperature_profiles` map — merged meaning
+/// "persisted TOML block with the CLI `--temperature-profile`
+/// specs already applied on top". Deriving the list from the
+/// merged map (instead of from the CLI specs alone) is what
+/// makes a TOML-only pair reachable: the pre-fix code hosted
+/// only the CLI pairs, so the coordinator panicked in
+/// `RunContext::provider_for` the first time it dispatched
+/// against a TOML-configured provider.
+///
+/// The key → pair mapping mirrors
+/// [`crate::discovery::matrix::ExplorationMatrix::active_provider_profiles`]
+/// exactly: a joined `section::model` key splits on `"::"`, and a
+/// legacy bare-model key is attributed to `default_section`. Keys
+/// are visited in sorted order so the resulting list (and thus
+/// the probe fan-out order) is deterministic despite the
+/// `HashMap` backing the profile map. The default pair always
+/// comes first and duplicates are dropped.
+fn active_pairs_for(
+    default_section: &str,
+    default_model: &str,
+    temperature_profiles: &std::collections::HashMap<
+        String,
+        crate::discovery::matrix::TemperatureProfile,
+    >,
+) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> =
+        vec![(default_section.to_owned(), default_model.to_owned())];
+    let mut keys: Vec<&String> = temperature_profiles.keys().collect();
+    keys.sort();
+    for key in keys {
+        let (section, model) = match key.split_once("::") {
+            Some((sec, mdl)) => (sec.to_owned(), mdl.to_owned()),
+            None => (default_section.to_owned(), key.clone()),
+        };
+        if !pairs.iter().any(|(s, m)| s == &section && m == &model) {
+            trace!(
+                section = %section,
+                model = %model,
+                joined_key = %key,
+                "discover: active pair from temperature profile"
+            );
+            pairs.push((section, model));
+        }
+    }
+    pairs
 }
 
 /// Run discovery end-to-end. Returns the run id on success.
@@ -527,43 +638,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     let default_provider_section = crate::cli::probe::parse_provider_model(&default_provider)
         .map(|(s, _)| s)
         .unwrap_or_else(|_| default_provider.clone());
-    // PR-x23: thread `active_pairs = Some(&[(section, model)])`
-    // through the registry build so the max_tokens probe fans out
-    // only for the `(provider, model)` pair the operator asked
-    // for. The pre-v0.10 `build_registry_for` shim drops
-    // `active_pairs` on the floor (it threads `None` into
-    // `build_registry_for_with_active`), which forces a
-    // multi-model `minimax` section to probe every model in
-    // parallel and races 8 sequential Phase-1 walks against the
-    // pipeline's first LLM call. The `build_registry_for_with_active`
-    // variant honours the filter.
-    let active_pairs: Vec<(String, String)> = vec![(
-        default_provider_section.clone(),
-        if default_provider.contains(':') {
-            crate::cli::probe::parse_provider_model(&default_provider)
-                .map(|(_, m)| m)
-                .unwrap_or_default()
-        } else {
-            default_provider.clone()
-        },
-    )];
-    let providers = Arc::new(super::run::build_registry_for_with_active(
-        cfg,
-        &default_provider,
-        opts.mock_dir.as_deref(),
-        None,
-        Some(&active_pairs),
-    )?);
-    debug!(
-        providers = providers.len(),
-        "discover: provider registry built"
-    );
-    // PR-x23: pull the auto-probe tables off the registry so the
-    // `RunContext` (and the pre-pipeline `await_ready` gate below)
-    // sees the same handles the registry fired.
-    let max_tokens_table = providers.max_tokens_table().cloned();
-    let temperature_table = providers.temperature_table().cloned();
-    let param_rejections = providers.param_rejections().cloned();
     let default_model = if default_provider.contains(':') {
         let m = crate::cli::probe::parse_provider_model(&default_provider)
             .map(|(_, m)| m)
@@ -586,6 +660,155 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
              'first model' fallback in v0.10+."
         )));
     };
+    // PR-x23: thread `active_pairs = Some(&[(section, model)])`
+    // through the registry build so the max_tokens probe fans out
+    // only for the `(provider, model)` pair the operator asked
+    // for. The pre-v0.10 `build_registry_for` shim drops
+    // `active_pairs` on the floor (it threads `None` into
+    // `build_registry_for_with_active`), which forces a
+    // multi-model `minimax` section to probe every model in
+    // parallel and races 8 sequential Phase-1 walks against the
+    // pipeline's first LLM call. The `build_registry_for_with_active`
+    // variant honours the filter.
+    //
+    // Tanda 04e D-1: the active-pairs list starts as the
+    // operator's `--provider SECTION:MODEL` pair (the v0.10
+    // default) and is then augmented with every `(section, model)`
+    // pair referenced by `--temperature-profile` (either form)
+    // so the registry hosts every provider the coordinator will
+    // dispatch to. Pairs duplicate the default are deduped by the
+    // `build_registry_for_with_active` helper via
+    // `ProviderRegistry::registry_key`.
+    //
+    // F2 (B2): the merge of the CLI specs into `effective_cfg`
+    // now happens BEFORE the registry is built, and the
+    // active-pairs list is derived from the MERGED profile map
+    // rather than from `opts.temperature_profiles` alone. A pair
+    // configured only in `[discovery_matrix].temperature_profiles`
+    // (the persisted TOML block) was previously invisible here,
+    // so the registry never hosted it and the coordinator
+    // panicked in `RunContext::provider_for` the moment the
+    // fan-out reached that pair.
+
+    // PR-D1: merge CLI `--temperature-profile` specs (last-wins per
+    // provider) on top of the persisted `[discovery]` block from
+    // `~/.config/moagan/config.toml`. The CLI flag always wins
+    // because the operator is explicitly overriding the persisted
+    // default for this run; the persisted block is the fall-back
+    // when no CLI flag was supplied. We clone `cfg` (so the
+    // caller's `&Config` stays borrowable downstream), apply the
+    // merge, and feed the resulting `Arc<Config>` into
+    // `RunContext::new_with_config` so the coordinator reads the
+    // merged profiles from `ctx.config.discovery_matrix`.
+    let mut effective_cfg = cfg.clone();
+    debug!(
+        temperature_profiles = opts.temperature_profiles.len(),
+        "discover: merging temperature profiles"
+    );
+    for spec in opts.temperature_profiles.iter() {
+        // Tanda 04e D-1: the profile key on the matrix is the
+        // joined `section::model` string. When the spec carries an
+        // explicit section (the `provider=<section>:<model>` form)
+        // we use it verbatim; otherwise we substitute the active
+        // `--provider` section (the legacy `provider=<model>` form
+        // is implicit-section).
+        let (section, model) = spec.into_pair(&default_provider_section);
+        let key = crate::llm::ProviderRegistry::registry_key(&section, &model);
+        let profile = spec.clone().into_matrix_profile();
+        trace!(
+            section = %section,
+            model = %model,
+            joined_key = %key,
+            temperatures = profile.temperatures.len(),
+            replicas = profile.replicas_per_temperature,
+            "discover: applied temperature profile"
+        );
+        effective_cfg
+            .discovery_matrix
+            .temperature_profiles
+            .insert(key, profile);
+        // Keep `effective_cfg.discovery_matrix.default_profile`
+        // (sourced from the persisted `[discovery]` block, falling
+        // back to `None` so the matrix uses its built-in
+        // `TemperatureProfile::default()`) as the source of truth.
+        // We deliberately do NOT honour a CLI flag named
+        // `--default-temperature-profile` to keep the surface small
+        // (the audit said "no magic switch") so the persisted
+        // block wins.
+    }
+
+    // F1 bridge: lift the CLI matrix knobs (`--matrix-spec` /
+    // `--dimensions` / `--facets-per-dimension` / `--llm-derive`)
+    // into `effective_cfg.discovery_matrix` so the coordinator
+    // (`src/discovery/coordinator.rs::build_coordinator_matrix`)
+    // and any downstream reader see the operator's CLI choice
+    // instead of the persisted `[discovery]` block alone. CLI
+    // always wins (matches the precedence the F1 subagent brief
+    // documented for `--temperature-profile`).
+    if !opts.matrix_spec.is_empty() {
+        effective_cfg.discovery_matrix.matrix_spec = opts.matrix_spec.clone();
+    }
+    if let Some(d) = opts.dimensions {
+        effective_cfg.discovery_matrix.dimensions = Some(d);
+    }
+    if let Some(f) = opts.facets_per_dimension {
+        effective_cfg.discovery_matrix.facets_per_dimension = Some(f);
+    }
+    if opts.llm_derive {
+        effective_cfg.discovery_matrix.llm_derive_first = true;
+    }
+    // F2 (Track G.2): the CLI's `--sketches-per-cell` flag is the
+    // canonical source-of-truth for the matrix fan-out. The TOML
+    // `[discovery_matrix].sketches_per_cell` block is the fall-back
+    // when no flag was supplied. We do NOT honour a CLI flag named
+    // `--default-sketches-per-cell` to keep the surface small (the
+    // F1 audit said "no magic switch") so the persisted block
+    // wins on conflict (matching the `--temperature-profile` merge
+    // order). The `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var
+    // was applied in `Config::apply_env_overrides` BEFORE the CLI
+    // value overwrites it here, so the precedence chain is
+    // CLI > env > TOML > default (10).
+    effective_cfg.discovery_matrix.sketches_per_cell = opts.sketches_per_cell;
+
+    let active_pairs = active_pairs_for(
+        &default_provider_section,
+        &default_model,
+        &effective_cfg.discovery_matrix.temperature_profiles,
+    );
+    debug!(
+        active_pairs = active_pairs.len(),
+        "discover: active (section, model) pairs resolved"
+    );
+    // F2 (B3): the throttle-governor and circuit-breaker
+    // registries are keyed by SECTION, so collapse the active
+    // pairs to their distinct sections once and pre-create an
+    // entry per `(section, role)` below.
+    let throttle_sections: Vec<String> = {
+        let mut sections: Vec<String> = Vec::new();
+        for (section, _) in active_pairs.iter() {
+            if !sections.iter().any(|s| s == section) {
+                sections.push(section.clone());
+            }
+        }
+        sections
+    };
+    let providers = Arc::new(super::run::build_registry_for_with_active(
+        cfg,
+        &default_provider,
+        opts.mock_dir.as_deref(),
+        None,
+        Some(&active_pairs),
+    )?);
+    debug!(
+        providers = providers.len(),
+        "discover: provider registry built"
+    );
+    // PR-x23: pull the auto-probe tables off the registry so the
+    // `RunContext` (and the pre-pipeline `await_ready` gate below)
+    // sees the same handles the registry fired.
+    let max_tokens_table = providers.max_tokens_table().cloned();
+    let temperature_table = providers.temperature_table().cloned();
+    let param_rejections = providers.param_rejections().cloned();
 
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;
@@ -641,77 +864,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     );
     let parallelism = Parallelism::new(resolved_parallelism);
 
-    // PR-D1: merge CLI `--temperature-profile` specs (last-wins per
-    // provider) on top of the persisted `[discovery]` block from
-    // `~/.config/moagan/config.toml`. The CLI flag always wins
-    // because the operator is explicitly overriding the persisted
-    // default for this run; the persisted block is the fall-back
-    // when no CLI flag was supplied. We clone `cfg` (so the
-    // caller's `&Config` stays borrowable downstream), apply the
-    // merge, and feed the resulting `Arc<Config>` into
-    // `RunContext::new_with_config` so the coordinator reads the
-    // merged profiles from `ctx.config.discovery_matrix`.
-    let mut effective_cfg = cfg.clone();
-    debug!(
-        temperature_profiles = opts.temperature_profiles.len(),
-        "discover: merging temperature profiles"
-    );
-    for spec in opts.temperature_profiles.iter() {
-        let model = spec.provider.clone();
-        let profile = spec.clone().into_matrix_profile();
-        trace!(
-            provider = %model,
-            temperatures = profile.temperatures.len(),
-            replicas = profile.replicas_per_temperature,
-            "discover: applied temperature profile"
-        );
-        effective_cfg
-            .discovery_matrix
-            .temperature_profiles
-            .insert(model, profile);
-        // Keep `effective_cfg.discovery_matrix.default_profile`
-        // (sourced from the persisted `[discovery]` block, falling
-        // back to `None` so the matrix uses its built-in
-        // `TemperatureProfile::default()`) as the source of truth.
-        // We deliberately do NOT honour a CLI flag named
-        // `--default-temperature-profile` to keep the surface small
-        // (the audit said "no magic switch") so the persisted
-        // block wins.
-    }
-
-    // F1 bridge: lift the CLI matrix knobs (`--matrix-spec` /
-    // `--dimensions` / `--facets-per-dimension` / `--llm-derive`)
-    // into `effective_cfg.discovery_matrix` so the coordinator
-    // (`src/discovery/coordinator.rs::build_coordinator_matrix`)
-    // and any downstream reader see the operator's CLI choice
-    // instead of the persisted `[discovery]` block alone. CLI
-    // always wins (matches the precedence the F1 subagent brief
-    // documented for `--temperature-profile`).
-    if !opts.matrix_spec.is_empty() {
-        effective_cfg.discovery_matrix.matrix_spec = opts.matrix_spec.clone();
-    }
-    if let Some(d) = opts.dimensions {
-        effective_cfg.discovery_matrix.dimensions = Some(d);
-    }
-    if let Some(f) = opts.facets_per_dimension {
-        effective_cfg.discovery_matrix.facets_per_dimension = Some(f);
-    }
-    if opts.llm_derive {
-        effective_cfg.discovery_matrix.llm_derive_first = true;
-    }
-    // F2 (Track G.2): the CLI's `--sketches-per-cell` flag is the
-    // canonical source-of-truth for the matrix fan-out. The TOML
-    // `[discovery_matrix].sketches_per_cell` block is the fall-back
-    // when no flag was supplied. We do NOT honour a CLI flag named
-    // `--default-sketches-per-cell` to keep the surface small (the
-    // F1 audit said "no magic switch") so the persisted block
-    // wins on conflict (matching the `--temperature-profile` merge
-    // order). The `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var
-    // was applied in `Config::apply_env_overrides` BEFORE the CLI
-    // value overwrites it here, so the precedence chain is
-    // CLI > env > TOML > default (10).
-    effective_cfg.discovery_matrix.sketches_per_cell = opts.sketches_per_cell;
-
     let ctx = RunContext::new_with_config(
         run_id,
         Arc::clone(&home),
@@ -758,36 +910,54 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // default-config governor the first time an unknown role is
     // called, so omitting the entry matches the v0.9.5 default
     // (no adaptive backpressure).
+    //
+    // F2 (B3): the pre-creation walks every active `(section,
+    // model)` pair instead of the default provider alone. The
+    // multi-provider dispatch path looks the governor up with
+    // `governor_for_at(section, role)`, so a pair that was never
+    // pre-created silently fell back to a default-config
+    // (lenient) governor and ignored `[throttle_per_role]`. The
+    // registry is keyed by SECTION (not by the joined
+    // `section::model`), which is also why the pre-fix
+    // `default_provider` key — the raw `--provider
+    // SECTION:MODEL` string — never matched: `RunContext`
+    // stores `default_provider = SECTION`.
     .with_throttle_governors({
         let mut throttle = crate::llm::governor::GovernorRegistry::new();
-        let dp = default_provider.clone();
-        for (role_name, cfg) in &effective_cfg.throttle_per_role {
-            if let Ok(role) = role_name.parse::<Role>() {
-                throttle.with_config_for(
-                    &dp,
-                    role,
-                    crate::llm::governor::ThrottleConfig::from(cfg.clone()),
-                );
+        for section in throttle_sections.iter() {
+            for (role_name, cfg) in &effective_cfg.throttle_per_role {
+                if let Ok(role) = role_name.parse::<Role>() {
+                    throttle.with_config_for(
+                        section,
+                        role,
+                        crate::llm::governor::ThrottleConfig::from(cfg.clone()),
+                    );
+                }
             }
         }
         throttle
     })
     // v0.9.6: per-`(provider, role)` circuit breakers. Each
     // `[circuit_breaker_per_role]` entry is a `BreakerConfig` keyed
-    // by `Role`. The provider is `default_provider` at the
-    // call-site so the lookup matches what the
-    // `ThrottleGovernor` and the per-`(provider, role)` breaker
-    // share.
+    // by `Role`. The provider key is the SECTION so the lookup
+    // matches what the `ThrottleGovernor` and the
+    // per-`(provider, role)` breaker share.
+    //
+    // F2 (B3): same fan-out as the governors above — every
+    // active section gets its configured breaker, so a
+    // non-default provider no longer falls through to the
+    // lenient default config.
     .with_breakers_per_role({
         let mut breakers = crate::llm::circuit_breaker::BreakerRegistry::new();
-        let dp = default_provider.clone();
-        for (role_name, cfg) in &effective_cfg.circuit_breaker_per_role {
-            if let Ok(role) = role_name.parse::<Role>() {
-                breakers.pre_create(
-                    &dp,
-                    role,
-                    crate::llm::circuit_breaker::BreakerConfig::from(*cfg),
-                );
+        for section in throttle_sections.iter() {
+            for (role_name, cfg) in &effective_cfg.circuit_breaker_per_role {
+                if let Ok(role) = role_name.parse::<Role>() {
+                    breakers.pre_create(
+                        section,
+                        role,
+                        crate::llm::circuit_breaker::BreakerConfig::from(*cfg),
+                    );
+                }
             }
         }
         breakers
@@ -1461,6 +1631,60 @@ mod tests {
         let matrix_profile = spec.into_matrix_profile();
         assert_eq!(matrix_profile.temperatures, vec![0.0, 0.7]);
         assert_eq!(matrix_profile.replicas_per_temperature, 3);
+    }
+
+    /// Tanda 04e D-1: the legacy `provider=<model>` form parses
+    /// with `section = None`. `into_pair` substitutes the supplied
+    /// default section so the CLI merge step produces the right
+    /// `(section, model)` pair for the matrix.
+    #[test]
+    fn parse_temperature_profile_spec_legacy_form_section_is_none() {
+        let spec = TemperatureProfileSpec::parse("provider=MiniMax-M3;temperatures=0.5;replicas=2")
+            .expect("legacy form must parse");
+        assert_eq!(spec.provider, "MiniMax-M3");
+        assert_eq!(spec.section, None);
+        let (section, model) = spec.into_pair("minimax");
+        assert_eq!(section, "minimax");
+        assert_eq!(model, "MiniMax-M3");
+    }
+
+    /// Tanda 04e D-1: the new `provider=<section>:<model>` form
+    /// parses with `section = Some("<section>")`. `into_pair`
+    /// returns the explicit pair verbatim, regardless of the
+    /// default section supplied.
+    #[test]
+    fn parse_temperature_profile_spec_explicit_section_form() {
+        let spec = TemperatureProfileSpec::parse(
+            "provider=opencode:mimo-v2.5;temperatures=0.0,0.7;replicas=3",
+        )
+        .expect("new form must parse");
+        assert_eq!(spec.provider, "mimo-v2.5");
+        assert_eq!(spec.section.as_deref(), Some("opencode"));
+        let (section, model) = spec.into_pair("minimax");
+        assert_eq!(section, "opencode");
+        assert_eq!(model, "mimo-v2.5");
+    }
+
+    /// Tanda 04e D-1: a value containing more than one `:` (e.g.
+    /// an IPv6-looking section name) does NOT silently slip through
+    /// `parse_provider_model`. The parser falls through to the
+    /// legacy form and stores the whole string as the model
+    /// name, which surfaces as a downstream error rather than
+    /// silently splitting on the wrong colon.
+    #[test]
+    fn parse_temperature_profile_spec_multi_colon_falls_back_to_legacy_form() {
+        // parse_provider_model rejects extra colons, so the parser
+        // falls through to the legacy `provider=<value>` form
+        // with `section = None` and the whole string as `provider`.
+        let spec = TemperatureProfileSpec::parse(
+            "provider=section:weird:MiniMax-M3;temperatures=0.5;replicas=1",
+        )
+        .expect("multi-colon must still parse as legacy form");
+        assert_eq!(spec.provider, "section:weird:MiniMax-M3");
+        assert_eq!(spec.section, None);
+        let (section, model) = spec.into_pair("minimax");
+        assert_eq!(section, "minimax");
+        assert_eq!(model, "section:weird:MiniMax-M3");
     }
 
     // ---- F2 (Track G.2): sketches_per_cell resume helper ----
