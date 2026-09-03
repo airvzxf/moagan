@@ -832,6 +832,24 @@ impl RunContext {
         })
     }
 
+    /// F2 (B1/B2): non-panicking companion to [`Self::provider_for`].
+    /// Returns `true` when the registry can serve the pair through
+    /// either the joined `section::model` key or the legacy bare
+    /// section key — i.e. exactly when `provider_for` would return
+    /// instead of panicking.
+    ///
+    /// The discovery fan-out uses this as a pre-flight filter: a
+    /// `(section, model)` pair reached through a legacy
+    /// `temperature_profiles` key (or a stale
+    /// `[discovery_matrix]` block naming a section the current
+    /// `--provider` never built) is dropped with a `warn!` before
+    /// the loop dispatches, so an operator misconfiguration
+    /// downgrades from a panic to a skipped provider.
+    pub fn has_provider_for(&self, section: &str, model_id: &str) -> bool {
+        let joined = crate::llm::ProviderRegistry::registry_key(section, model_id);
+        self.providers.get(&joined).is_some() || self.providers.get(section).is_some()
+    }
+
     /// Send a `Request` through the active provider and surface the
     /// response. Every call is mirrored into the call-level telemetry
     /// (JSONL + SQLite when the index is enabled) with a fresh

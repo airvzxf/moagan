@@ -788,7 +788,33 @@ impl DiscoveryCoordinator {
             String,
             String,
             crate::discovery::matrix::TemperatureProfile,
-        )> = matrix.active_provider_profiles(&ctx.default_provider, &ctx.default_model);
+        )> = matrix
+            .active_provider_profiles(&ctx.default_provider, &ctx.default_model)
+            .into_iter()
+            // F2 (B1/B2): drop any pair the registry cannot serve
+            // before the loop dispatches. `RunContext::provider_for`
+            // panics on a missing pair by design (the CLI boundary
+            // is supposed to guarantee registration), so an
+            // unregistered pair reached through a legacy
+            // `temperature_profiles` key would abort the run
+            // mid-fan-out. Skipping with a `warn!` keeps the
+            // configured pairs running and leaves the operator an
+            // audit line naming the pair that was dropped.
+            .filter(|(section, model, _)| {
+                let ok = ctx.has_provider_for(section, model);
+                if !ok {
+                    tracing::warn!(
+                        section = %section,
+                        model = %model,
+                        default_section = %ctx.default_provider,
+                        default_model = %ctx.default_model,
+                        "discovery: temperature profile names a (section, model) pair that is \
+                         not in the provider registry; skipping it in the fan-out"
+                    );
+                }
+                ok
+            })
+            .collect();
         let total = cells.len()
             * per_cell
             * active_provider_profiles

@@ -332,7 +332,29 @@ impl Phase for DiscoverMatrixPhase {
             String,
             String,
             crate::discovery::matrix::TemperatureProfile,
-        )> = matrix.active_provider_profiles(&ctx.default_provider, &ctx.default_model);
+        )> = matrix
+            .active_provider_profiles(&ctx.default_provider, &ctx.default_model)
+            .into_iter()
+            // F2 (B1/B2): mirror the coordinator's pre-flight
+            // filter. `RunContext::provider_for` panics on an
+            // unregistered pair, so a legacy `temperature_profiles`
+            // key naming a section this run never built is dropped
+            // (with an audit line) instead of aborting the phase.
+            .filter(|(section, model, _)| {
+                let ok = ctx.has_provider_for(section, model);
+                if !ok {
+                    tracing::warn!(
+                        section = %section,
+                        model = %model,
+                        default_section = %ctx.default_provider,
+                        default_model = %ctx.default_model,
+                        "discover_matrix: temperature profile names a (section, model) pair \
+                         that is not in the provider registry; skipping it in the fan-out"
+                    );
+                }
+                ok
+            })
+            .collect();
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let brief_arc = Arc::new(brief_text);
         let system_arc = Arc::clone(&system);
