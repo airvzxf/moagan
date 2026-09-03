@@ -5,6 +5,31 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+(empty — placeholder for the next release cycle)
+
+## [0.14.2] - 2026-09-03
+
+### Fixed
+
+- **CI: serialize `release.yml` runs for the same tag with `queue: max`**
+  (closes #741). The existing `cancel-in-progress: false` on
+  `.github/workflows/release.yml` was insufficient: with the default
+  `queue: single`, only one in-flight + one pending run is allowed per
+  concurrency group; a third dispatch cancels the pending one.
+  Empirically observed during the v0.14.1 release: `git push origin
+  v0.14.1` produced TWO `release.yml` runs dispatched 1 second apart
+  (run IDs `33781175526` and `33781177161`). The first published the
+  release successfully; the second raced the SBOM-upload step and
+  failed at `DELETE /releases/assets/{id}` because the default
+  `GITHUB_TOKEN` lacks that scope (`Resource not accessible by
+  integration`). Adding `queue: max` serializes a duplicate dispatch
+  FIFO so the race cannot happen. Different tags do not share a group
+  (the group key is `release-${{ github.ref_name }}`) so parallel
+  releases of distinct versions remain unblocked. Mirrors the pattern
+  applied to `test-ignored-*.yml` in #739.
+
 ## [0.14.1] - 2026-09-03
 
 ### Added
