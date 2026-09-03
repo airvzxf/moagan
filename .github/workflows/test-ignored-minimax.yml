@@ -5,18 +5,27 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Serialize concurrent runs in FIFO order — do NOT cancel in-flight runs.
-# The integration_discover_minimax -- --ignored test makes real upstream
-# calls against https://api.minimax.io/anthropic/v1/models, which are
-# billed by tokens; cancelling a run 14 min into a 16–25 min run discards
-# the upstream spend AND marks the previous commit as red (the workflow
-# is informational but GitHub renders cancelled runs as failures on the
-# commit page). Queueing lets every commit get exactly one real result;
-# the artifact race the previous comment guarded against is still avoided
-# because the queue is per-group (one runner at a time). See issue #738.
+# Serialize concurrent runs in FIFO order — do NOT cancel in-flight or
+# pending runs. The integration_discover_minimax -- --ignored test makes
+# real upstream calls against https://api.minimax.io/anthropic/v1/models,
+# which are billed by tokens; cancelling a run 14 min into a 16–25 min run
+# discards the upstream spend AND marks the previous commit as red (the
+# workflow is informational but GitHub renders cancelled runs as failures
+# on the commit page). See issue #738.
+#
+# `cancel-in-progress: false` keeps the in-flight run alive. `queue: max`
+# is the matching half: without it the default `queue: single` silently
+# cancels any *pending* run when a new one lands, so a burst of 3–5
+# squash-merges within the run window would still render 3–4 commits as
+# cancelled (red) on the commit page. With `queue: max` GitHub keeps up
+# to 100 runs pending in the group and processes them in FIFO order, so
+# every commit gets exactly one real result. The artifact race the
+# previous comment guarded against is still avoided because the queue is
+# per-group (one runner at a time).
 concurrency:
   group: test-ignored-minimax-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
