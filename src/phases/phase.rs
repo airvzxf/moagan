@@ -1053,6 +1053,16 @@ impl RunContext {
     /// `retry_count` parameter tags the resulting `calls` row so
     /// the retry loop's attempt index survives into the JSONL /
     /// SQLite `calls.retry_count` column.
+    ///
+    /// Tanda 04e D-1: the single-provider callers
+    /// (`DiscoverMatrixPhase` and the coordinator's default-path
+    /// retry) now go through [`Self::call_uncached_at_temp_for`]
+    /// which threads the `(section, model)` pair. This
+    /// single-provider shim is preserved as a thin wrapper around
+    /// the `_for` variant for any test or integration code that
+    /// still wants to dispatch against the active context's
+    /// default pair without threading section/model explicitly.
+    #[allow(dead_code)]
     pub(crate) async fn call_uncached_at_temp(
         &self,
         role: Role,
