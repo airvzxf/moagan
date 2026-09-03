@@ -279,6 +279,8 @@ pub enum Event<'a> {
         ts: String,
         n: usize,
         total: usize,
+        section: &'a str,
+        model: &'a str,
         cell_dim: &'a str,
         cell_facet: &'a str,
         temperature: f32,

@@ -1123,6 +1123,8 @@ impl DiscoveryCoordinator {
                                                         ts: now_rfc3339(),
                                                         n: n_for_attempt,
                                                         total,
+                                                        section: section_for_attempt.as_str(),
+                                                        model: model_for_attempt.as_str(),
                                                         cell_dim: cell_for_angle
                                                             .dimension_id
                                                             .as_str(),
@@ -1217,6 +1219,8 @@ impl DiscoveryCoordinator {
                                                         ts: now_rfc3339(),
                                                         n: n_for_attempt,
                                                         total,
+                                                        section: section_for_attempt.as_str(),
+                                                        model: model_for_attempt.as_str(),
                                                         cell_dim: cell_for_angle
                                                             .dimension_id
                                                             .as_str(),
@@ -1261,6 +1265,8 @@ impl DiscoveryCoordinator {
                                                         ts: now_rfc3339(),
                                                         n: n_for_attempt,
                                                         total,
+                                                        section: section_for_attempt.as_str(),
+                                                        model: model_for_attempt.as_str(),
                                                         cell_dim: cell_for_angle
                                                             .dimension_id
                                                             .as_str(),
@@ -2859,12 +2865,16 @@ mod tests {
     // never fires end-to-end and the integration assertion can only
     // verify the emitter compiles + serialises. This unit test
     // pins the wire schema directly: a hand-rolled
-    // `Event::DiscoveryIteration` with all 9 fields populated must
+    // `Event::DiscoveryIteration` with all 11 fields populated must
     // round-trip through `serde_json::to_string` with the
     // `kind = "discovery_iteration"` discriminator and the field
     // names documented in `docs/events-v1.md`. A future enum
     // rename or schema break trips the assertion instead of
     // silently changing the wire format.
+    //
+    // F2 (B4) added `section` + `model` so a dashboard consuming
+    // the NDJSON stream can attribute each sketch to the provider
+    // pair that produced it.
     // -----------------------------------------------------------
     #[test]
     fn discovery_iteration_event_serializes_with_kind_discriminator() {
@@ -2874,6 +2884,8 @@ mod tests {
             ts: "2026-08-26T10:37:54.667Z".to_owned(),
             n: 7,
             total: 80,
+            section: "minimax",
+            model: "MiniMax-M3",
             cell_dim: "storage",
             cell_facet: "sql",
             temperature: 0.5,
@@ -2891,6 +2903,16 @@ mod tests {
             v["kind"],
             serde_json::Value::String("discovery_iteration".into()),
             "DiscoveryIteration event must serialise with kind=\"discovery_iteration\"; got {v}"
+        );
+        assert_eq!(
+            v["section"],
+            serde_json::Value::String("minimax".into()),
+            "F2 (B4): the event must attribute the sketch to its provider section"
+        );
+        assert_eq!(
+            v["model"],
+            serde_json::Value::String("MiniMax-M3".into()),
+            "F2 (B4): the event must attribute the sketch to its provider model"
         );
         assert_eq!(
             v["schema"],
