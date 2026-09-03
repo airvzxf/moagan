@@ -1206,7 +1206,7 @@ impl RunContext {
     /// path's shape) but no cache lookup runs — the retry
     /// budget must not be poisoned by a previously cached broken
     /// response.
-    #[allow(dead_code, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_uncached_at_temp_for(
         &self,
         section: &str,
