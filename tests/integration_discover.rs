@@ -273,3 +273,104 @@ fn discovery_iteration_event_emitted_per_sketch() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// Tanda 04e D-1: --temperature-profile multi-provider wire-up
+// ---------------------------------------------------------------------------
+
+/// Drive a `moagan discover` invocation with two
+/// `--temperature-profile` flags pinning different `(section,
+/// model)` pairs. The mock provider serves the same canned
+/// fixtures for every pair (the mock short-circuit re-uses one
+/// `MockProvider` instance per `active_pair`), so the test can
+/// assert on the per-pair fan-out count without needing real
+/// upstream credentials.
+///
+/// Matrix shape:
+/// - `--matrix-spec auth=oauth,api-key` -> 1 dim x 2 facets = 2 cells
+/// - `--sketches-per-cell 2` -> 2 sketches per cell
+/// - Profile A: `(mock, mock-model)` x `[0.5] x 1` = 1 iteration per cell
+/// - Profile B: `(mock, other-model)` x `[0.7] x 1` = 1 iteration per cell
+/// - The default `(mock, mock-model)` pair is suppressed because
+///   an explicit entry exists for it
+///
+/// Total fan-out: `cells * per_cell * (1 + 1) = 2 x 2 x 2 = 8`.
+/// The test asserts at least 8 `discovery_iteration` events.
+fn drive_multi_provider_discover(home: &Path, work: &Path) -> DiscoverOutput {
+    let mock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mock_provider");
+    let stdout_path = work.join("events.jsonl");
+    let stderr_path = work.join("log.jsonl");
+    let output = Command::new(moagan_bin())
+        .env("MOAGAN_HOME", home)
+        .env_remove("MOAGAN_QUIET")
+        .env_remove("MOAGAN_DECISION_FORMAT")
+        .arg("discover")
+        .arg("--non-interactive")
+        .arg("--prompt")
+        .arg("Enumera los 7 colores del arcoiris en orden")
+        .arg("--provider")
+        .arg("mock:mock-model")
+        .arg("--mock-dir")
+        .arg(&mock_dir)
+        .arg("--matrix-spec")
+        .arg("auth=oauth,api-key")
+        .arg("--dimensions")
+        .arg("1")
+        .arg("--sketches-per-cell")
+        .arg("2")
+        // Tanda 04e D-1: two `--temperature-profile` flags with
+        // the new `provider=<section>:<model>` form so the
+        // coordinator fans out across two `(section, model)`
+        // pairs.
+        .arg("--temperature-profile")
+        .arg("provider=mock:mock-model;temperatures=0.5;replicas=1")
+        .arg("--temperature-profile")
+        .arg("provider=mock:other-model;temperatures=0.7;replicas=1")
+        .arg("--max-parallelism")
+        .arg("1")
+        .arg("--log-format")
+        .arg("json")
+        .arg("--event-format")
+        .arg("jsonl")
+        .stdout(std::fs::File::create(&stdout_path).expect("create events.jsonl"))
+        .stderr(std::fs::File::create(&stderr_path).expect("create log.jsonl"))
+        .output()
+        .expect("spawn moagan discover multi-provider");
+    let exit_code = output.status.code();
+    let events = read_jsonl(&stdout_path);
+    let stderr_text = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    DiscoverOutput {
+        events,
+        exit_code,
+        stderr_text,
+    }
+}
+
+/// Tanda 04e D-1: when two `--temperature-profile` flags pin two
+/// distinct `(section, model)` pairs, the coordinator fans out
+/// the matrix across BOTH pairs. The per-pair sketch count
+/// sums so the total `discovery_iteration` event count matches
+/// `cells * per_cell * Sigma profile.total()`.
+///
+/// Matrix: 2 cells x 2 sketches/cell = 4 sketches per provider.
+/// Two providers -> 8 sketches total.
+#[test]
+fn discovery_iteration_event_count_matches_multi_provider_fanout() {
+    with_moagan_home("discovery_multi_provider_iter_count", |home| {
+        let work = tempfile::tempdir().expect("workdir");
+        let out = drive_multi_provider_discover(home, work.path());
+        let iter_count = count_kind(&out.events, "discovery_iteration");
+        let expected = 8;
+        assert!(
+            iter_count >= expected,
+            "expected >= {expected} discovery_iteration events (2 cells x 2 sketches x \
+             2 providers); got {iter_count}; exit_code={:?}; stderr={}; events={}",
+            out.exit_code,
+            out.stderr_text,
+            serde_json::to_string_pretty(&out.events).unwrap_or_default()
+        );
+    });
+}
