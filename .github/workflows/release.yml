@@ -12,6 +12,11 @@ on:
         description: 'Tag to release (e.g. v0.5.0). Must exist on the remote.'
         required: true
         type: string
+        # Constrains the manual path to the same shape the `push` tag
+        # filter enforces; a malformed tag string fails fast in the
+        # validate-tag-input job below instead of producing a
+        # confusing `git rev-parse` error mid-build.
+        pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
 # Releases need to write tags and create a GitHub Release page, but only the
 # `publish` job does — the `build-release` job only reads repo contents. Scoping
@@ -25,6 +30,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Tag-input validator: the `push` trigger filters to
+  # `v[0-9]+.[0-9]+.[0-9]+` so a manual dispatch could otherwise
+  # feed arbitrary strings (`main`, `refs/tags/v…`, leading
+  # whitespace, etc.) into `git rev-parse`, producing a confusing
+  # failure mid-build. This job runs first and fails fast on a
+  # malformed tag name. It also confirms the tag exists on the
+  # remote — the push trigger guarantees this for tag events, but
+  # the dispatch path is unvalidated otherwise.
+  validate-tag-input:
+    name: 'Validate · tag input'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.TAG }}
+    steps:
+      - name: Validate tag shape
+        id: resolve
+        env:
+          RAW: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG="${RAW}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "ERROR: '$TAG' is not vX.Y.Z"; exit 1; }
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+
   # Tag-reachability guard: enforces the AGENTS.md "tag the trunk
   # merge commit, NOT the branch tip" rule mechanically. If the tag's
   # commit is not an ancestor of origin/main, the workflow fails
@@ -36,8 +69,18 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    needs: validate-tag-input
+    outputs:
+      tag_commit: ${{ steps.resolve.outputs.TAG_COMMIT }}
+      main_commit: ${{ steps.resolve.outputs.MAIN_COMMIT }}
     steps:
-      - name: Checkout at ref
+      - name: Checkout at tag SHA
+        # Pinning to the resolved SHA (not the ref) closes the TOCTOU
+        # gap with build-release: `git rev-parse ${TAG}^{commit}`
+        # produces an immutable object SHA, and any subsequent tag
+        # force-push cannot redirect the workflow to a different
+        # commit. The allow-list fetch in `verify-tag-signature`
+        # is the second half of the same closure.
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -46,7 +89,7 @@ jobs:
       - name: Resolve tag commit + fetch main
         id: resolve
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ needs.validate-tag-input.outputs.tag }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
@@ -91,13 +134,131 @@ jobs:
           } >&2
           exit 1
 
+  # Tag-signature guard (closes #716): verifies that the tag was
+  # GPG/SSH-signed by a key listed in `.github/trusted-signers`
+  # before any binary is built or published. The allow-list is
+  # fetched from `origin/main` (NOT the tagged tree) so revoking a
+  # key on main takes effect on the next release — otherwise the
+  # trust anchor is the same object being verified and revocation is
+  # structurally impossible. The reachability guard proves the
+  # tag points at a real commit; this guard proves a trusted
+  # signer cut the release. Defense in depth — the procedural rule
+  # ("`git tag -s vX.Y.Z`") still lives in AGENTS.md and
+  # CONTRIBUTING.md; this job is the structural check.
+  verify-tag-signature:
+    name: 'Verify · tag is signed by a trusted signer'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    needs: validate-tag-input
+    steps:
+      - name: Fetch allow-list from origin/main
+        # The trust anchor lives on `main`, not on the tagged tree
+        # the workflow is verifying. Reading it from the tagged
+        # tree makes key revocation ineffective: a compromised key
+        # could re-cut a tag pointing at an old commit whose tree
+        # still lists that key, and verification would pass.
+        # Pinning to a fixed ref (origin/main) closes that gap.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p "$RUNNER_TEMP/trusted"
+          git show "origin/main:.github/trusted-signers" \
+            > "$RUNNER_TEMP/trusted/allowed_signers"
+          # `.asc` is optional: only imported when the tag is actually
+          # PGP-signed (v0.13.3 and earlier). v0.13.4+ are
+          # SSH-signed and never consult this file.
+          if git show "origin/main:.github/trusted-signers.asc" \
+              > "$RUNNER_TEMP/trusted/allowed_signers.asc" 2>/dev/null; then
+            echo "GPG allow-list fetched"
+          else
+            echo "GPG allow-list absent on origin/main (acceptable; SSH-only signers)"
+            rm -f "$RUNNER_TEMP/trusted/allowed_signers.asc"
+          fi
+          test -s "$RUNNER_TEMP/trusted/allowed_signers" \
+            || { echo "ERROR: empty .github/trusted-signers on origin/main"; exit 1; }
+
+      - name: Configure git to use the trusted signers file
+        # `git verify-tag` consults `gpg.ssh.allowedsignersfile` for
+        # SSH-signed tags and the GPG keyring for PGP-signed tags.
+        # Both paths auto-detect from the tag's signature format,
+        # so the same verification works for v0.13.3 (PGP) and
+        # v0.13.4+ (SSH) without conditional logic.
+        run: |
+          set -euo pipefail
+          git config gpg.format ssh
+          git config gpg.ssh.allowedsignersfile "$RUNNER_TEMP/trusted/allowed_signers"
+
+      - name: Import GPG allow-list if the tag is PGP-signed
+        # v0.13.3 and earlier were PGP-signed with the maintainer's
+        # RSA key. Importing into the runner's keyring only when
+        # needed avoids the `.asc` becoming a hard dependency for
+        # SSH-only releases (which would otherwise block the
+        # documented key-removal path in AGENTS.md).
+        env:
+          TAG: ${{ needs.validate-tag-input.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git cat-file tag "$TAG" | grep -q 'BEGIN PGP SIGNATURE'; then
+            test -f "$RUNNER_TEMP/trusted/allowed_signers.asc" \
+              || { echo "ERROR: tag is PGP-signed but .github/trusted-signers.asc is missing on origin/main"; exit 1; }
+            gpg --batch --import "$RUNNER_TEMP/trusted/allowed_signers.asc"
+          else
+            echo "Tag uses SSH signature — GPG keyring not required"
+          fi
+
+      - name: Verify tag signature
+        env:
+          TAG: ${{ needs.validate-tag-input.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git verify-tag "${TAG}"; then
+            echo "✓ ${TAG} is signed by a key in .github/trusted-signers"
+            exit 0
+          fi
+          {
+            echo "ERROR: tag ${TAG} is NOT signed by a key in"
+            echo ".github/trusted-signers (fetched from origin/main)."
+            echo ""
+            echo "Signer info for diagnosis:"
+            git cat-file tag "${TAG}" \
+              | grep -E '^(tagger|-----BEGIN|-----END)' \
+              | head -10 >&2 || true
+            echo ""
+            echo "Allow-list (SSH): $(wc -l < "$RUNNER_TEMP/trusted/allowed_signers") lines"
+            echo ""
+            echo "Either the tag is unsigned, or it was signed by a key"
+            echo "not on the allow-list."
+            echo ""
+            echo "Fix (re-tag with the maintainer's signing key):"
+            echo "  git tag -d ${TAG}"
+            echo "  git push origin :refs/tags/${TAG}"
+            echo "  git tag -s ${TAG} -m 'release: ${TAG#v}'"
+            echo "  git push origin ${TAG}"
+            echo ""
+            echo "See .github/trusted-signers and ADR 0005."
+          } >&2
+          exit 1
+
   build-release:
     name: 'Build · release binary'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-    needs: verify-tag-reachability
+    needs: [verify-tag-reachability, verify-tag-signature]
+    steps:
+      - name: Checkout at pinned tag SHA
+        # Pinning to the immutable commit SHA (resolved by
+        # `verify-tag-reachability` and propagated through the
+        # job graph) closes the TOCTOU gap: a tag force-push that
+        # arrives mid-workflow cannot redirect checkout away from
+        # the commit the two verify jobs just approved.
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.verify-tag-reachability.outputs.tag_commit }}
+          fetch-depth: 0
     steps:
       - name: Checkout at ref
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
