@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (empty — placeholder for the next release cycle)
 
+## [0.14.4] - 2026-09-03
+
+### Fixed — Cross-section multi-provider fan-out (closes Tanda 04e D-1 follow-up)
+
+- `build_registry_for_with_active` (`src/cli/run.rs`) now iterates
+  `active_pairs` and adds a `ProviderConfig` for every distinct
+  section referenced, so the inner `registry_from_config_with_sink_active`
+  builder sees the same set the coordinator will dispatch against.
+  Pre-fix, the function only added the `--provider` section's
+  spec to `spec_map`, then passed `active_pairs` (which included
+  cross-section pairs) to a builder that iterates `spec_map`, NOT
+  `active_pairs`. The cross-section profiles were silently dropped:
+  the registry was missing the second section entirely, the
+  coordinator's `has_provider_for` filter dropped the second pair
+  with a `warn!`, and the operator saw only the default provider's
+  sketches.
+
+  Reproduces against any two distinct configured sections:
+
+  ```bash
+  moagan discover \
+    --provider minimax:MiniMax-M3 \
+    --temperature-profile 'provider=minimax:MiniMax-M3;temperatures=1.0;replicas=2' \
+    --temperature-profile 'provider=opencode:mimo-v2.5;temperatures=0.1;replicas=1'
+  ```
+
+  Expected 3 sketches (2 minimax + 1 opencode). Pre-fix produced
+  2 sketches (only minimax). Post-fix produces 3.
+
+  The existing mock-only integration test missed the bug because
+  the mock short-circuit at lines 917-937 already iterates
+  `active_pairs` correctly; the bug only surfaces with two
+  DISTINCT configured sections. Two new unit tests
+  (`build_registry_for_with_active_hosts_cross_section_pairs` and
+  `build_registry_for_with_active_warns_on_unknown_section`) pin
+  the fix.
+
 ## [0.14.3] - 2026-09-03
 
 ### Added — D-1: `--temperature-profile` multi-provider
@@ -1616,5 +1653,6 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
   response.
 
 [0.14.3]: https://github.com/airvzxf/moagan/compare/v0.14.2...v0.14.3
+[0.14.4]: https://github.com/airvzxf/moagan/compare/v0.14.3...v0.14.4
 [0.9.2]: https://github.com/airvzxf/moagan/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/airvzxf/moagan/compare/v0.9.0...v0.9.1
