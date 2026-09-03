@@ -1649,10 +1649,29 @@ pub fn attach_parallelism_rate_limit(
         // absent, use the parallelism-derived default so the
         // throttling scales with `--max-parallelism` instead of
         // the hardcoded `refill_per_sec = 4`.
+        //
+        // F2 (B5): `name` is the registry key, which is the
+        // joined `section::model` form for every multi-model
+        // section, while `[rate_limit_per_provider]` is keyed by
+        // SECTION name. Looking the joined key up directly
+        // therefore missed every override the operator wrote and
+        // silently applied the derived default instead. The
+        // lookup is now layered: an exact joined-key entry wins
+        // (an operator may want a per-model cap), then the
+        // section half, then the derived default.
+        let section = name.split_once("::").map(|(sec, _)| sec).unwrap_or(name);
         let rl_cfg = rate_limit_per_provider
             .get(name)
+            .or_else(|| rate_limit_per_provider.get(section))
             .cloned()
             .unwrap_or_else(|| default_cfg.clone());
+        tracing::trace!(
+            registry_key = %name,
+            section = %section,
+            capacity = rl_cfg.capacity,
+            refill_per_sec = rl_cfg.refill_per_sec,
+            "attach_parallelism_rate_limit: rate limiter attached"
+        );
         wrapped.set_rate_limiter(Arc::new(RateLimiter::new(rl_cfg)));
     }
 }
@@ -2144,6 +2163,124 @@ mod tests {
         assert!(r.get("mock").is_some());
         assert!(r.get("nope").is_none());
         assert_eq!(r.len(), 1);
+    }
+
+    // ----------------------------------------------------------------
+    // F2 (B5/T3) — `attach_parallelism_rate_limit` key resolution.
+    //
+    // `[rate_limit_per_provider]` is keyed by SECTION name
+    // (`minimax`), but the registry keys every multi-model section
+    // under the joined `section::model` form
+    // (`minimax::MiniMax-M3`). The pre-fix lookup used the joined
+    // key verbatim, so the operator's per-section override never
+    // matched and every provider silently got the
+    // parallelism-derived default instead.
+    // ----------------------------------------------------------------
+
+    /// Build a wrapper around an empty mock so the test can inspect
+    /// the rate limiter `attach_parallelism_rate_limit` installs.
+    fn wrapper_for_rate_limit_test() -> Arc<BreakeredProvider> {
+        let inner: Arc<dyn Provider> = Arc::new(crate::llm::mock::MockProvider::empty());
+        Arc::new(BreakeredProvider::new(
+            inner,
+            Arc::new(CircuitBreaker::default()),
+        ))
+    }
+
+    /// Read back the limiter the attach step installed. Returns
+    /// `(capacity, refill_per_sec)`.
+    fn installed_rate_limit(wrapper: &BreakeredProvider) -> (u32, u32) {
+        let guard = wrapper.rate_limiter.lock();
+        let rl = guard.as_ref().expect("rate limiter attached");
+        (rl.capacity(), rl.refill_per_sec())
+    }
+
+    #[test]
+    fn attach_parallelism_rate_limit_resolves_section_from_joined_key() {
+        let mut registry = ProviderRegistry::default();
+        let joined = wrapper_for_rate_limit_test();
+        let other_section = wrapper_for_rate_limit_test();
+        registry.insert_wrapped("minimax::MiniMax-M3".to_owned(), Arc::clone(&joined));
+        registry.insert_wrapped("opencode::mimo-v2.5".to_owned(), Arc::clone(&other_section));
+
+        // Derived default from `--max-parallelism 32`.
+        let derived = RateLimitConfig {
+            capacity: 32,
+            refill_per_sec: 32,
+            initial: None,
+        };
+        // Operator override, keyed by SECTION exactly as the TOML
+        // block `[rate_limit_per_provider.minimax]` produces it.
+        let mut per_provider: std::collections::HashMap<String, RateLimitConfig> =
+            std::collections::HashMap::new();
+        per_provider.insert(
+            "minimax".to_owned(),
+            RateLimitConfig {
+                capacity: 7,
+                refill_per_sec: 3,
+                initial: None,
+            },
+        );
+
+        attach_parallelism_rate_limit(&registry, Some(&derived), &per_provider);
+
+        assert_eq!(
+            installed_rate_limit(&joined),
+            (7, 3),
+            "a `[rate_limit_per_provider]` entry keyed by section must apply to the \
+             joined `section::model` registry key"
+        );
+        assert_eq!(
+            installed_rate_limit(&other_section),
+            (32, 32),
+            "a section without an override keeps the parallelism-derived default"
+        );
+    }
+
+    #[test]
+    fn attach_parallelism_rate_limit_prefers_exact_joined_key_override() {
+        let mut registry = ProviderRegistry::default();
+        let m3 = wrapper_for_rate_limit_test();
+        let m2 = wrapper_for_rate_limit_test();
+        registry.insert_wrapped("minimax::MiniMax-M3".to_owned(), Arc::clone(&m3));
+        registry.insert_wrapped("minimax::MiniMax-M2".to_owned(), Arc::clone(&m2));
+
+        let derived = RateLimitConfig {
+            capacity: 32,
+            refill_per_sec: 32,
+            initial: None,
+        };
+        let mut per_provider: std::collections::HashMap<String, RateLimitConfig> =
+            std::collections::HashMap::new();
+        per_provider.insert(
+            "minimax".to_owned(),
+            RateLimitConfig {
+                capacity: 7,
+                refill_per_sec: 3,
+                initial: None,
+            },
+        );
+        per_provider.insert(
+            "minimax::MiniMax-M3".to_owned(),
+            RateLimitConfig {
+                capacity: 2,
+                refill_per_sec: 1,
+                initial: None,
+            },
+        );
+
+        attach_parallelism_rate_limit(&registry, Some(&derived), &per_provider);
+
+        assert_eq!(
+            installed_rate_limit(&m3),
+            (2, 1),
+            "an exact joined-key entry beats the section-level entry"
+        );
+        assert_eq!(
+            installed_rate_limit(&m2),
+            (7, 3),
+            "sibling models in the same section still get the section-level entry"
+        );
     }
 
     // ----------------------------------------------------------------
