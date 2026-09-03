@@ -93,6 +93,33 @@ impl TemperatureProfile {
     pub fn total(&self) -> usize {
         self.temperatures.len() * self.replicas_per_temperature.max(1)
     }
+
+    /// F2 (B7): the per-cell fan-out counted over *distinct*
+    /// temperatures, measured with `f32::to_bits()` so
+    /// bit-identical duplicates collapse into one.
+    ///
+    /// [`Self::total`] is the number of LLM calls the loop
+    /// actually fires — duplicates are preserved on purpose, one
+    /// call per declared temperature. `unique_total` is the
+    /// number of *distinct* `(temperature, replica)` points that
+    /// fan-out explores, which is strictly smaller whenever
+    /// `ExplorationMatrix::rewrite_temperatures_to_supported`
+    /// snapped several declared temperatures onto the same
+    /// upstream-supported value. The gap between the two is what
+    /// the `RewriteEvent::dropped_count` signal reports per
+    /// profile; the coordinator surfaces the summed version on
+    /// its `discovery: loop initialised` line so an operator can
+    /// see that the tracker is sized against the pre-collapse
+    /// call count while the exploration is narrower.
+    pub fn unique_total(&self) -> usize {
+        let unique = self
+            .temperatures
+            .iter()
+            .map(|t| t.to_bits())
+            .collect::<std::collections::BTreeSet<u32>>()
+            .len();
+        unique * self.replicas_per_temperature.max(1)
+    }
 }
 
 /// One dimension in the exploration matrix. A dimension is a

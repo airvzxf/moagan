@@ -766,12 +766,17 @@ impl DiscoveryCoordinator {
         // `target.max(matrix.cardinality()) == matrix.cardinality()`
         // — the saturation tracker anchors to the matrix fan-out
         // the operator picked.
+        //
+        // F2 (B6): the tracker is constructed ONCE, after `total`
+        // is known, and the resume baseline is replayed into that
+        // instance. The pre-fix code constructed a first tracker
+        // here, replayed `state.completed_sketches.len()` into it,
+        // and then overwrote the whole binding a few lines below
+        // with a second `SaturationTracker::with_policy(...)` —
+        // silently discarding the baseline, so a resumed run
+        // reported `tracker.coverage() == 0` and re-ran the full
+        // fan-out before the stop policy could fire.
         let policy = StopPolicy::default();
-        let mut tracker = SaturationTracker::with_policy(target.max(matrix.cardinality()), policy);
-
-        // Replay the already-completed count into the tracker so a
-        // resume picks up the right `completed` baseline.
-        tracker.record_completions(state.completed_sketches.len());
 
         let per_cell = matrix.sketches_per_cell.max(1);
         let cells: Vec<MatrixCell> = matrix.iter_cells().collect();
@@ -842,11 +847,39 @@ impl DiscoveryCoordinator {
         // cut the loop short at iteration #420 — the operator's
         // intent was the full 1680.
         let expanded_policy = policy;
-        tracker = SaturationTracker::with_policy(total.max(target), expanded_policy);
+        let tracker = init_saturation_tracker(
+            total,
+            target,
+            expanded_policy,
+            state.completed_sketches.len(),
+        );
+
+        // F2 (B7): the tracker is sized against `total`, the
+        // PRE-collapse call count — the loop really does fire one
+        // LLM call per declared temperature, even when
+        // `rewrite_temperatures_to_supported` snapped two of them
+        // onto the same upstream-supported value. `effective_total`
+        // is the post-collapse count: how many DISTINCT
+        // `(temperature, replica)` points the fan-out explores.
+        // `dropped_total = total - effective_total` is the number
+        // of calls that are duplicates of another point, i.e. the
+        // summed form of `RewriteEvent::dropped_count`. Surfacing
+        // both here means an operator reading the init line can
+        // tell "the tracker targets 1680 calls" from "but only
+        // 560 of them explore a distinct temperature".
+        let effective_total = cells.len()
+            * per_cell
+            * active_provider_profiles
+                .iter()
+                .map(|(_, _, p)| p.unique_total())
+                .sum::<usize>();
+        let dropped_total = total.saturating_sub(effective_total);
 
         let resume_from = state.completed_sketches.len();
         tracing::info!(
             total = total,
+            effective_total = effective_total,
+            dropped_total = dropped_total,
             cells = cells.len(),
             per_cell = per_cell,
             active_providers = active_provider_profiles.len(),
@@ -854,6 +887,7 @@ impl DiscoveryCoordinator {
             target = target,
             matrix_cardinality = matrix.cardinality(),
             tracker_target = tracker.target,
+            tracker_completed = tracker.completed,
             tracker_hard_cap = tracker.policy.hard_cap,
             tracker_max_sketches = tracker.policy.max_sketches,
             tracker_min_sketches = tracker.policy.min_sketches,
@@ -1470,6 +1504,43 @@ fn build_coordinator_matrix(
     //    phase) reads the freshly-written sidecar.
     tracing::debug!("build_coordinator_matrix: falling through to empty matrix (LLM-derive)");
     Ok(ExplorationMatrix::new(Vec::new(), sketches_per_cell))
+}
+
+/// F2 (B6): build the sketch loop's [`SaturationTracker`] in one
+/// place, sized against the loop's real fan-out and pre-loaded
+/// with the resume baseline.
+///
+/// The tracker is constructed EXACTLY once per run. The pre-fix
+/// code built a first tracker from `matrix.cardinality()`,
+/// replayed `state.completed_sketches.len()` into it, and then
+/// rebound the same variable to a second
+/// `SaturationTracker::with_policy(...)` once `total` was known —
+/// silently discarding the baseline. A resumed run therefore saw
+/// `tracker.completed == 0` and `tracker.coverage() == 0.0`, so
+/// the stop policy behaved as if nothing had been explored.
+///
+/// Keeping the construction + the replay in one function is what
+/// makes the invariant testable: a future re-introduction of a
+/// second construction has to go through here, and the unit test
+/// `resume_baseline_survives_tracker_initialisation` pins that
+/// `completed == resume_baseline` on the returned tracker.
+fn init_saturation_tracker(
+    total: usize,
+    target: usize,
+    policy: StopPolicy,
+    resume_baseline: usize,
+) -> SaturationTracker {
+    let mut tracker = SaturationTracker::with_policy(total.max(target), policy);
+    tracker.record_completions(resume_baseline);
+    tracing::debug!(
+        total,
+        target,
+        tracker_target = tracker.target,
+        resume_baseline,
+        completed = tracker.completed,
+        "init_saturation_tracker"
+    );
+    tracker
 }
 
 /// Build the user payload the LLM sees for one `(cell, sketch_index)`
@@ -2787,6 +2858,67 @@ mod tests {
     /// pre-F1 tests.
     fn legacy_4x2_cardinality(target: usize) -> usize {
         legacy_4x2_dimensions().len() * 2 * ((target / (legacy_4x2_dimensions().len() * 2)).max(1))
+    }
+
+    // -----------------------------------------------------------
+    // F2 (B6/T5) — the resume baseline survives tracker init.
+    //
+    // The pre-fix loop constructed the tracker twice: the first
+    // instance got the replayed `state.completed_sketches.len()`,
+    // the second (built once `total` was known) silently replaced
+    // it and started from zero. A resumed run therefore reported
+    // `coverage() == 0` no matter how much of the fan-out was
+    // already on disk. `init_saturation_tracker` is now the single
+    // construction site and these tests pin that contract.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn resume_baseline_survives_tracker_initialisation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path();
+
+        // Persist a mid-run state with 5 completed sketches, then
+        // read it back the way `run_with_ctx_and_target` does.
+        let mut persisted = SketchLoopState::new("deployment-model:serverless".to_owned());
+        for i in 0..5 {
+            persisted.record_completion(format!("sk_{i:04}"));
+        }
+        persisted.save(run_dir).expect("save state");
+        let state = SketchLoopState::load(run_dir)
+            .expect("load state")
+            .expect("state file exists");
+        assert_eq!(state.completed_sketches.len(), 5);
+
+        let tracker =
+            init_saturation_tracker(80, 8, StopPolicy::default(), state.completed_sketches.len());
+
+        assert_eq!(
+            tracker.completed, 5,
+            "the persisted completion count must reach the tracker that the loop uses"
+        );
+        assert_eq!(
+            tracker.target, 80,
+            "the tracker is anchored to the loop's real fan-out (total.max(target))"
+        );
+        assert!(
+            tracker.coverage() > 0.0,
+            "a resumed run must not report zero coverage; got {}",
+            tracker.coverage()
+        );
+        assert!(
+            (tracker.coverage() - 0.0625).abs() < 1e-6,
+            "coverage must be 5/80; got {}",
+            tracker.coverage()
+        );
+    }
+
+    #[test]
+    fn fresh_run_tracker_starts_at_zero_completions() {
+        let state = SketchLoopState::new("deployment-model:serverless".to_owned());
+        let tracker =
+            init_saturation_tracker(80, 8, StopPolicy::default(), state.completed_sketches.len());
+        assert_eq!(tracker.completed, 0);
+        assert_eq!(tracker.coverage(), 0.0);
     }
 
     /// Build the 4-dim × 2-facet legacy matrix dimensions. Mirrors
