@@ -558,11 +558,12 @@ impl DiscoveryCoordinator {
         // fires). The file is rewritten in-place on the next
         // `write_json` call below, so a re-read sees the new
         // shape automatically.
-        let rewritten = matrix.migrate_legacy_keys(&ctx.default_provider);
+        let rewritten = matrix.migrate_legacy_keys(&ctx.default_provider, &ctx.default_model);
         if rewritten > 0 {
             tracing::info!(
                 rewritten,
                 default_section = %ctx.default_provider,
+                default_model = %ctx.default_model,
                 "discovery: legacy temperature-profile keys migrated to section::model form"
             );
         }

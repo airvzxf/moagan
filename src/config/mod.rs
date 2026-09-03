@@ -427,8 +427,11 @@ pub struct DiscoveryMatrixConfig {
     /// Backward compat: a v0.14.x sidecar that still carries
     /// bare-model keys (e.g. `temperature_profiles["MiniMax-M3"]`)
     /// is upgraded in-memory via
-    /// `ExplorationMatrix::migrate_legacy_keys` at read time; the
-    /// file is rewritten in-place on the next `write_json` call
+    /// `ExplorationMatrix::migrate_legacy_keys` at read time —
+    /// only the entry whose model equals the run's `--provider`
+    /// model is re-keyed, since every other bare key belongs to
+    /// an unknown section. The file is rewritten in-place on the
+    /// next `write_json` call
     /// so a re-read sees the new shape. CLI specs use the new
     /// `provider=<section>:<model>` form (Tanda 04e D-1) or the
     /// legacy `provider=<model>` form (PR-D1, implicit section

@@ -316,8 +316,11 @@ pub struct ExplorationMatrix {
     /// the coordinator can fan out across multiple providers in
     /// one run. A v0.14.x sidecar that carries bare-model keys
     /// (e.g. `temperature_profiles["MiniMax-M3"]`) is upgraded
-    /// in-memory via [`Self::migrate_legacy_keys`] at read time;
-    /// the file is rewritten in-place on the next `write_json`
+    /// in-memory via [`Self::migrate_legacy_keys`] at read time —
+    /// but only for the entry whose model matches the run's
+    /// `--provider` model, because that is the only bare key
+    /// whose section can be inferred unambiguously. The file is
+    /// rewritten in-place on the next `write_json`
     /// call so a re-read sees the new shape. Default empty so the
     /// matrix is bit-identical to the v0.5 behaviour when no
     /// profile is configured (PR-D1).
@@ -570,32 +573,39 @@ impl ExplorationMatrix {
     /// entry whose model differs from `default_model` is left
     /// alone: those entries are outside the documented
     /// migration scope (they would be ambiguous — we do not
-    /// know which section they belong to). The coordinator
-    /// surfaces them through [`Self::active_provider_profiles`]
-    /// as `(default_section, model)` so the loop still fans
-    /// out against them, but the audit log may want to flag
-    /// the legacy key separately. Future work.
+    /// know which section they belong to). Re-keying them under
+    /// `default_section` would synthesise a `(section, model)`
+    /// pair the registry was never asked to host: a v0.14.x
+    /// sidecar carrying `temperature_profiles["MiniMax-M3"]`
+    /// run under `--provider deepseek:deepseek-v4-flash` would
+    /// migrate to `deepseek::MiniMax-M3` and then panic at
+    /// dispatch time in `RunContext::provider_for`. Each such
+    /// entry gets one `tracing::warn!` so the operator sees the
+    /// key was recognised but deliberately not migrated.
     ///
     /// The migration is idempotent: running it twice leaves the
     /// matrix in the new shape without an infinite loop or
     /// duplicate entries.
-    pub fn migrate_legacy_keys(&mut self, default_section: &str) -> usize {
+    pub fn migrate_legacy_keys(&mut self, default_section: &str, default_model: &str) -> usize {
         let mut rewritten = 0usize;
         let mut to_insert: Vec<(String, TemperatureProfile)> = Vec::new();
         let mut to_remove: Vec<String> = Vec::new();
+        let mut out_of_scope: Vec<String> = Vec::new();
         for (key, profile) in self.temperature_profiles.iter() {
             if key.contains("::") {
                 // Already in the new shape.
                 continue;
             }
-            // The legacy entry should be keyed by the model name
-            // alone. We migrate only the entry that matches
-            // `default_section::key` semantically — i.e. the
-            // entry whose bare model equals the configured
-            // default model. Without the default_model parameter
-            // we cannot distinguish a v0.14.x entry (which was
-            // meant for the default provider) from a typo /
-            // future bare-model key we do not want to touch.
+            // The legacy entry is keyed by the model name alone.
+            // Only the entry whose bare model equals the
+            // configured default model can be attributed to
+            // `default_section` — that is exactly what v0.14.x
+            // wrote. Any other bare key belongs to an unknown
+            // section, so it stays as-is.
+            if key != default_model {
+                out_of_scope.push(key.clone());
+                continue;
+            }
             let joined = crate::llm::ProviderRegistry::registry_key(default_section, key);
             if joined == *key {
                 // Should be unreachable: the joined form for
@@ -624,10 +634,21 @@ impl ExplorationMatrix {
         for k in to_remove {
             self.temperature_profiles.remove(&k);
         }
+        for key in &out_of_scope {
+            tracing::warn!(
+                legacy_key = %key,
+                default_section = %default_section,
+                default_model = %default_model,
+                "ExplorationMatrix::migrate_legacy_keys: bare-model key does not match \
+                 the default model; left unmigrated (its section is unknown)"
+            );
+        }
         if rewritten > 0 {
             tracing::info!(
                 rewritten,
+                out_of_scope = out_of_scope.len(),
                 default_section = %default_section,
+                default_model = %default_model,
                 "ExplorationMatrix::migrate_legacy_keys"
             );
         }
@@ -1180,7 +1201,7 @@ mod tests {
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
-        let rewritten = m.migrate_legacy_keys("minimax");
+        let rewritten = m.migrate_legacy_keys("minimax", "MiniMax-M3");
         assert_eq!(rewritten, 1);
         assert!(!m.temperature_profiles.contains_key("MiniMax-M3"));
         assert!(m.temperature_profiles.contains_key("minimax::MiniMax-M3"));
@@ -1208,7 +1229,7 @@ mod tests {
             temperature_profiles: profiles.clone(),
             default_profile: TemperatureProfile::default(),
         };
-        let rewritten = m.migrate_legacy_keys("minimax");
+        let rewritten = m.migrate_legacy_keys("minimax", "MiniMax-M3");
         assert_eq!(rewritten, 0);
         assert_eq!(m.temperature_profiles, profiles);
     }
@@ -1232,8 +1253,8 @@ mod tests {
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
-        assert_eq!(m.migrate_legacy_keys("minimax"), 1);
-        assert_eq!(m.migrate_legacy_keys("minimax"), 0);
+        assert_eq!(m.migrate_legacy_keys("minimax", "MiniMax-M3"), 1);
+        assert_eq!(m.migrate_legacy_keys("minimax", "MiniMax-M3"), 0);
         assert_eq!(m.temperature_profiles.len(), 1);
         assert!(m.temperature_profiles.contains_key("minimax::MiniMax-M3"));
     }
@@ -1267,13 +1288,84 @@ mod tests {
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
-        let rewritten = m.migrate_legacy_keys("minimax");
+        let rewritten = m.migrate_legacy_keys("minimax", "MiniMax-M3");
         assert_eq!(rewritten, 1, "the bare entry is migrated-and-dropped");
         // The joined entry wins (temperatures = [0.5]).
         let restored = m.profile_for_pair("minimax", "MiniMax-M3");
         assert_eq!(restored.temperatures, vec![0.5]);
         assert_eq!(restored.replicas_per_temperature, 2);
         assert!(!m.temperature_profiles.contains_key("MiniMax-M3"));
+    }
+
+    /// F2 (B1): a bare-model entry whose model does NOT match
+    /// `default_model` is left untouched. Migrating it under
+    /// `default_section` would synthesise a `(section, model)`
+    /// pair the registry was never built for — the exact
+    /// over-migration that made a v0.14.x sidecar panic in
+    /// `RunContext::provider_for` when the operator switched
+    /// `--provider` to another section.
+    #[test]
+    fn migrate_legacy_keys_leaves_non_default_model_untouched() {
+        let mut profiles = HashMap::new();
+        // v0.14.x sidecar entry written by a MiniMax run.
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0, 0.5],
+                replicas_per_temperature: 2,
+            },
+        );
+        let mut m = ExplorationMatrix {
+            dimensions: dims_2_3(),
+            sketches_per_cell: 1,
+            temperature_profiles: profiles,
+            default_profile: TemperatureProfile::default(),
+        };
+        // The operator re-runs with a different provider AND model.
+        let rewritten = m.migrate_legacy_keys("deepseek", "deepseek-v4-flash");
+        assert_eq!(rewritten, 0, "no key belongs to the new default pair");
+        assert!(
+            m.temperature_profiles.contains_key("MiniMax-M3"),
+            "the legacy entry is preserved verbatim"
+        );
+        assert!(
+            !m.temperature_profiles.contains_key("deepseek::MiniMax-M3"),
+            "the legacy entry must NOT be re-keyed under the new section"
+        );
+    }
+
+    /// F2 (B1): the migration is scoped per default pair, so a
+    /// matrix holding several bare-model keys upgrades exactly
+    /// one of them — the one the current run's `--provider`
+    /// selects — and leaves the rest for a future run that
+    /// selects them.
+    #[test]
+    fn migrate_legacy_keys_migrates_only_the_default_model_entry() {
+        let mut profiles = HashMap::new();
+        for model in ["MiniMax-M3", "deepseek-v4-flash", "mimo-v2.5"] {
+            profiles.insert(
+                model.to_owned(),
+                TemperatureProfile {
+                    temperatures: vec![0.5],
+                    replicas_per_temperature: 1,
+                },
+            );
+        }
+        let mut m = ExplorationMatrix {
+            dimensions: dims_2_3(),
+            sketches_per_cell: 1,
+            temperature_profiles: profiles,
+            default_profile: TemperatureProfile::default(),
+        };
+        let rewritten = m.migrate_legacy_keys("deepseek", "deepseek-v4-flash");
+        assert_eq!(rewritten, 1);
+        assert!(
+            m.temperature_profiles
+                .contains_key("deepseek::deepseek-v4-flash")
+        );
+        assert!(!m.temperature_profiles.contains_key("deepseek-v4-flash"));
+        assert!(m.temperature_profiles.contains_key("MiniMax-M3"));
+        assert!(m.temperature_profiles.contains_key("mimo-v2.5"));
     }
 
     /// F1: an asymmetric matrix (3 dims with 1/2/3 facets) sums

@@ -319,11 +319,12 @@ impl Phase for DiscoverMatrixPhase {
         // a v0.14.x sidecar (bare-model keys) upgrades to the new
         // joined form before the loop fans out.
         let mut matrix = self.matrix.clone();
-        let rewritten = matrix.migrate_legacy_keys(&ctx.default_provider);
+        let rewritten = matrix.migrate_legacy_keys(&ctx.default_provider, &ctx.default_model);
         if rewritten > 0 {
             tracing::info!(
                 rewritten,
                 default_section = %ctx.default_provider,
+                default_model = %ctx.default_model,
                 "discover_matrix: legacy temperature-profile keys migrated to section::model form"
             );
         }
