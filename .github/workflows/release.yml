@@ -23,11 +23,24 @@ on:
 # `contents: write` to the `publish` job applies the principle of least
 # privilege at the workflow level.
 
-# Do not let two release jobs for the same tag run in parallel; the
-# second one would race the upload.
+# Serialize release runs for the same tag FIFO; do NOT cancel
+# in-flight or pending runs. Without `queue: max` the default
+# `queue: single` allows only one in-flight + one pending per group;
+# a third dispatch cancels the pending one. Empirically observed
+# on v0.14.1 (closes #741): `git push origin v0.14.1` produced TWO
+# `release.yml` runs dispatched 1 second apart (run IDs 33781175526
+# and 33781177161). The first published the release successfully;
+# the second raced the SBOM-upload step (`softprops/action-gh-release`
+# tried to dedupe via DELETE /releases/assets/{id} and the default
+# GITHUB_TOKEN lacks that scope). With `cancel-in-progress: false`
+# + `queue: max` the second dispatch waits in the same group until
+# the first finishes, so the race cannot happen. Different tags do
+# not share a group (the group key includes the tag), so parallel
+# releases of different versions remain unblocked.
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   # Tag-input validator: the `push` trigger filters to
