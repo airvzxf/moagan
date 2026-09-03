@@ -24,10 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merge order) and always appends
   `(default_section, default_model, default_profile)` so the
   unconfigured case collapses to the v0.5 single-shot contract.
-- `ExplorationMatrix::migrate_legacy_keys(default_section)`
-  rewrites bare-model entries (e.g. `temperature_profiles["MiniMax-M3"]`)
-  to the joined `section::model` form so a v0.14.x sidecar
-  transparently upgrades in-memory. The file is rewritten in-place
+- `ExplorationMatrix::migrate_legacy_keys(default_section, default_model)`
+  rewrites the bare-model entry whose model equals `default_model`
+  (e.g. `temperature_profiles["MiniMax-M3"]` on a
+  `--provider minimax:MiniMax-M3` run) to the joined
+  `section::model` form so a v0.14.x sidecar transparently
+  upgrades in-memory. The file is rewritten in-place
   on the next `write_json` call.
 - `ExplorationMatrix::profile_for_pair(section, model)` is the
   new canonical lookup by joined key. `profile_for(provider_model)`
@@ -61,6 +63,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integration test `discovery_iteration_event_count_matches_multi_provider_fanout`
   drives the real binary with two `--temperature-profile` flags
   and asserts the per-provider fan-out fires.
+- `Event::DiscoveryIteration` carries `section` and `model` so a
+  dashboard consuming the NDJSON stream can attribute each sketch
+  to the provider pair that produced it. The change is additive,
+  so `schema` stays at `1` (see `docs/events-v1.md`
+  §"Additive changes"); `docs/events-v1.md`'s event table lists
+  the two new fields.
+- `TemperatureProfile::unique_total()` — the per-cell fan-out
+  counted over *distinct* temperatures. The coordinator's
+  `discovery: loop initialised` line now carries `effective_total`
+  (the post-collapse count) and `dropped_total` next to `total`,
+  so an operator can tell "the tracker targets N calls" from
+  "but only M of them explore a distinct temperature" after
+  `rewrite_temperatures_to_supported` snapped several declared
+  temperatures onto the same upstream-supported value.
+- `RunContext::has_provider_for(section, model)` — non-panicking
+  companion to `provider_for`. The discovery fan-out uses it as a
+  pre-flight filter so a `(section, model)` pair the registry does
+  not host is dropped with a `warn!` instead of aborting the run.
+
+### Fixed — D-1 follow-up (F2 audit)
+
+- **`migrate_legacy_keys` over-migrated every bare-model key.**
+  The pre-fix signature took only `default_section` and re-keyed
+  EVERY bare entry under it. A v0.14.x sidecar carrying
+  `temperature_profiles["MiniMax-M3"]` re-run with
+  `--provider deepseek:deepseek-v4-flash` migrated to
+  `deepseek::MiniMax-M3` — a pair the registry was never built
+  for — and the coordinator then panicked in
+  `RunContext::provider_for`. Only the entry whose bare model
+  equals `default_model` is migrated now; the rest are preserved
+  verbatim with one `warn!` each.
+- **TOML-configured provider pairs were missing from
+  `active_pairs`.** `cli::discover::run` built the active-pair
+  list from the CLI `--temperature-profile` specs plus the default
+  provider, BEFORE merging the persisted
+  `[discovery_matrix].temperature_profiles` block. A pair
+  configured only in TOML was therefore never hosted by the
+  registry and the coordinator panicked at dispatch. The merge now
+  runs first and `active_pairs_for` derives the list from the
+  merged profile map, using the same joined-key → `(section,
+  model)` mapping as `active_provider_profiles`.
+- **Throttle governors and circuit breakers were pre-created for
+  the default provider only.** Every other `(section, role)` fell
+  through to a lenient default config, so `[throttle_per_role]`
+  and `[circuit_breaker_per_role]` were ignored on the
+  non-default providers of a multi-provider fan-out. Both
+  registries are now pre-created for every active section. This
+  also fixes the key itself: the pre-fix code keyed the entries by
+  the raw `--provider SECTION:MODEL` string while every lookup
+  (`governor_for` / `breaker_for`) uses the bare SECTION, so even
+  the default provider's configured throttle never matched.
+- **`attach_parallelism_rate_limit` looked up
+  `[rate_limit_per_provider]` by the joined registry key.** The
+  config block is keyed by SECTION (`minimax`) but the registry
+  keys every multi-model section under `section::model`
+  (`minimax::MiniMax-M3`), so the operator's override never
+  matched and the parallelism-derived default was applied
+  instead. The lookup is now layered: exact joined key, then
+  section, then the derived default.
+- **The saturation tracker was constructed twice, discarding the
+  resume baseline.** The first construction replayed
+  `state.completed_sketches.len()` and was then silently
+  overwritten by a second construction once `total` was known, so
+  a resumed run reported `tracker.coverage() == 0`. The
+  construction now lives in a single `init_saturation_tracker`
+  helper that owns both the sizing and the replay.
+- Tests: `cache_key` byte-identity against the v0.14.x
+  single-provider recipe, per-pair `discovery_iteration`
+  distribution, end-to-end v0.14.x bare-model profile migration
+  (both the matching and the foreign-model case),
+  `attach_parallelism_rate_limit` key resolution, and the
+  saturation tracker's resume baseline.
+
+### Known limitations
+
+- A `[discovery_matrix].temperature_profiles` entry naming a
+  section OTHER than the `--provider` section is dropped from the
+  fan-out with a `warn!` for non-mock providers:
+  `cli::run::build_registry_for_with_active` builds its
+  `spec_map` from the selected section alone, so the registry
+  never hosts a cross-section pair. Hosting them requires
+  widening the registry build to every referenced section (and
+  deciding what to do when one of them has no API key), which is
+  out of scope for this fix.
 
 ## [0.14.2] - 2026-09-03
 
