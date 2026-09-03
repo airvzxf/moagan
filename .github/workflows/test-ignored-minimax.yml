@@ -5,10 +5,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Serialize concurrent runs to avoid artifact races.
+# Serialize concurrent runs in FIFO order — do NOT cancel in-flight runs.
+# The integration_discover_minimax -- --ignored test makes real upstream
+# calls against https://api.minimax.io/anthropic/v1/models, which are
+# billed by tokens; cancelling a run 14 min into a 16–25 min run discards
+# the upstream spend AND marks the previous commit as red (the workflow
+# is informational but GitHub renders cancelled runs as failures on the
+# commit page). Queueing lets every commit get exactly one real result;
+# the artifact race the previous comment guarded against is still avoided
+# because the queue is per-group (one runner at a time). See issue #738.
 concurrency:
   group: test-ignored-minimax-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read

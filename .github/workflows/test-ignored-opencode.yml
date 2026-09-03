@@ -35,10 +35,15 @@ name: test-ignored-opencode
 on:
   workflow_dispatch:
 
-# Serialize concurrent runs to avoid artifact races.
+# Serialize concurrent runs in FIFO order — do NOT cancel in-flight runs.
+# The trigger here is workflow_dispatch only (no auto push: branches:
+# [main]), so today the cancel path is unreachable; kept as `false` for
+# symmetry with test-ignored-minimax.yml (closes #738) so a future PR
+# that re-enables the auto push trigger (per ci.yml:46-53 budget
+# context) does not reintroduce the wasted-API-token + red-commit bug.
 concurrency:
   group: test-ignored-opencode-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
