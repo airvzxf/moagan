@@ -25,6 +25,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [`docs/adr/0005-verify-tag-signature-guard.md`](docs/adr/0005-verify-tag-signature-guard.md)
   for the design.
 
+### Fixed
+
+- **CI: stop cancelling in-flight `test-ignored-*` runs** (closes #738).
+  Flipped `cancel-in-progress: true → false` and added `queue: max` on
+  `.github/workflows/test-ignored-{minimax,opencode,deepseek}.yml` so
+  concurrent runs to the same ref queue behind the in-flight one in
+  FIFO order instead of being killed mid-test. `test-ignored-minimax`
+  makes real upstream calls against
+  `https://api.minimax.io/anthropic/v1/models` (token-billed); a
+  cancel 14 min into a 16–25 min run wasted the upstream spend AND
+  marked the previous commit as red on the commit page (GitHub
+  renders cancelled runs as failed checks even though the workflow
+  is informational per `docs/branch-protection.md:108-111`). With
+  `queue: max` (≤100 pending) the guarantee holds even for bursts of
+  squash-merges within the run window. The two manual-only siblings
+  (`test-ignored-opencode.yml`, `test-ignored-deepseek.yml`) mirror
+  the change defensively so a future PR that re-enables the auto
+  `push: branches: [main]` trigger does not reintroduce the bug.
+  `ci.yml` keeps `cancel-in-progress: true` (no `queue: max`) because
+  its jobs are short, mock-LLM, and the cancel-on-push behavior is
+  the right PR-iteration UX.
+
 ## [0.13.4] - 2026-09-02
 
 ### Fixed
