@@ -7,7 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(empty — placeholder for the next release cycle)
+### Added — D-1: `--temperature-profile` multi-provider
+
+- `--temperature-profile` accepts a new
+  `provider=<section>:<model>` form alongside the legacy
+  `provider=<model>` form (Tanda 04e D-1). The legacy form's
+  section is implicit (the active `--provider` section); the new
+  form's section is explicit. Both forms populate the new
+  `TemperatureProfileSpec::section` field, and `into_pair(default_section)`
+  resolves the `(section, model)` pair the matrix should be keyed
+  under.
+- `ExplorationMatrix::active_provider_profiles(default_section, default_model)`
+  enumerates every `(section, model, profile)` triple the
+  coordinator should fan out across. Deduplicates by
+  `(section, model)` with last-wins semantics (matching the CLI
+  merge order) and always appends
+  `(default_section, default_model, default_profile)` so the
+  unconfigured case collapses to the v0.5 single-shot contract.
+- `ExplorationMatrix::migrate_legacy_keys(default_section)`
+  rewrites bare-model entries (e.g. `temperature_profiles["MiniMax-M3"]`)
+  to the joined `section::model` form so a v0.14.x sidecar
+  transparently upgrades in-memory. The file is rewritten in-place
+  on the next `write_json` call.
+- `ExplorationMatrix::profile_for_pair(section, model)` is the
+  new canonical lookup by joined key. `profile_for(provider_model)`
+  is preserved as a thin shim for the handful of test-side callers
+  and is documented as deprecated for new code.
+- `RunContext::call_with_retry_at_temp_for(section, model, ...)` and
+  `RunContext::call_uncached_at_temp_for(section, model, ...)` are
+  the multi-provider dispatch helpers. They look up
+  `self.providers.get_model(section, model)` and thread the cache
+  key through the same hash the existing helpers compute, but
+  with `(section, model)` mixed in so two providers answering the
+  same prompt do not collide in the cross-run cache.
+- `DiscoveryCoordinator::run_with_ctx_and_target` now iterates over
+  `active_provider_profiles` instead of the single default model.
+  The total fan-out is `cells × per_cell × Σ profile.total()`
+  summed across providers. The migration runs before
+  `write_json` so a v0.14.x sidecar upgrades before the matrix
+  hits disk.
+- `DiscoverMatrixPhase::execute` mirrors the coordinator's
+  multi-provider fan-out. The legacy flat-pipeline path and the
+  coordinator path produce the same fan-out for the same matrix.
+- `[discovery_matrix].temperature_profiles` config keys are now
+  documented as joined `section::model` strings (e.g.
+  `"minimax::MiniMax-M3"`); the on-disk wire format follows the
+  same convention so a v0.14.3+ run's `exploration_matrix.json`
+  is forward-compatible.
+- Unit tests pin: `active_provider_profiles` enumeration,
+  `migrate_legacy_keys` re-keying + idempotency + conflict
+  resolution, the new CLI parser form, and the legacy form's
+  `into_pair` default-section fallback.
+- Integration test `discovery_iteration_event_count_matches_multi_provider_fanout`
+  drives the real binary with two `--temperature-profile` flags
+  and asserts the per-provider fan-out fires.
 
 ## [0.14.2] - 2026-09-03
 
