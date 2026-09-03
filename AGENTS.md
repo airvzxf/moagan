@@ -232,8 +232,13 @@ Concretely:
 
     **Normative procedure — execute these in order, do not skip a
     step.** The `release.yml` workflow has a `verify-tag-reachability`
-    job that mechanically enforces invariant ④ on the CI side
-    (defense in depth — this procedural list is still load-bearing).
+    job that mechanically enforces invariant ④ on the CI side, plus
+    a `verify-tag-signature` job (closes #716) that enforces a new
+    invariant: that the tag was signed by a key in
+    `.github/trusted-signers` (and, for PGP-signed tags, after
+    `.github/trusted-signers.asc` is imported). Both jobs run in
+    parallel and `build-release` is gated on both. Defense in depth
+    — this procedural list is still load-bearing.
 
     ① **Fetch and align local `main` to remote.** Covers the local
        drift that the squash merge creates.
@@ -282,9 +287,17 @@ Concretely:
 
     ⑥ **Watch the `release.yml` run.** The
        `Verify · tag is reachable from main` job passes if ④ holds;
-       `Build · release binary` cold-builds (~5 min);
-       `Publish · GitHub Release` uploads the binary + sha256 +
-       sha512 + CycloneDX SBOM and creates the release page.
+       `Verify · tag is signed by a trusted signer` passes if `git
+       verify-tag vX.Y.Z` succeeds against the allow-list fetched
+       from `origin/main` (SSH backend via
+       `.github/trusted-signers`, PGP backend via
+       `.github/trusted-signers.asc` — used by v0.13.3 and earlier
+       tags). Both jobs run in parallel and
+       `Build · release binary` cold-builds (~5 min) only after both
+       pass; the build is pinned to the immutable tag commit SHA so
+       a tag force-push mid-run cannot redirect it. `Publish ·
+       GitHub Release` uploads the binary + sha256 + sha512 +
+       CycloneDX SBOM and creates the release page.
 
     **If you discover you orphaned a tag** (e.g. you tagged before
     the squash, or ④ fails):
@@ -319,6 +332,66 @@ and the only remedy is another release.
 Always: branch green → trunk green → release-branch green → merge →
 tag. Any step that comes back red sends the agent back to the repair
 loop, never forward.
+
+### Tag signature guard (closes #716)
+
+In addition to the reachability guard (invariant ④), `release.yml`
+runs a `verify-tag-signature` job that mechanically checks the tag
+was signed by a key on the in-repo allow-list. The allow-list is
+**fetched from `origin/main`** (NOT the tagged tree) so revoking a
+key on main takes effect on the next release — reading it from the
+tagged tree would make revocation structurally impossible because
+the trust anchor would be the same object being verified.
+
+- **`.github/trusted-signers`** — SSH backend. Each line is
+  `<principal> <key-type> <key-body>`. Used by `git config
+  gpg.ssh.allowedsignersfile` so `git verify-tag` can check
+  SSH-signed tags. **Matching is by key body, not by principal** —
+  git resolves the principal via `ssh-keygen -Y find-principals`
+  and accepts the signature if any principal in this file owns the
+  key that produced it. Treat every line as an unconditional grant.
+  Current entry: `israel.alberto.rv@gmail.com` (ED25519, fingerprint
+  `SHA256:POu2Sr8ILb1IM05Vh1cGU3xivjx05QjWoWYhdLc6YHA`).
+- **`.github/trusted-signers.asc`** — PGP backend. The maintainer's
+  RSA primary key (long ID `414687A3CD7E65B9`, full fingerprint
+  `82DE44111B30F91F55BCEB1F414687A3CD7E65B9`) in ASCII-armored
+  form. Imported into the runner's keyring **only when the tag
+  being verified is PGP-signed** (v0.13.3 and earlier). For
+  v0.13.4+ SSH-signed tags the file is optional — this keeps the
+  documented key-removal path below intact when the maintainer
+  eventually drops the legacy GPG key.
+
+`git verify-tag` auto-detects which backend the tag used, so both
+formats are supported without conditional logic in the workflow.
+See [`docs/adr/0005-verify-tag-signature-guard.md`](docs/adr/0005-verify-tag-signature-guard.md)
+for the design rationale.
+
+**Adding a new trusted signer** requires a PR that:
+
+1. Appends one entry to `.github/trusted-signers` (and, **if the
+   new signer uses PGP**, appends a `-----BEGIN PGP PUBLIC KEY
+   BLOCK-----` to `.github/trusted-signers.asc`; if all signers
+   are SSH-only the `.asc` file may be deleted).
+2. Documents the signer's key fingerprint and identity in
+   `.github/CONTRIBUTING.md` so the audit log captures who holds
+   the signing key.
+3. Is reviewed by a co-maintainer when one exists. Today the
+   ruleset `protect-main` has `require_code_owner_review: true`
+   but `required_approving_review_count: 0`, so the CODEOWNER
+   review is auto-requested but not blocking — the maintainer
+   merges their own PR. Treat this procedural step as the
+   load-bearing control while the repo remains single-maintainer;
+   re-evaluate when a co-maintainer joins (see ADR 0005 §"Re-
+   evaluation §1" and `docs/branch-protection.md` for the current
+   ruleset state).
+
+**Removing a signer** must wait until the most recent tag signed
+by that key is at least one minor version old, so a compromise of
+the removed key cannot rewrite a release that's in production.
+The gauntlet's tag-signature gate (see §"Validation tiers" /
+`scripts/gauntlet.sh`) re-verifies every `vX.Y.Z` tag locally on
+every run, so a removed signer surfaces immediately for the
+operator who removes it.
 
 ## No-go list
 

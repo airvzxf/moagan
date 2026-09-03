@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`verify-tag-signature` job in `release.yml`** (closes #716):
+  gates every release build on `git verify-tag vX.Y.Z` succeeding
+  against the in-repo allow-list. Two new files back the check:
+  `.github/trusted-signers` (SSH backend, used by v0.13.4+) and
+  `.github/trusted-signers.asc` (PGP backend, used by v0.13.3 and
+  earlier). `git verify-tag` auto-detects which backend the tag
+  used, so both formats continue to verify without workflow
+  changes. The allow-list is fetched from `origin/main` (not the
+  tagged tree) so key revocation on main takes effect on the next
+  release; the build is pinned to the immutable tag commit SHA
+  resolved by the reachability guard so a tag force-push mid-run
+  cannot redirect it. Mirrored locally by `scripts/gauntlet.sh` so
+  a misconfigured allow-list surfaces before a tag push. See
+  [`docs/adr/0005-verify-tag-signature-guard.md`](docs/adr/0005-verify-tag-signature-guard.md)
+  for the design.
+
 ## [0.13.4] - 2026-09-02
 
 ### Fixed

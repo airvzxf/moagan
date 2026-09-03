@@ -171,6 +171,97 @@ else
 fi
 echo
 
+# 8. Tag signature verification (closes #716) — every semver tag
+# must verify against the in-repo allow-list
+# (`.github/trusted-signers` for SSH, `.github/trusted-signers.asc`
+# for GPG). Mirrors the `verify-tag-signature` job in
+# `.github/workflows/release.yml` so a misconfigured allow-list
+# surfaces locally before a tag push. The workflow fetches the
+# allow-list from `origin/main`; the gauntlet uses the working
+# tree (the operator's checkout is the source of truth locally).
+#
+# State semantics:
+#   SKIP — no `.github/trusted-signers*` present, or the matching
+#          binary (`ssh-keygen` / `gpg`) is not installed. Local
+#          gauntlet cannot enforce what CI enforces.
+#   PASS — every semver tag verifies (or no tags exist).
+#   FAIL — at least one semver tag does not verify.
+#
+# Per-invocation `git -c …` overrides are used everywhere so this
+# script never writes to the developer's `.git/config` or to the
+# permanent `~/.gnupg` keyring. The CI runner image is too, but
+# the gauntlet runs on dev workstations too.
+SIGNED_TAGS=0
+FAILED_TAGS=()
+SKIP_REASON=""
+SEMVER_TAGS=( $(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V) )
+LATEST_TAG="${SEMVER_TAGS[-1]:-}"
+
+if [[ ! -f .github/trusted-signers && ! -f .github/trusted-signers.asc ]]; then
+  SKIP_REASON="no .github/trusted-signers* present locally"
+fi
+
+# Per-invocation GPG keyring so we never touch the developer's
+# permanent keyring. GNUPGHOME is set inline so even the import
+# is scoped to this run.
+TEMP_GPG=""
+if [[ -z "$SKIP_REASON" && -f .github/trusted-signers.asc ]]; then
+  if command -v gpg >/dev/null 2>&1; then
+    TEMP_GPG="$(mktemp -d)"
+    GNUPGHOME="$TEMP_GPG" gpg --batch --import \
+      .github/trusted-signers.asc >/dev/null 2>&1 \
+      || SKIP_REASON="gpg --import failed"
+  else
+    SKIP_REASON="gpg not installed; GPG-signed tags unverifiable"
+  fi
+fi
+
+if [[ -z "$SKIP_REASON" && -f .github/trusted-signers ]]; then
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    SKIP_REASON="ssh-keygen not installed; SSH-signed tags unverifiable"
+  fi
+fi
+
+if [[ -n "$SKIP_REASON" ]]; then
+  printf "  %s⊘%s %-50s %s(%s)%s\n" "$YELLOW" "$RESET" "semver tags verify against allow-list" "$BLUE" "$SKIP_REASON" "$RESET"
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+elif [[ "${#SEMVER_TAGS[@]}" -eq 0 ]]; then
+  printf "  %s⊘%s %-50s %s(no semver tags to check)%s\n" "$YELLOW" "$RESET" "semver tags verify against allow-list" "$BLUE" "" "$RESET"
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+else
+  for tag in "${SEMVER_TAGS[@]}"; do
+    # Per-invocation overrides: never write to .git/config.
+    if [[ -n "$TEMP_GPG" ]]; then
+      GNUPGHOME="$TEMP_GPG" git \
+        -c gpg.format=ssh \
+        -c gpg.ssh.allowedsignersfile=.github/trusted-signers \
+        verify-tag "$tag" >/dev/null 2>&1 \
+        && SIGNED_TAGS=$((SIGNED_TAGS + 1)) \
+        || FAILED_TAGS+=("$tag")
+    else
+      git \
+        -c gpg.format=ssh \
+        -c gpg.ssh.allowedsignersfile=.github/trusted-signers \
+        verify-tag "$tag" >/dev/null 2>&1 \
+        && SIGNED_TAGS=$((SIGNED_TAGS + 1)) \
+        || FAILED_TAGS+=("$tag")
+    fi
+  done
+  if [[ "${#FAILED_TAGS[@]}" -eq 0 ]]; then
+    printf "  %s✓%s %-50s %s(%d signed tags, latest %s)%s\n" "$GREEN" "$RESET" "semver tags verify against allow-list" "$BLUE" "$SIGNED_TAGS" "$LATEST_TAG" "$RESET"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf "  %s✗%s %-50s %s(%d/%d tags failed verify-tag)%s\n" "$RED" "$RESET" "semver tags verify against allow-list" "$BLUE" "${#FAILED_TAGS[@]}" "$SIGNED_TAGS" "$RESET"
+    printf "  %s!%s Failed tags: %s\n" "$RED" "$RESET" "${FAILED_TAGS[*]}"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+fi
+# Best-effort cleanup of the temp keyring.
+if [[ -n "$TEMP_GPG" ]]; then
+  rm -rf "$TEMP_GPG"
+fi
+echo
+
 # Summary
 echo "${BOLD}Summary${RESET}"
 printf "  %s%d passed%s, %s%d failed%s, %s%d skipped%s\n" \

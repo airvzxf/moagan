@@ -93,13 +93,28 @@ The release pipeline is in `.github/workflows/release.yml`. To cut a
 release:
 
 ```bash
-git tag -s vX.Y.Z -m "release: vX.Y.Z"   # GPG-signed tag
+git tag -s vX.Y.Z -m "release: vX.Y.Z"   # signed tag (GPG or SSH per local gitconfig)
 git push origin main vX.Y.Z             # push the branch + the tag
 ```
 
 The workflow handles the binary build, SHA-256/512 checksums, CycloneDX
 SBOM, and the GitHub Release page. The maintainer (`@airvzxf`) is the
-only signer today; the key is `414687A3CD7E65B9`.
+only signer today; the key is `414687A3CD7E65B9` (GPG RSA, used for
+v0.13.3 and earlier tags) and the SSH ED25519 key whose principal is
+`airvzxf@github` (committed to `.github/trusted-signers`; used for
+v0.13.4 onward).
+
+The `verify-tag-signature` job (closes #716) gates every release
+build on `git verify-tag vX.Y.Z` succeeding against the allow-list
+in `.github/trusted-signers` (SSH backend) or after the GPG key in
+`.github/trusted-signers.asc` is imported (PGP backend, only when
+the tag is PGP-signed). The allow-list is fetched from `origin/main`
+so revoking a key on main takes effect on the next release. Both
+formats work — `git verify-tag` auto-detects which backend the tag
+used. An unsigned or wrongly-signed tag fails the workflow before
+any binary is built. See
+[`docs/adr/0005-verify-tag-signature-guard.md`](docs/adr/0005-verify-tag-signature-guard.md)
+for the design.
 
 ## License
 
