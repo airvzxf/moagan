@@ -1026,15 +1026,17 @@ mod tests {
         assert_eq!(m.cardinality(), 50);
     }
 
-    /// PR-D1: a profile-configured matrix round-trips through
-    /// JSON. The persisted `exploration_matrix.json` artefact must
-    /// carry the per-provider map so a resumed run picks it up
-    /// without re-deriving from the CLI flags.
+    /// Tanda 04e D-1: a profile-configured matrix round-trips
+    /// through JSON. The persisted `exploration_matrix.json`
+    /// artefact must carry the per-`(section, model)` map so a
+    /// resumed run picks it up without re-deriving from the CLI
+    /// flags. The keys use the joined `section::model` form (the
+    /// canonical wire shape since v0.14.3).
     #[test]
     fn exploration_matrix_round_trips_with_profiles() {
         let mut profiles = HashMap::new();
         profiles.insert(
-            "MiniMax-M3".to_owned(),
+            "minimax::MiniMax-M3".to_owned(),
             TemperatureProfile {
                 temperatures: vec![0.0, 0.7],
                 replicas_per_temperature: 2,
@@ -1048,10 +1050,18 @@ mod tests {
         };
         let j = serde_json::to_string(&m).unwrap();
         let back: ExplorationMatrix = serde_json::from_str(&j).unwrap();
-        let restored = back.profile_for("MiniMax-M3");
+        let restored = back.profile_for_pair("minimax", "MiniMax-M3");
         assert_eq!(restored.temperatures, vec![0.0, 0.7]);
         assert_eq!(restored.replicas_per_temperature, 2);
         assert_eq!(back.default_profile.temperatures, vec![0.5]);
+        // The legacy bare-model lookup is preserved as a thin shim
+        // for the handful of pre-D-1 tests / callers; it now misses
+        // the new joined key.
+        let bare = back.profile_for("MiniMax-M3");
+        assert_eq!(
+            bare.replicas_per_temperature, 1,
+            "bare-model lookup misses the joined key form; new code MUST use profile_for_pair"
+        );
     }
 
     /// F1: an asymmetric matrix (3 dims with 1/2/3 facets) sums
