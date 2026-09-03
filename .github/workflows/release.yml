@@ -153,6 +153,19 @@ jobs:
       contents: read
     needs: validate-tag-input
     steps:
+      - name: Checkout at ref
+        # Need a checkout so `git show` and `git fetch` have a
+        # `.git/` to operate on (the `git fetch --no-tags --depth=1
+        # origin main` below needs a remote configured; the
+        # actions/checkout step is what configures it). Pin to the
+        # ref (mutable) for this job — the SHA pinning is the
+        # `build-release` job's responsibility.
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Fetch allow-list from origin/main
         # The trust anchor lives on `main`, not on the tagged tree
         # the workflow is verifying. Reading it from the tagged
