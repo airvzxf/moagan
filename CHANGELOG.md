@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+(empty — placeholder for the next release cycle)
+
+## [0.14.3] - 2026-09-03
+
 ### Added — D-1: `--temperature-profile` multi-provider
 
 - `--temperature-profile` accepts a new
@@ -1611,5 +1615,6 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
   upstream MiniMax model stalling on the first character of the
   response.
 
+[0.14.3]: https://github.com/airvzxf/moagan/compare/v0.14.2...v0.14.3
 [0.9.2]: https://github.com/airvzxf/moagan/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/airvzxf/moagan/compare/v0.9.0...v0.9.1
