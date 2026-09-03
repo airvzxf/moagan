@@ -546,6 +546,59 @@ impl TemperatureProfileSpec {
     }
 }
 
+/// F2 (B2): resolve every `(section, model)` pair the discovery
+/// run may dispatch against, so the provider registry hosts all
+/// of them before the coordinator's fan-out starts.
+///
+/// The list is the default `--provider SECTION:MODEL` pair plus
+/// one entry per key in the MERGED
+/// `[discovery_matrix].temperature_profiles` map — merged meaning
+/// "persisted TOML block with the CLI `--temperature-profile`
+/// specs already applied on top". Deriving the list from the
+/// merged map (instead of from the CLI specs alone) is what
+/// makes a TOML-only pair reachable: the pre-fix code hosted
+/// only the CLI pairs, so the coordinator panicked in
+/// `RunContext::provider_for` the first time it dispatched
+/// against a TOML-configured provider.
+///
+/// The key → pair mapping mirrors
+/// [`crate::discovery::matrix::ExplorationMatrix::active_provider_profiles`]
+/// exactly: a joined `section::model` key splits on `"::"`, and a
+/// legacy bare-model key is attributed to `default_section`. Keys
+/// are visited in sorted order so the resulting list (and thus
+/// the probe fan-out order) is deterministic despite the
+/// `HashMap` backing the profile map. The default pair always
+/// comes first and duplicates are dropped.
+fn active_pairs_for(
+    default_section: &str,
+    default_model: &str,
+    temperature_profiles: &std::collections::HashMap<
+        String,
+        crate::discovery::matrix::TemperatureProfile,
+    >,
+) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> =
+        vec![(default_section.to_owned(), default_model.to_owned())];
+    let mut keys: Vec<&String> = temperature_profiles.keys().collect();
+    keys.sort();
+    for key in keys {
+        let (section, model) = match key.split_once("::") {
+            Some((sec, mdl)) => (sec.to_owned(), mdl.to_owned()),
+            None => (default_section.to_owned(), key.clone()),
+        };
+        if !pairs.iter().any(|(s, m)| s == &section && m == &model) {
+            trace!(
+                section = %section,
+                model = %model,
+                joined_key = %key,
+                "discover: active pair from temperature profile"
+            );
+            pairs.push((section, model));
+        }
+    }
+    pairs
+}
+
 /// Run discovery end-to-end. Returns the run id on success.
 ///
 /// `run_id` is the canonical id for THIS run. The caller
@@ -626,88 +679,16 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // dispatch to. Pairs duplicate the default are deduped by the
     // `build_registry_for_with_active` helper via
     // `ProviderRegistry::registry_key`.
-    let mut active_pairs: Vec<(String, String)> = Vec::new();
-    active_pairs.push((default_provider_section.clone(), default_model.clone()));
-    for spec in &opts.temperature_profiles {
-        let (section, model) = spec.into_pair(&default_provider_section);
-        if !active_pairs
-            .iter()
-            .any(|(s, m)| s == &section && m == &model)
-        {
-            active_pairs.push((section, model));
-        }
-    }
-    let providers = Arc::new(super::run::build_registry_for_with_active(
-        cfg,
-        &default_provider,
-        opts.mock_dir.as_deref(),
-        None,
-        Some(&active_pairs),
-    )?);
-    debug!(
-        providers = providers.len(),
-        "discover: provider registry built"
-    );
-    // PR-x23: pull the auto-probe tables off the registry so the
-    // `RunContext` (and the pre-pipeline `await_ready` gate below)
-    // sees the same handles the registry fired.
-    let max_tokens_table = providers.max_tokens_table().cloned();
-    let temperature_table = providers.temperature_table().cloned();
-    let param_rejections = providers.param_rejections().cloned();
-
-    let policy = RedactPolicy::default();
-    let db = Db::open(&home.meta_db_path())?;
-    db.register_run(
-        run_id,
-        "discover",
-        "running",
-        env!("CARGO_PKG_VERSION"),
-        None,
-        None,
-        None,
-    )?;
-    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    // PR-B1: `--max-parallelism` is validated up-front (PR #543
-    // lifted the cap from 64 to u32::MAX simultaneous LLM calls to
-    // honour the operator's choice). We surface
-    // `flags_batch::validate_max_parallelism`'s exact error message
-    // so the operator sees a consistent rejection across commands.
-    if let Some(n) = opts.max_parallelism {
-        flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
-    }
-    let resolved_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
-    debug!(resolved_parallelism, "discover: parallelism resolved");
-    // Wire the per-provider `RateLimiter` from the resolved
-    // `--max-parallelism` so `parallelism=32` actually produces
-    // 32 in flight rather than being throttled at the hardcoded
-    // `refill_per_sec = 4` default. Per-provider overrides
-    // (`MOAGAN_RATE_LIMIT_<provider>` or
-    // `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`)
-    // beat the derived default on conflict (catalog §D.19.6).
-    let effective_rate_limit = crate::config::RateLimitConfig {
-        capacity: resolved_parallelism as u32,
-        // PR-2 (perf/discovery-parallelism): the discovery loop is
-        // now actually parallel (see `coordinator::run_with_ctx_and_target`,
-        // `join_set.spawn`). The previous `parallelism / 4` default
-        // was calibrated for the old sequential loop where the
-        // bottleneck was a single concurrent call — it silently
-        // throttled dispatcher throughput to 1/4 of the configured
-        // parallelism. With the parallel loop, the rate limiter
-        // and the semaphore have the same knob — both limit
-        // concurrent in-flight calls — so the default matches
-        // 1:1. Operators who want a lower rate than the parallelism
-        // cap can override with `MOAGAN_RATE_LIMIT_<provider>` (the
-        // `attach_parallelism_rate_limit` call below applies that
-        // override whenever the per-provider config is set).
-        refill_per_sec: resolved_parallelism.max(1) as u32,
-        initial: None,
-    };
-    crate::llm::provider::attach_parallelism_rate_limit(
-        providers.as_ref(),
-        Some(&effective_rate_limit),
-        &cfg.rate_limit_per_provider,
-    );
-    let parallelism = Parallelism::new(resolved_parallelism);
+    //
+    // F2 (B2): the merge of the CLI specs into `effective_cfg`
+    // now happens BEFORE the registry is built, and the
+    // active-pairs list is derived from the MERGED profile map
+    // rather than from `opts.temperature_profiles` alone. A pair
+    // configured only in `[discovery_matrix].temperature_profiles`
+    // (the persisted TOML block) was previously invisible here,
+    // so the registry never hosted it and the coordinator
+    // panicked in `RunContext::provider_for` the moment the
+    // fan-out reached that pair.
 
     // PR-D1: merge CLI `--temperature-profile` specs (last-wins per
     // provider) on top of the persisted `[discovery]` block from
@@ -789,6 +770,100 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // CLI > env > TOML > default (10).
     effective_cfg.discovery_matrix.sketches_per_cell = opts.sketches_per_cell;
 
+    let active_pairs = active_pairs_for(
+        &default_provider_section,
+        &default_model,
+        &effective_cfg.discovery_matrix.temperature_profiles,
+    );
+    debug!(
+        active_pairs = active_pairs.len(),
+        "discover: active (section, model) pairs resolved"
+    );
+    // F2 (B3): the throttle-governor and circuit-breaker
+    // registries are keyed by SECTION, so collapse the active
+    // pairs to their distinct sections once and pre-create an
+    // entry per `(section, role)` below.
+    let throttle_sections: Vec<String> = {
+        let mut sections: Vec<String> = Vec::new();
+        for (section, _) in active_pairs.iter() {
+            if !sections.iter().any(|s| s == section) {
+                sections.push(section.clone());
+            }
+        }
+        sections
+    };
+    let providers = Arc::new(super::run::build_registry_for_with_active(
+        cfg,
+        &default_provider,
+        opts.mock_dir.as_deref(),
+        None,
+        Some(&active_pairs),
+    )?);
+    debug!(
+        providers = providers.len(),
+        "discover: provider registry built"
+    );
+    // PR-x23: pull the auto-probe tables off the registry so the
+    // `RunContext` (and the pre-pipeline `await_ready` gate below)
+    // sees the same handles the registry fired.
+    let max_tokens_table = providers.max_tokens_table().cloned();
+    let temperature_table = providers.temperature_table().cloned();
+    let param_rejections = providers.param_rejections().cloned();
+
+    let policy = RedactPolicy::default();
+    let db = Db::open(&home.meta_db_path())?;
+    db.register_run(
+        run_id,
+        "discover",
+        "running",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        None,
+        None,
+    )?;
+    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
+    // PR-B1: `--max-parallelism` is validated up-front (PR #543
+    // lifted the cap from 64 to u32::MAX simultaneous LLM calls to
+    // honour the operator's choice). We surface
+    // `flags_batch::validate_max_parallelism`'s exact error message
+    // so the operator sees a consistent rejection across commands.
+    if let Some(n) = opts.max_parallelism {
+        flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
+    }
+    let resolved_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
+    debug!(resolved_parallelism, "discover: parallelism resolved");
+    // Wire the per-provider `RateLimiter` from the resolved
+    // `--max-parallelism` so `parallelism=32` actually produces
+    // 32 in flight rather than being throttled at the hardcoded
+    // `refill_per_sec = 4` default. Per-provider overrides
+    // (`MOAGAN_RATE_LIMIT_<provider>` or
+    // `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`)
+    // beat the derived default on conflict (catalog §D.19.6).
+    let effective_rate_limit = crate::config::RateLimitConfig {
+        capacity: resolved_parallelism as u32,
+        // PR-2 (perf/discovery-parallelism): the discovery loop is
+        // now actually parallel (see `coordinator::run_with_ctx_and_target`,
+        // `join_set.spawn`). The previous `parallelism / 4` default
+        // was calibrated for the old sequential loop where the
+        // bottleneck was a single concurrent call — it silently
+        // throttled dispatcher throughput to 1/4 of the configured
+        // parallelism. With the parallel loop, the rate limiter
+        // and the semaphore have the same knob — both limit
+        // concurrent in-flight calls — so the default matches
+        // 1:1. Operators who want a lower rate than the parallelism
+        // cap can override with `MOAGAN_RATE_LIMIT_<provider>` (the
+        // `attach_parallelism_rate_limit` call below applies that
+        // override whenever the per-provider config is set).
+        refill_per_sec: resolved_parallelism.max(1) as u32,
+        initial: None,
+    };
+    crate::llm::provider::attach_parallelism_rate_limit(
+        providers.as_ref(),
+        Some(&effective_rate_limit),
+        &cfg.rate_limit_per_provider,
+    );
+    let parallelism = Parallelism::new(resolved_parallelism);
+
     let ctx = RunContext::new_with_config(
         run_id,
         Arc::clone(&home),
@@ -835,36 +910,54 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // default-config governor the first time an unknown role is
     // called, so omitting the entry matches the v0.9.5 default
     // (no adaptive backpressure).
+    //
+    // F2 (B3): the pre-creation walks every active `(section,
+    // model)` pair instead of the default provider alone. The
+    // multi-provider dispatch path looks the governor up with
+    // `governor_for_at(section, role)`, so a pair that was never
+    // pre-created silently fell back to a default-config
+    // (lenient) governor and ignored `[throttle_per_role]`. The
+    // registry is keyed by SECTION (not by the joined
+    // `section::model`), which is also why the pre-fix
+    // `default_provider` key — the raw `--provider
+    // SECTION:MODEL` string — never matched: `RunContext`
+    // stores `default_provider = SECTION`.
     .with_throttle_governors({
         let mut throttle = crate::llm::governor::GovernorRegistry::new();
-        let dp = default_provider.clone();
-        for (role_name, cfg) in &effective_cfg.throttle_per_role {
-            if let Ok(role) = role_name.parse::<Role>() {
-                throttle.with_config_for(
-                    &dp,
-                    role,
-                    crate::llm::governor::ThrottleConfig::from(cfg.clone()),
-                );
+        for section in throttle_sections.iter() {
+            for (role_name, cfg) in &effective_cfg.throttle_per_role {
+                if let Ok(role) = role_name.parse::<Role>() {
+                    throttle.with_config_for(
+                        section,
+                        role,
+                        crate::llm::governor::ThrottleConfig::from(cfg.clone()),
+                    );
+                }
             }
         }
         throttle
     })
     // v0.9.6: per-`(provider, role)` circuit breakers. Each
     // `[circuit_breaker_per_role]` entry is a `BreakerConfig` keyed
-    // by `Role`. The provider is `default_provider` at the
-    // call-site so the lookup matches what the
-    // `ThrottleGovernor` and the per-`(provider, role)` breaker
-    // share.
+    // by `Role`. The provider key is the SECTION so the lookup
+    // matches what the `ThrottleGovernor` and the
+    // per-`(provider, role)` breaker share.
+    //
+    // F2 (B3): same fan-out as the governors above — every
+    // active section gets its configured breaker, so a
+    // non-default provider no longer falls through to the
+    // lenient default config.
     .with_breakers_per_role({
         let mut breakers = crate::llm::circuit_breaker::BreakerRegistry::new();
-        let dp = default_provider.clone();
-        for (role_name, cfg) in &effective_cfg.circuit_breaker_per_role {
-            if let Ok(role) = role_name.parse::<Role>() {
-                breakers.pre_create(
-                    &dp,
-                    role,
-                    crate::llm::circuit_breaker::BreakerConfig::from(*cfg),
-                );
+        for section in throttle_sections.iter() {
+            for (role_name, cfg) in &effective_cfg.circuit_breaker_per_role {
+                if let Ok(role) = role_name.parse::<Role>() {
+                    breakers.pre_create(
+                        section,
+                        role,
+                        crate::llm::circuit_breaker::BreakerConfig::from(*cfg),
+                    );
+                }
             }
         }
         breakers
