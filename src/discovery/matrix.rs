@@ -1064,6 +1064,218 @@ mod tests {
         );
     }
 
+    /// Tanda 04e D-1: `active_provider_profiles` on a matrix with
+    /// no explicit profiles collapses to a single default pair with
+    /// the `default_profile` (the v0.5 single-shot contract).
+    #[test]
+    fn active_provider_profiles_returns_default_pair_when_empty() {
+        let m = ExplorationMatrix::new(dims_2_3(), 1);
+        let active = m.active_provider_profiles("minimax", "MiniMax-M3");
+        assert_eq!(active.len(), 1, "unconfigured case yields exactly one pair");
+        let (section, model, profile) = &active[0];
+        assert_eq!(section, "minimax");
+        assert_eq!(model, "MiniMax-M3");
+        assert_eq!(profile.temperatures, vec![1.0]);
+        assert_eq!(profile.replicas_per_temperature, 1);
+    }
+
+    /// Tanda 04e D-1: `active_provider_profiles` enumerates every
+    /// explicit `(section, model)` triple in addition to the
+    /// default pair. With two explicit pairs and one default pair
+    /// we get three triples total.
+    #[test]
+    fn active_provider_profiles_enumerates_multi_provider_set() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "minimax::MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0, 0.5],
+                replicas_per_temperature: 2,
+            },
+        );
+        profiles.insert(
+            "opencode::mimo-v2.5".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.7],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix::new(dims_2_3(), 1);
+        m.temperature_profiles = profiles;
+        m.default_profile = TemperatureProfile {
+            temperatures: vec![0.99],
+            replicas_per_temperature: 1,
+        };
+        let active = m.active_provider_profiles("minimax", "MiniMax-M3");
+        assert_eq!(
+            active.len(),
+            2,
+            "explicit pairs cover both keys; default pair is suppressed"
+        );
+        let total_iterations: usize = active.iter().map(|(_, _, p)| p.total()).sum();
+        assert_eq!(total_iterations, 5, "Σ profile.total() = 4 + 1");
+        // The default fallback does NOT fire because every pair
+        // has an explicit entry.
+        for (_, _, profile) in &active {
+            assert_ne!(
+                profile.temperatures,
+                vec![0.99],
+                "default profile must not appear when all pairs have explicit entries"
+            );
+        }
+    }
+
+    /// Tanda 04e D-1: `active_provider_profiles` dedupes by
+    /// `(section, model)` with last-wins semantics so the CLI
+    /// merge order (`--temperature-profile` flags applied in
+    /// declaration order) survives into the fan-out enumeration.
+    #[test]
+    fn active_provider_profiles_dedupes_last_wins() {
+        let mut profiles = HashMap::new();
+        // Two entries for the same `(section, model)` pair;
+        // the LATER insert must win per the merge-order contract.
+        profiles.insert(
+            "minimax::MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0],
+                replicas_per_temperature: 1,
+            },
+        );
+        profiles.insert(
+            "minimax::MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0, 0.5, 1.0],
+                replicas_per_temperature: 4,
+            },
+        );
+        let m = ExplorationMatrix {
+            dimensions: dims_2_3(),
+            sketches_per_cell: 1,
+            temperature_profiles: profiles,
+            default_profile: TemperatureProfile::default(),
+        };
+        let active = m.active_provider_profiles("minimax", "MiniMax-M3");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].2.temperatures, vec![0.0, 0.5, 1.0]);
+        assert_eq!(active[0].2.replicas_per_temperature, 4);
+    }
+
+    /// Tanda 04e D-1: `migrate_legacy_keys` re-keys a bare-model
+    /// entry whose model matches the default model into the joined
+    /// `<default_section>::<default_model>` form. The legacy entry
+    /// disappears from the map (no double-fan-out risk).
+    #[test]
+    fn migrate_legacy_keys_rekeys_default_model() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0, 0.5],
+                replicas_per_temperature: 2,
+            },
+        );
+        let mut m = ExplorationMatrix {
+            dimensions: dims_2_3(),
+            sketches_per_cell: 1,
+            temperature_profiles: profiles,
+            default_profile: TemperatureProfile::default(),
+        };
+        let rewritten = m.migrate_legacy_keys("minimax");
+        assert_eq!(rewritten, 1);
+        assert!(!m.temperature_profiles.contains_key("MiniMax-M3"));
+        assert!(m.temperature_profiles.contains_key("minimax::MiniMax-M3"));
+        let restored = m.profile_for_pair("minimax", "MiniMax-M3");
+        assert_eq!(restored.temperatures, vec![0.0, 0.5]);
+        assert_eq!(restored.replicas_per_temperature, 2);
+    }
+
+    /// Tanda 04e D-1: `migrate_legacy_keys` is a no-op on a
+    /// matrix whose keys are already in the joined form. Returns
+    /// 0 and leaves the map unchanged.
+    #[test]
+    fn migrate_legacy_keys_no_op_on_already_joined_keys() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "minimax::MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix {
+            dimensions: dims_2_3(),
+            sketches_per_cell: 1,
+            temperature_profiles: profiles.clone(),
+            default_profile: TemperatureProfile::default(),
+        };
+        let rewritten = m.migrate_legacy_keys("minimax");
+        assert_eq!(rewritten, 0);
+        assert_eq!(m.temperature_profiles, profiles);
+    }
+
+    /// Tanda 04e D-1: `migrate_legacy_keys` is idempotent —
+    /// running it twice leaves the matrix in the new shape
+    /// without an infinite loop or duplicate entries.
+    #[test]
+    fn migrate_legacy_keys_is_idempotent() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0],
+                replicas_per_temperature: 1,
+            },
+        );
+        let mut m = ExplorationMatrix {
+            dimensions: dims_2_3(),
+            sketches_per_cell: 1,
+            temperature_profiles: profiles,
+            default_profile: TemperatureProfile::default(),
+        };
+        assert_eq!(m.migrate_legacy_keys("minimax"), 1);
+        assert_eq!(m.migrate_legacy_keys("minimax"), 0);
+        assert_eq!(m.temperature_profiles.len(), 1);
+        assert!(m.temperature_profiles.contains_key("minimax::MiniMax-M3"));
+    }
+
+    /// Tanda 04e D-1: `migrate_legacy_keys` drops a bare-model
+    /// entry whose joined form already exists, so the explicit
+    /// joined entry wins and the matrix does not double-fire the
+    /// profile on `active_provider_profiles`.
+    #[test]
+    fn migrate_legacy_keys_drops_conflicting_bare_entry() {
+        let mut profiles = HashMap::new();
+        // Legacy bare-model entry.
+        profiles.insert(
+            "MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.0],
+                replicas_per_temperature: 1,
+            },
+        );
+        // New joined-key entry that already exists.
+        profiles.insert(
+            "minimax::MiniMax-M3".to_owned(),
+            TemperatureProfile {
+                temperatures: vec![0.5],
+                replicas_per_temperature: 2,
+            },
+        );
+        let mut m = ExplorationMatrix {
+            dimensions: dims_2_3(),
+            sketches_per_cell: 1,
+            temperature_profiles: profiles,
+            default_profile: TemperatureProfile::default(),
+        };
+        let rewritten = m.migrate_legacy_keys("minimax");
+        assert_eq!(rewritten, 1, "the bare entry is migrated-and-dropped");
+        // The joined entry wins (temperatures = [0.5]).
+        let restored = m.profile_for_pair("minimax", "MiniMax-M3");
+        assert_eq!(restored.temperatures, vec![0.5]);
+        assert_eq!(restored.replicas_per_temperature, 2);
+        assert!(!m.temperature_profiles.contains_key("MiniMax-M3"));
+    }
+
     /// F1: an asymmetric matrix (3 dims with 1/2/3 facets) sums
     /// to 6 cells and rounds to the supplied fan-out for the
     /// cardinality calculation. The previous Cartesian-product

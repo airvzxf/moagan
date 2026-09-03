@@ -1540,6 +1540,60 @@ mod tests {
         assert_eq!(matrix_profile.replicas_per_temperature, 3);
     }
 
+    /// Tanda 04e D-1: the legacy `provider=<model>` form parses
+    /// with `section = None`. `into_pair` substitutes the supplied
+    /// default section so the CLI merge step produces the right
+    /// `(section, model)` pair for the matrix.
+    #[test]
+    fn parse_temperature_profile_spec_legacy_form_section_is_none() {
+        let spec = TemperatureProfileSpec::parse("provider=MiniMax-M3;temperatures=0.5;replicas=2")
+            .expect("legacy form must parse");
+        assert_eq!(spec.provider, "MiniMax-M3");
+        assert_eq!(spec.section, None);
+        let (section, model) = spec.into_pair("minimax");
+        assert_eq!(section, "minimax");
+        assert_eq!(model, "MiniMax-M3");
+    }
+
+    /// Tanda 04e D-1: the new `provider=<section>:<model>` form
+    /// parses with `section = Some("<section>")`. `into_pair`
+    /// returns the explicit pair verbatim, regardless of the
+    /// default section supplied.
+    #[test]
+    fn parse_temperature_profile_spec_explicit_section_form() {
+        let spec = TemperatureProfileSpec::parse(
+            "provider=opencode:mimo-v2.5;temperatures=0.0,0.7;replicas=3",
+        )
+        .expect("new form must parse");
+        assert_eq!(spec.provider, "mimo-v2.5");
+        assert_eq!(spec.section.as_deref(), Some("opencode"));
+        let (section, model) = spec.into_pair("minimax");
+        assert_eq!(section, "opencode");
+        assert_eq!(model, "mimo-v2.5");
+    }
+
+    /// Tanda 04e D-1: a value containing more than one `:` (e.g.
+    /// an IPv6-looking section name) does NOT silently slip through
+    /// `parse_provider_model`. The parser falls through to the
+    /// legacy form and stores the whole string as the model
+    /// name, which surfaces as a downstream error rather than
+    /// silently splitting on the wrong colon.
+    #[test]
+    fn parse_temperature_profile_spec_multi_colon_falls_back_to_legacy_form() {
+        // parse_provider_model rejects extra colons, so the parser
+        // falls through to the legacy `provider=<value>` form
+        // with `section = None` and the whole string as `provider`.
+        let spec = TemperatureProfileSpec::parse(
+            "provider=section:weird:MiniMax-M3;temperatures=0.5;replicas=1",
+        )
+        .expect("multi-colon must still parse as legacy form");
+        assert_eq!(spec.provider, "section:weird:MiniMax-M3");
+        assert_eq!(spec.section, None);
+        let (section, model) = spec.into_pair("minimax");
+        assert_eq!(section, "minimax");
+        assert_eq!(model, "section:weird:MiniMax-M3");
+    }
+
     // ---- F2 (Track G.2): sketches_per_cell resume helper ----
 
     /// F2: a fresh resume probe (no `exploration_matrix.json`)
