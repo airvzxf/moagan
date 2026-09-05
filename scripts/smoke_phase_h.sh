@@ -122,15 +122,15 @@ run_test "rank_phase_fires_checkpoint_on_sensitive" '
 # ---------------------------------------------------------------------
 
 run_test "lib_stability_tests_pass" '
-  (cd '"$ROOT"' && cargo test --lib ranking::stability:: --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib ranking::stability:: --quiet) >/dev/null
 '
 
 run_test "lib_propose_source_nodes_tests_pass" '
-  (cd '"$ROOT"' && cargo test --lib phases::propose::tests:: --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib phases::propose::tests:: --quiet) >/dev/null
 '
 
 run_test "lib_rank_phase_tests_pass" '
-  (cd '"$ROOT"' && cargo test --lib phases::rank:: --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib phases::rank:: --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------
@@ -193,15 +193,15 @@ run_test "cli_fast_writes_ranking_with_stability_fields" '
 # python to read the JSON; the library code path that actually
 # matters is covered by tests/integration_phase_h.rs::legacy_ranking_...
 run_test "legacy_ranking_json_parses_via_lib" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h legacy_ranking_without_stability_fields_parses --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h legacy_ranking_without_stability_fields_parses --quiet) >/dev/null
 '
 
 run_test "ranking_with_stability_round_trips_via_lib" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h ranking_with_stability_round_trips_json --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h ranking_with_stability_round_trips_json --quiet) >/dev/null
 '
 
 run_test "rank_phase_integration_tests_all_pass" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------
@@ -209,7 +209,7 @@ run_test "rank_phase_integration_tests_all_pass" '
 # ---------------------------------------------------------------------
 
 run_test "default_sigma_labels_clear_winner_stable" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h ranking_marked_stable_when_weights_uniform_and_clear_winner --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h ranking_marked_stable_when_weights_uniform_and_clear_winner --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------
@@ -217,7 +217,7 @@ run_test "default_sigma_labels_clear_winner_stable" '
 # ---------------------------------------------------------------------
 
 run_test "high_sigma_labels_split_criteria_sensitive" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h ranking_marked_sensitive_under_high_sigma_perturbation --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h ranking_marked_sensitive_under_high_sigma_perturbation --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------
@@ -225,7 +225,7 @@ run_test "high_sigma_labels_split_criteria_sensitive" '
 # ---------------------------------------------------------------------
 
 run_test "disabled_stability_keeps_fields_absent" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h ranking_stability_fields_absent_when_disabled --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h ranking_stability_fields_absent_when_disabled --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------
@@ -233,11 +233,11 @@ run_test "disabled_stability_keeps_fields_absent" '
 # ---------------------------------------------------------------------
 
 run_test "interactive_sensitive_run_writes_checkpoint_sidecar" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h human_checkpoint_triggered_on_sensitive_interactive_run --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h human_checkpoint_triggered_on_sensitive_interactive_run --quiet) >/dev/null
 '
 
 run_test "non_interactive_sensitive_run_writes_skip_marker" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_h non_interactive_sensitive_run_writes_skip_marker --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_h non_interactive_sensitive_run_writes_skip_marker --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------
@@ -245,7 +245,7 @@ run_test "non_interactive_sensitive_run_writes_skip_marker" '
 # ---------------------------------------------------------------------
 
 run_test "proposal_source_nodes_populate_unit_test" '
-  (cd '"$ROOT"' && cargo test --lib phases::propose::tests::source_nodes_picks_up_high_overlap_nodes --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib phases::propose::tests::source_nodes_picks_up_high_overlap_nodes --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------

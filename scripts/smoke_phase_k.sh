@@ -102,7 +102,7 @@ run_test "k2_cosine_helper_present" '
 '
 
 run_test "k2_unit_tests_pass" '
-  ( cd '"$ROOT"' && cargo test --lib embed:: >/tmp/smoke-k2 2>&1 )
+  ( cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib embed:: >/tmp/smoke-k2 2>&1 )
   grep -q "test result: ok" /tmp/smoke-k2
 '
 
@@ -147,7 +147,7 @@ run_test "k5_sqlite_rs_exposes_row_types" '
 '
 
 run_test "k5_sqlite_v008_tests_pass" '
-  ( cd '"$ROOT"' && cargo test --lib storage::sqlite::tests::v008 >/tmp/smoke-k5 2>&1 )
+  ( cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib storage::sqlite::tests::v008 >/tmp/smoke-k5 2>&1 )
   grep -q "test result: ok" /tmp/smoke-k5
 '
 
@@ -174,7 +174,7 @@ run_test "k7_apply_with_categories_present" '
 '
 
 run_test "k7_redact_tests_pass" '
-  ( cd '"$ROOT"' && cargo test --lib redact:: >/tmp/smoke-k7 2>&1 )
+  ( cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib redact:: >/tmp/smoke-k7 2>&1 )
   grep -q "test result: ok" /tmp/smoke-k7
 '
 
@@ -203,7 +203,7 @@ run_test "k9_retry_budget_matrix_values" '
 '
 
 run_test "k9_retry_budget_tests_pass" '
-  ( cd '"$ROOT"' && cargo test --lib retry_budget:: >/tmp/smoke-k9 2>&1 )
+  ( cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib retry_budget:: >/tmp/smoke-k9 2>&1 )
   grep -q "test result: ok" /tmp/smoke-k9
 '
 
@@ -212,12 +212,12 @@ run_test "k9_retry_budget_tests_pass" '
 # ---------------------------------------------------------------------
 
 run_test "k_constraint_module_tests_pass" '
-  ( cd '"$ROOT"' && cargo test --lib constraint:: >/tmp/smoke-k-cst 2>&1 )
+  ( cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib constraint:: >/tmp/smoke-k-cst 2>&1 )
   grep -q "test result: ok" /tmp/smoke-k-cst
 '
 
 run_test "k_integration_phase_k_tests_pass" '
-  ( cd '"$ROOT"' && cargo test --test integration_phase_k >/tmp/smoke-k-int 2>&1 )
+  ( cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_k >/tmp/smoke-k-int 2>&1 )
   grep -q "test result: ok" /tmp/smoke-k-int
 '
 

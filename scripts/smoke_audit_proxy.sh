@@ -730,7 +730,7 @@ run_test "commit_count_under_30" \
 # ---------------------------------------------------------------------
 
 run_test "test_count_over_400" \
-  "cd ${ROOT} && cargo test --lib 2>&1 | grep 'test result' | grep -oE '[0-9]+ passed' | head -1 | awk '{ if (\$1 >= 400) exit 0; else exit 1 }'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --lib 2>&1 | grep 'test result' | grep -oE '[0-9]+ passed' | head -1 | awk '{ if (\$1 >= 400) exit 0; else exit 1 }'"
 
 run_test "integration_test_discovery_exists" \
   "[[ -f ${ROOT}/tests/integration_discovery.rs ]]"

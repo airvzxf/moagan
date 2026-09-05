@@ -77,11 +77,11 @@ run_test "ranking_mod_reexports_criterion" '
 # ---------------------------------------------------------------------
 
 run_test "rubric_unit_tests_pass" '
-  (cd '"$ROOT"' && cargo test --lib ranking::rubric::tests --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib ranking::rubric::tests --quiet) >/dev/null
 '
 
 run_test "compression_unit_tests_pass" '
-  (cd '"$ROOT"' && cargo test --lib storage::compression::tests --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib storage::compression::tests --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------
@@ -89,7 +89,7 @@ run_test "compression_unit_tests_pass" '
 # ---------------------------------------------------------------------
 
 run_test "integration_phase_o_passes" '
-  (cd '"$ROOT"' && cargo test --test integration_phase_o --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_o --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------

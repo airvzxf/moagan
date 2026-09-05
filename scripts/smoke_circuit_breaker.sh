@@ -162,23 +162,23 @@ check_cli_run_passes_breaker_cfg() {
 # ----------------------------------------------------------------------
 
 check_unit_tests_circuit_breaker() {
-    cargo test --lib circuit_breaker:: --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --lib circuit_breaker:: --quiet
 }
 
 check_unit_tests_provider_breaker() {
-    cargo test --lib llm::provider:: --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --lib llm::provider:: --quiet
 }
 
 check_unit_tests_error_opening() {
-    cargo test --lib error:: --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --lib error:: --quiet
 }
 
 check_unit_tests_config_breaker() {
-    cargo test --lib config:: --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --lib config:: --quiet
 }
 
 check_integration_tests_circuit_breaker() {
-    cargo test --test integration_circuit_breaker --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_circuit_breaker --quiet
 }
 
 check_no_anthropic_sdk() {

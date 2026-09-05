@@ -48,7 +48,7 @@ run_check 'tier cancellation method exists' grep -qF -- 'cancel_with_tier' "${RO
 run_check 'ExitCode exists' grep -qF -- 'pub enum ExitCode' "${ROOT}/src/error.rs"
 run_check 'ExitCode maps I/O to 8' grep -qF -- 'IoError = 8' "${ROOT}/src/error.rs"
 run_check 'Phase L integration file exists' test -f "${ROOT}/tests/integration_phase_l.rs"
-run_check 'Phase L integration suite passes' cargo test --manifest-path "${ROOT}/Cargo.toml" --test integration_phase_l
+run_check 'Phase L integration suite passes' MOAGAN_NON_INTERACTIVE=1 cargo test --manifest-path "${ROOT}/Cargo.toml" --test integration_phase_l
 run_check 'main binary panic output is redacted' bash -c "
   secret='sk-ant-abcdefghijklmnopqrst'
   output=\$(MOAGAN_PHASE_L_TEST_PANIC=\"provider key \${secret}\" \"\$1\" 2>&1)

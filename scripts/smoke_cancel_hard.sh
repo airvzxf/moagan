@@ -106,15 +106,15 @@ check_validate_wires_cancel() {
 # ----------------------------------------------------------------------
 
 check_unit_tests_cancel() {
-    cargo test --lib cancel:: --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --lib cancel:: --quiet
 }
 
 check_unit_tests_sandbox() {
-    cargo test --lib sandbox::process:: --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --lib sandbox::process:: --quiet
 }
 
 check_integration_tests() {
-    cargo test --test integration_cancel_hard_kill --quiet
+    MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_cancel_hard_kill --quiet
 }
 
 check_no_anthropic_sdk() {
