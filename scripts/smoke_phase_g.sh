@@ -105,11 +105,11 @@ EOF
 # We don't actually have an example file; replace the previous with
 # a real check that compiles against the library.
 run_test "problem_graph_trivial_compiles_via_lib_tests" '
-  (cd '"$ROOT"' && cargo test --lib domain::tests::problem_graph_trivial_is_empty --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib domain::tests::problem_graph_trivial_is_empty --quiet) >/dev/null
 '
 
 run_test "topological_layers_stable_compiles_via_lib_tests" '
-  (cd '"$ROOT"' && cargo test --lib domain::tests::problem_graph_two_layers_kahn --quiet) >/dev/null
+  (cd '"$ROOT"' && MOAGAN_NON_INTERACTIVE=1 cargo test --lib domain::tests::problem_graph_two_layers_kahn --quiet) >/dev/null
 '
 
 # ---------------------------------------------------------------------

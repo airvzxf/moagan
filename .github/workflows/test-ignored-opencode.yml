@@ -107,7 +107,7 @@ jobs:
           fi
           echo "Starting cargo test at $(date -u +%H:%M:%SZ)..."
           START_TS=$(date +%s)
-          cargo test --test integration_discover_opencode -- --ignored --nocapture
+          MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_discover_opencode -- --ignored --nocapture
           CARGO_RC=$?
           END_TS=$(date +%s)
           echo "============================================================"

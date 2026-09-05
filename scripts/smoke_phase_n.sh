@@ -91,11 +91,11 @@ check_public_exports() {
 }
 
 check_unit_tests() {
-    cargo test --lib sandbox::process
+    MOAGAN_NON_INTERACTIVE=1 cargo test --lib sandbox::process
 }
 
 check_integration_tests() {
-    cargo test --test integration_phase_n
+    MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_n
 }
 
 run_check "sandbox_module_layout" check_module_layout

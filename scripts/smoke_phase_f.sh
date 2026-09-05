@@ -465,34 +465,34 @@ run_test "f_commits_match_conventional" \
 echo "Section 9: Cargo test integration"
 
 run_test "f_cargo_test_replace_module" \
-  "cd ${ROOT} && cargo test --lib phases::replace 2>&1 | grep -qE 'test result: ok'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --lib phases::replace 2>&1 | grep -qE 'test result: ok'"
 
 run_test "f_cargo_test_rank_module" \
-  "cd ${ROOT} && cargo test --lib phases::rank 2>&1 | grep -qE 'test result: ok'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --lib phases::rank 2>&1 | grep -qE 'test result: ok'"
 
 run_test "f_cargo_test_integration_phase_d" \
-  "cd ${ROOT} && cargo test --test integration_phase_d 2>&1 | grep -qE 'test result: ok'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_d 2>&1 | grep -qE 'test result: ok'"
 
 run_test "f_cargo_test_synthesis_replaces" \
-  "cd ${ROOT} && cargo test --test integration_phase_d synthesis_replaces_sources_when_dominant 2>&1 | grep -qE 'test result: ok'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_d synthesis_replaces_sources_when_dominant 2>&1 | grep -qE 'test result: ok'"
 
 run_test "f_cargo_test_synthesis_does_not" \
-  "cd ${ROOT} && cargo test --test integration_phase_d synthesis_does_not_replace_when_not_dominant 2>&1 | grep -qE 'test result: ok'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_d synthesis_does_not_replace_when_not_dominant 2>&1 | grep -qE 'test result: ok'"
 
 run_test "f_cargo_test_no_replace_flag" \
-  "cd ${ROOT} && cargo test --test integration_phase_d no_replace_sources_flag_disables_replacement 2>&1 | grep -qE 'test result: ok'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_phase_d no_replace_sources_flag_disables_replacement 2>&1 | grep -qE 'test result: ok'"
 
 run_test "f_cargo_test_all_targets" \
-  "cd ${ROOT} && cargo test --all-targets 2>&1 | grep -qE 'test result: ok'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets 2>&1 | grep -qE 'test result: ok'"
 
 run_test "f_cargo_test_count_above_590" \
-  "cd ${ROOT} && cargo test --all-targets 2>&1 | grep -E 'test result: ok' | awk '{sum+=\$4} END {print sum}' | grep -qE '^[6-9][0-9]{2}|^[0-9]{4}$'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets 2>&1 | grep -E 'test result: ok' | awk '{sum+=\$4} END {print sum}' | grep -qE '^[6-9][0-9]{2}|^[0-9]{4}$'"
 
 run_test "f_cargo_test_no_failures" \
-  "cd ${ROOT} && cargo test --all-targets 2>&1 | grep -E '0 failed' | wc -l | grep -qE '^[1-9][0-9]*$'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets 2>&1 | grep -E '0 failed' | wc -l | grep -qE '^[1-9][0-9]*$'"
 
 run_test "f_cargo_test_no_panics" \
-  "cd ${ROOT} && cargo test --all-targets 2>&1 | grep -E 'thread .* panicked|panicked at' | wc -l | grep -qE '^0$'"
+  "cd ${ROOT} && MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets 2>&1 | grep -E 'thread .* panicked|panicked at' | wc -l | grep -qE '^0$'"
 
 # ---------------------------------------------------------------------
 # SECTION 10 — argv parsing (15 tests)

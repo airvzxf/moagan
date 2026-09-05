@@ -135,9 +135,11 @@ jobs:
       - name: prepare logs directory
         run: mkdir -p logs
       - name: cargo test (integration suite)
+        env:
+          MOAGAN_NON_INTERACTIVE: "1"
         run: |
           bash -c '
-          cargo test --tests --no-fail-fast
+          MOAGAN_NON_INTERACTIVE=1 cargo test --tests --no-fail-fast
           ' > logs/${{ github.job }}-stdout.log 2> logs/${{ github.job }}-stderr.log
       - name: gzip captured logs
         if: always()
@@ -192,9 +194,11 @@ jobs:
       - name: prepare logs directory
         run: mkdir -p logs
       - name: cargo test (lib + bins)
+        env:
+          MOAGAN_NON_INTERACTIVE: "1"
         run: |
           bash -c '
-          cargo test --lib --bins --no-fail-fast
+          MOAGAN_NON_INTERACTIVE=1 cargo test --lib --bins --no-fail-fast
           ' > logs/${{ github.job }}-stdout.log 2> logs/${{ github.job }}-stderr.log
       - name: gzip captured logs
         if: always()
@@ -375,9 +379,11 @@ jobs:
       - name: prepare logs directory
         run: mkdir -p logs
       - name: cargo test --doc
+        env:
+          MOAGAN_NON_INTERACTIVE: "1"
         run: |
           bash -c '
-          cargo test --doc
+          MOAGAN_NON_INTERACTIVE=1 cargo test --doc
           ' > logs/${{ github.job }}-stdout.log 2> logs/${{ github.job }}-stderr.log
       - name: gzip captured logs
         if: always()

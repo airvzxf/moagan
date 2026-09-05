@@ -65,9 +65,50 @@ The skip list is empty. The historical three skip sites
 (`Makefile::test-ci`, `ci.yml::test-lib`, `ci.yml::test-tests`)
 have been collapsed back to plain `cargo test` invocations:
 
-- `Makefile:72-73` — `test-ci` runs `MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`
-- `.github/workflows/ci.yml::test-lib` — runs `cargo test --lib --bins`
-- `.github/workflows/ci.yml::test-tests` — runs `cargo test --tests --no-fail-fast`
+- `Makefile:96` — `test` runs `MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`
+- `Makefile:99` — `test-ci` runs `MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`
+- `Makefile:102` — `test-doc` runs `MOAGAN_NON_INTERACTIVE=1 cargo test --doc`
+- `.github/workflows/ci.yml:137` (`test-tests`) — runs `MOAGAN_NON_INTERACTIVE=1 cargo test --tests --no-fail-fast` (env block on the step plus inline prefix inside the `bash -c '...'` heredoc)
+- `.github/workflows/ci.yml:194` (`test-lib`) — runs `MOAGAN_NON_INTERACTIVE=1 cargo test --lib --bins --no-fail-fast` (same defense-in-depth pattern)
+- `.github/workflows/ci.yml:377` (`test-doc`) — runs `MOAGAN_NON_INTERACTIVE=1 cargo test --doc` (same)
+- `.github/workflows/test-ignored-minimax.yml:104` — runs `MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_discover_minimax -- --ignored --nocapture`
+- `.github/workflows/test-ignored-deepseek.yml:108` — runs `MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_discover_deepseek -- --ignored --nocapture`
+- `.github/workflows/test-ignored-opencode.yml:110` — runs `MOAGAN_NON_INTERACTIVE=1 cargo test --test integration_discover_opencode -- --ignored --nocapture`
+- `scripts/gauntlet.sh:114` — runs `MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets`
+
+Smoke scripts (`scripts/`) — all `MOAGAN_NON_INTERACTIVE=1 cargo test` invocations:
+
+- `scripts/smoke_phase_f.sh:468,471,474,477,480,483,486,489,492,495` — SECTION 9 (full `--all-targets`, `--lib`, `--test integration_phase_d` runs)
+- `scripts/smoke_phase_g.sh:108,112` — domain::tests problem-graph + Kahn lib tests
+- `scripts/smoke_phase_h.sh:125,129,133,196,200,204,212,220,228,236,240,248` — ranking::stability, phases::propose, phases::rank, integration_phase_h batches
+- `scripts/smoke_phase_k.sh:105,150,177,206,215,220` — embed, sqlite v008, redact, retry_budget, constraint, integration_phase_k
+- `scripts/smoke_phase_l.sh:51` — `cargo test --manifest-path ... --test integration_phase_l`
+- `scripts/smoke_phase_n.sh:94,98` — sandbox::process + integration_phase_n
+- `scripts/smoke_phase_o.sh:80,84,92` — ranking::rubric, storage::compression, integration_phase_o
+- `scripts/smoke_discovery.sh:640` — `--lib` test-count probe
+- `scripts/smoke_audit_proxy.sh:733` — `--lib` test-count probe
+- `scripts/smoke_circuit_breaker.sh:165,169,173,177,181` — circuit_breaker, llm::provider, error, config, integration_circuit_breaker
+- `scripts/smoke_cancel_hard.sh:109,113,117` — cancel, sandbox::process, integration_cancel_hard_kill
+
+**Invariant (added by EPIC #755 PR2, 2026-09-05):** every `cargo test`
+invocation in the repo MUST export `MOAGAN_NON_INTERACTIVE=1`. PR #757
+(EPIC #755 PR1) added the library-side env-var read at
+`RunContext::default_interactive` (`src/phases/phase.rs:227`); this PR2
+closes #736 by propagating the env var to every CI workflow job, every
+Makefile target, `scripts/gauntlet.sh`, and every smoke script that
+invokes `cargo test`. If a future change adds a new `cargo test`
+invocation, the env-var prefix MUST be set on it — grep verification:
+
+```bash
+grep -rn 'cargo test' scripts/ .github/workflows/ Makefile docs/ \
+  | grep -v 'MOAGAN_NON_INTERACTIVE' \
+  | grep -v '^[^:]*:#' \
+  | grep -v 'docs/test-skips.md'
+```
+
+Real invocations produce zero matches; the only remaining hits are
+display labels (`name:`, `context:`), diagnostic `echo` strings, help
+text (`@echo`), comments, and markdown table cells.
 
 If a future test ever needs to be skipped again, follow the
 "How to add a new skip" playbook below. Until then, every test

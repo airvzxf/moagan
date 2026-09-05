@@ -111,7 +111,7 @@ echo
 
 # 4. cargo test --all-targets
 echo "${BOLD}Testing${RESET}"
-run_gate "cargo test --all-targets" bash -c "cargo test --all-targets"
+run_gate "cargo test --all-targets" bash -c "MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets"
 echo
 
 # 5. check scripts (no-go list + forbidden crates + Anthropic SDK)

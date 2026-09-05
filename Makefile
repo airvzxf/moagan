@@ -99,7 +99,7 @@ test-ci:
 	MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets
 
 test-doc:
-	cargo test --doc
+	MOAGAN_NON_INTERACTIVE=1 cargo test --doc
 
 build:
 	cargo build
