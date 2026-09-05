@@ -219,6 +219,16 @@ pub struct CheckpointOpts {
     /// `true` for `standard` / `deep`, `false` for `batch` /
     /// `--non-interactive`. When `false`, [`ask`] is a no-op that
     /// returns `Resolution::Approved` without touching stdin.
+    ///
+    /// Callers MUST mirror `RunContext::interactive` into this
+    /// field rather than hardcoding a literal. The previous
+    /// hardcoded `interactive: true` at the `DeliverPhase`
+    /// checkpoint (fixed by #735) was the silent P0 that left
+    /// `moagan` blocking on stdin when the CLI flag had been
+    /// `false` the whole time — the env-var and CLI overrides
+    /// had already flipped `ctx.interactive` to `false` but the
+    /// checkpoint struct still said `true`, so the `ask` call
+    /// entered its interactive branch.
     pub interactive: bool,
     /// When set, [`ask`] writes to this path (used by tests that
     /// want to inject a pre-canned answer). When `None`, the call

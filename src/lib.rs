@@ -165,6 +165,41 @@ pub static TEST_EVENT_FORMAT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 #[cfg(test)]
 pub static TEST_LOG_TO_STDERR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialises every test that mutates `MOAGAN_NON_INTERACTIVE`
+/// (the env var honoured by [`RunContext::default_interactive`] at
+/// `src/phases/phase.rs:227` — the single-source-of-truth helper
+/// introduced for EPIC #755 / #734 so library callers can opt out
+/// of human checkpoints via env var alone, without parsing the
+/// CLI flag themselves). Currently consumed by:
+///
+/// - `src/phases/phase.rs::tests::run_context_*` (nine regression
+///   tests for the env-var precedence surface added by PR1 of
+///   EPIC #755) — save-and-restore the env var around every
+///   `RunContext::new` / `RunContext::new_with_config` call.
+///
+/// Lock window covers the full `RunContext::new` construction
+/// (and any subsequent `with_interactive` call) because
+/// `default_interactive()` reads `MOAGAN_NON_INTERACTIVE` once at
+/// construction time — distinguishing it from
+/// `TEST_EVENT_FORMAT_LOCK` / `TEST_LOG_TO_STDERR_LOCK` whose
+/// clap bindings only read at `Cli::try_parse_from` parse time.
+///
+/// Split off from `TEST_LOG_TO_STDERR_LOCK` / `TEST_MOAGAN_HOME_LOCK`
+/// by PR1 of EPIC #755 because the env-var scope is independent
+/// (the `MOAGAN_NON_INTERACTIVE` path is consumed inside
+/// `RunContext`, not at CLI parse time), so serialising any of the
+/// existing locks would over-serialise the new
+/// `phases::tests::run_context_*` block against unrelated env-var
+/// mutations.
+///
+/// Gated with `#[cfg(test)]` matching the existing
+/// `TEST_LOG_TO_STDERR_LOCK` precedent — only unit tests in
+/// `src/phases/phase.rs` need it today; integration tests use
+/// `cmd.env(...)` on a child process and do not race with this
+/// lock.
+#[cfg(test)]
+pub static TEST_NON_INTERACTIVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// CLI entry point. Returns a Unix exit code.
 pub async fn run() -> anyhow::Result<()> {
     use clap::Parser;

@@ -372,6 +372,7 @@ view of the env-var they touch.
 | `TEST_CWD_LOCK` | `std::env::set_current_dir` (cwd) | `src/lib.rs:99` | `src/config/mod.rs` tests (6 sites) |
 | `TEST_EVENT_FORMAT_LOCK` | `MOAGAN_EVENT_FORMAT` (clap `env = "..."` binding at `src/cli/mod.rs:255`) | `src/lib.rs:133` | `src/cli/mod.rs::tests::event_format_default_is_auto`, `src/cli/mod.rs::tests::event_format_env_off_reaches_parser` (PR #678) |
 | `TEST_LOG_TO_STDERR_LOCK` | `MOAGAN_LOG_TO_STDERR` (clap `env = "..."` binding at `src/cli/mod.rs:299`) | `src/lib.rs:166` | `src/cli/mod.rs::tests::log_to_stderr_env_accepts_shell_idiomatic_one`, `src/cli/mod.rs::tests::log_to_stderr_env_accepts_false` (PR #679) |
+| `TEST_NON_INTERACTIVE_LOCK` | `MOAGAN_NON_INTERACTIVE` (env var read by `RunContext::default_interactive` at `src/phases/phase.rs:227` — closes #734 / EPIC #755 PR1) | `src/lib.rs:197` | `src/phases/phase.rs::tests::run_context_*` (9 regression tests added by PR1 of EPIC #755 — env-var precedence surface for `BoolishValueParser` accept/reject vocabulary, save-and-restore on every `RunContext::new` / `new_with_config` call) |
 
 Plus one **module-local** lock that lives outside `src/lib.rs`
 because its scope is bounded to a single module:
